@@ -184,6 +184,13 @@ pub struct Stoat {
     /// blocking pool). Multiple notifications collapse into one
     /// pending wake-up.
     pub(crate) redraw_notify: Arc<tokio::sync::Notify>,
+    /// In-flight working-tree review scan. The git2 diff runs on a
+    /// blocking thread; [`pump_review_scan`](action_handlers::pump_review_scan)
+    /// polls the ready [`ReviewSession`](crate::review_session::ReviewSession)
+    /// off this task and installs it on the main loop, so opening a review
+    /// never stalls input on the scan.
+    pub(crate) pending_review_scan:
+        Option<stoat_scheduler::Task<Option<crate::review_session::ReviewSession>>>,
     pub(crate) modal_run: Option<RunId>,
     pub(crate) render_tick: u64,
     /// Accumulated digit prefix for the next motion (Vim-style
@@ -655,6 +662,7 @@ impl Stoat {
             pty_tx,
             pty_rx,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
+            pending_review_scan: None,
             modal_run: None,
             render_tick: 0,
             pending_count: None,
@@ -2925,6 +2933,7 @@ impl Stoat {
         self.render_tick += 1;
         self.drive_parse_jobs();
         action_handlers::pump_commits(self);
+        action_handlers::pump_review_scan(self);
         action_handlers::pump_lsp_jumps(self);
         action_handlers::lsp::pump_lsp_hover(self);
         action_handlers::lsp::pump_lsp_code_actions(self);

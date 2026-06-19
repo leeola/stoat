@@ -533,6 +533,7 @@ impl TestHarness {
             self.scheduler.run_until_parked();
             let claude = self.stoat.drain_claude_notifications();
             let commits = crate::action_handlers::pump_commits(&mut self.stoat);
+            let review = crate::action_handlers::pump_review_scan(&mut self.stoat);
             let lsp_jumps = crate::action_handlers::pump_lsp_jumps(&mut self.stoat);
             let lsp_hover = crate::action_handlers::lsp::pump_lsp_hover(&mut self.stoat);
             let lsp_code_actions =
@@ -551,6 +552,7 @@ impl TestHarness {
             let external_edits = self.stoat.drain_pending_external_edits();
             if !claude
                 && !commits
+                && !review
                 && !lsp_jumps
                 && !lsp_hover
                 && !lsp_code_actions

@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState},
-    host::WatchToken,
+    host::{FsHost, GitHost, WatchToken},
     pane::View,
     review::ReviewFileInput,
     review_session::{ReviewProgress, ReviewSession, ReviewSource, ReviewViewState},
@@ -12,7 +12,14 @@ use ratatui::{
     style::{Color, Style},
     text::Line,
 };
-use std::{path::Path, sync::Arc};
+use std::{
+    future::Future,
+    path::Path,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
+use stoat_language::LanguageRegistry;
 
 pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
     let Some(session) = scan_commit(stoat, workdir, sha) else {
@@ -616,23 +623,61 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn open_review(stoat: &mut Stoat) {
+    let executor = stoat.executor.clone();
     let git_root = stoat.active_workspace().git_root.clone();
-    let Some(session) = scan_working_tree(stoat, &git_root) else {
-        return;
-    };
-    install_review_session(stoat, session);
+    let git_host = stoat.git_host.clone();
+    let fs_host = stoat.fs_host.clone();
+    let langs = stoat.language_registry.clone();
+    let redraw = stoat.redraw_notify.clone();
+
+    let scan = executor
+        .spawn_blocking(move || scan_working_tree_pure(&*git_host, &*fs_host, &langs, &git_root));
+    stoat.pending_review_scan = Some(executor.spawn_with_redraw(redraw, scan));
 }
 
-/// Build a review session by scanning the git working tree rooted at
-/// `git_root`. Returns `None` when the root is not a repository or has no
-/// diff hunks. Shared by [`open_review`] and [`review_refresh`].
-fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
-    let Some((workdir, inputs)) = crate::diff::scan_working_tree(
-        &*stoat.git_host,
-        &*stoat.fs_host,
-        &stoat.language_registry,
-        git_root,
-    ) else {
+/// Install the result of a working-tree scan spawned by [`open_review`].
+///
+/// Polls the in-flight scan with a no-op waker, so it never blocks. On
+/// completion the ready [`ReviewSession`] is installed on the main loop;
+/// `None` means the tree had no changes worth reviewing. Returns whether the
+/// task resolved this call, mirroring the other render-time pumps.
+///
+/// Driven from [`Stoat::render`] and the test harness `settle` loop. The
+/// scan's completion notifies the redraw channel, so the loop wakes to pump
+/// it without the user pressing a key.
+pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_review_scan.take() else {
+        return false;
+    };
+
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(session)) => {
+            install_review_session(stoat, session);
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_review_scan = Some(task);
+            false
+        },
+    }
+}
+
+/// Scan the git working tree rooted at `git_root` into a review session.
+/// Returns `None` when the root is not a repository or has no diff hunks.
+///
+/// Takes no `&Stoat` so the git2 diff can run on a blocking thread off the
+/// input loop. [`open_review`] drives it through `spawn_blocking`;
+/// [`scan_working_tree`] wraps it for the synchronous [`review_refresh`].
+fn scan_working_tree_pure(
+    git: &dyn GitHost,
+    fs: &dyn FsHost,
+    langs: &LanguageRegistry,
+    git_root: &Path,
+) -> Option<ReviewSession> {
+    let Some((workdir, inputs)) = crate::diff::scan_working_tree(git, fs, langs, git_root) else {
         tracing::warn!("open_review: no working-tree changes to review");
         return None;
     };
@@ -646,6 +691,17 @@ fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
     }
 
     Some(session)
+}
+
+/// Synchronous [`scan_working_tree_pure`] wrapper reading the hosts off
+/// `stoat`, used by [`review_refresh`] to re-scan in place.
+fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
+    scan_working_tree_pure(
+        &*stoat.git_host,
+        &*stoat.fs_host,
+        &stoat.language_registry,
+        git_root,
+    )
 }
 
 /// Build a session from a single commit by diffing its tree against its

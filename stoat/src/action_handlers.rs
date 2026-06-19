@@ -41,6 +41,7 @@ pub(crate) use file_finder::close_file_finder;
 pub(crate) use lsp::pump_lsp_jumps;
 #[cfg(test)]
 pub(crate) use review::install_review_session;
+pub(crate) use review::pump_review_scan;
 use std::path::Path;
 use stoat_action::{
     Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
