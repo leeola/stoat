@@ -792,8 +792,10 @@ impl TestHarness {
     }
 
     fn maybe_capture(&mut self, action: &str) {
+        self.stoat.drive_background();
         let _ = self.stoat.render();
         self.scheduler.run_until_parked();
+        self.stoat.drive_background();
         let buf = self.stoat.render();
         if self.last_buffer.as_ref() == Some(&buf) {
             if let Some(last) = self.frames.last_mut() {
@@ -1005,8 +1007,10 @@ impl TestHarness {
         // First render spawns any pending parse jobs. Settling the test
         // scheduler runs them to completion. The second render polls the
         // results and installs them so the snapshot reflects them.
+        self.stoat.drive_background();
         let _ = self.stoat.render();
         self.scheduler.run_until_parked();
+        self.stoat.drive_background();
         let buf = self.stoat.render();
         let is_different = self.last_buffer.as_ref() != Some(&buf);
         self.last_buffer = Some(buf.clone());

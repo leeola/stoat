@@ -809,6 +809,7 @@ mod tests {
     }
 
     fn user_message_screen_row(h: &mut TestHarness, msg_idx: usize) -> u16 {
+        h.stoat.drive_background();
         let _ = h.stoat.render();
         let session_id = h
             .stoat
@@ -892,6 +893,7 @@ mod tests {
         h.claude().open();
         submit_message(&mut h, "only prompt");
 
+        h.stoat.drive_background();
         let _ = h.stoat.render();
         h.stoat.update(mouse_up_left(0, 0));
 

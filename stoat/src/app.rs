@@ -965,6 +965,7 @@ impl Stoat {
 
             match effect {
                 UpdateEffect::Redraw => {
+                    self.drive_background();
                     if render.send(Some(self.render())).is_err() {
                         break;
                     }
@@ -2928,8 +2929,24 @@ impl Stoat {
         workspaces[*active_workspace].drive_parse_jobs(executor, syntax_styles, redraw_notify);
     }
 
+    /// Paint the current state into a fresh [`Buffer`]. Pure painting: it
+    /// reads state and never drives background work. The event loop calls
+    /// [`Self::drive_background`] before each redraw so the painted frame
+    /// reflects freshly-installed async results.
     pub(crate) fn render(&mut self) -> Buffer {
         self.render_tick += 1;
+        let mut buf = Buffer::empty(self.size);
+        crate::render::frame(self, &mut buf);
+        buf
+    }
+
+    /// Drive the background work whose results feed the next paint: parse-job
+    /// scheduling and the commit, review, LSP, and completion result pumps.
+    ///
+    /// Run from the event loop after input is handled and before the redraw,
+    /// keeping [`Self::render`] a pure paint. Tests that previously relied on
+    /// `render` to drive this call it directly.
+    pub(crate) fn drive_background(&mut self) {
         self.drive_parse_jobs();
         action_handlers::pump_commits(self);
         action_handlers::pump_review_scan(self);
@@ -2943,9 +2960,6 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_workspace_symbol(self);
         action_handlers::lsp::pump_lsp_format(self);
         crate::completion::request::pump(self);
-        let mut buf = Buffer::empty(self.size);
-        crate::render::frame(self, &mut buf);
-        buf
     }
 
     fn dispatch_workspace_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {

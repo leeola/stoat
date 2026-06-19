@@ -130,8 +130,10 @@ mod tests {
             .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
         h.stoat.active_workspace_mut().git_root = root;
         crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.stoat.drive_background();
         let _ = h.stoat.render();
         h.settle();
+        h.stoat.drive_background();
         let _ = h.stoat.render();
         h.settle();
         path
