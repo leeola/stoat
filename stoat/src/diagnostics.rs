@@ -20,6 +20,9 @@ use std::{
 #[derive(Debug, Default, Clone)]
 pub struct DiagnosticSet {
     by_path: HashMap<PathBuf, Vec<Diagnostic>>,
+    /// Bumped on every mutation so render-side caches keyed off the set can
+    /// detect a change without comparing the diagnostics themselves.
+    version: u64,
 }
 
 /// Severity-bucketed counts for a single document plus the worst
@@ -50,6 +53,7 @@ impl DiagnosticSet {
     /// a full snapshot per `textDocument/publishDiagnostics` call,
     /// so prior entries for the same path are dropped.
     pub fn replace_for_path(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>) {
+        self.version += 1;
         if diagnostics.is_empty() {
             self.by_path.remove(&path);
         } else {
@@ -61,6 +65,13 @@ impl DiagnosticSet {
     /// empty slice when the path is unknown.
     pub fn get(&self, path: &Path) -> &[Diagnostic] {
         self.by_path.get(path).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Monotonic counter bumped on every [`Self::replace_for_path`]. A
+    /// render-side cache keyed off this can skip recomputing while the
+    /// diagnostics are unchanged.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Iterate every `(path, diagnostics)` pair currently in the set.
@@ -128,6 +139,17 @@ mod tests {
         );
         assert_eq!(set.get(&path).len(), 1);
         assert_eq!(set.get(&path)[0].message, "second");
+    }
+
+    #[test]
+    fn version_bumps_on_every_replace() {
+        let mut set = DiagnosticSet::new();
+        let path = PathBuf::from("/ws/a.rs");
+        assert_eq!(set.version(), 0);
+        set.replace_for_path(path.clone(), vec![diag(DiagnosticSeverity::ERROR, "x")]);
+        assert_eq!(set.version(), 1);
+        set.replace_for_path(path.clone(), vec![]);
+        assert_eq!(set.version(), 2, "clearing a path is still a change");
     }
 
     #[test]

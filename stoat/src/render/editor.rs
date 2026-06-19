@@ -58,9 +58,28 @@ pub(crate) fn render_editor_with_overlay(
         return;
     }
 
-    let row_severity = diagnostic_info
-        .map(|(path, set)| compute_row_severity(set, path))
-        .unwrap_or_default();
+    let empty_severity = BTreeMap::new();
+    let row_severity: &BTreeMap<u32, DiagnosticSeverity> = match diagnostic_info {
+        Some((path, set)) => {
+            let version = set.version();
+            let stale = match &editor.gutter_severity_cache {
+                Some(cache) => cache.version != version,
+                None => true,
+            };
+            if stale {
+                editor.gutter_severity_cache = Some(GutterSeverityCache {
+                    version,
+                    map: compute_row_severity(set, path),
+                });
+            }
+            &editor
+                .gutter_severity_cache
+                .as_ref()
+                .expect("set above")
+                .map
+        },
+        None => &empty_severity,
+    };
     let gutter_w: u16 = if row_severity.is_empty() { 0 } else { 1 };
     let inner = Rect {
         x: inner.x + gutter_w,
@@ -70,7 +89,7 @@ pub(crate) fn render_editor_with_overlay(
     };
     if gutter_w > 0 {
         paint_diagnostic_gutter(
-            &row_severity,
+            row_severity,
             inner.x - gutter_w,
             inner.y,
             inner.height,
@@ -240,6 +259,16 @@ pub(crate) fn render_editor_with_overlay(
             }
         }
     }
+}
+
+/// Cached gutter severity map for one diagnostic-set version.
+///
+/// `map` is the per-buffer-row worst severity. Recomputed only when the
+/// diagnostic set's version changes, so the gutter is not rebuilt from the
+/// full diagnostic list every frame.
+pub(crate) struct GutterSeverityCache {
+    version: u64,
+    map: BTreeMap<u32, DiagnosticSeverity>,
 }
 
 /// Build a per-buffer-row map from `path`'s diagnostics, picking the

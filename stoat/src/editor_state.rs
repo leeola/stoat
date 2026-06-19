@@ -64,6 +64,9 @@ pub(crate) struct EditorState {
     /// Cached search-match byte ranges for the current `(version, query)`.
     /// See [`SearchMatchCache`]. Transient render state, not persisted.
     pub(crate) search_match_cache: Option<SearchMatchCache>,
+    /// Cached diagnostic gutter severity map, keyed by the diagnostic-set
+    /// version. Transient render state, not persisted.
+    pub(crate) gutter_severity_cache: Option<crate::render::editor::GutterSeverityCache>,
 }
 
 /// Snapshot of an [`EditorState`] suitable for workspace save/load.
@@ -96,6 +99,7 @@ impl EditorState {
             expansion_tip: None,
             jumplist: JumpList::new(),
             search_match_cache: None,
+            gutter_severity_cache: None,
         }
     }
 
@@ -117,6 +121,7 @@ impl EditorState {
             expansion_tip: None,
             jumplist: JumpList::new(),
             search_match_cache: None,
+            gutter_severity_cache: None,
         }
     }
 
