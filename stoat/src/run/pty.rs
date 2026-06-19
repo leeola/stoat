@@ -138,16 +138,15 @@ async fn reader_task(
     run_id: RunId,
     tx: mpsc::Sender<PtyNotification>,
 ) {
-    let mut buf = [0u8; 4096];
     let mut line_buf = String::new();
 
     loop {
-        let n = match host.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+        let chunk = match host.read_chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) | Err(_) => break,
         };
 
-        let chunk = &buf[..n];
+        let n = chunk.len();
         let mut output_start = 0;
 
         for (i, &byte) in chunk.iter().enumerate() {
@@ -180,7 +179,7 @@ async fn reader_task(
         if tx
             .send(PtyNotification::Output {
                 run_id,
-                data: chunk.to_vec(),
+                data: chunk,
             })
             .await
             .is_err()

@@ -5,7 +5,11 @@ use tokio::sync::mpsc;
 #[async_trait]
 pub trait TerminalHost: Send + Sync {
     async fn write(&self, data: &[u8]) -> io::Result<()>;
-    async fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
+    /// The next chunk of shell output, or `None` once the shell closes its end.
+    ///
+    /// Each call returns one read's worth of bytes and hands ownership to the
+    /// caller, so the chunk can move on without a further copy.
+    async fn read_chunk(&self) -> io::Result<Option<Vec<u8>>>;
     async fn kill(&self) -> io::Result<()>;
 }
 
@@ -13,7 +17,6 @@ pub(crate) struct PtyTerminal {
     writer: Mutex<Box<dyn io::Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     read_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
-    leftover: tokio::sync::Mutex<Vec<u8>>,
 }
 
 impl PtyTerminal {
@@ -32,7 +35,6 @@ impl PtyTerminal {
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             read_rx: tokio::sync::Mutex::new(rx),
-            leftover: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -61,29 +63,8 @@ impl TerminalHost for PtyTerminal {
         writer.flush()
     }
 
-    async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut leftover = self.leftover.lock().await;
-        if !leftover.is_empty() {
-            let n = leftover.len().min(buf.len());
-            buf[..n].copy_from_slice(&leftover[..n]);
-            leftover.drain(..n);
-            return Ok(n);
-        }
-        drop(leftover);
-
-        let mut rx = self.read_rx.lock().await;
-        match rx.recv().await {
-            Some(chunk) => {
-                let n = chunk.len().min(buf.len());
-                buf[..n].copy_from_slice(&chunk[..n]);
-                if n < chunk.len() {
-                    let mut leftover = self.leftover.lock().await;
-                    leftover.extend_from_slice(&chunk[n..]);
-                }
-                Ok(n)
-            },
-            None => Ok(0),
-        }
+    async fn read_chunk(&self) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.read_rx.lock().await.recv().await)
     }
 
     async fn kill(&self) -> io::Result<()> {

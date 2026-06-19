@@ -80,16 +80,8 @@ impl TerminalHost for FakeTerminal {
         Ok(())
     }
 
-    async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut rx = self.read_rx.lock().await;
-        match rx.recv().await {
-            Some(chunk) => {
-                let n = chunk.len().min(buf.len());
-                buf[..n].copy_from_slice(&chunk[..n]);
-                Ok(n)
-            },
-            None => Ok(0),
-        }
+    async fn read_chunk(&self) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.read_rx.lock().await.recv().await)
     }
 
     async fn kill(&self) -> io::Result<()> {
@@ -148,13 +140,12 @@ mod tests {
     }
 
     #[test]
-    fn read_returns_pushed_data() {
+    fn read_chunk_returns_pushed_data() {
         rt().block_on(async {
             let fake = FakeTerminal::new();
             fake.push_output(b"hello");
-            let mut buf = [0u8; 64];
-            let n = fake.read(&mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"hello");
+            let chunk = fake.read_chunk().await.unwrap();
+            assert_eq!(chunk.as_deref(), Some(b"hello".as_slice()));
         });
     }
 
