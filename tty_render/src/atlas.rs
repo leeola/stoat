@@ -46,6 +46,18 @@ pub struct GlyphInfo {
     pub placement: [i32; 2],
 }
 
+/// What a cached glyph was rasterized from.
+///
+/// Font glyphs are re-rasterizable through swash from their [`CacheKey`], while
+/// procedurally drawn glyphs are sized to a specific cell and kept as pixels.
+/// Both share one atlas, packer, and eviction order; the distinct variants keep
+/// a procedural glyph from colliding with the font glyph for the same codepoint.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum CacheId {
+    Font(CacheKey),
+    Procedural { cp: u32, width: u32, height: u32 },
+}
+
 /// A pair of glyph atlases, one for mask glyphs and one for color glyphs.
 pub struct GlyphAtlas {
     mask: Atlas,
@@ -82,10 +94,11 @@ impl GlyphAtlas {
         swash_cache: &mut SwashCache,
         key: CacheKey,
     ) -> Option<GlyphInfo> {
-        if let Some(hit) = self.mask.lookup(key) {
+        let id = CacheId::Font(key);
+        if let Some(hit) = self.mask.lookup(id) {
             return hit;
         }
-        if let Some(hit) = self.color.lookup(key) {
+        if let Some(hit) = self.color.lookup(id) {
             return hit;
         }
 
@@ -95,7 +108,44 @@ impl GlyphAtlas {
             AtlasKind::Color => &mut self.color,
         };
 
-        atlas.insert(device, queue, font_system, swash_cache, key, &image)
+        atlas.insert_image(device, queue, font_system, swash_cache, id, &image)
+    }
+
+    /// Look up a procedurally drawn glyph, rasterizing and caching it on first
+    /// use.
+    ///
+    /// `render` produces the `width`x`height` R8 coverage only on a cache miss;
+    /// the glyph is stored with those pixels so an atlas grow re-uploads it
+    /// without re-running `render`. Procedural glyphs always live in the mask
+    /// atlas. `None` when the atlas is full and nothing can be evicted, or when
+    /// `render` yields no pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_or_insert_procedural(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+        cp: u32,
+        width: u32,
+        height: u32,
+        render: impl FnOnce() -> Vec<u8>,
+    ) -> Option<GlyphInfo> {
+        let id = CacheId::Procedural { cp, width, height };
+        if let Some(hit) = self.mask.lookup(id) {
+            return hit;
+        }
+
+        self.mask.insert_pixels(
+            device,
+            queue,
+            font_system,
+            swash_cache,
+            id,
+            width,
+            height,
+            render(),
+        )
     }
 
     pub fn mask_view(&self) -> &TextureView {
@@ -123,8 +173,8 @@ struct Atlas {
     packer: BucketedAtlasAllocator,
     size: u32,
     max_dim: u32,
-    cache: LruCache<CacheKey, CachedGlyph, FxBuildHasher>,
-    in_use: HashSet<CacheKey>,
+    cache: LruCache<CacheId, CachedGlyph, FxBuildHasher>,
+    in_use: HashSet<CacheId>,
 }
 
 impl Atlas {
@@ -145,21 +195,24 @@ impl Atlas {
         }
     }
 
-    /// `Some` if `key` is cached (inner value `None` for an empty glyph),
+    /// `Some` if `id` is cached (inner value `None` for an empty glyph),
     /// `None` if it must be rasterized.
-    fn lookup(&mut self, key: CacheKey) -> Option<Option<GlyphInfo>> {
-        let cached = self.cache.get(&key).copied()?;
-        self.in_use.insert(key);
-        Some(self.glyph_info(&cached))
+    fn lookup(&mut self, id: CacheId) -> Option<Option<GlyphInfo>> {
+        let cached = self.cache.get(&id)?;
+        let info = glyph_info(cached, self.kind, self.size);
+        self.in_use.insert(id);
+        Some(info)
     }
 
-    fn insert(
+    /// Pack and cache a font glyph's swash bitmap, with no retained pixels: a
+    /// later grow re-rasterizes it through swash from its [`CacheKey`].
+    fn insert_image(
         &mut self,
         device: &Device,
         queue: &Queue,
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
-        key: CacheKey,
+        id: CacheId,
         image: &SwashImage,
     ) -> Option<GlyphInfo> {
         let width = image.placement.width;
@@ -167,22 +220,14 @@ impl Atlas {
 
         if width == 0 || height == 0 {
             self.cache.put(
-                key,
+                id,
                 CachedGlyph::empty(image.placement.left, image.placement.top),
             );
-            self.in_use.insert(key);
+            self.in_use.insert(id);
             return None;
         }
 
-        let allocation = loop {
-            if let Some(allocation) = self.try_allocate(width, height) {
-                break allocation;
-            }
-            if !self.grow(device, queue, font_system, swash_cache) {
-                return None;
-            }
-        };
-
+        let allocation = self.allocate(device, queue, font_system, swash_cache, width, height)?;
         let x = allocation.rectangle.min.x as u32;
         let y = allocation.rectangle.min.y as u32;
         write_glyph(
@@ -202,24 +247,82 @@ impl Atlas {
             height,
             left: image.placement.left,
             top: image.placement.top,
+            pixels: None,
         };
-        self.cache.put(key, cached);
-        self.in_use.insert(key);
+        let info = glyph_info(&cached, self.kind, self.size);
+        self.cache.put(id, cached);
+        self.in_use.insert(id);
 
-        self.glyph_info(&cached)
+        info
     }
 
-    fn glyph_info(&self, glyph: &CachedGlyph) -> Option<GlyphInfo> {
-        if glyph.width == 0 || glyph.height == 0 {
+    /// Pack and cache a procedurally drawn glyph, retaining its `pixels` so a
+    /// grow re-uploads them rather than re-rasterizing through swash.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_pixels(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+        id: CacheId,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Option<GlyphInfo> {
+        if width == 0 || height == 0 || pixels.is_empty() {
             return None;
         }
 
-        Some(GlyphInfo {
-            kind: self.kind,
-            uv: uv_rect(glyph.x, glyph.y, glyph.width, glyph.height, self.size),
-            size: [glyph.width, glyph.height],
-            placement: [glyph.left, glyph.top],
-        })
+        let allocation = self.allocate(device, queue, font_system, swash_cache, width, height)?;
+        let x = allocation.rectangle.min.x as u32;
+        let y = allocation.rectangle.min.y as u32;
+        write_glyph(
+            queue,
+            &self.texture,
+            num_channels(self.kind),
+            [x, y],
+            [width, height],
+            &pixels,
+        );
+
+        let cached = CachedGlyph {
+            alloc: Some(allocation.id),
+            x,
+            y,
+            width,
+            height,
+            left: 0,
+            top: 0,
+            pixels: Some(pixels),
+        };
+        let info = glyph_info(&cached, self.kind, self.size);
+        self.cache.put(id, cached);
+        self.in_use.insert(id);
+
+        info
+    }
+
+    /// Reserve a slot for a `width`x`height` glyph, growing the atlas when the
+    /// packer is full. `None` only when the atlas is at the device limit and
+    /// every sized glyph is needed this frame.
+    fn allocate(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+        width: u32,
+        height: u32,
+    ) -> Option<Allocation> {
+        loop {
+            if let Some(allocation) = self.try_allocate(width, height) {
+                return Some(allocation);
+            }
+            if !self.grow(device, queue, font_system, swash_cache) {
+                return None;
+            }
+        }
     }
 
     /// Reserve a `width`x`height` region, evicting least-recently-used glyphs
@@ -271,21 +374,21 @@ impl Atlas {
         self.texture = create_texture(device, self.kind, new_size);
 
         let channels = num_channels(self.kind);
-        for (key, glyph) in &self.cache {
+        for (id, glyph) in &self.cache {
             if glyph.alloc.is_none() {
                 continue;
             }
-            let Some(image) = swash_cache.get_image_uncached(font_system, *key) else {
-                continue;
-            };
-            write_glyph(
-                queue,
-                &self.texture,
-                channels,
-                [glyph.x, glyph.y],
-                [glyph.width, glyph.height],
-                &image.data,
-            );
+
+            let origin = [glyph.x, glyph.y];
+            let size = [glyph.width, glyph.height];
+            if let Some(pixels) = &glyph.pixels {
+                write_glyph(queue, &self.texture, channels, origin, size, pixels);
+            } else if let CacheId::Font(key) = id {
+                let Some(image) = swash_cache.get_image_uncached(font_system, *key) else {
+                    continue;
+                };
+                write_glyph(queue, &self.texture, channels, origin, size, &image.data);
+            }
         }
 
         self.view = self.texture.create_view(&TextureViewDescriptor::default());
@@ -294,7 +397,6 @@ impl Atlas {
     }
 }
 
-#[derive(Clone, Copy)]
 struct CachedGlyph {
     /// `None` for an empty (whitespace) glyph that occupies no atlas space.
     alloc: Option<AllocId>,
@@ -304,6 +406,10 @@ struct CachedGlyph {
     height: u32,
     left: i32,
     top: i32,
+    /// `Some` for a procedurally drawn glyph, holding its coverage bytes so a
+    /// grow re-uploads it without a font; `None` for a font glyph, which is
+    /// re-rasterized through swash on grow.
+    pixels: Option<Vec<u8>>,
 }
 
 impl CachedGlyph {
@@ -316,8 +422,24 @@ impl CachedGlyph {
             height: 0,
             left,
             top,
+            pixels: None,
         }
     }
+}
+
+/// The atlas placement of `glyph` for the text pass to draw, or `None` for an
+/// empty glyph that occupies no atlas space.
+fn glyph_info(glyph: &CachedGlyph, kind: AtlasKind, atlas_size: u32) -> Option<GlyphInfo> {
+    if glyph.width == 0 || glyph.height == 0 {
+        return None;
+    }
+
+    Some(GlyphInfo {
+        kind,
+        uv: uv_rect(glyph.x, glyph.y, glyph.width, glyph.height, atlas_size),
+        size: [glyph.width, glyph.height],
+        placement: [glyph.left, glyph.top],
+    })
 }
 
 fn atlas_kind(content: Content) -> AtlasKind {

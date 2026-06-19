@@ -9,7 +9,7 @@
 //! [`GlyphAtlas`]: crate::atlas::GlyphAtlas
 
 use crate::{
-    atlas::{AtlasKind, GlyphAtlas},
+    atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{CellMetrics, Frame},
 };
 use bytemuck::{Pod, Zeroable};
@@ -32,6 +32,8 @@ use wgpu::{
     ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, TextureSampleType,
     TextureView, TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode,
 };
+
+mod powerline;
 
 /// Instance buffer capacity, in glyphs, allocated up front. Grows by doubling
 /// when a frame exceeds it.
@@ -574,35 +576,41 @@ impl TextPass {
     ) -> Vec<TextInstance> {
         let mut instances = Vec::with_capacity(pending.len());
         for glyph in pending {
-            let Some(info) = self.atlas.get_or_insert(
-                device,
-                queue,
-                &mut self.font_system,
-                &mut self.swash_cache,
-                glyph.key,
-            ) else {
+            let Some(info) = self.resolve_glyph(device, queue, glyph.source) else {
                 continue;
             };
-            let pos = glyph_origin(
-                glyph.col,
-                glyph.row,
-                info.placement,
-                self.baseline * glyph.scale,
-                self.metrics,
-            );
-            let dim = [info.size[0] as f32, info.size[1] as f32];
-            let (pos, dim) = if glyph.cell_fill {
-                fill_cell_box(
-                    pos,
-                    dim,
-                    glyph.row,
-                    glyph.scale,
-                    self.baseline,
-                    self.metrics,
-                )
-            } else {
-                (pos, dim)
+
+            // A procedural separator already fills the cell, so it lands on the
+            // pixel-snapped cell rect; a font glyph sits at its bitmap placement,
+            // with cell-fill codepoints scaled to the cell box.
+            let (pos, dim) = match glyph.source {
+                GlyphSource::Procedural { .. } => {
+                    cell_box_rect(glyph.row, glyph.col, glyph.scale, self.metrics)
+                },
+                GlyphSource::Font(_) => {
+                    let pos = glyph_origin(
+                        glyph.col,
+                        glyph.row,
+                        info.placement,
+                        self.baseline * glyph.scale,
+                        self.metrics,
+                    );
+                    let dim = [info.size[0] as f32, info.size[1] as f32];
+                    if glyph.cell_fill {
+                        fill_cell_box(
+                            pos,
+                            dim,
+                            glyph.row,
+                            glyph.scale,
+                            self.baseline,
+                            self.metrics,
+                        )
+                    } else {
+                        (pos, dim)
+                    }
+                },
             };
+
             instances.push(TextInstance {
                 pos,
                 dim,
@@ -613,6 +621,36 @@ impl TextPass {
             });
         }
         instances
+    }
+
+    /// Resolve a pending glyph's final atlas placement, re-rasterizing only on a
+    /// cache miss. The font and procedural paths share the atlas, so each
+    /// resolves through its own keyed lookup.
+    fn resolve_glyph(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        source: GlyphSource,
+    ) -> Option<GlyphInfo> {
+        match source {
+            GlyphSource::Font(key) => self.atlas.get_or_insert(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.swash_cache,
+                key,
+            ),
+            GlyphSource::Procedural { cp, width, height } => self.atlas.get_or_insert_procedural(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.swash_cache,
+                cp,
+                width,
+                height,
+                || powerline::rasterize(cp, width, height).unwrap_or_default(),
+            ),
+        }
     }
 
     /// Build the glyph instances for the grid's off-grid text runs.
@@ -925,27 +963,10 @@ impl TextPass {
                 || is_cell_fill(cell.ch)
                 || shaping.cursor_cell == Some((row, col))
             {
-                if let Some(key) = self.glyph_key(cell.ch, f32::from(scale))
-                    && self
-                        .atlas
-                        .get_or_insert(
-                            device,
-                            queue,
-                            &mut self.font_system,
-                            &mut self.swash_cache,
-                            key,
-                        )
-                        .is_some()
+                if let Some(glyph) =
+                    self.single_glyph(device, queue, &cell, row, col, f32::from(scale))
                 {
-                    pending.push(PendingGlyph {
-                        row,
-                        col,
-                        key,
-                        fg: cell.fg,
-                        bg: cell.bg,
-                        scale: f32::from(scale),
-                        cell_fill: is_cell_fill(cell.ch),
-                    });
+                    pending.push(glyph);
                 }
                 col += 1;
                 continue;
@@ -990,7 +1011,7 @@ impl TextPass {
                     pending.push(PendingGlyph {
                         row,
                         col: glyph_col,
-                        key,
+                        source: GlyphSource::Font(key),
                         fg: cell.fg,
                         bg: cell.bg,
                         scale: 1.0,
@@ -1002,6 +1023,64 @@ impl TextPass {
         }
 
         pending
+    }
+
+    /// Shape and rasterize one cell's glyph on its own, returning its placement.
+    ///
+    /// A geometric powerline separator is drawn procedurally to fill the exact
+    /// cell box; every other character, including the box-drawing, block, and
+    /// stylized powerline cell-fill codepoints, is shaped from the font and (for
+    /// cell-fill codepoints) scaled to the cell by [`fill_cell_box`].
+    fn single_glyph(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        cell: &Cell,
+        row: usize,
+        col: usize,
+        scale: f32,
+    ) -> Option<PendingGlyph> {
+        let cp = u32::from(cell.ch);
+        if powerline::is_geometric(cp) {
+            let (width, height) = cell_fill_pixels(scale, self.metrics);
+            self.atlas.get_or_insert_procedural(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.swash_cache,
+                cp,
+                width,
+                height,
+                || powerline::rasterize(cp, width, height).unwrap_or_default(),
+            )?;
+            return Some(PendingGlyph {
+                row,
+                col,
+                source: GlyphSource::Procedural { cp, width, height },
+                fg: cell.fg,
+                bg: cell.bg,
+                scale,
+                cell_fill: false,
+            });
+        }
+
+        let key = self.glyph_key(cell.ch, scale)?;
+        self.atlas.get_or_insert(
+            device,
+            queue,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            key,
+        )?;
+        Some(PendingGlyph {
+            row,
+            col,
+            source: GlyphSource::Font(key),
+            fg: cell.fg,
+            bg: cell.bg,
+            scale,
+            cell_fill: is_cell_fill(cell.ch),
+        })
     }
 
     /// Shape and rasterize each overlay's content glyphs, returning one group of
@@ -1047,7 +1126,7 @@ impl TextPass {
                     group.push(PendingGlyph {
                         row,
                         col,
-                        key,
+                        source: GlyphSource::Font(key),
                         fg: overlay.content_fg,
                         bg: overlay.fill,
                         scale: f32::from(scale),
@@ -1092,20 +1171,35 @@ struct RowShaping<'a> {
     cursor_cell: Option<(usize, usize)>,
 }
 
+/// Where a pending glyph's bitmap comes from, so
+/// [`TextPass::build_text_instances`] re-resolves the same atlas entry the glyph
+/// was rasterized into once every glyph this frame is packed.
+///
+/// A [`GlyphSource::Font`] glyph is shaped from the font and keyed by its
+/// [`CacheKey`]; a [`GlyphSource::Procedural`] glyph is a powerline separator
+/// drawn to fill the cell, keyed by its codepoint and cell pixel size.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum GlyphSource {
+    Font(CacheKey),
+    Procedural { cp: u32, width: u32, height: u32 },
+}
+
 /// A glyph that has been rasterized into the atlas, awaiting its final atlas
 /// sub-rect once every glyph this frame is packed.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct PendingGlyph {
     row: usize,
     col: usize,
-    key: CacheKey,
+    source: GlyphSource,
     fg: Rgb,
     bg: Rgb,
     /// Multiple of the cell size this glyph is rasterized and drawn at. Integer
     /// for cell and overlay glyphs; the text-run path uses fractional scales.
     scale: f32,
-    /// Whether this is a cell-fill codepoint whose quad is scaled to the cell
-    /// box by [`fill_cell_box`] rather than drawn at its bitmap size.
+    /// Whether a [`GlyphSource::Font`] cell-fill codepoint (box-drawing or
+    /// block) has its quad scaled to the cell box by [`fill_cell_box`] rather
+    /// than drawn at its bitmap size. A [`GlyphSource::Procedural`] glyph already
+    /// fills its cell, so this stays false for one.
     cell_fill: bool,
 }
 
@@ -1471,9 +1565,12 @@ fn glyph_origin(
 /// Whether `ch` is a cell-fill codepoint: box-drawing (U+2500-257F), block
 /// elements (U+2580-259F), or powerline (U+E0B0-E0D4).
 ///
-/// These are designed to fill the cell box rather than sit on the text
-/// baseline, so [`TextPass::build_text_instances`] scales their quad to the cell
-/// via [`fill_cell_box`] instead of drawing them at their bitmap size.
+/// These are designed to fill the cell box rather than sit on the text baseline.
+/// Codepoints flagged here that are not drawn procedurally (see
+/// [`powerline::is_geometric`]) have their font glyph scaled to the cell by
+/// [`fill_cell_box`] instead of drawn at their bitmap size; the geometric
+/// powerline separators bypass that and fill the cell exactly via
+/// [`cell_box_rect`].
 fn is_cell_fill(ch: char) -> bool {
     matches!(ch, '\u{2500}'..='\u{257F}' | '\u{2580}'..='\u{259F}' | '\u{E0B0}'..='\u{E0D4}')
 }
@@ -1502,6 +1599,29 @@ fn fill_cell_box(
         [pos[0], baseline_y + (pos[1] - baseline_y) * scale_y],
         [dim[0], dim[1] * scale_y],
     )
+}
+
+/// Integer pixel size to rasterize a procedural cell-fill glyph at, covering a
+/// `scale`-cell block so the coverage mask matches the cell rect it fills.
+fn cell_fill_pixels(scale: f32, metrics: CellMetrics) -> (u32, u32) {
+    (
+        (metrics.width * scale).round().max(1.0) as u32,
+        (metrics.height * scale).round().max(1.0) as u32,
+    )
+}
+
+/// The pixel-snapped rectangle of the `scale`-cell block at (`row`, `col`), as
+/// `(top-left, [width, height])` in physical pixels.
+///
+/// Each edge is rounded to a whole pixel exactly as the background pass snaps
+/// its cells, so a procedural cell-fill glyph shares an integer boundary with
+/// the neighbouring cell backgrounds and leaves no seam.
+fn cell_box_rect(row: usize, col: usize, scale: f32, metrics: CellMetrics) -> ([f32; 2], [f32; 2]) {
+    let left = (col as f32 * metrics.width).round();
+    let top = (row as f32 * metrics.height).round();
+    let right = ((col as f32 + scale) * metrics.width).round();
+    let bottom = ((row as f32 + scale) * metrics.height).round();
+    ([left, top], [right - left, bottom - top])
 }
 
 /// Screen position of glyph `index` in a fractional, vertically-centered text
@@ -1677,7 +1797,7 @@ mod tests {
         build_font_system, build_underline_instances, cell_glyph_scale, cell_rect_scissor,
         cursor_cell, fill_cell_box, glyph_family, glyph_origin, is_cell_fill, load_bundled_fonts,
         overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_family,
-        shape_run, text_run_origin, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        shape_run, text_run_origin, GlyphSource, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
@@ -2148,24 +2268,37 @@ mod tests {
     }
 
     #[test]
-    fn flags_cell_fill_codepoints_through_shaping() {
+    fn routes_cell_fill_codepoints_by_kind() {
         let Some((device, queue, mut pass)) = headless_text_pass() else {
             return;
         };
         let mut grid = Grid::new(1, 4);
-        grid.get_mut(0, 0).ch = '\u{E0B0}'; // powerline separator
+        grid.get_mut(0, 0).ch = '\u{E0B0}'; // geometric powerline separator
         grid.get_mut(0, 1).ch = 'M'; // ordinary glyph
+        grid.get_mut(0, 2).ch = '\u{2500}'; // box-drawing, a font cell-fill glyph
 
         pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
         let glyphs = pass.collect_grid_glyphs();
+        let glyph = |col| glyphs.iter().find(|g| g.col == col).expect("glyph");
 
-        let separator = glyphs.iter().find(|g| g.col == 0).expect("separator glyph");
-        let letter = glyphs.iter().find(|g| g.col == 1).expect("letter glyph");
         assert!(
-            separator.cell_fill,
-            "powerline separator scales to the cell"
+            matches!(glyph(0).source, GlyphSource::Procedural { cp: 0xE0B0, .. }),
+            "a geometric powerline separator is drawn procedurally"
         );
-        assert!(!letter.cell_fill, "an ordinary letter does not");
+        assert!(
+            !glyph(0).cell_fill,
+            "a procedural separator scales no font bitmap"
+        );
+
+        assert!(
+            matches!(glyph(1).source, GlyphSource::Font(_)) && !glyph(1).cell_fill,
+            "an ordinary letter shapes from the font and is not cell-fill"
+        );
+
+        assert!(
+            matches!(glyph(2).source, GlyphSource::Font(_)) && glyph(2).cell_fill,
+            "box-drawing stays on the font path and scales its glyph to the cell"
+        );
     }
 
     #[test]
