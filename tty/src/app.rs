@@ -13,9 +13,12 @@ use crate::{
     pty::{self, Pty, PtyOutput},
 };
 use alacritty_terminal::sync::FairMutex;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Instant,
 };
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, Scroll},
@@ -187,6 +190,10 @@ struct State {
     /// wakeup only on the clean-to-dirty edge, so a flood of chunks coalesces
     /// into one wakeup per render cycle instead of one per chunk.
     dirty: Arc<AtomicBool>,
+    /// Set by the reader while a DEC 2026 synchronized update is buffering in the
+    /// parser, so [`App::about_to_wait`] arms a wait until the update's timeout
+    /// and flushes it if no ESU arrives. Cleared once the update flushes.
+    sync_pending: Arc<AtomicBool>,
     grid: Grid,
     pty: Pty,
     /// The live font size in logical points, seeded from the config and stepped
@@ -271,11 +278,13 @@ impl ApplicationHandler<PtyEvent> for App {
         let grid = Grid::new(rows, cols);
         let terminal = Arc::new(FairMutex::new(Terminal::new(rows, cols, self.theme)));
         let dirty = Arc::new(AtomicBool::new(false));
+        let sync_pending = Arc::new(AtomicBool::new(false));
 
         let pty = {
             let proxy = self.proxy.clone();
             let terminal = terminal.clone();
             let dirty = dirty.clone();
+            let sync_pending = sync_pending.clone();
             Pty::spawn(
                 &self.program,
                 &self.args,
@@ -284,18 +293,24 @@ impl ApplicationHandler<PtyEvent> for App {
                 move |output| match output {
                     PtyOutput::Data(bytes) => {
                         // Parse on the reader thread under the shared lock.
-                        let responses = {
+                        let (redraw, responses) = {
                             let mut terminal = terminal.lock();
-                            terminal.advance(&bytes);
-                            terminal.take_responses()
+                            let redraw = terminal.advance(&bytes);
+                            // A buffering synchronized update needs the main
+                            // thread to arm and drive its timeout flush.
+                            sync_pending
+                                .store(terminal.sync_deadline().is_some(), Ordering::Relaxed);
+                            (redraw, terminal.take_responses())
                         };
                         if !responses.is_empty() {
                             let _ = proxy.send_event(PtyEvent::Responses(responses));
                         }
                         // Wake the main thread to redraw, but only on the
-                        // clean-to-dirty edge so a burst of chunks collapses
-                        // into one wakeup per render cycle.
-                        if !dirty.swap(true, Ordering::Relaxed) {
+                        // clean-to-dirty edge so a burst of chunks collapses into
+                        // one wakeup per render cycle. A chunk wholly held in the
+                        // synchronized-update buffer changes nothing on screen, so
+                        // it skips the wakeup.
+                        if redraw && !dirty.swap(true, Ordering::Relaxed) {
                             let _ = proxy.send_event(PtyEvent::Redraw);
                         }
                     },
@@ -313,6 +328,7 @@ impl ApplicationHandler<PtyEvent> for App {
             gpu,
             terminal,
             dirty,
+            sync_pending,
             grid,
             pty,
             font_size: self.font_size,
@@ -345,6 +361,45 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             PtyEvent::Exited => event_loop.exit(),
+        }
+    }
+
+    /// Drive the DEC 2026 synchronized-update timeout.
+    ///
+    /// While an update buffers in the parser, wait until its deadline and then
+    /// flush it, so a missing or slow ESU cannot freeze the screen; the redraw
+    /// the flush warrants is requested here. With no update pending the loop waits
+    /// idle for the next event. The chunk that opens an update always warrants a
+    /// redraw (its BSU bytes reach the screen ahead of the buffer), so the reader
+    /// always wakes the main thread once to arm this.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+
+        if !state.sync_pending.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        let deadline = {
+            let mut terminal = state.terminal.lock();
+            match terminal.sync_deadline() {
+                Some(deadline) if deadline <= Instant::now() => {
+                    terminal.flush_synchronized_update();
+                    None
+                },
+                other => other,
+            }
+        };
+
+        match deadline {
+            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+            None => {
+                state.sync_pending.store(false, Ordering::Relaxed);
+                state.window.request_redraw();
+                event_loop.set_control_flow(ControlFlow::Wait);
+            },
         }
     }
 

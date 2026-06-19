@@ -25,7 +25,7 @@ use alacritty_terminal::{
     Term,
 };
 use parking_lot::Mutex;
-use std::{mem, sync::Arc};
+use std::{mem, sync::Arc, time::Instant};
 use stoatty_protocol::command::{
     self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PopoverCommand,
     ScaleCommand, ScrollRegionCommand, TextRunCommand,
@@ -193,6 +193,12 @@ impl Terminal {
 
     /// Feed `bytes` of the VT stream into the parser, mutating the screen.
     ///
+    /// Returns whether the screen changed visibly and a redraw is warranted. It
+    /// returns `false` while a DEC 2026 synchronized update is buffering -- when
+    /// the whole chunk went into the parser's sync buffer rather than the screen
+    /// -- so the caller can skip presenting the frozen frame until the update
+    /// flushes (on ESU or via [`Self::flush_synchronized_update`] at the timeout).
+    ///
     /// Bytes need not be escape-sequence aligned; the parser retains a partial
     /// sequence across calls.
     ///
@@ -204,7 +210,7 @@ impl Terminal {
     /// XTVERSION queries (`CSI > Ps q`) are answered here too. The vte parser
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
-    pub fn advance(&mut self, bytes: &[u8]) {
+    pub fn advance(&mut self, bytes: &[u8]) -> bool {
         // The APC and XTVERSION scanners only act on ESC-prefixed sequences, so
         // when neither holds a partial frame a chunk with no ESC carries nothing
         // for them. A SIMD memchr for the first ESC lets the bulk of plain output
@@ -228,6 +234,28 @@ impl Terminal {
         }
 
         self.parser.advance(&mut self.term, bytes);
+
+        // A redraw is warranted unless the whole chunk was held in the parser's
+        // synchronized-update buffer (nothing reached the screen).
+        self.parser.sync_bytes_count() < bytes.len()
+    }
+
+    /// The instant the in-progress synchronized update must be flushed by, or
+    /// `None` when no update is buffering.
+    ///
+    /// A DEC 2026 update buffers bytes until ESU, but a missing or slow ESU would
+    /// freeze the screen, so the host loop must flush at this deadline via
+    /// [`Self::flush_synchronized_update`].
+    pub fn sync_deadline(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    /// Apply the buffered synchronized-update bytes and end the update.
+    ///
+    /// Called by the host loop when [`Self::sync_deadline`] passes; a no-op when
+    /// no update is buffering. ESU within the stream flushes on its own.
+    pub fn flush_synchronized_update(&mut self) {
+        self.parser.stop_sync(&mut self.term);
     }
 
     /// Take the bytes the terminal wants written back to the PTY, leaving none
@@ -1946,6 +1974,58 @@ mod tests {
         // icon, but the grid's list persists.
         terminal.project(&mut grid);
         assert_eq!(grid.icons().len(), 1, "icon survives an idle projection");
+    }
+
+    #[test]
+    fn synchronized_update_buffers_until_esu() {
+        let mut terminal = Terminal::new(2, 3, Theme::default());
+        let mut grid = Grid::new(2, 3);
+
+        terminal.advance(b"\x1b[?2026h");
+        terminal.advance(b"AB");
+        assert!(terminal.sync_deadline().is_some(), "update is buffering");
+        terminal.project(&mut grid);
+        assert_eq!(grid.get(0, 0).ch, ' ', "buffered content not yet on screen");
+
+        terminal.advance(b"\x1b[?2026l");
+        assert!(terminal.sync_deadline().is_none(), "ESU ended the update");
+        terminal.project(&mut grid);
+        assert_eq!(grid.get(0, 0).ch, 'A');
+        assert_eq!(grid.get(0, 1).ch, 'B');
+    }
+
+    #[test]
+    fn flush_synchronized_update_applies_buffered_bytes() {
+        let mut terminal = Terminal::new(2, 3, Theme::default());
+        let mut grid = Grid::new(2, 3);
+
+        terminal.advance(b"\x1b[?2026hAB");
+        assert!(terminal.sync_deadline().is_some());
+
+        terminal.flush_synchronized_update();
+        assert!(terminal.sync_deadline().is_none(), "flush ended the update");
+        terminal.project(&mut grid);
+        assert_eq!(grid.get(0, 0).ch, 'A');
+        assert_eq!(grid.get(0, 1).ch, 'B');
+    }
+
+    #[test]
+    fn advance_reports_no_redraw_while_buffering() {
+        let mut terminal = Terminal::new(2, 3, Theme::default());
+
+        assert!(terminal.advance(b"hi"), "normal output warrants a redraw");
+        assert!(
+            terminal.advance(b"\x1b[?2026h"),
+            "the BSU chunk itself is not all buffered"
+        );
+        assert!(
+            !terminal.advance(b"X"),
+            "a fully buffered chunk warrants no redraw"
+        );
+        assert!(
+            terminal.advance(b"\x1b[?2026l"),
+            "the ESU flush warrants a redraw"
+        );
     }
 
     #[test]
