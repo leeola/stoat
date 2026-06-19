@@ -202,6 +202,9 @@ struct State {
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
     wheel_pixels: f64,
+    /// The grid cell `(col, row)` under the pointer, tracked from `CursorMoved`,
+    /// so a mouse-reporting app receives wheel reports at the pointer position.
+    pointer_cell: (usize, usize),
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -281,6 +284,7 @@ impl ApplicationHandler<PtyEvent> for App {
             region_scroll: 0.0,
             last_region_offset: 0.0,
             wheel_pixels: 0.0,
+            pointer_cell: (0, 0),
         });
     }
 
@@ -464,19 +468,29 @@ impl ApplicationHandler<PtyEvent> for App {
                     render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
                 let lines = wheel_lines(delta, &mut state.wheel_pixels, cell_height);
                 if lines != 0 {
-                    // An alt-screen pager with alternate-scroll on expects arrow
-                    // keys, not local scrollback; the pager's reply repaints. Shift
-                    // forces local scrollback instead.
-                    if !state.modifiers.shift_key()
+                    if state.terminal.mouse_mode() && state.terminal.sgr_mouse() {
+                        // A mouse-reporting app wants the wheel as a button press
+                        // at the pointer, not scrolling; its redraw follows its
+                        // response.
+                        let (col, row) = state.pointer_cell;
+                        let _ = state.pty.write(&sgr_wheel_bytes(lines, col, row));
+                    } else if !state.modifiers.shift_key()
                         && state.terminal.is_alt_screen()
                         && state.terminal.alternate_scroll()
                     {
+                        // An alt-screen pager with alternate-scroll on expects
+                        // arrow keys; Shift forces local scrollback instead.
                         let _ = state.pty.write(&alternate_scroll_bytes(lines));
                     } else {
                         state.terminal.scroll_display(lines);
                         state.window.request_redraw();
                     }
                 }
+            },
+            WindowEvent::CursorMoved { position, .. } => {
+                let cell_size = render::cell_size(state.font_size, state.scale_factor as f32);
+                let (rows, cols) = state.gpu.grid_size();
+                state.pointer_cell = cell_at(position.x, position.y, cell_size, rows, cols);
             },
             _ => {},
         }
@@ -574,6 +588,23 @@ fn alternate_scroll_bytes(lines: i32) -> Vec<u8> {
     arrow.repeat(lines.unsigned_abs() as usize)
 }
 
+/// Encode `lines` of wheel scroll as SGR mouse-wheel reports at cell
+/// (`col`, `row`): one button-press report per line, button 64 (up) when
+/// `lines` is positive, 65 (down) when negative, with 1-based coordinates.
+fn sgr_wheel_bytes(lines: i32, col: usize, row: usize) -> Vec<u8> {
+    let button = if lines > 0 { 64 } else { 65 };
+    let report = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
+    report.repeat(lines.unsigned_abs() as usize).into_bytes()
+}
+
+/// The grid cell `(col, row)` under physical pixel (`x`, `y`), clamped to the
+/// `rows` x `cols` grid, for a `cell_size` of `[width, height]` physical pixels.
+fn cell_at(x: f64, y: f64, cell_size: [f32; 2], rows: usize, cols: usize) -> (usize, usize) {
+    let col = ((x / f64::from(cell_size[0])) as usize).min(cols.saturating_sub(1));
+    let row = ((y / f64::from(cell_size[1])) as usize).min(rows.saturating_sub(1));
+    (col, row)
+}
+
 /// Step the animated cursor toward `target`, returning the new position and
 /// whether it has reached the target.
 ///
@@ -645,8 +676,8 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, ease, encode_key, font_step, popover_overflow, step_grid_scroll,
-        step_popover_scroll, step_region_scroll, wheel_lines,
+        alternate_scroll_bytes, cell_at, ease, encode_key, font_step, popover_overflow,
+        sgr_wheel_bytes, step_grid_scroll, step_popover_scroll, step_region_scroll, wheel_lines,
     };
     use stoatty_term::grid::{Overlay, Rgb};
     use winit::{
@@ -805,6 +836,41 @@ mod tests {
             alternate_scroll_bytes(0),
             b"".to_vec(),
             "no lines, no bytes"
+        );
+    }
+
+    #[test]
+    fn sgr_wheel_bytes_reports_one_press_per_line_at_the_cell() {
+        // Two lines up: button 64, one press per line, 1-based cell (3,7)->(4,8).
+        assert_eq!(
+            sgr_wheel_bytes(2, 3, 7),
+            b"\x1b[<64;4;8M\x1b[<64;4;8M".to_vec(),
+            "wheel up reports button 64 once per line"
+        );
+        assert_eq!(
+            sgr_wheel_bytes(-1, 0, 0),
+            b"\x1b[<65;1;1M".to_vec(),
+            "wheel down at the origin cell reports button 65"
+        );
+    }
+
+    #[test]
+    fn cell_at_maps_pixels_to_a_clamped_cell() {
+        let cell = [10.0, 20.0];
+        assert_eq!(
+            cell_at(25.0, 50.0, cell, 5, 8),
+            (2, 2),
+            "x 25/10 is col 2, y 50/20 is row 2"
+        );
+        assert_eq!(
+            cell_at(1000.0, 1000.0, cell, 5, 8),
+            (7, 4),
+            "a pointer past the grid clamps to the last cell"
+        );
+        assert_eq!(
+            cell_at(-5.0, -5.0, cell, 5, 8),
+            (0, 0),
+            "a negative position saturates to the origin"
         );
     }
 
