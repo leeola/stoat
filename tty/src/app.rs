@@ -12,7 +12,7 @@ use crate::{
 };
 use std::sync::Arc;
 use stoatty_render::{
-    gpu::{FontConfig, Frame, GpuContext, Scroll},
+    gpu::{FontConfig, FontLoad, Frame, GpuContext, Scroll},
     render,
 };
 use stoatty_term::{
@@ -206,6 +206,11 @@ impl ApplicationHandler<PtyEvent> for App {
             return;
         }
 
+        // Kick off font enumeration before creating the window, so it runs on a
+        // background thread concurrently with window and GPU setup rather than
+        // blocking the first paint after them.
+        let font_load = FontLoad::spawn();
+
         let mut attributes = Window::default_attributes().with_title("stoatty");
         if let Some([cols, rows]) = self.size {
             let [cell_width, cell_height] = render::cell_size(self.font_size, 1.0);
@@ -222,6 +227,7 @@ impl ApplicationHandler<PtyEvent> for App {
             window.clone(),
             size.width.max(1),
             size.height.max(1),
+            font_load,
             FontConfig {
                 size: self.font_size,
                 scale_factor: scale_factor as f32,

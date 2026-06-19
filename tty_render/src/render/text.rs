@@ -172,21 +172,18 @@ pub struct TextPass {
 impl TextPass {
     /// Build the pipeline targeting `format`, with an empty instance buffer.
     ///
-    /// Loads the system fonts (cosmic-text [`FontSystem::new`]) plus the bundled
-    /// JetBrains Mono default, resolves `font_family` against them to pick the
-    /// shaping primary, and creates the glyph atlas, so this is the heavy part of
-    /// renderer startup. `format` must
-    /// be the non-sRGB surface format the text pass composites into; the shader
-    /// does its own sRGB encoding.
+    /// Takes a ready `font_system` (see [`build_font_system`]), resolves
+    /// `font_family` against it to pick the shaping primary, and creates the
+    /// glyph atlas. `format` must be the non-sRGB surface format the text pass
+    /// composites into; the shader does its own sRGB encoding.
     pub(crate) fn new(
         device: &Device,
         format: TextureFormat,
         metrics: CellMetrics,
+        mut font_system: FontSystem,
         font_family: &[String],
         ligatures: bool,
     ) -> TextPass {
-        let mut font_system = FontSystem::new();
-        load_bundled_fonts(&mut font_system);
         let family = resolve_primary_family(&font_system, font_family);
         let baseline = probe_baseline(&mut font_system, metrics, shape_family(&family));
         let swash_cache = SwashCache::new();
@@ -1351,6 +1348,19 @@ fn font_covers(font: &Font, ch: char) -> bool {
     font.as_swash().charmap().map(ch) != 0
 }
 
+/// Build the [`FontSystem`] a [`TextPass`] shapes with: cosmic-text's system
+/// font enumeration plus the bundled fonts.
+///
+/// Enumerating the system fonts dominates renderer startup, and this needs no
+/// window or GPU, so it is run on a background thread (see
+/// [`GpuContext::new`](crate::gpu::GpuContext::new)) concurrently with the
+/// main-thread surface and device setup.
+pub fn build_font_system() -> FontSystem {
+    let mut font_system = FontSystem::new();
+    load_bundled_fonts(&mut font_system);
+    font_system
+}
+
 /// Register the bundled faces into `font_system`'s font database so they resolve
 /// regardless of which fonts are installed system-wide: the JetBrains Mono
 /// variable faces (the `JetBrains Mono` family) and the Symbols Nerd Font Mono
@@ -1601,10 +1611,10 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_underline_instances, cell_glyph_scale, cell_rect_scissor, cursor_cell, glyph_family,
-        glyph_origin, load_bundled_fonts, overlay_content_cells, resolve_primary_family,
-        run_text_and_columns, shape_family, shape_run, text_run_origin, TextPass, STYLE_DOTTED,
-        SYMBOLS_FAMILY,
+        build_font_system, build_underline_instances, cell_glyph_scale, cell_rect_scissor,
+        cursor_cell, glyph_family, glyph_origin, load_bundled_fonts, overlay_content_cells,
+        resolve_primary_family, run_text_and_columns, shape_family, shape_run, text_run_origin,
+        TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
@@ -1969,6 +1979,7 @@ mod tests {
             &device,
             TextureFormat::Rgba8Unorm,
             CellMetrics::from_font_size(16, 1.0),
+            build_font_system(),
             &["JetBrains Mono".to_owned()],
             true,
         );

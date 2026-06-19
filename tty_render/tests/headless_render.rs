@@ -7,7 +7,9 @@
 //! `create_render_pipeline`. This test reaches that path and the draw path,
 //! skipping when no GPU adapter is present so GPU-less CI stays green.
 
-use stoatty_render::gpu::{headless_device, FontConfig, Frame, Renderer, Scroll};
+use stoatty_render::gpu::{
+    build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll,
+};
 use stoatty_term::{
     grid::{Bar, Border, BorderStyle, Grid, Icon, IconKind, Overlay, Rgb, ScrollRegion, TextRun},
     term::Damage,
@@ -47,6 +49,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         &device,
         format,
         [width, height],
+        build_font_system(),
         FontConfig {
             size: 30,
             scale_factor: 1.0,

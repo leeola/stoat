@@ -18,9 +18,11 @@ use crate::render::{
     text::TextPass,
     CellMetrics,
 };
-pub use crate::render::{Frame, Scroll};
+pub use crate::render::{text::build_font_system, Frame, Scroll};
+use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::thread;
 use stoatty_term::grid::{Grid, Rgb};
 use wgpu::{
     Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
@@ -82,6 +84,7 @@ impl Renderer {
         device: &Device,
         format: TextureFormat,
         size: [u32; 2],
+        font_system: FontSystem,
         font: FontConfig<'_>,
         background: Rgb,
         cursor: Rgb,
@@ -90,7 +93,14 @@ impl Renderer {
         Renderer {
             background: BackgroundPass::new(device, format, metrics),
             decoration: DecorationPass::new(device, format, metrics),
-            text: TextPass::new(device, format, metrics, font.family, font.ligatures),
+            text: TextPass::new(
+                device,
+                format,
+                metrics,
+                font_system,
+                font.family,
+                font.ligatures,
+            ),
             overlay: OverlayPass::new(device, format, metrics),
             icon: IconPass::new(device, format, metrics),
             bar: BarPass::new(device, format, metrics),
@@ -232,6 +242,27 @@ pub struct GpuContext {
     renderer: Renderer,
 }
 
+/// A [`FontSystem`] being built on a background thread, handed to
+/// [`GpuContext::new`].
+///
+/// Enumerating the system fonts dominates startup and needs no window or GPU,
+/// so the app starts it via [`Self::spawn`] before creating the window; the
+/// font build then runs concurrently with the main-thread window and GPU setup
+/// instead of after it.
+pub struct FontLoad(thread::JoinHandle<FontSystem>);
+
+impl FontLoad {
+    /// Start building the font system on a background thread.
+    pub fn spawn() -> FontLoad {
+        FontLoad(thread::spawn(build_font_system))
+    }
+
+    /// Block until the font system is ready.
+    fn join(self) -> FontSystem {
+        self.0.join().expect("font system thread panicked")
+    }
+}
+
 impl GpuContext {
     /// Build the context for `window`, sized to `width`x`height` physical
     /// pixels, with cells sized and text shaped per `font`, clearing to
@@ -239,7 +270,9 @@ impl GpuContext {
     ///
     /// `window` is anything carrying window and display handles; the surface
     /// takes ownership of it, so it must outlive the context (pass an
-    /// `Arc`-wrapped window). Blocks on adapter and device acquisition.
+    /// `Arc`-wrapped window). Blocks on adapter and device acquisition, while the
+    /// font system loads concurrently on a background thread, so startup costs
+    /// the slower of the two rather than their sum.
     ///
     /// Panics if no GPU adapter is available even with the software fallback,
     /// device creation fails, or the surface cannot be created. All three are
@@ -248,6 +281,7 @@ impl GpuContext {
         window: W,
         width: u32,
         height: u32,
+        font_load: FontLoad,
         font: FontConfig<'_>,
         background: Rgb,
         cursor: Rgb,
@@ -309,10 +343,12 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
 
+        let font_system = font_load.join();
         let renderer = Renderer::new(
             &device,
             view_format,
             [width, height],
+            font_system,
             font,
             background,
             cursor,
