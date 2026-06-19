@@ -1131,6 +1131,7 @@ mod tests {
             sha: "c2".into(),
         };
         crate::action_handlers::dispatch(&mut h.stoat, &action);
+        h.settle();
 
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("session for commit");
@@ -1158,6 +1159,7 @@ mod tests {
             sha: "root".into(),
         };
         crate::action_handlers::dispatch(&mut h.stoat, &action);
+        h.settle();
 
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("session for root commit");
@@ -1185,6 +1187,7 @@ mod tests {
             to: "c3".into(),
         };
         crate::action_handlers::dispatch(&mut h.stoat, &action);
+        h.settle();
 
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("session for range");
@@ -1237,6 +1240,7 @@ mod tests {
             sha: "c2".into(),
         };
         crate::action_handlers::dispatch(&mut h.stoat, &action);
+        h.settle();
 
         h.set_review_status(0, ChunkStatus::Staged);
         h.dispatch_review_refresh();

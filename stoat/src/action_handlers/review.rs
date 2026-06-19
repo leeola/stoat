@@ -22,10 +22,16 @@ use std::{
 use stoat_language::LanguageRegistry;
 
 pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
-    let Some(session) = scan_commit(stoat, workdir, sha) else {
-        return;
-    };
-    install_review_session(stoat, session);
+    let executor = stoat.executor.clone();
+    let git_host = stoat.git_host.clone();
+    let langs = stoat.language_registry.clone();
+    let redraw = stoat.redraw_notify.clone();
+    let workdir = workdir.to_path_buf();
+    let sha = sha.to_string();
+
+    let scan =
+        executor.spawn_blocking(move || scan_commit_pure(&*git_host, &langs, &workdir, &sha));
+    stoat.pending_review_scan = Some(executor.spawn_with_redraw(redraw, scan));
 }
 
 pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
@@ -230,19 +236,32 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
     }) else {
         return UpdateEffect::None;
     };
-    let Some(mut session) = scan_commit(stoat, &workdir, &sha) else {
-        return UpdateEffect::None;
-    };
-    session.origin = ReviewOrigin::FromCommits;
-    install_review_session(stoat, session);
+    let executor = stoat.executor.clone();
+    let git_host = stoat.git_host.clone();
+    let langs = stoat.language_registry.clone();
+    let redraw = stoat.redraw_notify.clone();
+
+    let scan = executor.spawn_blocking(move || {
+        let mut session = scan_commit_pure(&*git_host, &langs, &workdir, &sha)?;
+        session.origin = ReviewOrigin::FromCommits;
+        Some(session)
+    });
+    stoat.pending_review_scan = Some(executor.spawn_with_redraw(redraw, scan));
     UpdateEffect::Redraw
 }
 
 pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: &str, to: &str) {
-    let Some(session) = scan_commit_range(stoat, workdir, from, to) else {
-        return;
-    };
-    install_review_session(stoat, session);
+    let executor = stoat.executor.clone();
+    let git_host = stoat.git_host.clone();
+    let langs = stoat.language_registry.clone();
+    let redraw = stoat.redraw_notify.clone();
+    let workdir = workdir.to_path_buf();
+    let from = from.to_string();
+    let to = to.to_string();
+
+    let scan = executor
+        .spawn_blocking(move || scan_commit_range_pure(&*git_host, &langs, &workdir, &from, &to));
+    stoat.pending_review_scan = Some(executor.spawn_with_redraw(redraw, scan));
 }
 
 pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::AgentEdit]) {
@@ -707,8 +726,18 @@ fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
 /// Build a session from a single commit by diffing its tree against its
 /// first parent (or the empty tree for a root commit). Returns `None` when
 /// the repo or sha is unknown, or when no paths differ.
-pub(super) fn scan_commit(stoat: &Stoat, workdir: &Path, sha: &str) -> Option<ReviewSession> {
-    let repo = stoat.git_host.discover(workdir)?;
+///
+/// Takes no `&Stoat` so the git2 reads run on a blocking thread off the
+/// input loop. [`open_review_commit`] and [`commits_open_review`] drive it
+/// through `spawn_blocking`; [`scan_commit`] wraps it for synchronous
+/// callers.
+fn scan_commit_pure(
+    git: &dyn GitHost,
+    langs: &LanguageRegistry,
+    workdir: &Path,
+    sha: &str,
+) -> Option<ReviewSession> {
+    let repo = git.discover(workdir)?;
     let workdir = repo.workdir()?;
     let new_tree = repo.commit_tree(sha)?;
     let base_tree = match repo.parent_sha(sha) {
@@ -716,7 +745,7 @@ pub(super) fn scan_commit(stoat: &Stoat, workdir: &Path, sha: &str) -> Option<Re
         None => std::collections::BTreeMap::new(),
     };
     build_session_from_trees(
-        stoat,
+        langs,
         ReviewSource::Commit {
             workdir: workdir.clone(),
             sha: sha.to_string(),
@@ -727,16 +756,30 @@ pub(super) fn scan_commit(stoat: &Stoat, workdir: &Path, sha: &str) -> Option<Re
     )
 }
 
+/// Synchronous [`scan_commit_pure`] wrapper reading the hosts off `stoat`,
+/// used by the reopen, removal, refresh, and rebase paths that scan inline.
+pub(super) fn scan_commit(stoat: &Stoat, workdir: &Path, sha: &str) -> Option<ReviewSession> {
+    scan_commit_pure(&*stoat.git_host, &stoat.language_registry, workdir, sha)
+}
+
 /// Build a session from a commit range `from..=to` (inclusive of `to`,
-/// exclusive of `from` -- same as `git diff from..to`). Pairs each path
+/// exclusive of `from`, the same as `git diff from..to`). Pairs each path
 /// in either tree to form file-level base/buffer contents.
-fn scan_commit_range(stoat: &Stoat, workdir: &Path, from: &str, to: &str) -> Option<ReviewSession> {
-    let repo = stoat.git_host.discover(workdir)?;
+///
+/// `&Stoat`-free for the same off-loop reason as [`scan_commit_pure`].
+fn scan_commit_range_pure(
+    git: &dyn GitHost,
+    langs: &LanguageRegistry,
+    workdir: &Path,
+    from: &str,
+    to: &str,
+) -> Option<ReviewSession> {
+    let repo = git.discover(workdir)?;
     let workdir = repo.workdir()?;
     let base_tree = repo.commit_tree(from).unwrap_or_default();
     let new_tree = repo.commit_tree(to)?;
     build_session_from_trees(
-        stoat,
+        langs,
         ReviewSource::CommitRange {
             workdir: workdir.clone(),
             from: from.to_string(),
@@ -745,6 +788,17 @@ fn scan_commit_range(stoat: &Stoat, workdir: &Path, from: &str, to: &str) -> Opt
         &workdir,
         &base_tree,
         &new_tree,
+    )
+}
+
+/// Synchronous [`scan_commit_range_pure`] wrapper used by [`rescan_source`].
+fn scan_commit_range(stoat: &Stoat, workdir: &Path, from: &str, to: &str) -> Option<ReviewSession> {
+    scan_commit_range_pure(
+        &*stoat.git_host,
+        &stoat.language_registry,
+        workdir,
+        from,
+        to,
     )
 }
 
@@ -808,11 +862,14 @@ fn scan_agent_edits(
     Some(session)
 }
 
-/// Common builder used by [`scan_commit`] / [`scan_commit_range`]. Walks
-/// the union of paths across `base_tree` and `new_tree`, skipping any
-/// pair whose base and buffer contents are equal.
+/// Common builder used by the commit scans. Walks the union of paths
+/// across `base_tree` and `new_tree`, skipping any pair whose base and
+/// buffer contents are equal.
+///
+/// Takes the language registry directly rather than `&Stoat` so it runs
+/// inside the off-loop scan closures.
 fn build_session_from_trees(
-    stoat: &Stoat,
+    langs: &LanguageRegistry,
     source: ReviewSource,
     workdir: &Path,
     base_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
@@ -837,7 +894,7 @@ fn build_session_from_trees(
             continue;
         }
         let abs = workdir.join(rel);
-        let lang = stoat.language_registry.for_path(&abs);
+        let lang = langs.for_path(&abs);
         inputs.push(ReviewFileInput {
             path: abs,
             rel_path: rel.display().to_string(),

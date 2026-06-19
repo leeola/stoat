@@ -329,6 +329,7 @@ impl TestHarness {
             sha: sha.to_string(),
         };
         crate::action_handlers::dispatch(&mut self.stoat, &action);
+        self.settle();
     }
 
     /// Open a review of a commit range (`from`..`to`).
@@ -344,6 +345,7 @@ impl TestHarness {
             to: to.to_string(),
         };
         crate::action_handlers::dispatch(&mut self.stoat, &action);
+        self.settle();
     }
 
     /// Enter commits mode against `workdir`. Updates the active
