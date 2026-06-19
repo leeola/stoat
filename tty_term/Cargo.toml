@@ -11,3 +11,4 @@ workspace = true
 stoatty_protocol = { path = "../tty_protocol" }
 alacritty_terminal.workspace = true
 memchr.workspace = true
+parking_lot.workspace = true

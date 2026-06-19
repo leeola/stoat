@@ -24,7 +24,8 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape as TermCursorShape, NamedColor, Processor},
     Term,
 };
-use std::{cell::RefCell, mem, rc::Rc};
+use parking_lot::Mutex;
+use std::{mem, sync::Arc};
 use stoatty_protocol::command::{
     self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PopoverCommand,
     ScaleCommand, ScrollRegionCommand, TextRunCommand,
@@ -389,32 +390,35 @@ impl Terminal {
 /// `alacritty_terminal` reports replies to host queries (device attributes,
 /// device-status and cursor-position reports, keyboard-mode queries) as
 /// [`Event::PtyWrite`] events through its [`EventListener`]. The trait method
-/// takes `&self`, so the buffer lives behind an [`Rc`]/[`RefCell`]: the `Term`
+/// takes `&self`, so the buffer lives behind a shared [`Mutex`]: the `Term`
 /// holds the listener while the owning [`Terminal`] keeps a clone to drain.
 /// Other event variants (title, clipboard, bell) are dropped.
+///
+/// The buffer is [`Arc`]/[`Mutex`] rather than `Rc`/`RefCell` so [`Terminal`]
+/// stays [`Send`], letting the app parse the byte stream on a thread off the
+/// render loop.
 #[derive(Clone, Default)]
 struct ResponseSink {
-    bytes: Rc<RefCell<Vec<u8>>>,
+    bytes: Arc<Mutex<Vec<u8>>>,
 }
 
 impl ResponseSink {
     /// Drain the buffered response bytes, leaving the buffer empty.
     fn take(&self) -> Vec<u8> {
-        let mut bytes = self.bytes.borrow_mut();
-        mem::take(&mut *bytes)
+        mem::take(&mut *self.bytes.lock())
     }
 
     /// Append `bytes` to the buffer, for a reply the driver synthesizes itself
     /// (XTVERSION) rather than receiving from the `Term` listener.
     fn push(&self, bytes: &[u8]) {
-        self.bytes.borrow_mut().extend_from_slice(bytes);
+        self.bytes.lock().extend_from_slice(bytes);
     }
 }
 
 impl EventListener for ResponseSink {
     fn send_event(&self, event: Event) {
         if let Event::PtyWrite(text) = event {
-            self.bytes.borrow_mut().extend_from_slice(text.as_bytes());
+            self.bytes.lock().extend_from_slice(text.as_bytes());
         }
     }
 }
