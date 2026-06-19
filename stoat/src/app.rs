@@ -931,6 +931,7 @@ impl Stoat {
         mut events: Receiver<Event>,
         render: watch::Sender<Option<Buffer>>,
     ) -> io::Result<()> {
+        let mut frame_buf = Buffer::empty(self.size);
         loop {
             let active = self.any_claude_active();
             let first = tokio::select! {
@@ -966,7 +967,15 @@ impl Stoat {
             match effect {
                 UpdateEffect::Redraw => {
                     self.drive_background();
-                    if render.send(Some(self.render())).is_err() {
+                    self.paint_into(&mut frame_buf);
+                    render.send_modify(|slot| match slot {
+                        Some(buf) => {
+                            buf.area = frame_buf.area;
+                            buf.content.clone_from(&frame_buf.content);
+                        },
+                        None => *slot = Some(frame_buf.clone()),
+                    });
+                    if render.is_closed() {
                         break;
                     }
                 },
@@ -2929,15 +2938,30 @@ impl Stoat {
         workspaces[*active_workspace].drive_parse_jobs(executor, syntax_styles, redraw_notify);
     }
 
-    /// Paint the current state into a fresh [`Buffer`]. Pure painting: it
-    /// reads state and never drives background work. The event loop calls
-    /// [`Self::drive_background`] before each redraw so the painted frame
-    /// reflects freshly-installed async results.
+    /// Paint the current state into a fresh [`Buffer`] and return it.
+    ///
+    /// A convenience wrapper over [`Self::paint_into`] for the test harness,
+    /// which snapshots the returned buffer. The event loop paints into one
+    /// reused buffer via [`Self::paint_into`] instead, so this is otherwise
+    /// unused.
+    #[allow(dead_code)]
     pub(crate) fn render(&mut self) -> Buffer {
-        self.render_tick += 1;
         let mut buf = Buffer::empty(self.size);
-        crate::render::frame(self, &mut buf);
+        self.paint_into(&mut buf);
         buf
+    }
+
+    /// Paint the current state into `buf`, reusing its allocation.
+    ///
+    /// Resizes `buf` to the current screen and resets it to blank before
+    /// drawing, so a recycled buffer paints byte-identically to a fresh one.
+    /// The event loop paints into one long-lived buffer this way to avoid a
+    /// per-frame screen allocation.
+    fn paint_into(&mut self, buf: &mut Buffer) {
+        self.render_tick += 1;
+        buf.resize(self.size);
+        buf.reset();
+        crate::render::frame(self, buf);
     }
 
     /// Drive the background work whose results feed the next paint: parse-job

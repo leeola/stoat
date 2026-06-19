@@ -10,7 +10,7 @@ use crossterm::{
     execute,
 };
 use futures::StreamExt;
-use ratatui::buffer::Buffer;
+use ratatui::{buffer::Buffer, layout::Rect};
 use std::{backtrace::Backtrace, io, panic, sync::Once, thread};
 use tokio::sync::{mpsc::Sender, watch};
 
@@ -90,6 +90,10 @@ async fn run(
 
     let mut events = EventStream::new();
 
+    // Reused so a redraw copies into this buffer's allocation instead of
+    // cloning a fresh one out of the watch each frame.
+    let mut frame = Buffer::empty(Rect::new(0, 0, size.width, size.height));
+
     loop {
         // Biased: always drain input before flushing frames so keypresses
         // are never starved by a burst of render buffers
@@ -108,9 +112,26 @@ async fn run(
                 if changed.is_err() {
                     break;
                 }
-                let frame = render_rx.borrow_and_update().clone();
-                if let Some(buf) = frame {
-                    terminal.draw(|f| *f.buffer_mut() = buf)?;
+                // Copy the latest frame into `frame` and drop the watch borrow
+                // before drawing, so the slow terminal flush never holds the
+                // lock the render thread needs to publish the next frame.
+                let has_frame = {
+                    let latest = render_rx.borrow_and_update();
+                    match latest.as_ref() {
+                        Some(src) => {
+                            frame.resize(src.area);
+                            frame.content.clone_from(&src.content);
+                            true
+                        },
+                        None => false,
+                    }
+                };
+                if has_frame {
+                    terminal.draw(|f| {
+                        let dst = f.buffer_mut();
+                        dst.resize(frame.area);
+                        dst.content.clone_from(&frame.content);
+                    })?;
                 }
             }
         }
