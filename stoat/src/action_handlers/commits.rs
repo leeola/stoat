@@ -247,7 +247,7 @@ fn spawn_commit_log_load(
     after: Option<String>,
     limit: usize,
 ) -> stoat_scheduler::Task<Vec<crate::host::CommitInfo>> {
-    executor.spawn(async move { repo.log_commits(after.as_deref(), limit) })
+    executor.spawn_blocking(move || repo.log_commits(after.as_deref(), limit))
 }
 
 fn spawn_commit_preview_load(
@@ -257,7 +257,7 @@ fn spawn_commit_preview_load(
     sha: String,
     language_registry: Arc<stoat_language::LanguageRegistry>,
 ) -> stoat_scheduler::Task<Option<ReviewSession>> {
-    executor.spawn(async move {
+    executor.spawn_blocking(move || {
         let new_tree = repo.commit_tree(&sha)?;
         let base_tree = match repo.parent_sha(&sha) {
             Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
