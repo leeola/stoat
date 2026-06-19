@@ -1,15 +1,18 @@
 //! The winit application: owns the window, the PTY shell, and the event loop.
 //!
-//! The reader thread forwards shell output as [`PtyEvent`]s onto the loop, which
-//! feeds them to a [`Terminal`], projects the parsed screen onto a [`Grid`], and
-//! drives [`stoatty_render`] to draw it. This is the windowing boundary: the
-//! window lives here and [`stoatty_render`] receives only its handle, keeping
-//! the renderer toolkit-agnostic.
+//! The reader thread parses shell output into a [`Terminal`] it shares with the
+//! main thread behind a [`FairMutex`], then wakes the loop with a [`PtyEvent`].
+//! The main thread projects the parsed screen onto a [`Grid`] and drives
+//! [`stoatty_render`] to draw it, so a flood of output never blocks input
+//! handling on the main thread. This is the windowing boundary: the window lives
+//! here and [`stoatty_render`] receives only its handle, keeping the renderer
+//! toolkit-agnostic.
 
 use crate::{
     config::{self, Config},
     pty::{self, Pty, PtyOutput},
 };
+use alacritty_terminal::sync::FairMutex;
 use std::sync::Arc;
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, Scroll},
@@ -104,11 +107,14 @@ fn load_config() -> Config {
 
 /// Shell activity delivered from the reader thread to the event loop.
 ///
-/// The PTY reader runs off the main thread, so it cannot touch the terminal
-/// directly; it sends these through the [`EventLoopProxy`] instead, which wakes
-/// the idle loop.
+/// The reader thread parses output into the shared [`Terminal`] itself, then
+/// sends these through the [`EventLoopProxy`] to wake the idle main thread for
+/// the follow-up it cannot do off-thread: writing query responses and redrawing.
 enum PtyEvent {
-    Output(Vec<u8>),
+    /// A batch was parsed into the terminal. Carries the host-query responses
+    /// the parse produced, for the main thread to write back to the PTY; an
+    /// empty buffer still signals that the screen changed and should redraw.
+    Parsed(Vec<u8>),
     Exited,
 }
 
@@ -164,7 +170,10 @@ impl App {
 struct State {
     window: Arc<Window>,
     gpu: GpuContext,
-    terminal: Terminal,
+    /// The parsed screen, shared with the reader thread that advances it. The
+    /// [`FairMutex`] lets the main thread lock it to project while the reader
+    /// locks it to parse, neither starving the other under heavy output.
+    terminal: Arc<FairMutex<Terminal>>,
     grid: Grid,
     pty: Pty,
     /// The live font size in logical points, seeded from the config and stepped
@@ -247,21 +256,30 @@ impl ApplicationHandler<PtyEvent> for App {
 
         let (rows, cols) = gpu.grid_size();
         let grid = Grid::new(rows, cols);
-        let terminal = Terminal::new(rows, cols, self.theme);
+        let terminal = Arc::new(FairMutex::new(Terminal::new(rows, cols, self.theme)));
 
         let pty = {
             let proxy = self.proxy.clone();
+            let terminal = terminal.clone();
             Pty::spawn(
                 &self.program,
                 &self.args,
                 rows as u16,
                 cols as u16,
-                move |output| {
-                    let event = match output {
-                        PtyOutput::Data(bytes) => PtyEvent::Output(bytes),
-                        PtyOutput::Eof => PtyEvent::Exited,
-                    };
-                    let _ = proxy.send_event(event);
+                move |output| match output {
+                    PtyOutput::Data(bytes) => {
+                        // Parse on the reader thread under the shared lock, then
+                        // wake the main thread to write any responses and redraw.
+                        let responses = {
+                            let mut terminal = terminal.lock();
+                            terminal.advance(&bytes);
+                            terminal.take_responses()
+                        };
+                        let _ = proxy.send_event(PtyEvent::Parsed(responses));
+                    },
+                    PtyOutput::Eof => {
+                        let _ = proxy.send_event(PtyEvent::Exited);
+                    },
                 },
             )
             .expect("spawn shell over pty")
@@ -294,10 +312,7 @@ impl ApplicationHandler<PtyEvent> for App {
         };
 
         match event {
-            PtyEvent::Output(bytes) => {
-                state.terminal.advance(&bytes);
-
-                let responses = state.terminal.take_responses();
+            PtyEvent::Parsed(responses) => {
                 if !responses.is_empty() {
                     let _ = state.pty.write(&responses);
                 }
@@ -319,7 +334,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.gpu.resize(size.width, size.height);
 
                 let (rows, cols) = state.gpu.grid_size();
-                state.terminal.resize(rows, cols);
+                state.terminal.lock().resize(rows, cols);
                 let _ = state.pty.resize(rows as u16, cols as u16);
 
                 state.window.request_redraw();
@@ -334,13 +349,13 @@ impl ApplicationHandler<PtyEvent> for App {
                 // re-fitted by the `Resized` that follows. Re-read the grid size
                 // and resize the rest now, mirroring the font-zoom chain.
                 let (rows, cols) = state.gpu.grid_size();
-                state.terminal.resize(rows, cols);
+                state.terminal.lock().resize(rows, cols);
                 let _ = state.pty.resize(rows as u16, cols as u16);
 
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let (cursor, scroll_delta, damage) = state.terminal.project(&mut state.grid);
+                let (cursor, scroll_delta, damage) = state.terminal.lock().project(&mut state.grid);
 
                 let overflows: Vec<Option<f32>> =
                     state.grid.overlays().iter().map(popover_overflow).collect();
@@ -449,7 +464,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     // The surface is unchanged, so skip `gpu.resize`; only the cell
                     // metrics moved, so re-read the grid size and resize the rest.
                     let (rows, cols) = state.gpu.grid_size();
-                    state.terminal.resize(rows, cols);
+                    state.terminal.lock().resize(rows, cols);
                     let _ = state.pty.resize(rows as u16, cols as u16);
 
                     state.window.request_redraw();
@@ -460,7 +475,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     let _ = state.pty.write(&bytes);
                     // Typing jumps the view back to the live prompt, the way a
                     // terminal resets scrollback on input.
-                    state.terminal.scroll_to_bottom();
+                    state.terminal.lock().scroll_to_bottom();
                 }
             },
             WindowEvent::MouseWheel { delta, .. } => {
@@ -468,21 +483,27 @@ impl ApplicationHandler<PtyEvent> for App {
                     render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
                 let lines = wheel_lines(delta, &mut state.wheel_pixels, cell_height);
                 if lines != 0 {
-                    if state.terminal.mouse_mode() && state.terminal.sgr_mouse() {
+                    // Snapshot the wheel-routing modes under one lock so the
+                    // branch reads a consistent terminal state.
+                    let (mouse_report, alternate_scroll) = {
+                        let terminal = state.terminal.lock();
+                        (
+                            terminal.mouse_mode() && terminal.sgr_mouse(),
+                            terminal.is_alt_screen() && terminal.alternate_scroll(),
+                        )
+                    };
+                    if mouse_report {
                         // A mouse-reporting app wants the wheel as a button press
                         // at the pointer, not scrolling; its redraw follows its
                         // response.
                         let (col, row) = state.pointer_cell;
                         let _ = state.pty.write(&sgr_wheel_bytes(lines, col, row));
-                    } else if !state.modifiers.shift_key()
-                        && state.terminal.is_alt_screen()
-                        && state.terminal.alternate_scroll()
-                    {
+                    } else if !state.modifiers.shift_key() && alternate_scroll {
                         // An alt-screen pager with alternate-scroll on expects
                         // arrow keys; Shift forces local scrollback instead.
                         let _ = state.pty.write(&alternate_scroll_bytes(lines));
                     } else {
-                        state.terminal.scroll_display(lines);
+                        state.terminal.lock().scroll_display(lines);
                         state.window.request_redraw();
                     }
                 }
