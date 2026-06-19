@@ -111,9 +111,10 @@ fn run_tui(
     stoat::ui::install_panic_hook();
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
-    // Capacity 1: natural backpressure -- main thread won't render ahead
-    // if the UI thread hasn't flushed the previous frame yet
-    let (render_tx, render_rx) = tokio::sync::mpsc::channel(1);
+    // Latest-frame-wins: the main loop ships frames without ever parking on a
+    // slow flush, so input acceptance is never stalled behind rendering.
+    // Redundant frames coalesce; only the most recently sent frame is drawn.
+    let (render_tx, render_rx) = tokio::sync::watch::channel(None);
 
     let mouse_capture_policy = stoat::default_mouse_capture_policy();
     let mouse_captured =

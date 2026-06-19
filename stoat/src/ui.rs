@@ -12,7 +12,7 @@ use crossterm::{
 use futures::StreamExt;
 use ratatui::buffer::Buffer;
 use std::{backtrace::Backtrace, io, panic, sync::Once, thread};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{mpsc::Sender, watch};
 
 /// Install a process-global panic hook that restores the terminal before the
 /// default hook runs, so a panic in either the main thread or the UI thread
@@ -49,7 +49,7 @@ pub fn install_panic_hook() {
 
 pub fn spawn(
     event_tx: Sender<Event>,
-    mut render_rx: Receiver<Buffer>,
+    mut render_rx: watch::Receiver<Option<Buffer>>,
     mouse_captured: bool,
 ) -> thread::JoinHandle<io::Result<()>> {
     thread::spawn(move || {
@@ -75,7 +75,7 @@ pub fn spawn(
 
 async fn run(
     event_tx: &Sender<Event>,
-    render_rx: &mut Receiver<Buffer>,
+    render_rx: &mut watch::Receiver<Option<Buffer>>,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> io::Result<()> {
     // Main thread needs terminal dimensions before it can render the first frame
@@ -104,9 +104,14 @@ async fn run(
                 }
             }
 
-            buf = render_rx.recv() => {
-                let Some(buf) = buf else { break };
-                terminal.draw(|f| *f.buffer_mut() = buf)?;
+            changed = render_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let frame = render_rx.borrow_and_update().clone();
+                if let Some(buf) = frame {
+                    terminal.draw(|f| *f.buffer_mut() = buf)?;
+                }
             }
         }
     }

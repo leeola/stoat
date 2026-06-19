@@ -37,7 +37,10 @@ use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::Bias;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    watch,
+};
 
 pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 
@@ -904,7 +907,7 @@ impl Stoat {
     pub async fn run(
         &mut self,
         mut events: Receiver<Event>,
-        render: Sender<Buffer>,
+        render: watch::Sender<Option<Buffer>>,
     ) -> io::Result<()> {
         loop {
             let active = self.any_claude_active();
@@ -937,7 +940,7 @@ impl Stoat {
             };
             match effect {
                 UpdateEffect::Redraw => {
-                    if render.send(self.render()).await.is_err() {
+                    if render.send(Some(self.render())).is_err() {
                         break;
                     }
                 },
