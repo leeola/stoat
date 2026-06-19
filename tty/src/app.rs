@@ -464,8 +464,18 @@ impl ApplicationHandler<PtyEvent> for App {
                     render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
                 let lines = wheel_lines(delta, &mut state.wheel_pixels, cell_height);
                 if lines != 0 {
-                    state.terminal.scroll_display(lines);
-                    state.window.request_redraw();
+                    // An alt-screen pager with alternate-scroll on expects arrow
+                    // keys, not local scrollback; the pager's reply repaints. Shift
+                    // forces local scrollback instead.
+                    if !state.modifiers.shift_key()
+                        && state.terminal.is_alt_screen()
+                        && state.terminal.alternate_scroll()
+                    {
+                        let _ = state.pty.write(&alternate_scroll_bytes(lines));
+                    } else {
+                        state.terminal.scroll_display(lines);
+                        state.window.request_redraw();
+                    }
                 }
             },
             _ => {},
@@ -556,6 +566,14 @@ fn wheel_lines(delta: MouseScrollDelta, pixels: &mut f64, cell_height: f64) -> i
     }
 }
 
+/// Encode `lines` of wheel scroll as the application-cursor arrow keys an
+/// alt-screen pager reads under alternate-scroll mode: one `ESC O A` (up) per
+/// line when `lines` is positive, one `ESC O B` (down) per line when negative.
+fn alternate_scroll_bytes(lines: i32) -> Vec<u8> {
+    let arrow: &[u8] = if lines > 0 { b"\x1bOA" } else { b"\x1bOB" };
+    arrow.repeat(lines.unsigned_abs() as usize)
+}
+
 /// Step the animated cursor toward `target`, returning the new position and
 /// whether it has reached the target.
 ///
@@ -627,8 +645,8 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ease, encode_key, font_step, popover_overflow, step_grid_scroll, step_popover_scroll,
-        step_region_scroll, wheel_lines,
+        alternate_scroll_bytes, ease, encode_key, font_step, popover_overflow, step_grid_scroll,
+        step_popover_scroll, step_region_scroll, wheel_lines,
     };
     use stoatty_term::grid::{Overlay, Rgb};
     use winit::{
@@ -768,6 +786,25 @@ mod tests {
             wheel_lines(px(5.0), &mut pixels, 20.0),
             0,
             "below a line scrolls nothing yet"
+        );
+    }
+
+    #[test]
+    fn alternate_scroll_bytes_emits_one_arrow_per_line() {
+        assert_eq!(
+            alternate_scroll_bytes(3),
+            b"\x1bOA\x1bOA\x1bOA".to_vec(),
+            "scrolling up sends one up arrow per line"
+        );
+        assert_eq!(
+            alternate_scroll_bytes(-2),
+            b"\x1bOB\x1bOB".to_vec(),
+            "scrolling down sends one down arrow per line"
+        );
+        assert_eq!(
+            alternate_scroll_bytes(0),
+            b"".to_vec(),
+            "no lines, no bytes"
         );
     }
 
