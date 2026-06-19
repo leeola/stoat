@@ -99,6 +99,13 @@ struct UnderlineInstance {
 struct TextGlobals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
+    /// Vertical scroll offset in pixels, added to each glyph's Y in the vertex
+    /// shader so a scroll-only frame rewrites this uniform instead of rebuilding
+    /// the glyph instances. Differs per draw: grid scroll for plain glyphs,
+    /// region scroll for region glyphs, zero for screen-anchored runs/overlays.
+    scroll_y: f32,
+    /// Pads the struct to the 32-byte (16-aligned) size a uniform requires.
+    _pad: [f32; 3],
 }
 
 /// The instanced glyph pipeline together with the font system, glyph atlas, and
@@ -109,8 +116,19 @@ struct TextGlobals {
 /// [`Self::prepare`].
 pub struct TextPass {
     pipeline: RenderPipeline,
+    /// Globals carrying the grid scroll offset; bound for the plain glyph and
+    /// underline draws. [`Self::region_globals`] and [`Self::static_globals`]
+    /// hold the same resolution and cell size but a different `scroll_y`, so
+    /// each draw scrolls correctly without rewriting one buffer mid-pass.
     globals: Buffer,
     globals_bind_group: BindGroup,
+    /// Globals carrying the scroll-region offset; bound for the region glyph draw.
+    region_globals: Buffer,
+    region_globals_bind_group: BindGroup,
+    /// Globals carrying zero scroll; bound for the screen-anchored text-run and
+    /// overlay-content draws, which must not move with the grid.
+    static_globals: Buffer,
+    static_globals_bind_group: BindGroup,
     atlas_layout: BindGroupLayout,
     sampler: Sampler,
     atlas_bind_group: BindGroup,
@@ -169,11 +187,6 @@ pub struct TextPass {
     /// The cursor cell at the previous frame, so a move can re-shape the row it
     /// left and the row it entered (the cursor breaks ligatures on its cell).
     last_cursor_cell: Option<(usize, usize)>,
-    /// The grid and region scroll offsets the cached grid-glyph instance buffers
-    /// were built with. Scroll is baked into instance positions, so a change
-    /// forces a rebuild even when no row's glyphs changed.
-    last_grid_scroll: f32,
-    last_region_scroll: f32,
     baseline: f32,
     metrics: CellMetrics,
 }
@@ -280,21 +293,14 @@ impl TextPass {
 
         let underline_pipeline = build_underline_pipeline(device, &shader, &globals_layout, format);
 
-        let globals = device.create_buffer(&BufferDescriptor {
-            label: Some("text globals"),
-            size: size_of::<TextGlobals>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let globals_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("text globals"),
-            layout: &globals_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: globals.as_entire_binding(),
-            }],
-        });
+        // Three globals buffers share one layout but carry a different scroll_y,
+        // so the plain, region, and screen-anchored draws each scroll correctly
+        // within a single render pass.
+        let (globals, globals_bind_group) = make_globals(device, &globals_layout, "text globals");
+        let (region_globals, region_globals_bind_group) =
+            make_globals(device, &globals_layout, "text region globals");
+        let (static_globals, static_globals_bind_group) =
+            make_globals(device, &globals_layout, "text static globals");
 
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("text atlas"),
@@ -339,6 +345,10 @@ impl TextPass {
             pipeline,
             globals,
             globals_bind_group,
+            region_globals,
+            region_globals_bind_group,
+            static_globals,
+            static_globals_bind_group,
             atlas_layout,
             sampler,
             atlas_bind_group,
@@ -370,8 +380,6 @@ impl TextPass {
             glyph_row_cache: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
-            last_grid_scroll: 0.0,
-            last_region_scroll: 0.0,
             baseline,
             metrics,
         }
@@ -421,11 +429,26 @@ impl TextPass {
         let scroll = frame.scroll;
         let damage = frame.damage;
 
-        let globals = TextGlobals {
-            resolution,
-            cell_size: [self.metrics.width, self.metrics.height],
+        // Write each globals buffer with its own scroll: grid scroll for the
+        // plain glyphs, region scroll for the region glyphs, none for the
+        // screen-anchored runs and overlays. Done every frame so a scroll-only
+        // frame refreshes the uniforms without rebuilding instances.
+        let cell_size = [self.metrics.width, self.metrics.height];
+        let write_globals = |buffer: &Buffer, scroll_y: f32| {
+            queue.write_buffer(
+                buffer,
+                0,
+                bytemuck::bytes_of(&TextGlobals {
+                    resolution,
+                    cell_size,
+                    scroll_y,
+                    _pad: [0.0; 3],
+                }),
+            );
         };
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        write_globals(&self.globals, scroll.grid * self.metrics.height);
+        write_globals(&self.region_globals, scroll.region * self.metrics.height);
+        write_globals(&self.static_globals, 0.0);
 
         // Underlines are built first, before the glyph path can return early on
         // an all-blank grid: an underlined space has no glyph but still draws.
@@ -439,19 +462,13 @@ impl TextPass {
         let region = grid.scroll_region();
 
         // The grid-glyph instance buffers from last frame stay valid when nothing
-        // that feeds them changed: no row was rebuilt, the scroll baked into their
-        // positions is unchanged, the atlas did not grow (its size drives every
-        // UV), and no text runs are present (those rasterize below, after the grid
-        // instances would be built, so a text-run grow could not be seen here). On
-        // such a frame the plain and region glyphs are neither rebuilt nor
-        // re-uploaded. Otherwise they are.
-        let grid_unchanged = !any_rebuilt
-            && scroll.grid == self.last_grid_scroll
-            && scroll.region == self.last_region_scroll
-            && self.atlas.texture_dims() == atlas_dims
-            && grid.text_runs().is_empty();
-        self.last_grid_scroll = scroll.grid;
-        self.last_region_scroll = scroll.region;
+        // that feeds them changed: no row was rebuilt, the atlas did not grow (its
+        // size drives every UV), and no text runs are present (those rasterize
+        // below, after the grid instances would be built, so a text-run grow could
+        // not be seen here). Scroll no longer counts -- it rides the globals
+        // uniform, so a scroll-only frame reuses these buffers untouched.
+        let grid_unchanged =
+            !any_rebuilt && self.atlas.texture_dims() == atlas_dims && grid.text_runs().is_empty();
 
         if !grid_unchanged {
             let (region_pending, plain_pending): (Vec<PendingGlyph>, Vec<PendingGlyph>) =
@@ -459,18 +476,8 @@ impl TextPass {
                     region.is_some_and(|region| region.contains(glyph.row, glyph.col))
                 });
 
-            let mut plain_instances = self.build_text_instances(device, queue, plain_pending);
-            let mut region_instances = self.build_text_instances(device, queue, region_pending);
-
-            let grid_scroll_px = scroll.grid * self.metrics.height;
-            for instance in &mut plain_instances {
-                instance.pos[1] += grid_scroll_px;
-            }
-
-            let region_scroll_px = scroll.region * self.metrics.height;
-            for instance in &mut region_instances {
-                instance.pos[1] += region_scroll_px;
-            }
+            let plain_instances = self.build_text_instances(device, queue, plain_pending);
+            let region_instances = self.build_text_instances(device, queue, region_pending);
 
             self.count = plain_instances.len() as u32;
             self.region_count = region_instances.len() as u32;
@@ -799,7 +806,7 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.text_run_instances.slice(..));
         render_pass.draw(0..6, 0..self.text_run_count);
@@ -821,7 +828,7 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.region_globals_bind_group, &[]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.region_instances.slice(..));
         render_pass.draw(0..6, 0..self.region_count);
@@ -841,7 +848,7 @@ impl TextPass {
         }
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.overlay_instances.slice(..));
 
@@ -1318,6 +1325,28 @@ fn build_underline_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+/// Build a [`TextGlobals`] uniform buffer and its bind group over `layout`.
+///
+/// The pass keeps three: one per distinct per-draw `scroll_y`, all sharing the
+/// group-0 layout.
+fn make_globals(device: &Device, layout: &BindGroupLayout, label: &str) -> (Buffer, BindGroup) {
+    let buffer = device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size: size_of::<TextGlobals>() as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+    (buffer, bind_group)
 }
 
 fn create_atlas_bind_group(
