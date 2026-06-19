@@ -59,6 +59,21 @@ pub enum UpdateEffect {
     None,
 }
 
+impl UpdateEffect {
+    /// Combine two effects, keeping the more urgent outcome.
+    ///
+    /// A coalesced batch applies several messages in one loop iteration and
+    /// must act on the strongest result. Quit outranks Redraw, which outranks
+    /// None. The result does not depend on argument order.
+    fn merge(self, other: UpdateEffect) -> UpdateEffect {
+        match (self, other) {
+            (UpdateEffect::Quit, _) | (_, UpdateEffect::Quit) => UpdateEffect::Quit,
+            (UpdateEffect::Redraw, _) | (_, UpdateEffect::Redraw) => UpdateEffect::Redraw,
+            _ => UpdateEffect::None,
+        }
+    }
+}
+
 pub struct Stoat {
     size: Rect,
     pub mode: String,
@@ -911,7 +926,7 @@ impl Stoat {
     ) -> io::Result<()> {
         loop {
             let active = self.any_claude_active();
-            let effect = tokio::select! {
+            let first = tokio::select! {
                 biased;
                 event = events.recv() => {
                     let Some(event) = event else { break };
@@ -938,6 +953,9 @@ impl Stoat {
                     }
                 } => UpdateEffect::Redraw,
             };
+
+            let effect = first.merge(self.drain_pending(&mut events));
+
             match effect {
                 UpdateEffect::Redraw => {
                     if render.send(Some(self.render())).is_err() {
@@ -952,6 +970,36 @@ impl Stoat {
             }
         }
         Ok(())
+    }
+
+    /// Apply every message already queued on the input and notification
+    /// channels without blocking, returning their combined [`UpdateEffect`].
+    ///
+    /// Called after [`Self::run`] wakes on its first message so a burst
+    /// collapses into a single render instead of one render per message. A
+    /// paste's worth of keystrokes or a flood of PTY and Claude notifications
+    /// all apply before that one render.
+    ///
+    /// Each channel is drained only to its currently-queued extent. Messages
+    /// that arrive mid-drain are handled on the next loop iteration, which
+    /// keeps render forward-progress under a sustained producer.
+    fn drain_pending(&mut self, events: &mut Receiver<Event>) -> UpdateEffect {
+        let mut effect = UpdateEffect::None;
+
+        while let Ok(event) = events.try_recv() {
+            effect = effect.merge(self.update(event));
+        }
+        while let Ok(notif) = self.pty_rx.try_recv() {
+            effect = effect.merge(self.handle_pty_notification(notif));
+        }
+        while let Ok(notif) = self.claude_rx.try_recv() {
+            effect = effect.merge(self.handle_claude_notification(notif));
+        }
+        while let Ok(prompt) = self.permission_prompt_rx.try_recv() {
+            effect = effect.merge(self.enqueue_permission_prompt(prompt));
+        }
+
+        effect
     }
 
     /// Rehydrate the active workspace from its most-recently-modified
@@ -3648,6 +3696,31 @@ mod tests {
             .diagnostics
             .summarize(std::path::Path::new("/ws/a.rs"));
         assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn update_effect_merge_keeps_most_urgent() {
+        let none = UpdateEffect::None;
+        let redraw = UpdateEffect::Redraw;
+        let quit = UpdateEffect::Quit;
+        assert_eq!(none.merge(redraw), redraw);
+        assert_eq!(redraw.merge(none), redraw);
+        assert_eq!(redraw.merge(quit), quit);
+        assert_eq!(quit.merge(redraw), quit);
+        assert_eq!(none.merge(none), none);
+    }
+
+    #[test]
+    fn drain_pending_applies_every_queued_event() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16);
+        for size in [(80u16, 24u16), (100, 30), (120, 40)] {
+            tx.try_send(Event::Resize(size.0, size.1)).unwrap();
+        }
+        let effect = h.stoat.drain_pending(&mut rx);
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(h.stoat.size(), Rect::new(0, 0, 120, 40));
+        assert!(rx.try_recv().is_err(), "drain must empty the channel");
     }
 
     fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8]) -> RunId {
