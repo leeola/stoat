@@ -96,8 +96,16 @@ fn patched_rows_match_a_full_rebuild() {
     };
 
     // Build the original grid, then edit a middle row so the rows after it shift.
+    // The edit also changes the row's background colour, so the comparison covers
+    // both the glyph and the background per-row patching at a non-zero offset.
     let original = render(&mut renderer, &grid, &Damage::Full);
-    fill_row(&mut grid, 1, "much longer middle row", white, black);
+    fill_row(
+        &mut grid,
+        1,
+        "much longer middle row",
+        white,
+        Rgb::new(30, 40, 120),
+    );
 
     // Incremental: only row 1 is damaged, so rows 0 and 2 come from the cache and
     // the upload starts at row 1's offset.

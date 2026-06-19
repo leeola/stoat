@@ -166,6 +166,7 @@ impl Renderer {
                 color: self.cursor_color,
             },
             frame.scroll.grid,
+            frame.damage,
         );
         self.decoration
             .prepare(device, queue, grid, resolution, frame.scroll.grid);

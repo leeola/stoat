@@ -10,7 +10,10 @@
 
 use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
-use stoatty_term::grid::{Grid, Rgb};
+use stoatty_term::{
+    grid::{Grid, Rgb},
+    term::Damage,
+};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
@@ -183,7 +186,8 @@ impl BackgroundPass {
     /// grid up by that many rows.
     ///
     /// Reallocates the instance buffer only when the grid outgrows the current
-    /// capacity.
+    /// capacity. With partial `damage`, only the damaged rows' cells are rewritten.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -192,6 +196,7 @@ impl BackgroundPass {
         resolution: [f32; 2],
         cursor: CursorState,
         grid_scroll: f32,
+        damage: &Damage,
     ) {
         let globals = Globals {
             resolution,
@@ -209,17 +214,35 @@ impl BackgroundPass {
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         self.cursor_visible = cursor.pos.is_some();
 
-        let instances = build_instances(grid);
-        self.count = instances.len() as u32;
-        if instances.is_empty() {
-            return;
-        }
+        let cols = grid.cols();
+        let total = grid.rows() * cols;
 
-        if instances.len() > self.capacity {
-            self.capacity = instances.len().next_power_of_two();
-            self.instances = alloc_instances(device, self.capacity);
+        // A resize changes the cell count and a grow reallocates (dropping the
+        // buffer's contents), so both rebuild every cell; otherwise rewrite only
+        // the damaged rows. Each cell is one instance, so row r is the fixed slice
+        // [r*cols, (r+1)*cols) and can be patched in place.
+        let full =
+            matches!(damage, Damage::Full) || total != self.count as usize || total > self.capacity;
+        if full {
+            let instances = build_instances(grid);
+            self.count = instances.len() as u32;
+            if instances.is_empty() {
+                return;
+            }
+            if instances.len() > self.capacity {
+                self.capacity = instances.len().next_power_of_two();
+                self.instances = alloc_instances(device, self.capacity);
+            }
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        } else {
+            for row in 0..grid.rows() {
+                if damage.is_dirty(row) {
+                    let instances = build_row_instances(grid, row);
+                    let offset = (row * cols * size_of::<BgInstance>()) as u64;
+                    queue.write_buffer(&self.instances, offset, bytemuck::cast_slice(&instances));
+                }
+            }
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
     }
 
     /// Record the background draw into `render_pass`.
@@ -305,22 +328,26 @@ fn build_cursor_pipeline(
 
 fn build_instances(grid: &Grid) -> Vec<BgInstance> {
     let mut instances = Vec::with_capacity(grid.rows() * grid.cols());
-
     for row in 0..grid.rows() {
-        for col in 0..grid.cols() {
+        instances.extend(build_row_instances(grid, row));
+    }
+    instances
+}
+
+fn build_row_instances(grid: &Grid, row: usize) -> Vec<BgInstance> {
+    (0..grid.cols())
+        .map(|col| {
             let bg = grid.get(row, col).bg;
-            instances.push(BgInstance {
+            BgInstance {
                 cell: [col as f32, row as f32],
                 color: [
                     bg.r as f32 / 255.0,
                     bg.g as f32 / 255.0,
                     bg.b as f32 / 255.0,
                 ],
-            });
-        }
-    }
-
-    instances
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
