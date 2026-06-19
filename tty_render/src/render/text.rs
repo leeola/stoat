@@ -557,13 +557,18 @@ impl TextPass {
             "text run instances",
         );
 
-        self.atlas_bind_group = create_atlas_bind_group(
-            device,
-            &self.atlas_layout,
-            &self.sampler,
-            self.atlas.mask_view(),
-            self.atlas.color_view(),
-        );
+        // The bind group references only the atlas texture views, which are
+        // recreated solely when an atlas grows. Reuse last frame's group unless
+        // a grow this frame moved the views.
+        if self.atlas.texture_dims() != atlas_dims {
+            self.atlas_bind_group = create_atlas_bind_group(
+                device,
+                &self.atlas_layout,
+                &self.sampler,
+                self.atlas.mask_view(),
+                self.atlas.color_view(),
+            );
+        }
     }
 
     /// Build the glyph instances for `pending`, reading each glyph's final atlas
