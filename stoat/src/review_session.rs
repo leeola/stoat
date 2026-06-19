@@ -1016,6 +1016,7 @@ mod tests {
         h.set_review_status(0, ChunkStatus::Staged);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
+        h.settle();
 
         let statuses = h.with_review(|s| {
             s.order
@@ -1038,6 +1039,7 @@ mod tests {
         h.set_review_status(0, ChunkStatus::Staged);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
+        h.settle();
 
         let statuses = h.with_review(|s| {
             s.order

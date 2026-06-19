@@ -251,17 +251,20 @@ impl TestHarness {
         }
     }
 
-    /// Dispatch `ReviewApplyStaged` against the current state. Does not
-    /// drive rendering; pair with [`Self::settle`] when a caller needs
-    /// the snapshot to reflect post-apply state.
+    /// Dispatch `ReviewApplyStaged` against the current state, then settle so
+    /// the post-apply refresh, now an off-loop re-scan, lands before callers
+    /// inspect state or snapshot.
     pub fn dispatch_review_apply(&mut self) {
         crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::ReviewApplyStaged);
+        self.settle();
     }
 
-    /// Dispatch `ReviewRefresh` directly (this action is palette-only and
-    /// not currently bound to a default key).
+    /// Dispatch `ReviewRefresh` directly (this action is palette-only and not
+    /// currently bound to a default key), then settle so the off-loop re-scan
+    /// lands before callers inspect state.
     pub fn dispatch_review_refresh(&mut self) {
         crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::ReviewRefresh);
+        self.settle();
     }
 
     /// Set the status of the chunk at `order_index` in the active review

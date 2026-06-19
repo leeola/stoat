@@ -189,8 +189,7 @@ pub struct Stoat {
     /// polls the ready [`ReviewSession`](crate::review_session::ReviewSession)
     /// off this task and installs it on the main loop, so opening a review
     /// never stalls input on the scan.
-    pub(crate) pending_review_scan:
-        Option<stoat_scheduler::Task<Option<crate::review_session::ReviewSession>>>,
+    pub(crate) pending_review_scan: Option<action_handlers::PendingReviewScan>,
     pub(crate) modal_run: Option<RunId>,
     pub(crate) render_tick: u64,
     /// Accumulated digit prefix for the next motion (Vim-style

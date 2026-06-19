@@ -41,7 +41,7 @@ pub(crate) use file_finder::close_file_finder;
 pub(crate) use lsp::pump_lsp_jumps;
 #[cfg(test)]
 pub(crate) use review::install_review_session;
-pub(crate) use review::pump_review_scan;
+pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::path::Path;
 use stoat_action::{
     Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
@@ -482,7 +482,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewUnstageChunk => review::review_mark(stoat, review::ReviewMark::Unstage),
         ActionKind::ReviewToggleStage => review::review_mark(stoat, review::ReviewMark::Toggle),
         ActionKind::ReviewSkipChunk => review::review_mark(stoat, review::ReviewMark::Skip),
-        ActionKind::ReviewRefresh => review::review_refresh(stoat),
+        ActionKind::ReviewRefresh => review::review_refresh(stoat, None),
         ActionKind::ReviewExternalEdit => {
             let a = action
                 .as_any()

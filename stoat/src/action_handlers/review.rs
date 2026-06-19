@@ -5,7 +5,9 @@ use crate::{
     host::{FsHost, GitHost, WatchToken},
     pane::View,
     review::ReviewFileInput,
-    review_session::{ReviewProgress, ReviewSession, ReviewSource, ReviewViewState},
+    review_session::{
+        ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
+    },
     workspace::Workspace,
 };
 use ratatui::{
@@ -20,6 +22,20 @@ use std::{
     task::{Context, Poll},
 };
 use stoat_language::LanguageRegistry;
+use stoat_scheduler::Task;
+
+/// An in-flight review scan and the work to run once it lands.
+///
+/// The git2 diff runs on a blocking thread. [`pump_review_scan`] polls
+/// `task` and installs the resulting session on the main loop. `sync_path`
+/// is set only for an external-edit refresh. After the install lands the
+/// pump scrolls the review to the chunk containing that path's first change
+/// and refreshes the progress badge, the work [`review_external_edit`] used
+/// to do inline.
+pub(crate) struct PendingReviewScan {
+    task: Task<Option<ReviewSession>>,
+    sync_path: Option<std::path::PathBuf>,
+}
 
 pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
     let executor = stoat.executor.clone();
@@ -31,7 +47,10 @@ pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
 
     let scan =
         executor.spawn_blocking(move || scan_commit_pure(&*git_host, &langs, &workdir, &sha));
-    stoat.pending_review_scan = Some(executor.spawn_with_redraw(redraw, scan));
+    stoat.pending_review_scan = Some(PendingReviewScan {
+        task: executor.spawn_with_redraw(redraw, scan),
+        sync_path: None,
+    });
 }
 
 pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
@@ -246,7 +265,10 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
         session.origin = ReviewOrigin::FromCommits;
         Some(session)
     });
-    stoat.pending_review_scan = Some(executor.spawn_with_redraw(redraw, scan));
+    stoat.pending_review_scan = Some(PendingReviewScan {
+        task: executor.spawn_with_redraw(redraw, scan),
+        sync_path: None,
+    });
     UpdateEffect::Redraw
 }
 
@@ -261,7 +283,10 @@ pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: 
 
     let scan = executor
         .spawn_blocking(move || scan_commit_range_pure(&*git_host, &langs, &workdir, &from, &to));
-    stoat.pending_review_scan = Some(executor.spawn_with_redraw(redraw, scan));
+    stoat.pending_review_scan = Some(PendingReviewScan {
+        task: executor.spawn_with_redraw(redraw, scan),
+        sync_path: None,
+    });
 }
 
 pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::AgentEdit]) {
@@ -487,7 +512,7 @@ pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     if failures.is_empty() && applied > 0 {
-        return review_refresh(stoat);
+        return review_refresh(stoat, None);
     }
     UpdateEffect::Redraw
 }
@@ -510,11 +535,141 @@ pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffe
         return UpdateEffect::None;
     }
 
-    let effect = review_refresh(stoat);
+    review_refresh(stoat, Some(path.to_path_buf()))
+}
 
+/// Re-scan the current review's source and reinstall it, carrying decided
+/// chunk statuses across by identity.
+///
+/// Git-backed sources run the diff on a blocking thread off the input loop.
+/// The carried statuses are reapplied inside the scan closure and the new
+/// session is installed by [`pump_review_scan`]. `sync_path`, set only by
+/// [`review_external_edit`], scrolls to the edited chunk and refreshes the
+/// badge once the install lands. In-memory sources have no git2 to offload,
+/// so they re-scan and install inline.
+pub(super) fn review_refresh(
+    stoat: &mut Stoat,
+    sync_path: Option<std::path::PathBuf>,
+) -> UpdateEffect {
+    let source = {
+        let ws = stoat.active_workspace();
+        let Some(old) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        old.source.clone()
+    };
+
+    let carried = {
+        let ws = stoat.active_workspace();
+        let old = ws
+            .review
+            .as_ref()
+            .expect("review session still present (early-returned above when absent)");
+        carried_statuses(old)
+    };
+
+    if is_git_source(&source) {
+        let executor = stoat.executor.clone();
+        let git_host = stoat.git_host.clone();
+        let fs_host = stoat.fs_host.clone();
+        let langs = stoat.language_registry.clone();
+        let redraw = stoat.redraw_notify.clone();
+
+        let scan = executor.spawn_blocking(move || {
+            let mut session = rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source)?;
+            apply_carried_status(&mut session, &carried);
+            Some(session)
+        });
+        stoat.pending_review_scan = Some(PendingReviewScan {
+            task: executor.spawn_with_redraw(redraw, scan),
+            sync_path,
+        });
+        return UpdateEffect::Redraw;
+    }
+
+    let Some(mut new_session) = rescan_source(stoat, &source) else {
+        return UpdateEffect::None;
+    };
+    apply_carried_status(&mut new_session, &carried);
+    install_review_session(stoat, new_session);
+    if let Some(path) = sync_path {
+        post_refresh_sync(stoat, &path);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Decided-chunk statuses keyed by [`ChunkIdentity`], snapshotted before a
+/// refresh so a re-scan that reproduces a matching chunk keeps the user's
+/// staged/rejected decision instead of resetting it to pending.
+fn carried_statuses(
+    session: &ReviewSession,
+) -> std::collections::HashMap<ChunkIdentity, ChunkStatus> {
+    session
+        .order
+        .iter()
+        .filter_map(|id| {
+            let status = session.chunks.get(id)?.status;
+            if !status.is_decided() {
+                return None;
+            }
+            let ident = session.identity_key(*id)?;
+            Some((ident, status))
+        })
+        .collect()
+}
+
+/// Reapply carried decisions to a freshly scanned session by chunk identity.
+fn apply_carried_status(
+    session: &mut ReviewSession,
+    carried: &std::collections::HashMap<ChunkIdentity, ChunkStatus>,
+) {
+    let ids: Vec<_> = session.order.clone();
+    for id in ids {
+        if let Some(ident) = session.identity_key(id)
+            && let Some(status) = carried.get(&ident).copied()
+        {
+            session.set_status(id, status);
+        }
+    }
+}
+
+/// True for review sources whose re-scan reads the git repository, and so
+/// must run off the input loop.
+fn is_git_source(source: &ReviewSource) -> bool {
+    matches!(
+        source,
+        ReviewSource::WorkingTree { .. }
+            | ReviewSource::Commit { .. }
+            | ReviewSource::CommitRange { .. }
+    )
+}
+
+/// `&Stoat`-free re-scan dispatcher for the git-backed sources, runnable on
+/// a blocking thread. Returns `None` for non-git sources, which
+/// [`review_refresh`] handles synchronously.
+fn rescan_git_source_pure(
+    git: &dyn GitHost,
+    fs: &dyn FsHost,
+    langs: &LanguageRegistry,
+    source: &ReviewSource,
+) -> Option<ReviewSession> {
+    match source {
+        ReviewSource::WorkingTree { workdir } => scan_working_tree_pure(git, fs, langs, workdir),
+        ReviewSource::Commit { workdir, sha } => scan_commit_pure(git, langs, workdir, sha),
+        ReviewSource::CommitRange { workdir, from, to } => {
+            scan_commit_range_pure(git, langs, workdir, from, to)
+        },
+        ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => None,
+    }
+}
+
+/// Scroll the review to the chunk containing `path`'s first change and
+/// refresh the progress badge, the post-install work for an external-edit
+/// refresh.
+fn post_refresh_sync(stoat: &mut Stoat, path: &Path) {
     let ws = stoat.active_workspace_mut();
     let Some(session) = ws.review.as_ref() else {
-        return effect;
+        return;
     };
     let editor_id = session.view_editor;
     let progress = session.progress();
@@ -525,55 +680,6 @@ pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffe
         .and_then(|file_index| session.chunk_containing_buffer_byte(file_index, 0));
     sync_review_view_and_scroll(ws, editor_id, chunk_id);
     emit_review_progress_badge(ws, &progress);
-    UpdateEffect::Redraw
-}
-
-pub(super) fn review_refresh(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::review_session::ChunkIdentity;
-    use std::collections::HashMap;
-
-    let source = {
-        let ws = stoat.active_workspace();
-        let Some(old) = ws.review.as_ref() else {
-            return UpdateEffect::None;
-        };
-        old.source.clone()
-    };
-
-    let carried: HashMap<ChunkIdentity, crate::review_session::ChunkStatus> = {
-        let ws = stoat.active_workspace();
-        let old = ws
-            .review
-            .as_ref()
-            .expect("review session still present (early-returned above when absent)");
-        old.order
-            .iter()
-            .filter_map(|id| {
-                let status = old.chunks.get(id)?.status;
-                if !status.is_decided() {
-                    return None;
-                }
-                let ident = old.identity_key(*id)?;
-                Some((ident, status))
-            })
-            .collect()
-    };
-
-    let Some(mut new_session) = rescan_source(stoat, &source) else {
-        return UpdateEffect::None;
-    };
-
-    let ids: Vec<_> = new_session.order.clone();
-    for id in ids {
-        if let Some(ident) = new_session.identity_key(id)
-            && let Some(status) = carried.get(&ident).copied()
-        {
-            new_session.set_status(id, status);
-        }
-    }
-
-    install_review_session(stoat, new_session);
-    UpdateEffect::Redraw
 }
 
 /// Re-scan the underlying source of a review session. Returns `None` when
@@ -651,34 +757,43 @@ pub(super) fn open_review(stoat: &mut Stoat) {
 
     let scan = executor
         .spawn_blocking(move || scan_working_tree_pure(&*git_host, &*fs_host, &langs, &git_root));
-    stoat.pending_review_scan = Some(executor.spawn_with_redraw(redraw, scan));
+    stoat.pending_review_scan = Some(PendingReviewScan {
+        task: executor.spawn_with_redraw(redraw, scan),
+        sync_path: None,
+    });
 }
 
-/// Install the result of a working-tree scan spawned by [`open_review`].
+/// Install a finished review scan spawned by one of the open or refresh
+/// handlers.
 ///
 /// Polls the in-flight scan with a no-op waker, so it never blocks. On
-/// completion the ready [`ReviewSession`] is installed on the main loop;
-/// `None` means the tree had no changes worth reviewing. Returns whether the
-/// task resolved this call, mirroring the other render-time pumps.
+/// completion the ready [`ReviewSession`] is installed on the main loop.
+/// `None` means the source had no changes worth reviewing. A
+/// [`PendingReviewScan::sync_path`] set by an external-edit refresh triggers
+/// the post-install scroll and badge update. Returns whether the task
+/// resolved this call, mirroring the other render-time pumps.
 ///
 /// Driven from [`Stoat::render`] and the test harness `settle` loop. The
 /// scan's completion notifies the redraw channel, so the loop wakes to pump
 /// it without the user pressing a key.
 pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_review_scan.take() else {
+    let Some(mut pending) = stoat.pending_review_scan.take() else {
         return false;
     };
 
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
+    match Pin::new(&mut pending.task).poll(&mut cx) {
         Poll::Ready(Some(session)) => {
             install_review_session(stoat, session);
+            if let Some(path) = pending.sync_path {
+                post_refresh_sync(stoat, &path);
+            }
             true
         },
         Poll::Ready(None) => true,
         Poll::Pending => {
-            stoat.pending_review_scan = Some(task);
+            stoat.pending_review_scan = Some(pending);
             false
         },
     }
