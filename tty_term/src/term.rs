@@ -89,9 +89,47 @@ pub struct Terminal {
     /// the grid by [`Self::project`]. Replaced, not accumulated, like the scroll
     /// region: the latest layout wins.
     line_layout: Option<LineLayoutCommand>,
+    /// Which decoration command lists changed since the last [`Self::project`],
+    /// so a projection re-stamps only the components that changed rather than all
+    /// of them every frame.
+    decorations_dirty: DecorationDirty,
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
+}
+
+/// Per-component "changed since last projection" flags for the accumulated APC
+/// decorations, so [`Terminal::project`] re-stamps only what changed.
+///
+/// Set by [`Terminal::apply_command`] when a command arrives (and all set by
+/// [`Terminal::clear_decorations`], which empties every list), cleared once a
+/// projection has applied them.
+#[derive(Default)]
+struct DecorationDirty {
+    borders: bool,
+    scales: bool,
+    popovers: bool,
+    scroll_region: bool,
+    icons: bool,
+    line_layout: bool,
+    text_runs: bool,
+    bars: bool,
+}
+
+impl DecorationDirty {
+    /// Every component marked changed, for a reset that empties all lists.
+    fn all() -> DecorationDirty {
+        DecorationDirty {
+            borders: true,
+            scales: true,
+            popovers: true,
+            scroll_region: true,
+            icons: true,
+            line_layout: true,
+            text_runs: true,
+            bars: true,
+        }
+    }
 }
 
 /// Where the cursor sits and how it is drawn, as of the last [`Terminal::project`].
@@ -148,6 +186,7 @@ impl Terminal {
             text_runs: Vec::new(),
             bars: Vec::new(),
             line_layout: None,
+            decorations_dirty: DecorationDirty::default(),
             last_history: 0,
         }
     }
@@ -210,14 +249,38 @@ impl Terminal {
     /// frames while the VT projection rewrites cells.
     fn apply_command(&mut self, command: Command) {
         match command {
-            Command::Border(border) => self.borders.push(border),
-            Command::Scale(scale) => self.scales.push(scale),
-            Command::Popover(popover) => self.popovers.push(popover),
-            Command::ScrollRegion(region) => self.scroll_region = Some(region),
-            Command::Icon(icon) => self.icons.push(icon),
-            Command::TextRun(text_run) => self.text_runs.push(text_run),
-            Command::Bar(bar) => self.bars.push(bar),
-            Command::LineLayout(layout) => self.line_layout = Some(layout),
+            Command::Border(border) => {
+                self.borders.push(border);
+                self.decorations_dirty.borders = true;
+            },
+            Command::Scale(scale) => {
+                self.scales.push(scale);
+                self.decorations_dirty.scales = true;
+            },
+            Command::Popover(popover) => {
+                self.popovers.push(popover);
+                self.decorations_dirty.popovers = true;
+            },
+            Command::ScrollRegion(region) => {
+                self.scroll_region = Some(region);
+                self.decorations_dirty.scroll_region = true;
+            },
+            Command::Icon(icon) => {
+                self.icons.push(icon);
+                self.decorations_dirty.icons = true;
+            },
+            Command::TextRun(text_run) => {
+                self.text_runs.push(text_run);
+                self.decorations_dirty.text_runs = true;
+            },
+            Command::Bar(bar) => {
+                self.bars.push(bar);
+                self.decorations_dirty.bars = true;
+            },
+            Command::LineLayout(layout) => {
+                self.line_layout = Some(layout);
+                self.decorations_dirty.line_layout = true;
+            },
             Command::Reset => self.clear_decorations(),
         }
     }
@@ -237,6 +300,9 @@ impl Terminal {
         self.bars.clear();
         self.scroll_region = None;
         self.line_layout = None;
+        // Every list emptied, so the next projection must re-apply all of them to
+        // clear the grid of what they previously stamped.
+        self.decorations_dirty = DecorationDirty::all();
     }
 
     /// Resize the terminal to `rows` by `cols`.
@@ -339,14 +405,42 @@ impl Terminal {
 
         let cursor = project_cursor(content.cursor, offset);
 
-        apply_borders(grid, &self.borders);
-        apply_scales(grid, &self.scales);
-        apply_popovers(grid, &self.popovers);
-        apply_scroll_region(grid, self.scroll_region);
-        apply_icons(grid, &self.icons);
-        apply_line_layout(grid, self.line_layout.as_ref());
-        apply_text_runs(grid, &self.text_runs);
-        apply_bars(grid, &self.bars);
+        // Re-stamp a decoration only when it changed, when a resize cleared the
+        // grid's lists and cells, or -- for the per-cell borders and scales --
+        // when any row's cells were reset by VT damage above. Text runs and bars
+        // resolve their row through the line layout, so they also re-stamp when
+        // the layout changed. A `Damage::Partial([])` idle frame re-stamps none.
+        let vt_damaged = match &dirty {
+            Damage::Full => true,
+            Damage::Partial(rows) => rows.iter().any(|&row| row),
+        };
+        let layout_changed = self.decorations_dirty.line_layout || resized;
+
+        if self.decorations_dirty.borders || resized || vt_damaged {
+            apply_borders(grid, &self.borders);
+        }
+        if self.decorations_dirty.scales || resized || vt_damaged {
+            apply_scales(grid, &self.scales);
+        }
+        if self.decorations_dirty.popovers || resized {
+            apply_popovers(grid, &self.popovers);
+        }
+        if self.decorations_dirty.scroll_region || resized {
+            apply_scroll_region(grid, self.scroll_region);
+        }
+        if self.decorations_dirty.icons || resized {
+            apply_icons(grid, &self.icons);
+        }
+        if layout_changed {
+            apply_line_layout(grid, self.line_layout.as_ref());
+        }
+        if self.decorations_dirty.text_runs || layout_changed {
+            apply_text_runs(grid, &self.text_runs);
+        }
+        if self.decorations_dirty.bars || layout_changed {
+            apply_bars(grid, &self.bars);
+        }
+        self.decorations_dirty = DecorationDirty::default();
 
         let history = self.term.history_size();
         let grew = history.saturating_sub(self.last_history);
@@ -1732,6 +1826,126 @@ mod tests {
 
         assert_eq!(grid.text_runs()[0].row, 80, "run shifts down two rows");
         assert_eq!(grid.bars()[0].y, 80, "bar shifts down two rows");
+    }
+
+    #[test]
+    fn border_re_stamps_on_a_vt_damaged_row() {
+        let frame = encode_border(&BorderCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            color: [255, 0, 0],
+        });
+        let edge = Some(Border {
+            style: BorderStyle::Light,
+            color: Rgb::new(255, 0, 0),
+        });
+
+        let mut terminal = Terminal::new(2, 3, Theme::default());
+        let mut grid = Grid::new(2, 3);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+        assert_eq!(grid.get(0, 0).borders.top, edge);
+
+        // Writing text damages row 0, so its cells are reset; the border must be
+        // re-stamped even though no new border command arrived.
+        terminal.advance(b"X");
+        terminal.project(&mut grid);
+        assert_eq!(grid.get(0, 0).ch, 'X');
+        assert_eq!(
+            grid.get(0, 0).borders.top,
+            edge,
+            "border re-stamped on the damaged row"
+        );
+    }
+
+    #[test]
+    fn text_runs_reresolve_when_only_the_line_layout_changes() {
+        let run = encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 48,
+            scale: 256,
+            color: [150, 160, 170],
+            bg: [0, 0, 0],
+            text: "4".to_owned(),
+        });
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&encode_line_layout(&LineLayoutCommand {
+            heights: vec![1, 3, 1],
+        }));
+        terminal.advance(&run);
+        terminal.project(&mut grid);
+        assert_eq!(grid.text_runs()[0].row, 80, "run shifts past the tall line");
+
+        // Flatten the layout without re-sending the run; it depends on the layout
+        // so it must re-resolve to its unshifted row.
+        terminal.advance(&encode_line_layout(&LineLayoutCommand {
+            heights: vec![1, 1, 1],
+        }));
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.text_runs()[0].row,
+            48,
+            "run re-resolves when the layout flattens"
+        );
+    }
+
+    #[test]
+    fn resize_re_applies_decorations() {
+        let frame = encode_border(&BorderCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            color: [255, 0, 0],
+        });
+        let edge = Some(Border {
+            style: BorderStyle::Light,
+            color: Rgb::new(255, 0, 0),
+        });
+
+        let mut terminal = Terminal::new(2, 3, Theme::default());
+        let mut grid = Grid::new(2, 3);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        // A resize clears the grid, so the border must be re-applied even with no
+        // new command.
+        terminal.resize(4, 6);
+        terminal.project(&mut grid);
+        assert_eq!((grid.rows(), grid.cols()), (4, 6));
+        assert_eq!(
+            grid.get(0, 0).borders.top,
+            edge,
+            "border re-applied after resize"
+        );
+    }
+
+    #[test]
+    fn idle_projection_keeps_grid_level_decorations() {
+        let icon = encode_icon(&IconCommand {
+            top: 1,
+            left: 1,
+            kind: ProtoIconKind::Warning,
+            color: [255, 200, 0],
+            size: 2,
+        });
+
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+        terminal.advance(&icon);
+        terminal.project(&mut grid);
+        assert_eq!(grid.icons().len(), 1);
+
+        // A projection with no new command and no damage skips re-applying the
+        // icon, but the grid's list persists.
+        terminal.project(&mut grid);
+        assert_eq!(grid.icons().len(), 1, "icon survives an idle projection");
     }
 
     #[test]
