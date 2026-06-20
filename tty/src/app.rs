@@ -227,6 +227,10 @@ struct State {
     /// The scroll region's declared offset at the previous frame, so the next
     /// one can seed the ease with the change since.
     last_region_offset: f32,
+    /// The live smooth-scroll offset, in document pages, eased toward the
+    /// terminal's app-declared scroll target. Unlike the grid and region offsets
+    /// it tracks an absolute position rather than decaying to zero.
+    document_scroll: f32,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -340,6 +344,7 @@ impl ApplicationHandler<PtyEvent> for App {
             grid_scroll: 0.0,
             region_scroll: 0.0,
             last_region_offset: 0.0,
+            document_scroll: 0.0,
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
         });
@@ -435,11 +440,18 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let (cursor, scroll_delta, damage, decoration_damage) = {
+                let (cursor, scroll_delta, damage, decoration_damage, scroll_target) = {
                     let mut terminal = state.terminal.lock();
                     let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
                     let decoration_damage = terminal.take_decoration_damage();
-                    (cursor, scroll_delta, damage, decoration_damage)
+                    let scroll_target = terminal.scroll_target();
+                    (
+                        cursor,
+                        scroll_delta,
+                        damage,
+                        decoration_damage,
+                        scroll_target,
+                    )
                 };
 
                 let overflows: Vec<Option<f32>> =
@@ -482,6 +494,10 @@ impl ApplicationHandler<PtyEvent> for App {
                 };
                 state.region_scroll = region_scroll;
 
+                let (document_scroll, document_scrolling) =
+                    step_document_scroll(state.document_scroll, scroll_target.pages());
+                state.document_scroll = document_scroll;
+
                 let cursor_easing = match cursor_position(cursor) {
                     Some(target) => {
                         let (next, settled) = ease(state.cursor_anim, target);
@@ -520,9 +536,14 @@ impl ApplicationHandler<PtyEvent> for App {
                 };
 
                 // Keep the vsync-paced loop running while the cursor eases, a
-                // popover scrolls, or the grid or a region scrolls. When all
-                // settle the loop idles until the next PTY output or resize.
-                if cursor_easing || popover_scrolling || grid_scrolling || region_scrolling {
+                // popover scrolls, or the grid, a region, or the document scrolls.
+                // When all settle the loop idles until the next PTY output or resize.
+                if cursor_easing
+                    || popover_scrolling
+                    || grid_scrolling
+                    || region_scrolling
+                    || document_scrolling
+                {
                     state.window.request_redraw();
                 }
             },
@@ -781,11 +802,23 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
     (next[0], !settled)
 }
 
+/// Advance the document's eased smooth-scroll offset one frame toward `target`.
+///
+/// Unlike the grid and region eases that decay a transient delta to zero, the
+/// document offset tracks an app-declared absolute position (in pages), so it
+/// eases the live offset toward that target and settles on it. Returns the new
+/// offset and whether it is still easing.
+fn step_document_scroll(scroll: f32, target: f32) -> (f32, bool) {
+    let (next, settled) = ease([scroll, 0.0], [target, 0.0]);
+    (next[0], !settled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         alternate_scroll_bytes, cell_at, ease, encode_key, font_step, popover_overflow,
-        sgr_wheel_bytes, step_grid_scroll, step_popover_scroll, step_region_scroll, wheel_lines,
+        sgr_wheel_bytes, step_document_scroll, step_grid_scroll, step_popover_scroll,
+        step_region_scroll, wheel_lines,
     };
     use stoatty_term::grid::{Overlay, Rgb};
     use winit::{
@@ -1054,6 +1087,19 @@ mod tests {
         // No new delta, within the snap epsilon: settles at zero.
         let (next, easing) = step_region_scroll(0.005, 0.0);
         assert_eq!(next, 0.0, "snaps onto zero");
+        assert!(!easing);
+    }
+
+    #[test]
+    fn document_scroll_eases_toward_a_target() {
+        // A target ahead of the live offset eases toward it without overshooting.
+        let (next, easing) = step_document_scroll(0.0, 4.0);
+        assert!(next > 0.0 && next < 4.0, "eases toward the target");
+        assert!(easing);
+
+        // Within the snap epsilon of the target: settles on it.
+        let (next, easing) = step_document_scroll(3.999, 4.0);
+        assert_eq!(next, 4.0, "snaps onto the target");
         assert!(!easing);
     }
 }

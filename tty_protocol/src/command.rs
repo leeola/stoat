@@ -34,6 +34,12 @@ pub enum Command {
     /// Commits the page painted since the open marker onto its pool slot and
     /// restores the live grid as the write target. Carries no payload.
     FillEnd,
+    /// Set the smooth-scroll target to an app-declared document offset.
+    ///
+    /// The renderer eases the live scroll offset toward [`ScrollCommand`]'s
+    /// page-plus-fraction position over subsequent frames, so the program
+    /// reports where it wants the viewport and the terminal owns the animation.
+    Scroll(ScrollCommand),
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
@@ -214,6 +220,19 @@ pub struct LineLayoutCommand {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FillCommand {
     pub index: u64,
+}
+
+/// A smooth-scroll target as a document-page offset.
+///
+/// Names where the program wants the viewport: `page` is the document page index
+/// (the same key the page pool is addressed by) and `fraction` is the sub-page
+/// position within it, in 1/65536ths of a page. The renderer eases the live
+/// offset toward this position rather than jumping, so the program reports an
+/// absolute target and the terminal animates toward it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScrollCommand {
+    pub page: u64,
+    pub fraction: u16,
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -494,6 +513,25 @@ pub fn encode_fill_end_into(out: &mut Vec<u8>) {
     frame::end(out);
 }
 
+/// Encode a [`ScrollCommand`] as a full `Gstoatty;scroll` frame for an emitter.
+///
+/// The page and sub-page fraction ride in a single fixed 10-byte argument.
+pub fn encode_scroll(command: &ScrollCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_scroll_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;scroll` frame for `command` to `out` without allocating.
+pub fn encode_scroll_into(out: &mut Vec<u8>, command: &ScrollCommand) {
+    frame::begin(out, "scroll");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.page.to_be_bytes())?;
+        w.write_all(&command.fraction.to_be_bytes())
+    });
+    frame::end(out);
+}
+
 /// Encode a [`Command::Reset`] as a full `Gstoatty;reset` frame for an emitter.
 ///
 /// The frame carries no arguments; receiving it clears all accumulated stoatty
@@ -541,6 +579,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
         Command::Fill(c) => encode_fill_into(out, c.index),
         Command::FillEnd => encode_fill_end_into(out),
+        Command::Scroll(c) => encode_scroll_into(out, c),
         Command::Reset => encode_reset_into(out),
     }
 }
@@ -561,6 +600,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "line_layout" => decode_line_layout(&frame.args).map(Command::LineLayout),
         "fill" => decode_fill(&frame.args).map(Command::Fill),
         "fill_end" => Some(Command::FillEnd),
+        "scroll" => decode_scroll(&frame.args).map(Command::Scroll),
         "reset" => Some(Command::Reset),
         _ => None,
     }
@@ -681,6 +721,17 @@ fn decode_fill(args: &[Vec<u8>]) -> Option<FillCommand> {
     })
 }
 
+fn decode_scroll(args: &[Vec<u8>]) -> Option<ScrollCommand> {
+    let arg: &[u8; 10] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(ScrollCommand {
+        page: u64::from_be_bytes([
+            arg[0], arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7],
+        ]),
+        fraction: u16::from_be_bytes([arg[8], arg[9]]),
+    })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -721,10 +772,10 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
-        encode_line_layout, encode_popover, encode_reset, encode_scale, encode_scroll_region,
-        encode_text_run, BarCommand, BorderCommand, BorderStyle, Command, FillCommand, IconCommand,
-        IconKind, LineLayoutCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
-        TextRunCommand,
+        encode_line_layout, encode_popover, encode_reset, encode_scale, encode_scroll,
+        encode_scroll_region, encode_text_run, BarCommand, BorderCommand, BorderStyle, Command,
+        FillCommand, IconCommand, IconKind, LineLayoutCommand, PopoverCommand, ScaleCommand,
+        ScrollCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -937,6 +988,25 @@ mod tests {
     }
 
     #[test]
+    fn scroll_round_trips() {
+        let command = ScrollCommand {
+            page: 5_000_000_000,
+            fraction: 40_000,
+        };
+
+        assert_eq!(
+            decode(&encode_scroll(&command)),
+            Some(Command::Scroll(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_scroll_payload() {
+        // The single arg here decodes to 3 bytes, not the 10 a scroll offset needs.
+        assert!(decode(b"Gstoatty;scroll;YWJj").is_none());
+    }
+
+    #[test]
     fn reset_round_trips() {
         assert_eq!(decode(&encode_reset()), Some(Command::Reset));
     }
@@ -1013,6 +1083,10 @@ mod tests {
             }),
             Command::Fill(FillCommand { index: 7 }),
             Command::FillEnd,
+            Command::Scroll(ScrollCommand {
+                page: 12,
+                fraction: 30_000,
+            }),
             Command::Reset,
         ];
 

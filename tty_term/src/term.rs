@@ -8,8 +8,8 @@
 
 use crate::{
     grid::{
-        Bar, Border, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind, Overlay, PagePool,
-        Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
+        Bar, Border, BorderStyle, Borders, Cell, DocumentOffset, Flags, Grid, Icon, IconKind,
+        Overlay, PagePool, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -39,6 +39,10 @@ const PALETTE_LEN: usize = 256;
 /// Bounds the pool's memory. Large enough to cover the pages straddling the
 /// viewport edges during a partial-cell scroll plus neighbours for momentum.
 const PAGE_POOL_CAPACITY: usize = 5;
+
+/// Denominator the wire's sub-page scroll fraction is expressed over: a
+/// `Gstoatty;scroll` fraction of `n` (a `u16`) means `n / 65536` of a page.
+const FRACTION_SCALE: f32 = 65536.0;
 
 /// A live terminal driven by a VT byte stream.
 ///
@@ -125,6 +129,13 @@ pub struct Terminal {
     /// `reset`), when the painted page is committed onto [`Self::page_pool`].
     /// `None` while writing the live grid.
     fill: Option<FillTarget>,
+    /// The latest app-declared smooth-scroll target, set by a `Gstoatty;scroll`
+    /// command.
+    ///
+    /// An absolute document-page position the renderer eases the live scroll
+    /// offset toward. Defaults to the document origin until a command moves it;
+    /// the terminal only records it, while the render loop owns the easing.
+    scroll_target: DocumentOffset,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -251,6 +262,7 @@ impl Terminal {
             last_history: 0,
             page_pool: PagePool::new(rows, cols, PAGE_POOL_CAPACITY),
             fill: None,
+            scroll_target: DocumentOffset::default(),
         }
     }
 
@@ -445,6 +457,12 @@ impl Terminal {
             },
             Command::Fill(fill) => self.begin_fill(fill.index),
             Command::FillEnd => self.commit_fill(),
+            Command::Scroll(scroll) => {
+                self.scroll_target = DocumentOffset {
+                    page: scroll.page,
+                    fraction: scroll.fraction as f32 / FRACTION_SCALE,
+                };
+            },
             // A reset is also a fill close trigger: commit any open page before
             // clearing decoration state and restoring the live grid.
             Command::Reset => {
@@ -452,6 +470,15 @@ impl Terminal {
                 self.clear_decorations();
             },
         }
+    }
+
+    /// The latest app-declared smooth-scroll target.
+    ///
+    /// An absolute document-page position set by `Gstoatty;scroll`, which the
+    /// render loop eases the live offset toward. Defaults to the document origin
+    /// before any command arrives.
+    pub fn scroll_target(&self) -> DocumentOffset {
+        self.scroll_target
     }
 
     /// Open a page-fill redirect onto the pool slot for document page `index`.
@@ -1422,17 +1449,17 @@ mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal, XTVERSION_REPLY};
     use crate::{
         grid::{
-            Bar, Border, BorderStyle, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
-            ScrollRegion, TextRun, UnderlineStyle,
+            Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Overlay,
+            Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
         },
         theme::Theme,
     };
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_line_layout,
-        encode_popover, encode_reset, encode_scale, encode_scroll_region, encode_text_run,
-        BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, IconCommand,
-        IconKind as ProtoIconKind, LineLayoutCommand, PopoverCommand, ScaleCommand,
-        ScrollRegionCommand, TextRunCommand,
+        encode_popover, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
+        encode_text_run, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand,
+        IconCommand, IconKind as ProtoIconKind, LineLayoutCommand, PopoverCommand, ScaleCommand,
+        ScrollCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -2404,6 +2431,24 @@ mod tests {
             grid.get(0, 0).borders.top,
             None,
             "page border spares the live grid"
+        );
+    }
+
+    #[test]
+    fn scroll_command_sets_the_target() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(&encode_scroll(&ScrollCommand {
+            page: 9,
+            fraction: 16_384,
+        }));
+
+        assert_eq!(
+            terminal.scroll_target(),
+            DocumentOffset {
+                page: 9,
+                fraction: 0.25,
+            }
         );
     }
 

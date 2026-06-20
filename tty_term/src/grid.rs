@@ -309,6 +309,27 @@ impl PagePool {
     }
 }
 
+/// A smooth-scroll position in document-page space.
+///
+/// `page` is a [`PagePool`] document page index and `fraction` is the sub-page
+/// position within it, in [0, 1). The renderer eases the live offset toward an
+/// app-declared target of this shape and reads the visible region from the pool
+/// at the eased position, so a partial-page scroll draws the buffered neighbour
+/// pages straddling the viewport edges.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct DocumentOffset {
+    pub page: u64,
+    pub fraction: f32,
+}
+
+impl DocumentOffset {
+    /// The offset as a single value in page units (`page + fraction`), for
+    /// easing and for mapping onto pool pages.
+    pub fn pages(&self) -> f32 {
+        self.page as f32 + self.fraction
+    }
+}
+
 /// One slot of a [`PagePool`]: a viewport-sized grid tagged with the document
 /// page it currently holds.
 ///
