@@ -26,7 +26,7 @@ use stoatty_render::{
 };
 use stoatty_term::{
     grid::{Grid, Overlay},
-    term::{Cursor, CursorShape, Terminal},
+    term::{Cursor, CursorShape, Damage, Terminal},
     theme::Theme,
 };
 use winit::{
@@ -231,6 +231,15 @@ struct State {
     /// terminal's app-declared scroll target. Unlike the grid and region offsets
     /// it tracks an absolute position rather than decaying to zero.
     document_scroll: f32,
+    /// The grid composed from the page pool at [`Self::document_scroll`], reused
+    /// across frames. Sized to the viewport plus one straddle row; rendered
+    /// instead of [`Self::grid`] whenever a pool window covers the offset.
+    document_grid: Grid,
+    /// The top document row [`Self::document_grid`] was last composed at, so a
+    /// frame that only changes the sub-cell fraction reuses the cached rows and
+    /// shifts them, rebuilding only when the integer row changes. `None` when the
+    /// previous frame rendered the live grid.
+    last_document_row: Option<i64>,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -345,6 +354,8 @@ impl ApplicationHandler<PtyEvent> for App {
             region_scroll: 0.0,
             last_region_offset: 0.0,
             document_scroll: 0.0,
+            document_grid: Grid::new(0, 0),
+            last_document_row: None,
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
         });
@@ -498,40 +509,83 @@ impl ApplicationHandler<PtyEvent> for App {
                     step_document_scroll(state.document_scroll, scroll_target.pages());
                 state.document_scroll = document_scroll;
 
-                let cursor_easing = match cursor_position(cursor) {
-                    Some(target) => {
-                        let (next, settled) = ease(state.cursor_anim, target);
-                        state.cursor_anim = next;
+                let document_view = {
+                    let terminal = state.terminal.lock();
+                    terminal.project_document(&mut state.document_grid, document_scroll)
+                };
+
+                let cursor_easing = match document_view {
+                    Some((frac, top)) => {
+                        // A pool window covers the offset: render the composed
+                        // document grid, gliding it by the sub-cell fraction. The
+                        // integer top alone selects which rows fill the grid, so an
+                        // unchanged top reuses the cached glyphs and only shifts
+                        // them; a new top rebuilds.
+                        let rebuild = state.last_document_row != Some(top);
+                        state.last_document_row = Some(top);
+                        let doc_damage = if rebuild {
+                            Damage::Full
+                        } else {
+                            Damage::Partial(vec![false; state.document_grid.rows()])
+                        };
                         state.gpu.render(
-                            &state.grid,
-                            Frame {
-                                cursor: Some(next),
-                                scroll: Scroll {
-                                    grid: state.grid_scroll,
-                                    region: state.region_scroll,
-                                    popovers: &state.popover_scrolls,
-                                },
-                                damage: &damage,
-                                decoration_damage: &decoration_damage,
-                            },
-                        );
-                        !settled
-                    },
-                    None => {
-                        state.gpu.render(
-                            &state.grid,
+                            &state.document_grid,
                             Frame {
                                 cursor: None,
                                 scroll: Scroll {
-                                    grid: state.grid_scroll,
-                                    region: state.region_scroll,
-                                    popovers: &state.popover_scrolls,
+                                    grid: 0.0,
+                                    document: -frac,
+                                    region: 0.0,
+                                    popovers: &[],
                                 },
-                                damage: &damage,
-                                decoration_damage: &decoration_damage,
+                                damage: &doc_damage,
+                                decoration_damage: &doc_damage,
                             },
                         );
                         false
+                    },
+                    None => {
+                        // No pool window covers the offset: render the projected
+                        // live grid (the degradation path), cursor easing as usual.
+                        state.last_document_row = None;
+                        match cursor_position(cursor) {
+                            Some(target) => {
+                                let (next, settled) = ease(state.cursor_anim, target);
+                                state.cursor_anim = next;
+                                state.gpu.render(
+                                    &state.grid,
+                                    Frame {
+                                        cursor: Some(next),
+                                        scroll: Scroll {
+                                            grid: state.grid_scroll,
+                                            document: 0.0,
+                                            region: state.region_scroll,
+                                            popovers: &state.popover_scrolls,
+                                        },
+                                        damage: &damage,
+                                        decoration_damage: &decoration_damage,
+                                    },
+                                );
+                                !settled
+                            },
+                            None => {
+                                state.gpu.render(
+                                    &state.grid,
+                                    Frame {
+                                        cursor: None,
+                                        scroll: Scroll {
+                                            grid: state.grid_scroll,
+                                            document: 0.0,
+                                            region: state.region_scroll,
+                                            popovers: &state.popover_scrolls,
+                                        },
+                                        damage: &damage,
+                                        decoration_damage: &decoration_damage,
+                                    },
+                                );
+                                false
+                            },
+                        }
                     },
                 };
 

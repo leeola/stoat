@@ -290,6 +290,45 @@ impl PagePool {
         (page.index == Some(index)).then_some(&page.grid)
     }
 
+    /// Compose the visible region into `out`, sourcing each row from the pooled
+    /// page that holds it, starting at document row `top`.
+    ///
+    /// Output row `r` is document row `top + r`, which lives in page
+    /// `(top + r) / page_rows` at row `(top + r) % page_rows`, so a viewport that
+    /// straddles a page boundary draws the neighbour pages on either side. `out`
+    /// is sized by the caller to the viewport plus one straddle row, so an upward
+    /// fractional shift has a row to reveal at the bottom.
+    ///
+    /// Returns `false` the moment a needed page is not buffered, or `top` falls
+    /// above the first page; `out` is left partly written, so the caller falls
+    /// back to the live grid rather than show holes.
+    pub fn compose(&self, top: i64, out: &mut Grid) -> bool {
+        let page_rows = match self.pages.first() {
+            Some(page) if page.grid.rows() > 0 => page.grid.rows(),
+            _ => return false,
+        };
+
+        for out_row in 0..out.rows() {
+            let doc_row = top + out_row as i64;
+            if doc_row < 0 {
+                return false;
+            }
+
+            let page_index = doc_row as u64 / page_rows as u64;
+            let row_in_page = doc_row as usize % page_rows;
+            let Some(page) = self.page(page_index) else {
+                return false;
+            };
+
+            let cols = out.cols().min(page.cols());
+            for col in 0..cols {
+                *out.get_mut(out_row, col) = *page.get(row_in_page, col);
+            }
+        }
+
+        true
+    }
+
     /// Resize every page to a `rows` by `cols` viewport, dropping all buffered
     /// content.
     ///
@@ -920,5 +959,58 @@ mod tests {
             Some('x'),
             "a zero-capacity request still yields a usable slot"
         );
+    }
+
+    fn fill_page_rows(pool: &mut PagePool, index: u64, rows: &[char]) {
+        let grid = pool.fill(index);
+        for (row, &ch) in rows.iter().enumerate() {
+            grid.get_mut(row, 0).ch = ch;
+        }
+    }
+
+    fn composed_rows(out: &Grid) -> Vec<char> {
+        (0..out.rows()).map(|row| out.get(row, 0).ch).collect()
+    }
+
+    #[test]
+    fn compose_aligned_top_reads_one_page() {
+        let mut pool = PagePool::new(2, 1, 4);
+        fill_page_rows(&mut pool, 0, &['a', 'b']);
+        fill_page_rows(&mut pool, 1, &['c', 'd']);
+
+        let mut out = Grid::new(2, 1);
+        assert!(pool.compose(0, &mut out));
+        assert_eq!(composed_rows(&out), ['a', 'b']);
+    }
+
+    #[test]
+    fn compose_straddles_a_page_boundary() {
+        let mut pool = PagePool::new(2, 1, 4);
+        fill_page_rows(&mut pool, 0, &['a', 'b']);
+        fill_page_rows(&mut pool, 1, &['c', 'd']);
+
+        // top=1 reads page 0's second row, then both of page 1's rows.
+        let mut out = Grid::new(3, 1);
+        assert!(pool.compose(1, &mut out));
+        assert_eq!(composed_rows(&out), ['b', 'c', 'd']);
+    }
+
+    #[test]
+    fn compose_fails_when_a_straddled_page_is_unbuffered() {
+        let mut pool = PagePool::new(2, 1, 4);
+        fill_page_rows(&mut pool, 0, &['a', 'b']);
+
+        // out needs page 0's last row plus page 1, which was never filled.
+        let mut out = Grid::new(3, 1);
+        assert!(!pool.compose(1, &mut out));
+    }
+
+    #[test]
+    fn compose_fails_above_the_first_page() {
+        let mut pool = PagePool::new(2, 1, 4);
+        fill_page_rows(&mut pool, 0, &['a', 'b']);
+
+        let mut out = Grid::new(2, 1);
+        assert!(!pool.compose(-1, &mut out));
     }
 }

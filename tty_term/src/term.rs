@@ -481,6 +481,37 @@ impl Terminal {
         self.scroll_target
     }
 
+    /// Compose the document-pool visible region into `out` at the eased page
+    /// offset, or `None` to fall back to the live grid.
+    ///
+    /// `doc_scroll` is the live smooth-scroll position in document pages. Sizes
+    /// `out` to the viewport plus one straddle row and fills it from the pooled
+    /// pages straddling the offset, returning the sub-cell fraction to shift the
+    /// rendered rows by and the top document row composed.
+    ///
+    /// Returns `None` when the straddled pages are not all buffered -- the
+    /// degradation path taken whenever no pool window covers the offset, so the
+    /// renderer shows the projected live grid instead of holes.
+    pub fn project_document(&self, out: &mut Grid, doc_scroll: f32) -> Option<(f32, i64)> {
+        let page_rows = self.term.screen_lines();
+        if page_rows == 0 {
+            return None;
+        }
+
+        let cols = self.term.columns();
+        if out.rows() != page_rows + 1 || out.cols() != cols {
+            out.resize(page_rows + 1, cols);
+        }
+
+        let doc_rows = doc_scroll * page_rows as f32;
+        let top = doc_rows.floor();
+        let frac = doc_rows - top;
+
+        self.page_pool
+            .compose(top as i64, out)
+            .then_some((frac, top as i64))
+    }
+
     /// Open a page-fill redirect onto the pool slot for document page `index`.
     ///
     /// Any already-open fill is committed first, so a dropped `fill_end` cannot
@@ -2450,6 +2481,35 @@ mod tests {
                 fraction: 0.25,
             }
         );
+    }
+
+    #[test]
+    fn project_document_composes_from_the_pool_with_the_sub_cell_fraction() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        // Buffer pages 0 and 1 so a 3-row compose at the top has every row.
+        let mut stream = encode_fill(&FillCommand { index: 0 });
+        stream.extend_from_slice(&encode_fill(&FillCommand { index: 1 }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let mut out = Grid::new(0, 0);
+        // 0.25 pages over a 2-row page is half a row: top row 0, half-cell shift.
+        let composed = terminal.project_document(&mut out, 0.25);
+
+        assert_eq!(composed, Some((0.5, 0)));
+        assert_eq!(
+            (out.rows(), out.cols()),
+            (3, 4),
+            "viewport plus a straddle row"
+        );
+    }
+
+    #[test]
+    fn project_document_degrades_when_no_window_is_buffered() {
+        let terminal = Terminal::new(2, 4, Theme::default());
+        let mut out = Grid::new(0, 0);
+        assert_eq!(terminal.project_document(&mut out, 0.0), None);
     }
 
     fn light_border(top: u16, height: u16) -> Vec<u8> {

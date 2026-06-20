@@ -84,6 +84,7 @@ fn powerline_separator_fills_the_cell() {
             cursor: None,
             scroll: Scroll {
                 grid: 0.0,
+                document: 0.0,
                 region: 0.0,
                 popovers: &[],
             },

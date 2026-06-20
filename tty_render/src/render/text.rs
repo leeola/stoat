@@ -460,7 +460,10 @@ impl TextPass {
                 }),
             );
         };
-        write_globals(&self.globals, scroll.grid * self.metrics.height);
+        write_globals(
+            &self.globals,
+            (scroll.grid + scroll.document) * self.metrics.height,
+        );
         write_globals(&self.region_globals, scroll.region * self.metrics.height);
         write_globals(&self.static_globals, 0.0);
 
@@ -2615,6 +2618,7 @@ mod tests {
             cursor: None,
             scroll: Scroll {
                 grid: 0.0,
+                document: 0.0,
                 region: 0.0,
                 popovers: &[],
             },
@@ -2669,6 +2673,7 @@ mod tests {
         };
         let no_scroll = Scroll {
             grid: 0.0,
+            document: 0.0,
             region: 0.0,
             popovers: &[],
         };
@@ -2690,6 +2695,7 @@ mod tests {
         for i in 0..iterations {
             let scroll = Scroll {
                 grid: i as f32 * 0.01,
+                document: 0.0,
                 region: 0.0,
                 popovers: &[],
             };

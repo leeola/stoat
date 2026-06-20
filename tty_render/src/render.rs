@@ -14,6 +14,14 @@ pub mod text;
 pub struct Scroll<'a> {
     /// Whole-grid scroll, applied to every cell outside a scroll region.
     pub grid: f32,
+    /// Sub-cell document-pool scroll, in rows, applied to the whole grid on top
+    /// of [`Self::grid`].
+    ///
+    /// Carries the fractional remainder of an app-driven document scroll whose
+    /// integer rows are already baked into which pooled page-rows fill the grid,
+    /// so it glides the composed view pixel-by-pixel and rests at zero on a cell
+    /// boundary. Zero outside document-pool rendering.
+    pub document: f32,
     /// Scroll-region content scroll, applied to the cells inside the grid's
     /// scroll region instead of [`Self::grid`].
     pub region: f32,
