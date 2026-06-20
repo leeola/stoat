@@ -23,6 +23,17 @@ pub enum Command {
     TextRun(TextRunCommand),
     Bar(BarCommand),
     LineLayout(LineLayoutCommand),
+    /// Open the page-fill redirect onto a recycled pool slot.
+    ///
+    /// The streamed bytes that follow paint the page named by
+    /// [`FillCommand::index`] instead of the live grid, until [`Command::FillEnd`]
+    /// (or the next `fill`/`reset`) commits the slot and restores the live grid.
+    Fill(FillCommand),
+    /// Close the page-fill redirect opened by [`Command::Fill`].
+    ///
+    /// Commits the page painted since the open marker onto its pool slot and
+    /// restores the live grid as the write target. Carries no payload.
+    FillEnd,
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
@@ -190,6 +201,19 @@ pub struct BarCommand {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LineLayoutCommand {
     pub heights: Vec<u16>,
+}
+
+/// Name the document page a [`Command::Fill`] redirect paints into.
+///
+/// The open half of the `fill`/`fill_end` marker pair. A page is a full grid of
+/// cells, far larger than the APC frame cap, so it cannot ride a frame payload:
+/// this marker only names the target page, and the page's content streams as
+/// ordinary VT + SGR bytes after the frame, committed when the redirect closes.
+/// `index` is the app's document page index, the same key the pool slot is
+/// addressed by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FillCommand {
+    pub index: u64,
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -436,6 +460,40 @@ pub fn encode_line_layout_into(out: &mut Vec<u8>, heights: &[u16]) {
     frame::end(out);
 }
 
+/// Encode a [`FillCommand`] as a full `Gstoatty;fill` open-marker frame.
+///
+/// The page index rides in a single fixed 8-byte big-endian argument; the
+/// page's content streams as VT bytes after the frame, not as a frame argument.
+pub fn encode_fill(command: &FillCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_fill_into(&mut out, command.index);
+    out
+}
+
+/// Append a `Gstoatty;fill` open-marker frame for page `index` to `out`.
+pub fn encode_fill_into(out: &mut Vec<u8>, index: u64) {
+    frame::begin(out, "fill");
+    frame::push_arg(out, |w| w.write_all(&index.to_be_bytes()));
+    frame::end(out);
+}
+
+/// Encode a [`Command::FillEnd`] as a full `Gstoatty;fill_end` close-marker
+/// frame.
+///
+/// The frame carries no arguments; receiving it commits the page painted since
+/// the matching [`Command::Fill`] onto its pool slot and restores the live grid.
+pub fn encode_fill_end() -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_fill_end_into(&mut out);
+    out
+}
+
+/// Append an argument-less `Gstoatty;fill_end` close-marker frame to `out`.
+pub fn encode_fill_end_into(out: &mut Vec<u8>) {
+    frame::begin(out, "fill_end");
+    frame::end(out);
+}
+
 /// Encode a [`Command::Reset`] as a full `Gstoatty;reset` frame for an emitter.
 ///
 /// The frame carries no arguments; receiving it clears all accumulated stoatty
@@ -481,6 +539,8 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         },
         Command::Bar(c) => encode_bar_into(out, c),
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
+        Command::Fill(c) => encode_fill_into(out, c.index),
+        Command::FillEnd => encode_fill_end_into(out),
         Command::Reset => encode_reset_into(out),
     }
 }
@@ -499,6 +559,8 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "text_run" => decode_text_run(&frame.args).map(Command::TextRun),
         "bar" => decode_bar(&frame.args).map(Command::Bar),
         "line_layout" => decode_line_layout(&frame.args).map(Command::LineLayout),
+        "fill" => decode_fill(&frame.args).map(Command::Fill),
+        "fill_end" => Some(Command::FillEnd),
         "reset" => Some(Command::Reset),
         _ => None,
     }
@@ -611,6 +673,14 @@ fn decode_line_layout(args: &[Vec<u8>]) -> Option<LineLayoutCommand> {
     Some(LineLayoutCommand { heights })
 }
 
+fn decode_fill(args: &[Vec<u8>]) -> Option<FillCommand> {
+    let arg: &[u8; 8] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(FillCommand {
+        index: u64::from_be_bytes(*arg),
+    })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -650,10 +720,11 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, encode_bar, encode_border, encode_icon, encode_into, encode_line_layout,
-        encode_popover, encode_reset, encode_scale, encode_scroll_region, encode_text_run,
-        BarCommand, BorderCommand, BorderStyle, Command, IconCommand, IconKind, LineLayoutCommand,
-        PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
+        decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
+        encode_line_layout, encode_popover, encode_reset, encode_scale, encode_scroll_region,
+        encode_text_run, BarCommand, BorderCommand, BorderStyle, Command, FillCommand, IconCommand,
+        IconKind, LineLayoutCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+        TextRunCommand,
     };
 
     #[test]
@@ -846,6 +917,26 @@ mod tests {
     }
 
     #[test]
+    fn fill_round_trips() {
+        let command = FillCommand {
+            index: 4_000_000_000,
+        };
+
+        assert_eq!(decode(&encode_fill(&command)), Some(Command::Fill(command)));
+    }
+
+    #[test]
+    fn fill_end_round_trips() {
+        assert_eq!(decode(&encode_fill_end()), Some(Command::FillEnd));
+    }
+
+    #[test]
+    fn rejects_wrong_length_fill_payload() {
+        // The single arg here decodes to 3 bytes, not the 8 a fill index needs.
+        assert!(decode(b"Gstoatty;fill;YWJj").is_none());
+    }
+
+    #[test]
     fn reset_round_trips() {
         assert_eq!(decode(&encode_reset()), Some(Command::Reset));
     }
@@ -920,6 +1011,8 @@ mod tests {
             Command::LineLayout(LineLayoutCommand {
                 heights: vec![1, 2, 3, 1],
             }),
+            Command::Fill(FillCommand { index: 7 }),
+            Command::FillEnd,
             Command::Reset,
         ];
 

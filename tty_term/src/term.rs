@@ -117,6 +117,14 @@ pub struct Terminal {
     /// app-declared positions. Rebuilt on resize so pages track the live
     /// viewport. Distinct from the per-frame projected [`Grid`].
     page_pool: PagePool,
+    /// The in-progress page fill, set while a `Gstoatty;fill` open marker has
+    /// redirected the VT write path onto a pool slot.
+    ///
+    /// Streamed bytes paint this isolated context's screen instead of the live
+    /// grid until the redirect closes (a `fill_end`, the next `fill`, or a
+    /// `reset`), when the painted page is committed onto [`Self::page_pool`].
+    /// `None` while writing the live grid.
+    fill: Option<FillTarget>,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -179,6 +187,36 @@ pub enum CursorShape {
     Hidden,
 }
 
+/// The isolated VT context a `Gstoatty;fill` redirect paints a page into.
+///
+/// Holds its own [`Term`] and parser so the streamed page content mutates a
+/// private screen, with its own cursor and parser state, while the live terminal
+/// stays untouched. On commit the screen's cells are projected onto the pool
+/// slot for [`Self::index`].
+struct FillTarget {
+    index: u64,
+    term: Term<ResponseSink>,
+    parser: Processor,
+}
+
+impl FillTarget {
+    /// Create a `rows` by `cols` fill context for document page `index`, with a
+    /// blank screen ready to receive the page's streamed bytes.
+    fn new(index: u64, rows: usize, cols: usize) -> FillTarget {
+        let term = Term::new(
+            Config::default(),
+            &GridSize { rows, cols },
+            ResponseSink::default(),
+        );
+
+        FillTarget {
+            index,
+            term,
+            parser: Processor::new(),
+        }
+    }
+}
+
 impl Terminal {
     /// Create a `rows` by `cols` terminal with an empty screen, resolving colors
     /// against `theme`.
@@ -212,6 +250,7 @@ impl Terminal {
             decoration_damage: Vec::new(),
             last_history: 0,
             page_pool: PagePool::new(rows, cols, PAGE_POOL_CAPACITY),
+            fill: None,
         }
     }
 
@@ -227,41 +266,102 @@ impl Terminal {
     /// sequence across calls.
     ///
     /// Each stoatty `Gstoatty` APC frame in the stream is decoded and applied
-    /// before the bytes reach the parser. The bytes are still fed to the parser
-    /// verbatim: alacritty consumes the APC string and ignores it, so feeding it
-    /// is harmless and avoids the desync that removing bytes would risk.
+    /// before the bytes reach the parser. Outside a fill redirect the bytes are
+    /// still fed to the parser verbatim: alacritty consumes the APC string and
+    /// ignores it, so feeding it is harmless and avoids the desync that removing
+    /// bytes would risk.
+    ///
+    /// A `Gstoatty;fill` open marker redirects the bytes that follow onto an
+    /// isolated page-painting context instead of the live screen, until the
+    /// matching `fill_end` (or the next `fill`/`reset`) commits the page. The
+    /// chunk is then split at the marker boundaries to route each segment to the
+    /// live or the fill parser.
     ///
     /// XTVERSION queries (`CSI > Ps q`) are answered here too. The vte parser
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
+        let redirecting = self.fill.is_some();
+
         // The APC and XTVERSION scanners only act on ESC-prefixed sequences, so
         // when neither holds a partial frame a chunk with no ESC carries nothing
         // for them. A SIMD memchr for the first ESC lets the bulk of plain output
-        // (cat, yes) skip the two per-byte scans, leaving only the vte parse.
-        let scan = if self.apc.is_idle() && self.xtversion.is_idle() {
+        // (cat, yes) skip the two per-byte scans, leaving only the vte parse. A
+        // fill redirect must route every byte, so it forgoes the fast path.
+        let scan = if !redirecting && self.apc.is_idle() && self.xtversion.is_idle() {
             memchr::memchr(ESC, bytes).map(|esc| &bytes[esc..])
         } else {
             Some(bytes)
         };
 
-        if let Some(scan) = scan {
-            for payload in self.apc.scan(scan) {
-                if let Some(command) = command::decode(&payload) {
+        let Some(scan) = scan else {
+            self.parser.advance(&mut self.term, bytes);
+            return self.parser.sync_bytes_count() < bytes.len();
+        };
+
+        let frames: Vec<(Option<Command>, usize)> = self
+            .apc
+            .scan(scan)
+            .into_iter()
+            .map(|(payload, end)| (command::decode(&payload), end))
+            .collect();
+
+        for _ in 0..self.xtversion.scan(scan) {
+            self.responses.push(XTVERSION_REPLY.as_bytes());
+        }
+
+        // Without a fill redirect every byte targets the live screen, so apply
+        // the commands and feed the whole chunk verbatim, preserving the
+        // synchronized-update accounting the redirect path cannot.
+        let involves_fill = redirecting
+            || frames
+                .iter()
+                .any(|(command, _)| matches!(command, Some(Command::Fill(_))));
+        if !involves_fill {
+            for (command, _) in frames {
+                if let Some(command) = command {
                     self.apply_command(command);
                 }
             }
 
-            for _ in 0..self.xtversion.scan(scan) {
-                self.responses.push(XTVERSION_REPLY.as_bytes());
-            }
+            self.parser.advance(&mut self.term, bytes);
+
+            // A redraw is warranted unless the whole chunk was held in the
+            // parser's synchronized-update buffer (nothing reached the screen).
+            return self.parser.sync_bytes_count() < bytes.len();
         }
 
-        self.parser.advance(&mut self.term, bytes);
+        // A fill redirect splits the chunk at frame boundaries: each segment up
+        // to and including a marker is routed to the target active before that
+        // marker, then the marker's command flips the target for the next
+        // segment. The marker's own APC bytes are ignored by whichever parser
+        // consumes them. `prefix` rebases the scan-relative offsets when a memchr
+        // skip left a plain head bound for the live screen.
+        let prefix = bytes.len() - scan.len();
+        let mut start = 0;
+        for (command, end) in frames {
+            self.feed_segment(&bytes[start..prefix + end]);
+            start = prefix + end;
 
-        // A redraw is warranted unless the whole chunk was held in the parser's
-        // synchronized-update buffer (nothing reached the screen).
-        self.parser.sync_bytes_count() < bytes.len()
+            if let Some(command) = command {
+                // Mid-redirect only the fill-control commands act. A decoration
+                // command in a page's stream is page-targeted, so applying it
+                // would leak onto the live grid; it is dropped to keep the live
+                // state untouched while a page paints.
+                // FIXME: capture page-targeted decorations onto the page grid
+                // rather than dropping them.
+                let control = matches!(
+                    command,
+                    Command::Fill(_) | Command::FillEnd | Command::Reset
+                );
+                if control || self.fill.is_none() {
+                    self.apply_command(command);
+                }
+            }
+        }
+        self.feed_segment(&bytes[start..]);
+
+        true
     }
 
     /// The instant the in-progress synchronized update must be flushed by, or
@@ -343,7 +443,50 @@ impl Terminal {
                 self.line_layout = Some(layout);
                 self.decorations_dirty.line_layout = true;
             },
-            Command::Reset => self.clear_decorations(),
+            Command::Fill(fill) => self.begin_fill(fill.index),
+            Command::FillEnd => self.commit_fill(),
+            // A reset is also a fill close trigger: commit any open page before
+            // clearing decoration state and restoring the live grid.
+            Command::Reset => {
+                self.commit_fill();
+                self.clear_decorations();
+            },
+        }
+    }
+
+    /// Open a page-fill redirect onto the pool slot for document page `index`.
+    ///
+    /// Any already-open fill is committed first, so a dropped `fill_end` cannot
+    /// strand the redirect: the next `fill` (or a `reset`) closes the previous
+    /// page. The fresh context is sized to the live viewport, matching the pool
+    /// slots [`Self::commit_fill`] writes into.
+    fn begin_fill(&mut self, index: u64) {
+        self.commit_fill();
+        let rows = self.term.screen_lines();
+        let cols = self.term.columns();
+        self.fill = Some(FillTarget::new(index, rows, cols));
+    }
+
+    /// Commit the open page fill onto its pool slot and restore the live grid.
+    ///
+    /// Projects the fill context's painted cells onto the recycled slot for its
+    /// page index. A no-op when no fill is open, so every close trigger
+    /// (`fill_end`, the next `fill`, `reset`) can call it unconditionally.
+    fn commit_fill(&mut self) {
+        let Some(fill) = self.fill.take() else {
+            return;
+        };
+
+        let grid = self.page_pool.fill(fill.index);
+        project_term_cells(grid, &fill.term, &self.theme, &self.palette);
+    }
+
+    /// Route a run of VT bytes to the active write target: the open fill
+    /// context's parser when a redirect is in effect, otherwise the live one.
+    fn feed_segment(&mut self, segment: &[u8]) {
+        match &mut self.fill {
+            Some(fill) => fill.parser.advance(&mut fill.term, segment),
+            None => self.parser.advance(&mut self.term, segment),
         }
     }
 
@@ -374,6 +517,9 @@ impl Terminal {
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.term.resize(GridSize { rows, cols });
         self.page_pool.rebuild(rows, cols);
+        // The pool is rebuilt empty for the new viewport, so any half-painted
+        // page is abandoned; the app re-pushes its pages at the new size.
+        self.fill = None;
     }
 
     /// Move the viewport `delta` lines through scrollback history: positive
@@ -648,13 +794,17 @@ impl ApcScanner {
         matches!(self.state, ApcState::Ground)
     }
 
-    /// Feed `bytes`, returning every APC payload that completes within them.
+    /// Feed `bytes`, returning every APC payload that completes within them,
+    /// each paired with the byte offset one past its terminator.
     ///
-    /// A payload split across calls is retained until its terminator arrives.
-    fn scan(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+    /// The offset lets a caller split the input at frame boundaries to route the
+    /// content between frames. A payload split across calls is retained until its
+    /// terminator arrives; its offset is then relative to the call it completes
+    /// in.
+    fn scan(&mut self, bytes: &[u8]) -> Vec<(Vec<u8>, usize)> {
         let mut payloads = Vec::new();
 
-        for &byte in bytes {
+        for (i, &byte) in bytes.iter().enumerate() {
             match self.state {
                 ApcState::Ground => {
                     if byte == ESC {
@@ -674,14 +824,14 @@ impl ApcScanner {
                 ApcState::Apc => match byte {
                     ESC => self.state = ApcState::ApcEscape,
                     BEL => {
-                        payloads.push(mem::take(&mut self.payload));
+                        payloads.push((mem::take(&mut self.payload), i + 1));
                         self.state = ApcState::Ground;
                     },
                     _ => self.push(byte),
                 },
                 ApcState::ApcEscape => match byte {
                     STRING_TERMINATOR => {
-                        payloads.push(mem::take(&mut self.payload));
+                        payloads.push((mem::take(&mut self.payload), i + 1));
                         self.state = ApcState::Ground;
                     },
                     ESC => self.state = ApcState::ApcEscape,
@@ -825,6 +975,35 @@ impl Dimensions for GridSize {
 
     fn columns(&self) -> usize {
         self.cols
+    }
+}
+
+/// Project a fill context's on-screen cells onto a page grid.
+///
+/// The pool clears the slot before this runs, so it copies each on-screen cell
+/// without damage tracking, resolving colors exactly as [`Terminal::project`]
+/// does for the live grid. Cells past the page's bounds are skipped.
+fn project_term_cells(
+    grid: &mut Grid,
+    term: &Term<ResponseSink>,
+    theme: &Theme,
+    palette: &[Rgb; PALETTE_LEN],
+) {
+    let content = term.renderable_content();
+    let offset = content.display_offset as i32;
+
+    for indexed in content.display_iter {
+        let row = indexed.point.line.0 + offset;
+        if row < 0 {
+            continue;
+        }
+
+        let (row, col) = (row as usize, indexed.point.column.0);
+        if row >= grid.rows() || col >= grid.cols() {
+            continue;
+        }
+
+        *grid.get_mut(row, col) = project_cell(indexed.cell, content.colors, theme, palette);
     }
 }
 
@@ -1249,10 +1428,11 @@ mod tests {
         theme::Theme,
     };
     use stoatty_protocol::command::{
-        encode_bar, encode_border, encode_icon, encode_line_layout, encode_popover, encode_reset,
-        encode_scale, encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
-        BorderStyle as ProtoBorderStyle, IconCommand, IconKind as ProtoIconKind, LineLayoutCommand,
-        PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
+        encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_line_layout,
+        encode_popover, encode_reset, encode_scale, encode_scroll_region, encode_text_run,
+        BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, IconCommand,
+        IconKind as ProtoIconKind, LineLayoutCommand, PopoverCommand, ScaleCommand,
+        ScrollRegionCommand, TextRunCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -1590,7 +1770,7 @@ mod tests {
 
         assert_eq!(
             scanner.scan(b"\x1b_Gstoatty;border\x1b\\"),
-            vec![b"Gstoatty;border".to_vec()]
+            vec![(b"Gstoatty;border".to_vec(), 19)]
         );
     }
 
@@ -1599,21 +1779,27 @@ mod tests {
         let mut scanner = ApcScanner::default();
 
         assert!(scanner.scan(b"\x1b_Gstoat").is_empty());
-        assert_eq!(scanner.scan(b"ty;x\x1b\\"), vec![b"Gstoatty;x".to_vec()]);
+        assert_eq!(
+            scanner.scan(b"ty;x\x1b\\"),
+            vec![(b"Gstoatty;x".to_vec(), 6)]
+        );
     }
 
     #[test]
     fn scans_bel_terminated_frame() {
         let mut scanner = ApcScanner::default();
 
-        assert_eq!(scanner.scan(b"\x1b_foo\x07"), vec![b"foo".to_vec()]);
+        assert_eq!(scanner.scan(b"\x1b_foo\x07"), vec![(b"foo".to_vec(), 6)]);
     }
 
     #[test]
     fn scans_frame_between_text() {
         let mut scanner = ApcScanner::default();
 
-        assert_eq!(scanner.scan(b"a\x1b_foo\x1b\\b"), vec![b"foo".to_vec()]);
+        assert_eq!(
+            scanner.scan(b"a\x1b_foo\x1b\\b"),
+            vec![(b"foo".to_vec(), 8)]
+        );
     }
 
     #[test]
@@ -1622,7 +1808,7 @@ mod tests {
 
         assert_eq!(
             scanner.scan(b"\x1b_a\x1b\\\x1b_b\x1b\\"),
-            vec![b"a".to_vec(), b"b".to_vec()]
+            vec![(b"a".to_vec(), 5), (b"b".to_vec(), 10)]
         );
     }
 
@@ -2123,6 +2309,101 @@ mod tests {
         assert!(
             terminal.advance(b"\x1b[?2026l"),
             "the ESU flush warrants a redraw"
+        );
+    }
+
+    #[test]
+    fn fill_paints_page_and_spares_live_grid() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        let mut stream = encode_fill(&FillCommand { index: 0 });
+        stream.extend_from_slice(b"hi");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let page = terminal.page_pool.page(0).expect("page 0 buffered");
+        assert_eq!((page.get(0, 0).ch, page.get(0, 1).ch), ('h', 'i'));
+
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.get(0, 0).ch,
+            ' ',
+            "page content never reaches the live grid"
+        );
+    }
+
+    #[test]
+    fn fill_persists_across_advance_calls() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        terminal.advance(&encode_fill(&FillCommand { index: 3 }));
+        terminal.advance(b"ab");
+        terminal.advance(&encode_fill_end());
+
+        let page = terminal.page_pool.page(3).expect("page 3 buffered");
+        assert_eq!((page.get(0, 0).ch, page.get(0, 1).ch), ('a', 'b'));
+    }
+
+    #[test]
+    fn next_fill_marker_auto_commits_the_previous_page() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        // No fill_end between the two pages: opening the second must commit the
+        // first, so a dropped close cannot strand the redirect.
+        let mut stream = encode_fill(&FillCommand { index: 0 });
+        stream.extend_from_slice(b"AA");
+        stream.extend_from_slice(&encode_fill(&FillCommand { index: 1 }));
+        stream.extend_from_slice(b"BB");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let page0 = terminal.page_pool.page(0).expect("page 0 committed");
+        assert_eq!(page0.get(0, 0).ch, 'A');
+        let page1 = terminal.page_pool.page(1).expect("page 1 committed");
+        assert_eq!(page1.get(0, 0).ch, 'B');
+    }
+
+    #[test]
+    fn reset_commits_an_in_progress_page() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        let mut stream = encode_fill(&FillCommand { index: 2 });
+        stream.extend_from_slice(b"zz");
+        stream.extend_from_slice(&encode_reset());
+        terminal.advance(&stream);
+
+        let page = terminal
+            .page_pool
+            .page(2)
+            .expect("reset committed the page");
+        assert_eq!((page.get(0, 0).ch, page.get(0, 1).ch), ('z', 'z'));
+    }
+
+    #[test]
+    fn fill_decoration_does_not_leak_to_the_live_grid() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        // A decoration command inside a page's stream is page-targeted; it must
+        // not stamp the live grid.
+        let mut stream = encode_fill(&FillCommand { index: 0 });
+        stream.extend_from_slice(&encode_border(&BorderCommand {
+            top: 0,
+            left: 0,
+            width: 2,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            color: [255, 0, 0],
+        }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.get(0, 0).borders.top,
+            None,
+            "page border spares the live grid"
         );
     }
 
