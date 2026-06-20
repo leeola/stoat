@@ -12,7 +12,7 @@
 //! invisible, so the loop also paints the current page onto the live grid as a
 //! degradation view: today the page snaps per page with no easing; once the pool
 //! read lands the same run eases smoothly and the live-grid paint is ignored.
-//! Run as the PTY shell by the `pool_scroll` example.
+//! Run as the PTY shell by the `smooth_scroll_pages` example.
 
 use std::{
     io::{self, Write},

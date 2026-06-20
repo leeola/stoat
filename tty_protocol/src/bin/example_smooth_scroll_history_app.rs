@@ -6,7 +6,7 @@
 //! viewport height marks a seam, so wheeling through the history shows the seams
 //! glide past: before the terminal eases its own scrollback the view steps whole
 //! cells, after it the seams move at fractional-pixel granularity and settle on a
-//! cell boundary. Run as the PTY shell by the `scrollback` example.
+//! cell boundary. Run as the PTY shell by the `smooth_scroll_history` example.
 
 use std::{
     fmt::Write as _,
