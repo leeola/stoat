@@ -441,6 +441,7 @@ impl TextPass {
         let cursor = frame.cursor;
         let scroll = frame.scroll;
         let damage = frame.damage;
+        let decoration_damage = frame.decoration_damage;
 
         // Write each globals buffer with its own scroll: grid scroll for the
         // plain glyphs, region scroll for the region glyphs, none for the
@@ -469,7 +470,14 @@ impl TextPass {
 
         self.atlas.begin_frame();
         let atlas_dims = self.atlas.texture_dims();
-        let rebuilt = self.rasterize_visible(device, queue, grid, cursor_cell(cursor), damage);
+        let rebuilt = self.rasterize_visible(
+            device,
+            queue,
+            grid,
+            cursor_cell(cursor),
+            damage,
+            decoration_damage,
+        );
         let overlay_groups = self.rasterize_overlays(device, queue, grid);
 
         let region = grid.scroll_region();
@@ -937,6 +945,7 @@ impl TextPass {
         grid: &Grid,
         cursor_cell: Option<(usize, usize)>,
         damage: &Damage,
+        decoration_damage: &Damage,
     ) -> Vec<usize> {
         let rows = grid.rows();
         let cols = grid.cols();
@@ -953,14 +962,13 @@ impl TextPass {
         };
 
         // The per-row cache holds the previous frame's glyphs. Every row rebuilds
-        // when the grid was resized, the terminal reported full damage, or scaled
-        // cells are present (whose scale changes outside VT damage); otherwise a
-        // row rebuilds only when its cells changed or the cursor entered or left
-        // it.
+        // when the grid was resized or the terminal reported full damage;
+        // otherwise a row rebuilds when its cells changed (VT damage), when an APC
+        // scale covering it changed (decoration damage), or when the cursor
+        // entered or left it.
         let rebuild_all = self.glyph_row_cache.len() != rows
             || self.glyph_cache_cols != cols
-            || matches!(damage, Damage::Full)
-            || grid_has_scaled_cells(grid);
+            || matches!(damage, Damage::Full);
         if self.glyph_row_cache.len() != rows {
             self.glyph_row_cache = vec![Vec::new(); rows];
         }
@@ -980,7 +988,11 @@ impl TextPass {
         for row in 0..rows {
             let cursor_touched =
                 cursor_moved && (left_row == Some(row) || entered_row == Some(row));
-            if rebuild_all || damage.is_dirty(row) || cursor_touched {
+            if rebuild_all
+                || damage.is_dirty(row)
+                || decoration_damage.is_dirty(row)
+                || cursor_touched
+            {
                 let row_glyphs = self.rasterize_row(device, queue, grid, row, &shaping);
                 self.glyph_row_cache[row] = row_glyphs;
                 rebuilt.push(row);
@@ -1854,17 +1866,6 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
     }
 }
 
-/// Whether any cell carries a non-[`Scale::Single`] scale.
-///
-/// Scaled-glyph blocks are stamped by the APC layer outside the terminal's VT
-/// damage, so the per-row glyph cache cannot trust the damage set while they are
-/// present and rebuilds every row instead.
-fn grid_has_scaled_cells(grid: &Grid) -> bool {
-    (0..grid.rows())
-        .flat_map(|row| (0..grid.cols()).map(move |col| (row, col)))
-        .any(|(row, col)| !matches!(grid.get(row, col).scale, Scale::Single))
-}
-
 /// The grid cell the cursor block sits on as `(row, col)`, or `None` when the
 /// cursor is hidden.
 ///
@@ -2412,7 +2413,14 @@ mod tests {
         fill_row(&mut grid, 0, "a => b == c");
         fill_row(&mut grid, 1, "hello world");
 
-        pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+        pass.rasterize_visible(
+            &device,
+            &queue,
+            &grid,
+            None,
+            &Damage::Full,
+            &Damage::Partial(Vec::new()),
+        );
 
         // Change one row, then rebuild only it; the other rows come from the cache.
         fill_row(&mut grid, 1, "GOODBYE all");
@@ -2422,15 +2430,61 @@ mod tests {
             &grid,
             None,
             &Damage::Partial(vec![false, true, false]),
+            &Damage::Partial(Vec::new()),
         );
         let incremental = pass.collect_grid_glyphs();
 
-        pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+        pass.rasterize_visible(
+            &device,
+            &queue,
+            &grid,
+            None,
+            &Damage::Full,
+            &Damage::Partial(Vec::new()),
+        );
         let full = pass.collect_grid_glyphs();
 
         assert_eq!(
             incremental, full,
             "rebuilding only the damaged row and reusing the rest matches a full rebuild"
+        );
+    }
+
+    #[test]
+    fn scaled_cells_reshape_only_damaged_rows() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(4, 12);
+        fill_row(&mut grid, 0, "alpha");
+        fill_row(&mut grid, 1, "bravo");
+        fill_row(&mut grid, 2, "charlie");
+        grid.place_scaled(2, 0, 2);
+
+        // Warm the per-row cache.
+        pass.rasterize_visible(
+            &device,
+            &queue,
+            &grid,
+            None,
+            &Damage::Full,
+            &Damage::Partial(Vec::new()),
+        );
+
+        // VT damage marks row 0; decoration damage (a scale change) marks row 1.
+        // The scaled cell on row 2 must no longer force a whole-grid reshape.
+        let rebuilt = pass.rasterize_visible(
+            &device,
+            &queue,
+            &grid,
+            None,
+            &Damage::Partial(vec![true, false, false, false]),
+            &Damage::Partial(vec![false, true, false, false]),
+        );
+        assert_eq!(
+            rebuilt,
+            vec![0, 1],
+            "only the VT- and decoration-damaged rows reshape, not the scaled grid"
         );
     }
 
@@ -2444,7 +2498,14 @@ mod tests {
         grid.get_mut(0, 1).ch = 'M'; // ordinary glyph
         grid.get_mut(0, 2).ch = '\u{2500}'; // box-drawing, a font cell-fill glyph
 
-        pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+        pass.rasterize_visible(
+            &device,
+            &queue,
+            &grid,
+            None,
+            &Damage::Full,
+            &Damage::Partial(Vec::new()),
+        );
         let glyphs = pass.collect_grid_glyphs();
         let glyph = |col| glyphs.iter().find(|g| g.col == col).expect("glyph");
 
@@ -2484,7 +2545,14 @@ mod tests {
         }
 
         // Warm the per-row cache and the atlas before timing.
-        pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+        pass.rasterize_visible(
+            &device,
+            &queue,
+            &grid,
+            None,
+            &Damage::Full,
+            &Damage::Partial(Vec::new()),
+        );
 
         let one_dirty = {
             let mut dirty = vec![false; rows];
@@ -2495,13 +2563,27 @@ mod tests {
         let iterations = 50;
         let full_start = std::time::Instant::now();
         for _ in 0..iterations {
-            pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+            pass.rasterize_visible(
+                &device,
+                &queue,
+                &grid,
+                None,
+                &Damage::Full,
+                &Damage::Partial(Vec::new()),
+            );
         }
         let full = full_start.elapsed();
 
         let dirty_start = std::time::Instant::now();
         for _ in 0..iterations {
-            pass.rasterize_visible(&device, &queue, &grid, None, &one_dirty);
+            pass.rasterize_visible(
+                &device,
+                &queue,
+                &grid,
+                None,
+                &one_dirty,
+                &Damage::Partial(Vec::new()),
+            );
         }
         let dirty = dirty_start.elapsed();
 
