@@ -10,6 +10,7 @@ use stoatty_protocol::command;
 pub mod bar;
 pub mod border;
 pub(crate) mod cells;
+pub mod gutter;
 pub mod icon;
 pub mod popover;
 pub mod scroll_region;
