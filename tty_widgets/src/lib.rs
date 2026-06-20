@@ -12,6 +12,7 @@ pub mod border;
 pub(crate) mod cells;
 pub mod icon;
 pub mod popover;
+pub mod scroll_region;
 pub mod text_run;
 
 /// The reused emission buffer a frame's widgets append their APC frames into.
