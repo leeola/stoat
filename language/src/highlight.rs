@@ -171,6 +171,11 @@ impl Drop for QueryCursorHandle {
 pub fn parse(language: &Language, text: &str, old_tree: Option<&Tree>) -> Option<Tree> {
     with_parser(|parser| {
         parser.set_language(&language.grammar).ok()?;
+
+        // A mismatched-grammar old_tree aborts the process in tree-sitter's
+        // C assert; drop it and full-parse, mirroring parse_rope_inner.
+        let old_tree = old_tree.filter(|t| *t.language() == language.grammar);
+
         parser.parse(text, old_tree)
     })
 }
@@ -242,6 +247,13 @@ fn parse_rope_inner(
 ) -> Option<Tree> {
     with_parser(|parser| {
         parser.set_language(&language.grammar).ok()?;
+
+        // old_tree must belong to the parser's current language. A tree
+        // from another grammar would index stale leaf symbols into the new
+        // parse table and abort the process in tree-sitter's C assert, so
+        // drop the mismatch and let the parser do a full parse.
+        let old_tree = old_tree.filter(|t| *t.language() == language.grammar);
+
         if let Some(ranges) = included_ranges {
             parser.set_included_ranges(ranges).ok()?;
         }
@@ -761,6 +773,15 @@ mod tests {
         let tree = super::parse_rope(&lang, &rope, None).unwrap();
         assert_eq!(tree.root_node().kind(), "source_file");
         assert_eq!(tree.root_node().byte_range(), 0..text.len());
+    }
+
+    #[test]
+    fn parse_rope_drops_mismatched_grammar_old_tree() {
+        use stoat_text::Rope;
+        let rust_tree = super::parse_rope(&rust(), &Rope::from("fn main() {}"), None).unwrap();
+        let tree = super::parse_rope(&markdown(), &Rope::from("# Title\n"), Some(&rust_tree))
+            .expect("mismatched-grammar old_tree must be dropped, not abort");
+        assert_eq!(tree.root_node().kind(), "document");
     }
 
     #[test]
