@@ -80,6 +80,7 @@ fn patched_rows_match_a_full_rebuild() {
     grid.get_mut(0, 0).underline = UnderlineStyle::Straight;
     grid.get_mut(0, 0).underline_color = Rgb::new(0, 200, 255);
 
+    let no_decoration = Damage::Partial(Vec::new());
     let render = |renderer: &mut Renderer, grid: &Grid, damage: &Damage| {
         renderer.render_into(
             &device,
@@ -94,6 +95,7 @@ fn patched_rows_match_a_full_rebuild() {
                     popovers: &[],
                 },
                 damage,
+                decoration_damage: &no_decoration,
             },
         );
         read_back(&device, &queue, &target, width, height)

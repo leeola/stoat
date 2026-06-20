@@ -93,6 +93,15 @@ pub struct Terminal {
     /// so a projection re-stamps only the components that changed rather than all
     /// of them every frame.
     decorations_dirty: DecorationDirty,
+    /// The grid rows the cell-stamped decorations (borders, scales) occupied at
+    /// the previous [`Self::project`], so a moved or cleared decoration can damage
+    /// the rows it used to cover and erase its stale footprint.
+    last_decoration_footprint: Vec<bool>,
+    /// Accumulated renderer-facing decoration row-damage since the renderer last
+    /// drained it via [`Self::take_decoration_damage`]. Distinct from VT
+    /// [`Damage`]: it marks rows where an APC border or scale changed, which the
+    /// cell-decoration passes gate their per-row rebuilds on.
+    decoration_damage: Vec<bool>,
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
@@ -187,6 +196,8 @@ impl Terminal {
             bars: Vec::new(),
             line_layout: None,
             decorations_dirty: DecorationDirty::default(),
+            last_decoration_footprint: Vec::new(),
+            decoration_damage: Vec::new(),
             last_history: 0,
         }
     }
@@ -268,6 +279,16 @@ impl Terminal {
     /// query.
     pub fn take_responses(&mut self) -> Vec<u8> {
         self.responses.take()
+    }
+
+    /// Drain the decoration row-damage accumulated since the last drain.
+    ///
+    /// Marks the rows where an APC border or scale changed across the projections
+    /// since the previous call, so the renderer's cell-decoration passes rebuild
+    /// only those rows. Distinct from the VT [`Damage`] returned by
+    /// [`Self::project`]; the caller drains this right after projecting.
+    pub fn take_decoration_damage(&mut self) -> Damage {
+        Damage::Partial(mem::take(&mut self.decoration_damage))
     }
 
     /// Apply a decoded stoatty command to the terminal.
@@ -468,6 +489,33 @@ impl Terminal {
         if self.decorations_dirty.bars || layout_changed {
             apply_bars(grid, &self.bars);
         }
+
+        // Accumulate renderer-facing decoration row-damage for the cell-stamped
+        // borders and scales: when one changed, damage the rows it covers now and
+        // the rows it covered last projection, so the cell-decoration passes
+        // rebuild the new footprint and erase a moved or cleared one. A VT
+        // re-stamp re-applies the same decorations, leaving this signal untouched.
+        if self.last_decoration_footprint.len() != rows {
+            self.last_decoration_footprint = vec![false; rows];
+        }
+        if self.decoration_damage.len() != rows {
+            self.decoration_damage = vec![false; rows];
+        }
+        let footprint = decoration_footprint(&self.borders, &self.scales, rows);
+        if self.decorations_dirty.borders || self.decorations_dirty.scales || resized {
+            for ((damage, &now), &before) in self
+                .decoration_damage
+                .iter_mut()
+                .zip(&footprint)
+                .zip(&self.last_decoration_footprint)
+            {
+                if now || before {
+                    *damage = true;
+                }
+            }
+        }
+        self.last_decoration_footprint = footprint;
+
         self.decorations_dirty = DecorationDirty::default();
 
         let history = self.term.history_size();
@@ -878,6 +926,42 @@ fn map_underline(flags: TermFlags) -> UnderlineStyle {
     } else {
         UnderlineStyle::None
     }
+}
+
+/// The grid rows the cell-stamped decorations occupy: each border region's
+/// perimeter span (`top..=top+height-1`) and each scale block's rows
+/// (`top..top+scale`), clamped to `rows`.
+///
+/// Mirrors the row ranges [`frame_region`] and [`apply_scales`] stamp, so the
+/// decoration-damage signal covers exactly the rows those appliers touch.
+fn decoration_footprint(
+    borders: &[BorderCommand],
+    scales: &[ScaleCommand],
+    rows: usize,
+) -> Vec<bool> {
+    let mut footprint = vec![false; rows];
+
+    for border in borders {
+        if border.width == 0 || border.height == 0 {
+            continue;
+        }
+        let top = border.top as usize;
+        if top >= rows {
+            continue;
+        }
+        let bottom = (top + border.height as usize - 1).min(rows - 1);
+        footprint[top..=bottom].fill(true);
+    }
+
+    for scale in scales {
+        let top = scale.top as usize;
+        let end = (top + scale.scale as usize).min(rows);
+        if top < end {
+            footprint[top..end].fill(true);
+        }
+    }
+
+    footprint
 }
 
 /// Stamp every stored border region's perimeter edges onto `grid`.
@@ -2025,6 +2109,102 @@ mod tests {
         assert!(
             terminal.advance(b"\x1b[?2026l"),
             "the ESU flush warrants a redraw"
+        );
+    }
+
+    fn light_border(top: u16, height: u16) -> Vec<u8> {
+        encode_border(&BorderCommand {
+            top,
+            left: 0,
+            width: 3,
+            height,
+            style: ProtoBorderStyle::Light,
+            color: [255, 0, 0],
+        })
+    }
+
+    #[test]
+    fn border_change_damages_its_rows() {
+        let mut terminal = Terminal::new(4, 3, Theme::default());
+        let mut grid = Grid::new(4, 3);
+        terminal.advance(&light_border(1, 2));
+        terminal.project(&mut grid);
+
+        let damage = terminal.take_decoration_damage();
+        assert!(!damage.is_dirty(0), "row above the border stays clean");
+        assert!(damage.is_dirty(1), "border top row damaged");
+        assert!(damage.is_dirty(2), "border bottom row damaged");
+        assert!(!damage.is_dirty(3), "row below the border stays clean");
+    }
+
+    #[test]
+    fn clearing_a_border_damages_its_prior_rows() {
+        let mut terminal = Terminal::new(4, 3, Theme::default());
+        let mut grid = Grid::new(4, 3);
+        terminal.advance(&light_border(1, 2));
+        terminal.project(&mut grid);
+        terminal.take_decoration_damage();
+
+        terminal.advance(&encode_reset());
+        terminal.project(&mut grid);
+        let damage = terminal.take_decoration_damage();
+        assert!(damage.is_dirty(1), "cleared border's prior top row damaged");
+        assert!(
+            damage.is_dirty(2),
+            "cleared border's prior bottom row damaged"
+        );
+    }
+
+    #[test]
+    fn scale_change_damages_its_block_rows() {
+        let mut terminal = Terminal::new(4, 3, Theme::default());
+        let mut grid = Grid::new(4, 3);
+        terminal.advance(&encode_scale(&ScaleCommand {
+            top: 1,
+            left: 0,
+            scale: 2,
+        }));
+        terminal.project(&mut grid);
+
+        let damage = terminal.take_decoration_damage();
+        assert!(!damage.is_dirty(0));
+        assert!(damage.is_dirty(1), "scale block top row damaged");
+        assert!(damage.is_dirty(2), "scale block bottom row damaged");
+        assert!(!damage.is_dirty(3));
+    }
+
+    #[test]
+    fn unchanged_projection_yields_no_decoration_damage() {
+        let mut terminal = Terminal::new(4, 3, Theme::default());
+        let mut grid = Grid::new(4, 3);
+        terminal.advance(&light_border(1, 2));
+        terminal.project(&mut grid);
+        terminal.take_decoration_damage();
+
+        terminal.project(&mut grid);
+        let damage = terminal.take_decoration_damage();
+        assert!(
+            (0..4).all(|row| !damage.is_dirty(row)),
+            "an unchanged projection damages no decoration rows"
+        );
+    }
+
+    #[test]
+    fn vt_damage_alone_yields_no_decoration_damage() {
+        let mut terminal = Terminal::new(4, 3, Theme::default());
+        let mut grid = Grid::new(4, 3);
+        terminal.advance(&light_border(0, 2));
+        terminal.project(&mut grid);
+        terminal.take_decoration_damage();
+
+        // Writing text re-stamps the same border onto the reset cells; the border
+        // instances are unchanged, so no decoration damage.
+        terminal.advance(b"X");
+        terminal.project(&mut grid);
+        let damage = terminal.take_decoration_damage();
+        assert!(
+            (0..4).all(|row| !damage.is_dirty(row)),
+            "a VT re-stamp leaves the border unchanged"
         );
     }
 

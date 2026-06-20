@@ -182,6 +182,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
                 popovers: &[0.0, 1.0],
             },
             damage: &Damage::Full,
+            decoration_damage: &Damage::Partial(Vec::new()),
         },
     );
 }

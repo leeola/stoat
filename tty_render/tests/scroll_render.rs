@@ -82,6 +82,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
     grid.get_mut(0, 0).underline = UnderlineStyle::Straight;
     grid.get_mut(0, 0).underline_color = white;
 
+    let no_decoration = Damage::Partial(Vec::new());
     let frame = |grid_scroll, damage| Frame {
         cursor: None,
         scroll: Scroll {
@@ -90,6 +91,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
             popovers: &[],
         },
         damage,
+        decoration_damage: &no_decoration,
     };
 
     // First frame builds the instances at row 0.

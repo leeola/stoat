@@ -2537,6 +2537,7 @@ mod tests {
                 popovers: &[],
             },
             damage,
+            decoration_damage: &idle_damage,
         };
 
         // Warm the cache and atlas.
@@ -2582,6 +2583,7 @@ mod tests {
             cursor: None,
             scroll,
             damage,
+            decoration_damage: &idle_damage,
         };
         let no_scroll = Scroll {
             grid: 0.0,

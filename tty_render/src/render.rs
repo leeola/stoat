@@ -32,6 +32,11 @@ pub struct Frame<'a> {
     pub cursor: Option<[f32; 2]>,
     pub scroll: Scroll<'a>,
     pub damage: &'a Damage,
+    /// Rows where an APC cell decoration (border or scale) changed since the
+    /// renderer last consumed this, distinct from the VT [`Damage`] in
+    /// [`Self::damage`]. The cell-decoration passes gate their per-row rebuilds
+    /// on it so an unchanged decoration is not re-uploaded every frame.
+    pub decoration_damage: &'a Damage,
 }
 
 /// Cell layout metrics in physical pixels, derived from the configured logical

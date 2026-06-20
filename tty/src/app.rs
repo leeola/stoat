@@ -435,7 +435,12 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let (cursor, scroll_delta, damage) = state.terminal.lock().project(&mut state.grid);
+                let (cursor, scroll_delta, damage, decoration_damage) = {
+                    let mut terminal = state.terminal.lock();
+                    let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
+                    let decoration_damage = terminal.take_decoration_damage();
+                    (cursor, scroll_delta, damage, decoration_damage)
+                };
 
                 let overflows: Vec<Option<f32>> =
                     state.grid.overlays().iter().map(popover_overflow).collect();
@@ -491,6 +496,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                     popovers: &state.popover_scrolls,
                                 },
                                 damage: &damage,
+                                decoration_damage: &decoration_damage,
                             },
                         );
                         !settled
@@ -506,6 +512,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                     popovers: &state.popover_scrolls,
                                 },
                                 damage: &damage,
+                                decoration_damage: &decoration_damage,
                             },
                         );
                         false
