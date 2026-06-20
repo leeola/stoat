@@ -8,8 +8,8 @@
 
 use crate::{
     grid::{
-        Bar, Border, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
-        ScrollRegion, TextRun, UnderlineStyle,
+        Bar, Border, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind, Overlay, PagePool,
+        Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -32,6 +32,13 @@ use stoatty_protocol::command::{
 };
 
 const PALETTE_LEN: usize = 256;
+
+/// Number of viewport-sized pages the smooth-scroll pool keeps buffered around
+/// the scroll target.
+///
+/// Bounds the pool's memory. Large enough to cover the pages straddling the
+/// viewport edges during a partial-cell scroll plus neighbours for momentum.
+const PAGE_POOL_CAPACITY: usize = 5;
 
 /// A live terminal driven by a VT byte stream.
 ///
@@ -105,6 +112,11 @@ pub struct Terminal {
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
+    /// Recycled pool of viewport-sized rich pages the app pushes around its
+    /// scroll target, read by the renderer to ease smooth scrolling between
+    /// app-declared positions. Rebuilt on resize so pages track the live
+    /// viewport. Distinct from the per-frame projected [`Grid`].
+    page_pool: PagePool,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -199,6 +211,7 @@ impl Terminal {
             last_decoration_footprint: Vec::new(),
             decoration_damage: Vec::new(),
             last_history: 0,
+            page_pool: PagePool::new(rows, cols, PAGE_POOL_CAPACITY),
         }
     }
 
@@ -360,6 +373,7 @@ impl Terminal {
     /// it wholesale at the new size, so the grid follows without a separate call.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.term.resize(GridSize { rows, cols });
+        self.page_pool.rebuild(rows, cols);
     }
 
     /// Move the viewport `delta` lines through scrollback history: positive

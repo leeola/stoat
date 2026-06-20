@@ -85,6 +85,21 @@ impl Grid {
         self.line_heights.clear();
     }
 
+    /// Reset every cell to [`Cell::default`] and drop all decorations, keeping
+    /// the current dimensions.
+    ///
+    /// Unlike [`Self::resize`], the cell buffer is cleared in place rather than
+    /// reallocated, so recycling a grid to hold new content allocates nothing.
+    fn clear(&mut self) {
+        self.cells.fill(Cell::default());
+        self.overlays.clear();
+        self.scroll_region = None;
+        self.icons.clear();
+        self.text_runs.clear();
+        self.bars.clear();
+        self.line_heights.clear();
+    }
+
     /// The floating overlay regions drawn above the cells, in draw order.
     pub fn overlays(&self) -> &[Overlay] {
         &self.overlays
@@ -215,6 +230,95 @@ impl Grid {
         );
         row * self.cols + col
     }
+}
+
+/// A bounded, recycled pool of viewport-sized content pages for smooth
+/// scrolling.
+///
+/// The app owns its scroll position and pushes a window of rich pages around
+/// the scroll target into this pool, each page a viewport's worth of rows --
+/// cells plus their APC decorations -- keyed by the app's document page index.
+/// The renderer reads the visible region from the pool at the live scroll
+/// offset, drawing the buffered neighbour pages that straddle the viewport
+/// edges during a partial-cell scroll.
+///
+/// Pages map to fixed slots by `index % capacity`, so a contiguous window of up
+/// to `capacity` pages fills every slot, and sliding the window one page reuses
+/// the slot the departed page vacated for the page entering it -- steady-state
+/// scrolling allocates nothing.
+///
+/// Distinct from the viewport-only projected [`Grid`]: the pool holds several
+/// pages of off-screen content, not just what is on screen.
+pub struct PagePool {
+    pages: Vec<Page>,
+}
+
+impl PagePool {
+    /// Create a pool of `capacity` viewport-sized pages, clamped to at least
+    /// one.
+    ///
+    /// Pages start empty: [`Self::page`] returns `None` until [`Self::fill`]
+    /// populates them.
+    pub fn new(rows: usize, cols: usize, capacity: usize) -> PagePool {
+        let pages = (0..capacity.max(1))
+            .map(|_| Page {
+                index: None,
+                grid: Grid::new(rows, cols),
+            })
+            .collect();
+        PagePool { pages }
+    }
+
+    /// Recycle the slot for document page `index` and return its cleared grid
+    /// for the caller to write the page's content into.
+    ///
+    /// [`Self::page`] resolves `index` to this grid afterward. If the slot held
+    /// a different page, that page is dropped and its buffer reused in place, so
+    /// a sliding window allocates nothing.
+    pub fn fill(&mut self, index: u64) -> &mut Grid {
+        let slot = self.slot(index);
+        let page = &mut self.pages[slot];
+        page.index = Some(index);
+        page.grid.clear();
+        &mut page.grid
+    }
+
+    /// The buffered grid for document page `index`, or `None` when that page is
+    /// not currently in the pool's window.
+    pub fn page(&self, index: u64) -> Option<&Grid> {
+        let page = &self.pages[self.slot(index)];
+        (page.index == Some(index)).then_some(&page.grid)
+    }
+
+    /// Resize every page to a `rows` by `cols` viewport, dropping all buffered
+    /// content.
+    ///
+    /// Called when a resize or font-zoom changes the viewport's row count,
+    /// since pages are sized to the live viewport. The window is emptied; the
+    /// app refills it for the new size.
+    pub fn rebuild(&mut self, rows: usize, cols: usize) {
+        for page in &mut self.pages {
+            page.index = None;
+            page.grid.resize(rows, cols);
+        }
+    }
+
+    /// The slot document page `index` maps to, modulo the pool capacity.
+    fn slot(&self, index: u64) -> usize {
+        (index % self.pages.len() as u64) as usize
+    }
+}
+
+/// One slot of a [`PagePool`]: a viewport-sized grid tagged with the document
+/// page it currently holds.
+///
+/// `index` is `None` for an empty slot and `Some(page)` once filled, so a
+/// lookup can tell a slot holding the requested page from a stale or empty one.
+/// The grid is reused in place as the slot recycles, so its allocation persists
+/// across pages.
+struct Page {
+    index: Option<u64>,
+    grid: Grid,
 }
 
 /// A single grid cell: one character and how to render it.
@@ -506,7 +610,8 @@ impl BitOrAssign for Flags {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bar, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale, ScrollRegion, TextRun,
+        Bar, Cell, Flags, Grid, Icon, IconKind, Overlay, PagePool, Rgb, Scale, ScrollRegion,
+        TextRun,
     };
 
     #[test]
@@ -711,5 +816,88 @@ mod tests {
         assert!(!region.contains(4, 2), "row below");
         assert!(!region.contains(1, 1), "column left");
         assert!(!region.contains(1, 4), "column right");
+    }
+
+    #[test]
+    fn page_pool_fills_and_looks_up_by_index() {
+        let mut pool = PagePool::new(2, 3, 4);
+        assert!(pool.page(0).is_none(), "an unfilled pool has no pages");
+
+        pool.fill(7).get_mut(1, 2).ch = 'Z';
+
+        assert_eq!(pool.page(7).map(|g| g.get(1, 2).ch), Some('Z'));
+        assert!(
+            pool.page(3).is_none(),
+            "index 3 shares a slot with 7, which holds it"
+        );
+    }
+
+    #[test]
+    fn page_pool_recycles_the_slot_a_slid_page_vacated() {
+        let mut pool = PagePool::new(2, 2, 2);
+        pool.fill(0).get_mut(0, 0).ch = 'a';
+        pool.fill(1).get_mut(0, 0).ch = 'b';
+
+        // Index 2 maps to index 0's slot (2 % 2 == 0), so it recycles 0's
+        // buffer in place.
+        let recycled = pool.fill(2);
+        assert_eq!(recycled.get(0, 0).ch, ' ', "the recycled buffer is cleared");
+        assert_eq!(
+            (recycled.rows(), recycled.cols()),
+            (2, 2),
+            "recycling keeps the page size"
+        );
+
+        assert!(pool.page(0).is_none(), "the slid-out page is gone");
+        assert_eq!(
+            pool.page(1).map(|g| g.get(0, 0).ch),
+            Some('b'),
+            "the neighbour page is untouched"
+        );
+        assert!(pool.page(2).is_some(), "the entering page is present");
+    }
+
+    #[test]
+    fn page_pool_clears_decorations_on_recycle() {
+        let mut pool = PagePool::new(1, 1, 1);
+        pool.fill(0).set_icons(vec![Icon {
+            top: 0,
+            left: 0,
+            kind: IconKind::Error,
+            color: Rgb::new(1, 2, 3),
+            size: 1,
+        }]);
+
+        assert!(
+            pool.fill(1).icons().is_empty(),
+            "recycling drops the prior page's decorations"
+        );
+    }
+
+    #[test]
+    fn page_pool_rebuild_resizes_pages_and_drops_content() {
+        let mut pool = PagePool::new(2, 2, 2);
+        pool.fill(0);
+
+        pool.rebuild(3, 5);
+
+        assert!(pool.page(0).is_none(), "rebuild drops buffered pages");
+        let page = pool.fill(0);
+        assert_eq!(
+            (page.rows(), page.cols()),
+            (3, 5),
+            "pages track the new viewport"
+        );
+    }
+
+    #[test]
+    fn page_pool_capacity_is_at_least_one() {
+        let mut pool = PagePool::new(1, 1, 0);
+        pool.fill(0).get_mut(0, 0).ch = 'x';
+        assert_eq!(
+            pool.page(0).map(|g| g.get(0, 0).ch),
+            Some('x'),
+            "a zero-capacity request still yields a usable slot"
+        );
     }
 }
