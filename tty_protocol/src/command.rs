@@ -204,31 +204,41 @@ pub fn decode(bytes: &[u8]) -> Option<Command> {
 
 /// Encode a [`BorderCommand`] as a full `Gstoatty;border` frame for an emitter.
 pub fn encode_border(command: &BorderCommand) -> Vec<u8> {
-    let mut arg = Vec::with_capacity(12);
-    arg.extend_from_slice(&command.top.to_be_bytes());
-    arg.extend_from_slice(&command.left.to_be_bytes());
-    arg.extend_from_slice(&command.width.to_be_bytes());
-    arg.extend_from_slice(&command.height.to_be_bytes());
-    arg.push(style_code(command.style));
-    arg.extend_from_slice(&command.color);
+    let mut out = Vec::new();
+    encode_border_into(&mut out, command);
+    out
+}
 
-    frame::encode(&Frame {
-        sub: "border".to_owned(),
-        args: vec![arg],
-    })
+/// Append a `Gstoatty;border` frame for `command` to `out` without allocating.
+pub fn encode_border_into(out: &mut Vec<u8>, command: &BorderCommand) {
+    frame::begin(out, "border");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.top.to_be_bytes())?;
+        w.write_all(&command.left.to_be_bytes())?;
+        w.write_all(&command.width.to_be_bytes())?;
+        w.write_all(&command.height.to_be_bytes())?;
+        w.write_all(&[style_code(command.style)])?;
+        w.write_all(&command.color)
+    });
+    frame::end(out);
 }
 
 /// Encode a [`ScaleCommand`] as a full `Gstoatty;scale` frame for an emitter.
 pub fn encode_scale(command: &ScaleCommand) -> Vec<u8> {
-    let mut arg = Vec::with_capacity(5);
-    arg.extend_from_slice(&command.top.to_be_bytes());
-    arg.extend_from_slice(&command.left.to_be_bytes());
-    arg.push(command.scale);
+    let mut out = Vec::new();
+    encode_scale_into(&mut out, command);
+    out
+}
 
-    frame::encode(&Frame {
-        sub: "scale".to_owned(),
-        args: vec![arg],
-    })
+/// Append a `Gstoatty;scale` frame for `command` to `out` without allocating.
+pub fn encode_scale_into(out: &mut Vec<u8>, command: &ScaleCommand) {
+    frame::begin(out, "scale");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.top.to_be_bytes())?;
+        w.write_all(&command.left.to_be_bytes())?;
+        w.write_all(&[command.scale])
+    });
+    frame::end(out);
 }
 
 /// Encode a [`PopoverCommand`] as a full `Gstoatty;popover` frame for an emitter.
@@ -236,53 +246,99 @@ pub fn encode_scale(command: &ScaleCommand) -> Vec<u8> {
 /// The region, colors, and scale ride in a fixed 18-byte first argument; the
 /// variable content text is a second argument.
 pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
-    let mut region = Vec::with_capacity(22);
-    region.extend_from_slice(&command.top.to_be_bytes());
-    region.extend_from_slice(&command.left.to_be_bytes());
-    region.extend_from_slice(&command.width.to_be_bytes());
-    region.extend_from_slice(&command.height.to_be_bytes());
-    region.extend_from_slice(&command.fill);
-    region.extend_from_slice(&command.border);
-    region.extend_from_slice(&command.content_fg);
-    region.push(command.scale);
-    region.extend_from_slice(&command.offset[0].to_be_bytes());
-    region.extend_from_slice(&command.offset[1].to_be_bytes());
+    let mut out = Vec::new();
+    encode_popover_into(
+        &mut out,
+        command.top,
+        command.left,
+        command.width,
+        command.height,
+        command.fill,
+        command.border,
+        command.content_fg,
+        command.scale,
+        command.offset,
+        &command.content,
+    );
+    out
+}
 
-    frame::encode(&Frame {
-        sub: "popover".to_owned(),
-        args: vec![region, command.content.as_bytes().to_vec()],
-    })
+/// Append a `Gstoatty;popover` frame to `out` without allocating.
+///
+/// `content` is borrowed so an emitter can pass a slice of its own buffer rather
+/// than build an owned [`String`] per frame. The fixed region fields ride in the
+/// first argument; `content` is the second.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_popover_into(
+    out: &mut Vec<u8>,
+    top: u16,
+    left: u16,
+    width: u16,
+    height: u16,
+    fill: [u8; 3],
+    border: [u8; 3],
+    content_fg: [u8; 3],
+    scale: u8,
+    offset: [i16; 2],
+    content: &str,
+) {
+    frame::begin(out, "popover");
+    frame::push_arg(out, |w| {
+        w.write_all(&top.to_be_bytes())?;
+        w.write_all(&left.to_be_bytes())?;
+        w.write_all(&width.to_be_bytes())?;
+        w.write_all(&height.to_be_bytes())?;
+        w.write_all(&fill)?;
+        w.write_all(&border)?;
+        w.write_all(&content_fg)?;
+        w.write_all(&[scale])?;
+        w.write_all(&offset[0].to_be_bytes())?;
+        w.write_all(&offset[1].to_be_bytes())
+    });
+    frame::push_arg(out, |w| w.write_all(content.as_bytes()));
+    frame::end(out);
 }
 
 /// Encode a [`ScrollRegionCommand`] as a full `Gstoatty;scroll_region` frame for
 /// an emitter.
 pub fn encode_scroll_region(command: &ScrollRegionCommand) -> Vec<u8> {
-    let mut arg = Vec::with_capacity(10);
-    arg.extend_from_slice(&command.top.to_be_bytes());
-    arg.extend_from_slice(&command.left.to_be_bytes());
-    arg.extend_from_slice(&command.width.to_be_bytes());
-    arg.extend_from_slice(&command.height.to_be_bytes());
-    arg.extend_from_slice(&command.offset.to_be_bytes());
+    let mut out = Vec::new();
+    encode_scroll_region_into(&mut out, command);
+    out
+}
 
-    frame::encode(&Frame {
-        sub: "scroll_region".to_owned(),
-        args: vec![arg],
-    })
+/// Append a `Gstoatty;scroll_region` frame for `command` to `out` without
+/// allocating.
+pub fn encode_scroll_region_into(out: &mut Vec<u8>, command: &ScrollRegionCommand) {
+    frame::begin(out, "scroll_region");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.top.to_be_bytes())?;
+        w.write_all(&command.left.to_be_bytes())?;
+        w.write_all(&command.width.to_be_bytes())?;
+        w.write_all(&command.height.to_be_bytes())?;
+        w.write_all(&command.offset.to_be_bytes())
+    });
+    frame::end(out);
 }
 
 /// Encode an [`IconCommand`] as a full `Gstoatty;icon` frame for an emitter.
 pub fn encode_icon(command: &IconCommand) -> Vec<u8> {
-    let mut arg = Vec::with_capacity(9);
-    arg.extend_from_slice(&command.top.to_be_bytes());
-    arg.extend_from_slice(&command.left.to_be_bytes());
-    arg.push(icon_kind_code(command.kind));
-    arg.extend_from_slice(&command.color);
-    arg.push(command.size);
+    let mut out = Vec::new();
+    encode_icon_into(&mut out, command);
+    out
+}
 
-    frame::encode(&Frame {
-        sub: "icon".to_owned(),
-        args: vec![arg],
-    })
+/// Append a `Gstoatty;icon` frame for `command` to `out` without allocating.
+pub fn encode_icon_into(out: &mut Vec<u8>, command: &IconCommand) {
+    frame::begin(out, "icon");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.top.to_be_bytes())?;
+        w.write_all(&command.left.to_be_bytes())?;
+        w.write_all(&[icon_kind_code(command.kind)])?;
+        w.write_all(&command.color)?;
+        w.write_all(&[command.size])
+    });
+    frame::end(out);
 }
 
 /// Encode a [`TextRunCommand`] as a full `Gstoatty;text_run` frame for an
@@ -291,34 +347,66 @@ pub fn encode_icon(command: &IconCommand) -> Vec<u8> {
 /// The position, scale, color, and background ride in a fixed 12-byte first
 /// argument; the variable run text is a second argument.
 pub fn encode_text_run(command: &TextRunCommand) -> Vec<u8> {
-    let mut head = Vec::with_capacity(12);
-    head.extend_from_slice(&command.col.to_be_bytes());
-    head.extend_from_slice(&command.row.to_be_bytes());
-    head.extend_from_slice(&command.scale.to_be_bytes());
-    head.extend_from_slice(&command.color);
-    head.extend_from_slice(&command.bg);
+    let mut out = Vec::new();
+    encode_text_run_into(
+        &mut out,
+        command.col,
+        command.row,
+        command.scale,
+        command.color,
+        command.bg,
+        &command.text,
+    );
+    out
+}
 
-    frame::encode(&Frame {
-        sub: "text_run".to_owned(),
-        args: vec![head, command.text.as_bytes().to_vec()],
-    })
+/// Append a `Gstoatty;text_run` frame to `out` without allocating.
+///
+/// `text` is borrowed so an emitter can pass a slice of a reused buffer (a gutter
+/// formats line numbers into a stack buffer) rather than build an owned
+/// [`String`] per frame. The fixed head fields ride in the first argument; `text`
+/// is the second.
+pub fn encode_text_run_into(
+    out: &mut Vec<u8>,
+    col: i16,
+    row: i16,
+    scale: u16,
+    color: [u8; 3],
+    bg: [u8; 3],
+    text: &str,
+) {
+    frame::begin(out, "text_run");
+    frame::push_arg(out, |w| {
+        w.write_all(&col.to_be_bytes())?;
+        w.write_all(&row.to_be_bytes())?;
+        w.write_all(&scale.to_be_bytes())?;
+        w.write_all(&color)?;
+        w.write_all(&bg)
+    });
+    frame::push_arg(out, |w| w.write_all(text.as_bytes()));
+    frame::end(out);
 }
 
 /// Encode a [`BarCommand`] as a full `Gstoatty;bar` frame for an emitter.
 ///
 /// The position, size, and color ride in a single fixed 11-byte argument.
 pub fn encode_bar(command: &BarCommand) -> Vec<u8> {
-    let mut arg = Vec::with_capacity(11);
-    arg.extend_from_slice(&command.x.to_be_bytes());
-    arg.extend_from_slice(&command.y.to_be_bytes());
-    arg.extend_from_slice(&command.width.to_be_bytes());
-    arg.extend_from_slice(&command.height.to_be_bytes());
-    arg.extend_from_slice(&command.color);
+    let mut out = Vec::new();
+    encode_bar_into(&mut out, command);
+    out
+}
 
-    frame::encode(&Frame {
-        sub: "bar".to_owned(),
-        args: vec![arg],
-    })
+/// Append a `Gstoatty;bar` frame for `command` to `out` without allocating.
+pub fn encode_bar_into(out: &mut Vec<u8>, command: &BarCommand) {
+    frame::begin(out, "bar");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.x.to_be_bytes())?;
+        w.write_all(&command.y.to_be_bytes())?;
+        w.write_all(&command.width.to_be_bytes())?;
+        w.write_all(&command.height.to_be_bytes())?;
+        w.write_all(&command.color)
+    });
+    frame::end(out);
 }
 
 /// Encode a [`LineLayoutCommand`] as a full `Gstoatty;line_layout` frame for an
@@ -327,15 +415,25 @@ pub fn encode_bar(command: &BarCommand) -> Vec<u8> {
 /// The per-line heights ride in a single argument as consecutive big-endian
 /// `u16`s.
 pub fn encode_line_layout(command: &LineLayoutCommand) -> Vec<u8> {
-    let mut arg = Vec::with_capacity(command.heights.len() * 2);
-    for height in &command.heights {
-        arg.extend_from_slice(&height.to_be_bytes());
-    }
+    let mut out = Vec::new();
+    encode_line_layout_into(&mut out, &command.heights);
+    out
+}
 
-    frame::encode(&Frame {
-        sub: "line_layout".to_owned(),
-        args: vec![arg],
-    })
+/// Append a `Gstoatty;line_layout` frame for `heights` to `out` without
+/// allocating.
+///
+/// `heights` is borrowed and streamed as consecutive big-endian `u16`s straight
+/// into the base64 sink, so no intermediate byte buffer is built.
+pub fn encode_line_layout_into(out: &mut Vec<u8>, heights: &[u16]) {
+    frame::begin(out, "line_layout");
+    frame::push_arg(out, |w| {
+        for height in heights {
+            w.write_all(&height.to_be_bytes())?;
+        }
+        Ok(())
+    });
+    frame::end(out);
 }
 
 /// Encode a [`Command::Reset`] as a full `Gstoatty;reset` frame for an emitter.
@@ -343,10 +441,48 @@ pub fn encode_line_layout(command: &LineLayoutCommand) -> Vec<u8> {
 /// The frame carries no arguments; receiving it clears all accumulated stoatty
 /// decoration state so the program can redraw its scene from scratch.
 pub fn encode_reset() -> Vec<u8> {
-    frame::encode(&Frame {
-        sub: "reset".to_owned(),
-        args: vec![],
-    })
+    let mut out = Vec::new();
+    encode_reset_into(&mut out);
+    out
+}
+
+/// Append an argument-less `Gstoatty;reset` frame to `out`.
+pub fn encode_reset_into(out: &mut Vec<u8>) {
+    frame::begin(out, "reset");
+    frame::end(out);
+}
+
+/// Append the full `Gstoatty` frame for any [`Command`] to `out` without
+/// allocating, dispatching on the variant.
+///
+/// The encode-side mirror of [`decode`]: an emitter assembling a scene appends
+/// each command into one reused buffer.
+pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
+    match command {
+        Command::Border(c) => encode_border_into(out, c),
+        Command::Scale(c) => encode_scale_into(out, c),
+        Command::Popover(c) => encode_popover_into(
+            out,
+            c.top,
+            c.left,
+            c.width,
+            c.height,
+            c.fill,
+            c.border,
+            c.content_fg,
+            c.scale,
+            c.offset,
+            &c.content,
+        ),
+        Command::ScrollRegion(c) => encode_scroll_region_into(out, c),
+        Command::Icon(c) => encode_icon_into(out, c),
+        Command::TextRun(c) => {
+            encode_text_run_into(out, c.col, c.row, c.scale, c.color, c.bg, &c.text)
+        },
+        Command::Bar(c) => encode_bar_into(out, c),
+        Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
+        Command::Reset => encode_reset_into(out),
+    }
 }
 
 /// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
@@ -514,9 +650,9 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, encode_bar, encode_border, encode_icon, encode_line_layout, encode_popover,
-        encode_reset, encode_scale, encode_scroll_region, encode_text_run, BarCommand,
-        BorderCommand, BorderStyle, Command, IconCommand, IconKind, LineLayoutCommand,
+        decode, encode_bar, encode_border, encode_icon, encode_into, encode_line_layout,
+        encode_popover, encode_reset, encode_scale, encode_scroll_region, encode_text_run,
+        BarCommand, BorderCommand, BorderStyle, Command, IconCommand, IconKind, LineLayoutCommand,
         PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
     };
 
@@ -722,5 +858,102 @@ mod tests {
     #[test]
     fn ignores_malformed_frame() {
         assert!(decode(b"garbage").is_none());
+    }
+
+    #[test]
+    fn encode_into_round_trips_every_variant() {
+        let commands = [
+            Command::Border(BorderCommand {
+                top: 1,
+                left: 2,
+                width: 3,
+                height: 4,
+                style: BorderStyle::Double,
+                color: [9, 8, 7],
+            }),
+            Command::Scale(ScaleCommand {
+                top: 5,
+                left: 6,
+                scale: 3,
+            }),
+            Command::Popover(PopoverCommand {
+                top: 1,
+                left: 1,
+                width: 10,
+                height: 4,
+                fill: [10, 20, 30],
+                border: [40, 50, 60],
+                content_fg: [70, 80, 90],
+                scale: 2,
+                offset: [-3, 7],
+                content: "hi".to_owned(),
+            }),
+            Command::ScrollRegion(ScrollRegionCommand {
+                top: 2,
+                left: 3,
+                width: 8,
+                height: 9,
+                offset: 12,
+            }),
+            Command::Icon(IconCommand {
+                top: 4,
+                left: 5,
+                kind: IconKind::Warning,
+                color: [1, 2, 3],
+                size: 2,
+            }),
+            Command::TextRun(TextRunCommand {
+                col: -8,
+                row: 16,
+                scale: 256,
+                color: [11, 22, 33],
+                bg: [44, 55, 66],
+                text: "42".to_owned(),
+            }),
+            Command::Bar(BarCommand {
+                x: -4,
+                y: 8,
+                width: 6,
+                height: 16,
+                color: [200, 100, 50],
+            }),
+            Command::LineLayout(LineLayoutCommand {
+                heights: vec![1, 2, 3, 1],
+            }),
+            Command::Reset,
+        ];
+
+        for command in commands {
+            let mut out = Vec::new();
+            encode_into(&mut out, &command);
+            assert_eq!(decode(&out), Some(command));
+        }
+    }
+
+    #[test]
+    fn encode_into_appends_each_frame() {
+        let border = BorderCommand {
+            top: 0,
+            left: 0,
+            width: 2,
+            height: 2,
+            style: BorderStyle::Light,
+            color: [1, 1, 1],
+        };
+        let bar = BarCommand {
+            x: 1,
+            y: 1,
+            width: 4,
+            height: 8,
+            color: [2, 2, 2],
+        };
+
+        let mut out = Vec::new();
+        encode_into(&mut out, &Command::Border(border));
+        encode_into(&mut out, &Command::Bar(bar));
+
+        let mut expected = encode_border(&border);
+        expected.extend(encode_bar(&bar));
+        assert_eq!(out, expected);
     }
 }

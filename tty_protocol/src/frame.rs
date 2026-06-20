@@ -9,7 +9,8 @@
 //! or the bare payload a parser hands over after stripping `ESC _` and the
 //! terminator.
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{engine::general_purpose::STANDARD, write::EncoderWriter, Engine};
+use std::io::Write;
 
 /// APC introducer, `ESC _`.
 const INTRODUCER: &[u8] = b"\x1b_";
@@ -34,18 +35,49 @@ pub struct Frame {
 /// Encode `frame` as the full `ESC _ Gstoatty ; sub ; b64(arg)... ESC \` bytes.
 pub fn encode(frame: &Frame) -> Vec<u8> {
     let mut out = Vec::new();
+    encode_into(&mut out, frame);
+    out
+}
+
+/// Append the full `ESC _ Gstoatty ; sub ; b64(arg)... ESC \` frame to `out`.
+///
+/// Allocation-free given spare capacity in `out`: each argument's base64 streams
+/// straight into the buffer rather than through a per-argument `String`. An
+/// emitter re-sending its whole scene each frame reuses one buffer across frames.
+pub fn encode_into(out: &mut Vec<u8>, frame: &Frame) {
+    begin(out, &frame.sub);
+    for arg in &frame.args {
+        push_arg(out, |w| w.write_all(arg));
+    }
+    end(out);
+}
+
+/// Write the frame header `ESC _ Gstoatty ; sub` into `out`.
+pub(crate) fn begin(out: &mut Vec<u8>, sub: &str) {
     out.extend_from_slice(INTRODUCER);
     out.extend_from_slice(PREFIX);
     out.push(b';');
-    out.extend_from_slice(frame.sub.as_bytes());
+    out.extend_from_slice(sub.as_bytes());
+}
 
-    for arg in &frame.args {
-        out.push(b';');
-        out.extend_from_slice(STANDARD.encode(arg).as_bytes());
-    }
+/// Append `; b64(payload)` to `out`, where `payload` is whatever `write_payload`
+/// writes into the supplied base64 sink.
+///
+/// The payload is written through a streaming base64 encoder, so a caller assembling
+/// a multi-field argument never materializes it as an intermediate buffer.
+pub(crate) fn push_arg(
+    out: &mut Vec<u8>,
+    write_payload: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) {
+    out.push(b';');
+    let mut encoder = EncoderWriter::new(&mut *out, &STANDARD);
+    write_payload(&mut encoder).expect("writing to a Vec is infallible");
+    encoder.finish().expect("writing to a Vec is infallible");
+}
 
+/// Write the frame terminator `ESC \` into `out`.
+pub(crate) fn end(out: &mut Vec<u8>) {
     out.extend_from_slice(TERMINATOR);
-    out
 }
 
 /// Parse a stoatty frame, or `None` if `bytes` is not a well-formed one.
