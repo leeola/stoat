@@ -21,7 +21,7 @@ fn span_to_range(span: SimpleSpan<usize>) -> std::ops::Range<usize> {
 
 fn comment<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone {
     just('#')
-        .then(any().and_is(just('\n').not()).repeated().collect::<()>())
+        .then(any().and_is(just('\n').not()).repeated().count().ignored())
         .ignored()
 }
 
@@ -31,7 +31,8 @@ fn ws<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone {
         .ignored()
         .or(comment())
         .repeated()
-        .collect::<()>()
+        .count()
+        .ignored()
 }
 
 fn required_ws<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone {
@@ -39,7 +40,8 @@ fn required_ws<'src>() -> impl Parser<'src, &'src str, (), Extra<'src>> + Clone 
         .filter(|c: &char| c.is_whitespace())
         .repeated()
         .at_least(1)
-        .collect::<()>()
+        .count()
+        .ignored()
 }
 
 fn ident<'src>() -> impl Parser<'src, &'src str, String, Extra<'src>> + Clone {
