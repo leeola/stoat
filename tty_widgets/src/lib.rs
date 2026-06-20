@@ -5,8 +5,10 @@
 //! a frame's widgets append into and then flush to the terminal.
 
 use std::io::{self, Write};
-
 use stoatty_protocol::command;
+
+pub mod bar;
+pub mod text_run;
 
 /// The reused emission buffer a frame's widgets append their APC frames into.
 ///
@@ -43,6 +45,15 @@ impl ApcScene {
         &mut self.current
     }
 
+    /// Append the surface's per-line row heights as a `line_layout` frame.
+    ///
+    /// Most lines are one row; a height above one is an integer-cell inline
+    /// expansion that pushes later lines down. The full layout is re-sent on each
+    /// change, so this rides alongside the widgets in the same frame.
+    pub fn set_line_layout(&mut self, heights: &[u16]) {
+        command::encode_line_layout_into(&mut self.current, heights);
+    }
+
     /// Flush the built scene to `out`, but only when it differs from the last
     /// flush.
     ///
@@ -72,7 +83,10 @@ impl Default for ApcScene {
 #[cfg(test)]
 mod tests {
     use super::ApcScene;
-    use stoatty_protocol::command::{self, encode_border, encode_reset, BorderCommand, BorderStyle};
+    use stoatty_protocol::command::{
+        self, encode_border, encode_line_layout, encode_reset, BorderCommand, BorderStyle,
+        LineLayoutCommand,
+    };
 
     fn border() -> BorderCommand {
         BorderCommand {
@@ -110,6 +124,17 @@ mod tests {
         scene.flush_to(&mut out).expect("vec write");
 
         assert!(out.is_empty(), "an unchanged scene emits nothing");
+    }
+
+    #[test]
+    fn set_line_layout_appends_the_heights_frame() {
+        let mut scene = ApcScene::new();
+        scene.set_line_layout(&[1, 2, 1]);
+
+        let expected = encode_line_layout(&LineLayoutCommand {
+            heights: vec![1, 2, 1],
+        });
+        assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }
 
     #[test]
