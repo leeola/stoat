@@ -50,7 +50,7 @@ fn build_emitter(bin: &str) -> PathBuf {
 /// to `stoatty_widgets`; the rest remain in `stoatty_protocol`.
 fn emitter_package(bin: &str) -> &'static str {
     match bin {
-        "example_gutter_app" => "stoatty_widgets",
+        "example_gutter_app" | "example_diagnostics_app" => "stoatty_widgets",
         _ => "stoatty_protocol",
     }
 }
