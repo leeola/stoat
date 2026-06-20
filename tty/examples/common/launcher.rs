@@ -9,10 +9,10 @@ use std::{env, ffi::OsStr, path::PathBuf, process::Command};
 /// Build the `bin` emitter and open the stoatty window, sized to `size` cells
 /// (`[cols, rows]`), running it as the shell.
 ///
-/// `bin` is an emitter binary in `stoatty_protocol`. The window renders that
-/// program's output end to end through the bytes to PTY to parse to grid to
-/// render path. `size` is the scene's cell extent, so the window opens close to
-/// the content it shows.
+/// `bin` names an emitter binary; the crate it is built from is resolved from
+/// its name (see [`emitter_package`]). The window renders that program's output
+/// end to end through the bytes to PTY to parse to grid to render path. `size`
+/// is the scene's cell extent, so the window opens close to the content it shows.
 pub fn run(bin: &str, size: [u16; 2]) {
     let emitter = build_emitter(bin);
     stoatty::app::run_with_shell(
@@ -35,7 +35,7 @@ fn build_emitter(bin: &str) -> PathBuf {
         .expect("example lives under a target profile directory");
 
     let mut command = Command::new(env!("CARGO"));
-    command.args(["build", "-p", "stoatty_protocol", "--bin", bin]);
+    command.args(["build", "-p", emitter_package(bin), "--bin", bin]);
     if profile_dir.file_name() == Some(OsStr::new("release")) {
         command.arg("--release");
     }
@@ -44,4 +44,13 @@ fn build_emitter(bin: &str) -> PathBuf {
     assert!(status.success(), "building {bin} failed");
 
     profile_dir.join(bin)
+}
+
+/// The crate an emitter bin is built from. Component-using emitters have migrated
+/// to `stoatty_widgets`; the rest remain in `stoatty_protocol`.
+fn emitter_package(bin: &str) -> &'static str {
+    match bin {
+        "example_gutter_app" => "stoatty_widgets",
+        _ => "stoatty_protocol",
+    }
 }
