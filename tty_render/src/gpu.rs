@@ -168,8 +168,14 @@ impl Renderer {
             frame.scroll.grid,
             frame.damage,
         );
-        self.decoration
-            .prepare(device, queue, grid, resolution, frame.scroll.grid);
+        self.decoration.prepare(
+            device,
+            queue,
+            grid,
+            resolution,
+            frame.scroll.grid,
+            frame.decoration_damage,
+        );
         self.text.prepare(device, queue, grid, resolution, &frame);
         self.overlay.prepare(device, queue, grid, resolution);
         self.icon.prepare(device, queue, grid.icons(), resolution);

@@ -5,15 +5,17 @@
 //! on screen. This renders a grid, edits a middle row (changing its glyph count
 //! so later rows shift, exercising the from-first-changed-row upload), renders
 //! once with partial damage (the incremental path) and once with full damage,
-//! and asserts the two frames are pixel-identical. Skips when no GPU adapter is
-//! present, so a GPU-less CI stays green.
+//! and asserts the two frames are pixel-identical. The edit also recolours one
+//! border row, marked via the separate decoration-damage signal, so the same
+//! comparison covers the border pass's per-row rebuild. Skips when no GPU adapter
+//! is present, so a GPU-less CI stays green.
 
 use stoatty_render::{
     gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Grid, Rgb, UnderlineStyle},
+    grid::{Border, BorderStyle, Grid, Rgb, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -79,32 +81,37 @@ fn patched_rows_match_a_full_rebuild() {
     // the comparison also checks the cached underline row is preserved.
     grid.get_mut(0, 0).underline = UnderlineStyle::Straight;
     grid.get_mut(0, 0).underline_color = Rgb::new(0, 200, 255);
+    // Border a cell in the stable row 0 and one in row 2; row 2's border colour
+    // changes in the edit below while row 0's stays, so the comparison checks the
+    // border pass rebuilds the decoration-damaged row and keeps the cached one.
+    set_border(&mut grid, 0, 0, Rgb::new(0, 200, 255));
+    set_border(&mut grid, 2, 0, Rgb::new(0, 200, 255));
 
-    let no_decoration = Damage::Partial(Vec::new());
-    let render = |renderer: &mut Renderer, grid: &Grid, damage: &Damage| {
-        renderer.render_into(
-            &device,
-            &queue,
-            &view,
-            grid,
-            Frame {
-                cursor: None,
-                scroll: Scroll {
-                    grid: 0.0,
-                    region: 0.0,
-                    popovers: &[],
+    let render =
+        |renderer: &mut Renderer, grid: &Grid, damage: &Damage, decoration_damage: &Damage| {
+            renderer.render_into(
+                &device,
+                &queue,
+                &view,
+                grid,
+                Frame {
+                    cursor: None,
+                    scroll: Scroll {
+                        grid: 0.0,
+                        region: 0.0,
+                        popovers: &[],
+                    },
+                    damage,
+                    decoration_damage,
                 },
-                damage,
-                decoration_damage: &no_decoration,
-            },
-        );
-        read_back(&device, &queue, &target, width, height)
-    };
+            );
+            read_back(&device, &queue, &target, width, height)
+        };
 
     // Build the original grid, then edit a middle row so the rows after it shift.
     // The edit also changes the row's background colour, so the comparison covers
     // both the glyph and the background per-row patching at a non-zero offset.
-    let original = render(&mut renderer, &grid, &Damage::Full);
+    let original = render(&mut renderer, &grid, &Damage::Full, &Damage::Full);
     fill_row(
         &mut grid,
         1,
@@ -112,9 +119,12 @@ fn patched_rows_match_a_full_rebuild() {
         white,
         Rgb::new(30, 40, 120),
     );
+    // Recolour row 2's border: a decoration change with no VT-cell change, so the
+    // incremental frame damages row 2 only through decoration_damage.
+    set_border(&mut grid, 2, 0, Rgb::new(220, 50, 47));
 
-    // Incremental: only row 1 is damaged, so rows 0 and 2 come from the cache and
-    // the upload starts at row 1's offset.
+    // Incremental: VT damage marks row 1 (glyph/bg) and decoration damage marks
+    // row 2 (border), so rows 0 and 2 come from their caches except row 2's border.
     let incremental = render(
         &mut renderer,
         &grid,
@@ -123,10 +133,15 @@ fn patched_rows_match_a_full_rebuild() {
             dirty[1] = true;
             dirty
         }),
+        &Damage::Partial({
+            let mut dirty = vec![false; rows];
+            dirty[2] = true;
+            dirty
+        }),
     );
 
     // Full rebuild of the same edited grid.
-    let full = render(&mut renderer, &grid, &Damage::Full);
+    let full = render(&mut renderer, &grid, &Damage::Full, &Damage::Full);
 
     assert!(
         incremental != original,
@@ -148,6 +163,18 @@ fn fill_row(grid: &mut Grid, row: usize, text: &str, fg: Rgb, bg: Rgb) {
         cell.fg = fg;
         cell.bg = bg;
     }
+}
+
+fn set_border(grid: &mut Grid, row: usize, col: usize, color: Rgb) {
+    let border = Border {
+        style: BorderStyle::Light,
+        color,
+    };
+    let cell = grid.get_mut(row, col);
+    cell.borders.top = Some(border);
+    cell.borders.right = Some(border);
+    cell.borders.bottom = Some(border);
+    cell.borders.left = Some(border);
 }
 
 /// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major

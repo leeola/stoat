@@ -10,7 +10,10 @@
 
 use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
-use stoatty_term::grid::{Border, BorderStyle, Borders, Grid, Rgb};
+use stoatty_term::{
+    grid::{Border, BorderStyle, Borders, Grid, Rgb},
+    term::Damage,
+};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor,
@@ -78,6 +81,11 @@ pub struct DecorationPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    /// The built border instances of each row from the previous frame, so a
+    /// damaged frame rebuilds and re-uploads only the rows an APC border change
+    /// touched rather than scanning the whole grid. Scroll rides the globals
+    /// uniform, so the cache survives a scroll-only frame.
+    border_row_instances: Vec<Vec<BorderInstance>>,
     metrics: CellMetrics,
 }
 
@@ -178,6 +186,7 @@ impl DecorationPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            border_row_instances: Vec::new(),
             metrics,
         }
     }
@@ -190,9 +199,13 @@ impl DecorationPass {
     /// Upload the frame's uniform and one instance per bordered cell edge.
     ///
     /// `resolution` is the surface size in physical pixels. `grid_scroll` shifts
-    /// the borders up by that many rows with the rest of the grid. Reallocates
-    /// the instance buffer only when the edge count outgrows the current
-    /// capacity.
+    /// the borders up by that many rows with the rest of the grid, via the
+    /// uniform, so the per-row instance cache is unaffected by scroll.
+    ///
+    /// `decoration_damage` marks the rows an APC border changed since the last
+    /// frame: only those rows rebuild (every row when the cache is stale or the
+    /// damage is `Full`), and the upload runs from the first changed row to the
+    /// end. A frame that marks no rows reuses the buffer untouched.
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -200,6 +213,7 @@ impl DecorationPass {
         grid: &Grid,
         resolution: [f32; 2],
         grid_scroll: f32,
+        decoration_damage: &Damage,
     ) {
         let globals = Globals {
             resolution,
@@ -209,17 +223,60 @@ impl DecorationPass {
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
-        let instances = build_border_instances(grid);
-        self.count = instances.len() as u32;
-        if instances.is_empty() {
+        let rows = grid.rows();
+        let stale = self.border_row_instances.len() != rows;
+        if stale {
+            self.border_row_instances = vec![Vec::new(); rows];
+        }
+
+        let rows_to_build: Vec<usize> = if matches!(decoration_damage, Damage::Full) || stale {
+            (0..rows).collect()
+        } else {
+            (0..rows)
+                .filter(|&row| decoration_damage.is_dirty(row))
+                .collect()
+        };
+        let Some(&first) = rows_to_build.iter().min() else {
+            return;
+        };
+
+        for &row in &rows_to_build {
+            self.border_row_instances[row] = build_border_row(grid, row);
+        }
+
+        let offset: usize = self.border_row_instances[..first]
+            .iter()
+            .map(Vec::len)
+            .sum();
+        let tail_len: usize = self.border_row_instances[first..]
+            .iter()
+            .map(Vec::len)
+            .sum();
+        self.count = (offset + tail_len) as u32;
+        if offset + tail_len == 0 {
             return;
         }
 
-        if instances.len() > self.capacity {
-            self.capacity = instances.len().next_power_of_two();
+        if offset + tail_len > self.capacity {
+            // Growing the buffer drops its contents, so re-upload every row.
+            self.capacity = (offset + tail_len).next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
+            let all: Vec<BorderInstance> = self
+                .border_row_instances
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&all));
+        } else {
+            let tail: Vec<BorderInstance> = self.border_row_instances[first..]
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            let byte_offset = (offset * size_of::<BorderInstance>()) as u64;
+            queue.write_buffer(&self.instances, byte_offset, bytemuck::cast_slice(&tail));
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
     }
 
     /// Record the border draw into `render_pass`.
@@ -248,19 +305,18 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 }
 
 /// One instance per bordered cell across the grid, in row-major order.
+#[cfg(test)]
 fn build_border_instances(grid: &Grid) -> Vec<BorderInstance> {
-    let mut instances = Vec::new();
+    (0..grid.rows())
+        .flat_map(|row| build_border_row(grid, row))
+        .collect()
+}
 
-    for row in 0..grid.rows() {
-        for col in 0..grid.cols() {
-            let borders = grid.get(row, col).borders;
-            if let Some(instance) = cell_instance([col as f32, row as f32], borders) {
-                instances.push(instance);
-            }
-        }
-    }
-
-    instances
+/// One instance per bordered cell in `row`, in column order.
+fn build_border_row(grid: &Grid, row: usize) -> Vec<BorderInstance> {
+    (0..grid.cols())
+        .filter_map(|col| cell_instance([col as f32, row as f32], grid.get(row, col).borders))
+        .collect()
 }
 
 /// Pack a cell's borders into one instance, or `None` when no edge is set.
