@@ -1,19 +1,30 @@
 //! A pane-layout stoatty demo: a tiling editor that splits, rearranges, and
 //! merges panes by redrawing their border frames at new positions.
 //!
-//! Each discrete step clears the prior decorations with a `Gstoatty;reset` frame,
-//! then draws the step's pane frames afresh, so panes jump straight to their new
-//! positions with no ghosts of the old layout. The steps are discrete: the
-//! renderer does not ease a frame between positions, so the demo pauses on each
-//! layout rather than faking a smooth reposition. Run as the PTY shell by the
-//! `panes` example.
+//! Each discrete step clears the prior decorations through the [`ApcScene`]'s
+//! leading `Gstoatty;reset`, then draws the step's pane frames afresh with the
+//! [`Border`] widget, so panes jump straight to their new positions with no
+//! ghosts of the old layout. The labels and body flow through a ratatui
+//! [`Terminal`], which resets its render buffer each draw, so a vacated pane
+//! leaves nothing behind.
+//!
+//! The steps are discrete: the renderer does not ease a frame between positions,
+//! so the demo pauses on each layout rather than faking a smooth reposition. Run
+//! as the PTY shell by the `panes` example.
 
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::Rect,
+    style::{Color, Style},
+    Frame, Terminal,
+};
 use std::{
     io::{self, Write},
     thread,
     time::Duration,
 };
-use stoatty_protocol::command::{self, BorderCommand, BorderStyle};
+use stoatty_protocol::command::BorderStyle;
+use stoatty_widgets::{border::Border, ApcScene};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so the scene looks the same under any
@@ -234,76 +245,76 @@ const OUTPUT: &[&str] = &[
 ];
 
 fn main() {
-    let mut stdout = io::stdout();
-    setup(&mut stdout);
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend).expect("build the terminal");
+    let mut scene = ApcScene::new();
+
+    terminal.clear().expect("clear the screen");
 
     loop {
         for panes in LAYOUTS {
-            let mut frame = Vec::new();
-            render_step(&mut frame, panes);
-            stdout.write_all(&frame).expect("write a layout");
-            stdout.flush().expect("flush a layout");
+            scene.clear();
+            terminal
+                .draw(|frame| render_step(frame, &mut scene, panes))
+                .expect("draw a layout");
+
+            let mut out = io::stdout();
+            scene.flush_to(&mut out).expect("write the decoration");
+            out.flush().expect("flush a layout");
+
             thread::sleep(STEP_PAUSE);
         }
     }
 }
 
-/// Set the editor palette and hide the cursor, since the demo is about pane
-/// frames rather than a text cursor.
-fn setup(out: &mut impl Write) {
-    let sgr = format!(
-        "\x1b[38;2;{};{};{};48;2;{};{};{}m",
-        EDITOR_FG[0], EDITOR_FG[1], EDITOR_FG[2], EDITOR_BG[0], EDITOR_BG[1], EDITOR_BG[2],
-    );
-    out.write_all(sgr.as_bytes()).expect("set the palette");
-    out.write_all(b"\x1b[?25l").expect("hide the cursor");
-    out.flush().expect("flush the setup");
-}
-
-/// Reset the prior decorations and cells, then draw this step's panes from
-/// scratch, so the new layout replaces the old with no leftover frames.
-fn render_step(out: &mut Vec<u8>, panes: &[Pane]) {
-    out.extend_from_slice(&command::encode_reset());
-    out.extend_from_slice(b"\x1b[2J\x1b[H");
+/// Fill the editor background and draw each pane of `panes` into `frame` and its
+/// borders into `scene`. The first pane is the focused one.
+fn render_step(frame: &mut Frame<'_>, scene: &mut ApcScene, panes: &[Pane]) {
+    let area = frame.area();
+    frame.buffer_mut().set_style(area, editor_style());
 
     for (index, pane) in panes.iter().enumerate() {
-        draw_pane(out, pane, index == 0);
+        draw_pane(frame, scene, pane, index == 0);
     }
 }
 
-/// Frame `pane` with a rounded border, brighter when focused, write its label
+/// Frame `pane` with a rounded [`Border`], brighter when focused, write its label
 /// just inside the top-left corner, and fill the interior with the label's body.
-fn draw_pane(out: &mut Vec<u8>, pane: &Pane, focused: bool) {
-    out.extend_from_slice(&command::encode_border(&BorderCommand {
-        top: pane.top,
-        left: pane.left,
-        width: pane.width,
-        height: pane.height,
-        style: BorderStyle::Rounded,
-        color: if focused { FOCUSED } else { DIM },
-    }));
+fn draw_pane(frame: &mut Frame<'_>, scene: &mut ApcScene, pane: &Pane, focused: bool) {
+    frame.render_stateful_widget(
+        Border {
+            style: BorderStyle::Rounded,
+            color: if focused { FOCUSED } else { DIM },
+        },
+        Rect::new(pane.left, pane.top, pane.width, pane.height),
+        scene,
+    );
 
-    cup(out, pane.top + 1, pane.left + 2);
-    out.extend_from_slice(pane.label.as_bytes());
+    frame
+        .buffer_mut()
+        .set_string(pane.left + 2, pane.top + 1, pane.label, editor_style());
 
-    draw_body(out, pane);
+    draw_body(frame, pane);
 }
 
 /// Write the pane's body text below its label, each line clipped to the frame's
 /// interior so nothing spills across the border.
 ///
 /// The interior is the `height - 3` rows below the label and the `width - 4`
-/// columns inside the left and right borders, both starting one column past the
-/// border to match the label. A narrow pane shows a horizontally-clipped view,
+/// columns inside the borders. A narrow pane shows a horizontally-clipped view,
 /// the same as a real editor that does not wrap.
-fn draw_body(out: &mut Vec<u8>, pane: &Pane) {
+fn draw_body(frame: &mut Frame<'_>, pane: &Pane) {
     let rows = pane.height.saturating_sub(3) as usize;
     let cols = pane.width.saturating_sub(4) as usize;
 
     for (row, line) in pane_body(pane.label).iter().take(rows).enumerate() {
-        let clipped: String = line.chars().take(cols).collect();
-        cup(out, pane.top + 2 + row as u16, pane.left + 2);
-        out.extend_from_slice(clipped.as_bytes());
+        frame.buffer_mut().set_stringn(
+            pane.left + 2,
+            pane.top + 2 + row as u16,
+            line,
+            cols,
+            editor_style(),
+        );
     }
 }
 
@@ -320,7 +331,12 @@ fn pane_body(label: &str) -> &'static [&'static str] {
     }
 }
 
-/// Emit a Cursor Position escape to the 0-based grid (`row`, `col`).
-fn cup(out: &mut Vec<u8>, row: u16, col: u16) {
-    out.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+/// The editor's foreground-on-background cell style, shared by erased cells,
+/// labels, and body text.
+fn editor_style() -> Style {
+    Style::default().fg(rgb(EDITOR_FG)).bg(rgb(EDITOR_BG))
+}
+
+fn rgb([r, g, b]: [u8; 3]) -> Color {
+    Color::Rgb(r, g, b)
 }
