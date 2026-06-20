@@ -1,0 +1,12 @@
+[package]
+name = "stoatty_widgets"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ratatui.workspace = true
+stoatty_protocol = { path = "../tty_protocol" }

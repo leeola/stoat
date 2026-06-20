@@ -13,6 +13,7 @@ members = [
   "text",
   "viewport",
   "tty_protocol",
+  "tty_widgets",
   "tty_term",
   "tty_render",
   "tty",

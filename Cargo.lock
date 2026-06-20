@@ -4028,6 +4028,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoatty_widgets"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "stoatty_protocol",
+]
+
+[[package]]
 name = "streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
