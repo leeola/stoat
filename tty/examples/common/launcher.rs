@@ -53,7 +53,8 @@ fn emitter_package(bin: &str) -> &'static str {
         "example_gutter_app"
         | "example_diagnostics_app"
         | "example_doc_tooltip_app"
-        | "example_panes_app" => "stoatty_widgets",
+        | "example_panes_app"
+        | "example_split_scroll_app" => "stoatty_widgets",
         _ => "stoatty_protocol",
     }
 }
