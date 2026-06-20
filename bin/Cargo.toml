@@ -33,7 +33,7 @@ tempfile.workspace = true
 time.workspace = true
 
 [dev-dependencies]
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 insta = "1"
 stoat_host = { path = "../host" }
 tokio-util.workspace = true

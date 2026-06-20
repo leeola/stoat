@@ -150,8 +150,8 @@ pub(super) fn cherry_pick_tree(
             return git2::TreeWalkResult::Ok;
         }
         let name = match entry.name() {
-            Some(n) => n,
-            None => return git2::TreeWalkResult::Ok,
+            Ok(n) => n,
+            Err(_) => return git2::TreeWalkResult::Ok,
         };
         let rel = if dir.is_empty() {
             PathBuf::from(name)

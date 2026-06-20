@@ -24,7 +24,7 @@ futures.workspace = true
 tracing.workspace = true
 compact_str.workspace = true
 etcetera.workspace = true
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 unicode-width.workspace = true
 slotmap.workspace = true
 lsp-types.workspace = true

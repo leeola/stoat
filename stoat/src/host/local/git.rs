@@ -79,8 +79,8 @@ impl GitRepo for LocalGitRepo {
 
         for entry in statuses.iter() {
             let rel = match entry.path() {
-                Some(p) => p,
-                None => continue,
+                Ok(p) => p,
+                Err(_) => continue,
             };
             let abs = workdir.join(rel);
             let status = entry.status();
@@ -135,8 +135,8 @@ impl GitRepo for LocalGitRepo {
                 return git2::TreeWalkResult::Ok;
             }
             let name = match entry.name() {
-                Some(n) => n,
-                None => return git2::TreeWalkResult::Ok,
+                Ok(n) => n,
+                Err(_) => return git2::TreeWalkResult::Ok,
             };
             let rel = if dir.is_empty() {
                 PathBuf::from(name)
@@ -222,7 +222,13 @@ impl GitRepo for LocalGitRepo {
             };
             let sha = oid.to_string();
             let short_sha = sha.chars().take(7).collect();
-            let summary = commit.summary().unwrap_or_default().trim().to_string();
+            let summary = commit
+                .summary()
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             let author = commit.author();
             let author_name = author.name().unwrap_or_default().to_string();
             let author_email = author.email().unwrap_or_default().to_string();
@@ -394,7 +400,12 @@ impl GitRepo for LocalGitRepo {
         let head_tree = head_commit.tree().ok()?;
         let branch_name = head_ref.shorthand().unwrap_or("HEAD").to_string();
         let head_short: String = head_commit.id().to_string().chars().take(7).collect();
-        let summary = head_commit.summary().unwrap_or("").to_string();
+        let summary = head_commit
+            .summary()
+            .ok()
+            .flatten()
+            .unwrap_or("")
+            .to_string();
 
         let mut index = repo.index().ok()?;
         let index_tree_oid = index.write_tree().ok()?;
