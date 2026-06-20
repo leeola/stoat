@@ -44,6 +44,8 @@ pub struct GutterLine {
     pub height: u16,
     /// Git-status bar color, or `None` for an unchanged line.
     pub git: Option<[u8; 3]>,
+    /// Diagnostic severity bar spanning the line's full [`Self::height`], or
+    /// `None` for a line without one.
     pub diagnostic: Option<Diagnostic>,
 }
 
@@ -116,7 +118,7 @@ impl Gutter<'_> {
                     x: 0,
                     y,
                     width: self.bar_width,
-                    height: 16,
+                    height: line.height * 16,
                     color: diag.color,
                 }
                 .render(area, buf, scene);
@@ -293,5 +295,47 @@ mod tests {
         });
         assert!(contains(scene.buffer(), &separator), "separator bar frame");
         assert!(contains(scene.buffer(), &diag_bar), "diagnostic bar frame");
+    }
+
+    #[test]
+    fn diagnostic_bar_spans_the_line_height() {
+        let lines = [GutterLine {
+            number: 1,
+            height: 2,
+            git: Some([152, 195, 121]),
+            diagnostic: Some(Diagnostic {
+                color: [224, 108, 117],
+                mark: 'E',
+            }),
+        }];
+        let gutter = config(&lines);
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        gutter.render(area, &mut buf, &mut scene);
+
+        let diag_bar = encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 5,
+            height: 32,
+            color: [224, 108, 117],
+        });
+        let git_bar = encode_bar(&BarCommand {
+            x: 7,
+            y: 0,
+            width: 5,
+            height: 16,
+            color: [152, 195, 121],
+        });
+        assert!(
+            contains(scene.buffer(), &diag_bar),
+            "diagnostic bar spans the two-row line"
+        );
+        assert!(
+            contains(scene.buffer(), &git_bar),
+            "git bar marks only the code row"
+        );
     }
 }
