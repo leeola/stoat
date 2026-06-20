@@ -9,6 +9,8 @@ use stoatty_protocol::command;
 
 pub mod bar;
 pub mod border;
+pub(crate) mod cells;
+pub mod popover;
 pub mod text_run;
 
 /// The reused emission buffer a frame's widgets append their APC frames into.

@@ -1,4 +1,4 @@
-use crate::ApcScene;
+use crate::{cells, ApcScene};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -41,10 +41,6 @@ impl StatefulWidget for Border {
 
 impl Border {
     fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-
         let set = match self.style {
             BorderStyle::Light => border::PLAIN,
             BorderStyle::Heavy => border::THICK,
@@ -54,28 +50,7 @@ impl Border {
         let [r, g, b] = self.color;
         let style = Style::default().fg(Color::Rgb(r, g, b));
 
-        let right = area.x + area.width - 1;
-        let bottom = area.y + area.height - 1;
-
-        put(buf, area.x, area.y, set.top_left, style);
-        put(buf, right, area.y, set.top_right, style);
-        put(buf, area.x, bottom, set.bottom_left, style);
-        put(buf, right, bottom, set.bottom_right, style);
-
-        for x in (area.x + 1)..right {
-            put(buf, x, area.y, set.horizontal_top, style);
-            put(buf, x, bottom, set.horizontal_bottom, style);
-        }
-        for y in (area.y + 1)..bottom {
-            put(buf, area.x, y, set.vertical_left, style);
-            put(buf, right, y, set.vertical_right, style);
-        }
-    }
-}
-
-fn put(buf: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        cell.set_symbol(symbol).set_style(style);
+        cells::draw_perimeter(buf, area, set, style);
     }
 }
 
