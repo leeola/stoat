@@ -88,6 +88,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
         scroll: Scroll {
             grid: grid_scroll,
             document: 0.0,
+            scrollback: 0.0,
             region: 0.0,
             popovers: &[],
         },
@@ -193,6 +194,7 @@ fn document_scroll_shifts_the_grid_like_grid_scroll() {
         scroll: Scroll {
             grid: 0.0,
             document,
+            scrollback: 0.0,
             region: 0.0,
             popovers: &[],
         },

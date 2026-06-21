@@ -165,7 +165,7 @@ impl Renderer {
                 pos: frame.cursor,
                 color: self.cursor_color,
             },
-            frame.scroll.grid + frame.scroll.document,
+            frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
             frame.damage,
         );
         self.decoration.prepare(
@@ -173,7 +173,7 @@ impl Renderer {
             queue,
             grid,
             resolution,
-            frame.scroll.grid + frame.scroll.document,
+            frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
             frame.decoration_damage,
         );
         self.text.prepare(device, queue, grid, resolution, &frame);

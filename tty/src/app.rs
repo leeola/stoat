@@ -42,6 +42,12 @@ use winit::{
 /// unreadable size.
 const FONT_SIZE_FLOOR: u32 = 6;
 
+/// Lines of terminal-owned scrollback the wheel moves per line of wheel travel,
+/// the idiomatic multi-line wheel step common terminals use (e.g. alacritty's
+/// default scroll multiplier of 3). Applies only to local scrollback, never to
+/// the wheel reports forwarded to a mouse-reporting app.
+const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
+
 /// Open the stoatty window running the configured command, or the user's
 /// default shell when the config sets none, at the winit default window size.
 ///
@@ -220,6 +226,27 @@ struct State {
     /// The grid's eased vertical scroll offset, in rows. Seeded by the term's
     /// per-frame scroll delta and eased toward zero so content glides into place.
     grid_scroll: f32,
+    /// The live smooth-scroll position through the terminal's own scrollback, in
+    /// rows back from the live bottom, eased toward [`Self::scrollback_target`].
+    /// Like the document offset it tracks an absolute position rather than
+    /// decaying to zero, so the history window scrolls through every row at
+    /// fractional-pixel granularity and rests on a cell boundary.
+    scrollback_visual: f32,
+    /// The whole-cell scrollback position the wheel last moved to, in rows back
+    /// from the live bottom, that [`Self::scrollback_visual`] eases toward. Kept
+    /// in step with the terminal's `display_offset`: the wheel advances both, and
+    /// a per-frame check folds in any auto-pin the terminal applied as live
+    /// output grew, so output never drags the eased view.
+    scrollback_target: f32,
+    /// The straddled history window composed at [`Self::scrollback_visual`],
+    /// reused across frames. Sized to the viewport plus one top straddle row;
+    /// rendered instead of [`Self::grid`] whenever the view is scrolled back.
+    scrollback_grid: Grid,
+    /// The integer offset [`Self::scrollback_grid`] was last composed at, so a
+    /// frame that only changes the sub-cell fraction reuses the cached rows and
+    /// shifts them, rebuilding only when the integer offset changes. `None` when
+    /// the previous frame rendered the live grid.
+    last_scrollback_offset: Option<i32>,
     /// The scroll region's eased vertical offset, in rows. Seeded by the change
     /// in the region's declared offset and eased toward zero, so the region's
     /// content glides when the program scrolls it.
@@ -351,6 +378,10 @@ impl ApplicationHandler<PtyEvent> for App {
             popover_scrolls: Vec::new(),
             popover_scroll_downs: Vec::new(),
             grid_scroll: 0.0,
+            scrollback_visual: 0.0,
+            scrollback_target: 0.0,
+            scrollback_grid: Grid::new(0, 0),
+            last_scrollback_offset: None,
             region_scroll: 0.0,
             last_region_offset: 0.0,
             document_scroll: 0.0,
@@ -451,12 +482,21 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let (cursor, scroll_delta, damage, decoration_damage, scroll_target, reposition) = {
+                let (
+                    cursor,
+                    scroll_delta,
+                    damage,
+                    decoration_damage,
+                    scroll_target,
+                    reposition,
+                    display_offset,
+                ) = {
                     let mut terminal = state.terminal.lock();
                     let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
                     let decoration_damage = terminal.take_decoration_damage();
                     let scroll_target = terminal.scroll_target();
                     let reposition = terminal.take_reposition();
+                    let display_offset = terminal.display_offset();
                     (
                         cursor,
                         scroll_delta,
@@ -464,6 +504,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         decoration_damage,
                         scroll_target,
                         reposition,
+                        display_offset,
                     )
                 };
 
@@ -492,6 +533,19 @@ impl ApplicationHandler<PtyEvent> for App {
                 let (grid_scroll, grid_scrolling) =
                     step_grid_scroll(state.grid_scroll, scroll_delta);
                 state.grid_scroll = grid_scroll;
+
+                // Fold any auto-pin the terminal applied as live output grew into
+                // both the target and the eased position, so growing history drags
+                // neither -- only a wheel move, which advances the target alone,
+                // starts an ease. Comparing against the target's integer part
+                // folds whole-row pins while leaving any sub-cell offset intact.
+                let pin = display_offset as f32 - state.scrollback_target.floor();
+                state.scrollback_target += pin;
+                state.scrollback_visual += pin;
+
+                let (scrollback_visual, scrollback_scrolling) =
+                    step_scrollback_scroll(state.scrollback_visual, state.scrollback_target);
+                state.scrollback_visual = scrollback_visual;
 
                 let (region_scroll, region_scrolling) = match state.grid.scroll_region() {
                     Some(region) => {
@@ -524,6 +578,16 @@ impl ApplicationHandler<PtyEvent> for App {
                     terminal.project_document(&mut state.document_grid, document_scroll)
                 };
 
+                // Compose the scrollback window only when no document-pool window
+                // is active and the view is scrolled back; otherwise the live grid
+                // (with cursor and decorations) renders.
+                let scrollback_view = if document_view.is_none() {
+                    let terminal = state.terminal.lock();
+                    terminal.project_scrollback(&mut state.scrollback_grid, state.scrollback_visual)
+                } else {
+                    None
+                };
+
                 let cursor_easing = match document_view {
                     Some((frac, top)) => {
                         // A pool window covers the offset: render the composed
@@ -533,6 +597,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         // them; a new top rebuilds.
                         let rebuild = state.last_document_row != Some(top);
                         state.last_document_row = Some(top);
+                        state.last_scrollback_offset = None;
                         let doc_damage = if rebuild {
                             Damage::Full
                         } else {
@@ -545,6 +610,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 scroll: Scroll {
                                     grid: 0.0,
                                     document: -frac,
+                                    scrollback: 0.0,
                                     region: 0.0,
                                     popovers: &[],
                                 },
@@ -554,57 +620,99 @@ impl ApplicationHandler<PtyEvent> for App {
                         );
                         false
                     },
-                    None => {
-                        // No pool window covers the offset: render the projected
-                        // live grid (the degradation path), cursor easing as usual.
-                        state.last_document_row = None;
-                        match cursor_position(cursor) {
-                            Some(target) => {
-                                let (next, settled) = ease(state.cursor_anim, target);
-                                state.cursor_anim = next;
-                                state.gpu.render(
-                                    &state.grid,
-                                    Frame {
-                                        cursor: Some(next),
-                                        scroll: Scroll {
-                                            grid: state.grid_scroll,
-                                            document: 0.0,
-                                            region: state.region_scroll,
-                                            popovers: &state.popover_scrolls,
-                                        },
-                                        damage: &damage,
-                                        decoration_damage: &decoration_damage,
+                    None => match scrollback_view {
+                        Some(scroll_offset) => {
+                            // The view is scrolled back: render the composed history
+                            // window, gliding it by the sub-cell fraction. The
+                            // integer offset selects which rows fill the window;
+                            // rebuild on an offset change or when live output
+                            // redamaged the grid, otherwise reuse the cached rows.
+                            state.last_document_row = None;
+                            let offset = state.scrollback_visual.floor() as i32;
+                            let vt_changed = matches!(&damage, Damage::Full)
+                                || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|&d| d));
+                            let rebuild =
+                                state.last_scrollback_offset != Some(offset) || vt_changed;
+                            state.last_scrollback_offset = Some(offset);
+                            let sb_damage = if rebuild {
+                                Damage::Full
+                            } else {
+                                Damage::Partial(vec![false; state.scrollback_grid.rows()])
+                            };
+                            state.gpu.render(
+                                &state.scrollback_grid,
+                                Frame {
+                                    cursor: None,
+                                    scroll: Scroll {
+                                        grid: 0.0,
+                                        document: 0.0,
+                                        scrollback: scroll_offset,
+                                        region: 0.0,
+                                        popovers: &[],
                                     },
-                                );
-                                !settled
-                            },
-                            None => {
-                                state.gpu.render(
-                                    &state.grid,
-                                    Frame {
-                                        cursor: None,
-                                        scroll: Scroll {
-                                            grid: state.grid_scroll,
-                                            document: 0.0,
-                                            region: state.region_scroll,
-                                            popovers: &state.popover_scrolls,
+                                    damage: &sb_damage,
+                                    decoration_damage: &sb_damage,
+                                },
+                            );
+                            false
+                        },
+                        None => {
+                            // At the live bottom: render the projected live grid
+                            // (cursor and decorations), cursor easing as usual.
+                            state.last_document_row = None;
+                            state.last_scrollback_offset = None;
+                            match cursor_position(cursor) {
+                                Some(target) => {
+                                    let (next, settled) = ease(state.cursor_anim, target);
+                                    state.cursor_anim = next;
+                                    state.gpu.render(
+                                        &state.grid,
+                                        Frame {
+                                            cursor: Some(next),
+                                            scroll: Scroll {
+                                                grid: state.grid_scroll,
+                                                document: 0.0,
+                                                scrollback: 0.0,
+                                                region: state.region_scroll,
+                                                popovers: &state.popover_scrolls,
+                                            },
+                                            damage: &damage,
+                                            decoration_damage: &decoration_damage,
                                         },
-                                        damage: &damage,
-                                        decoration_damage: &decoration_damage,
-                                    },
-                                );
-                                false
-                            },
-                        }
+                                    );
+                                    !settled
+                                },
+                                None => {
+                                    state.gpu.render(
+                                        &state.grid,
+                                        Frame {
+                                            cursor: None,
+                                            scroll: Scroll {
+                                                grid: state.grid_scroll,
+                                                document: 0.0,
+                                                scrollback: 0.0,
+                                                region: state.region_scroll,
+                                                popovers: &state.popover_scrolls,
+                                            },
+                                            damage: &damage,
+                                            decoration_damage: &decoration_damage,
+                                        },
+                                    );
+                                    false
+                                },
+                            }
+                        },
                     },
                 };
 
                 // Keep the vsync-paced loop running while the cursor eases, a
-                // popover scrolls, or the grid, a region, or the document scrolls.
-                // When all settle the loop idles until the next PTY output or resize.
+                // popover scrolls, or the grid, scrollback, a region, or the
+                // document scrolls. When all settle the loop idles until the next
+                // PTY output or resize.
                 if cursor_easing
                     || popover_scrolling
                     || grid_scrolling
+                    || scrollback_scrolling
                     || region_scrolling
                     || document_scrolling
                 {
@@ -675,7 +783,19 @@ impl ApplicationHandler<PtyEvent> for App {
                         // arrow keys; Shift forces local scrollback instead.
                         let _ = state.pty.write(&alternate_scroll_bytes(lines));
                     } else {
-                        state.terminal.lock().scroll_display(lines);
+                        // Advance the whole-cell scrollback target by the rows the
+                        // move actually shifted the viewport, an idiomatic multiple
+                        // of the wheel's line delta (clamped at the history edge).
+                        // The render loop eases the visual position toward it,
+                        // scrolling the history window through every row, so the
+                        // motion is smooth and lands cell-aligned.
+                        let moved = {
+                            let mut terminal = state.terminal.lock();
+                            let before = terminal.display_offset() as i32;
+                            terminal.scroll_display(lines * SCROLLBACK_SCROLL_MULTIPLIER);
+                            terminal.display_offset() as i32 - before
+                        };
+                        state.scrollback_target += moved as f32;
                         state.window.request_redraw();
                     }
                 }
@@ -853,6 +973,37 @@ fn step_grid_scroll(scroll: f32, delta: usize) -> (f32, bool) {
     (next[0], !settled)
 }
 
+/// Floor on the scrollback ease's per-frame step, in rows, so the exponential
+/// tail locks in with a quick, even glide instead of crawling the last
+/// sub-pixels into the target. A few pixels per frame at a typical cell height;
+/// raise for a snappier lock-in, lower for a softer one.
+const SCROLLBACK_MIN_STEP: f32 = 0.15;
+
+/// Advance the eased scrollback position one frame toward `target`.
+///
+/// `scroll` and `target` are positions in rows back from the live bottom: the
+/// wheel advances `target` and this eases `scroll` toward it, so the history
+/// window scrolls through each row and settles cell-aligned on the target.
+///
+/// Closes a fixed fraction of the remaining distance each frame for an
+/// exponential ease-out, but never moves slower than [`SCROLLBACK_MIN_STEP`], so
+/// the tail finishes crisply instead of crawling sub-pixel-by-sub-pixel into the
+/// target. Returns the new position and whether it is still easing.
+fn step_scrollback_scroll(scroll: f32, target: f32) -> (f32, bool) {
+    const FACTOR: f32 = 0.35;
+    const EPSILON: f32 = 0.01;
+
+    let remaining = target - scroll;
+    if remaining.abs() < EPSILON {
+        return (target, false);
+    }
+
+    let step = (remaining.abs() * FACTOR)
+        .max(SCROLLBACK_MIN_STEP)
+        .min(remaining.abs());
+    (scroll + step.copysign(remaining), true)
+}
+
 /// Advance the scroll region's eased vertical offset one frame.
 ///
 /// `delta` is the change in the region's declared scroll offset since the last
@@ -888,7 +1039,7 @@ mod tests {
     use super::{
         alternate_scroll_bytes, cell_at, ease, encode_key, font_step, popover_overflow,
         sgr_wheel_bytes, step_document_scroll, step_grid_scroll, step_popover_scroll,
-        step_region_scroll, wheel_lines,
+        step_region_scroll, step_scrollback_scroll, wheel_lines, SCROLLBACK_MIN_STEP,
     };
     use stoatty_term::grid::{Overlay, Rgb};
     use winit::{
@@ -1140,6 +1291,29 @@ mod tests {
         let (next, easing) = step_grid_scroll(0.005, 0);
         assert_eq!(next, 0.0, "snaps onto zero");
         assert!(!easing);
+    }
+
+    #[test]
+    fn scrollback_scroll_eases_toward_a_target() {
+        // A target deeper in history eases toward it without overshooting.
+        let (next, easing) = step_scrollback_scroll(0.0, 4.0);
+        assert!(next > 0.0 && next < 4.0, "eases toward the target");
+        assert!(easing);
+
+        // Within the snap epsilon of the target: settles on it.
+        let (next, easing) = step_scrollback_scroll(3.999, 4.0);
+        assert_eq!(next, 4.0, "snaps onto the target");
+        assert!(!easing);
+
+        // Near the target the per-frame step is floored so the tail does not
+        // crawl: from twice the floor out it advances by the floor itself, not
+        // the smaller geometric step.
+        let (next, easing) = step_scrollback_scroll(0.0, SCROLLBACK_MIN_STEP * 2.0);
+        assert!(
+            (next - SCROLLBACK_MIN_STEP).abs() < 1e-5,
+            "tail advances by the floor"
+        );
+        assert!(easing);
     }
 
     #[test]

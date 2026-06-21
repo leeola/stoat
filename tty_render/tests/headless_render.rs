@@ -179,6 +179,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             scroll: Scroll {
                 grid: 0.0,
                 document: 0.0,
+                scrollback: 0.0,
                 region: 1.5,
                 popovers: &[0.0, 1.0],
             },

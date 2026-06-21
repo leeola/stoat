@@ -22,6 +22,15 @@ pub struct Scroll<'a> {
     /// so it glides the composed view pixel-by-pixel and rests at zero on a cell
     /// boundary. Zero outside document-pool rendering.
     pub document: f32,
+    /// Sub-cell scrollback-history scroll, in rows, applied to the whole grid on
+    /// top of [`Self::grid`].
+    ///
+    /// Carries the fractional remainder of an eased wheel move through the
+    /// terminal's own scrollback, whose integer rows are already baked into which
+    /// history rows fill the composed scrollback window, so it glides the window
+    /// pixel-by-pixel and rests on a cell boundary. Zero outside scrollback
+    /// rendering.
+    pub scrollback: f32,
     /// Scroll-region content scroll, applied to the cells inside the grid's
     /// scroll region instead of [`Self::grid`].
     pub region: f32,

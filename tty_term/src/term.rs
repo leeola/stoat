@@ -16,6 +16,7 @@ use crate::{
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::{Dimensions, Scroll},
+    index::{Column, Line},
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
         color::Colors,
@@ -535,6 +536,64 @@ impl Terminal {
             .then_some((frac, top as i64))
     }
 
+    /// Compose a straddled scrollback-history window into `out` at the eased
+    /// offset, or `None` to fall back to the live grid.
+    ///
+    /// `visual` is the live smooth-scroll position in rows back from the live
+    /// bottom: zero at the bottom, growing toward older history. Sizes `out` to
+    /// the viewport plus one straddle row at the top and fills it from the
+    /// history rows straddling the offset, returning the fractional row offset to
+    /// shift the rendered window by (in `[-1, 0)`) -- gap-free at both edges.
+    ///
+    /// Returns `None` at the live bottom (`visual` at or below zero), so the
+    /// renderer shows the live grid -- the cursor- and decoration-bearing
+    /// projection -- rather than a history snapshot.
+    pub fn project_scrollback(&self, out: &mut Grid, visual: f32) -> Option<f32> {
+        if visual <= 0.0 {
+            return None;
+        }
+
+        let rows = self.term.screen_lines();
+        let cols = self.term.columns();
+        if rows == 0 {
+            return None;
+        }
+        if out.rows() != rows + 1 || out.cols() != cols {
+            out.resize(rows + 1, cols);
+        }
+
+        let offset = visual.floor();
+        let frac = visual - offset;
+        let offset = offset as i32;
+
+        let grid = self.term.grid();
+        let colors = self.term.colors();
+        let topmost = grid.topmost_line().0;
+        let bottommost = grid.bottommost_line().0;
+
+        // Row 0 is the straddle row one line older than the offset's top, so a
+        // downward sub-cell shift always has an older row to reveal at the top.
+        let top_line = -offset - 1;
+        for out_row in 0..out.rows() {
+            let line = top_line + out_row as i32;
+            let source = (line >= topmost && line <= bottommost).then(|| &grid[Line(line)]);
+            for col in 0..cols {
+                *out.get_mut(out_row, col) = match source {
+                    Some(row) => {
+                        project_cell(&row[Column(col)], colors, &self.theme, &self.palette)
+                    },
+                    None => Cell::default(),
+                };
+            }
+        }
+
+        // The window begins one row above the offset's top, so it rests shifted
+        // up a full row with that straddle hidden above the viewport; as the
+        // fraction grows the window slides down, revealing the older row and
+        // advancing one whole row by the time it reaches 1.
+        Some(frac - 1.0)
+    }
+
     /// Open a page-fill redirect onto the pool slot for document page `index`.
     ///
     /// Any already-open fill is committed first, so a dropped `fill_end` cannot
@@ -611,6 +670,16 @@ impl Terminal {
     /// repaints the scrolled-back view through the usual path.
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
+    }
+
+    /// The viewport's offset back into scrollback history, in rows: zero at the
+    /// live bottom, growing as the view scrolls toward older output.
+    ///
+    /// Read before and after [`Self::scroll_display`] to recover the rows a
+    /// wheel move actually shifted the viewport, so a move clamped at the
+    /// history edge is measured by the clamped amount.
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
     }
 
     /// Reset the viewport to the live bottom of history, so the next
@@ -2555,6 +2624,43 @@ mod tests {
         let terminal = Terminal::new(2, 4, Theme::default());
         let mut out = Grid::new(0, 0);
         assert_eq!(terminal.project_document(&mut out, 0.0), None);
+    }
+
+    #[test]
+    fn project_scrollback_composes_a_straddled_history_window() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        // a, b, c scroll into history; d, e stay on the live screen.
+        terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne");
+
+        let mut out = Grid::new(0, 0);
+
+        // At the live bottom nothing is scrolled back: fall back to the live grid.
+        assert_eq!(terminal.project_scrollback(&mut out, 0.0), None);
+
+        // One row back: the window is the older straddle row (b) above the
+        // offset-1 view (c, d), shifted up a whole row so the straddle hides.
+        assert_eq!(terminal.project_scrollback(&mut out, 1.0), Some(-1.0));
+        assert_eq!(
+            (out.rows(), out.cols()),
+            (3, 4),
+            "viewport plus a straddle row"
+        );
+        assert_eq!(
+            [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
+            ['b', 'c', 'd'],
+        );
+
+        // Half a row deeper keeps the same window, shifted by the sub-cell frac.
+        assert_eq!(terminal.project_scrollback(&mut out, 1.5), Some(-0.5));
+        assert_eq!(
+            [out.get(0, 0).ch, out.get(1, 0).ch, out.get(2, 0).ch],
+            ['b', 'c', 'd'],
+        );
+
+        // At the oldest line the straddle falls above history and stays blank.
+        assert_eq!(terminal.project_scrollback(&mut out, 3.0), Some(-1.0));
+        assert_eq!(*out.get(0, 0), Cell::default(), "no row older than the top");
+        assert_eq!([out.get(1, 0).ch, out.get(2, 0).ch], ['a', 'b']);
     }
 
     fn light_border(top: u16, height: u16) -> Vec<u8> {

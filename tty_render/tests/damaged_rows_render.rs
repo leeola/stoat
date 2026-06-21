@@ -99,6 +99,7 @@ fn patched_rows_match_a_full_rebuild() {
                     scroll: Scroll {
                         grid: 0.0,
                         document: 0.0,
+                        scrollback: 0.0,
                         region: 0.0,
                         popovers: &[],
                     },
