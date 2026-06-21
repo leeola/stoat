@@ -55,6 +55,7 @@ fn emitter_package(bin: &str) -> &'static str {
         | "example_doc_tooltip_app"
         | "example_panes_app"
         | "example_scale_app"
+        | "example_smooth_scroll_pages_app"
         | "example_split_scroll_app" => "stoatty_widgets",
         _ => "stoatty_protocol",
     }
