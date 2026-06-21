@@ -10,9 +10,10 @@
 //! that offset and glides to it at sub-cell granularity.
 //!
 //! Runs in raw mode with mouse reporting on, so stoatty forwards the wheel as SGR
-//! mouse reports the event loop consumes; `q` or Ctrl-C quits. In any other
-//! terminal the `Gstoatty` frames are ignored and the wheel does nothing. Run as
-//! the PTY shell by the `smooth_scroll_pages` example.
+//! mouse reports the event loop consumes. Ctrl-F and Ctrl-B skip a whole page at
+//! a time, like a pager, to cover the document far faster than the wheel; `q` or
+//! Ctrl-C quits. In any other terminal the `Gstoatty` frames are ignored and the
+//! controls do nothing. Run as the PTY shell by the `smooth_scroll_pages` example.
 
 use ratatui::crossterm::{
     event::{
@@ -38,6 +39,10 @@ const WINDOW_PAGES: u64 = 5;
 /// Rows a single wheel notch scrolls. Kept a sub-page step so the wheel nudges
 /// the document a few lines at a time and stoatty eases across them.
 const STEP_ROWS: f32 = 3.0;
+
+/// Pages a single Ctrl-F / Ctrl-B press skips, a full viewport like a pager's
+/// page key, so the document scrolls far faster than the wheel's [`STEP_ROWS`].
+const PAGE_STEP: f32 = 1.0;
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so the scene looks the same under any
@@ -83,13 +88,17 @@ fn run() {
                 _ => continue,
             },
             Event::Key(key) => {
-                let quit = key.code == KeyCode::Char('q')
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL));
-                if quit {
-                    break;
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('c') if ctrl => break,
+                    // Page forward and back a whole viewport at a time, so the
+                    // document covers far faster than the wheel; stoatty eases
+                    // across each page.
+                    KeyCode::Char('f') if ctrl => position += PAGE_STEP,
+                    KeyCode::Char('b') if ctrl => position = (position - PAGE_STEP).max(0.0),
+                    _ => continue,
                 }
-                continue;
             },
             _ => continue,
         }
@@ -100,10 +109,14 @@ fn run() {
     }
 }
 
-/// Buffer the pool window around `position`, refilling only when the integer page
-/// changes so a sub-page move reuses the already-buffered pages.
+/// Buffer the pool window centered on `position`, refilling only when the integer
+/// page changes so a sub-page move reuses the already-buffered pages.
+///
+/// Centering leaves pages buffered on both sides of the target, so a Ctrl-F /
+/// Ctrl-B page jump stays covered while stoatty's ease lags behind it (a forward
+/// jump leaves the lagging rows below buffered, a backward one the rows above).
 fn refill_window(out: &mut Vec<u8>, position: f32, window_start: &mut Option<u64>) {
-    let start = (position as u64).saturating_sub(1);
+    let start = (position as u64).saturating_sub(WINDOW_PAGES / 2);
     if *window_start == Some(start) {
         return;
     }
