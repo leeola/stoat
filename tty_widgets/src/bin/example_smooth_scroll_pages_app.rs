@@ -2,7 +2,11 @@
 //! scrolls a tall numbered document the program streams into the recycled page
 //! pool, and stoatty eases the live offset toward each reported target.
 //!
-//! Each page is one viewport of numbered lines, pushed into its pool slot with a
+//! The pool occupies a declared sub-rectangle (`Gstoatty;pool_region`), not the
+//! whole viewport: a reversed title bar on the top row, a status line on the
+//! bottom row, and a left border down the side are written once to the live grid
+//! as ordinary VT and stay fixed while the pooled rows scroll beneath them. Each
+//! page is one region of numbered lines, pushed into its pool slot with a
 //! `fill`/`fill_end` redirect pair so the content lands off the live grid. The
 //! program keeps a window of pages buffered around the cursor and, on each wheel
 //! notch, advances a fractional document position by a few rows and emits a
@@ -13,7 +17,8 @@
 //! mouse reports the event loop consumes. Ctrl-F and Ctrl-B skip a whole page at
 //! a time, like a pager, to cover the document far faster than the wheel; `q` or
 //! Ctrl-C quits. In any other terminal the `Gstoatty` frames are ignored and the
-//! controls do nothing. Run as the PTY shell by the `smooth_scroll_pages` example.
+//! static chrome renders as a plain framed screen. Run as the PTY shell by the
+//! `smooth_scroll_pages` example.
 
 use ratatui::crossterm::{
     event::{
@@ -24,13 +29,22 @@ use ratatui::crossterm::{
 };
 use std::io::{self, Write};
 use stoatty_protocol::command::{
-    encode_fill_end_into, encode_fill_into, encode_scroll_into, ScrollCommand,
+    encode_fill_end_into, encode_fill_into, encode_pool_region_into, encode_scroll_into,
+    PoolRegionCommand, ScrollCommand,
 };
 
 /// Viewport size in cells, matching the window the `smooth_scroll_pages` example
 /// opens.
 const COLS: usize = 80;
 const VIEWPORT_H: usize = 24;
+
+/// The pooled sub-rectangle inside the viewport: a one-row header above and a
+/// one-row footer below, with a two-column left margin for the border, so the
+/// pool scrolls within a frame of static chrome rather than the whole screen.
+const REGION_TOP: u16 = 1;
+const REGION_LEFT: u16 = 2;
+const REGION_W: usize = 76;
+const REGION_H: usize = 22;
 
 /// Pages kept buffered around the cursor, the pool's capacity, so the visible
 /// region and its straddle neighbour are always present.
@@ -40,7 +54,7 @@ const WINDOW_PAGES: u64 = 5;
 /// the document a few lines at a time and stoatty eases across them.
 const STEP_ROWS: f32 = 3.0;
 
-/// Pages a single Ctrl-F / Ctrl-B press skips, a full viewport like a pager's
+/// Pages a single Ctrl-F / Ctrl-B press skips, a full region like a pager's
 /// page key, so the document scrolls far faster than the wheel's [`STEP_ROWS`].
 const PAGE_STEP: f32 = 1.0;
 
@@ -52,6 +66,10 @@ const EDITOR_FG: [u8; 3] = [171, 178, 191];
 
 /// Color of each page's header line, so page seams stay legible while scrolling.
 const HEADER_FG: [u8; 3] = [97, 175, 239];
+
+/// Chrome foreground (`#e5c07b`, One Dark yellow) for the title bar, footer, and
+/// border, so the static frame reads distinctly from the scrolling body.
+const CHROME_FG: [u8; 3] = [229, 192, 123];
 
 fn main() {
     enable_raw_mode().expect("enable raw mode");
@@ -71,10 +89,21 @@ fn main() {
 /// Scroll the document under wheel control until the user quits, returning so
 /// [`main`] can restore the terminal.
 fn run() {
-    let step = STEP_ROWS / VIEWPORT_H as f32;
+    let step = STEP_ROWS / REGION_H as f32;
     let mut out = Vec::new();
     let mut position = 0.0_f32;
     let mut window_start = None;
+
+    write_chrome(&mut out);
+    encode_pool_region_into(
+        &mut out,
+        &PoolRegionCommand {
+            top: REGION_TOP,
+            left: REGION_LEFT,
+            width: REGION_W as u16,
+            height: REGION_H as u16,
+        },
+    );
 
     refill_window(&mut out, position, &mut window_start);
     emit_scroll(&mut out, position);
@@ -92,7 +121,7 @@ fn run() {
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('c') if ctrl => break,
-                    // Page forward and back a whole viewport at a time, so the
+                    // Page forward and back a whole region at a time, so the
                     // document covers far faster than the wheel; stoatty eases
                     // across each page.
                     KeyCode::Char('f') if ctrl => position += PAGE_STEP,
@@ -107,6 +136,49 @@ fn run() {
         emit_scroll(&mut out, position);
         flush(&mut out);
     }
+}
+
+/// Paint the static frame around the pool region: a reversed title bar on the top
+/// row, a status line on the bottom row, and a vertical border down the column
+/// left of the region.
+///
+/// Ordinary VT writes to the live grid, so they stay fixed while the pooled rows
+/// scroll inside the region and degrade to a plain framed screen in any other
+/// terminal.
+fn write_chrome(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\x1b[H");
+    let _ = write!(
+        out,
+        "\x1b[7;38;2;{};{};{}m",
+        CHROME_FG[0], CHROME_FG[1], CHROME_FG[2],
+    );
+    let title = " stoatty pool-region smooth scroll  (wheel / Ctrl-F / Ctrl-B, q to quit) ";
+    let _ = write!(out, "{title:<COLS$}");
+    out.extend_from_slice(b"\x1b[0m");
+
+    for r in 0..REGION_H {
+        let row = REGION_TOP as usize + r + 1;
+        let _ = write!(
+            out,
+            "\x1b[{};{}H\x1b[38;2;{};{};{}m\u{2502}\x1b[0m",
+            row, REGION_LEFT, CHROME_FG[0], CHROME_FG[1], CHROME_FG[2],
+        );
+    }
+
+    let _ = write!(
+        out,
+        "\x1b[{};1H\x1b[38;2;{};{};{};48;2;{};{};{}m",
+        VIEWPORT_H,
+        CHROME_FG[0],
+        CHROME_FG[1],
+        CHROME_FG[2],
+        EDITOR_BG[0],
+        EDITOR_BG[1],
+        EDITOR_BG[2],
+    );
+    let footer = " ready ";
+    let _ = write!(out, "{footer:<COLS$}");
+    out.extend_from_slice(b"\x1b[0m");
 }
 
 /// Buffer the pool window centered on `position`, refilling only when the integer
@@ -143,16 +215,16 @@ fn emit_scroll(out: &mut Vec<u8>, position: f32) {
     );
 }
 
-/// Append a full viewport of one page's numbered lines, homing the cursor first
-/// so the bytes paint a fresh pool slot.
+/// Append one region of a page's numbered lines, homing the cursor first so the
+/// bytes paint a fresh pool slot sized to the region rather than the viewport.
 fn write_page(out: &mut Vec<u8>, page: u64) {
     out.extend_from_slice(b"\x1b[H");
 
-    for row in 0..VIEWPORT_H {
-        let line = page as usize * VIEWPORT_H + row + 1;
+    for row in 0..REGION_H {
+        let line = page as usize * REGION_H + row + 1;
         if row == 0 {
-            let first = page as usize * VIEWPORT_H + 1;
-            let last = first + VIEWPORT_H - 1;
+            let first = page as usize * REGION_H + 1;
+            let last = first + REGION_H - 1;
             write_line(
                 out,
                 HEADER_FG,
@@ -166,14 +238,14 @@ fn write_page(out: &mut Vec<u8>, page: u64) {
             );
         }
 
-        if row + 1 < VIEWPORT_H {
+        if row + 1 < REGION_H {
             out.extend_from_slice(b"\r\n");
         }
     }
 }
 
-/// Append one row of `text` in `fg` over the editor background, padded to [`COLS`]
-/// so it overwrites whatever the row held before.
+/// Append one row of `text` in `fg` over the editor background, padded to
+/// [`REGION_W`] so it overwrites whatever the row held before.
 fn write_line(out: &mut Vec<u8>, fg: [u8; 3], text: &str) {
     let _ = write!(
         out,
@@ -182,8 +254,8 @@ fn write_line(out: &mut Vec<u8>, fg: [u8; 3], text: &str) {
     );
 
     let mut text = text.to_string();
-    text.truncate(COLS);
-    let _ = write!(out, "{text:<COLS$}");
+    text.truncate(REGION_W);
+    let _ = write!(out, "{text:<REGION_W$}");
 
     out.extend_from_slice(b"\x1b[0m");
 }
