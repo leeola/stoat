@@ -694,6 +694,16 @@ impl Terminal {
         self.term.grid().display_offset()
     }
 
+    /// The app-declared sub-rectangle the document pool composites into, or
+    /// `None` when the pool covers the whole viewport.
+    ///
+    /// Set by `Gstoatty;pool_region`. The render loop reads it to composite the
+    /// pooled pages over a region of the live grid -- leaving static chrome
+    /// around the region fixed -- rather than replacing the whole viewport.
+    pub fn pool_region(&self) -> Option<PoolRegionCommand> {
+        self.pool_region
+    }
+
     /// Reset the viewport to the live bottom of history, so the next
     /// [`Self::project`] shows current output again. Used to pin the view on
     /// keyboard input.

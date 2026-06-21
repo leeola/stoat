@@ -20,12 +20,13 @@ use std::{
     },
     time::Instant,
 };
+use stoatty_protocol::command::PoolRegionCommand;
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, Scroll},
     render,
 };
 use stoatty_term::{
-    grid::{Grid, Overlay},
+    grid::{Cell, Grid, Overlay},
     term::{Cursor, CursorShape, Damage, Terminal},
     theme::Theme,
 };
@@ -267,6 +268,11 @@ struct State {
     /// shifts them, rebuilding only when the integer row changes. `None` when the
     /// previous frame rendered the live grid.
     last_document_row: Option<i64>,
+    /// The full-viewport grid the document pool is composited into when a
+    /// `pool_region` is declared: the region's pooled rows copied into the
+    /// declared sub-rectangle, the rest left blank since the scissor clips the
+    /// composite to that rectangle over the live grid. Reused across frames.
+    pool_grid: Grid,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -387,6 +393,7 @@ impl ApplicationHandler<PtyEvent> for App {
             document_scroll: 0.0,
             document_grid: Grid::new(0, 0),
             last_document_row: None,
+            pool_grid: Grid::new(0, 0),
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
         });
@@ -490,6 +497,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     scroll_target,
                     reposition,
                     display_offset,
+                    pool_region,
                 ) = {
                     let mut terminal = state.terminal.lock();
                     let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
@@ -497,6 +505,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     let scroll_target = terminal.scroll_target();
                     let reposition = terminal.take_reposition();
                     let display_offset = terminal.display_offset();
+                    let pool_region = terminal.pool_region();
                     (
                         cursor,
                         scroll_delta,
@@ -505,6 +514,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         scroll_target,
                         reposition,
                         display_offset,
+                        pool_region,
                     )
                 };
 
@@ -590,35 +600,95 @@ impl ApplicationHandler<PtyEvent> for App {
 
                 let cursor_easing = match document_view {
                     Some((frac, top)) => {
-                        // A pool window covers the offset: render the composed
-                        // document grid, gliding it by the sub-cell fraction. The
-                        // integer top alone selects which rows fill the grid, so an
-                        // unchanged top reuses the cached glyphs and only shifts
-                        // them; a new top rebuilds.
                         let rebuild = state.last_document_row != Some(top);
                         state.last_document_row = Some(top);
                         state.last_scrollback_offset = None;
-                        let doc_damage = if rebuild {
-                            Damage::Full
-                        } else {
-                            Damage::Partial(vec![false; state.document_grid.rows()])
-                        };
-                        state.gpu.render(
-                            &state.document_grid,
-                            Frame {
-                                cursor: None,
-                                scroll: Scroll {
-                                    grid: 0.0,
-                                    document: -frac,
-                                    scrollback: 0.0,
-                                    region: 0.0,
-                                    popovers: &[],
-                                },
-                                damage: &doc_damage,
-                                decoration_damage: &doc_damage,
+
+                        match pool_region {
+                            Some(region) => {
+                                // The pool covers a declared sub-rectangle, not the
+                                // whole viewport: render the live grid as the static
+                                // chrome base (cursor and all), then composite the
+                                // pooled rows over the region, gliding them by the
+                                // sub-cell fraction and clipping to the region.
+                                copy_pool_region(
+                                    &mut state.pool_grid,
+                                    &state.document_grid,
+                                    &state.grid,
+                                    region,
+                                );
+                                let [cw, ch] =
+                                    render::cell_size(state.font_size, state.scale_factor as f32);
+                                let scissor = [
+                                    (region.left as f32 * cw) as u32,
+                                    (region.top as f32 * ch) as u32,
+                                    (region.width as f32 * cw) as u32,
+                                    (region.height as f32 * ch) as u32,
+                                ];
+
+                                let (base_cursor, easing) = match cursor_position(cursor) {
+                                    Some(target) => {
+                                        let (next, settled) = ease(state.cursor_anim, target);
+                                        state.cursor_anim = next;
+                                        (Some(next), !settled)
+                                    },
+                                    None => (None, false),
+                                };
+                                state.gpu.render_with_pool(
+                                    &state.grid,
+                                    Frame {
+                                        cursor: base_cursor,
+                                        scroll: Scroll {
+                                            grid: state.grid_scroll,
+                                            document: 0.0,
+                                            scrollback: 0.0,
+                                            region: state.region_scroll,
+                                            popovers: &state.popover_scrolls,
+                                        },
+                                        // Force a full rebuild: composite_pool prepares the
+                                        // shared background/text instance buffers with the
+                                        // pool's cells, so the live grid must rebuild every
+                                        // frame rather than reuse those polluted instances
+                                        // and paint the pool over the static chrome.
+                                        damage: &Damage::Full,
+                                        decoration_damage: &Damage::Full,
+                                    },
+                                    &state.pool_grid,
+                                    scissor,
+                                    -frac,
+                                );
+                                easing
                             },
-                        );
-                        false
+                            None => {
+                                // No region declared: the pool replaces the whole
+                                // viewport. Render the composed document grid,
+                                // gliding it by the sub-cell fraction. The integer
+                                // top alone selects which rows fill the grid, so an
+                                // unchanged top reuses the cached glyphs and only
+                                // shifts them; a new top rebuilds.
+                                let doc_damage = if rebuild {
+                                    Damage::Full
+                                } else {
+                                    Damage::Partial(vec![false; state.document_grid.rows()])
+                                };
+                                state.gpu.render(
+                                    &state.document_grid,
+                                    Frame {
+                                        cursor: None,
+                                        scroll: Scroll {
+                                            grid: 0.0,
+                                            document: -frac,
+                                            scrollback: 0.0,
+                                            region: 0.0,
+                                            popovers: &[],
+                                        },
+                                        damage: &doc_damage,
+                                        decoration_damage: &doc_damage,
+                                    },
+                                );
+                                false
+                            },
+                        }
                     },
                     None => match scrollback_view {
                         Some(scroll_offset) => {
@@ -806,6 +876,43 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.pointer_cell = cell_at(position.x, position.y, cell_size, rows, cols);
             },
             _ => {},
+        }
+    }
+}
+
+/// Build the full-viewport `pool_grid` for a region composite: sized to
+/// `live_grid`, blank, with `document_grid`'s composed rows copied into the
+/// `region` sub-rectangle.
+///
+/// `document_grid` holds the pooled `region.height + 1` rows by `region.width`
+/// columns (one straddle row past the region) the term composed; they land at
+/// (`region.top`, `region.left`). Cells of `document_grid` that would fall
+/// outside `pool_grid` are skipped, so a region declared past the viewport
+/// clips rather than panicking. The scissor the renderer applies clips the
+/// composite to the region, so the blank surround is never drawn.
+fn copy_pool_region(
+    pool_grid: &mut Grid,
+    document_grid: &Grid,
+    live_grid: &Grid,
+    region: PoolRegionCommand,
+) {
+    if pool_grid.rows() != live_grid.rows() || pool_grid.cols() != live_grid.cols() {
+        pool_grid.resize(live_grid.rows(), live_grid.cols());
+    } else {
+        for row in 0..pool_grid.rows() {
+            for col in 0..pool_grid.cols() {
+                *pool_grid.get_mut(row, col) = Cell::default();
+            }
+        }
+    }
+
+    for r in 0..document_grid.rows() {
+        for c in 0..document_grid.cols() {
+            let row = region.top as usize + r;
+            let col = region.left as usize + c;
+            if row < pool_grid.rows() && col < pool_grid.cols() {
+                *pool_grid.get_mut(row, col) = *document_grid.get(r, c);
+            }
         }
     }
 }

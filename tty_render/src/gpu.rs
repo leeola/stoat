@@ -23,7 +23,10 @@ use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::thread;
-use stoatty_term::grid::{Grid, Rgb};
+use stoatty_term::{
+    grid::{Grid, Rgb},
+    term::Damage,
+};
 use wgpu::{
     Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
     DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations, PowerPreference,
@@ -220,6 +223,85 @@ impl Renderer {
             // full surface before the icons draw on top of the overlays.
             render_pass.set_scissor_rect(0, 0, self.width, self.height);
             self.icon.draw(&mut render_pass);
+        }
+
+        queue.submit([encoder.finish()]);
+    }
+
+    /// Composite `pool_grid`'s backgrounds and text over an already-rendered
+    /// `view`, clipped to `scissor` and shifted up by `shift_rows` rows.
+    ///
+    /// Loads (does not clear) `view`, so it overwrites only the scissor
+    /// rectangle with the pool's cells, leaving the live grid drawn elsewhere by
+    /// a prior [`Self::render_into`] intact. `scissor` is `[x, y, width,
+    /// height]` in physical pixels. `shift_rows` is the sub-cell document scroll
+    /// applied to both passes so the composed pool glides pixel-by-pixel; pass a
+    /// negative value to shift the rows up.
+    ///
+    /// Draws only the background and text passes: no cursor, decorations,
+    /// regions, overlays, icons, or bars, since the pool carries plain composed
+    /// page rows.
+    pub fn composite_pool(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        view: &TextureView,
+        pool_grid: &Grid,
+        scissor: [u32; 4],
+        shift_rows: f32,
+    ) {
+        let resolution = [self.width as f32, self.height as f32];
+        self.background.prepare(
+            device,
+            queue,
+            pool_grid,
+            resolution,
+            CursorState {
+                pos: None,
+                color: self.cursor_color,
+            },
+            shift_rows,
+            &Damage::Full,
+        );
+
+        let frame = Frame {
+            cursor: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: shift_rows,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &Damage::Full,
+            decoration_damage: &Damage::Full,
+        };
+        self.text
+            .prepare(device, queue, pool_grid, resolution, &frame);
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("pool composite"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            render_pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
+            self.background.draw(&mut render_pass);
+            self.text.draw(&mut render_pass);
         }
 
         queue.submit([encoder.finish()]);
@@ -432,6 +514,56 @@ impl GpuContext {
         });
         self.renderer
             .render_into(&self.device, &self.queue, &view, grid, frame);
+        surface_frame.present();
+    }
+
+    /// Draw `live_grid` to the window surface, then composite `pool_grid` over
+    /// the `scissor` sub-rectangle, in one presented frame.
+    ///
+    /// `live_grid` and `frame` render exactly as [`Self::render`] does -- the
+    /// static chrome and its cursor. `pool_grid`, `scissor`, and `shift_rows`
+    /// then drive [`Renderer::composite_pool`] over the same view, so the eased
+    /// document pool overwrites only the declared region. The two passes submit
+    /// separately into the one view (the second loading rather than clearing),
+    /// so the live grid is drawn first and the pool over it.
+    ///
+    /// Skips and re-configures on the same transient surface states as
+    /// [`Self::render`].
+    pub fn render_with_pool(
+        &mut self,
+        live_grid: &Grid,
+        frame: Frame<'_>,
+        pool_grid: &Grid,
+        scissor: [u32; 4],
+        shift_rows: f32,
+    ) {
+        let surface_frame = match self.surface.get_current_texture() {
+            CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
+                frame
+            },
+            CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            },
+            CurrentSurfaceTexture::Timeout
+            | CurrentSurfaceTexture::Occluded
+            | CurrentSurfaceTexture::Validation => return,
+        };
+
+        let view = surface_frame.texture.create_view(&TextureViewDescriptor {
+            format: Some(self.view_format),
+            ..Default::default()
+        });
+        self.renderer
+            .render_into(&self.device, &self.queue, &view, live_grid, frame);
+        self.renderer.composite_pool(
+            &self.device,
+            &self.queue,
+            &view,
+            pool_grid,
+            scissor,
+            shift_rows,
+        );
         surface_frame.present();
     }
 }
