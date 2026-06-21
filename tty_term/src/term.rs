@@ -136,6 +136,11 @@ pub struct Terminal {
     /// offset toward. Defaults to the document origin until a command moves it;
     /// the terminal only records it, while the render loop owns the easing.
     scroll_target: DocumentOffset,
+    /// A pending discontinuous-jump request from `Gstoatty;reposition`, the
+    /// destination page the render loop should re-anchor the live offset near.
+    /// Consumed once via [`Terminal::take_reposition`]; `None` between a jump and
+    /// its consumption.
+    reposition: Option<u64>,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -263,6 +268,7 @@ impl Terminal {
             page_pool: PagePool::new(rows, cols, PAGE_POOL_CAPACITY),
             fill: None,
             scroll_target: DocumentOffset::default(),
+            reposition: None,
         }
     }
 
@@ -463,6 +469,13 @@ impl Terminal {
                     fraction: scroll.fraction as f32 / FRACTION_SCALE,
                 };
             },
+            Command::Reposition(reposition) => {
+                self.scroll_target = DocumentOffset {
+                    page: reposition.page,
+                    fraction: 0.0,
+                };
+                self.reposition = Some(reposition.page);
+            },
             // A reset is also a fill close trigger: commit any open page before
             // clearing decoration state and restoring the live grid.
             Command::Reset => {
@@ -479,6 +492,16 @@ impl Terminal {
     /// before any command arrives.
     pub fn scroll_target(&self) -> DocumentOffset {
         self.scroll_target
+    }
+
+    /// Take the pending discontinuous-jump destination, clearing it.
+    ///
+    /// Set by `Gstoatty;reposition`. The render loop consumes it once per arrival
+    /// to re-anchor the live scroll offset near the destination before easing
+    /// onto the target, so a far jump lands softly instead of dragging across the
+    /// unbuffered gap.
+    pub fn take_reposition(&mut self) -> Option<u64> {
+        self.reposition.take()
     }
 
     /// Compose the document-pool visible region into `out` at the eased page
@@ -1487,10 +1510,11 @@ mod tests {
     };
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_line_layout,
-        encode_popover, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-        encode_text_run, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand,
-        IconCommand, IconKind as ProtoIconKind, LineLayoutCommand, PopoverCommand, ScaleCommand,
-        ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
+        encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
+        BorderStyle as ProtoBorderStyle, FillCommand, IconCommand, IconKind as ProtoIconKind,
+        LineLayoutCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
+        ScrollRegionCommand, TextRunCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -2480,6 +2504,27 @@ mod tests {
                 page: 9,
                 fraction: 0.25,
             }
+        );
+    }
+
+    #[test]
+    fn reposition_sets_the_target_and_a_one_shot_jump() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(&encode_reposition(&RepositionCommand { page: 1_000 }));
+
+        assert_eq!(
+            terminal.scroll_target(),
+            DocumentOffset {
+                page: 1_000,
+                fraction: 0.0,
+            }
+        );
+        assert_eq!(terminal.take_reposition(), Some(1_000));
+        assert_eq!(
+            terminal.take_reposition(),
+            None,
+            "the jump is consumed once"
         );
     }
 

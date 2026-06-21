@@ -40,6 +40,12 @@ pub enum Command {
     /// page-plus-fraction position over subsequent frames, so the program
     /// reports where it wants the viewport and the terminal owns the animation.
     Scroll(ScrollCommand),
+    /// Jump the smooth-scroll target to a document page across an unbuffered gap.
+    ///
+    /// Re-anchors the live offset to a local neighbour of [`RepositionCommand`]'s
+    /// page and lands softly on it, for a jump too far to ease across the pool
+    /// window. Pair with the `fill`s that buffer the destination neighbourhood.
+    Reposition(RepositionCommand),
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
@@ -233,6 +239,19 @@ pub struct FillCommand {
 pub struct ScrollCommand {
     pub page: u64,
     pub fraction: u16,
+}
+
+/// A discontinuous smooth-scroll jump to a document page.
+///
+/// `page` is the destination document page index. Unlike [`ScrollCommand`], which
+/// the terminal eases toward across the buffered window, this re-anchors the live
+/// offset to a local neighbour of the destination and lands softly on it, so a
+/// jump too far to animate within the pool does not drag across the unbuffered
+/// gap. The program pushes a window of pages around the destination before
+/// sending it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RepositionCommand {
+    pub page: u64,
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -532,6 +551,23 @@ pub fn encode_scroll_into(out: &mut Vec<u8>, command: &ScrollCommand) {
     frame::end(out);
 }
 
+/// Encode a [`RepositionCommand`] as a full `Gstoatty;reposition` frame.
+///
+/// The destination page index rides in a single fixed 8-byte big-endian
+/// argument, the same shape as [`encode_fill`]'s page index.
+pub fn encode_reposition(command: &RepositionCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_reposition_into(&mut out, command.page);
+    out
+}
+
+/// Append a `Gstoatty;reposition` frame for destination `page` to `out`.
+pub fn encode_reposition_into(out: &mut Vec<u8>, page: u64) {
+    frame::begin(out, "reposition");
+    frame::push_arg(out, |w| w.write_all(&page.to_be_bytes()));
+    frame::end(out);
+}
+
 /// Encode a [`Command::Reset`] as a full `Gstoatty;reset` frame for an emitter.
 ///
 /// The frame carries no arguments; receiving it clears all accumulated stoatty
@@ -580,6 +616,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Fill(c) => encode_fill_into(out, c.index),
         Command::FillEnd => encode_fill_end_into(out),
         Command::Scroll(c) => encode_scroll_into(out, c),
+        Command::Reposition(c) => encode_reposition_into(out, c.page),
         Command::Reset => encode_reset_into(out),
     }
 }
@@ -601,6 +638,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "fill" => decode_fill(&frame.args).map(Command::Fill),
         "fill_end" => Some(Command::FillEnd),
         "scroll" => decode_scroll(&frame.args).map(Command::Scroll),
+        "reposition" => decode_reposition(&frame.args).map(Command::Reposition),
         "reset" => Some(Command::Reset),
         _ => None,
     }
@@ -732,6 +770,14 @@ fn decode_scroll(args: &[Vec<u8>]) -> Option<ScrollCommand> {
     })
 }
 
+fn decode_reposition(args: &[Vec<u8>]) -> Option<RepositionCommand> {
+    let arg: &[u8; 8] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(RepositionCommand {
+        page: u64::from_be_bytes(*arg),
+    })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -772,10 +818,11 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
-        encode_line_layout, encode_popover, encode_reset, encode_scale, encode_scroll,
-        encode_scroll_region, encode_text_run, BarCommand, BorderCommand, BorderStyle, Command,
-        FillCommand, IconCommand, IconKind, LineLayoutCommand, PopoverCommand, ScaleCommand,
-        ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        encode_line_layout, encode_popover, encode_reposition, encode_reset, encode_scale,
+        encode_scroll, encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
+        BorderStyle, Command, FillCommand, IconCommand, IconKind, LineLayoutCommand,
+        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+        TextRunCommand,
     };
 
     #[test]
@@ -1007,6 +1054,24 @@ mod tests {
     }
 
     #[test]
+    fn reposition_round_trips() {
+        let command = RepositionCommand {
+            page: 6_000_000_000,
+        };
+
+        assert_eq!(
+            decode(&encode_reposition(&command)),
+            Some(Command::Reposition(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_reposition_payload() {
+        // The single arg here decodes to 3 bytes, not the 8 a page index needs.
+        assert!(decode(b"Gstoatty;reposition;YWJj").is_none());
+    }
+
+    #[test]
     fn reset_round_trips() {
         assert_eq!(decode(&encode_reset()), Some(Command::Reset));
     }
@@ -1087,6 +1152,7 @@ mod tests {
                 page: 12,
                 fraction: 30_000,
             }),
+            Command::Reposition(RepositionCommand { page: 1_000 }),
             Command::Reset,
         ];
 

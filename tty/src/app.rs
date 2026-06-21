@@ -451,17 +451,19 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let (cursor, scroll_delta, damage, decoration_damage, scroll_target) = {
+                let (cursor, scroll_delta, damage, decoration_damage, scroll_target, reposition) = {
                     let mut terminal = state.terminal.lock();
                     let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
                     let decoration_damage = terminal.take_decoration_damage();
                     let scroll_target = terminal.scroll_target();
+                    let reposition = terminal.take_reposition();
                     (
                         cursor,
                         scroll_delta,
                         damage,
                         decoration_damage,
                         scroll_target,
+                        reposition,
                     )
                 };
 
@@ -504,6 +506,14 @@ impl ApplicationHandler<PtyEvent> for App {
                     },
                 };
                 state.region_scroll = region_scroll;
+
+                // A reposition jump re-anchors the live offset to a local
+                // neighbour of the destination, so the ease that follows lands
+                // softly within the freshly-buffered window instead of dragging
+                // across the unbuffered gap.
+                if let Some(target) = reposition {
+                    state.document_scroll = (target as f32 - REPOSITION_LAND_PAGES).max(0.0);
+                }
 
                 let (document_scroll, document_scrolling) =
                     step_document_scroll(state.document_scroll, scroll_target.pages());
@@ -855,6 +865,12 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
     let (next, settled) = ease([seeded, 0.0], [0.0, 0.0]);
     (next[0], !settled)
 }
+
+/// Pages before a reposition target the live offset re-anchors to, so a
+/// discontinuous jump lands with a one-page soft glide onto the destination
+/// rather than appearing instantly. The app buffers from this many pages before
+/// the target so the landing glide draws pooled content.
+const REPOSITION_LAND_PAGES: f32 = 1.0;
 
 /// Advance the document's eased smooth-scroll offset one frame toward `target`.
 ///

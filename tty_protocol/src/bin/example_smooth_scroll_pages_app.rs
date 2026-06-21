@@ -8,11 +8,12 @@
 //! targets, stepping the sub-page fraction across each page and advancing the
 //! page index, so stoatty eases the live offset across the buffered pages.
 //!
-//! Until the renderer reads the pool at the live offset, document scroll is
-//! invisible, so the loop also paints the current page onto the live grid as a
-//! degradation view: today the page snaps per page with no easing; once the pool
-//! read lands the same run eases smoothly and the live-grid paint is ignored.
-//! Run as the PTY shell by the `smooth_scroll_pages` example.
+//! The loop also paints the current page onto the live grid as a degradation
+//! view for any offset the pool does not cover. After the contiguous sweep it
+//! demonstrates discontinuous `Gstoatty;reposition` jumps of growing distance,
+//! each buffering a fresh window around its destination and landing softly on it
+//! from the page above. Run as the PTY shell by the `smooth_scroll_pages`
+//! example.
 
 use std::{
     io::{self, Write},
@@ -20,7 +21,8 @@ use std::{
     time::Duration,
 };
 use stoatty_protocol::command::{
-    encode_fill_end_into, encode_fill_into, encode_scroll_into, ScrollCommand,
+    encode_fill_end_into, encode_fill_into, encode_reposition_into, encode_scroll_into,
+    ScrollCommand,
 };
 
 /// Viewport size in cells, matching the window the `pool_scroll` example opens.
@@ -52,19 +54,44 @@ const HEADER_FG: [u8; 3] = [97, 175, 239];
 
 fn main() {
     let mut out = Vec::new();
-
     out.extend_from_slice(b"\x1b[?25l");
-    for page in 0..NUM_PAGES {
-        encode_fill_into(&mut out, page);
-        write_page(&mut out, page);
-        encode_fill_end_into(&mut out);
-    }
-    flush(&mut out);
 
     loop {
+        // Contiguous smooth scroll over a buffered window of pages.
+        fill_pages(&mut out, 0, NUM_PAGES);
         scroll_through(&mut out, (0..NUM_PAGES).collect());
         scroll_through(&mut out, (0..NUM_PAGES).rev().collect());
+
+        // Discontinuous jumps of growing distance, each landing softly on its
+        // destination from a freshly-buffered neighbourhood.
+        for target in [NUM_PAGES + 8, 60, 800] {
+            jump_to(&mut out, target);
+        }
+        jump_to(&mut out, 0);
     }
+}
+
+/// Stream `count` pages starting at document page `start` into their pool slots.
+fn fill_pages(out: &mut Vec<u8>, start: u64, count: u64) {
+    for page in start..start + count {
+        encode_fill_into(out, page);
+        write_page(out, page);
+        encode_fill_end_into(out);
+    }
+    flush(out);
+}
+
+/// Buffer a window around `target` and jump to it with `reposition`, so stoatty
+/// re-anchors and eases onto the destination from the page above.
+///
+/// The window starts one page before the target -- the soft-landing start the
+/// terminal re-anchors to -- and spans the pool's capacity, so the landing glide
+/// draws pooled content rather than the degradation grid.
+fn jump_to(out: &mut Vec<u8>, target: u64) {
+    fill_pages(out, target.saturating_sub(1), NUM_PAGES);
+    encode_reposition_into(out, target);
+    flush(out);
+    thread::sleep(REST_DELAY);
 }
 
 /// Drive the viewport across `pages` in order, emitting one degradation paint and
