@@ -60,13 +60,9 @@ impl Pty {
             })
             .map_err(io::Error::other)?;
 
-        let mut command = CommandBuilder::new(program);
-        command.args(args);
-        command.env("TERM", "xterm-256color");
-
         let child = pair
             .slave
-            .spawn_command(command)
+            .spawn_command(shell_command(program, args))
             .map_err(io::Error::other)?;
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
@@ -108,6 +104,20 @@ impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
+}
+
+/// Build the shell command with the stoatty environment.
+///
+/// `TERM` selects the terminfo the shell and its children load. `STOATTY` marks
+/// the shell as running under stoatty, so a child can gate stoatty-only output on
+/// its presence synchronously at startup, without the `XTVERSION` query round
+/// trip.
+fn shell_command(program: &str, args: &[String]) -> CommandBuilder {
+    let mut command = CommandBuilder::new(program);
+    command.args(args);
+    command.env("TERM", "xterm-256color");
+    command.env("STOATTY", "1");
+    command
 }
 
 /// Size of the reader thread's buffer. Each read fills up to this many bytes
@@ -195,8 +205,9 @@ fn passwd_shell() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_loop, shell_or_default, PtyOutput, READ_BUF_SIZE};
+    use super::{read_loop, shell_command, shell_or_default, PtyOutput, READ_BUF_SIZE};
     use std::{
+        ffi::OsStr,
         io::{self, Cursor, Write},
         thread,
     };
@@ -223,6 +234,13 @@ mod tests {
     fn shell_or_default_falls_back_to_bin_sh() {
         assert_eq!(shell_or_default(None, None), "/bin/sh");
         assert_eq!(shell_or_default(shell(""), shell("")), "/bin/sh");
+    }
+
+    #[test]
+    fn shell_command_sets_term_and_stoatty_env() {
+        let command = shell_command("/bin/sh", &[]);
+        assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
+        assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
     }
 
     #[test]
