@@ -28,8 +28,8 @@ use alacritty_terminal::{
 use parking_lot::Mutex;
 use std::{mem, sync::Arc, time::Instant};
 use stoatty_protocol::command::{
-    self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PopoverCommand,
-    ScaleCommand, ScrollRegionCommand, TextRunCommand,
+    self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PoolRegionCommand,
+    PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -130,6 +130,10 @@ pub struct Terminal {
     /// `reset`), when the painted page is committed onto [`Self::page_pool`].
     /// `None` while writing the live grid.
     fill: Option<FillTarget>,
+    /// The sub-rectangle the document pool composites into, set by a
+    /// `Gstoatty;pool_region` command. `None` until declared, in which case the
+    /// pool spans the full viewport.
+    pool_region: Option<PoolRegionCommand>,
     /// The latest app-declared smooth-scroll target, set by a `Gstoatty;scroll`
     /// command.
     ///
@@ -268,6 +272,7 @@ impl Terminal {
             last_history: 0,
             page_pool: PagePool::new(rows, cols, PAGE_POOL_CAPACITY),
             fill: None,
+            pool_region: None,
             scroll_target: DocumentOffset::default(),
             reposition: None,
         }
@@ -446,6 +451,11 @@ impl Terminal {
                 self.scroll_region = Some(region);
                 self.decorations_dirty.scroll_region = true;
             },
+            Command::PoolRegion(region) => {
+                self.page_pool
+                    .rebuild(region.height as usize, region.width as usize);
+                self.pool_region = Some(region);
+            },
             Command::Icon(icon) => {
                 self.icons.push(icon);
                 self.decorations_dirty.icons = true;
@@ -517,12 +527,14 @@ impl Terminal {
     /// degradation path taken whenever no pool window covers the offset, so the
     /// renderer shows the projected live grid instead of holes.
     pub fn project_document(&self, out: &mut Grid, doc_scroll: f32) -> Option<(f32, i64)> {
-        let page_rows = self.term.screen_lines();
+        let (page_rows, cols) = match self.pool_region {
+            Some(region) => (region.height as usize, region.width as usize),
+            None => (self.term.screen_lines(), self.term.columns()),
+        };
         if page_rows == 0 {
             return None;
         }
 
-        let cols = self.term.columns();
         if out.rows() != page_rows + 1 || out.cols() != cols {
             out.resize(page_rows + 1, cols);
         }
@@ -1579,11 +1591,11 @@ mod tests {
     };
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_line_layout,
-        encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
-        encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
+        encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
+        encode_scroll, encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
         BorderStyle as ProtoBorderStyle, FillCommand, IconCommand, IconKind as ProtoIconKind,
-        LineLayoutCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
-        ScrollRegionCommand, TextRunCommand,
+        LineLayoutCommand, PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand,
+        ScrollCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -2616,6 +2628,34 @@ mod tests {
             (out.rows(), out.cols()),
             (3, 4),
             "viewport plus a straddle row"
+        );
+    }
+
+    #[test]
+    fn project_document_composes_into_the_declared_pool_region() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        // A 3x2 pool region narrower than the 4-col viewport; buffer pages 0 and
+        // 1 so a 3-row compose at the top has every row.
+        let mut stream = encode_pool_region(&PoolRegionCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+        });
+        stream.extend_from_slice(&encode_fill(&FillCommand { index: 0 }));
+        stream.extend_from_slice(&encode_fill(&FillCommand { index: 1 }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let mut out = Grid::new(0, 0);
+        let composed = terminal.project_document(&mut out, 0.25);
+
+        assert_eq!(composed, Some((0.5, 0)));
+        assert_eq!(
+            (out.rows(), out.cols()),
+            (3, 3),
+            "region height plus a straddle row, by region width"
         );
     }
 

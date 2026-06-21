@@ -19,6 +19,7 @@ pub enum Command {
     Scale(ScaleCommand),
     Popover(PopoverCommand),
     ScrollRegion(ScrollRegionCommand),
+    PoolRegion(PoolRegionCommand),
     Icon(IconCommand),
     TextRun(TextRunCommand),
     Bar(BarCommand),
@@ -136,6 +137,22 @@ pub struct ScrollRegionCommand {
     pub width: u16,
     pub height: u16,
     pub offset: u16,
+}
+
+/// Declare the sub-rectangle the smooth-scroll document pool composites into.
+///
+/// The pool is `width` by `height` cells with its top-left at (`top`, `left`) in
+/// absolute grid coordinates. Unlike [`ScrollRegionCommand`] it carries no
+/// offset: the pool's scroll position rides [`ScrollCommand`] (page plus
+/// fraction). The renderer composites the eased pool over this rectangle and
+/// draws the rest of the grid -- any static chrome around it -- from the live
+/// content, so a program need not own the whole viewport to smooth-scroll.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PoolRegionCommand {
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
 }
 
 /// Composite a fixed renderer-drawn status icon at a grid cell.
@@ -383,6 +400,27 @@ pub fn encode_scroll_region_into(out: &mut Vec<u8>, command: &ScrollRegionComman
     frame::end(out);
 }
 
+/// Encode a [`PoolRegionCommand`] as a full `Gstoatty;pool_region` frame for an
+/// emitter.
+pub fn encode_pool_region(command: &PoolRegionCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_pool_region_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;pool_region` frame for `command` to `out` without
+/// allocating.
+pub fn encode_pool_region_into(out: &mut Vec<u8>, command: &PoolRegionCommand) {
+    frame::begin(out, "pool_region");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.top.to_be_bytes())?;
+        w.write_all(&command.left.to_be_bytes())?;
+        w.write_all(&command.width.to_be_bytes())?;
+        w.write_all(&command.height.to_be_bytes())
+    });
+    frame::end(out);
+}
+
 /// Encode an [`IconCommand`] as a full `Gstoatty;icon` frame for an emitter.
 pub fn encode_icon(command: &IconCommand) -> Vec<u8> {
     let mut out = Vec::new();
@@ -607,6 +645,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
             &c.content,
         ),
         Command::ScrollRegion(c) => encode_scroll_region_into(out, c),
+        Command::PoolRegion(c) => encode_pool_region_into(out, c),
         Command::Icon(c) => encode_icon_into(out, c),
         Command::TextRun(c) => {
             encode_text_run_into(out, c.col, c.row, c.scale, c.color, c.bg, &c.text)
@@ -631,6 +670,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "scale" => decode_scale(&frame.args).map(Command::Scale),
         "popover" => decode_popover(&frame.args).map(Command::Popover),
         "scroll_region" => decode_scroll_region(&frame.args).map(Command::ScrollRegion),
+        "pool_region" => decode_pool_region(&frame.args).map(Command::PoolRegion),
         "icon" => decode_icon(&frame.args).map(Command::Icon),
         "text_run" => decode_text_run(&frame.args).map(Command::TextRun),
         "bar" => decode_bar(&frame.args).map(Command::Bar),
@@ -697,6 +737,17 @@ fn decode_scroll_region(args: &[Vec<u8>]) -> Option<ScrollRegionCommand> {
         width: u16::from_be_bytes([arg[4], arg[5]]),
         height: u16::from_be_bytes([arg[6], arg[7]]),
         offset: u16::from_be_bytes([arg[8], arg[9]]),
+    })
+}
+
+fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
+    let arg: &[u8; 8] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(PoolRegionCommand {
+        top: u16::from_be_bytes([arg[0], arg[1]]),
+        left: u16::from_be_bytes([arg[2], arg[3]]),
+        width: u16::from_be_bytes([arg[4], arg[5]]),
+        height: u16::from_be_bytes([arg[6], arg[7]]),
     })
 }
 
@@ -818,11 +869,11 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
-        encode_line_layout, encode_popover, encode_reposition, encode_reset, encode_scale,
-        encode_scroll, encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
-        BorderStyle, Command, FillCommand, IconCommand, IconKind, LineLayoutCommand,
-        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
-        TextRunCommand,
+        encode_line_layout, encode_pool_region, encode_popover, encode_reposition, encode_reset,
+        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, BarCommand,
+        BorderCommand, BorderStyle, Command, FillCommand, IconCommand, IconKind, LineLayoutCommand,
+        PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
+        ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -933,6 +984,27 @@ mod tests {
     fn rejects_wrong_length_scroll_region_payload() {
         // The single arg here decodes to 3 bytes, not the 10 a scroll region needs.
         assert!(decode(b"Gstoatty;scroll_region;YWJj").is_none());
+    }
+
+    #[test]
+    fn pool_region_round_trips() {
+        let command = PoolRegionCommand {
+            top: 1,
+            left: 2,
+            width: 76,
+            height: 22,
+        };
+
+        assert_eq!(
+            decode(&encode_pool_region(&command)),
+            Some(Command::PoolRegion(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_pool_region_payload() {
+        // The single arg here decodes to 3 bytes, not the 8 a pool region needs.
+        assert!(decode(b"Gstoatty;pool_region;YWJj").is_none());
     }
 
     #[test]
