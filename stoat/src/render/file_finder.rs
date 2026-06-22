@@ -10,7 +10,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 /// The on-screen rectangles of the file finder modal, derived from a terminal
@@ -101,6 +101,8 @@ pub(crate) fn render_file_finder(
         FinderScope::Modified => " file finder (modified) ",
         FinderScope::Buffers => " file finder (buffers) ",
     };
+    Clear.render(layout.modal, buf);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(modal_style)

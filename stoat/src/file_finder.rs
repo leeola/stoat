@@ -1080,6 +1080,32 @@ mod tests {
         h.assert_snapshot("file_finder_multi_token_highlight");
     }
 
+    /// The finder modal is opaque, so a short preview file's blank rows render
+    /// blank rather than leaking the editor content the centered modal is drawn
+    /// over.
+    #[test]
+    fn snapshot_finder_preview_clears_short_file_background() {
+        let mut h = TestHarness::with_size(120, 30);
+        let filler: String = (0..40)
+            .map(|i| format!("background row {i:02} {}\n", "=".repeat(100)))
+            .collect();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[("short.txt", "alpha\nbravo\n"), ("filler.txt", &filler)],
+        );
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("filler.txt"),
+            },
+        );
+        h.settle();
+
+        h.type_keys("space p");
+        h.type_text("short");
+        h.assert_snapshot("finder_preview_clears_short_file_background");
+    }
+
     #[test]
     fn preview_buffer_assigned_language_for_selected_path() {
         let mut h = crate::Stoat::test();
