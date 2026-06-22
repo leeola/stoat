@@ -28,6 +28,8 @@ use crossterm::event::{
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -3034,8 +3036,18 @@ impl Stoat {
             self.editor_pool_panes()
         };
 
+        // The file finder is a modal over normal mode (not a full-screen overlay
+        // mode); its result list pools as a non-pane surface above the panes.
+        let finder_list = (!overlay && self.file_finder.is_some())
+            .then(|| crate::render::file_finder::file_finder_layout(self.size()))
+            .flatten()
+            .map(|layout| layout.list);
+
         let mut out = Vec::new();
-        let active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
+        let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
+        if finder_list.is_some() {
+            active.push(crate::smooth_scroll::non_pane_pool::FINDER);
+        }
         self.smooth_scroll.drop_absent(&mut out, &active);
 
         let ws = &mut self.workspaces[self.active_workspace];
@@ -3080,6 +3092,43 @@ impl Stoat {
                             region.height,
                         )
                     }
+                },
+            );
+        }
+
+        if let (Some(list), Some(finder)) = (finder_list, self.file_finder.as_ref()) {
+            let region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::FINDER,
+                top: list.y,
+                left: list.x,
+                width: list.width,
+                height: list.height,
+            };
+            let scroll_row = finder
+                .selected
+                .saturating_sub(list.height.saturating_sub(1) as usize)
+                as u32;
+            // The visible row set is the finder's filtered indices; a re-filter
+            // changes it, so its hash is the pool's content version.
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                finder.filtered.hash(&mut hasher);
+                hasher.finish()
+            };
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                region,
+                scroll_row,
+                content_version,
+                |page| {
+                    crate::smooth_scroll::render_finder_page(
+                        finder,
+                        page,
+                        theme,
+                        region.width,
+                        region.height,
+                    )
                 },
             );
         }
@@ -3893,6 +3942,53 @@ mod tests {
         assert!(
             cmds.iter().any(|cmd| matches!(cmd, Command::PoolRegion(_))),
             "a review split pane declares a smooth-scroll pool, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn file_finder_list_is_pooled_and_retired() {
+        use stoat_action::OpenFileFinder;
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/finder");
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            h.fake_fs().insert_file(&root.join(name), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+        let bytes = rx.try_recv().expect("the open finder emits an APC batch");
+        let list = crate::render::file_finder::file_finder_layout(size)
+            .expect("finder fits the test terminal")
+            .list;
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::FINDER,
+            top: list.y,
+            left: list.x,
+            width: list.width,
+            height: list.height,
+        };
+        assert!(
+            decode_apc_stream(&bytes).contains(&Command::PoolRegion(expected)),
+            "the finder list declares a pool at its list rect"
+        );
+
+        h.stoat.file_finder = None;
+        h.stoat.emit_smooth_scroll();
+        let bytes = rx.try_recv().expect("closing the finder emits a drop");
+        assert!(
+            decode_apc_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::FINDER,
+            })),
+            "closing the finder retires its pool"
         );
     }
 
