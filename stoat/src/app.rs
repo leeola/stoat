@@ -3043,10 +3043,24 @@ impl Stoat {
             .flatten()
             .map(|layout| layout.list);
 
+        // The commits overlay renders into the focused pane; its left list pools
+        // as a non-pane surface while editor panes stay suppressed in this mode.
+        let commits_region = (self.mode == "commits")
+            .then(|| {
+                let ws = self.active_workspace();
+                ws.commits.as_ref()?;
+                let pane = ws.panes.pane(ws.panes.focus());
+                crate::render::commits::commits_list_rect(pane.area)
+            })
+            .flatten();
+
         let mut out = Vec::new();
         let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
         if finder_list.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::FINDER);
+        }
+        if commits_region.is_some() {
+            active.push(crate::smooth_scroll::non_pane_pool::COMMITS);
         }
         self.smooth_scroll.drop_absent(&mut out, &active);
 
@@ -3124,6 +3138,41 @@ impl Stoat {
                 |page| {
                     crate::smooth_scroll::render_finder_page(
                         finder,
+                        page,
+                        theme,
+                        region.width,
+                        region.height,
+                    )
+                },
+            );
+        }
+
+        if let (Some(list), Some(state)) = (
+            commits_region,
+            self.workspaces[self.active_workspace].commits.as_ref(),
+        ) {
+            let region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::COMMITS,
+                top: list.y,
+                left: list.x,
+                width: list.width,
+                height: list.height,
+            };
+            let scroll_row = state.scroll_top as u32;
+            // Commits stream in lazily, so the length plus the load/end flags
+            // form the content version; new commits refill the pages.
+            let content_version = (state.commits.len() as u64) << 2
+                | ((state.pending_load.is_some() as u64) << 1)
+                | (state.reached_end as u64);
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                region,
+                scroll_row,
+                content_version,
+                |page| {
+                    crate::smooth_scroll::render_commits_page(
+                        state,
                         page,
                         theme,
                         region.width,
@@ -3989,6 +4038,55 @@ mod tests {
                 pool: crate::smooth_scroll::non_pane_pool::FINDER,
             })),
             "closing the finder retires its pool"
+        );
+    }
+
+    #[test]
+    fn commits_list_is_pooled_and_retired() {
+        use crate::commit_list::CommitListState;
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        h.stoat.active_workspace_mut().commits =
+            Some(CommitListState::new(std::path::PathBuf::from("/work")));
+        h.stoat.mode = "commits".to_string();
+
+        h.stoat.emit_smooth_scroll();
+        let focused = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let list = crate::render::commits::commits_list_rect(focused)
+            .expect("the commits list fits the test terminal");
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::COMMITS,
+            top: list.y,
+            left: list.x,
+            width: list.width,
+            height: list.height,
+        };
+        let bytes = rx
+            .try_recv()
+            .expect("the commits overlay emits an APC batch");
+        assert!(
+            decode_apc_stream(&bytes).contains(&Command::PoolRegion(expected)),
+            "the commits list declares a pool at its list rect"
+        );
+
+        h.stoat.mode = "normal".to_string();
+        h.stoat.active_workspace_mut().commits = None;
+        h.stoat.emit_smooth_scroll();
+        let bytes = rx.try_recv().expect("leaving commits emits a drop");
+        assert!(
+            decode_apc_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::COMMITS,
+            })),
+            "leaving commits mode retires its pool"
         );
     }
 

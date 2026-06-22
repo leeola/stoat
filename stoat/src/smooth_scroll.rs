@@ -26,9 +26,13 @@
 //! [`ScrollCommand::page`] and [`FillCommand::index`] carry.
 
 use crate::{
+    commit_list::CommitListState,
     editor_state::EditorState,
     file_finder::FileFinder,
-    render::{editor::render_editor, file_finder::paint_finder_rows, review::render_review},
+    render::{
+        commits::paint_commit_rows, editor::render_editor, file_finder::paint_finder_rows,
+        review::render_review,
+    },
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, ops::Range};
@@ -326,6 +330,30 @@ pub(crate) fn render_finder_page(
         .saturating_mul(region_height as u64)
         .min(usize::MAX as u64) as usize;
     paint_finder_rows(finder, area, start_row, theme, &mut buf);
+
+    serialize_buffer(&buf)
+}
+
+/// Render `region_height` rows of the commit list starting at row
+/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
+/// page's self-contained VT byte stream.
+///
+/// Mirrors [`render_finder_page`] but paints commit rows; the page index alone
+/// selects the rows, and the list is read-only here.
+pub(crate) fn render_commits_page(
+    state: &CommitListState,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+
+    let start_row = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+    paint_commit_rows(state, area, start_row, theme, &mut buf);
 
     serialize_buffer(&buf)
 }
