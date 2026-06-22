@@ -40,6 +40,30 @@ use stoatty_protocol::command::{
 /// slots.
 const WINDOW_PAGES: u64 = 5;
 
+/// Pool ids for the non-pane smooth-scroll surfaces (overlays and popups).
+///
+/// Split-pane editor pools key on [`crate::pane::Pane::index`], a monotonic
+/// `u32` counter from 1, so reserving every non-pane id at or above [`BASE`]
+/// keeps them from ever colliding with a pane. The renderer composites pools in
+/// ascending-id z-order, so these higher ids always composite above the
+/// split-pane editors beneath them. Each surface's emit consumes its id from
+/// here as it lands.
+// Reserved allocation table: the per-surface ids are consumed by the
+// per-surface emit items as they land, so they read as unused until then.
+#[allow(dead_code)]
+pub(crate) mod non_pane_pool {
+    /// First id reserved for non-pane surfaces; panes occupy `[1, BASE)`.
+    pub(crate) const BASE: u32 = 1 << 24;
+    pub(crate) const COMMITS: u32 = BASE;
+    pub(crate) const FINDER: u32 = BASE + 1;
+    pub(crate) const PALETTE: u32 = BASE + 2;
+    pub(crate) const COMPLETION: u32 = BASE + 3;
+    pub(crate) const HELP_LIST: u32 = BASE + 4;
+    pub(crate) const HELP_DETAIL: u32 = BASE + 5;
+    pub(crate) const SYMBOL: u32 = BASE + 6;
+    pub(crate) const WORKSPACE_SYMBOL: u32 = BASE + 7;
+}
+
 /// Per-app smooth-scroll emit state: what has been declared to the terminal for
 /// each pool, so each frame emits only the deltas.
 ///
@@ -526,5 +550,36 @@ mod tests {
         out.clear();
         emit_into(&mut out, &mut state, region(2, 20), 0, 0, |_| Vec::new());
         assert!(commands(&out).contains(&Command::PoolRegion(region(2, 20))));
+    }
+
+    #[test]
+    fn non_pane_pool_ids_are_distinct_and_above_the_base() {
+        use super::non_pane_pool::{
+            BASE, COMMITS, COMPLETION, FINDER, HELP_DETAIL, HELP_LIST, PALETTE, SYMBOL,
+            WORKSPACE_SYMBOL,
+        };
+        use std::collections::BTreeSet;
+
+        let ids = [
+            COMMITS,
+            FINDER,
+            PALETTE,
+            COMPLETION,
+            HELP_LIST,
+            HELP_DETAIL,
+            SYMBOL,
+            WORKSPACE_SYMBOL,
+        ];
+        assert!(
+            ids.iter().all(|&id| id >= BASE),
+            "every non-pane pool id sits at or above the base"
+        );
+
+        let unique: BTreeSet<u32> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "non-pane pool ids must be pairwise distinct: {ids:?}"
+        );
     }
 }
