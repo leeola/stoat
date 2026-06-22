@@ -30,7 +30,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, ops::Range};
 use stoatty_protocol::command::{
     encode_fill_end_into, encode_fill_into, encode_pool_drop_into, encode_pool_region_into,
-    encode_scroll_into, PoolRegionCommand, ScrollCommand,
+    encode_reposition_into, encode_scroll_into, PoolRegionCommand, ScrollCommand,
 };
 
 /// Pages kept buffered around each pool's visible page, the pool's working
@@ -103,8 +103,10 @@ impl SmoothScrollState {
 ///
 /// Emits, in order: a `pool_region` frame when the rectangle changed; a
 /// `fill`/page-VT/`fill_end` triple for each page newly entering the buffered
-/// window; then a `scroll` frame when the target moved. A frame that needs none
-/// of these appends nothing.
+/// window; a `reposition` frame when the new window is disjoint from the old, so
+/// a far jump re-anchors near the destination instead of easing across the gap;
+/// then a `scroll` frame carrying the precise target. A frame that needs none of
+/// these appends nothing.
 pub(crate) fn emit_into(
     out: &mut Vec<u8>,
     state: &mut SmoothScrollState,
@@ -127,7 +129,19 @@ pub(crate) fn emit_into(
     let page = scroll_row as u64 / region_height;
     let window = window_range(page);
 
+    let prev = entry.filled.clone();
+    let jumped = prev.is_some_and(|p| p.end <= window.start || window.end <= p.start);
+
     refill(out, entry, pool, window, &mut render_page);
+
+    // A jump whose new window does not overlap the old one is too far to ease
+    // across an unbuffered gap. The reposition re-anchors the terminal's offset
+    // near the destination; the scroll below still carries the precise target,
+    // so the glide lands on `scroll_row` rather than the page boundary the
+    // reposition alone would force.
+    if jumped {
+        encode_reposition_into(out, pool, page);
+    }
 
     if entry.last_scroll_row != Some(scroll_row) {
         encode_scroll_into(out, &scroll_target(pool, scroll_row, region.height));
@@ -248,7 +262,7 @@ fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
 mod tests {
     use super::{emit_into, scroll_target, window_range, SmoothScrollState, WINDOW_PAGES};
     use stoatty_protocol::command::{
-        decode, Command, PoolDropCommand, PoolRegionCommand, ScrollCommand,
+        decode, Command, PoolDropCommand, PoolRegionCommand, RepositionCommand, ScrollCommand,
     };
 
     fn region(pool: u32, height: u16) -> PoolRegionCommand {
@@ -378,6 +392,33 @@ mod tests {
                 page: 0,
                 fraction: 9830
             })]
+        );
+    }
+
+    #[test]
+    fn far_jump_emits_reposition_then_precise_scroll() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        emit_into(&mut out, &mut state, region(1, 20), 0, |_| Vec::new());
+
+        out.clear();
+        emit_into(&mut out, &mut state, region(1, 20), 170, |_| Vec::new());
+
+        let nav: Vec<Command> = commands(&out)
+            .into_iter()
+            .filter(|c| matches!(c, Command::Reposition(_) | Command::Scroll(_)))
+            .collect();
+        assert_eq!(
+            nav,
+            vec![
+                Command::Reposition(RepositionCommand { pool: 1, page: 8 }),
+                Command::Scroll(ScrollCommand {
+                    pool: 1,
+                    page: 8,
+                    fraction: 32768,
+                }),
+            ],
+            "a far jump re-anchors with a reposition, then targets the exact row"
         );
     }
 
