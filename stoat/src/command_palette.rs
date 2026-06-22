@@ -906,4 +906,12 @@ mod tests {
         h.type_text(":open file");
         h.assert_snapshot("command_palette_multi_token_highlight");
     }
+
+    #[test]
+    fn snapshot_command_palette_filter_scrolls_to_selection() {
+        let mut h = Stoat::test();
+        h.type_text(":");
+        h.type_keys("down down down down down down down down down down down down");
+        h.assert_snapshot("command_palette_filter_scrolls_to_selection");
+    }
 }
