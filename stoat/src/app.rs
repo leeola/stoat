@@ -3047,21 +3047,39 @@ impl Stoat {
                 continue;
             };
             let scroll_row = editor.scroll_row;
+            // Review rows regenerate on accept/reject, so their count is the
+            // pool's content version; plain editors stay stable while scrolling.
+            let is_review = editor.review_view.is_some();
+            let content_version = editor
+                .review_view
+                .as_ref()
+                .map_or(0, |view| view.rows.len() as u64);
             crate::smooth_scroll::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
                 scroll_row,
-                0,
+                content_version,
                 |page| {
-                    crate::smooth_scroll::render_editor_page(
-                        editor,
-                        page,
-                        fallback_style,
-                        theme,
-                        region.width,
-                        region.height,
-                    )
+                    if is_review {
+                        crate::smooth_scroll::render_review_page(
+                            editor,
+                            page,
+                            fallback_style,
+                            theme,
+                            region.width,
+                            region.height,
+                        )
+                    } else {
+                        crate::smooth_scroll::render_editor_page(
+                            editor,
+                            page,
+                            fallback_style,
+                            theme,
+                            region.width,
+                            region.height,
+                        )
+                    }
                 },
             );
         }
@@ -3071,11 +3089,11 @@ impl Stoat {
         }
     }
 
-    /// Every visible split pane showing a plain editor, as `(pool id, editor id,
+    /// Every visible split pane showing an editor, as `(pool id, editor id,
     /// pool region)`.
     ///
-    /// One entry per [`Placement::Split`] pane whose [`View::Editor`] is not a
-    /// review view and whose content area is non-empty. The pool id is the pane's
+    /// One entry per [`Placement::Split`] pane whose [`View::Editor`] has a
+    /// non-empty content area, plain or review alike. The pool id is the pane's
     /// stable [`crate::pane::Pane::index`], so a pane keeps its pool across
     /// frames; the region is the pane area minus its bottom status row, the same
     /// content area the editor is painted into. The caller pools nothing while a
@@ -3093,13 +3111,7 @@ impl Stoat {
                 let View::Editor(editor_id) = pane.view else {
                     return None;
                 };
-                let plain_editor = ws
-                    .editors
-                    .get(editor_id)
-                    .is_some_and(|editor| editor.review_view.is_none());
-                if !plain_editor {
-                    return None;
-                }
+                ws.editors.get(editor_id)?;
 
                 let (content, _) = crate::render::layout::split_pane_status(pane.area);
                 if content.width == 0 || content.height == 0 {
@@ -3853,6 +3865,34 @@ mod tests {
         assert!(
             !cmds.is_empty() && cmds.iter().all(|cmd| matches!(cmd, Command::PoolDrop(_))),
             "overlay mode only drops pools, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn review_pane_is_pooled_for_smooth_scroll() {
+        use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};
+        use stoatty_protocol::command::Command;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+
+        let bytes = rx.try_recv().expect("the review pane emits an APC batch");
+        let cmds = decode_apc_stream(&bytes);
+        assert!(
+            cmds.iter().any(|cmd| matches!(cmd, Command::PoolRegion(_))),
+            "a review split pane declares a smooth-scroll pool, got {cmds:?}"
         );
     }
 

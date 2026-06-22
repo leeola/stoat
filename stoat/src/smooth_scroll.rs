@@ -25,7 +25,10 @@
 //! `p * region.height`. Each pool is addressed by this page index, the same key
 //! [`ScrollCommand::page`] and [`FillCommand::index`] carry.
 
-use crate::{editor_state::EditorState, render::editor::render_editor};
+use crate::{
+    editor_state::EditorState,
+    render::{editor::render_editor, review::render_review},
+};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, ops::Range};
 use stoatty_protocol::command::{
@@ -268,6 +271,34 @@ pub(crate) fn render_editor_page(
         .saturating_mul(region_height as u64)
         .min(u32::MAX as u64) as u32;
     render_editor(editor, area, fallback_style, theme, &mut buf, false);
+    editor.scroll_row = saved_scroll;
+
+    serialize_buffer(&buf)
+}
+
+/// Render `region_height` rows of a review pane starting at row
+/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
+/// page's self-contained VT byte stream.
+///
+/// Mirrors [`render_editor_page`] but drives the review painter, so a pooled
+/// review page matches the live diff at that scroll position. `editor.scroll_row`
+/// is saved and restored, leaving the live scroll position unchanged.
+pub(crate) fn render_review_page(
+    editor: &mut EditorState,
+    page: u64,
+    fallback_style: Style,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+
+    let saved_scroll = editor.scroll_row;
+    editor.scroll_row = page
+        .saturating_mul(region_height as u64)
+        .min(u32::MAX as u64) as u32;
+    render_review(editor, area, fallback_style, theme, &mut buf);
     editor.scroll_row = saved_scroll;
 
     serialize_buffer(&buf)
