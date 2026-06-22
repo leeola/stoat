@@ -3052,6 +3052,7 @@ impl Stoat {
                 &mut self.smooth_scroll,
                 region,
                 scroll_row,
+                0,
                 |page| {
                     crate::smooth_scroll::render_editor_page(
                         editor,
