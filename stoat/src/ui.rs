@@ -140,8 +140,11 @@ async fn run(
                 if has_frame {
                     terminal.draw(|f| {
                         let dst = f.buffer_mut();
-                        dst.resize(frame.area);
-                        dst.content.clone_from(&frame.content);
+                        if dst.area == frame.area {
+                            dst.content.clone_from(&frame.content);
+                        } else {
+                            copy_clamped(dst, &frame);
+                        }
                     })?;
                 }
                 // Write any stoatty APC byte batches the app pushed for this
@@ -180,4 +183,52 @@ fn drain_apc(apc_rx: &mut UnboundedReceiver<Vec<u8>>) -> io::Result<()> {
         stdout.flush()?;
     }
     Ok(())
+}
+
+/// Copy `src` into `dst` over their overlapping top-left region, leaving `dst`'s
+/// area unchanged.
+///
+/// `dst` is the terminal's buffer, sized by ratatui's autoresize to the live
+/// terminal dimensions; `src` is the frame the main thread rendered, which can
+/// lag a frame during a resize and still carry the previous dimensions. The two
+/// must never be reconciled by resizing `dst`: ratatui flushes by diffing `dst`
+/// against its sibling buffer (also held at the live size), and a differing
+/// origin or width there panics. Copying only the intersection keeps that diff
+/// valid; any uncovered margin stays blank for the one frame until the main
+/// thread re-renders at the new size.
+fn copy_clamped(dst: &mut Buffer, src: &Buffer) {
+    dst.reset();
+
+    let cols = dst.area.width.min(src.area.width);
+    let rows = dst.area.height.min(src.area.height);
+    for y in 0..rows {
+        for x in 0..cols {
+            dst[(x, y)] = src[(x, y)].clone();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_clamped_keeps_dst_area_and_copies_overlap_when_src_is_larger() {
+        let src = Buffer::with_lines(["abc", "def"]);
+        let mut dst = Buffer::with_lines(["ZZ"]);
+
+        copy_clamped(&mut dst, &src);
+
+        assert_eq!(dst, Buffer::with_lines(["ab"]));
+    }
+
+    #[test]
+    fn copy_clamped_clears_stale_margin_when_src_is_smaller() {
+        let src = Buffer::with_lines(["xy"]);
+        let mut dst = Buffer::with_lines(["ZZZ", "ZZZ"]);
+
+        copy_clamped(&mut dst, &src);
+
+        assert_eq!(dst, Buffer::with_lines(["xy ", "   "]));
+    }
 }
