@@ -26,7 +26,7 @@ use alacritty_terminal::{
     Term,
 };
 use parking_lot::Mutex;
-use std::{mem, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, mem, sync::Arc, time::Instant};
 use stoatty_protocol::command::{
     self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PoolRegionCommand,
     PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
@@ -117,35 +117,24 @@ pub struct Terminal {
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
-    /// Recycled pool of viewport-sized rich pages the app pushes around its
-    /// scroll target, read by the renderer to ease smooth scrolling between
-    /// app-declared positions. Rebuilt on resize so pages track the live
-    /// viewport. Distinct from the per-frame projected [`Grid`].
-    page_pool: PagePool,
+    /// Smooth-scroll pools keyed by id: each a declared region plus the recycled
+    /// pages buffered around its scroll target and that target itself.
+    ///
+    /// Several pools scroll independently and compose in ascending-id z-order,
+    /// so split panes side by side and a modal stacked over an editor each
+    /// smooth-scroll at once. Created by `Gstoatty;pool_region`, fed by
+    /// `Gstoatty;fill`, moved by `Gstoatty;scroll`/`reposition`, and retired by
+    /// `Gstoatty;pool_drop`. A [`BTreeMap`] so [`Self::pools`] yields them in
+    /// ascending-id (z) order.
+    pools: BTreeMap<u32, Pool>,
     /// The in-progress page fill, set while a `Gstoatty;fill` open marker has
     /// redirected the VT write path onto a pool slot.
     ///
     /// Streamed bytes paint this isolated context's screen instead of the live
     /// grid until the redirect closes (a `fill_end`, the next `fill`, or a
-    /// `reset`), when the painted page is committed onto [`Self::page_pool`].
+    /// `reset`), when the painted page is committed onto its pool's buffer.
     /// `None` while writing the live grid.
     fill: Option<FillTarget>,
-    /// The sub-rectangle the document pool composites into, set by a
-    /// `Gstoatty;pool_region` command. `None` until declared, in which case the
-    /// pool spans the full viewport.
-    pool_region: Option<PoolRegionCommand>,
-    /// The latest app-declared smooth-scroll target, set by a `Gstoatty;scroll`
-    /// command.
-    ///
-    /// An absolute document-page position the renderer eases the live scroll
-    /// offset toward. Defaults to the document origin until a command moves it;
-    /// the terminal only records it, while the render loop owns the easing.
-    scroll_target: DocumentOffset,
-    /// A pending discontinuous-jump request from `Gstoatty;reposition`, the
-    /// destination page the render loop should re-anchor the live offset near.
-    /// Consumed once via [`Terminal::take_reposition`]; `None` between a jump and
-    /// its consumption.
-    reposition: Option<u64>,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -208,22 +197,66 @@ pub enum CursorShape {
     Hidden,
 }
 
+/// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
+///
+/// Carries the pool's id, its latest declared region, and its scroll target.
+/// The renderer steps an eased offset toward [`Self::scroll_target`] and
+/// composites [`Self::region`]; pools compose in ascending [`Self::id`] order,
+/// which is their z-order.
+#[derive(Clone, Copy, Debug)]
+pub struct PoolView {
+    pub id: u32,
+    pub region: PoolRegionCommand,
+    pub scroll_target: DocumentOffset,
+}
+
+/// One smooth-scroll surface the document pool tracks.
+///
+/// A declared region, the recycled pages buffered around the surface's scroll
+/// target, and that target. One per `Gstoatty;pool_region` id; the renderer
+/// reads its visible region from [`Self::page_pool`] at the eased offset.
+struct Pool {
+    region: PoolRegionCommand,
+    page_pool: PagePool,
+    scroll_target: DocumentOffset,
+    /// A pending discontinuous-jump destination from `Gstoatty;reposition`,
+    /// taken once via [`Terminal::take_reposition`].
+    reposition: Option<u64>,
+}
+
+impl Pool {
+    /// Create a pool for `region`, its page buffer sized to the region.
+    fn new(region: PoolRegionCommand) -> Pool {
+        Pool {
+            page_pool: PagePool::new(
+                region.height.max(1) as usize,
+                region.width.max(1) as usize,
+                PAGE_POOL_CAPACITY,
+            ),
+            region,
+            scroll_target: DocumentOffset::default(),
+            reposition: None,
+        }
+    }
+}
+
 /// The isolated VT context a `Gstoatty;fill` redirect paints a page into.
 ///
 /// Holds its own [`Term`] and parser so the streamed page content mutates a
 /// private screen, with its own cursor and parser state, while the live terminal
-/// stays untouched. On commit the screen's cells are projected onto the pool
-/// slot for [`Self::index`].
+/// stays untouched. On commit the screen's cells are projected onto pool
+/// [`Self::pool`]'s slot for [`Self::index`].
 struct FillTarget {
+    pool: u32,
     index: u64,
     term: Term<ResponseSink>,
     parser: Processor,
 }
 
 impl FillTarget {
-    /// Create a `rows` by `cols` fill context for document page `index`, with a
-    /// blank screen ready to receive the page's streamed bytes.
-    fn new(index: u64, rows: usize, cols: usize) -> FillTarget {
+    /// Create a `rows` by `cols` fill context for page `index` of pool `pool`,
+    /// with a blank screen ready to receive the page's streamed bytes.
+    fn new(pool: u32, index: u64, rows: usize, cols: usize) -> FillTarget {
         let term = Term::new(
             Config::default(),
             &GridSize { rows, cols },
@@ -231,6 +264,7 @@ impl FillTarget {
         );
 
         FillTarget {
+            pool,
             index,
             term,
             parser: Processor::new(),
@@ -270,11 +304,8 @@ impl Terminal {
             last_decoration_footprint: Vec::new(),
             decoration_damage: Vec::new(),
             last_history: 0,
-            page_pool: PagePool::new(rows, cols, PAGE_POOL_CAPACITY),
+            pools: BTreeMap::new(),
             fill: None,
-            pool_region: None,
-            scroll_target: DocumentOffset::default(),
-            reposition: None,
         }
     }
 
@@ -451,10 +482,19 @@ impl Terminal {
                 self.scroll_region = Some(region);
                 self.decorations_dirty.scroll_region = true;
             },
-            Command::PoolRegion(region) => {
-                self.page_pool
-                    .rebuild(region.height as usize, region.width as usize);
-                self.pool_region = Some(region);
+            Command::PoolRegion(region) => match self.pools.get_mut(&region.pool) {
+                Some(pool) => {
+                    let resized =
+                        pool.region.width != region.width || pool.region.height != region.height;
+                    pool.region = region;
+                    if resized {
+                        pool.page_pool
+                            .rebuild(region.height.max(1) as usize, region.width.max(1) as usize);
+                    }
+                },
+                None => {
+                    self.pools.insert(region.pool, Pool::new(region));
+                },
             },
             Command::Icon(icon) => {
                 self.icons.push(icon);
@@ -472,20 +512,30 @@ impl Terminal {
                 self.line_layout = Some(layout);
                 self.decorations_dirty.line_layout = true;
             },
-            Command::Fill(fill) => self.begin_fill(fill.index),
+            Command::Fill(fill) => self.begin_fill(fill.pool, fill.index),
             Command::FillEnd => self.commit_fill(),
             Command::Scroll(scroll) => {
-                self.scroll_target = DocumentOffset {
-                    page: scroll.page,
-                    fraction: scroll.fraction as f32 / FRACTION_SCALE,
-                };
+                if let Some(pool) = self.pools.get_mut(&scroll.pool) {
+                    pool.scroll_target = DocumentOffset {
+                        page: scroll.page,
+                        fraction: scroll.fraction as f32 / FRACTION_SCALE,
+                    };
+                }
             },
             Command::Reposition(reposition) => {
-                self.scroll_target = DocumentOffset {
-                    page: reposition.page,
-                    fraction: 0.0,
-                };
-                self.reposition = Some(reposition.page);
+                if let Some(pool) = self.pools.get_mut(&reposition.pool) {
+                    pool.scroll_target = DocumentOffset {
+                        page: reposition.page,
+                        fraction: 0.0,
+                    };
+                    pool.reposition = Some(reposition.page);
+                }
+            },
+            Command::PoolDrop(drop) => {
+                self.pools.remove(&drop.pool);
+                if self.fill.as_ref().map(|fill| fill.pool) == Some(drop.pool) {
+                    self.fill = None;
+                }
             },
             // A reset is also a fill close trigger: commit any open page before
             // clearing decoration state and restoring the live grid.
@@ -496,41 +546,48 @@ impl Terminal {
         }
     }
 
-    /// The latest app-declared smooth-scroll target.
+    /// Snapshots of every declared smooth-scroll pool, in ascending-id (z) order.
     ///
-    /// An absolute document-page position set by `Gstoatty;scroll`, which the
-    /// render loop eases the live offset toward. Defaults to the document origin
-    /// before any command arrives.
-    pub fn scroll_target(&self) -> DocumentOffset {
-        self.scroll_target
+    /// Each carries the pool's id, latest region, and scroll target, so the
+    /// render loop can step each pool's ease and composite it. Empty until a
+    /// `Gstoatty;pool_region` declares the first pool.
+    pub fn pools(&self) -> Vec<PoolView> {
+        self.pools
+            .values()
+            .map(|pool| PoolView {
+                id: pool.region.pool,
+                region: pool.region,
+                scroll_target: pool.scroll_target,
+            })
+            .collect()
     }
 
-    /// Take the pending discontinuous-jump destination, clearing it.
+    /// Take pool `id`'s pending discontinuous-jump destination, clearing it.
     ///
     /// Set by `Gstoatty;reposition`. The render loop consumes it once per arrival
-    /// to re-anchor the live scroll offset near the destination before easing
+    /// to re-anchor that pool's live offset near the destination before easing
     /// onto the target, so a far jump lands softly instead of dragging across the
-    /// unbuffered gap.
-    pub fn take_reposition(&mut self) -> Option<u64> {
-        self.reposition.take()
+    /// unbuffered gap. `None` for an unknown id or when no jump is pending.
+    pub fn take_reposition(&mut self, id: u32) -> Option<u64> {
+        self.pools.get_mut(&id)?.reposition.take()
     }
 
-    /// Compose the document-pool visible region into `out` at the eased page
-    /// offset, or `None` to fall back to the live grid.
+    /// Compose pool `id`'s visible region into `out` at the eased page offset,
+    /// or `None` to fall back to the live grid.
     ///
-    /// `doc_scroll` is the live smooth-scroll position in document pages. Sizes
-    /// `out` to the viewport plus one straddle row and fills it from the pooled
-    /// pages straddling the offset, returning the sub-cell fraction to shift the
-    /// rendered rows by and the top document row composed.
+    /// `doc_scroll` is the pool's live smooth-scroll position in document pages.
+    /// Sizes `out` to the pool's region plus one straddle row and fills it from
+    /// the pooled pages straddling the offset, returning the sub-cell fraction to
+    /// shift the rendered rows by and the top document row composed.
     ///
-    /// Returns `None` when the straddled pages are not all buffered -- the
-    /// degradation path taken whenever no pool window covers the offset, so the
-    /// renderer shows the projected live grid instead of holes.
-    pub fn project_document(&self, out: &mut Grid, doc_scroll: f32) -> Option<(f32, i64)> {
-        let (page_rows, cols) = match self.pool_region {
-            Some(region) => (region.height as usize, region.width as usize),
-            None => (self.term.screen_lines(), self.term.columns()),
-        };
+    /// Returns `None` for an unknown id, or when the straddled pages are not all
+    /// buffered -- the degradation path taken whenever no pool window covers the
+    /// offset, so the renderer shows the live grid for that region instead of
+    /// holes.
+    pub fn project_pool(&self, id: u32, out: &mut Grid, doc_scroll: f32) -> Option<(f32, i64)> {
+        let pool = self.pools.get(&id)?;
+        let page_rows = pool.region.height as usize;
+        let cols = pool.region.width as usize;
         if page_rows == 0 {
             return None;
         }
@@ -543,7 +600,7 @@ impl Terminal {
         let top = doc_rows.floor();
         let frac = doc_rows - top;
 
-        self.page_pool
+        pool.page_pool
             .compose(top as i64, out)
             .then_some((frac, top as i64))
     }
@@ -606,30 +663,43 @@ impl Terminal {
         Some(frac - 1.0)
     }
 
-    /// Open a page-fill redirect onto the pool slot for document page `index`.
+    /// Open a page-fill redirect onto pool `pool`'s slot for document page
+    /// `index`.
     ///
     /// Any already-open fill is committed first, so a dropped `fill_end` cannot
     /// strand the redirect: the next `fill` (or a `reset`) closes the previous
-    /// page. The fresh context is sized to the live viewport, matching the pool
-    /// slots [`Self::commit_fill`] writes into.
-    fn begin_fill(&mut self, index: u64) {
+    /// page. The fresh context is sized to the pool's region, matching the slots
+    /// [`Self::commit_fill`] writes into; an unknown pool falls back to the
+    /// viewport so the redirect still captures (and later discards) the bytes
+    /// rather than leaking them onto the live grid.
+    fn begin_fill(&mut self, pool: u32, index: u64) {
         self.commit_fill();
-        let rows = self.term.screen_lines();
-        let cols = self.term.columns();
-        self.fill = Some(FillTarget::new(index, rows, cols));
+        let (rows, cols) = match self.pools.get(&pool) {
+            Some(pool) => (
+                pool.region.height.max(1) as usize,
+                pool.region.width.max(1) as usize,
+            ),
+            None => (self.term.screen_lines(), self.term.columns()),
+        };
+        self.fill = Some(FillTarget::new(pool, index, rows, cols));
     }
 
-    /// Commit the open page fill onto its pool slot and restore the live grid.
+    /// Commit the open page fill onto its pool's slot and restore the live grid.
     ///
     /// Projects the fill context's painted cells onto the recycled slot for its
-    /// page index. A no-op when no fill is open, so every close trigger
-    /// (`fill_end`, the next `fill`, `reset`) can call it unconditionally.
+    /// page index in the target pool. A no-op when no fill is open, so every
+    /// close trigger (`fill_end`, the next `fill`, `reset`) can call it
+    /// unconditionally; the painted page is discarded if its pool was dropped
+    /// mid-fill.
     fn commit_fill(&mut self) {
         let Some(fill) = self.fill.take() else {
             return;
         };
+        let Some(pool) = self.pools.get_mut(&fill.pool) else {
+            return;
+        };
 
-        let grid = self.page_pool.fill(fill.index);
+        let grid = pool.page_pool.fill(fill.index);
         project_term_cells(grid, &fill.term, &self.theme, &self.palette);
     }
 
@@ -668,9 +738,15 @@ impl Terminal {
     /// it wholesale at the new size, so the grid follows without a separate call.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.term.resize(GridSize { rows, cols });
-        self.page_pool.rebuild(rows, cols);
-        // The pool is rebuilt empty for the new viewport, so any half-painted
-        // page is abandoned; the app re-pushes its pages at the new size.
+        // Pages are sized to each pool's region, not the viewport, so a viewport
+        // resize only empties them: the app re-declares regions and refills as
+        // its layout recomputes. Any half-painted page is abandoned.
+        for pool in self.pools.values_mut() {
+            pool.page_pool.rebuild(
+                pool.region.height.max(1) as usize,
+                pool.region.width.max(1) as usize,
+            );
+        }
         self.fill = None;
     }
 
@@ -692,16 +768,6 @@ impl Terminal {
     /// history edge is measured by the clamped amount.
     pub fn display_offset(&self) -> usize {
         self.term.grid().display_offset()
-    }
-
-    /// The app-declared sub-rectangle the document pool composites into, or
-    /// `None` when the pool covers the whole viewport.
-    ///
-    /// Set by `Gstoatty;pool_region`. The render loop reads it to composite the
-    /// pooled pages over a region of the live grid -- leaving static chrome
-    /// around the region fixed -- rather than replacing the whole viewport.
-    pub fn pool_region(&self) -> Option<PoolRegionCommand> {
-        self.pool_region
     }
 
     /// Reset the viewport to the live bottom of history, so the next
@@ -2485,17 +2551,38 @@ mod tests {
         );
     }
 
+    /// Declare pool `id` over a `rows` by `cols` region at the origin, so the
+    /// pool tests have a pool to fill, scroll, and project before driving it.
+    fn declare_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16) {
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: id,
+            top: 0,
+            left: 0,
+            width: cols,
+            height: rows,
+        }));
+    }
+
+    /// The buffered page `index` of pool `id`, panicking if it is not present.
+    fn pool_page(terminal: &Terminal, id: u32, index: u64) -> &Grid {
+        terminal.pools[&id]
+            .page_pool
+            .page(index)
+            .expect("page buffered")
+    }
+
     #[test]
     fn fill_paints_page_and_spares_live_grid() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
         let mut grid = Grid::new(2, 4);
 
-        let mut stream = encode_fill(&FillCommand { index: 0 });
+        declare_pool(&mut terminal, 0, 2, 4);
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
         stream.extend_from_slice(b"hi");
         stream.extend_from_slice(&encode_fill_end());
         terminal.advance(&stream);
 
-        let page = terminal.page_pool.page(0).expect("page 0 buffered");
+        let page = pool_page(&terminal, 0, 0);
         assert_eq!((page.get(0, 0).ch, page.get(0, 1).ch), ('h', 'i'));
 
         terminal.project(&mut grid);
@@ -2510,11 +2597,12 @@ mod tests {
     fn fill_persists_across_advance_calls() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
 
-        terminal.advance(&encode_fill(&FillCommand { index: 3 }));
+        declare_pool(&mut terminal, 0, 2, 4);
+        terminal.advance(&encode_fill(&FillCommand { pool: 0, index: 3 }));
         terminal.advance(b"ab");
         terminal.advance(&encode_fill_end());
 
-        let page = terminal.page_pool.page(3).expect("page 3 buffered");
+        let page = pool_page(&terminal, 0, 3);
         assert_eq!((page.get(0, 0).ch, page.get(0, 1).ch), ('a', 'b'));
     }
 
@@ -2522,18 +2610,19 @@ mod tests {
     fn next_fill_marker_auto_commits_the_previous_page() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
 
+        declare_pool(&mut terminal, 0, 2, 4);
         // No fill_end between the two pages: opening the second must commit the
         // first, so a dropped close cannot strand the redirect.
-        let mut stream = encode_fill(&FillCommand { index: 0 });
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
         stream.extend_from_slice(b"AA");
-        stream.extend_from_slice(&encode_fill(&FillCommand { index: 1 }));
+        stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
         stream.extend_from_slice(b"BB");
         stream.extend_from_slice(&encode_fill_end());
         terminal.advance(&stream);
 
-        let page0 = terminal.page_pool.page(0).expect("page 0 committed");
+        let page0 = pool_page(&terminal, 0, 0);
         assert_eq!(page0.get(0, 0).ch, 'A');
-        let page1 = terminal.page_pool.page(1).expect("page 1 committed");
+        let page1 = pool_page(&terminal, 0, 1);
         assert_eq!(page1.get(0, 0).ch, 'B');
     }
 
@@ -2541,15 +2630,13 @@ mod tests {
     fn reset_commits_an_in_progress_page() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
 
-        let mut stream = encode_fill(&FillCommand { index: 2 });
+        declare_pool(&mut terminal, 0, 2, 4);
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 2 });
         stream.extend_from_slice(b"zz");
         stream.extend_from_slice(&encode_reset());
         terminal.advance(&stream);
 
-        let page = terminal
-            .page_pool
-            .page(2)
-            .expect("reset committed the page");
+        let page = pool_page(&terminal, 0, 2);
         assert_eq!((page.get(0, 0).ch, page.get(0, 1).ch), ('z', 'z'));
     }
 
@@ -2558,9 +2645,10 @@ mod tests {
         let mut terminal = Terminal::new(2, 4, Theme::default());
         let mut grid = Grid::new(2, 4);
 
+        declare_pool(&mut terminal, 0, 2, 4);
         // A decoration command inside a page's stream is page-targeted; it must
         // not stamp the live grid.
-        let mut stream = encode_fill(&FillCommand { index: 0 });
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
         stream.extend_from_slice(&encode_border(&BorderCommand {
             top: 0,
             left: 0,
@@ -2584,17 +2672,19 @@ mod tests {
     fn scroll_command_sets_the_target() {
         let mut terminal = Terminal::new(4, 8, Theme::default());
 
+        declare_pool(&mut terminal, 0, 4, 8);
         terminal.advance(&encode_scroll(&ScrollCommand {
+            pool: 0,
             page: 9,
             fraction: 16_384,
         }));
 
         assert_eq!(
-            terminal.scroll_target(),
-            DocumentOffset {
+            terminal.pools().first().map(|pool| pool.scroll_target),
+            Some(DocumentOffset {
                 page: 9,
                 fraction: 0.25,
-            }
+            }),
         );
     }
 
@@ -2602,64 +2692,70 @@ mod tests {
     fn reposition_sets_the_target_and_a_one_shot_jump() {
         let mut terminal = Terminal::new(4, 8, Theme::default());
 
-        terminal.advance(&encode_reposition(&RepositionCommand { page: 1_000 }));
+        declare_pool(&mut terminal, 0, 4, 8);
+        terminal.advance(&encode_reposition(&RepositionCommand {
+            pool: 0,
+            page: 1_000,
+        }));
 
         assert_eq!(
-            terminal.scroll_target(),
-            DocumentOffset {
+            terminal.pools().first().map(|pool| pool.scroll_target),
+            Some(DocumentOffset {
                 page: 1_000,
                 fraction: 0.0,
-            }
+            }),
         );
-        assert_eq!(terminal.take_reposition(), Some(1_000));
+        assert_eq!(terminal.take_reposition(0), Some(1_000));
         assert_eq!(
-            terminal.take_reposition(),
+            terminal.take_reposition(0),
             None,
             "the jump is consumed once"
         );
     }
 
     #[test]
-    fn project_document_composes_from_the_pool_with_the_sub_cell_fraction() {
+    fn project_pool_composes_from_the_pool_with_the_sub_cell_fraction() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
 
+        declare_pool(&mut terminal, 0, 2, 4);
         // Buffer pages 0 and 1 so a 3-row compose at the top has every row.
-        let mut stream = encode_fill(&FillCommand { index: 0 });
-        stream.extend_from_slice(&encode_fill(&FillCommand { index: 1 }));
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
         stream.extend_from_slice(&encode_fill_end());
         terminal.advance(&stream);
 
         let mut out = Grid::new(0, 0);
         // 0.25 pages over a 2-row page is half a row: top row 0, half-cell shift.
-        let composed = terminal.project_document(&mut out, 0.25);
+        let composed = terminal.project_pool(0, &mut out, 0.25);
 
         assert_eq!(composed, Some((0.5, 0)));
         assert_eq!(
             (out.rows(), out.cols()),
             (3, 4),
-            "viewport plus a straddle row"
+            "region height plus a straddle row"
         );
     }
 
     #[test]
-    fn project_document_composes_into_the_declared_pool_region() {
+    fn project_pool_composes_into_the_declared_pool_region() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
 
         // A 3x2 pool region narrower than the 4-col viewport; buffer pages 0 and
         // 1 so a 3-row compose at the top has every row.
         let mut stream = encode_pool_region(&PoolRegionCommand {
+            pool: 0,
             top: 0,
             left: 0,
             width: 3,
             height: 2,
         });
-        stream.extend_from_slice(&encode_fill(&FillCommand { index: 0 }));
-        stream.extend_from_slice(&encode_fill(&FillCommand { index: 1 }));
+        stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 0 }));
+        stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
         stream.extend_from_slice(&encode_fill_end());
         terminal.advance(&stream);
 
         let mut out = Grid::new(0, 0);
-        let composed = terminal.project_document(&mut out, 0.25);
+        let composed = terminal.project_pool(0, &mut out, 0.25);
 
         assert_eq!(composed, Some((0.5, 0)));
         assert_eq!(
@@ -2670,10 +2766,11 @@ mod tests {
     }
 
     #[test]
-    fn project_document_degrades_when_no_window_is_buffered() {
-        let terminal = Terminal::new(2, 4, Theme::default());
+    fn project_pool_degrades_when_no_window_is_buffered() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        declare_pool(&mut terminal, 0, 2, 4);
         let mut out = Grid::new(0, 0);
-        assert_eq!(terminal.project_document(&mut out, 0.0), None);
+        assert_eq!(terminal.project_pool(0, &mut out, 0.0), None);
     }
 
     #[test]

@@ -313,6 +313,23 @@ impl Renderer {
     }
 }
 
+/// One pool's contribution to a multi-pool frame: the grid to draw, the pixel
+/// rectangle to clip it to, and the sub-cell row shift to glide it by.
+///
+/// [`GpuContext::render_with_pools`] composites these over the live grid in
+/// slice order, so an earlier entry sits beneath a later one.
+pub struct PoolComposite<'a> {
+    /// The viewport-sized grid whose region cells hold the pool's composed page
+    /// rows; only the [`Self::scissor`] rectangle is drawn.
+    pub grid: &'a Grid,
+    /// The clip rectangle `[x, y, width, height]` in physical pixels: the pool's
+    /// region in screen space.
+    pub scissor: [u32; 4],
+    /// The sub-cell document scroll, in rows; a negative value shifts the rows
+    /// up.
+    pub shift_rows: f32,
+}
+
 /// The GPU swapchain wrapping a [`Renderer`] for an on-screen window.
 ///
 /// Holds the surface configuration so [`Self::resize`] and the surface-loss
@@ -517,25 +534,24 @@ impl GpuContext {
         surface_frame.present();
     }
 
-    /// Draw `live_grid` to the window surface, then composite `pool_grid` over
-    /// the `scissor` sub-rectangle, in one presented frame.
+    /// Draw `live_grid` to the window surface, then composite each pool in
+    /// `pools` over its scissor sub-rectangle, in one presented frame.
     ///
     /// `live_grid` and `frame` render exactly as [`Self::render`] does -- the
-    /// static chrome and its cursor. `pool_grid`, `scissor`, and `shift_rows`
-    /// then drive [`Renderer::composite_pool`] over the same view, so the eased
-    /// document pool overwrites only the declared region. The two passes submit
-    /// separately into the one view (the second loading rather than clearing),
-    /// so the live grid is drawn first and the pool over it.
+    /// static chrome and its cursor. Each [`PoolComposite`] then drives
+    /// [`Renderer::composite_pool`] over the same view in slice order, so several
+    /// eased pools (split panes, a modal over an editor) each overwrite only
+    /// their own region and stack earlier-under-later. Every pass loads rather
+    /// than clears, so the live grid is drawn first and the pools over it; an
+    /// empty slice renders just the live grid.
     ///
     /// Skips and re-configures on the same transient surface states as
     /// [`Self::render`].
-    pub fn render_with_pool(
+    pub fn render_with_pools(
         &mut self,
         live_grid: &Grid,
         frame: Frame<'_>,
-        pool_grid: &Grid,
-        scissor: [u32; 4],
-        shift_rows: f32,
+        pools: &[PoolComposite<'_>],
     ) {
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -556,14 +572,16 @@ impl GpuContext {
         });
         self.renderer
             .render_into(&self.device, &self.queue, &view, live_grid, frame);
-        self.renderer.composite_pool(
-            &self.device,
-            &self.queue,
-            &view,
-            pool_grid,
-            scissor,
-            shift_rows,
-        );
+        for pool in pools {
+            self.renderer.composite_pool(
+                &self.device,
+                &self.queue,
+                &view,
+                pool.grid,
+                pool.scissor,
+                pool.shift_rows,
+            );
+        }
         surface_frame.present();
     }
 }

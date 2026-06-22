@@ -42,6 +42,7 @@ mod review_apply;
 mod review_session;
 pub mod run;
 mod selection;
+mod smooth_scroll;
 pub mod theme;
 pub mod ui;
 pub mod workspace;

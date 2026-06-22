@@ -14,7 +14,7 @@ use crate::{
     },
     keymap::{Keymap, ResolvedAction},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
-    pane::{FocusTarget, View},
+    pane::{FocusTarget, Placement, View},
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
     rebase::RebasePause,
     register,
@@ -530,6 +530,22 @@ pub struct Stoat {
     /// arbitration arm in `handle_insert_key`. Cleared when insert
     /// mode exits so re-entering insert is not stuck mid-snippet.
     pub(crate) active_snippet: Option<crate::completion::snippet::ActiveSnippet>,
+
+    /// Whether stoat is running inside the stoatty terminal, detected from
+    /// the `STOATTY` env var at startup. Gates the smooth-scroll APC emit:
+    /// when `false`, [`Self::emit_smooth_scroll`] is a no-op and the byte
+    /// stream is identical to a run in any other terminal.
+    pub(crate) stoatty: bool,
+    /// Ordered, non-dropping channel carrying stoatty APC byte batches from
+    /// the app loop to the UI thread, written to stdout right after each
+    /// rendered frame. Separate from the latest-wins render watch because
+    /// `fill` page content must not be coalesced or dropped. `None` outside
+    /// stoatty or before [`Self::set_stoatty_apc`] is called.
+    pub(crate) apc_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    /// Smooth-scroll pool emit state for the focused editor. Tracks the
+    /// last-declared pool region, filled page window, and emitted scroll row
+    /// so each frame emits only the deltas.
+    pub(crate) smooth_scroll: crate::smooth_scroll::SmoothScrollState,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -729,6 +745,9 @@ impl Stoat {
             pending_completion_request: None,
             last_completion_signature: None,
             active_snippet: None,
+            stoatty: false,
+            apc_tx: None,
+            smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
         }
     }
 
@@ -748,6 +767,22 @@ impl Stoat {
     /// [`Stoat::handle_diff_lookup`] calls hit instead of recomputing.
     pub fn diff_cache(&self) -> Arc<std::sync::Mutex<crate::diff_cache::DiffCache>> {
         self.diff_cache.clone()
+    }
+
+    /// Enable the stoatty smooth-scroll APC path.
+    ///
+    /// `stoatty` is whether the process is running inside the stoatty
+    /// terminal; when `false` the smooth-scroll emit stays a no-op. `apc_tx`
+    /// is the ordered channel the app loop pushes APC byte batches onto for
+    /// the UI thread to write after each frame. The bin layer calls this once
+    /// at startup, before [`Self::run`].
+    pub fn set_stoatty_apc(
+        &mut self,
+        stoatty: bool,
+        apc_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    ) {
+        self.stoatty = stoatty;
+        self.apc_tx = Some(apc_tx);
     }
 
     /// Swap in an alternative [`FsHost`]. The default is [`LocalFs`]; the
@@ -975,6 +1010,7 @@ impl Stoat {
                         },
                         None => *slot = Some(frame_buf.clone()),
                     });
+                    self.emit_smooth_scroll();
                     if render.is_closed() {
                         break;
                     }
@@ -2964,6 +3000,126 @@ impl Stoat {
         crate::render::frame(self, buf);
     }
 
+    /// Emit the stoatty smooth-scroll APC for every visible editor pane's current
+    /// scroll position, pushing one byte batch onto the APC channel.
+    ///
+    /// A no-op unless running inside stoatty. Each plain-editor split pane (a
+    /// [`View::Editor`] that is not a review view) gets its own pool, keyed by the
+    /// pane's stable index, so split panes glide independently and at once. A pane
+    /// that is no longer pooled -- closed, switched to another view, turned into a
+    /// review, or hidden behind a full-screen overlay (commits, rebase, reword,
+    /// conflict) -- is retired with `pool_drop`, so returning to it re-declares the
+    /// region and refills the page window.
+    ///
+    /// Runs at the frame seam after the live frame is published, so the pane
+    /// layout (and thus each editor rectangle) reflects the frame just drawn and
+    /// the APC bytes are written to stdout right after the grid frame.
+    fn emit_smooth_scroll(&mut self) {
+        if !self.stoatty {
+            return;
+        }
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+
+        // A full-screen overlay mode hides every editor, so nothing is pooled this
+        // frame and any live pools are retired.
+        let overlay = matches!(
+            self.mode.as_str(),
+            "commits" | "rebase" | "reword" | "reword_insert" | "conflict"
+        );
+        let panes = if overlay {
+            Vec::new()
+        } else {
+            self.editor_pool_panes()
+        };
+
+        let mut out = Vec::new();
+        let active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
+        self.smooth_scroll.drop_absent(&mut out, &active);
+
+        let ws = &mut self.workspaces[self.active_workspace];
+        let theme = &self.theme;
+        let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
+        for (_, editor_id, region) in &panes {
+            let region = *region;
+            let Some(editor) = ws.editors.get_mut(*editor_id) else {
+                continue;
+            };
+            let scroll_row = editor.scroll_row;
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                region,
+                scroll_row,
+                |page| {
+                    crate::smooth_scroll::render_editor_page(
+                        editor,
+                        page,
+                        fallback_style,
+                        theme,
+                        region.width,
+                        region.height,
+                    )
+                },
+            );
+        }
+
+        if !out.is_empty() {
+            let _ = apc_tx.send(out);
+        }
+    }
+
+    /// Every visible split pane showing a plain editor, as `(pool id, editor id,
+    /// pool region)`.
+    ///
+    /// One entry per [`Placement::Split`] pane whose [`View::Editor`] is not a
+    /// review view and whose content area is non-empty. The pool id is the pane's
+    /// stable [`crate::pane::Pane::index`], so a pane keeps its pool across
+    /// frames; the region is the pane area minus its bottom status row, the same
+    /// content area the editor is painted into. The caller pools nothing while a
+    /// full-screen overlay mode is active.
+    fn editor_pool_panes(
+        &self,
+    ) -> Vec<(u32, EditorId, stoatty_protocol::command::PoolRegionCommand)> {
+        let ws = self.active_workspace();
+        ws.panes
+            .split_panes()
+            .filter_map(|(_, pane)| {
+                if pane.placement != Placement::Split {
+                    return None;
+                }
+                let View::Editor(editor_id) = pane.view else {
+                    return None;
+                };
+                let plain_editor = ws
+                    .editors
+                    .get(editor_id)
+                    .is_some_and(|editor| editor.review_view.is_none());
+                if !plain_editor {
+                    return None;
+                }
+
+                let (content, _) = crate::render::layout::split_pane_status(pane.area);
+                if content.width == 0 || content.height == 0 {
+                    return None;
+                }
+
+                Some((
+                    pane.index,
+                    editor_id,
+                    stoatty_protocol::command::PoolRegionCommand {
+                        pool: pane.index,
+                        top: content.y,
+                        left: content.x,
+                        width: content.width,
+                        height: content.height,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     /// Drive the background work whose results feed the next paint: parse-job
     /// scheduling and the commit, review, LSP, and completion result pumps.
     ///
@@ -3635,6 +3791,137 @@ mod tests {
         h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(10, 5, 20, 8);
         let translated = h.stoat.translate_mouse_to_focused(3, 2);
         assert_eq!(translated, Some((0, 0)));
+    }
+
+    #[test]
+    fn editor_pool_pane_region_is_content_rect() {
+        let mut h = Stoat::test();
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(2, 1, 76, 23);
+
+        let panes = h.stoat.editor_pool_panes();
+        assert_eq!(panes.len(), 1, "one editor pane is pooled");
+        let (_, _, region) = panes[0];
+        // Content rect is the pane area minus its one-row status bar.
+        assert_eq!(
+            (region.top, region.left, region.width, region.height),
+            (1, 2, 76, 22)
+        );
+    }
+
+    #[test]
+    fn no_pool_pane_when_pane_is_not_an_editor() {
+        let mut h = Stoat::test();
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).view = View::Label("scratch".into());
+        assert!(h.stoat.editor_pool_panes().is_empty());
+    }
+
+    #[test]
+    fn emit_smooth_scroll_retires_pools_in_overlay_mode() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+        let _ = rx.try_recv().expect("first emit declares the editor pool");
+
+        // Entering a full-screen overlay mode retires the editor pool.
+        h.stoat.mode = "rebase".into();
+        h.stoat.emit_smooth_scroll();
+        let bytes = rx.try_recv().expect("overlay emit retires the pool");
+        let cmds = decode_apc_stream(&bytes);
+        assert!(
+            !cmds.is_empty() && cmds.iter().all(|cmd| matches!(cmd, Command::PoolDrop(_))),
+            "overlay mode only drops pools, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn emit_smooth_scroll_pushes_pool_region_then_scroll() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        // Lay the panes out so the focused editor has a non-zero rect.
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+
+        let bytes = rx.try_recv().expect("an APC batch was pushed");
+        let cmds = decode_apc_stream(&bytes);
+        assert!(
+            matches!(cmds.first(), Some(Command::PoolRegion(_))),
+            "first frame should declare the pool region, got {cmds:?}"
+        );
+        assert!(
+            matches!(cmds.last(), Some(Command::Scroll(_))),
+            "last frame should be the scroll target, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn emit_smooth_scroll_is_noop_outside_stoatty() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(false, tx);
+
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+        assert!(rx.try_recv().is_err(), "no APC bytes outside stoatty");
+    }
+
+    /// Decode the sequence of stoatty commands in `bytes`, skipping the raw page
+    /// VT that rides between `fill`/`fill_end` markers.
+    fn decode_apc_stream(bytes: &[u8]) -> Vec<stoatty_protocol::command::Command> {
+        let mut out = Vec::new();
+        let mut rest = bytes;
+        while let Some(start) = rest.windows(2).position(|w| w == b"\x1b_") {
+            let after = &rest[start..];
+            let Some(end) = after.windows(2).position(|w| w == b"\x1b\\") else {
+                break;
+            };
+            if let Some(cmd) = stoatty_protocol::command::decode(&after[..end + 2]) {
+                out.push(cmd);
+            }
+            rest = &after[end + 2..];
+        }
+        out
     }
 
     #[test]

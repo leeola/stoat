@@ -115,12 +115,16 @@ fn run_tui(
     // slow flush, so input acceptance is never stalled behind rendering.
     // Redundant frames coalesce; only the most recently sent frame is drawn.
     let (render_tx, render_rx) = tokio::sync::watch::channel(None);
+    // Ordered, lossless side channel for stoatty APC byte batches. Separate
+    // from the render watch because `fill` page content must not coalesce or
+    // drop; written to stdout by the UI thread right after each grid frame.
+    let (apc_tx, apc_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
     let mouse_capture_policy = stoat::default_mouse_capture_policy();
     let mouse_captured =
         stoat::resolve_mouse_captured(mouse_capture_policy, &stoat::host::LocalEnv);
 
-    let ui_handle = stoat::ui::spawn(event_tx, render_rx, mouse_captured);
+    let ui_handle = stoat::ui::spawn(event_tx, render_rx, apc_rx, mouse_captured);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -148,8 +152,14 @@ fn run_tui(
         cwd
     };
 
+    // Stoat smooth-scrolls the focused editor via stoatty's APC when it detects
+    // it is running inside stoatty; the env var is set on the shell stoatty
+    // spawns. Absent it, the APC emit stays a no-op.
+    let stoatty = std::env::var_os("STOATTY").is_some();
+
     rt.block_on(async {
         let mut stoat = Stoat::new(executor.clone(), cli_settings, initial_git_root);
+        stoat.set_stoatty_apc(stoatty, apc_tx);
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }

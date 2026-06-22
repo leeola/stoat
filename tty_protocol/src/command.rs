@@ -47,6 +47,13 @@ pub enum Command {
     /// page and lands softly on it, for a jump too far to ease across the pool
     /// window. Pair with the `fill`s that buffer the destination neighbourhood.
     Reposition(RepositionCommand),
+    /// Retire a smooth-scroll pool, freeing the pages it buffered.
+    ///
+    /// Sent when the surface backing pool [`PoolDropCommand::pool`] goes away (a
+    /// closed pane, a dismissed modal), so the terminal frees its region and page
+    /// buffer rather than holding them for a pool that will never scroll again. A
+    /// later [`Command::PoolRegion`] with the same id starts a fresh pool.
+    PoolDrop(PoolDropCommand),
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
@@ -139,7 +146,7 @@ pub struct ScrollRegionCommand {
     pub offset: u16,
 }
 
-/// Declare the sub-rectangle the smooth-scroll document pool composites into.
+/// Declare the sub-rectangle a smooth-scroll document pool composites into.
 ///
 /// The pool is `width` by `height` cells with its top-left at (`top`, `left`) in
 /// absolute grid coordinates. Unlike [`ScrollRegionCommand`] it carries no
@@ -147,8 +154,15 @@ pub struct ScrollRegionCommand {
 /// fraction). The renderer composites the eased pool over this rectangle and
 /// draws the rest of the grid -- any static chrome around it -- from the live
 /// content, so a program need not own the whole viewport to smooth-scroll.
+///
+/// `pool` names which pool this declares. Pools scroll independently and
+/// composite in ascending-id z-order, so a program can smooth-scroll several
+/// regions at once (split panes side by side, a modal stacked over an editor).
+/// Re-declaring an existing id updates that pool's rectangle;
+/// [`Command::PoolDrop`] retires it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PoolRegionCommand {
+    pub pool: u32,
     pub top: u16,
     pub left: u16,
     pub width: u16,
@@ -232,43 +246,56 @@ pub struct LineLayoutCommand {
     pub heights: Vec<u16>,
 }
 
-/// Name the document page a [`Command::Fill`] redirect paints into.
+/// Name the pool and document page a [`Command::Fill`] redirect paints into.
 ///
 /// The open half of the `fill`/`fill_end` marker pair. A page is a full grid of
 /// cells, far larger than the APC frame cap, so it cannot ride a frame payload:
 /// this marker only names the target page, and the page's content streams as
 /// ordinary VT + SGR bytes after the frame, committed when the redirect closes.
-/// `index` is the app's document page index, the same key the pool slot is
-/// addressed by.
+/// `pool` selects which pool's buffer receives the page; `index` is the app's
+/// document page index, the same key the pool slot is addressed by.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FillCommand {
+    pub pool: u32,
     pub index: u64,
 }
 
 /// A smooth-scroll target as a document-page offset.
 ///
-/// Names where the program wants the viewport: `page` is the document page index
-/// (the same key the page pool is addressed by) and `fraction` is the sub-page
-/// position within it, in 1/65536ths of a page. The renderer eases the live
-/// offset toward this position rather than jumping, so the program reports an
-/// absolute target and the terminal animates toward it.
+/// Names where the program wants pool [`Self::pool`]'s viewport: `page` is the
+/// document page index (the same key the page pool is addressed by) and
+/// `fraction` is the sub-page position within it, in 1/65536ths of a page. The
+/// renderer eases the live offset toward this position rather than jumping, so
+/// the program reports an absolute target and the terminal animates toward it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ScrollCommand {
+    pub pool: u32,
     pub page: u64,
     pub fraction: u16,
 }
 
 /// A discontinuous smooth-scroll jump to a document page.
 ///
-/// `page` is the destination document page index. Unlike [`ScrollCommand`], which
-/// the terminal eases toward across the buffered window, this re-anchors the live
-/// offset to a local neighbour of the destination and lands softly on it, so a
-/// jump too far to animate within the pool does not drag across the unbuffered
-/// gap. The program pushes a window of pages around the destination before
-/// sending it.
+/// `page` is the destination document page index in pool [`Self::pool`]. Unlike
+/// [`ScrollCommand`], which the terminal eases toward across the buffered window,
+/// this re-anchors the live offset to a local neighbour of the destination and
+/// lands softly on it, so a jump too far to animate within the pool does not drag
+/// across the unbuffered gap. The program pushes a window of pages around the
+/// destination before sending it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RepositionCommand {
+    pub pool: u32,
     pub page: u64,
+}
+
+/// Retire smooth-scroll pool [`Self::pool`], freeing the pages it buffered.
+///
+/// The payload of [`Command::PoolDrop`]: a single pool id. Sent when the surface
+/// backing the pool goes away, so the terminal need not hold its buffers for a
+/// pool that will never scroll again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PoolDropCommand {
+    pub pool: u32,
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -413,6 +440,7 @@ pub fn encode_pool_region(command: &PoolRegionCommand) -> Vec<u8> {
 pub fn encode_pool_region_into(out: &mut Vec<u8>, command: &PoolRegionCommand) {
     frame::begin(out, "pool_region");
     frame::push_arg(out, |w| {
+        w.write_all(&command.pool.to_be_bytes())?;
         w.write_all(&command.top.to_be_bytes())?;
         w.write_all(&command.left.to_be_bytes())?;
         w.write_all(&command.width.to_be_bytes())?;
@@ -542,14 +570,18 @@ pub fn encode_line_layout_into(out: &mut Vec<u8>, heights: &[u16]) {
 /// page's content streams as VT bytes after the frame, not as a frame argument.
 pub fn encode_fill(command: &FillCommand) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_fill_into(&mut out, command.index);
+    encode_fill_into(&mut out, command.pool, command.index);
     out
 }
 
-/// Append a `Gstoatty;fill` open-marker frame for page `index` to `out`.
-pub fn encode_fill_into(out: &mut Vec<u8>, index: u64) {
+/// Append a `Gstoatty;fill` open-marker frame for page `index` of pool `pool`
+/// to `out`.
+pub fn encode_fill_into(out: &mut Vec<u8>, pool: u32, index: u64) {
     frame::begin(out, "fill");
-    frame::push_arg(out, |w| w.write_all(&index.to_be_bytes()));
+    frame::push_arg(out, |w| {
+        w.write_all(&pool.to_be_bytes())?;
+        w.write_all(&index.to_be_bytes())
+    });
     frame::end(out);
 }
 
@@ -583,6 +615,7 @@ pub fn encode_scroll(command: &ScrollCommand) -> Vec<u8> {
 pub fn encode_scroll_into(out: &mut Vec<u8>, command: &ScrollCommand) {
     frame::begin(out, "scroll");
     frame::push_arg(out, |w| {
+        w.write_all(&command.pool.to_be_bytes())?;
         w.write_all(&command.page.to_be_bytes())?;
         w.write_all(&command.fraction.to_be_bytes())
     });
@@ -595,14 +628,33 @@ pub fn encode_scroll_into(out: &mut Vec<u8>, command: &ScrollCommand) {
 /// argument, the same shape as [`encode_fill`]'s page index.
 pub fn encode_reposition(command: &RepositionCommand) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_reposition_into(&mut out, command.page);
+    encode_reposition_into(&mut out, command.pool, command.page);
     out
 }
 
-/// Append a `Gstoatty;reposition` frame for destination `page` to `out`.
-pub fn encode_reposition_into(out: &mut Vec<u8>, page: u64) {
+/// Append a `Gstoatty;reposition` frame for destination `page` of pool `pool`
+/// to `out`.
+pub fn encode_reposition_into(out: &mut Vec<u8>, pool: u32, page: u64) {
     frame::begin(out, "reposition");
-    frame::push_arg(out, |w| w.write_all(&page.to_be_bytes()));
+    frame::push_arg(out, |w| {
+        w.write_all(&pool.to_be_bytes())?;
+        w.write_all(&page.to_be_bytes())
+    });
+    frame::end(out);
+}
+
+/// Encode a [`PoolDropCommand`] as a full `Gstoatty;pool_drop` frame for an
+/// emitter.
+pub fn encode_pool_drop(command: &PoolDropCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_pool_drop_into(&mut out, command.pool);
+    out
+}
+
+/// Append a `Gstoatty;pool_drop` frame retiring pool `pool` to `out`.
+pub fn encode_pool_drop_into(out: &mut Vec<u8>, pool: u32) {
+    frame::begin(out, "pool_drop");
+    frame::push_arg(out, |w| w.write_all(&pool.to_be_bytes()));
     frame::end(out);
 }
 
@@ -652,10 +704,11 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         },
         Command::Bar(c) => encode_bar_into(out, c),
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
-        Command::Fill(c) => encode_fill_into(out, c.index),
+        Command::Fill(c) => encode_fill_into(out, c.pool, c.index),
         Command::FillEnd => encode_fill_end_into(out),
         Command::Scroll(c) => encode_scroll_into(out, c),
-        Command::Reposition(c) => encode_reposition_into(out, c.page),
+        Command::Reposition(c) => encode_reposition_into(out, c.pool, c.page),
+        Command::PoolDrop(c) => encode_pool_drop_into(out, c.pool),
         Command::Reset => encode_reset_into(out),
     }
 }
@@ -679,6 +732,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "fill_end" => Some(Command::FillEnd),
         "scroll" => decode_scroll(&frame.args).map(Command::Scroll),
         "reposition" => decode_reposition(&frame.args).map(Command::Reposition),
+        "pool_drop" => decode_pool_drop(&frame.args).map(Command::PoolDrop),
         "reset" => Some(Command::Reset),
         _ => None,
     }
@@ -741,13 +795,14 @@ fn decode_scroll_region(args: &[Vec<u8>]) -> Option<ScrollRegionCommand> {
 }
 
 fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
-    let arg: &[u8; 8] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
 
     Some(PoolRegionCommand {
-        top: u16::from_be_bytes([arg[0], arg[1]]),
-        left: u16::from_be_bytes([arg[2], arg[3]]),
-        width: u16::from_be_bytes([arg[4], arg[5]]),
-        height: u16::from_be_bytes([arg[6], arg[7]]),
+        pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        top: u16::from_be_bytes([arg[4], arg[5]]),
+        left: u16::from_be_bytes([arg[6], arg[7]]),
+        width: u16::from_be_bytes([arg[8], arg[9]]),
+        height: u16::from_be_bytes([arg[10], arg[11]]),
     })
 }
 
@@ -803,29 +858,44 @@ fn decode_line_layout(args: &[Vec<u8>]) -> Option<LineLayoutCommand> {
 }
 
 fn decode_fill(args: &[Vec<u8>]) -> Option<FillCommand> {
-    let arg: &[u8; 8] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
 
     Some(FillCommand {
-        index: u64::from_be_bytes(*arg),
+        pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        index: u64::from_be_bytes([
+            arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11],
+        ]),
     })
 }
 
 fn decode_scroll(args: &[Vec<u8>]) -> Option<ScrollCommand> {
-    let arg: &[u8; 10] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 14] = args.first()?.as_slice().try_into().ok()?;
 
     Some(ScrollCommand {
+        pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
         page: u64::from_be_bytes([
-            arg[0], arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7],
+            arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11],
         ]),
-        fraction: u16::from_be_bytes([arg[8], arg[9]]),
+        fraction: u16::from_be_bytes([arg[12], arg[13]]),
     })
 }
 
 fn decode_reposition(args: &[Vec<u8>]) -> Option<RepositionCommand> {
-    let arg: &[u8; 8] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
 
     Some(RepositionCommand {
-        page: u64::from_be_bytes(*arg),
+        pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        page: u64::from_be_bytes([
+            arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11],
+        ]),
+    })
+}
+
+fn decode_pool_drop(args: &[Vec<u8>]) -> Option<PoolDropCommand> {
+    let arg: &[u8; 4] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(PoolDropCommand {
+        pool: u32::from_be_bytes(*arg),
     })
 }
 
@@ -869,11 +939,11 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
-        encode_line_layout, encode_pool_region, encode_popover, encode_reposition, encode_reset,
-        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, BarCommand,
-        BorderCommand, BorderStyle, Command, FillCommand, IconCommand, IconKind, LineLayoutCommand,
-        PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
-        ScrollRegionCommand, TextRunCommand,
+        encode_line_layout, encode_pool_drop, encode_pool_region, encode_popover,
+        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
+        encode_text_run, BarCommand, BorderCommand, BorderStyle, Command, FillCommand, IconCommand,
+        IconKind, LineLayoutCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
+        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -989,6 +1059,7 @@ mod tests {
     #[test]
     fn pool_region_round_trips() {
         let command = PoolRegionCommand {
+            pool: 4,
             top: 1,
             left: 2,
             width: 76,
@@ -1003,7 +1074,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_pool_region_payload() {
-        // The single arg here decodes to 3 bytes, not the 8 a pool region needs.
+        // The single arg here decodes to 3 bytes, not the 12 a pool region needs.
         assert!(decode(b"Gstoatty;pool_region;YWJj").is_none());
     }
 
@@ -1089,6 +1160,7 @@ mod tests {
     #[test]
     fn fill_round_trips() {
         let command = FillCommand {
+            pool: 9,
             index: 4_000_000_000,
         };
 
@@ -1102,13 +1174,14 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_fill_payload() {
-        // The single arg here decodes to 3 bytes, not the 8 a fill index needs.
+        // The single arg here decodes to 3 bytes, not the 12 a fill index needs.
         assert!(decode(b"Gstoatty;fill;YWJj").is_none());
     }
 
     #[test]
     fn scroll_round_trips() {
         let command = ScrollCommand {
+            pool: 3,
             page: 5_000_000_000,
             fraction: 40_000,
         };
@@ -1121,13 +1194,14 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_scroll_payload() {
-        // The single arg here decodes to 3 bytes, not the 10 a scroll offset needs.
+        // The single arg here decodes to 3 bytes, not the 14 a scroll offset needs.
         assert!(decode(b"Gstoatty;scroll;YWJj").is_none());
     }
 
     #[test]
     fn reposition_round_trips() {
         let command = RepositionCommand {
+            pool: 2,
             page: 6_000_000_000,
         };
 
@@ -1139,8 +1213,24 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_reposition_payload() {
-        // The single arg here decodes to 3 bytes, not the 8 a page index needs.
+        // The single arg here decodes to 3 bytes, not the 12 a page index needs.
         assert!(decode(b"Gstoatty;reposition;YWJj").is_none());
+    }
+
+    #[test]
+    fn pool_drop_round_trips() {
+        let command = PoolDropCommand { pool: 7 };
+
+        assert_eq!(
+            decode(&encode_pool_drop(&command)),
+            Some(Command::PoolDrop(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_pool_drop_payload() {
+        // The single arg here decodes to 3 bytes, not the 4 a pool id needs.
+        assert!(decode(b"Gstoatty;pool_drop;YWJj").is_none());
     }
 
     #[test]
@@ -1218,13 +1308,18 @@ mod tests {
             Command::LineLayout(LineLayoutCommand {
                 heights: vec![1, 2, 3, 1],
             }),
-            Command::Fill(FillCommand { index: 7 }),
+            Command::Fill(FillCommand { pool: 1, index: 7 }),
             Command::FillEnd,
             Command::Scroll(ScrollCommand {
+                pool: 2,
                 page: 12,
                 fraction: 30_000,
             }),
-            Command::Reposition(RepositionCommand { page: 1_000 }),
+            Command::Reposition(RepositionCommand {
+                pool: 3,
+                page: 1_000,
+            }),
+            Command::PoolDrop(PoolDropCommand { pool: 4 }),
             Command::Reset,
         ];
 

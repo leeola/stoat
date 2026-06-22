@@ -11,8 +11,17 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ratatui::{buffer::Buffer, layout::Rect};
-use std::{backtrace::Backtrace, io, panic, sync::Once, thread};
-use tokio::sync::{mpsc::Sender, watch};
+use std::{
+    backtrace::Backtrace,
+    io::{self, Write},
+    panic,
+    sync::Once,
+    thread,
+};
+use tokio::sync::{
+    mpsc::{Sender, UnboundedReceiver},
+    watch,
+};
 
 /// Install a process-global panic hook that restores the terminal before the
 /// default hook runs, so a panic in either the main thread or the UI thread
@@ -50,6 +59,7 @@ pub fn install_panic_hook() {
 pub fn spawn(
     event_tx: Sender<Event>,
     mut render_rx: watch::Receiver<Option<Buffer>>,
+    mut apc_rx: UnboundedReceiver<Vec<u8>>,
     mouse_captured: bool,
 ) -> thread::JoinHandle<io::Result<()>> {
     thread::spawn(move || {
@@ -63,7 +73,7 @@ pub fn spawn(
             if mouse_captured {
                 execute!(io::stdout(), EnableMouseCapture)?;
             }
-            let result = run(&event_tx, &mut render_rx, &mut terminal).await;
+            let result = run(&event_tx, &mut render_rx, &mut apc_rx, &mut terminal).await;
             if mouse_captured {
                 let _ = execute!(io::stdout(), DisableMouseCapture);
             }
@@ -76,6 +86,7 @@ pub fn spawn(
 async fn run(
     event_tx: &Sender<Event>,
     render_rx: &mut watch::Receiver<Option<Buffer>>,
+    apc_rx: &mut UnboundedReceiver<Vec<u8>>,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> io::Result<()> {
     // Main thread needs terminal dimensions before it can render the first frame
@@ -133,9 +144,40 @@ async fn run(
                         dst.content.clone_from(&frame.content);
                     })?;
                 }
+                // Write any stoatty APC byte batches the app pushed for this
+                // frame to the same stdout, after the grid frame so the pool
+                // composites over the content just drawn.
+                drain_apc(apc_rx)?;
+            }
+
+            batch = apc_rx.recv() => {
+                let Some(batch) = batch else { break };
+                let mut stdout = io::stdout();
+                stdout.write_all(&batch)?;
+                drain_apc(apc_rx)?;
+                stdout.flush()?;
             }
         }
     }
 
+    Ok(())
+}
+
+/// Write every APC byte batch already queued on `apc_rx` to stdout without
+/// blocking, then flush.
+///
+/// Drains only the currently-queued batches; a batch arriving mid-drain is
+/// handled on the next loop wake. Ordered and lossless, unlike the render watch,
+/// so `fill` page content is never coalesced or dropped.
+fn drain_apc(apc_rx: &mut UnboundedReceiver<Vec<u8>>) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    let mut wrote = false;
+    while let Ok(batch) = apc_rx.try_recv() {
+        stdout.write_all(&batch)?;
+        wrote = true;
+    }
+    if wrote {
+        stdout.flush()?;
+    }
     Ok(())
 }
