@@ -31,21 +31,18 @@ pub(crate) fn render_commits(
     let (inner, status_area) = split_pane_status(pane.area);
     render_overlay_status(status_area, is_focused, frame, "commits", buf);
 
-    if inner.width < 10 || inner.height == 0 {
+    let Some(left_area) = commits_list_rect(pane.area) else {
         return;
-    }
-
-    let left_w = commit_list_width(inner.width);
-    let sep_x = inner.x + left_w;
+    };
+    let sep_x = left_area.x + left_area.width;
     let right_x = sep_x + 1;
-    let right_w = inner.width.saturating_sub(left_w + 1);
+    let right_w = inner.width.saturating_sub(left_area.width + 1);
 
     let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     for y in inner.y..inner.y + inner.height {
         buf[(sep_x, y)].set_char('│').set_style(sep_style);
     }
 
-    let left_area = Rect::new(inner.x, inner.y, left_w, inner.height);
     state.viewport_rows = left_area.height as usize;
     state.ensure_selected_visible(state.viewport_rows);
     render_commit_list_pane(state, theme, left_area, buf);
@@ -54,6 +51,18 @@ pub(crate) fn render_commits(
         let right_area = Rect::new(right_x, inner.y, right_w, inner.height);
         render_commit_detail_pane(state, workspace_root, theme, right_area, buf);
     }
+}
+
+/// The commit list's rectangle within an overlay pane, or `None` when the pane
+/// is too small. Shared by the renderer and the smooth-scroll emit so the pooled
+/// region matches the painted list.
+pub(crate) fn commits_list_rect(pane_area: Rect) -> Option<Rect> {
+    let (inner, _) = split_pane_status(pane_area);
+    if inner.width < 10 || inner.height == 0 {
+        return None;
+    }
+    let left_w = commit_list_width(inner.width);
+    Some(Rect::new(inner.x, inner.y, left_w, inner.height))
 }
 
 fn commit_list_width(total: u16) -> u16 {
@@ -65,6 +74,23 @@ fn render_commit_list_pane(
     state: &CommitListState,
     theme: &crate::theme::Theme,
     area: Rect,
+    buf: &mut Buffer,
+) {
+    let top = state.scroll_top.min(state.commits.len().saturating_sub(1));
+    paint_commit_rows(state, area, top, theme, buf);
+}
+
+/// Paint the commit list into `area` starting at row `start_row`, with the
+/// selected row highlighted and a trailing load/end marker.
+///
+/// Shared by the live list, which derives `start_row` from `scroll_top`, and the
+/// smooth-scroll pool, which paints absolute pages, so both render identical
+/// rows.
+pub(crate) fn paint_commit_rows(
+    state: &CommitListState,
+    area: Rect,
+    start_row: usize,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     use crate::theme::scope as s;
@@ -83,7 +109,7 @@ fn render_commit_list_pane(
     let sha_style = theme.get(s::VCS_COMMIT_SHA);
     let summary_style = theme.get(s::VCS_COMMIT_SUMMARY);
 
-    let top = state.scroll_top.min(state.commits.len().saturating_sub(1));
+    let top = start_row.min(state.commits.len());
     let rows_visible = area.height as usize;
     let end = (top + rows_visible).min(state.commits.len());
 
