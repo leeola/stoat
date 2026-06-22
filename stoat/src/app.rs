@@ -4005,7 +4005,7 @@ mod tests {
 
         let root = std::path::PathBuf::from("/finder");
         for name in ["a.rs", "b.rs", "c.rs"] {
-            h.fake_fs().insert_file(&root.join(name), b"x\n");
+            h.fake_fs().insert_file(root.join(name), b"x\n");
         }
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
