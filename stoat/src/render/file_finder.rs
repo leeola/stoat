@@ -13,6 +13,72 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
+/// The on-screen rectangles of the file finder modal, derived from a terminal
+/// `area` by [`file_finder_layout`].
+///
+/// Shared by the renderer and the smooth-scroll emit so the pooled list region
+/// matches the painted one exactly.
+pub(crate) struct FinderLayout {
+    /// The bordered modal box.
+    pub(crate) modal: Rect,
+    /// Inside the border: prompt, input, separator, and body.
+    pub(crate) inner: Rect,
+    /// The result list, also the smooth-scroll pool region.
+    pub(crate) list: Rect,
+    /// The preview pane, present only when the body is wide enough.
+    pub(crate) preview: Option<Rect>,
+}
+
+/// Lay out the file finder modal within `area`, or `None` when `area` is too
+/// small to host it.
+pub(crate) fn file_finder_layout(area: Rect) -> Option<FinderLayout> {
+    if area.width < 40 || area.height < 12 {
+        return None;
+    }
+
+    let box_width = 120u16.min(area.width.saturating_sub(4));
+    let box_height = 32u16.min(area.height.saturating_sub(4));
+    if box_width < 40 || box_height < 12 {
+        return None;
+    }
+
+    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
+    let modal = Rect::new(x, y, box_width, box_height);
+    // The title rides the top border, so it does not shrink the inner rect.
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+
+    let body_top = inner.y + 2;
+    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    if body_height == 0 {
+        return None;
+    }
+    let body_width = inner.width;
+
+    let (list, preview) = if body_width >= 80 {
+        let list_width = (body_width * 40 / 100).max(24);
+        let preview_width = body_width.saturating_sub(list_width + 1);
+        (
+            Rect::new(inner.x, body_top, list_width, body_height),
+            Some(Rect::new(
+                inner.x + list_width + 1,
+                body_top,
+                preview_width,
+                body_height,
+            )),
+        )
+    } else {
+        (Rect::new(inner.x, body_top, body_width, body_height), None)
+    };
+
+    Some(FinderLayout {
+        modal,
+        inner,
+        list,
+        preview,
+    })
+}
+
 pub(crate) fn render_file_finder(
     finder: &mut FileFinder,
     ws: &mut Workspace,
@@ -25,19 +91,9 @@ pub(crate) fn render_file_finder(
     finder.refilter_from_input(ws);
     finder.sync_preview(ws, fs_host, language_registry);
 
-    if area.width < 40 || area.height < 12 {
+    let Some(layout) = file_finder_layout(area) else {
         return;
-    }
-
-    let box_width = 120u16.min(area.width.saturating_sub(4));
-    let box_height = 32u16.min(area.height.saturating_sub(4));
-    if box_width < 40 || box_height < 12 {
-        return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal_area = Rect::new(x, y, box_width, box_height);
+    };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     let title = match finder.scope() {
@@ -50,9 +106,9 @@ pub(crate) fn render_file_finder(
         .border_style(modal_style)
         .title(title)
         .title_style(modal_style);
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
+    block.render(layout.modal, buf);
 
+    let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
 
@@ -76,42 +132,37 @@ pub(crate) fn render_file_finder(
             .set_style(muted_style);
     }
 
-    let body_top = separator_row + 1;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
-    if body_height == 0 {
-        return;
-    }
-    let body_width = inner.width;
-    let show_preview = body_width >= 80;
-    let (list_rect, preview_rect) = if show_preview {
-        let list_width = (body_width * 40 / 100).max(24);
-        let preview_width = body_width.saturating_sub(list_width + 1);
-        (
-            Rect::new(inner.x, body_top, list_width, body_height),
-            Some(Rect::new(
-                inner.x + list_width + 1,
-                body_top,
-                preview_width,
-                body_height,
-            )),
-        )
-    } else {
-        (Rect::new(inner.x, body_top, body_width, body_height), None)
-    };
-
-    if let Some(preview_rect) = preview_rect {
-        for row in list_rect.y..list_rect.y + list_rect.height {
-            buf[(list_rect.x + list_rect.width, row)]
+    if let Some(preview_rect) = layout.preview {
+        for row in layout.list.y..layout.list.y + layout.list.height {
+            buf[(layout.list.x + layout.list.width, row)]
                 .set_char('│')
                 .set_style(muted_style);
         }
         render_preview(finder, preview_rect, theme, ws, buf);
     }
 
-    render_list(finder, list_rect, theme, buf);
+    render_list(finder, layout.list, theme, buf);
 }
 
 fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
+    let rows = area.height as usize;
+    let start_row = finder.selected.saturating_sub(rows.saturating_sub(1));
+    paint_finder_rows(finder, area, start_row, theme, buf);
+}
+
+/// Paint finder result rows into `area` starting at `start_row`, one row per
+/// line, with the selected row and fuzzy-match characters highlighted.
+///
+/// Shared by the live list, which derives `start_row` from the selection, and
+/// the smooth-scroll pool, which paints absolute pages, so both render
+/// identical rows.
+pub(crate) fn paint_finder_rows(
+    finder: &FileFinder,
+    area: Rect,
+    start_row: usize,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
     let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
@@ -120,7 +171,6 @@ fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf
     if rows == 0 {
         return;
     }
-    let scroll = finder.selected.saturating_sub(rows.saturating_sub(1));
     let base = finder.base_paths();
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
@@ -129,12 +179,12 @@ fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf
         .filtered
         .iter()
         .zip(finder.match_indices.iter())
-        .skip(scroll)
+        .skip(start_row)
         .take(rows)
         .enumerate()
     {
         let row = area.y + row_idx as u16;
-        let is_selected = scroll + row_idx == finder.selected;
+        let is_selected = start_row + row_idx == finder.selected;
         let style = if is_selected {
             selected_style
         } else {
