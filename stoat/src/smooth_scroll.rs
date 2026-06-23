@@ -30,12 +30,13 @@ use crate::{
     editor_state::EditorState,
     file_finder::FileFinder,
     render::{
-        commits::paint_commit_rows, editor::render_editor, file_finder::paint_finder_rows,
-        review::render_review,
+        command_palette::paint_palette_rows, commits::paint_commit_rows, editor::render_editor,
+        file_finder::paint_finder_rows, review::render_review,
     },
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, ops::Range};
+use stoat_action::registry::RegistryEntry;
 use stoatty_protocol::command::{
     encode_fill_end_into, encode_fill_into, encode_pool_drop_into, encode_pool_region_into,
     encode_reposition_into, encode_scroll_into, PoolRegionCommand, ScrollCommand,
@@ -330,6 +331,40 @@ pub(crate) fn render_finder_page(
         .saturating_mul(region_height as u64)
         .min(usize::MAX as u64) as usize;
     paint_finder_rows(finder, area, start_row, theme, &mut buf);
+
+    serialize_buffer(&buf)
+}
+
+/// Render `region_height` rows of the command-palette result list starting at
+/// row `page * region_height` into a fresh region-sized [`Buffer`], returning
+/// the page's self-contained VT byte stream.
+///
+/// Mirrors [`render_finder_page`] but paints palette result rows; the page
+/// index alone selects the rows, and the list is read-only here.
+pub(crate) fn render_palette_page(
+    filtered: &[&'static RegistryEntry],
+    match_indices: &[Vec<u32>],
+    selected: usize,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+
+    let start_row = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+    paint_palette_rows(
+        filtered,
+        match_indices,
+        selected,
+        area,
+        start_row,
+        theme,
+        &mut buf,
+    );
 
     serialize_buffer(&buf)
 }

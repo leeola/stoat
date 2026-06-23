@@ -3043,6 +3043,17 @@ impl Stoat {
             .flatten()
             .map(|layout| layout.list);
 
+        // The command palette is a modal over normal mode like the finder; its
+        // fixed list region pools as a non-pane surface. Only the Filter phase
+        // has a list -- CollectArgs walks parameters with no scrolling list.
+        let palette_list = (!overlay
+            && self.command_palette.as_ref().is_some_and(|p| {
+                matches!(p.phase, crate::command_palette::PalettePhase::Filter { .. })
+            }))
+        .then(|| crate::render::command_palette::palette_filter_layout(self.size()))
+        .flatten()
+        .map(|layout| layout.list);
+
         // The commits overlay renders into the focused pane; its left list pools
         // as a non-pane surface while editor panes stay suppressed in this mode.
         let commits_region = (self.mode == "commits")
@@ -3058,6 +3069,9 @@ impl Stoat {
         let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
         if finder_list.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::FINDER);
+        }
+        if palette_list.is_some() {
+            active.push(crate::smooth_scroll::non_pane_pool::PALETTE);
         }
         if commits_region.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::COMMITS);
@@ -3138,6 +3152,51 @@ impl Stoat {
                 |page| {
                     crate::smooth_scroll::render_finder_page(
                         finder,
+                        page,
+                        theme,
+                        region.width,
+                        region.height,
+                    )
+                },
+            );
+        }
+
+        if let (Some(list), Some(palette)) = (palette_list, self.command_palette.as_ref())
+            && let crate::command_palette::PalettePhase::Filter {
+                filtered,
+                match_indices,
+                selected,
+                ..
+            } = &palette.phase
+        {
+            let region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+                top: list.y,
+                left: list.x,
+                width: list.width,
+                height: list.height,
+            };
+            let scroll_row = selected.saturating_sub(list.height.saturating_sub(1) as usize) as u32;
+            // The visible row set is the filtered entries; a re-filter changes it,
+            // so a hash of their names is the pool's content version.
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                for entry in filtered {
+                    entry.def.name().hash(&mut hasher);
+                }
+                hasher.finish()
+            };
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                region,
+                scroll_row,
+                content_version,
+                |page| {
+                    crate::smooth_scroll::render_palette_page(
+                        filtered,
+                        match_indices,
+                        *selected,
                         page,
                         theme,
                         region.width,
@@ -4038,6 +4097,48 @@ mod tests {
                 pool: crate::smooth_scroll::non_pane_pool::FINDER,
             })),
             "closing the finder retires its pool"
+        );
+    }
+
+    #[test]
+    fn palette_list_is_pooled_and_retired() {
+        use stoat_action::OpenCommandPalette;
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        action_handlers::dispatch(&mut h.stoat, &OpenCommandPalette);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+        let bytes = rx.try_recv().expect("the open palette emits an APC batch");
+        let list = crate::render::command_palette::palette_filter_layout(size)
+            .expect("the palette fits the test terminal")
+            .list;
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            top: list.y,
+            left: list.x,
+            width: list.width,
+            height: list.height,
+        };
+        assert!(
+            decode_apc_stream(&bytes).contains(&Command::PoolRegion(expected)),
+            "the palette list declares a pool at its list rect"
+        );
+
+        h.stoat.command_palette = None;
+        h.stoat.emit_smooth_scroll();
+        let bytes = rx.try_recv().expect("closing the palette emits a drop");
+        assert!(
+            decode_apc_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            })),
+            "closing the palette retires its pool"
         );
     }
 
