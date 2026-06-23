@@ -17,7 +17,14 @@ use crate::frame::{self, Frame};
 pub enum Command {
     Border(BorderCommand),
     Scale(ScaleCommand),
+    /// Open a popover whose content text streams as the bytes that follow,
+    /// until [`Command::PopoverEnd`] commits it. The fixed head (region, colors,
+    /// scale, offset) rides on this marker; the content is captured off-frame so
+    /// it is not bounded by the frame-size cap.
     Popover(PopoverCommand),
+    /// Close the popover opened by [`Command::Popover`], committing the streamed
+    /// content into its [`PopoverCommand::content`]. Carries no payload.
+    PopoverEnd,
     ScrollRegion(ScrollRegionCommand),
     PoolRegion(PoolRegionCommand),
     Icon(IconCommand),
@@ -369,11 +376,13 @@ pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
     out
 }
 
-/// Append a `Gstoatty;popover` frame to `out` without allocating.
+/// Append a `Gstoatty;popover` open marker, its streamed `content`, and a
+/// `Gstoatty;popover_end` close marker to `out`.
 ///
-/// `content` is borrowed so an emitter can pass a slice of its own buffer rather
-/// than build an owned [`String`] per frame. The fixed region fields ride in the
-/// first argument; `content` is the second.
+/// The fixed head fields ride in the open marker's single argument; `content`
+/// streams as the raw bytes between the two markers, so it is not bounded by the
+/// per-frame size cap. `content` is borrowed so an emitter can pass a slice of
+/// its own buffer rather than build an owned [`String`] per frame.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_popover_into(
     out: &mut Vec<u8>,
@@ -401,7 +410,25 @@ pub fn encode_popover_into(
         w.write_all(&offset[0].to_be_bytes())?;
         w.write_all(&offset[1].to_be_bytes())
     });
-    frame::push_arg(out, |w| w.write_all(content.as_bytes()));
+    frame::end(out);
+    out.extend_from_slice(content.as_bytes());
+    encode_popover_end_into(out);
+}
+
+/// Encode a [`Command::PopoverEnd`] as a full `Gstoatty;popover_end` close-marker
+/// frame.
+///
+/// The frame carries no arguments; receiving it commits the content streamed
+/// since the matching [`Command::Popover`] into the popover's `content`.
+pub fn encode_popover_end() -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_popover_end_into(&mut out);
+    out
+}
+
+/// Append an argument-less `Gstoatty;popover_end` close-marker frame to `out`.
+pub fn encode_popover_end_into(out: &mut Vec<u8>) {
+    frame::begin(out, "popover_end");
     frame::end(out);
 }
 
@@ -696,6 +723,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
             c.offset,
             &c.content,
         ),
+        Command::PopoverEnd => encode_popover_end_into(out),
         Command::ScrollRegion(c) => encode_scroll_region_into(out, c),
         Command::PoolRegion(c) => encode_pool_region_into(out, c),
         Command::Icon(c) => encode_icon_into(out, c),
@@ -722,6 +750,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "border" => decode_border(&frame.args).map(Command::Border),
         "scale" => decode_scale(&frame.args).map(Command::Scale),
         "popover" => decode_popover(&frame.args).map(Command::Popover),
+        "popover_end" => Some(Command::PopoverEnd),
         "scroll_region" => decode_scroll_region(&frame.args).map(Command::ScrollRegion),
         "pool_region" => decode_pool_region(&frame.args).map(Command::PoolRegion),
         "icon" => decode_icon(&frame.args).map(Command::Icon),
@@ -761,9 +790,11 @@ fn decode_scale(args: &[Vec<u8>]) -> Option<ScaleCommand> {
     })
 }
 
+/// Decode a `Gstoatty;popover` open marker's head. The `content` streams as the
+/// bytes after this frame and is captured by the terminal between the open
+/// marker and [`Command::PopoverEnd`], so it is empty here.
 fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
     let region: &[u8; 22] = args.first()?.as_slice().try_into().ok()?;
-    let content = std::str::from_utf8(args.get(1)?).ok()?.to_owned();
 
     Some(PopoverCommand {
         top: u16::from_be_bytes([region[0], region[1]]),
@@ -778,7 +809,7 @@ fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
             i16::from_be_bytes([region[18], region[19]]),
             i16::from_be_bytes([region[20], region[21]]),
         ],
-        content,
+        content: String::new(),
     })
 }
 
@@ -939,11 +970,11 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
-        encode_line_layout, encode_pool_drop, encode_pool_region, encode_popover,
+        encode_line_layout, encode_pool_drop, encode_pool_region, encode_popover_end,
         encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
         encode_text_run, BarCommand, BorderCommand, BorderStyle, Command, FillCommand, IconCommand,
-        IconKind, LineLayoutCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
-        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        IconKind, LineLayoutCommand, PoolDropCommand, PoolRegionCommand, RepositionCommand,
+        ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -1007,24 +1038,12 @@ mod tests {
     }
 
     #[test]
-    fn popover_round_trips() {
-        let command = PopoverCommand {
-            top: 3,
-            left: 12,
-            width: 16,
-            height: 4,
-            fill: [30, 30, 60],
-            border: [200, 200, 255],
-            content_fg: [255, 255, 255],
-            scale: 2,
-            offset: [-3, 5],
-            content: "items".to_owned(),
-        };
-
-        assert_eq!(
-            decode(&encode_popover(&command)),
-            Some(Command::Popover(command))
-        );
+    fn popover_end_round_trips() {
+        // The popover head and its streamed content round-trip at the terminal
+        // layer (the content streams between the open and popover_end markers, so
+        // a single-frame decode cannot recover it); see the tty_term popover
+        // tests. Here we cover the close marker.
+        assert_eq!(decode(&encode_popover_end()), Some(Command::PopoverEnd));
     }
 
     #[test]
@@ -1264,18 +1283,11 @@ mod tests {
                 left: 6,
                 scale: 3,
             }),
-            Command::Popover(PopoverCommand {
-                top: 1,
-                left: 1,
-                width: 10,
-                height: 4,
-                fill: [10, 20, 30],
-                border: [40, 50, 60],
-                content_fg: [70, 80, 90],
-                scale: 2,
-                offset: [-3, 7],
-                content: "hi".to_owned(),
-            }),
+            // Popover is a multi-frame open/content/close construct, so it does
+            // not round-trip through a single-frame `decode`; its head and
+            // streamed content are covered by the tty_term popover tests. Its
+            // close marker is single-frame and covered here.
+            Command::PopoverEnd,
             Command::ScrollRegion(ScrollRegionCommand {
                 top: 2,
                 left: 3,

@@ -135,6 +135,14 @@ pub struct Terminal {
     /// `reset`), when the painted page is committed onto its pool's buffer.
     /// `None` while writing the live grid.
     fill: Option<FillTarget>,
+    /// The in-progress popover, set while a `Gstoatty;popover` open marker has
+    /// redirected the streamed bytes into a pending popover's content.
+    ///
+    /// Streamed bytes accumulate as the popover's content text instead of
+    /// painting the live grid until the redirect closes (a `popover_end` or a
+    /// `reset`), when the popover is committed onto [`Self::popovers`]. `None`
+    /// while writing the live grid.
+    popover: Option<PendingPopover>,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -272,6 +280,15 @@ impl FillTarget {
     }
 }
 
+/// The in-progress popover opened by a `Gstoatty;popover` marker.
+///
+/// Holds the decoded head while the streamed content accumulates in `content`,
+/// moved into [`PopoverCommand::content`] when the close marker commits it.
+struct PendingPopover {
+    command: PopoverCommand,
+    content: Vec<u8>,
+}
+
 impl Terminal {
     /// Create a `rows` by `cols` terminal with an empty screen, resolving colors
     /// against `theme`.
@@ -306,6 +323,7 @@ impl Terminal {
             last_history: 0,
             pools: BTreeMap::new(),
             fill: None,
+            popover: None,
         }
     }
 
@@ -336,13 +354,14 @@ impl Terminal {
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
-        let redirecting = self.fill.is_some();
+        let redirecting = self.fill.is_some() || self.popover.is_some();
 
         // The APC and XTVERSION scanners only act on ESC-prefixed sequences, so
         // when neither holds a partial frame a chunk with no ESC carries nothing
         // for them. A SIMD memchr for the first ESC lets the bulk of plain output
         // (cat, yes) skip the two per-byte scans, leaving only the vte parse. A
-        // fill redirect must route every byte, so it forgoes the fast path.
+        // fill or popover redirect must route every byte (popover content is
+        // plain text with no ESC), so it forgoes the fast path.
         let scan = if !redirecting && self.apc.is_idle() && self.xtversion.is_idle() {
             memchr::memchr(ESC, bytes).map(|esc| &bytes[esc..])
         } else {
@@ -365,14 +384,14 @@ impl Terminal {
             self.responses.push(XTVERSION_REPLY.as_bytes());
         }
 
-        // Without a fill redirect every byte targets the live screen, so apply
-        // the commands and feed the whole chunk verbatim, preserving the
+        // Without a redirect every byte targets the live screen, so apply the
+        // commands and feed the whole chunk verbatim, preserving the
         // synchronized-update accounting the redirect path cannot.
-        let involves_fill = redirecting
-            || frames
-                .iter()
-                .any(|(command, _)| matches!(command, Some(Command::Fill(_))));
-        if !involves_fill {
+        let involves_redirect = redirecting
+            || frames.iter().any(|(command, _)| {
+                matches!(command, Some(Command::Fill(_)) | Some(Command::Popover(_)))
+            });
+        if !involves_redirect {
             for (command, _) in frames {
                 if let Some(command) = command {
                     self.apply_command(command);
@@ -399,17 +418,22 @@ impl Terminal {
             start = prefix + end;
 
             if let Some(command) = command {
-                // Mid-redirect only the fill-control commands act. A decoration
-                // command in a page's stream is page-targeted, so applying it
-                // would leak onto the live grid; it is dropped to keep the live
-                // state untouched while a page paints.
+                // Mid-redirect only the fill/popover-control commands act. A
+                // decoration command in a redirected stream is target-bound, so
+                // applying it would leak onto the live grid; it is dropped to
+                // keep the live state untouched while a page paints or a popover
+                // captures.
                 // FIXME: capture page-targeted decorations onto the page grid
                 // rather than dropping them.
                 let control = matches!(
                     command,
-                    Command::Fill(_) | Command::FillEnd | Command::Reset
+                    Command::Fill(_)
+                        | Command::FillEnd
+                        | Command::Reset
+                        | Command::Popover(_)
+                        | Command::PopoverEnd
                 );
-                if control || self.fill.is_none() {
+                if control || (self.fill.is_none() && self.popover.is_none()) {
                     self.apply_command(command);
                 }
             }
@@ -474,10 +498,8 @@ impl Terminal {
                 self.scales.push(scale);
                 self.decorations_dirty.scales = true;
             },
-            Command::Popover(popover) => {
-                self.popovers.push(popover);
-                self.decorations_dirty.popovers = true;
-            },
+            Command::Popover(popover) => self.begin_popover(popover),
+            Command::PopoverEnd => self.commit_popover(),
             Command::ScrollRegion(region) => {
                 self.scroll_region = Some(region);
                 self.decorations_dirty.scroll_region = true;
@@ -537,10 +559,12 @@ impl Terminal {
                     self.fill = None;
                 }
             },
-            // A reset is also a fill close trigger: commit any open page before
-            // clearing decoration state and restoring the live grid.
+            // A reset is also a fill/popover close trigger: commit any open page
+            // or popover before clearing decoration state and restoring the live
+            // grid.
             Command::Reset => {
                 self.commit_fill();
+                self.commit_popover();
                 self.clear_decorations();
             },
         }
@@ -703,12 +727,55 @@ impl Terminal {
         project_term_cells(grid, &fill.term, &self.theme, &self.palette);
     }
 
+    /// Open a popover content capture for the popover described by `command`.
+    ///
+    /// Any already-open popover is committed first, so a dropped `popover_end`
+    /// cannot strand the capture: the next `popover` (or a `reset`) closes the
+    /// previous one. The streamed bytes that follow accumulate as its content
+    /// until [`Self::commit_popover`].
+    fn begin_popover(&mut self, command: PopoverCommand) {
+        self.commit_popover();
+        self.popover = Some(PendingPopover {
+            command,
+            content: Vec::new(),
+        });
+    }
+
+    /// Commit the open popover onto [`Self::popovers`] with its streamed content.
+    ///
+    /// A no-op when no popover is open, so every close trigger (`popover_end`, the
+    /// next `popover`, `reset`) can call it unconditionally. The redirect feeds
+    /// the trailing `popover_end` marker's bytes into the buffer along with the
+    /// content; popover content is plain text, so the first `ESC` is that marker's
+    /// introducer, and everything from it is dropped.
+    fn commit_popover(&mut self) {
+        let Some(mut pending) = self.popover.take() else {
+            return;
+        };
+
+        let content_end = pending
+            .content
+            .iter()
+            .position(|&byte| byte == ESC)
+            .unwrap_or(pending.content.len());
+        pending.content.truncate(content_end);
+
+        let mut command = pending.command;
+        command.content = String::from_utf8_lossy(&pending.content).into_owned();
+        self.popovers.push(command);
+        self.decorations_dirty.popovers = true;
+    }
+
     /// Route a run of VT bytes to the active write target: the open fill
-    /// context's parser when a redirect is in effect, otherwise the live one.
+    /// context's parser when a fill redirect is in effect, the popover content
+    /// buffer when a popover capture is in effect, otherwise the live parser.
     fn feed_segment(&mut self, segment: &[u8]) {
-        match &mut self.fill {
-            Some(fill) => fill.parser.advance(&mut fill.term, segment),
-            None => self.parser.advance(&mut self.term, segment),
+        if let Some(fill) = &mut self.fill {
+            fill.parser.advance(&mut fill.term, segment);
+        } else if let Some(popover) = &mut self.popover {
+            popover.content.extend_from_slice(segment);
+        } else {
+            self.parser.advance(&mut self.term, segment);
         }
     }
 
@@ -2258,6 +2325,50 @@ mod tests {
                 scale: 2,
                 offset: [4, -2],
                 content: "ok".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn popover_content_streams_across_advance_chunks() {
+        let frame = encode_popover(&PopoverCommand {
+            top: 1,
+            left: 2,
+            width: 6,
+            height: 3,
+            fill: [10, 20, 30],
+            border: [40, 50, 60],
+            content_fg: [70, 80, 90],
+            scale: 1,
+            offset: [0, 0],
+            content: "streamed".to_owned(),
+        });
+
+        // Split just inside the content run (past the open marker's ESC \
+        // terminator) so the content arrives across two advance calls, exercising
+        // the cross-chunk popover capture.
+        let open_end = frame.windows(2).position(|w| w == [0x1b, b'\\']).unwrap() + 2;
+        let split = open_end + 3;
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame[..split]);
+        terminal.advance(&frame[split..]);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.overlays(),
+            [Overlay {
+                top: 1,
+                left: 2,
+                width: 6,
+                height: 3,
+                fill: Rgb::new(10, 20, 30),
+                border: Rgb::new(40, 50, 60),
+                content_fg: Rgb::new(70, 80, 90),
+                scale: 1,
+                offset: [0, 0],
+                content: "streamed".to_owned(),
             }]
         );
     }
