@@ -201,24 +201,6 @@ pub trait GitRepo: Send + Sync {
     /// Point HEAD at `sha` (detached update; does not move any branch
     /// refs). Used by the rebase stepper after the plan completes.
     fn update_head(&self, sha: &str) -> Result<(), GitApplyError>;
-
-    /// Capture the current working tree as a free-floating commit and
-    /// return its sha. Mirrors `git stash create` semantics: the
-    /// resulting commit is not pushed onto the stash list and not
-    /// pinned on any ref, so it is subject to git's gc unless callers
-    /// promote it. Returns `None` when there is nothing to capture
-    /// (clean working tree, orphan HEAD, or backend failure); callers
-    /// treat the absence as "no checkpoint" rather than a hard error.
-    fn stash_create(&self) -> Option<String>;
-
-    /// Overwrite the working tree with the tree at `sha`. Used to
-    /// restore a checkpoint captured by [`Self::stash_create`]: the
-    /// commit's tree is materialised onto disk via a forced checkout,
-    /// so any existing workdir contents at the same paths are
-    /// replaced. The index and HEAD are left untouched. Returns
-    /// `Err(GitApplyError::Backend(..))` when the sha is unknown or
-    /// the checkout fails.
-    fn restore_tree(&self, sha: &str) -> Result<(), GitApplyError>;
 }
 
 /// Result of a [`GitRepo::rewrite_commit`] call.

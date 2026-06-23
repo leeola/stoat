@@ -102,29 +102,6 @@ impl FakeGit {
             .unwrap_or_default()
     }
 
-    /// Snapshot the synthetic stash shas minted against `workdir` via
-    /// [`GitRepo::stash_create`], in call order. Empty when no stashes
-    /// have been captured or the repo is unknown.
-    pub fn stashes(&self, workdir: &Path) -> Vec<String> {
-        let state = self.state.lock().unwrap();
-        state
-            .repos
-            .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().stashes.clone())
-            .unwrap_or_default()
-    }
-
-    /// Snapshot the shas passed to [`GitRepo::restore_tree`] against
-    /// `workdir`, in call order.
-    pub fn restored_shas(&self, workdir: &Path) -> Vec<String> {
-        let state = self.state.lock().unwrap();
-        state
-            .repos
-            .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().restored_shas.clone())
-            .unwrap_or_default()
-    }
-
     /// Snapshot the amend-head calls against `workdir`, in call order.
     pub fn amend_history(&self, workdir: &Path) -> Vec<RecordedAmend> {
         let state = self.state.lock().unwrap();
@@ -467,14 +444,6 @@ struct FakeRepoState {
     applied_rebases: Vec<RecordedRebase>,
     /// Record of every amend_head invocation, in call order.
     amend_history: Vec<RecordedAmend>,
-    /// Synthetic stash shas minted by [`GitRepo::stash_create`], in
-    /// call order. Tests inspect this via [`FakeGit::stashes`] to assert
-    /// what was captured.
-    stashes: Vec<String>,
-    /// Shas passed to [`GitRepo::restore_tree`], in call order. The
-    /// fake does not actually mutate any tracked state on restore;
-    /// tests assert on this via [`FakeGit::restored_shas`].
-    restored_shas: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -700,29 +669,6 @@ impl GitRepo for FakeGitRepo {
             .fail();
         }
         state.head = Some(sha.to_string());
-        Ok(())
-    }
-
-    fn stash_create(&self) -> Option<String> {
-        let mut state = self.state.lock().unwrap();
-        if state.changed.is_empty() {
-            return None;
-        }
-        state.synth_counter += 1;
-        let sha = format!("stash{:040}", state.synth_counter);
-        state.stashes.push(sha.clone());
-        Some(sha)
-    }
-
-    fn restore_tree(&self, sha: &str) -> Result<(), GitApplyError> {
-        let mut state = self.state.lock().unwrap();
-        if !state.stashes.iter().any(|s| s == sha) && !state.commits.contains_key(sha) {
-            return BackendSnafu {
-                reason: format!("unknown sha: {sha}"),
-            }
-            .fail();
-        }
-        state.restored_shas.push(sha.to_string());
         Ok(())
     }
 
