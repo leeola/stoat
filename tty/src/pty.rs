@@ -12,6 +12,7 @@ use std::{
     ffi::{c_char, CStr},
     io::{self, Read, Write},
     mem::MaybeUninit,
+    path::Path,
     ptr,
     thread::{self, JoinHandle},
 };
@@ -39,7 +40,8 @@ pub(crate) struct Pty {
 
 impl Pty {
     /// Spawn `program` with `args` over a fresh PTY sized `rows` by `cols` and
-    /// start reading.
+    /// start reading. Runs the command in `cwd` when given, otherwise inheriting
+    /// the caller's working directory.
     ///
     /// `sink` runs on the reader thread: it is called with [`PtyOutput::Data`]
     /// for each chunk the shell writes and once with [`PtyOutput::Eof`] when the
@@ -47,6 +49,7 @@ impl Pty {
     pub(crate) fn spawn(
         program: &str,
         args: &[String],
+        cwd: Option<&Path>,
         rows: u16,
         cols: u16,
         sink: impl FnMut(PtyOutput) + Send + 'static,
@@ -62,7 +65,7 @@ impl Pty {
 
         let child = pair
             .slave
-            .spawn_command(shell_command(program, args))
+            .spawn_command(shell_command(program, args, cwd))
             .map_err(io::Error::other)?;
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
@@ -106,15 +109,19 @@ impl Drop for Pty {
     }
 }
 
-/// Build the shell command with the stoatty environment.
+/// Build the shell command with the stoatty environment, running in `cwd` when
+/// given.
 ///
 /// `TERM` selects the terminfo the shell and its children load. `STOATTY` marks
 /// the shell as running under stoatty, so a child can gate stoatty-only output on
 /// its presence synchronously at startup, without the `XTVERSION` query round
 /// trip.
-fn shell_command(program: &str, args: &[String]) -> CommandBuilder {
+fn shell_command(program: &str, args: &[String], cwd: Option<&Path>) -> CommandBuilder {
     let mut command = CommandBuilder::new(program);
     command.args(args);
+    if let Some(dir) = cwd {
+        command.cwd(dir);
+    }
     command.env("TERM", "xterm-256color");
     command.env("STOATTY", "1");
     command
@@ -238,9 +245,18 @@ mod tests {
 
     #[test]
     fn shell_command_sets_term_and_stoatty_env() {
-        let command = shell_command("/bin/sh", &[]);
+        let command = shell_command("/bin/sh", &[], None);
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
+    }
+
+    #[test]
+    fn shell_command_sets_cwd_when_given() {
+        let command = shell_command("/bin/sh", &[], Some(std::path::Path::new("/tmp")));
+        assert_eq!(
+            command.get_cwd().map(|cwd| cwd.as_os_str()),
+            Some(OsStr::new("/tmp"))
+        );
     }
 
     #[test]

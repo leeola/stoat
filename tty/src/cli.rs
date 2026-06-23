@@ -1,4 +1,5 @@
-use clap::Parser;
+use clap::{Parser, ValueHint};
+use std::path::PathBuf;
 
 /// Per-invocation launch overrides for the stoatty terminal, parsed from argv.
 ///
@@ -22,6 +23,11 @@ pub struct Cli {
         num_args = 1..,
     )]
     command: Vec<String>,
+
+    /// Set the spawned command's working directory for this run. Defaults to
+    /// stoatty's own working directory when unset.
+    #[arg(long = "working-directory", value_name = "DIR", value_hint = ValueHint::DirPath)]
+    pub working_directory: Option<PathBuf>,
 }
 
 impl Cli {
@@ -58,5 +64,14 @@ mod tests {
     fn command_without_args() {
         let cli = Cli::parse_from(["stoatty", "--command", "ls"]);
         assert_eq!(cli.command(), Some(("ls".to_string(), Vec::new())));
+    }
+
+    #[test]
+    fn working_directory_parses_path() {
+        use std::path::PathBuf;
+
+        let cli = Cli::parse_from(["stoatty", "--working-directory", "/tmp"]);
+        assert_eq!(cli.working_directory, Some(PathBuf::from("/tmp")));
+        assert_eq!(Cli::parse_from(["stoatty"]).working_directory, None);
     }
 }

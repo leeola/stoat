@@ -15,6 +15,7 @@ use crate::{
 use alacritty_terminal::sync::FairMutex;
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -55,14 +56,29 @@ const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
 ///
 /// Resolves the launch program and its arguments by precedence: `command` (the
 /// `-e`/`--command` CLI override) first, then the `[shell]` config, then the
-/// default shell with no arguments. Blocks the calling thread for the lifetime
-/// of the window. See [`run_with_shell`] to force a specific command instead.
-pub fn run(command: Option<(String, Vec<String>)>) {
+/// default shell with no arguments. The command runs in `working_directory`
+/// when it names an existing directory; a non-directory is warned about and
+/// ignored, falling back to stoatty's own working directory.
+///
+/// Blocks the calling thread for the lifetime of the window. See
+/// [`run_with_shell`] to force a specific command instead.
+pub fn run(command: Option<(String, Vec<String>)>, working_directory: Option<PathBuf>) {
     let mut config = load_config();
     let (program, args) = command
         .or_else(|| config.shell.take().map(|s| (s.program, s.args)))
         .unwrap_or_else(|| (pty::default_shell(), Vec::new()));
-    run_with_config(config, program, args, None);
+    let working_directory = working_directory.and_then(|dir| {
+        if dir.is_dir() {
+            Some(dir)
+        } else {
+            eprintln!(
+                "stoatty: ignoring --working-directory {}: not a directory",
+                dir.display()
+            );
+            None
+        }
+    });
+    run_with_config(config, program, args, None, working_directory);
 }
 
 /// Open the stoatty window running `program` with `args` as the PTY command,
@@ -78,7 +94,7 @@ pub fn run(command: Option<(String, Vec<String>)>) {
 /// (`ControlFlow::Wait`): frames are drawn on demand when PTY output arrives or
 /// the window is resized, not on a continuous timer.
 pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>) {
-    run_with_config(load_config(), program, args, size);
+    run_with_config(load_config(), program, args, size, None);
 }
 
 /// Open the window running `program` with `args`, drawing with `config`'s theme
@@ -86,7 +102,13 @@ pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>
 ///
 /// The shared core of [`run`] and [`run_with_shell`]. It takes an
 /// already-loaded `config` so each entry point loads it exactly once.
-fn run_with_config(config: Config, program: String, args: Vec<String>, size: Option<[u16; 2]>) {
+fn run_with_config(
+    config: Config,
+    program: String,
+    args: Vec<String>,
+    size: Option<[u16; 2]>,
+    working_directory: Option<PathBuf>,
+) {
     let theme = config.resolve_theme();
 
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
@@ -105,6 +127,7 @@ fn run_with_config(config: Config, program: String, args: Vec<String>, size: Opt
             ligatures: config.ligatures,
         },
         size,
+        working_directory,
     );
     event_loop.run_app(&mut app).expect("run event loop");
 }
@@ -148,6 +171,9 @@ struct App {
     proxy: EventLoopProxy<PtyEvent>,
     program: String,
     args: Vec<String>,
+    /// Working directory for the spawned command, or `None` to inherit
+    /// stoatty's own. Already validated to an existing directory.
+    working_directory: Option<PathBuf>,
     theme: Theme,
     font_size: u32,
     /// Ordered font-family cascade from the config, resolved against the font db
@@ -170,11 +196,13 @@ impl App {
         theme: Theme,
         font: FontSettings,
         size: Option<[u16; 2]>,
+        working_directory: Option<PathBuf>,
     ) -> App {
         App {
             proxy,
             program,
             args,
+            working_directory,
             theme,
             font_size: font.size,
             font_family: font.family,
@@ -364,6 +392,7 @@ impl ApplicationHandler<PtyEvent> for App {
             Pty::spawn(
                 &self.program,
                 &self.args,
+                self.working_directory.as_deref(),
                 rows as u16,
                 cols as u16,
                 move |output| match output {
