@@ -5,7 +5,9 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     workspace::Workspace,
 };
-pub use pty::{spawn_oneshot, spawn_shell, PtyNotification, ShellHandle};
+pub use pty::{
+    agent_socket_path, spawn_claude, spawn_oneshot, spawn_shell, PtyNotification, ShellHandle,
+};
 use ratatui::layout::Rect;
 use slotmap::new_key_type;
 use std::path::PathBuf;
