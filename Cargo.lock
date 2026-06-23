@@ -3983,6 +3983,7 @@ name = "stoatty"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "clap",
  "etcetera",
  "libc",
  "portable-pty",

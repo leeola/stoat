@@ -50,19 +50,18 @@ const FONT_SIZE_FLOOR: u32 = 6;
 /// the wheel reports forwarded to a mouse-reporting app.
 const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
 
-/// Open the stoatty window running the configured command, or the user's
-/// default shell when the config sets none, at the winit default window size.
+/// Open the stoatty window running the launch command, or the user's default
+/// shell when none is given, at the winit default window size.
 ///
-/// Reads the `[shell]` config override for the program and its arguments,
-/// falling back to the default shell with no arguments. Blocks the calling
-/// thread for the lifetime of the window. See [`run_with_shell`] to force a
-/// specific command instead.
-pub fn run() {
+/// Resolves the launch program and its arguments by precedence: `command` (the
+/// `-e`/`--command` CLI override) first, then the `[shell]` config, then the
+/// default shell with no arguments. Blocks the calling thread for the lifetime
+/// of the window. See [`run_with_shell`] to force a specific command instead.
+pub fn run(command: Option<(String, Vec<String>)>) {
     let mut config = load_config();
-    let (program, args) = match config.shell.take() {
-        Some(shell) => (shell.program, shell.args),
-        None => (pty::default_shell(), Vec::new()),
-    };
+    let (program, args) = command
+        .or_else(|| config.shell.take().map(|s| (s.program, s.args)))
+        .unwrap_or_else(|| (pty::default_shell(), Vec::new()));
     run_with_config(config, program, args, None);
 }
 

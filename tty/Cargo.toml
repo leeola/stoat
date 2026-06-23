@@ -16,6 +16,7 @@ stoatty_protocol = { path = "../tty_protocol" }
 stoatty_term = { path = "../tty_term" }
 stoatty_render = { path = "../tty_render" }
 alacritty_terminal.workspace = true
+clap.workspace = true
 winit.workspace = true
 portable-pty.workspace = true
 libc.workspace = true
