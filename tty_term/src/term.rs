@@ -135,14 +135,15 @@ pub struct Terminal {
     /// `reset`), when the painted page is committed onto its pool's buffer.
     /// `None` while writing the live grid.
     fill: Option<FillTarget>,
-    /// The in-progress popover, set while a `Gstoatty;popover` open marker has
-    /// redirected the streamed bytes into a pending popover's content.
+    /// The in-progress content capture, set while a `Gstoatty;popover` or
+    /// `Gstoatty;text_run` open marker has redirected the streamed bytes into a
+    /// pending command's text.
     ///
-    /// Streamed bytes accumulate as the popover's content text instead of
-    /// painting the live grid until the redirect closes (a `popover_end` or a
-    /// `reset`), when the popover is committed onto [`Self::popovers`]. `None`
-    /// while writing the live grid.
-    popover: Option<PendingPopover>,
+    /// Streamed bytes accumulate as that text instead of painting the live grid
+    /// until the redirect closes (a matching close marker or a `reset`), when the
+    /// command is committed onto its decoration list. `None` while writing the
+    /// live grid.
+    capture: Option<ContentCapture>,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -280,13 +281,20 @@ impl FillTarget {
     }
 }
 
-/// The in-progress popover opened by a `Gstoatty;popover` marker.
+/// An in-progress capture of a content-bearing marker's streamed text.
 ///
-/// Holds the decoded head while the streamed content accumulates in `content`,
-/// moved into [`PopoverCommand::content`] when the close marker commits it.
-struct PendingPopover {
-    command: PopoverCommand,
+/// Opened by a `Gstoatty;popover` or `Gstoatty;text_run` marker, it holds the
+/// decoded head in `target` while the streamed bytes accumulate in `content`,
+/// moved into the command's text field when the close marker commits it.
+struct ContentCapture {
+    target: CaptureTarget,
     content: Vec<u8>,
+}
+
+/// The command awaiting its streamed text in an open [`ContentCapture`].
+enum CaptureTarget {
+    Popover(PopoverCommand),
+    TextRun(TextRunCommand),
 }
 
 impl Terminal {
@@ -323,7 +331,7 @@ impl Terminal {
             last_history: 0,
             pools: BTreeMap::new(),
             fill: None,
-            popover: None,
+            capture: None,
         }
     }
 
@@ -354,13 +362,13 @@ impl Terminal {
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
-        let redirecting = self.fill.is_some() || self.popover.is_some();
+        let redirecting = self.fill.is_some() || self.capture.is_some();
 
         // The APC and XTVERSION scanners only act on ESC-prefixed sequences, so
         // when neither holds a partial frame a chunk with no ESC carries nothing
         // for them. A SIMD memchr for the first ESC lets the bulk of plain output
         // (cat, yes) skip the two per-byte scans, leaving only the vte parse. A
-        // fill or popover redirect must route every byte (popover content is
+        // fill or content redirect must route every byte (captured content is
         // plain text with no ESC), so it forgoes the fast path.
         let scan = if !redirecting && self.apc.is_idle() && self.xtversion.is_idle() {
             memchr::memchr(ESC, bytes).map(|esc| &bytes[esc..])
@@ -389,7 +397,10 @@ impl Terminal {
         // synchronized-update accounting the redirect path cannot.
         let involves_redirect = redirecting
             || frames.iter().any(|(command, _)| {
-                matches!(command, Some(Command::Fill(_)) | Some(Command::Popover(_)))
+                matches!(
+                    command,
+                    Some(Command::Fill(_)) | Some(Command::Popover(_)) | Some(Command::TextRun(_))
+                )
             });
         if !involves_redirect {
             for (command, _) in frames {
@@ -418,11 +429,11 @@ impl Terminal {
             start = prefix + end;
 
             if let Some(command) = command {
-                // Mid-redirect only the fill/popover-control commands act. A
+                // Mid-redirect only the fill/capture-control commands act. A
                 // decoration command in a redirected stream is target-bound, so
                 // applying it would leak onto the live grid; it is dropped to
-                // keep the live state untouched while a page paints or a popover
-                // captures.
+                // keep the live state untouched while a page paints or a content
+                // capture runs.
                 // FIXME: capture page-targeted decorations onto the page grid
                 // rather than dropping them.
                 let control = matches!(
@@ -432,8 +443,10 @@ impl Terminal {
                         | Command::Reset
                         | Command::Popover(_)
                         | Command::PopoverEnd
+                        | Command::TextRun(_)
+                        | Command::TextRunEnd
                 );
-                if control || (self.fill.is_none() && self.popover.is_none()) {
+                if control || (self.fill.is_none() && self.capture.is_none()) {
                     self.apply_command(command);
                 }
             }
@@ -498,8 +511,8 @@ impl Terminal {
                 self.scales.push(scale);
                 self.decorations_dirty.scales = true;
             },
-            Command::Popover(popover) => self.begin_popover(popover),
-            Command::PopoverEnd => self.commit_popover(),
+            Command::Popover(popover) => self.begin_capture(CaptureTarget::Popover(popover)),
+            Command::PopoverEnd => self.commit_capture(),
             Command::ScrollRegion(region) => {
                 self.scroll_region = Some(region);
                 self.decorations_dirty.scroll_region = true;
@@ -522,10 +535,8 @@ impl Terminal {
                 self.icons.push(icon);
                 self.decorations_dirty.icons = true;
             },
-            Command::TextRun(text_run) => {
-                self.text_runs.push(text_run);
-                self.decorations_dirty.text_runs = true;
-            },
+            Command::TextRun(text_run) => self.begin_capture(CaptureTarget::TextRun(text_run)),
+            Command::TextRunEnd => self.commit_capture(),
             Command::Bar(bar) => {
                 self.bars.push(bar);
                 self.decorations_dirty.bars = true;
@@ -559,12 +570,12 @@ impl Terminal {
                     self.fill = None;
                 }
             },
-            // A reset is also a fill/popover close trigger: commit any open page
-            // or popover before clearing decoration state and restoring the live
-            // grid.
+            // A reset is also a fill/capture close trigger: commit any open page
+            // or content capture before clearing decoration state and restoring
+            // the live grid.
             Command::Reset => {
                 self.commit_fill();
-                self.commit_popover();
+                self.commit_capture();
                 self.clear_decorations();
             },
         }
@@ -727,53 +738,63 @@ impl Terminal {
         project_term_cells(grid, &fill.term, &self.theme, &self.palette);
     }
 
-    /// Open a popover content capture for the popover described by `command`.
+    /// Open a content capture for the command described by `target`.
     ///
-    /// Any already-open popover is committed first, so a dropped `popover_end`
-    /// cannot strand the capture: the next `popover` (or a `reset`) closes the
-    /// previous one. The streamed bytes that follow accumulate as its content
-    /// until [`Self::commit_popover`].
-    fn begin_popover(&mut self, command: PopoverCommand) {
-        self.commit_popover();
-        self.popover = Some(PendingPopover {
-            command,
+    /// Any already-open capture is committed first, so a dropped close marker
+    /// cannot strand it: the next open marker (or a `reset`) closes the previous
+    /// one. The streamed bytes that follow accumulate as its text until
+    /// [`Self::commit_capture`].
+    fn begin_capture(&mut self, target: CaptureTarget) {
+        self.commit_capture();
+        self.capture = Some(ContentCapture {
+            target,
             content: Vec::new(),
         });
     }
 
-    /// Commit the open popover onto [`Self::popovers`] with its streamed content.
+    /// Commit the open content capture onto its decoration list with the streamed
+    /// text.
     ///
-    /// A no-op when no popover is open, so every close trigger (`popover_end`, the
-    /// next `popover`, `reset`) can call it unconditionally. The redirect feeds
-    /// the trailing `popover_end` marker's bytes into the buffer along with the
-    /// content; popover content is plain text, so the first `ESC` is that marker's
+    /// A no-op when no capture is open, so every close trigger (a close marker,
+    /// the next open marker, `reset`) can call it unconditionally. The redirect
+    /// feeds the trailing close marker's bytes into the buffer along with the
+    /// text; captured content is plain text, so the first `ESC` is that marker's
     /// introducer, and everything from it is dropped.
-    fn commit_popover(&mut self) {
-        let Some(mut pending) = self.popover.take() else {
+    fn commit_capture(&mut self) {
+        let Some(mut capture) = self.capture.take() else {
             return;
         };
 
-        let content_end = pending
+        let content_end = capture
             .content
             .iter()
             .position(|&byte| byte == ESC)
-            .unwrap_or(pending.content.len());
-        pending.content.truncate(content_end);
+            .unwrap_or(capture.content.len());
+        capture.content.truncate(content_end);
 
-        let mut command = pending.command;
-        command.content = String::from_utf8_lossy(&pending.content).into_owned();
-        self.popovers.push(command);
-        self.decorations_dirty.popovers = true;
+        let text = String::from_utf8_lossy(&capture.content).into_owned();
+        match capture.target {
+            CaptureTarget::Popover(mut command) => {
+                command.content = text;
+                self.popovers.push(command);
+                self.decorations_dirty.popovers = true;
+            },
+            CaptureTarget::TextRun(mut command) => {
+                command.text = text;
+                self.text_runs.push(command);
+                self.decorations_dirty.text_runs = true;
+            },
+        }
     }
 
     /// Route a run of VT bytes to the active write target: the open fill
-    /// context's parser when a fill redirect is in effect, the popover content
-    /// buffer when a popover capture is in effect, otherwise the live parser.
+    /// context's parser when a fill redirect is in effect, the content buffer when
+    /// a content capture is in effect, otherwise the live parser.
     fn feed_segment(&mut self, segment: &[u8]) {
         if let Some(fill) = &mut self.fill {
             fill.parser.advance(&mut fill.term, segment);
-        } else if let Some(popover) = &mut self.popover {
-            popover.content.extend_from_slice(segment);
+        } else if let Some(capture) = &mut self.capture {
+            capture.content.extend_from_slice(segment);
         } else {
             self.parser.advance(&mut self.term, segment);
         }

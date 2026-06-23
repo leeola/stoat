@@ -28,7 +28,14 @@ pub enum Command {
     ScrollRegion(ScrollRegionCommand),
     PoolRegion(PoolRegionCommand),
     Icon(IconCommand),
+    /// Open a text run whose text streams as the bytes that follow, until
+    /// [`Command::TextRunEnd`] commits it. The fixed head (position, scale,
+    /// colors) rides on this marker; the text is captured off-frame so it is not
+    /// bounded by the frame-size cap.
     TextRun(TextRunCommand),
+    /// Close the text run opened by [`Command::TextRun`], committing the streamed
+    /// text into its [`TextRunCommand::text`]. Carries no payload.
+    TextRunEnd,
     Bar(BarCommand),
     LineLayout(LineLayoutCommand),
     /// Open the page-fill redirect onto a recycled pool slot.
@@ -517,10 +524,14 @@ pub fn encode_text_run(command: &TextRunCommand) -> Vec<u8> {
 
 /// Append a `Gstoatty;text_run` frame to `out` without allocating.
 ///
-/// `text` is borrowed so an emitter can pass a slice of a reused buffer (a gutter
-/// formats line numbers into a stack buffer) rather than build an owned
-/// [`String`] per frame. The fixed head fields ride in the first argument; `text`
-/// is the second.
+/// Append a `Gstoatty;text_run` open marker, its streamed `text`, and a
+/// `Gstoatty;text_run_end` close marker to `out`.
+///
+/// The fixed head fields ride in the open marker's single argument; `text`
+/// streams as the raw bytes between the two markers, so it is not bounded by the
+/// per-frame size cap. `text` is borrowed so an emitter can pass a slice of a
+/// reused buffer (a gutter formats line numbers into a stack buffer) rather than
+/// build an owned [`String`] per frame.
 pub fn encode_text_run_into(
     out: &mut Vec<u8>,
     col: i16,
@@ -538,7 +549,25 @@ pub fn encode_text_run_into(
         w.write_all(&color)?;
         w.write_all(&bg)
     });
-    frame::push_arg(out, |w| w.write_all(text.as_bytes()));
+    frame::end(out);
+    out.extend_from_slice(text.as_bytes());
+    encode_text_run_end_into(out);
+}
+
+/// Encode a [`Command::TextRunEnd`] as a full `Gstoatty;text_run_end`
+/// close-marker frame.
+///
+/// The frame carries no arguments; receiving it commits the text streamed since
+/// the matching [`Command::TextRun`] into the run's `text`.
+pub fn encode_text_run_end() -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_text_run_end_into(&mut out);
+    out
+}
+
+/// Append an argument-less `Gstoatty;text_run_end` close-marker frame to `out`.
+pub fn encode_text_run_end_into(out: &mut Vec<u8>) {
+    frame::begin(out, "text_run_end");
     frame::end(out);
 }
 
@@ -730,6 +759,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::TextRun(c) => {
             encode_text_run_into(out, c.col, c.row, c.scale, c.color, c.bg, &c.text)
         },
+        Command::TextRunEnd => encode_text_run_end_into(out),
         Command::Bar(c) => encode_bar_into(out, c),
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
         Command::Fill(c) => encode_fill_into(out, c.pool, c.index),
@@ -755,6 +785,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "pool_region" => decode_pool_region(&frame.args).map(Command::PoolRegion),
         "icon" => decode_icon(&frame.args).map(Command::Icon),
         "text_run" => decode_text_run(&frame.args).map(Command::TextRun),
+        "text_run_end" => Some(Command::TextRunEnd),
         "bar" => decode_bar(&frame.args).map(Command::Bar),
         "line_layout" => decode_line_layout(&frame.args).map(Command::LineLayout),
         "fill" => decode_fill(&frame.args).map(Command::Fill),
@@ -849,9 +880,11 @@ fn decode_icon(args: &[Vec<u8>]) -> Option<IconCommand> {
     })
 }
 
+/// Decode a `Gstoatty;text_run` open marker's head. The `text` streams as the
+/// bytes after this frame and is captured by the terminal between the open
+/// marker and [`Command::TextRunEnd`], so it is empty here.
 fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
     let head: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
-    let text = std::str::from_utf8(args.get(1)?).ok()?.to_owned();
 
     Some(TextRunCommand {
         col: i16::from_be_bytes([head[0], head[1]]),
@@ -859,7 +892,7 @@ fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
         scale: u16::from_be_bytes([head[4], head[5]]),
         color: [head[6], head[7], head[8]],
         bg: [head[9], head[10], head[11]],
-        text,
+        text: String::new(),
     })
 }
 
@@ -972,9 +1005,9 @@ mod tests {
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
         encode_line_layout, encode_pool_drop, encode_pool_region, encode_popover_end,
         encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-        encode_text_run, BarCommand, BorderCommand, BorderStyle, Command, FillCommand, IconCommand,
-        IconKind, LineLayoutCommand, PoolDropCommand, PoolRegionCommand, RepositionCommand,
-        ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
+        IconCommand, IconKind, LineLayoutCommand, PoolDropCommand, PoolRegionCommand,
+        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
     };
 
     #[test]
@@ -1117,20 +1150,12 @@ mod tests {
     }
 
     #[test]
-    fn text_run_round_trips() {
-        let command = TextRunCommand {
-            col: -6,
-            row: 80,
-            scale: 192,
-            color: [180, 190, 200],
-            bg: [24, 26, 32],
-            text: "127".to_owned(),
-        };
-
-        assert_eq!(
-            decode(&encode_text_run(&command)),
-            Some(Command::TextRun(command))
-        );
+    fn text_run_end_round_trips() {
+        // The text_run head and its streamed text round-trip at the terminal
+        // layer (the text streams between the open and text_run_end markers, so a
+        // single-frame decode cannot recover it); see the tty_term text_run
+        // tests. Here we cover the close marker.
+        assert_eq!(decode(&encode_text_run_end()), Some(Command::TextRunEnd));
     }
 
     #[test]
@@ -1302,14 +1327,11 @@ mod tests {
                 color: [1, 2, 3],
                 size: 2,
             }),
-            Command::TextRun(TextRunCommand {
-                col: -8,
-                row: 16,
-                scale: 256,
-                color: [11, 22, 33],
-                bg: [44, 55, 66],
-                text: "42".to_owned(),
-            }),
+            // TextRun is a multi-frame open/text/close construct, so it does not
+            // round-trip through a single-frame `decode`; its head and streamed
+            // text are covered by the tty_term text_run tests. Its close marker is
+            // single-frame and covered here.
+            Command::TextRunEnd,
             Command::Bar(BarCommand {
                 x: -4,
                 y: 8,
