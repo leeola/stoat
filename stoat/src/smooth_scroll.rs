@@ -27,11 +27,13 @@
 
 use crate::{
     commit_list::CommitListState,
+    completion::CompletionItem,
     editor_state::EditorState,
     file_finder::FileFinder,
     render::{
-        command_palette::paint_palette_rows, commits::paint_commit_rows, editor::render_editor,
-        file_finder::paint_finder_rows, review::render_review,
+        command_palette::paint_palette_rows, commits::paint_commit_rows,
+        completion::paint_completion_rows, editor::render_editor, file_finder::paint_finder_rows,
+        review::render_review,
     },
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
@@ -362,6 +364,40 @@ pub(crate) fn render_palette_page(
         selected,
         area,
         start_row,
+        theme,
+        &mut buf,
+    );
+
+    serialize_buffer(&buf)
+}
+
+/// Render `region_height` rows of the completion popup list starting at row
+/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
+/// page's self-contained VT byte stream.
+///
+/// Mirrors [`render_finder_page`] but paints completion rows; the page index
+/// alone selects the rows, and the list is read-only here.
+pub(crate) fn render_completion_page(
+    items: &[CompletionItem],
+    selected_idx: usize,
+    prefix: &str,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+
+    let start_row = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+    paint_completion_rows(
+        items,
+        selected_idx,
+        prefix,
+        start_row,
+        area,
         theme,
         &mut buf,
     );

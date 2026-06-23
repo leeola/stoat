@@ -3065,6 +3065,13 @@ impl Stoat {
             })
             .flatten();
 
+        // The completion popup is cursor-anchored: its inner list region pools
+        // and moves with the cursor each frame (emit_into re-emits the region on
+        // a move). The layout reads the focused editor, so it borrows self.
+        let completion = (!overlay)
+            .then(|| crate::render::completion::completion_popup_layout(self))
+            .flatten();
+
         let mut out = Vec::new();
         let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
         if finder_list.is_some() {
@@ -3075,6 +3082,9 @@ impl Stoat {
         }
         if commits_region.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::COMMITS);
+        }
+        if completion.is_some() {
+            active.push(crate::smooth_scroll::non_pane_pool::COMPLETION);
         }
         self.smooth_scroll.drop_absent(&mut out, &active);
 
@@ -3232,6 +3242,44 @@ impl Stoat {
                 |page| {
                     crate::smooth_scroll::render_commits_page(
                         state,
+                        page,
+                        theme,
+                        region.width,
+                        region.height,
+                    )
+                },
+            );
+        }
+
+        if let Some((popup, prefix, layout)) = completion {
+            let region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
+                top: layout.inner.y,
+                left: layout.inner.x,
+                width: layout.inner.width,
+                height: layout.inner.height,
+            };
+            let scroll_row = layout.viewport_top as u32;
+            // Items are replaced wholesale when the prefix re-queries, so a hash
+            // of their labels is the pool's content version: a re-query refills.
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                for item in &popup.items {
+                    item.label.hash(&mut hasher);
+                }
+                hasher.finish()
+            };
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                region,
+                scroll_row,
+                content_version,
+                |page| {
+                    crate::smooth_scroll::render_completion_page(
+                        &popup.items,
+                        popup.selected_idx,
+                        &prefix,
                         page,
                         theme,
                         region.width,
@@ -4139,6 +4187,61 @@ mod tests {
                 pool: crate::smooth_scroll::non_pane_pool::PALETTE,
             })),
             "closing the palette retires its pool"
+        );
+    }
+
+    #[test]
+    fn completion_popup_is_pooled_and_retired() {
+        use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        let item = |label: &str| CompletionItem {
+            label: label.into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: 0..0,
+            insert_text: label.into(),
+            is_snippet: false,
+        };
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![item("alpha"), item("beta"), item("gamma")],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..0,
+        });
+
+        h.stoat.emit_smooth_scroll();
+        let (_, _, layout) = crate::render::completion::completion_popup_layout(&mut h.stoat)
+            .expect("the popup anchors in the test terminal");
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
+            top: layout.inner.y,
+            left: layout.inner.x,
+            width: layout.inner.width,
+            height: layout.inner.height,
+        };
+        let bytes = rx.try_recv().expect("the open popup emits an APC batch");
+        assert!(
+            decode_apc_stream(&bytes).contains(&Command::PoolRegion(expected)),
+            "the completion popup declares a pool at its inner rect"
+        );
+
+        h.stoat.pending_completion = None;
+        h.stoat.emit_smooth_scroll();
+        let bytes = rx.try_recv().expect("closing the popup emits a drop");
+        assert!(
+            decode_apc_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
+            })),
+            "closing the popup retires its pool"
         );
     }
 

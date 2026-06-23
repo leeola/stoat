@@ -1,5 +1,6 @@
 use crate::{
     app::Stoat,
+    completion::{CompletionItem, CompletionPopup},
     fuzzy,
     pane::{FocusTarget, View},
     render::layout::split_pane_status,
@@ -15,65 +16,72 @@ use ratatui::{
 /// scroll so the selected row stays in view.
 pub(crate) const MAX_VISIBLE_ROWS: usize = 10;
 
-/// Paint the completion popup, if any, anchored to the focused
-/// editor's primary cursor. Renders below the cursor when there is
-/// room below, otherwise above. Truncates labels that exceed the
-/// popup's interior width and clamps height to the focused pane.
+/// The on-screen rectangles of the completion popup, derived from `stoat` by
+/// [`completion_popup_layout`], plus the scroll offset of the first visible row.
 ///
-/// No-op when [`Stoat::pending_completion`] is `None` or empty,
-/// when the focused pane is not an editor, when the cursor is
-/// off-screen, or when neither the popup width nor height fits.
-pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
+/// The popup is cursor-anchored, so the rects move with the cursor each frame.
+/// Shared by the renderer and the smooth-scroll emit so the pooled list region
+/// matches the painted one exactly.
+pub(crate) struct CompletionLayout {
+    /// The bordered popup rect.
+    pub(crate) popup_area: Rect,
+    /// Inside the border: the scrolling row region, also the pool region.
+    pub(crate) inner: Rect,
+    /// Index of the first visible item, the list's scroll offset.
+    pub(crate) viewport_top: usize,
+}
+
+/// Compute the anchored completion popup geometry, returning the cloned popup,
+/// its match prefix, and the [`CompletionLayout`], or `None` when no popup
+/// should show.
+///
+/// `None` mirrors every [`render_completion`] bail: no pending completion or
+/// empty items, the focused pane is not an editor, the cursor is off-screen, or
+/// the interior width collapses to zero.
+pub(crate) fn completion_popup_layout(
+    stoat: &mut Stoat,
+) -> Option<(CompletionPopup, String, CompletionLayout)> {
     let popup = match &stoat.pending_completion {
         Some(p) if !p.items.is_empty() => p.clone(),
-        _ => return,
+        _ => return None,
     };
 
     let prefix = extract_prefix(stoat, &popup);
 
     let ws = stoat.active_workspace_mut();
     let FocusTarget::SplitPane(pane_id) = ws.focus else {
-        return;
+        return None;
     };
-
     let pane = ws.panes.pane(pane_id);
     let View::Editor(editor_id) = pane.view else {
-        return;
+        return None;
     };
-    let pane_area = pane.area;
-    let (content_area, _) = split_pane_status(pane_area);
+    let (content_area, _) = split_pane_status(pane.area);
 
-    let editor = match ws.editors.get_mut(editor_id) {
-        Some(e) => e,
-        None => return,
-    };
-
-    let cursor_screen = match cursor_screen_position(editor, content_area, popup.anchor_offset) {
-        Some(p) => p,
-        None => return,
-    };
-
-    let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let selected_style = stoat.theme.get(crate::theme::scope::UI_SELECTION);
-    let match_style = stoat.theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+    let editor = ws.editors.get_mut(editor_id)?;
+    let cursor_screen = cursor_screen_position(editor, content_area, popup.anchor_offset)?;
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
-        return;
+        return None;
     }
+
     let total = popup.items.len();
     let viewport_top = viewport_top_for(popup.selected_idx, total, MAX_VISIBLE_ROWS);
     let visible_count = total.saturating_sub(viewport_top).min(MAX_VISIBLE_ROWS);
 
-    let labels: Vec<String> = popup
+    let max_line_width = popup
         .items
         .iter()
         .skip(viewport_top)
         .take(visible_count)
-        .map(|item| truncate_to_width(&item.label, interior_width as usize))
-        .collect();
-
-    let max_line_width = labels.iter().map(|s| s.chars().count()).max().unwrap_or(0) as u16;
+        .map(|item| {
+            truncate_to_width(&item.label, interior_width as usize)
+                .chars()
+                .count()
+        })
+        .max()
+        .unwrap_or(0) as u16;
     let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
     let popup_height = (visible_count as u16 + 2).clamp(3, content_area.height.max(3));
 
@@ -94,28 +102,85 @@ pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
         width: popup_width,
         height: popup_height,
     };
+    let inner = Block::default().borders(Borders::ALL).inner(popup_area);
 
-    let block = Block::default()
+    Some((
+        popup,
+        prefix,
+        CompletionLayout {
+            popup_area,
+            inner,
+            viewport_top,
+        },
+    ))
+}
+
+/// Paint the completion popup, if any, anchored to the focused
+/// editor's primary cursor. Renders below the cursor when there is
+/// room below, otherwise above. Truncates labels that exceed the
+/// popup's interior width and clamps height to the focused pane.
+///
+/// No-op when [`Stoat::pending_completion`] is `None` or empty,
+/// when the focused pane is not an editor, when the cursor is
+/// off-screen, or when neither the popup width nor height fits.
+pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
+    let Some((popup, prefix, layout)) = completion_popup_layout(stoat) else {
+        return;
+    };
+
+    let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    Block::default()
         .borders(Borders::ALL)
-        .border_style(modal_style);
-    let inner = block.inner(popup_area);
-    block.render(popup_area, buf);
+        .border_style(modal_style)
+        .render(layout.popup_area, buf);
 
-    let pattern = fuzzy::parse_query(&prefix);
+    paint_completion_rows(
+        &popup.items,
+        popup.selected_idx,
+        &prefix,
+        layout.viewport_top,
+        layout.inner,
+        &stoat.theme,
+        buf,
+    );
+}
+
+/// Paint completion rows into `area` starting at item `start_row`, one row per
+/// item, truncating each label to the area width and highlighting the selected
+/// row and the characters matching `prefix`.
+///
+/// Shared by the live popup, which derives `start_row` from the viewport, and
+/// the smooth-scroll pool, which paints absolute pages, so both render
+/// identical rows.
+pub(crate) fn paint_completion_rows(
+    items: &[CompletionItem],
+    selected_idx: usize,
+    prefix: &str,
+    start_row: usize,
+    area: Rect,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+
+    let pattern = fuzzy::parse_query(prefix);
     let mut matcher_guard = pattern
         .as_ref()
         .map(|_| fuzzy::matcher().lock().expect("fuzzy matcher poisoned"));
-
     let mut hay_buf: Vec<char> = Vec::new();
     let mut indices_buf: Vec<u32> = Vec::new();
 
-    for (row_idx, label) in labels.iter().enumerate() {
-        let row = inner.y + row_idx as u16;
-        if row >= inner.y + inner.height {
+    let width = area.width as usize;
+    for row_idx in 0..area.height {
+        let item_idx = start_row + row_idx as usize;
+        let Some(item) = items.get(item_idx) else {
             break;
-        }
-        let item_idx = viewport_top + row_idx;
-        let row_style = if item_idx == popup.selected_idx {
+        };
+        let row = area.y + row_idx;
+        let label = truncate_to_width(&item.label, width);
+        let row_style = if item_idx == selected_idx {
             selected_style
         } else {
             modal_style
@@ -123,13 +188,13 @@ pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
 
         indices_buf.clear();
         if let (Some(p), Some(matcher)) = (&pattern, matcher_guard.as_deref_mut()) {
-            let hay = Utf32Str::new(label, &mut hay_buf);
+            let hay = Utf32Str::new(&label, &mut hay_buf);
             p.indices(hay, matcher, &mut indices_buf);
         }
 
         for (col_idx, ch) in label.chars().enumerate() {
-            let col = inner.x + col_idx as u16;
-            if col >= inner.x + inner.width {
+            let col = area.x + col_idx as u16;
+            if col >= area.x + area.width {
                 break;
             }
             let style = if indices_buf.contains(&(col_idx as u32)) {
@@ -142,7 +207,7 @@ pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
     }
 }
 
-fn extract_prefix(stoat: &Stoat, popup: &crate::completion::CompletionPopup) -> String {
+fn extract_prefix(stoat: &Stoat, popup: &CompletionPopup) -> String {
     let ws = stoat.active_workspace();
     let FocusTarget::SplitPane(pane_id) = ws.focus else {
         return String::new();
