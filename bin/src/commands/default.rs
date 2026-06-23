@@ -2,10 +2,9 @@ use clap::{ArgAction, Parser, Subcommand};
 use snafu::{ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
-    host::{BashDenialPolicy, ChainedPermissionPolicy, LocalFs, LocalFsWatcher, RuleBasedPolicy},
+    host::{LocalFs, LocalFsWatcher},
     Axis, Settings, Stoat,
 };
-use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_scheduler::TokioScheduler;
 
 const VERSION_INFO: &str = concat!(
@@ -44,7 +43,7 @@ pub struct Args {
     #[arg(short = 'r', long = "resume", conflicts_with = "continue_")]
     pub resume: bool,
 
-    /// Enable the Claude Code / LSP text-protocol transcript log. Overrides
+    /// Enable the LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
     #[arg(long, env = "STOAT_TEXT_PROTO_LOG")]
     pub text_proto_log: Option<bool>,
@@ -140,11 +139,9 @@ fn run_tui(
 
     let cli_settings = Settings {
         text_proto_log,
-        claude_default_placement: None,
         theme: None,
         mouse_capture: None,
         mode_badges: std::collections::BTreeMap::new(),
-        claude_permissions: std::collections::BTreeMap::new(),
     };
 
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -168,17 +165,6 @@ fn run_tui(
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }
-        let permission_policy = ChainedPermissionPolicy::new(vec![
-            Arc::new(BashDenialPolicy::new()),
-            Arc::new(RuleBasedPolicy::with_prompt_channel(
-                &stoat.settings.claude_permissions,
-                stoat.permission_prompt_tx.clone(),
-            )),
-        ]);
-        stoat.set_claude_code_host(Arc::new(
-            ClaudeCodeLauncher::new(Arc::new(LocalFs), executor)
-                .with_permission_callback(Arc::new(permission_policy)),
-        ));
         match LocalFsWatcher::new() {
             Ok(watcher) => stoat.set_fs_watch_host(Arc::new(watcher)),
             Err(err) => tracing::warn!(

@@ -12,16 +12,16 @@ size: 80x24
   [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[97mFoc[0m[7m [0m                                                                    [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[30m[46m [0m[30m[43mFoc[0m[30m[46musDown                focus pane down                                 [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musLeft                [0m[90mfocus pane left[0m[97m                                 [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musNext                [0m[90mfocus next pane[0m[97m                                 [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musPrev                [0m[90mfocus previous pane[0m[97m                             [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musRight               [0m[90mfocus pane right[0m[97m                                [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musUp                  [0m[90mfocus pane up[0m[97m                                   [0m[35m│[0m
-  [0m[35m│[0m[97m Claude[0m[30m[43mFoc[0m[97musNextToolCard  [0m[90mfocus next tool card[0m[97m                            [0m[35m│[0m
-  [0m[35m│[0m[97m Claude[0m[30m[43mFoc[0m[97musPrevToolCard  [0m[90mfocus previous tool card[0m[97m                        [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeJumpTo[0m[30m[43mFoc[0m[97musedCard  [0m[90mjump to focused tool card[0m[97m                       [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mFo[0m[97mrmatSele[0m[30m[43mc[0m[97mtions         [0m[90mformat selection via LSP[0m[97m                        [0m[35m│[0m
+  [0m[35m│[0m[30m[46m [0m[30m[43mFoc[0m[30m[46musDown                     focus pane down                            [0m[35m│[0m
+  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musLeft                     [0m[90mfocus pane left[0m[97m                            [0m[35m│[0m
+  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musNext                     [0m[90mfocus next pane[0m[97m                            [0m[35m│[0m
+  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musPrev                     [0m[90mfocus previous pane[0m[97m                        [0m[35m│[0m
+  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musRight                    [0m[90mfocus pane right[0m[97m                           [0m[35m│[0m
+  [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musUp                       [0m[90mfocus pane up[0m[97m                              [0m[35m│[0m
+  [0m[35m│[0m[97m [0m[30m[43mFo[0m[97mrmatSele[0m[30m[43mc[0m[97mtions              [0m[90mformat selection via LSP[0m[97m                   [0m[35m│[0m
+  [0m[35m│[0m[97m ExtendGoto[0m[30m[43mF[0m[97mirstN[0m[30m[43mo[0m[97mnwhitespa[0m[30m[43mc[0m[97me  [0m[90mextend to first non-whitespace[0m[97m             [0m[35m│[0m
+  [0m[35m│[0m[97m Goto[0m[30m[43mF[0m[97mirstN[0m[30m[43mo[0m[97mnwhitespa[0m[30m[43mc[0m[97me        [0m[90mgoto first nonwhitespace[0m[97m                   [0m[35m│[0m
+  [0m[35m│[0m                                                                          [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[37mMove focus to the pane below the current pane.[0m                            [0m[35m│[0m
   [0m[35m│[0m                                                                          [0m[35m│[0m

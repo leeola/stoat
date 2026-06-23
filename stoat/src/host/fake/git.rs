@@ -16,10 +16,10 @@ use std::{
 /// In-memory [`GitHost`] for tests.
 ///
 /// Populate with repos via [`FakeGit::add_repo`]; each call returns a
-/// [`FakeRepoBuilder`] that mirrors the ergonomics of [`crate::host::FakeClaudeCode`]'s
-/// `push_*` helpers. When a [`FakeFs`] reference is supplied to the
-/// builder, the builder also writes working-tree content into it so the
-/// application code (which reads via `FsHost`) sees consistent state.
+/// [`FakeRepoBuilder`] with a chainable `push_*` API. When a [`FakeFs`]
+/// reference is supplied to the builder, the builder also writes
+/// working-tree content into it so the application code (which reads via
+/// `FsHost`) sees consistent state.
 pub struct FakeGit {
     state: Mutex<FakeGitState>,
 }
@@ -104,9 +104,7 @@ impl FakeGit {
 
     /// Snapshot the synthetic stash shas minted against `workdir` via
     /// [`GitRepo::stash_create`], in call order. Empty when no stashes
-    /// have been captured or the repo is unknown. Used by Claude
-    /// per-message-checkpoint tests to assert that submit captured a
-    /// stash before the message was added.
+    /// have been captured or the repo is unknown.
     pub fn stashes(&self, workdir: &Path) -> Vec<String> {
         let state = self.state.lock().unwrap();
         state
@@ -117,9 +115,7 @@ impl FakeGit {
     }
 
     /// Snapshot the shas passed to [`GitRepo::restore_tree`] against
-    /// `workdir`, in call order. Used by Claude restore-picker tests
-    /// to assert that selecting an entry routed the right sha to the
-    /// host.
+    /// `workdir`, in call order.
     pub fn restored_shas(&self, workdir: &Path) -> Vec<String> {
         let state = self.state.lock().unwrap();
         state
@@ -206,10 +202,9 @@ impl GitHost for FakeGit {
     }
 }
 
-/// Builder returned by [`FakeGit::add_repo`]. Method chaining style
-/// mirrors [`crate::host::FakeClaudeCode`]'s `push_*` API: each call
-/// returns `&mut Self` so a test can line up fixtures in a single
-/// statement.
+/// Builder returned by [`FakeGit::add_repo`]. Method chaining style: each
+/// `push_*` call returns `&mut Self` so a test can line up fixtures in a
+/// single statement.
 pub struct FakeRepoBuilder<'a> {
     host: &'a FakeGit,
     workdir: PathBuf,
@@ -473,9 +468,8 @@ struct FakeRepoState {
     /// Record of every amend_head invocation, in call order.
     amend_history: Vec<RecordedAmend>,
     /// Synthetic stash shas minted by [`GitRepo::stash_create`], in
-    /// call order. Tests that drive Claude per-message checkpoints
-    /// inspect this via [`FakeGit::stashes`] to assert what was
-    /// captured.
+    /// call order. Tests inspect this via [`FakeGit::stashes`] to assert
+    /// what was captured.
     stashes: Vec<String>,
     /// Shas passed to [`GitRepo::restore_tree`], in call order. The
     /// fake does not actually mutate any tracked state on restore;

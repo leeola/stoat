@@ -101,6 +101,26 @@ define_action!(
     "Close every split pane except the focused one. No-op when the focused pane is the only one."
 );
 
+define_action!(
+    ToggleDockRightDef,
+    ToggleDockRight,
+    "ToggleDockRight",
+    ActionKind::ToggleDockRight,
+    "toggle right dock",
+    "Cycle the right dock panel through visible, minimized, and hidden states.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ToggleDockLeftDef,
+    ToggleDockLeft,
+    "ToggleDockLeft",
+    ActionKind::ToggleDockLeft,
+    "toggle left dock",
+    "Cycle the left dock panel through visible, minimized, and hidden states.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

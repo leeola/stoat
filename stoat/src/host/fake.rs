@@ -1,11 +1,9 @@
-mod claude_code;
 mod clipboard;
 mod git;
 mod lsp;
 pub mod terminal;
 
 pub use self::{
-    claude_code::{FakeClaudeCode, FakeClaudeCodeHost},
     clipboard::FakeClipboard,
     git::{FakeGit, FakeGitRepo, FakeRepoBuilder},
     lsp::{

@@ -7,11 +7,6 @@
 //! directory across a set of paths so list-style displays (the workspace
 //! picker) can strip the repetitive root once and show only the
 //! distinguishing tails.
-//!
-//! See also `agent::claude_code::tools::to_display_path`, which performs a
-//! simpler variant of the same strip for Claude tool-call titles. The two
-//! live in different crates today (stoat depends on claude_code, not the
-//! reverse); unify into a shared crate only if a third consumer appears.
 
 use etcetera::{base_strategy::Xdg, BaseStrategy};
 use std::path::{Component, Path, PathBuf};

@@ -50,7 +50,6 @@ pub(crate) fn render_workspace_picker(
 
     const NAME_W: u16 = 12;
     const BUF_W: u16 = 5;
-    const CHAT_W: u16 = 6;
     const RUN_W: u16 = 5;
     const EDIT_W: u16 = 6;
 
@@ -59,8 +58,7 @@ pub(crate) fn render_workspace_picker(
 
     let edit_col_x = inner.x + inner.width.saturating_sub(1 + EDIT_W);
     let run_col_x = edit_col_x.saturating_sub(RUN_W);
-    let chat_col_x = run_col_x.saturating_sub(CHAT_W);
-    let buf_col_x = chat_col_x.saturating_sub(BUF_W);
+    let buf_col_x = run_col_x.saturating_sub(BUF_W);
     let marker_x = inner.x + 1;
     let name_x = marker_x + 2;
     let path_x = name_x + NAME_W + 2;
@@ -83,13 +81,6 @@ pub(crate) fn render_workspace_picker(
         buf_col_x,
         header_row,
         &right_pad("buf", BUF_W),
-        header_style,
-    );
-    write_str(
-        buf,
-        chat_col_x,
-        header_row,
-        &right_pad("chat", CHAT_W),
         header_style,
     );
     write_str(
@@ -144,13 +135,6 @@ pub(crate) fn render_workspace_picker(
             buf_col_x,
             row,
             &right_pad(&entry.buffer_count.to_string(), BUF_W),
-            base_style,
-        );
-        write_str(
-            buf,
-            chat_col_x,
-            row,
-            &right_pad(&entry.chat_count.to_string(), CHAT_W),
             base_style,
         );
         write_str(

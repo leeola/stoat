@@ -80,18 +80,6 @@ pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-pub(crate) fn truncate(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}...",
-            s.chars().take(max.saturating_sub(3)).collect::<String>()
-        )
-    }
-}
-
 pub(crate) fn truncate_to_cols(text: &str, max_cols: usize) -> String {
     if max_cols == 0 {
         return String::new();
@@ -107,13 +95,4 @@ pub(crate) fn truncate_to_cols(text: &str, max_cols: usize) -> String {
         used += w;
     }
     out
-}
-
-pub(crate) fn short_path(p: &str) -> String {
-    let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
-    match parts.len() {
-        0 => p.to_string(),
-        1 => parts[0].to_string(),
-        n => format!("{}/{}", parts[n - 2], parts[n - 1]),
-    }
 }

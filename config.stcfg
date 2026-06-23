@@ -435,7 +435,6 @@ on key {
     }
     mode == insert {
         Escape -> SetMode(normal);
-        Enter -> ClaudeSubmit();
         Tab -> SmartTab();
         Ctrl-Space -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
@@ -466,11 +465,6 @@ on key {
         PageDown -> HelpScrollDetailDown();
         BackTab -> HelpScopeToggle();
     }
-    mode == prompt && claude_focused {
-        Ctrl-c -> ClaudeInterrupt();
-        Tab -> ClaudeFocusNextToolCard();
-        BackTab -> ClaudeFocusPrevToolCard();
-    }
     mode == prompt {
         Escape -> CancelPromptInput();
         Enter -> SubmitPromptInput();
@@ -484,7 +478,6 @@ on key {
         q -> Quit();
         a -> SetMode(space_pane_nav);
         t -> [OpenRun(), SetMode(run)];
-        c -> SetMode(claude);
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
         l -> SetMode(space_lsp);
@@ -566,14 +559,5 @@ on key {
         s -> [SplitNewRight(), SetMode(normal)];
         v -> [SplitNewDown(), SetMode(normal)];
         : -> OpenCommandPalette();
-    }
-    mode == claude {
-        Escape -> SetMode(normal);
-        c -> [OpenClaude(), SetMode(normal)];
-        p -> [ClaudeToPane(), SetMode(normal)];
-        l -> [ClaudeToDockLeft(), SetMode(normal)];
-        r -> [ClaudeToDockRight(), SetMode(normal)];
-        R -> [OpenCheckpointPicker(), SetMode(normal)];
-        f -> [ClaudeToggleFollow(), SetMode(normal)];
     }
 }

@@ -1,4 +1,3 @@
-mod claude;
 mod commits;
 pub(crate) mod completion;
 mod conflict;
@@ -35,7 +34,6 @@ use crate::{
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace_picker::WorkspacePicker,
 };
-pub(crate) use claude::handle_follow_tool_use;
 pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::close_file_finder;
 pub(crate) use lsp::pump_lsp_jumps;
@@ -420,18 +418,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("Run action downcast");
             run::run_command(stoat, &cmd.command)
         },
-        ActionKind::OpenClaude => claude::open_claude(stoat),
-        ActionKind::ClaudeSubmit => claude::claude_submit(stoat),
-        ActionKind::ClaudeToPane => claude::claude_to_pane(stoat),
-        ActionKind::ClaudeToDockLeft => claude::claude_to_dock(stoat, DockSide::Left),
-        ActionKind::ClaudeToDockRight => claude::claude_to_dock(stoat, DockSide::Right),
-        ActionKind::ClaudeToggleFollow => claude::toggle_claude_follow(stoat),
-        ActionKind::ClaudeInterrupt => claude::claude_interrupt(stoat),
-        ActionKind::ClaudeFocusNextToolCard => claude::claude_focus_next_tool_card(stoat),
-        ActionKind::ClaudeFocusPrevToolCard => claude::claude_focus_prev_tool_card(stoat),
-        ActionKind::ClaudeToggleToolCardExpand => claude::claude_toggle_tool_card_expand(stoat),
-        ActionKind::ClaudeJumpToFocusedCard => claude::claude_jump_to_focused_card(stoat),
-        ActionKind::OpenCheckpointPicker => claude::open_checkpoint_picker(stoat),
         ActionKind::ToggleDockRight => pane::toggle_dock(stoat, DockSide::Right),
         ActionKind::ToggleDockLeft => pane::toggle_dock(stoat, DockSide::Left),
         ActionKind::JumpToMoveSource => {
@@ -603,7 +589,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());
     }
-    stoat.sync_claude_badges();
     effect
 }
 
@@ -679,10 +664,6 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     };
     match view {
         View::Editor(id) => ws.editors.get_mut(id),
-        View::Claude(session_id) => {
-            let editor_id = ws.chats.get(&session_id)?.input.editor_id;
-            ws.editors.get_mut(editor_id)
-        },
         _ => None,
     }
 }
@@ -1697,40 +1678,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_submit_queues_when_session_not_ready() {
-        let mut stoat = stoat();
-
-        dispatch(&mut stoat, &stoat_action::OpenClaude);
-
-        let session_id = stoat
-            .active_workspace()
-            .claude_chat
-            .expect("claude_chat should be set");
-        assert!(
-            stoat.claude_sessions().get(session_id).is_none(),
-            "host slot should be None after reserve_slot"
-        );
-
-        {
-            let ws = stoat.active_workspace();
-            let chat = ws.chats.get(&session_id).expect("chat state exists");
-            let buffer = ws.buffers.get(chat.input.buffer_id).expect("buffer");
-            buffer.write().expect("poisoned").edit(0..0, "hello claude");
-        }
-
-        dispatch(&mut stoat, &stoat_action::ClaudeSubmit);
-
-        let ws = stoat.active_workspace();
-        let chat = ws.chats.get(&session_id).expect("chat state");
-        assert_eq!(chat.messages.len(), 1, "user message should be in chat");
-        assert_eq!(
-            chat.pending_sends,
-            vec!["hello claude"],
-            "message should be queued, not dropped"
-        );
-    }
-
-    #[test]
     fn type_action_direct() {
         let mut h = Stoat::test();
         h.type_action("SetMode(space)");
@@ -1837,7 +1784,6 @@ mod tests {
         let new_ws = h.stoat.active_workspace();
         assert_eq!(new_ws.panes.pane_count(), 1);
         assert_eq!(new_ws.editors.len(), 1);
-        assert!(new_ws.claude_chat.is_none());
         assert!(new_ws.rebase.is_none());
     }
 

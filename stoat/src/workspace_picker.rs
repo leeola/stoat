@@ -24,7 +24,6 @@ pub struct PickerEntry {
     pub uid: WorkspaceUid,
     pub is_current: bool,
     pub buffer_count: usize,
-    pub chat_count: usize,
     pub run_count: usize,
     pub editor_count: usize,
 }
@@ -74,7 +73,6 @@ impl WorkspacePicker {
                 uid: ws.uid,
                 is_current: id == active,
                 buffer_count: ws.buffers.len(),
-                chat_count: ws.chats.len(),
                 run_count: ws.runs.len(),
                 editor_count: ws.editors.len(),
             })

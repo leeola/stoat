@@ -23,7 +23,7 @@ impl ActionDef for SubmitPromptInputDef {
 
     fn long_desc(&self) -> &'static str {
         "Submit the currently focused prompt input (command palette, help search, \
-         Claude chat, reword, etc.). Routes to the owning consumer based on focus."
+         reword, etc.). Routes to the owning consumer based on focus."
     }
 
     fn palette_visible(&self) -> bool {

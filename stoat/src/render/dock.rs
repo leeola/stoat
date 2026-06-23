@@ -1,6 +1,6 @@
 use crate::{
     pane::{DockPanel, View},
-    render::{claude_pane::render_claude_pane, editor::render_editor, FrameCtx, PaneCtx},
+    render::{editor::render_editor, FrameCtx, PaneCtx},
 };
 use ratatui::{
     buffer::Buffer,
@@ -55,30 +55,11 @@ pub(crate) fn render_dock_open(
     let inner = block.inner(area);
     block.render(area, buf);
 
-    let PaneCtx {
-        editors,
-        buffers,
-        runs,
-        chats,
-    } = ctx;
+    let PaneCtx { editors, .. } = ctx;
 
-    match &dock.view {
-        View::Claude(session_id) => {
-            if let Some(chat) = chats.get(session_id) {
-                let chat_ctx = PaneCtx {
-                    editors,
-                    buffers,
-                    runs,
-                    chats,
-                };
-                render_claude_pane(chat, chat_ctx, inner, is_focused, frame, buf);
-            }
-        },
-        View::Editor(editor_id) => {
-            if let Some(editor) = editors.get_mut(*editor_id) {
-                render_editor(editor, inner, border_style, theme, buf, is_focused);
-            }
-        },
-        _ => {},
+    if let View::Editor(editor_id) = &dock.view
+        && let Some(editor) = editors.get_mut(*editor_id)
+    {
+        render_editor(editor, inner, border_style, theme, buf, is_focused);
     }
 }

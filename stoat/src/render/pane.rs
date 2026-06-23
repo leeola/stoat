@@ -3,7 +3,6 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, View},
     render::{
-        claude_pane::render_claude_pane,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
         run_pane::render_run_pane,
@@ -40,7 +39,6 @@ pub(crate) fn render_pane(
         editors,
         buffers,
         runs,
-        chats,
     } = ctx;
 
     match &pane.view {
@@ -75,17 +73,6 @@ pub(crate) fn render_pane(
         View::Run(run_id) => {
             if let Some(run_state) = runs.get(*run_id) {
                 render_run_pane(run_state, editors, theme, content_area, is_focused, buf);
-            }
-        },
-        View::Claude(session_id) => {
-            if let Some(chat) = chats.get(session_id) {
-                let chat_ctx = PaneCtx {
-                    editors,
-                    buffers,
-                    runs,
-                    chats,
-                };
-                render_claude_pane(chat, chat_ctx, content_area, is_focused, frame, buf);
             }
         },
     }
@@ -422,7 +409,6 @@ pub(crate) fn mode_segment(
         "space_workspace" => ("SWS", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
         "space_pane_nav" => ("SPN", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
         "space_pane_nav_new" => ("SNN", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
-        "claude" => ("CLA", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
         _ => ("---", Color::Gray, scope::UI_STATUSLINE_DEFAULT),
     };
     let per_mode_scope = format!("ui.statusline.{mode}");
@@ -462,7 +448,6 @@ fn pane_status_info(
             (filename, dirty, cursor_pos)
         },
         View::Run(_) => (Some("[run]".to_string()), false, None),
-        View::Claude(_) => (Some("[claude]".to_string()), false, None),
         View::Label(label) => (Some(label.clone()), false, None),
     }
 }

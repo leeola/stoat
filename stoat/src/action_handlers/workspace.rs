@@ -18,10 +18,9 @@ pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
 pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
     let mut state = stoat.active_workspace().to_state();
-    // The copy must not inherit live Claude session identity or any in-flight
-    // rebase pointer from its source; those tie to OS-level resources or
-    // half-applied git state that belong to the original workspace.
-    state.claude_session_id = None;
+    // The copy must not inherit any in-flight rebase pointer from its
+    // source; it ties to half-applied git state that belongs to the
+    // original workspace.
     state.rebase = None;
     state.rebase_active = None;
     state.uid = WorkspaceUid::now(&stoat.executor);

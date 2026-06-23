@@ -6,12 +6,10 @@ use crate::{
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
-    claude_chat::ClaudeChatState,
     commit_list::CommitListState,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
-    host::ClaudeSessionId,
-    pane::{DockId, DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, PaneTree, View},
+    pane::{DockId, DockPanel, DockSide, FocusTarget, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     review_session::ReviewSession,
     run::{RunId, RunState},
@@ -64,8 +62,8 @@ impl std::fmt::Display for WorkspaceUid {
     }
 }
 
-/// A self-contained editing context: its own buffers, editors, pane layout, git
-/// root, and optional Claude chat. Workspaces are owned by the root [`crate::app::Stoat`]
+/// A self-contained editing context: its own buffers, editors, pane layout, and
+/// git root. Workspaces are owned by the root [`crate::app::Stoat`]
 /// and can run in the background; switching between workspaces is a render-target
 /// swap rather than a lifecycle transition.
 ///
@@ -91,20 +89,12 @@ pub struct Workspace {
     /// the renderer into the `git_root.file_name()` fallback used by tests.
     pub(crate) name: String,
     pub git_root: PathBuf,
-    pub claude_chat: Option<ClaudeSessionId>,
-    /// Protocol session UUID recovered from the persisted workspace state.
-    /// Populated by [`crate::workspace::persist`] on restore when the prior
-    /// session had received `AgentMessage::Init`. Reserved for future
-    /// resume-on-load wiring; `None` in freshly constructed workspaces.
-    #[allow(dead_code)]
-    pub(crate) restored_claude_session_id: Option<String>,
     pub panes: PaneTree,
     pub(crate) docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
-    pub(crate) chats: HashMap<ClaudeSessionId, ClaudeChatState>,
     /// Active review session (if any). Owned at the workspace level because
     /// a review spans files and can be viewed by multiple panes in future
     /// multi-pane review flows. Dropped on `CloseReview`.
@@ -148,15 +138,12 @@ impl Workspace {
             uid,
             name,
             git_root,
-            claude_chat: None,
-            restored_claude_session_id: None,
             panes,
             docks: SlotMap::with_key(),
             focus: FocusTarget::SplitPane(initial_focus),
             buffers,
             editors,
             runs: SlotMap::with_key(),
-            chats: HashMap::new(),
             review: None,
             commits: None,
             rebase: None,
@@ -168,15 +155,13 @@ impl Workspace {
 
     /// True when this workspace is structurally indistinguishable from the
     /// state produced by [`Self::new`]: one empty scratch buffer, one editor,
-    /// one un-split pane, and no auxiliary state (docks, chats, review,
+    /// one un-split pane, and no auxiliary state (docks, review,
     /// commits, rebase, runs). Used by [`crate::app::Stoat::save_workspace`]
     /// to skip persisting workspaces the user opened but never used, so the
     /// on-disk directory does not fill up with empty session files now that
     /// each launch without `--continue` spawns a fresh workspace.
     pub(crate) fn is_fresh(&self) -> bool {
-        self.claude_chat.is_none()
-            && self.chats.is_empty()
-            && self.review.is_none()
+        self.review.is_none()
             && self.commits.is_none()
             && self.rebase.is_none()
             && self.rebase_active.is_none()
@@ -239,7 +224,7 @@ impl Workspace {
                         visible.push(editor.buffer_id);
                     }
                 },
-                View::Label(_) | View::Run(_) | View::Claude(_) => {},
+                View::Label(_) | View::Run(_) => {},
             }
         }
         for id in self.buffers.preview_buffer_ids() {
@@ -337,22 +322,5 @@ impl Workspace {
             };
             dock.area = Rect::new(x, dock_y, width, dock_height);
         }
-    }
-
-    pub(crate) fn is_claude_visible(&self, session_id: ClaudeSessionId) -> bool {
-        let in_split = self
-            .panes
-            .split_panes()
-            .any(|(_, pane)| matches!(&pane.view, View::Claude(id) if *id == session_id));
-        let in_dock = self.docks.values().any(|dock| {
-            !matches!(dock.visibility, DockVisibility::Hidden)
-                && matches!(&dock.view, View::Claude(id) if *id == session_id)
-        });
-        in_split || in_dock
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn show_claude_session(&mut self, pane_id: PaneId, session_id: ClaudeSessionId) {
-        self.panes.pane_mut(pane_id).view = View::Claude(session_id);
     }
 }

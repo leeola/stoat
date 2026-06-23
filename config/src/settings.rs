@@ -9,14 +9,6 @@
 use crate::ast::{Config, EventType, Setting, Statement, Value};
 use std::collections::BTreeMap;
 
-/// Default placement for a newly-opened Claude chat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaudePlacement {
-    Pane,
-    DockLeft,
-    DockRight,
-}
-
 /// Mouse-capture policy applied at terminal startup. `Auto` keeps the
 /// parent-multiplexer guard (capture disabled when `$TMUX` or `$ZELLIJ`
 /// is set so the parent owns drag-select); `Always` forces capture on
@@ -28,26 +20,11 @@ pub enum MouseCapturePolicy {
     Never,
 }
 
-/// Per-tool Claude permission rule lists. Each `Vec<String>` carries
-/// raw regex source as parsed from stcfg; compilation happens at the
-/// host's policy construction so a bad pattern can be reported with
-/// context rather than failing config load. Set via stcfg paths
-/// `claude.permissions.<tool>.always_allow|always_confirm|always_deny =
-/// [pattern, ...]`.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ToolPermissions {
-    pub always_allow: Vec<String>,
-    pub always_confirm: Vec<String>,
-    pub always_deny: Vec<String>,
-}
-
 /// Top-level resolved settings struct.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Settings {
-    /// Enables the Claude Code / LSP text-protocol transcript log.
+    /// Enables the LSP text-protocol transcript log.
     pub text_proto_log: Option<bool>,
-    /// Default placement of `OpenClaude`. `None` means "pane".
-    pub claude_default_placement: Option<ClaudePlacement>,
     /// Name of the active theme block. Resolves against `theme NAME { ... }`
     /// blocks in the config. `None` means "use the compiled-in default".
     pub theme: Option<String>,
@@ -60,11 +37,6 @@ pub struct Settings {
     /// table; user-defined modes can supply their own entry here so
     /// the status line shows something more meaningful than `---`.
     pub mode_badges: BTreeMap<String, String>,
-    /// Per-tool Claude permission rules, keyed by tool name (e.g.
-    /// `Bash`, `Read`, `WebFetch`). Empty when no rules are
-    /// configured. Right-hand wins on merge: a CLI override fully
-    /// replaces the file's rules for any tool it specifies.
-    pub claude_permissions: BTreeMap<String, ToolPermissions>,
 }
 
 impl Settings {
@@ -91,17 +63,11 @@ impl Settings {
     pub fn merge(self, other: Settings) -> Settings {
         let mut mode_badges = self.mode_badges;
         mode_badges.extend(other.mode_badges);
-        let mut claude_permissions = self.claude_permissions;
-        claude_permissions.extend(other.claude_permissions);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
-            claude_default_placement: other
-                .claude_default_placement
-                .or(self.claude_default_placement),
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             mode_badges,
-            claude_permissions,
         }
     }
 
@@ -111,21 +77,6 @@ impl Settings {
             ["text_proto_log"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.text_proto_log = Some(b);
-                }
-            },
-            ["claude", "default_placement"] => {
-                let raw = match &setting.value.node {
-                    Value::String(s) | Value::Ident(s) => Some(s.as_str()),
-                    _ => None,
-                };
-                let placement = match raw {
-                    Some("pane") => Some(ClaudePlacement::Pane),
-                    Some("dock-left") => Some(ClaudePlacement::DockLeft),
-                    Some("dock-right") => Some(ClaudePlacement::DockRight),
-                    _ => None,
-                };
-                if let Some(p) = placement {
-                    self.claude_default_placement = Some(p);
                 }
             },
             ["theme"] => {
@@ -153,28 +104,6 @@ impl Settings {
                     self.mouse_capture = Some(p);
                 }
             },
-            ["claude", "permissions", tool, behavior] => {
-                let Value::Array(items) = &setting.value.node else {
-                    return;
-                };
-                let patterns: Vec<String> = items
-                    .iter()
-                    .filter_map(|item| match &item.node {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                let entry = self
-                    .claude_permissions
-                    .entry((*tool).to_string())
-                    .or_default();
-                match *behavior {
-                    "always_allow" => entry.always_allow = patterns,
-                    "always_confirm" => entry.always_confirm = patterns,
-                    "always_deny" => entry.always_deny = patterns,
-                    _ => {},
-                }
-            },
             _ => {},
         }
     }
@@ -198,11 +127,9 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
-                claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
             }
         );
     }
@@ -214,11 +141,9 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(false),
-                claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
             }
         );
     }
@@ -230,11 +155,9 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
-                claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
             }
         );
     }
@@ -255,29 +178,23 @@ mod tests {
     fn merge_right_wins_over_some() {
         let left = Settings {
             text_proto_log: Some(false),
-            claude_default_placement: None,
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: Some(true),
-            claude_default_placement: None,
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
         };
         assert_eq!(
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
-                claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
             }
         );
     }
@@ -286,22 +203,18 @@ mod tests {
     fn merge_right_none_preserves_left() {
         let left = Settings {
             text_proto_log: Some(true),
-            claude_default_placement: None,
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
         };
         let right = Settings::default();
         assert_eq!(
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
-                claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
             }
         );
     }
@@ -315,101 +228,15 @@ mod tests {
     }
 
     #[test]
-    fn from_config_extracts_claude_default_placement_pane() {
-        let config = parse_ok(r#"on init { claude.default_placement = "pane"; }"#);
-        assert_eq!(
-            Settings::from_config(&config),
-            Settings {
-                text_proto_log: None,
-                claude_default_placement: Some(ClaudePlacement::Pane),
-                theme: None,
-                mouse_capture: None,
-                mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn from_config_extracts_claude_default_placement_dock_left() {
-        let config = parse_ok(r#"on init { claude.default_placement = "dock-left"; }"#);
-        assert_eq!(
-            Settings::from_config(&config),
-            Settings {
-                text_proto_log: None,
-                claude_default_placement: Some(ClaudePlacement::DockLeft),
-                theme: None,
-                mouse_capture: None,
-                mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn from_config_extracts_claude_default_placement_dock_right() {
-        let config = parse_ok(r#"on init { claude.default_placement = "dock-right"; }"#);
-        assert_eq!(
-            Settings::from_config(&config),
-            Settings {
-                text_proto_log: None,
-                claude_default_placement: Some(ClaudePlacement::DockRight),
-                theme: None,
-                mouse_capture: None,
-                mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn from_config_ignores_unknown_placement_value() {
-        let config = parse_ok(r#"on init { claude.default_placement = "elsewhere"; }"#);
-        assert_eq!(Settings::from_config(&config), Settings::default());
-    }
-
-    #[test]
-    fn from_config_ignores_wrong_type_placement_value() {
-        let config = parse_ok("on init { claude.default_placement = true; }");
-        assert_eq!(Settings::from_config(&config), Settings::default());
-    }
-
-    #[test]
-    fn merge_preserves_claude_placement() {
-        let left = Settings {
-            text_proto_log: None,
-            claude_default_placement: Some(ClaudePlacement::DockRight),
-            theme: None,
-            mouse_capture: None,
-            mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
-        };
-        let right = Settings::default();
-        assert_eq!(
-            left.clone().merge(right),
-            Settings {
-                text_proto_log: None,
-                claude_default_placement: Some(ClaudePlacement::DockRight),
-                theme: None,
-                mouse_capture: None,
-                mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
-            }
-        );
-    }
-
-    #[test]
     fn from_config_extracts_theme_ident() {
         let config = parse_ok("on init { theme = default_dark; }");
         assert_eq!(
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
-                claude_default_placement: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
             }
         );
     }
@@ -421,11 +248,9 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
-                claude_default_placement: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
             }
         );
     }
@@ -434,52 +259,17 @@ mod tests {
     fn merge_right_overrides_theme() {
         let left = Settings {
             text_proto_log: None,
-            claude_default_placement: None,
             theme: Some("a".into()),
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
-            claude_default_placement: None,
             theme: Some("b".into()),
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
-    }
-
-    #[test]
-    fn merge_right_overrides_claude_placement() {
-        let left = Settings {
-            text_proto_log: None,
-            claude_default_placement: Some(ClaudePlacement::Pane),
-            theme: None,
-            mouse_capture: None,
-            mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
-        };
-        let right = Settings {
-            text_proto_log: None,
-            claude_default_placement: Some(ClaudePlacement::DockLeft),
-            theme: None,
-            mouse_capture: None,
-            mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
-        };
-        assert_eq!(
-            left.merge(right),
-            Settings {
-                text_proto_log: None,
-                claude_default_placement: Some(ClaudePlacement::DockLeft),
-                theme: None,
-                mouse_capture: None,
-                mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
-            }
-        );
     }
 
     #[test]
@@ -599,117 +389,5 @@ mod tests {
                 ("shared".to_string(), "R".to_string()),
             ])
         );
-    }
-
-    #[test]
-    fn from_config_extracts_claude_permissions() {
-        let config = parse_ok(
-            r#"on init {
-                claude.permissions.Bash.always_allow = ["^cargo (build|test)"];
-                claude.permissions.Bash.always_deny = ["^sudo "];
-                claude.permissions.Read.always_confirm = ["secrets/.*"];
-            }"#,
-        );
-        let settings = Settings::from_config(&config);
-        let bash = settings.claude_permissions.get("Bash").expect("Bash entry");
-        assert_eq!(bash.always_allow, vec!["^cargo (build|test)".to_string()]);
-        assert_eq!(bash.always_deny, vec!["^sudo ".to_string()]);
-        assert!(bash.always_confirm.is_empty());
-        let read = settings.claude_permissions.get("Read").expect("Read entry");
-        assert_eq!(read.always_confirm, vec!["secrets/.*".to_string()]);
-    }
-
-    #[test]
-    fn from_config_ignores_non_string_permission_items() {
-        let config = parse_ok(
-            r#"on init {
-                claude.permissions.Bash.always_allow = ["^cargo", 42, true];
-            }"#,
-        );
-        let settings = Settings::from_config(&config);
-        let bash = settings.claude_permissions.get("Bash").expect("Bash entry");
-        assert_eq!(bash.always_allow, vec!["^cargo".to_string()]);
-    }
-
-    #[test]
-    fn from_config_ignores_non_array_permission_value() {
-        let config = parse_ok(
-            r#"on init {
-                claude.permissions.Bash.always_allow = "not-an-array";
-            }"#,
-        );
-        assert!(Settings::from_config(&config).claude_permissions.is_empty());
-    }
-
-    #[test]
-    fn from_config_ignores_unknown_permission_behavior() {
-        let config = parse_ok(
-            r#"on init {
-                claude.permissions.Bash.never_allow = ["^cargo"];
-            }"#,
-        );
-        let settings = Settings::from_config(&config);
-        let bash = settings.claude_permissions.get("Bash").expect("Bash entry");
-        assert!(bash.always_allow.is_empty());
-        assert!(bash.always_confirm.is_empty());
-        assert!(bash.always_deny.is_empty());
-    }
-
-    #[test]
-    fn merge_claude_permissions_right_wins_per_tool() {
-        let left = Settings {
-            claude_permissions: BTreeMap::from([(
-                "Bash".to_string(),
-                ToolPermissions {
-                    always_allow: vec!["^left".to_string()],
-                    always_confirm: vec![],
-                    always_deny: vec![],
-                },
-            )]),
-            ..Settings::default()
-        };
-        let right = Settings {
-            claude_permissions: BTreeMap::from([(
-                "Bash".to_string(),
-                ToolPermissions {
-                    always_allow: vec!["^right".to_string()],
-                    always_confirm: vec![],
-                    always_deny: vec![],
-                },
-            )]),
-            ..Settings::default()
-        };
-        let merged = left.merge(right);
-        assert_eq!(
-            merged.claude_permissions.get("Bash").unwrap().always_allow,
-            vec!["^right".to_string()]
-        );
-    }
-
-    #[test]
-    fn merge_claude_permissions_layers_disjoint_tools() {
-        let left = Settings {
-            claude_permissions: BTreeMap::from([(
-                "Bash".to_string(),
-                ToolPermissions {
-                    always_allow: vec!["^cargo".to_string()],
-                    ..Default::default()
-                },
-            )]),
-            ..Settings::default()
-        };
-        let right = Settings {
-            claude_permissions: BTreeMap::from([(
-                "Read".to_string(),
-                ToolPermissions {
-                    always_deny: vec!["secrets/".to_string()],
-                    ..Default::default()
-                },
-            )]),
-            ..Settings::default()
-        };
-        let merged = left.merge(right);
-        assert!(merged.claude_permissions.contains_key("Bash"));
-        assert!(merged.claude_permissions.contains_key("Read"));
     }
 }

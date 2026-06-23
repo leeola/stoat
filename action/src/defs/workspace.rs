@@ -9,7 +9,7 @@ define_action!(
     "NewWorkspace",
     ActionKind::NewWorkspace,
     "create a new workspace",
-    "Create a fresh workspace at the current workspace's git root. The new workspace has default panes and no inherited buffers, Claude session, or rebase state. The current workspace is saved and kept in the background; the new workspace becomes active.",
+    "Create a fresh workspace at the current workspace's git root. The new workspace has default panes and no inherited buffers or rebase state. The current workspace is saved and kept in the background; the new workspace becomes active.",
     ActionPriority::Common
 );
 
@@ -19,7 +19,7 @@ define_action!(
     "CopyWorkspace",
     ActionKind::CopyWorkspace,
     "duplicate this workspace",
-    "Create a new workspace that clones the current workspace's panes, editors, buffers, and layout. The copy sits at the same git root as the source but does not inherit live Claude session or in-flight rebase state. The current workspace is saved; the copy becomes active."
+    "Create a new workspace that clones the current workspace's panes, editors, buffers, and layout. The copy sits at the same git root as the source but does not inherit in-flight rebase state. The current workspace is saved; the copy becomes active."
 );
 
 define_action!(

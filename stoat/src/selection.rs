@@ -1668,7 +1668,6 @@ mod tests {
             "space",
             "space_workspace",
             "space_pane_nav",
-            "claude",
         ] {
             let (_, color) = crate::render::pane::mode_segment(mode, &theme, &badges);
             assert_eq!(
@@ -1811,7 +1810,6 @@ mod tests {
             ("space_workspace", "SWS"),
             ("space_pane_nav", "SPN"),
             ("space_pane_nav_new", "SNN"),
-            ("claude", "CLA"),
         ];
         let badges = std::collections::BTreeMap::new();
         for (mode, expected) in cases {

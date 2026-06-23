@@ -88,9 +88,6 @@ fn dropped_fields_for(workspace: &Workspace) -> Vec<String> {
     if !workspace.runs.is_empty() {
         dropped.push("runs".to_string());
     }
-    if !workspace.chats.is_empty() {
-        dropped.push("chats".to_string());
-    }
     if !workspace.docks.is_empty() {
         dropped.push("docks".to_string());
     }

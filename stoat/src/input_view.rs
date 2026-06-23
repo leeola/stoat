@@ -12,7 +12,7 @@ use stoat_text::{Bias, SelectionGoal};
 
 /// Embeddable multi-line text editor backed by the standard [`EditorState`].
 /// Used for every compact text-input surface in the TUI: command palette,
-/// help search, run pane, Claude chat, reword. Height grows with the rope
+/// help search, run pane, reword. Height grows with the rope
 /// line count up to `max_height`, so a single-line field looks compact while
 /// still being a real editor. When the global mode is `"prompt"`, the view
 /// hides its modeline and `Enter` is routed to submission; in other modes
@@ -23,9 +23,9 @@ pub(crate) struct InputView {
     pub(crate) buffer_id: BufferId,
     pub(crate) target: SubmitTarget,
     /// Cap used by `desired_height`. Currently unread because callers allocate
-    /// fixed single-row regions for palette / run and an external 1/3-pane
-    /// clamp for Claude; retained so the eventual dynamic-sizing migration of
-    /// Claude chat (and reword) can use it without re-adding the field.
+    /// fixed single-row regions for palette / run; retained so the eventual
+    /// dynamic-sizing migration of reword can use it without re-adding the
+    /// field.
     #[allow(dead_code)]
     pub(crate) max_height: u16,
     /// Mode to transition to when the view is focused. Callers typically use
@@ -40,10 +40,9 @@ pub(crate) struct InputView {
 
 /// Identifies which consumer owns an [`InputView`], used by
 /// `SubmitPromptInput` to route submission to the correct handler. The
-/// concrete [`crate::run::RunId`] / [`crate::host::ClaudeSessionId`] for
-/// targets that need them is resolved from pane focus at dispatch time, not
-/// stored here, so the [`InputView`] stays constructible before the owning
-/// consumer has its slotmap key.
+/// concrete [`crate::run::RunId`] for targets that need it is resolved from
+/// pane focus at dispatch time, not stored here, so the [`InputView`] stays
+/// constructible before the owning consumer has its slotmap key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum SubmitTarget {
@@ -52,7 +51,6 @@ pub(crate) enum SubmitTarget {
     HelpSearch,
     Run,
     Reword,
-    ClaudeChat,
     FileFinder,
     RenameSymbol,
     WorkspaceSymbolPicker,
@@ -103,7 +101,7 @@ impl InputView {
     }
 
     /// Remove the underlying editor slot. Scratch buffers stay in the registry
-    /// (no public removal API today); this matches the existing reword/Claude
+    /// (no public removal API today); this matches the existing reword
     /// teardown and is safe for transient inputs.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         ws.editors.remove(self.editor_id);
@@ -295,9 +293,8 @@ impl InputView {
     /// Desired row count for layout, clamped to `self.max_height`. Adds one
     /// row for the per-view modeline when the mode is non-prompt. Currently
     /// unused - palette and run callers allocate their own fixed-height
-    /// single-row regions - but kept on the type because the Claude chat
-    /// dynamic-height path (`max_input = area.height / 3` clamp) will want
-    /// this once its renderer is migrated off the manual line-count helper.
+    /// single-row regions - but kept on the type for a future dynamic-height
+    /// input path that wants line-count-driven sizing.
     #[allow(dead_code)]
     pub(crate) fn desired_height(&self, ws: &Workspace, current_mode: &str) -> u16 {
         let Some(buffer) = ws.buffers.get(self.buffer_id) else {

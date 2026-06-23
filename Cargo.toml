@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
   "action",
-  "agent/claude_code",
   "bin",
   "config",
   "host",

@@ -1,11 +1,6 @@
 use crate::{
     defs::{
         app::{Quit, QuitAll},
-        claude::{
-            ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeJumpToFocusedCard,
-            ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
-            ClaudeToggleToolCardExpand, OpenClaude, ToggleDockLeft, ToggleDockRight,
-        },
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
@@ -62,7 +57,8 @@ use crate::{
         palette::OpenCommandPalette,
         pane::{
             CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight,
-            FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight,
+            FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight, ToggleDockLeft,
+            ToggleDockRight,
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
@@ -503,26 +499,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(HelpJumpFirst::DEF, |_| Ok(Box::new(HelpJumpFirst)));
     add(HelpJumpLast::DEF, |_| Ok(Box::new(HelpJumpLast)));
     add(CloseHelp::DEF, |_| Ok(Box::new(CloseHelp)));
-    add(OpenClaude::DEF, |_| Ok(Box::new(OpenClaude)));
-    add(ClaudeSubmit::DEF, |_| Ok(Box::new(ClaudeSubmit)));
-    add(ClaudeToPane::DEF, |_| Ok(Box::new(ClaudeToPane)));
-    add(ClaudeToDockLeft::DEF, |_| Ok(Box::new(ClaudeToDockLeft)));
-    add(ClaudeToDockRight::DEF, |_| Ok(Box::new(ClaudeToDockRight)));
-    add(ClaudeToggleFollow::DEF, |_| {
-        Ok(Box::new(ClaudeToggleFollow))
-    });
-    add(ClaudeFocusNextToolCard::DEF, |_| {
-        Ok(Box::new(ClaudeFocusNextToolCard))
-    });
-    add(ClaudeFocusPrevToolCard::DEF, |_| {
-        Ok(Box::new(ClaudeFocusPrevToolCard))
-    });
-    add(ClaudeToggleToolCardExpand::DEF, |_| {
-        Ok(Box::new(ClaudeToggleToolCardExpand))
-    });
-    add(ClaudeJumpToFocusedCard::DEF, |_| {
-        Ok(Box::new(ClaudeJumpToFocusedCard))
-    });
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
     add(OpenCommits::DEF, |_| Ok(Box::new(OpenCommits)));
@@ -765,16 +741,6 @@ mod tests {
         "RunInterrupt",
         "RunHistoryPrev",
         "RunHistoryNext",
-        "OpenClaude",
-        "ClaudeSubmit",
-        "ClaudeToPane",
-        "ClaudeToDockLeft",
-        "ClaudeToDockRight",
-        "ClaudeToggleFollow",
-        "ClaudeFocusNextToolCard",
-        "ClaudeFocusPrevToolCard",
-        "ClaudeToggleToolCardExpand",
-        "ClaudeJumpToFocusedCard",
         "ToggleDockRight",
         "ToggleDockLeft",
         "NewWorkspace",
@@ -868,7 +834,6 @@ mod tests {
         // Insert and Backspace in reword mode are handled by the editor
         // directly, not via the action registry.
         // + 4 file-finder actions (open, select prev/next, scope toggle).
-        // + 1 ClaudeToggleFollow.
         // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
         // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
         // + 3 window-relative gotos (GotoWindowTop/Center/Bottom).
@@ -945,10 +910,7 @@ mod tests {
         // + 1 SelectRegister.
         // + 1 InsertRegister.
         // + 1 CommitUndoCheckpoint.
-        // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
-        //   ClaudeToggleToolCardExpand).
-        // + 1 ClaudeJumpToFocusedCard.
-        assert_eq!(all().count(), 278);
+        assert_eq!(all().count(), 268);
     }
 
     #[test]

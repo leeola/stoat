@@ -7,12 +7,6 @@ pub mod registry;
 pub use action::{Action, ActionDef, ActionPriority};
 pub use defs::{
     app::{Quit, QuitAll},
-    claude::{
-        ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeInterrupt, ClaudeJumpToFocusedCard,
-        ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
-        ClaudeToggleToolCardExpand, OpenCheckpointPicker, OpenClaude, ToggleDockLeft,
-        ToggleDockRight,
-    },
     commits::{
         CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
         CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
@@ -66,7 +60,7 @@ pub use defs::{
     palette::OpenCommandPalette,
     pane::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
-        SplitNewDown, SplitNewRight, SplitRight,
+        SplitNewDown, SplitNewRight, SplitRight, ToggleDockLeft, ToggleDockRight,
     },
     prompt::{
         CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,

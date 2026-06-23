@@ -1,12 +1,10 @@
 #![allow(dead_code)]
 
-pub(crate) mod claude;
 pub(crate) mod editor;
 pub(crate) mod keys;
 
 use crate::{
     app::{Stoat, UpdateEffect},
-    host::ClaudeSessionId,
     keymap::resolve_config_action,
     keymap_state::arg_as_str,
 };
@@ -16,7 +14,7 @@ use ratatui::{
     style::{Color, Modifier},
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     fmt::Write,
     sync::Arc,
     time::Duration,
@@ -48,15 +46,12 @@ pub struct TestHarness {
     pub(crate) stoat: Stoat,
     #[allow(dead_code)]
     scheduler: Arc<TestScheduler>,
-    pub(crate) fake_claude_host: Arc<crate::host::FakeClaudeCodeHost>,
     pub(crate) fake_fs: Arc<crate::host::FakeFs>,
     pub(crate) fake_fs_watcher: Arc<crate::host::FakeFsWatcher>,
     pub(crate) fake_git: Arc<crate::host::FakeGit>,
     pub(crate) fake_env: Arc<crate::host::FakeEnv>,
     pub(crate) fake_lsp: Arc<crate::host::FakeLsp>,
     pub(crate) fake_clipboard: Arc<crate::host::FakeClipboard>,
-    pub(crate) claude_fakes: HashMap<ClaudeSessionId, Arc<crate::host::FakeClaudeCode>>,
-    pub(crate) claude_tool_id_counter: u64,
     frames: Vec<Frame>,
     last_buffer: Option<Buffer>,
     step: usize,
@@ -71,7 +66,6 @@ impl TestHarness {
     pub(crate) fn new_with_settings(width: u16, height: u16, settings: Settings) -> Self {
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
-        let fake_claude_host = Arc::new(crate::host::FakeClaudeCodeHost::new());
         let fake_fs = Arc::new(crate::host::FakeFs::new());
         let fake_fs_watcher = Arc::new(crate::host::FakeFsWatcher::new());
         fake_fs_watcher.install_on(&fake_fs);
@@ -83,7 +77,6 @@ impl TestHarness {
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;
         stoat.active_workspace_mut().name = String::new();
-        stoat.set_claude_code_host(fake_claude_host.clone());
         stoat.set_fs_host(fake_fs.clone());
         stoat.set_fs_watch_host(fake_fs_watcher.clone());
         stoat.set_git_host(fake_git.clone());
@@ -95,15 +88,12 @@ impl TestHarness {
         let mut harness = Self {
             stoat,
             scheduler,
-            fake_claude_host,
             fake_fs,
             fake_fs_watcher,
             fake_git,
             fake_env,
             fake_lsp,
             fake_clipboard,
-            claude_fakes: HashMap::new(),
-            claude_tool_id_counter: 0,
             frames: Vec::new(),
             last_buffer: None,
             step: 0,
@@ -217,16 +207,6 @@ impl TestHarness {
             alloc_ptr(&self.stoat.clipboard_host),
             alloc_ptr(&self.fake_clipboard),
             "ClipboardHost was replaced during the test; real clipboard writes may have escaped"
-        );
-        let claude = self
-            .stoat
-            .claude_host
-            .as_ref()
-            .expect("ClaudeCodeHost was uninstalled during the test");
-        assert_eq!(
-            alloc_ptr(claude),
-            alloc_ptr(&self.fake_claude_host),
-            "ClaudeCodeHost was replaced during the test"
         );
     }
 
@@ -520,23 +500,20 @@ impl TestHarness {
     }
 
     /// Advance the fake clock by `duration`, firing every timer that
-    /// expires inside the window, then settle the harness so any
-    /// [`crate::host::ClaudeNotification`] or pending commit produced
-    /// by those wake-ups is routed through the main dispatch path
-    /// before returning.
+    /// expires inside the window, then settle the harness so any pending
+    /// commit produced by those wake-ups is routed through the main dispatch
+    /// path before returning.
     pub fn advance_clock(&mut self, duration: Duration) {
         self.scheduler.advance_clock(duration);
         self.settle();
     }
 
-    /// Drive the scheduler and Claude notification pipeline to a fixed
-    /// point. After returning, every spawned task has been polled to
-    /// suspension and every queued [`crate::host::ClaudeNotification`] has
-    /// been routed through the main dispatch path.
+    /// Drive the scheduler and async pump pipeline to a fixed point. After
+    /// returning, every spawned task has been polled to suspension and every
+    /// queued pump result has been routed through the main dispatch path.
     pub fn settle(&mut self) {
         loop {
             self.scheduler.run_until_parked();
-            let claude = self.stoat.drain_claude_notifications();
             let commits = crate::action_handlers::pump_commits(&mut self.stoat);
             let review = crate::action_handlers::pump_review_scan(&mut self.stoat);
             let lsp_jumps = crate::action_handlers::pump_lsp_jumps(&mut self.stoat);
@@ -555,8 +532,7 @@ impl TestHarness {
             let lsp_format = crate::action_handlers::lsp::pump_lsp_format(&mut self.stoat);
             let completion = crate::completion::request::pump(&mut self.stoat);
             let external_edits = self.stoat.drain_pending_external_edits();
-            if !claude
-                && !commits
+            if !commits
                 && !review
                 && !lsp_jumps
                 && !lsp_hover
@@ -817,82 +793,6 @@ impl TestHarness {
         self.sub_frame += 1;
     }
 
-    pub fn open_claude_with_fake(&mut self, fake: crate::host::FakeClaudeCode) -> ClaudeSessionId {
-        let arc = self.fake_claude_host.push_session(fake);
-        crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::OpenClaude);
-        self.settle();
-        let id = self
-            .stoat
-            .active_workspace()
-            .claude_chat
-            .expect("OpenClaude should set claude_chat");
-        self.claude_fakes.insert(id, arc);
-        self.capture("open_claude");
-        id
-    }
-
-    pub fn create_background_session(
-        &mut self,
-        fake: crate::host::FakeClaudeCode,
-    ) -> ClaudeSessionId {
-        let arc = Arc::new(fake);
-        let id = self.stoat.claude_sessions_mut().reserve_slot();
-        let session: Arc<dyn crate::host::ClaudeCodeSession> = arc.clone();
-        self.stoat
-            .claude_sessions_mut()
-            .fill_slot(id, session.clone());
-        // Spawn the polling task for this session so pushes flow through
-        // the real notification pipeline. Mirrors what the
-        // `SessionReady` notification does for OpenClaude-driven sessions.
-        let claude_tx = self.stoat.claude_tx.clone();
-        self.stoat
-            .executor
-            .spawn(crate::app::claude_polling_task(id, session, claude_tx))
-            .detach();
-        self.claude_fakes.insert(id, arc);
-        id
-    }
-
-    pub fn show_claude_session(&mut self, session_id: ClaudeSessionId) {
-        use crate::{
-            badge::BadgeSource,
-            pane::{DockVisibility, View},
-        };
-        let ws = self.stoat.active_workspace_mut();
-        for (_, dock) in &mut ws.docks {
-            if matches!(&dock.view, View::Claude(id) if *id == session_id) {
-                dock.visibility = DockVisibility::Open {
-                    width: dock.default_width,
-                };
-            }
-        }
-        self.stoat
-            .badges
-            .remove_by_source(BadgeSource::Claude(session_id));
-        self.capture("show_claude_session");
-    }
-
-    pub fn claude_badge_state(
-        &self,
-        session_id: ClaudeSessionId,
-    ) -> Option<crate::badge::BadgeState> {
-        let source = crate::badge::BadgeSource::Claude(session_id);
-        self.stoat
-            .badges
-            .find_by_source(source)
-            .and_then(|id| self.stoat.badges.get(id))
-            .map(|b| b.state)
-    }
-
-    pub fn claude_badge_detail(&self, session_id: ClaudeSessionId) -> Option<String> {
-        let source = crate::badge::BadgeSource::Claude(session_id);
-        self.stoat
-            .badges
-            .find_by_source(source)
-            .and_then(|id| self.stoat.badges.get(id))
-            .and_then(|b| b.detail.clone())
-    }
-
     /// Insert a fresh workspace into the app's slot map and return its id.
     /// The new workspace is not automatically made active; call
     /// [`Self::set_active_workspace`] to switch.
@@ -907,13 +807,6 @@ impl TestHarness {
 
     pub(crate) fn set_active_workspace(&mut self, id: crate::workspace::WorkspaceId) {
         self.stoat.active_workspace = id;
-    }
-
-    /// Sub-harness for driving Claude Code sessions in tests. Returned by
-    /// short-lived reborrow; each method call on the harness re-acquires
-    /// `&mut self`, mirroring the `HashMap::entry` pattern.
-    pub fn claude(&mut self) -> claude::ClaudeHarness<'_> {
-        claude::ClaudeHarness::new(self)
     }
 
     /// Seed a file in the harness' fake filesystem under `/test/<name>`
@@ -1327,18 +1220,6 @@ pub(crate) const REVIEW_TWO_HUNK_BASE: &str =
 pub(crate) const REVIEW_TWO_HUNK_BUFFER: &str =
     "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nT\n";
 
-/// Badge tests need a non-visible Claude session: opened, moved into
-/// the right dock, then toggled through Minimized to Hidden. The badge
-/// machinery predates pane-based Claude and the layout expectations
-/// track the dock overlay.
-pub(crate) fn setup_hidden_claude_session(h: &mut TestHarness) -> ClaudeSessionId {
-    let id = h.claude().open();
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
-    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
-    id
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1488,187 +1369,6 @@ mod tests {
         }
     }
 
-    // --- ClaudeHarness session-tracking and transport coverage ---
-
-    #[test]
-    fn claude_harness_single_session_reports_id() {
-        let mut h = TestHarness::with_size(80, 24);
-        let id = h.claude().open();
-        assert_eq!(h.claude().session_ids(), vec![id]);
-    }
-
-    #[test]
-    fn claude_harness_init_sessions_multiple_background() {
-        let mut h = TestHarness::with_size(80, 24);
-        let ids = h
-            .claude()
-            .init_sessions(["first session", "second session", "third session"]);
-        assert_eq!(ids.len(), 3);
-        let mut known = h.claude().session_ids();
-        known.sort_by_key(|id| ids.iter().position(|i| i == id).unwrap_or(usize::MAX));
-        assert_eq!(known, ids);
-    }
-
-    #[test]
-    fn claude_harness_list_sessions_reflects_seeded_summaries() {
-        use crate::host::ClaudeCodeHost;
-
-        let mut h = TestHarness::with_size(80, 24);
-        h.claude()
-            .init_sessions(["alpha".to_string(), "beta".to_string()]);
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let summaries = rt
-            .block_on(h.fake_claude_host.list_sessions())
-            .expect("list_sessions");
-
-        let titles: Vec<&str> = summaries.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, vec!["alpha", "beta"]);
-        let expected_ids: Vec<&str> = summaries.iter().map(|s| s.session_id.as_str()).collect();
-        assert_eq!(expected_ids, vec!["sess-01", "sess-02"]);
-    }
-
-    #[test]
-    fn claude_harness_say_flows_through_real_polling() {
-        let mut h = TestHarness::with_size(80, 24);
-        let id = h.claude().open();
-        h.claude().get_session(id).say("Hello from the fake.");
-
-        let ws = h.stoat.active_workspace();
-        let chat = ws.chats.get(&id).expect("chat state");
-        let has_text = chat.messages.iter().any(|m| {
-            matches!(
-                &m.content,
-                crate::claude_chat::ChatMessageContent::Text(t)
-                    if t == "Hello from the fake."
-            )
-        });
-        assert!(
-            has_text,
-            "expected text message to land in chat state via the polling path"
-        );
-        let has_turn_complete = chat.messages.iter().any(|m| {
-            matches!(
-                &m.content,
-                crate::claude_chat::ChatMessageContent::TurnComplete { .. }
-            )
-        });
-        assert!(has_turn_complete, "say() should emit a Result message");
-    }
-
-    #[test]
-    fn claude_harness_bash_tool_pair_populates_kind_and_content() {
-        use crate::host::{ToolCallContent, ToolKind};
-
-        let mut h = TestHarness::with_size(80, 24);
-        let id = h.claude().open();
-        h.claude()
-            .get_session(id)
-            .bash("ls /tmp")
-            .result("one\ntwo");
-
-        let ws = h.stoat.active_workspace();
-        let chat = ws.chats.get(&id).expect("chat state");
-        let use_msg = chat
-            .messages
-            .iter()
-            .find_map(|m| match &m.content {
-                crate::claude_chat::ChatMessageContent::ToolUse { name, input, id } => {
-                    Some((name.clone(), input.clone(), id.clone()))
-                },
-                _ => None,
-            })
-            .expect("ToolUse in chat");
-        assert_eq!(use_msg.0, "Bash");
-        assert!(use_msg.1.contains("ls /tmp"), "input JSON: {}", use_msg.1);
-        assert!(
-            use_msg.2.starts_with("toolu_"),
-            "tool id {} should match toolu_* shape",
-            use_msg.2
-        );
-
-        let result_msg = chat
-            .messages
-            .iter()
-            .find_map(|m| match &m.content {
-                crate::claude_chat::ChatMessageContent::ToolResult { id, content, .. } => {
-                    Some((id.clone(), content.clone()))
-                },
-                _ => None,
-            })
-            .expect("ToolResult in chat");
-        assert_eq!(result_msg.0, use_msg.2, "result id pairs with use id");
-        assert_eq!(result_msg.1, "one\ntwo");
-
-        let _ = (
-            ToolKind::Execute,
-            ToolCallContent::Text {
-                text: String::new(),
-            },
-        );
-    }
-
-    #[test]
-    fn claude_harness_stream_message_emits_partials() {
-        let mut h = TestHarness::with_size(80, 24);
-        let id = h.claude().open();
-        h.claude()
-            .get_session(id)
-            .stream_message("The quick brown fox jumps over the lazy dog.");
-
-        let ws = h.stoat.active_workspace();
-        let chat = ws.chats.get(&id).expect("chat state");
-        let has_final_text = chat.messages.iter().any(|m| {
-            matches!(
-                &m.content,
-                crate::claude_chat::ChatMessageContent::Text(t)
-                    if t == "The quick brown fox jumps over the lazy dog."
-            )
-        });
-        assert!(has_final_text, "final Text should land in chat history");
-        let has_turn_complete = chat.messages.iter().any(|m| {
-            matches!(
-                &m.content,
-                crate::claude_chat::ChatMessageContent::TurnComplete { .. }
-            )
-        });
-        assert!(
-            has_turn_complete,
-            "stream_message should terminate the turn with Result"
-        );
-        assert!(
-            chat.streaming_text.is_none(),
-            "streaming_text cleared after final Text: {:?}",
-            chat.streaming_text
-        );
-    }
-
-    #[test]
-    fn claude_harness_tool_pending_leaves_result_absent() {
-        let mut h = TestHarness::with_size(80, 24);
-        let id = h.claude().open();
-        h.claude().get_session(id).bash("ls").pending();
-
-        let ws = h.stoat.active_workspace();
-        let chat = ws.chats.get(&id).expect("chat state");
-        let result_count = chat
-            .messages
-            .iter()
-            .filter(|m| {
-                matches!(
-                    m.content,
-                    crate::claude_chat::ChatMessageContent::ToolResult { .. }
-                )
-            })
-            .count();
-        assert_eq!(
-            result_count, 0,
-            "pending() should NOT emit a ToolResult message"
-        );
-    }
-
     #[test]
     fn assert_no_real_io_passes_for_default_harness() {
         let h = TestHarness::with_size(80, 24);
@@ -1704,14 +1404,6 @@ mod tests {
     fn assert_no_real_io_panics_when_lsp_host_swapped() {
         let mut h = TestHarness::with_size(80, 24);
         h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
-        h.assert_no_real_io();
-    }
-
-    #[test]
-    #[should_panic(expected = "ClaudeCodeHost was uninstalled")]
-    fn assert_no_real_io_panics_when_claude_host_uninstalled() {
-        let mut h = TestHarness::with_size(80, 24);
-        h.stoat.claude_host = None;
         h.assert_no_real_io();
     }
 }

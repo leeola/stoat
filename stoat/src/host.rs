@@ -8,7 +8,6 @@
 //! - Borrowed paths (`&Path` inputs)
 //! - Small `Copy` return types for metadata
 
-pub mod claude_code;
 pub mod clipboard;
 #[cfg(test)]
 pub mod fake;
@@ -17,24 +16,14 @@ pub mod local;
 pub mod lsp;
 pub mod terminal;
 
-pub use claude_code::{
-    AgentMessage, ApprovalDecision, BashDenialPolicy, ChainedPermissionPolicy, ClaudeCodeHost,
-    ClaudeCodeSession, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
-    ClaudeSessionSummary, HookCallback, HookDecision, HookEvent, HookKind, HookLifecycleEvent,
-    HookResponse, ModeInfo, ModelInfo, PermissionBehavior, PermissionCallback,
-    PermissionDestination, PermissionPrompt, PermissionResult, PermissionRule, PermissionScope,
-    PermissionSuggestion, PlanEntry, PlanEntryStatus, RuleBasedPolicy, SessionStateEvent,
-    TaskEvent, TerminalMeta, TokenUsage, ToolCallContent, ToolCallLocation, ToolCallStatus,
-    ToolKind, ToolPermissionContext,
-};
 pub use clipboard::{osc52_should_emit, ClipboardHost, NoopClipboard};
 #[cfg(test)]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
     terminal::{inject_done, inject_output, FakeTerminal},
-    workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeClipboard, FakeEnv, FakeFs,
-    FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp, FakeRepoBuilder,
+    workspace_symbol_params, FakeClipboard, FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeGit,
+    FakeLsp, FakeRepoBuilder,
 };
 pub use git::{
     ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,

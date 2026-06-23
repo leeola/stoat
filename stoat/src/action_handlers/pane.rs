@@ -54,7 +54,7 @@ fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
                 state.dispose(ws);
             }
         },
-        View::Label(_) | View::Claude(_) => {},
+        View::Label(_) => {},
     }
     true
 }
