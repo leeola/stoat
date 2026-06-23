@@ -3072,6 +3072,12 @@ impl Stoat {
             .then(|| crate::render::completion::completion_popup_layout(self))
             .flatten();
 
+        // The help view is a fixed centered modal over the editor like the
+        // finder; its list and detail panes pool as two non-pane surfaces.
+        let help_layout = (!overlay && self.help.is_some())
+            .then(|| crate::render::help::help_layout(self.size()))
+            .flatten();
+
         let mut out = Vec::new();
         let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
         if finder_list.is_some() {
@@ -3085,6 +3091,10 @@ impl Stoat {
         }
         if completion.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::COMPLETION);
+        }
+        if help_layout.is_some() {
+            active.push(crate::smooth_scroll::non_pane_pool::HELP_LIST);
+            active.push(crate::smooth_scroll::non_pane_pool::HELP_DETAIL);
         }
         self.smooth_scroll.drop_absent(&mut out, &active);
 
@@ -3284,6 +3294,79 @@ impl Stoat {
                         theme,
                         region.width,
                         region.height,
+                    )
+                },
+            );
+        }
+
+        if let (Some(layout), Some(help)) = (help_layout, self.help.as_ref()) {
+            let list = layout.list;
+            let list_region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
+                top: list.y,
+                left: list.x,
+                width: list.width,
+                height: list.height,
+            };
+            let list_scroll =
+                help.selected()
+                    .saturating_sub(list.height.saturating_sub(1) as usize) as u32;
+            // The filtered entry set changes on every search refilter, so its
+            // hash is the list pool's content version.
+            let list_version = {
+                let mut hasher = DefaultHasher::new();
+                help.filtered().hash(&mut hasher);
+                hasher.finish()
+            };
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                list_region,
+                list_scroll,
+                list_version,
+                |page| {
+                    crate::smooth_scroll::render_help_list_page(
+                        help,
+                        page,
+                        theme,
+                        list.width,
+                        list.height,
+                    )
+                },
+            );
+
+            let detail = layout.detail;
+            let detail_region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
+                top: detail.y,
+                left: detail.x,
+                width: detail.width,
+                height: detail.height,
+            };
+            let detail_scroll = help.detail_scroll() as u32;
+            // The detail body is the selected entry's, so a hash of its name is
+            // the content version: it bumps on a selection move and on a filter
+            // change that lands a different entry at the same index.
+            let detail_version = {
+                let mut hasher = DefaultHasher::new();
+                help.selected_entry()
+                    .map(|entry| entry.def.name())
+                    .hash(&mut hasher);
+                hasher.finish()
+            };
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                detail_region,
+                detail_scroll,
+                detail_version,
+                |page| {
+                    crate::smooth_scroll::render_help_detail_page(
+                        help,
+                        page,
+                        theme,
+                        detail.width,
+                        detail.height,
                     )
                 },
             );
@@ -4242,6 +4325,63 @@ mod tests {
                 pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
             })),
             "closing the popup retires its pool"
+        );
+    }
+
+    #[test]
+    fn help_list_and_detail_are_pooled_and_retired() {
+        use stoat_action::OpenHelp;
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        action_handlers::dispatch(&mut h.stoat, &OpenHelp);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+        let layout = crate::render::help::help_layout(size).expect("help fits the test terminal");
+        let list = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
+            top: layout.list.y,
+            left: layout.list.x,
+            width: layout.list.width,
+            height: layout.list.height,
+        };
+        let detail = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
+            top: layout.detail.y,
+            left: layout.detail.x,
+            width: layout.detail.width,
+            height: layout.detail.height,
+        };
+        let cmds = decode_apc_stream(&rx.try_recv().expect("the open help emits an APC batch"));
+        assert!(
+            cmds.contains(&Command::PoolRegion(list)),
+            "the help list declares a pool at its rect"
+        );
+        assert!(
+            cmds.contains(&Command::PoolRegion(detail)),
+            "the help detail declares a pool at its rect"
+        );
+
+        h.stoat.help = None;
+        h.stoat.emit_smooth_scroll();
+        let cmds = decode_apc_stream(&rx.try_recv().expect("closing help emits drops"));
+        assert!(
+            cmds.contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
+            })),
+            "closing help retires the list pool"
+        );
+        assert!(
+            cmds.contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
+            })),
+            "closing help retires the detail pool"
         );
     }
 

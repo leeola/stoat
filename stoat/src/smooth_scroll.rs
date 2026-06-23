@@ -30,9 +30,14 @@ use crate::{
     completion::CompletionItem,
     editor_state::EditorState,
     file_finder::FileFinder,
+    help::Help,
     render::{
-        command_palette::paint_palette_rows, commits::paint_commit_rows,
-        completion::paint_completion_rows, editor::render_editor, file_finder::paint_finder_rows,
+        command_palette::paint_palette_rows,
+        commits::paint_commit_rows,
+        completion::paint_completion_rows,
+        editor::render_editor,
+        file_finder::paint_finder_rows,
+        help::{paint_help_detail_rows, paint_help_list_rows},
         review::render_review,
     },
 };
@@ -401,6 +406,54 @@ pub(crate) fn render_completion_page(
         theme,
         &mut buf,
     );
+
+    serialize_buffer(&buf)
+}
+
+/// Render `region_height` rows of the help entry list starting at row
+/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
+/// page's self-contained VT byte stream.
+///
+/// Mirrors [`render_finder_page`] but paints help list rows; the page index
+/// alone selects the rows, and the list is read-only here.
+pub(crate) fn render_help_list_page(
+    help: &Help,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+
+    let start_row = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+    paint_help_list_rows(help, area, start_row, theme, &mut buf);
+
+    serialize_buffer(&buf)
+}
+
+/// Render `region_height` lines of the selected help entry's detail starting at
+/// line `page * region_height` into a fresh region-sized [`Buffer`], returning
+/// the page's self-contained VT byte stream.
+///
+/// Mirrors [`render_help_list_page`] but paints the detail body; the page index
+/// alone selects the lines, and the detail is read-only here.
+pub(crate) fn render_help_detail_page(
+    help: &Help,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+
+    let start_row = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+    paint_help_detail_rows(help, area, start_row, theme, &mut buf);
 
     serialize_buffer(&buf)
 }
