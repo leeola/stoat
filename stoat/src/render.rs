@@ -237,6 +237,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
     symbol_picker::render_symbol_picker(stoat, buf);
     workspace_symbol_picker::render_workspace_symbol(stoat, buf);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
+    badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
     badges::render_badges(
         &ws.badges,
         &stoat.badges,

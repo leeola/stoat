@@ -1,5 +1,6 @@
 use crate::{
-    badge::{Anchor, Badge, BadgeState, BadgeTray, StackDirection},
+    agent_status::AgentStatus,
+    badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection},
     render::text::{write_cell, write_str},
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
@@ -83,6 +84,17 @@ pub(crate) fn render_badges(
                 },
             }
         }
+    }
+}
+
+/// Reflect the live [`AgentStatus`] into `tray` under [`BadgeSource::Agent`],
+/// replacing any agent badge left from a previous frame. Run each frame so the
+/// overlay tracks the status the render process reads on paint. A cleanly
+/// ended or absent session leaves no agent badge.
+pub(crate) fn sync_agent_badge(tray: &mut BadgeTray, agent: Option<&AgentStatus>) {
+    tray.remove_by_source(BadgeSource::Agent);
+    if let Some(badge) = agent.and_then(AgentStatus::badge) {
+        tray.insert(badge);
     }
 }
 
@@ -229,5 +241,49 @@ fn badge_border_style(state: BadgeState, theme: &crate::theme::Theme) -> Style {
         BadgeState::Active => theme.get(scope::UI_BADGE_ACTIVE),
         BadgeState::Complete => theme.get(scope::UI_BADGE_COMPLETE),
         BadgeState::Error => theme.get(scope::UI_BADGE_ERROR),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{agent_status::AgentHookEvent, Stoat};
+
+    #[test]
+    fn snapshot_agent_badge_active() {
+        let mut h = Stoat::test();
+        let mut status = AgentStatus::new();
+        status.apply(AgentHookEvent::PreToolUse {
+            tool: "Bash".into(),
+        });
+        h.stoat.active_workspace_mut().agent = Some(status);
+        h.assert_snapshot("agent_badge_active");
+    }
+
+    #[test]
+    fn sync_replaces_then_clears_agent_badge() {
+        let mut tray = BadgeTray::new();
+        let mut status = AgentStatus::new();
+        status.apply(AgentHookEvent::PreToolUse {
+            tool: "Bash".into(),
+        });
+
+        sync_agent_badge(&mut tray, Some(&status));
+        let id = tray
+            .find_by_source(BadgeSource::Agent)
+            .expect("agent badge present");
+        assert_eq!(tray.get(id).unwrap().label, "claude: Bash");
+        assert_eq!(tray.get(id).unwrap().state, BadgeState::Active);
+
+        status.apply(AgentHookEvent::Notification);
+        sync_agent_badge(&mut tray, Some(&status));
+        let replaced = tray
+            .find_by_source(BadgeSource::Agent)
+            .expect("agent badge still present");
+        assert_eq!(tray.get(replaced).unwrap().label, "claude: awaiting input");
+
+        status.apply(AgentHookEvent::SessionEnd);
+        sync_agent_badge(&mut tray, Some(&status));
+        assert!(tray.find_by_source(BadgeSource::Agent).is_none());
     }
 }

@@ -2,6 +2,7 @@ mod name;
 mod persist;
 
 use crate::{
+    agent_status::AgentStatus,
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
     badge::BadgeTray,
     buffer::BufferId,
@@ -113,6 +114,11 @@ pub struct Workspace {
     pub(crate) rebase_active: Option<ActiveRebase>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     pub(crate) badges: BadgeTray,
+    /// Status of the owned Claude subshell for this workspace's session, or
+    /// `None` until one is spawned. Owned here so the render process reads it
+    /// on paint without touching the agent's IPC path. The per-session hook
+    /// server drives it via [`AgentStatus::apply`].
+    pub(crate) agent: Option<AgentStatus>,
 }
 
 struct ParseJob {
@@ -150,6 +156,7 @@ impl Workspace {
             rebase_active: None,
             parse_jobs: HashMap::new(),
             badges: BadgeTray::new(),
+            agent: None,
         }
     }
 

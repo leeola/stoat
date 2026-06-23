@@ -43,6 +43,10 @@ pub enum BadgeSource {
     /// Notification attached to the active review session. At most one
     /// Review-sourced badge exists per workspace.
     Review,
+    /// Status of the owned Claude subshell, re-derived each frame from the
+    /// workspace's [`AgentStatus`](crate::agent_status::AgentStatus). At most
+    /// one Agent-sourced badge exists per workspace.
+    Agent,
 }
 
 #[derive(Debug, Clone)]
