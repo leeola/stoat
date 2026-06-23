@@ -78,6 +78,12 @@ enum Command {
     /// git supplies; positional args are not accepted in the
     /// default mode.
     Diff(crate::commands::diff::DiffArgs),
+    /// Thin client the owned Claude subshell's hooks invoke to push status
+    /// into the owning session.
+    AgentApi {
+        #[command(subcommand)]
+        sub: crate::commands::agent_api::AgentApiCommand,
+    },
 }
 
 pub fn run(args: Args) -> Result<(), Whatever> {
@@ -93,6 +99,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
+        Some(Command::AgentApi { sub }) => crate::commands::agent_api::run(sub),
         Some(Command::Review) => {
             run_tui(text_proto_log, files, continue_, resume, TuiStart::Review)
         },

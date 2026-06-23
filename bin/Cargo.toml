@@ -26,6 +26,7 @@ viewport = { path = "../viewport" }
 blake3 = { workspace = true }
 clap.workspace = true
 snafu.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tempfile.workspace = true

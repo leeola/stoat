@@ -3817,6 +3817,7 @@ dependencies = [
  "futures",
  "git2",
  "insta",
+ "serde_json",
  "snafu",
  "stoat",
  "stoat_host",
