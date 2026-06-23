@@ -3,6 +3,8 @@
 
 pub mod clipboard;
 pub mod git;
+pub mod terminal;
 
 pub use clipboard::LocalClipboard;
 pub use git::LocalGit;
+pub use terminal::LocalTerminalHost;

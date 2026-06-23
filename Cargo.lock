@@ -3773,6 +3773,7 @@ dependencies = [
  "git2",
  "ignore",
  "insta",
+ "libc",
  "lsp-types",
  "nucleo",
  "portable-pty",

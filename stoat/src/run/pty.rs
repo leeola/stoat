@@ -1,7 +1,6 @@
 use super::RunId;
-use crate::host::terminal::{PtyTerminal, TerminalHost};
-use portable_pty::CommandBuilder;
-use std::{path::PathBuf, sync::Arc};
+use crate::host::terminal::{open_local_pty, SpawnArgs, TerminalSession};
+use std::{path::Path, sync::Arc};
 use stoat_scheduler::Executor;
 use tokio::sync::mpsc;
 
@@ -17,14 +16,14 @@ pub enum PtyNotification {
 }
 
 pub struct ShellHandle {
-    host: Arc<dyn TerminalHost>,
+    session: Arc<dyn TerminalSession>,
     pub active_sentinel: Option<String>,
 }
 
 impl ShellHandle {
-    pub(crate) fn new(host: Arc<dyn TerminalHost>) -> Self {
+    pub(crate) fn new(session: Arc<dyn TerminalSession>) -> Self {
         Self {
-            host,
+            session,
             active_sentinel: None,
         }
     }
@@ -32,116 +31,80 @@ impl ShellHandle {
     pub fn send_command(&self, command: &str, sentinel: &str) {
         use futures::FutureExt;
         let payload = format!("{command}\necho {sentinel} $?\n");
-        let _ = self.host.write(payload.as_bytes()).now_or_never();
+        let _ = self.session.write(payload.as_bytes()).now_or_never();
     }
 
     pub fn send_interrupt(&self) {
         use futures::FutureExt;
-        let _ = self.host.write(b"\x03").now_or_never();
+        let _ = self.session.write(b"\x03").now_or_never();
     }
 
     pub fn kill(&self) {
         use futures::FutureExt;
-        let _ = self.host.kill().now_or_never();
+        let _ = self.session.kill().now_or_never();
     }
 }
 
 pub fn spawn_shell(
     executor: &Executor,
-    cwd: &PathBuf,
+    cwd: &Path,
     width: u16,
     pty_tx: mpsc::Sender<PtyNotification>,
     run_id: RunId,
 ) -> std::io::Result<ShellHandle> {
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system
-        .openpty(portable_pty::PtySize {
-            rows: 24,
-            cols: width,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(std::io::Error::other)?;
-
-    let mut cmd = CommandBuilder::new("bash");
-    cmd.args(["--noediting", "--noprofile", "--norc"]);
-    cmd.env("PS1", "");
-    cmd.env("PS2", "");
-    cmd.env("TERM", "dumb");
-    cmd.cwd(cwd);
-
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(std::io::Error::other)?;
-
-    let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
-
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(std::io::Error::other)?;
-
-    let host: Arc<dyn TerminalHost> = Arc::new(PtyTerminal::new(writer, child, reader));
+    let args = SpawnArgs {
+        program: "bash".into(),
+        args: vec!["--noediting".into(), "--noprofile".into(), "--norc".into()],
+        env: vec![
+            ("PS1".into(), String::new()),
+            ("PS2".into(), String::new()),
+            ("TERM".into(), "dumb".into()),
+        ],
+        cwd: cwd.to_path_buf(),
+        width,
+        rows: 24,
+    };
+    let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
     executor
-        .spawn(reader_task(host.clone(), run_id, pty_tx))
+        .spawn(reader_task(session.clone(), run_id, pty_tx))
         .detach();
 
-    Ok(ShellHandle::new(host))
+    Ok(ShellHandle::new(session))
 }
 
 pub fn spawn_oneshot(
     executor: &Executor,
     command: &str,
-    cwd: &PathBuf,
+    cwd: &Path,
     width: u16,
     pty_tx: mpsc::Sender<PtyNotification>,
     run_id: RunId,
 ) -> std::io::Result<ShellHandle> {
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system
-        .openpty(portable_pty::PtySize {
-            rows: 24,
-            cols: width,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(std::io::Error::other)?;
-
-    let mut cmd = CommandBuilder::new("bash");
-    cmd.args(["-c", command]);
-    cmd.env("TERM", "dumb");
-    cmd.cwd(cwd);
-
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(std::io::Error::other)?;
-
-    let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
-
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(std::io::Error::other)?;
-
-    let host: Arc<dyn TerminalHost> = Arc::new(PtyTerminal::new(writer, child, reader));
+    let args = SpawnArgs {
+        program: "bash".into(),
+        args: vec!["-c".into(), command.to_string()],
+        env: vec![("TERM".into(), "dumb".into())],
+        cwd: cwd.to_path_buf(),
+        width,
+        rows: 24,
+    };
+    let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
     executor
-        .spawn(reader_task(host.clone(), run_id, pty_tx))
+        .spawn(reader_task(session.clone(), run_id, pty_tx))
         .detach();
 
-    Ok(ShellHandle::new(host))
+    Ok(ShellHandle::new(session))
 }
 
 async fn reader_task(
-    host: Arc<dyn TerminalHost>,
+    session: Arc<dyn TerminalSession>,
     run_id: RunId,
     tx: mpsc::Sender<PtyNotification>,
 ) {
     let mut line_buf = String::new();
 
     loop {
-        let chunk = match host.read_chunk().await {
+        let chunk = match session.read_chunk().await {
             Ok(Some(chunk)) => chunk,
             Ok(None) | Err(_) => break,
         };

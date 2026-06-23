@@ -32,6 +32,7 @@ lsp-types.workspace = true
 async-trait.workspace = true
 snafu = { workspace = true }
 portable-pty.workspace = true
+libc.workspace = true
 vte.workspace = true
 ignore.workspace = true
 nucleo.workspace = true
