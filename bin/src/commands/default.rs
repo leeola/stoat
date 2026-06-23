@@ -49,6 +49,11 @@ pub struct Args {
     #[arg(long, env = "STOAT_TEXT_PROTO_LOG")]
     pub text_proto_log: Option<bool>,
 
+    /// Route tracing output to stderr instead of the background log file. The
+    /// raw-mode TUI is corrupted by stderr unless redirected, e.g. `2>log`.
+    #[arg(long = "log-stderr")]
+    pub log_stderr: bool,
+
     #[arg(
         short = 'v',
         long = "version",
@@ -76,7 +81,7 @@ enum Command {
     Diff(crate::commands::diff::DiffArgs),
 }
 
-pub fn run() -> Result<(), Whatever> {
+pub fn run(args: Args) -> Result<(), Whatever> {
     let Args {
         command,
         files,
@@ -84,7 +89,7 @@ pub fn run() -> Result<(), Whatever> {
         resume,
         text_proto_log,
         ..
-    } = Args::parse();
+    } = args;
 
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
