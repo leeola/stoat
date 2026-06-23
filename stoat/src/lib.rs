@@ -1,4 +1,5 @@
 pub mod action_handlers;
+pub mod agent_ipc;
 pub mod agent_status;
 pub mod app;
 pub mod badge;

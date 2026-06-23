@@ -7,6 +7,7 @@
 //! and projects it into a status badge.
 
 use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+use serde::{Deserialize, Serialize};
 
 /// Lifecycle phase of the owned Claude subshell, derived from its hook
 /// event stream.
@@ -36,7 +37,11 @@ pub enum AgentPhase {
 /// Each variant corresponds to one hook in Claude's hook set. The IPC server
 /// decodes a socket message into one of these and feeds it to
 /// [`AgentStatus::apply`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The newline-framed JSON wire form is internally tagged on a `hook` field,
+/// so a line reads `{"hook":"pre-tool-use","tool":"Bash"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "hook", rename_all = "kebab-case")]
 pub enum AgentHookEvent {
     /// `session-start`: a new agent session began.
     SessionStart,

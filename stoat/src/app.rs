@@ -1,5 +1,7 @@
 use crate::{
     action_handlers,
+    agent_ipc::AgentEvent,
+    agent_status::AgentStatus,
     badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
     command_palette::CommandPalette,
@@ -18,7 +20,7 @@ use crate::{
     rebase::RebasePause,
     register,
     run::{GridSelection, PtyNotification, RunId},
-    workspace::{Workspace, WorkspaceId},
+    workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::{PickerOutcome, WorkspacePicker},
 };
 use crossterm::event::{
@@ -156,6 +158,12 @@ pub struct Stoat {
     pub(crate) badges: BadgeTray,
     pub(crate) pty_tx: Sender<PtyNotification>,
     pty_rx: Receiver<PtyNotification>,
+    /// Hook events from the per-session agent IPC servers. Each
+    /// [`crate::agent_ipc::serve_agent_hooks`] task holds a clone of the
+    /// sender; [`Self::run`] drains the receiver and applies events to the
+    /// owning workspace's [`AgentStatus`] off the paint path.
+    pub(crate) agent_event_tx: Sender<AgentEvent>,
+    agent_event_rx: Receiver<AgentEvent>,
     /// Wake-up signal for [`Self::run`]'s `tokio::select!`. Background
     /// tasks call `notify_one()` to kick the loop into a fresh
     /// `UpdateEffect::Redraw` once their result is ready, so the user
@@ -611,6 +619,7 @@ impl Stoat {
         workspaces[active_workspace].id = active_workspace;
 
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
+        let (agent_event_tx, agent_event_rx) = tokio::sync::mpsc::channel(256);
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
@@ -645,6 +654,8 @@ impl Stoat {
             badges: BadgeTray::new(),
             pty_tx,
             pty_rx,
+            agent_event_tx,
+            agent_event_rx,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
             pending_review_scan: None,
             modal_run: None,
@@ -871,6 +882,10 @@ impl Stoat {
                     let Some(notif) = notif else { continue };
                     self.handle_pty_notification(notif)
                 }
+                ev = self.agent_event_rx.recv() => {
+                    let Some(ev) = ev else { continue };
+                    self.handle_agent_event(ev)
+                }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
             };
 
@@ -921,6 +936,9 @@ impl Stoat {
         }
         while let Ok(notif) = self.pty_rx.try_recv() {
             effect = effect.merge(self.handle_pty_notification(notif));
+        }
+        while let Ok(ev) = self.agent_event_rx.try_recv() {
+            effect = effect.merge(self.handle_agent_event(ev));
         }
 
         effect
@@ -2295,6 +2313,34 @@ impl Stoat {
         guard.edit(offset..end, "");
     }
 
+    /// Apply one agent hook event to the workspace whose session matches
+    /// `ev.uid`, creating the [`AgentStatus`] on first contact. Returns
+    /// [`UpdateEffect::None`] when no live workspace owns that session, e.g.
+    /// the workspace closed before its agent's events drained.
+    pub(crate) fn handle_agent_event(&mut self, ev: AgentEvent) -> UpdateEffect {
+        let Some((_, ws)) = self.workspaces.iter_mut().find(|(_, ws)| ws.uid == ev.uid) else {
+            return UpdateEffect::None;
+        };
+        ws.agent
+            .get_or_insert_with(AgentStatus::new)
+            .apply(ev.event);
+        UpdateEffect::Redraw
+    }
+
+    /// Start the per-session agent hook server for `uid` on the executor.
+    ///
+    /// Binds the session's hook socket (see [`crate::run::agent_socket_path`])
+    /// and forwards decoded events to [`Self::handle_agent_event`] through the
+    /// shared channel. Callers spawn this alongside the owned Claude subshell.
+    pub fn serve_agent_session(&self, uid: WorkspaceUid) -> io::Result<()> {
+        let socket_path = crate::run::agent_socket_path(uid)?;
+        let tx = self.agent_event_tx.clone();
+        self.executor
+            .spawn(crate::agent_ipc::serve_agent_hooks(socket_path, uid, tx))
+            .detach();
+        Ok(())
+    }
+
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
         let clipboard_host = self.clipboard_host.clone();
         let ws = self.active_workspace_mut();
@@ -3207,7 +3253,7 @@ pub(crate) async fn parse_buffer_async(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::TextBuffer;
+    use crate::{agent_status::AgentHookEvent, buffer::TextBuffer};
     use std::path::{Path, PathBuf};
 
     /// When `parse_buffer_step` aborts on the deadline, the prior state
@@ -4916,5 +4962,41 @@ mod tests {
             0,
             "the surviving task fires once advance_clock crosses the debounce window",
         );
+    }
+
+    #[test]
+    fn agent_event_drives_owning_workspace_status() {
+        let mut h = Stoat::test();
+        let uid = h.stoat.active_workspace().uid;
+
+        let effect = h.stoat.handle_agent_event(AgentEvent {
+            uid,
+            event: AgentHookEvent::PreToolUse {
+                tool: "Bash".into(),
+            },
+        });
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        let label = h
+            .stoat
+            .active_workspace()
+            .agent
+            .as_ref()
+            .and_then(|status| status.badge())
+            .map(|badge| badge.label);
+        assert_eq!(label, Some("claude: Bash".to_string()));
+    }
+
+    #[test]
+    fn agent_event_for_unknown_session_is_ignored() {
+        let mut h = Stoat::test();
+
+        let effect = h.stoat.handle_agent_event(AgentEvent {
+            uid: WorkspaceUid(0xdead_beef),
+            event: AgentHookEvent::SessionStart,
+        });
+
+        assert_eq!(effect, UpdateEffect::None);
+        assert!(h.stoat.active_workspace().agent.is_none());
     }
 }
