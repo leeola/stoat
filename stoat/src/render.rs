@@ -1,3 +1,4 @@
+pub(crate) mod agent_pane;
 pub(crate) mod badges;
 pub(crate) mod code_action;
 pub(crate) mod command_palette;
@@ -28,6 +29,7 @@ pub(crate) mod workspace_picker;
 pub(crate) mod workspace_symbol_picker;
 
 use crate::{
+    agent_session::{AgentId, AgentSession},
     app::Stoat,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
@@ -44,6 +46,7 @@ pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,
     pub(crate) runs: &'a SlotMap<RunId, RunState>,
+    pub(crate) agents: &'a SlotMap<AgentId, AgentSession>,
 }
 
 /// Ambient workspace and frame state shared across render functions. Bundled
@@ -163,6 +166,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
                 editors: &mut ws.editors,
                 buffers: &ws.buffers,
                 runs: &ws.runs,
+                agents: &ws.agents,
             },
             frame,
             buf,
@@ -224,6 +228,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
                     editors: &mut ws.editors,
                     buffers: &ws.buffers,
                     runs: &ws.runs,
+                    agents: &ws.agents,
                 },
                 frame,
                 buf,

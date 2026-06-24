@@ -3,6 +3,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, View},
     render::{
+        agent_pane::render_agent_pane,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
         run_pane::render_run_pane,
@@ -39,6 +40,7 @@ pub(crate) fn render_pane(
         editors,
         buffers,
         runs,
+        agents,
     } = ctx;
 
     match &pane.view {
@@ -75,10 +77,10 @@ pub(crate) fn render_pane(
                 render_run_pane(run_state, editors, theme, content_area, is_focused, buf);
             }
         },
-        View::Agent(_) => {
-            Paragraph::new(Text::styled("agent", text_style))
-                .centered()
-                .render(content_area, buf);
+        View::Agent(agent_id) => {
+            if let Some(agent) = agents.get(*agent_id) {
+                render_agent_pane(agent, content_area, is_focused, buf);
+            }
         },
     }
 

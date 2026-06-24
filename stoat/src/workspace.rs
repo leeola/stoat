@@ -13,6 +13,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
+    render::layout::split_pane_status,
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
@@ -332,6 +333,35 @@ impl Workspace {
                 DockSide::Right => total_area.x + total_area.width - width,
             };
             dock.area = Rect::new(x, dock_y, width, dock_height);
+        }
+
+        self.fit_agents_to_panes();
+    }
+
+    /// Resize every hosted agent's emulator and PTY to its pane's content area,
+    /// so an agent reflows whenever the layout that frames it changes.
+    ///
+    /// Runs on every [`Self::layout`], but [`AgentSession::fit`] skips agents
+    /// already at the right size, so a steady layout issues no PTY resizes. The
+    /// content area excludes the status row via [`split_pane_status`], matching
+    /// the rectangle the renderer composites the emulator into.
+    fn fit_agents_to_panes(&mut self) {
+        let targets: Vec<(AgentId, u16, u16)> = self
+            .panes
+            .split_panes()
+            .filter_map(|(_, pane)| match pane.view {
+                View::Agent(id) => {
+                    let (content, _) = split_pane_status(pane.area);
+                    Some((id, content.height, content.width))
+                },
+                _ => None,
+            })
+            .collect();
+
+        for (id, rows, cols) in targets {
+            if let Some(agent) = self.agents.get_mut(id) {
+                agent.fit(rows, cols);
+            }
         }
     }
 }

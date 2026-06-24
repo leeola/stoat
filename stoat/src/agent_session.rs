@@ -25,3 +25,22 @@ pub struct AgentSession {
     pub term: AgentTerm,
     pub session: Arc<dyn TerminalSession>,
 }
+
+impl AgentSession {
+    /// Resize the emulator and its PTY to `rows` by `cols` so the agent reflows
+    /// to the hosting pane.
+    ///
+    /// A no-op when the emulator already matches, which keeps per-frame layout
+    /// from issuing a redundant PTY resize (and the SIGWINCH redraw storm it
+    /// would trigger in the agent) on every frame.
+    pub fn fit(&mut self, rows: u16, cols: u16) {
+        if self.term.rows() == rows as usize && self.term.cols() == cols as usize {
+            return;
+        }
+
+        self.term.resize(rows, cols);
+        if let Err(err) = self.session.resize(rows, cols) {
+            tracing::warn!(target: "stoat::agent", %err, "failed to resize agent pty");
+        }
+    }
+}

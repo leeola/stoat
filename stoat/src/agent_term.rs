@@ -97,6 +97,22 @@ impl AgentTerm {
         self.parser.advance(&mut self.term, bytes);
     }
 
+    /// Resize the viewport to `rows` by `cols`, reflowing the screen onto the
+    /// new dimensions.
+    ///
+    /// Both dimensions are clamped to at least one, matching [`Self::new`]. The
+    /// hosting pane calls this as its area changes so the agent redraws within
+    /// the live size. Pair it with a PTY resize so the agent process learns the
+    /// size too.
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let dimensions = GridSize {
+            rows: (rows as usize).max(1),
+            cols: (cols as usize).max(1),
+        };
+
+        self.term.resize(dimensions);
+    }
+
     /// The viewport height in rows.
     pub fn rows(&self) -> usize {
         self.term.screen_lines()
@@ -318,6 +334,22 @@ mod tests {
         term.feed(b"\x1b[2J");
         assert_eq!(text_row(&term, 0), "");
         assert_eq!(text_row(&term, 1), "");
+    }
+
+    #[test]
+    fn resize_changes_viewport_and_keeps_content() {
+        let mut term = AgentTerm::new(24, 80);
+        term.feed(b"hi");
+        term.resize(10, 20);
+        assert_eq!((term.rows(), term.cols()), (10, 20));
+        assert_eq!(text_row(&term, 0), "hi");
+    }
+
+    #[test]
+    fn resize_clamps_zero_dimensions_to_one() {
+        let mut term = AgentTerm::new(24, 80);
+        term.resize(0, 0);
+        assert_eq!((term.rows(), term.cols()), (1, 1));
     }
 
     #[test]

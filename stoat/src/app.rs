@@ -3295,6 +3295,39 @@ mod tests {
         assert!(row.starts_with("hello"), "row: {row:?}");
     }
 
+    #[test]
+    fn layout_fits_agent_emulator_and_pty_to_pane() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        ws.panes.split(crate::pane::Axis::Vertical);
+        let focused = ws.panes.focus();
+
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
+        let agent_id = ws.agents.insert(crate::agent_session::AgentSession {
+            term: crate::agent_term::AgentTerm::new(24, 80),
+            session,
+        });
+        ws.panes.pane_mut(focused).view = View::Agent(agent_id);
+
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        let ws = h.stoat.active_workspace();
+        let (content, _) = crate::render::layout::split_pane_status(ws.panes.pane(focused).area);
+        let term = &ws.agents[agent_id].term;
+        assert_eq!(
+            (term.rows(), term.cols()),
+            (content.height as usize, content.width as usize),
+            "emulator fits the pane content area",
+        );
+        assert_eq!(
+            fake.last_size(),
+            Some((content.height, content.width)),
+            "pty resized to the pane content area",
+        );
+    }
+
     /// When `parse_buffer_step` aborts on the deadline, the prior state
     /// passed via `&mut Option<_>` must remain populated so the caller
     /// can hand it to a follow-up parse without losing incrementality.
