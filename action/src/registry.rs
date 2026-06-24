@@ -1,5 +1,6 @@
 use crate::{
     defs::{
+        agent::SpawnClaude,
         app::{Quit, QuitAll},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
@@ -483,6 +484,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         }))
     });
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
+    add(SpawnClaude::DEF, |_| Ok(Box::new(SpawnClaude)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
@@ -737,6 +739,7 @@ mod tests {
         "ConflictApply",
         "ConflictAbort",
         "OpenRun",
+        "SpawnClaude",
         "RunSubmit",
         "RunInterrupt",
         "RunHistoryPrev",
@@ -910,7 +913,8 @@ mod tests {
         // + 1 SelectRegister.
         // + 1 InsertRegister.
         // + 1 CommitUndoCheckpoint.
-        assert_eq!(all().count(), 268);
+        // + 1 SpawnClaude.
+        assert_eq!(all().count(), 269);
     }
 
     #[test]

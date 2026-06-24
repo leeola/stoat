@@ -1,3 +1,4 @@
+mod agent;
 mod commits;
 pub(crate) mod completion;
 mod conflict;
@@ -399,6 +400,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RotateSelectionsBackward => movement::rotate_selections_backward(stoat),
         ActionKind::TrimSelections => movement::trim_selections(stoat),
         ActionKind::OpenRun => run::open_run(stoat),
+        ActionKind::SpawnClaude => agent::spawn_claude_pane(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),
         ActionKind::RunHistoryPrev => run::run_history_prev(stoat),

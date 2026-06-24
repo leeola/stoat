@@ -183,6 +183,7 @@ pub enum ActionKind {
     RunSubmit,
     RunInterrupt,
     Run,
+    SpawnClaude,
     ToggleDockRight,
     ToggleDockLeft,
     JumpToMoveSource,

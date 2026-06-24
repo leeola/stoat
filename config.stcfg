@@ -478,6 +478,7 @@ on key {
         q -> Quit();
         a -> SetMode(space_pane_nav);
         t -> [OpenRun(), SetMode(run)];
+        c -> [SpawnClaude(), SetMode(normal)];
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
         l -> SetMode(space_lsp);

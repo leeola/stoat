@@ -143,6 +143,10 @@ pub struct Stoat {
     /// Subprocess executor used by the shell-integration actions.
     /// Tests install [`crate::host::FakeShell`].
     pub(crate) shell_host: Arc<dyn crate::host::ShellHost>,
+    /// Opens owned agent (Claude) PTY sessions. Production wires
+    /// [`crate::host::LocalTerminalHost`]. Tests can install
+    /// [`crate::host::FakeTerminalHost`].
+    pub(crate) terminal_host: Arc<dyn crate::host::TerminalHost>,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
@@ -646,6 +650,7 @@ impl Stoat {
             pending_macro_replay: false,
             shell_input: None,
             shell_host: Arc::new(crate::host::LocalShell),
+            terminal_host: Arc::new(crate::host::LocalTerminalHost),
             persistence_disabled: false,
             language_registry,
             syntax_styles,
