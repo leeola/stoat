@@ -2394,6 +2394,13 @@ impl Stoat {
                 }
                 UpdateEffect::Redraw
             },
+            PtyNotification::AgentOutput { agent_id, data } => {
+                let Some(agent) = ws.agents.get_mut(agent_id) else {
+                    return UpdateEffect::None;
+                };
+                agent.term.feed(&data);
+                UpdateEffect::Redraw
+            },
         }
     }
 
@@ -3260,6 +3267,33 @@ mod tests {
     use super::*;
     use crate::{agent_status::AgentHookEvent, buffer::TextBuffer};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn agent_output_feeds_emulator() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
+
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        let agent_id =
+            stoat
+                .active_workspace_mut()
+                .agents
+                .insert(crate::agent_session::AgentSession {
+                    term: crate::agent_term::AgentTerm::new(24, 80),
+                    session,
+                });
+
+        let effect = stoat.handle_pty_notification(PtyNotification::AgentOutput {
+            agent_id,
+            data: b"hello".to_vec(),
+        });
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        let term = &stoat.active_workspace().agents[agent_id].term;
+        let row: String = term.row(0).iter().map(|cell| cell.ch).collect();
+        assert!(row.starts_with("hello"), "row: {row:?}");
+    }
 
     /// When `parse_buffer_step` aborts on the deadline, the prior state
     /// passed via `&mut Option<_>` must remain populated so the caller

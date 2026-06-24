@@ -1,5 +1,6 @@
 use super::RunId;
 use crate::{
+    agent_session::AgentId,
     host::terminal::{open_local_pty, SpawnArgs, TerminalHost, TerminalSession},
     workspace::WorkspaceUid,
 };
@@ -18,6 +19,10 @@ pub enum PtyNotification {
     CommandDone {
         run_id: RunId,
         exit_status: Option<i32>,
+    },
+    AgentOutput {
+        agent_id: AgentId,
+        data: Vec<u8>,
     },
 }
 
@@ -116,6 +121,43 @@ pub async fn spawn_claude(
 ) -> std::io::Result<Box<dyn TerminalSession>> {
     let socket_path = agent_socket_path(uid)?;
     host.spawn(claude_spawn_args(uid, cwd, &socket_path)).await
+}
+
+/// Spawn the reader that pumps an agent session's PTY output into its
+/// emulator, tagging each chunk with `agent_id`. Detached on the executor like
+/// the run pane's reader.
+pub fn spawn_agent_reader(
+    executor: &Executor,
+    session: Arc<dyn TerminalSession>,
+    agent_id: AgentId,
+    pty_tx: mpsc::Sender<PtyNotification>,
+) {
+    executor
+        .spawn(agent_reader_task(session, agent_id, pty_tx))
+        .detach();
+}
+
+async fn agent_reader_task(
+    session: Arc<dyn TerminalSession>,
+    agent_id: AgentId,
+    tx: mpsc::Sender<PtyNotification>,
+) {
+    loop {
+        let chunk = match session.read_chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) | Err(_) => break,
+        };
+        if tx
+            .send(PtyNotification::AgentOutput {
+                agent_id,
+                data: chunk,
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
 }
 
 /// Filesystem path of the per-session agent hook socket for `uid`, under
