@@ -75,6 +75,11 @@ pub(crate) fn render_pane(
                 render_run_pane(run_state, editors, theme, content_area, is_focused, buf);
             }
         },
+        View::Agent(_) => {
+            Paragraph::new(Text::styled("agent", text_style))
+                .centered()
+                .render(content_area, buf);
+        },
     }
 
     render_pane_status(
@@ -448,6 +453,7 @@ fn pane_status_info(
             (filename, dirty, cursor_pos)
         },
         View::Run(_) => (Some("[run]".to_string()), false, None),
+        View::Agent(_) => (Some("[agent]".to_string()), false, None),
         View::Label(label) => (Some(label.clone()), false, None),
     }
 }

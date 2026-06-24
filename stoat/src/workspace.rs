@@ -2,6 +2,7 @@ mod name;
 mod persist;
 
 use crate::{
+    agent_session::{AgentId, AgentSession},
     agent_status::AgentStatus,
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
     badge::BadgeTray,
@@ -96,6 +97,7 @@ pub struct Workspace {
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
+    pub(crate) agents: SlotMap<AgentId, AgentSession>,
     /// Active review session (if any). Owned at the workspace level because
     /// a review spans files and can be viewed by multiple panes in future
     /// multi-pane review flows. Dropped on `CloseReview`.
@@ -150,6 +152,7 @@ impl Workspace {
             buffers,
             editors,
             runs: SlotMap::with_key(),
+            agents: SlotMap::with_key(),
             review: None,
             commits: None,
             rebase: None,
@@ -173,6 +176,7 @@ impl Workspace {
             && self.rebase.is_none()
             && self.rebase_active.is_none()
             && self.runs.is_empty()
+            && self.agents.is_empty()
             && self.docks.is_empty()
             && self.editors.len() == 1
             && self.panes.split_panes().count() == 1
@@ -231,7 +235,7 @@ impl Workspace {
                         visible.push(editor.buffer_id);
                     }
                 },
-                View::Label(_) | View::Run(_) => {},
+                View::Label(_) | View::Run(_) | View::Agent(_) => {},
             }
         }
         for id in self.buffers.preview_buffer_ids() {

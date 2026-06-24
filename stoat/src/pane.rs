@@ -1,4 +1,4 @@
-use crate::{editor_state::EditorId, run::RunId};
+use crate::{agent_session::AgentId, editor_state::EditorId, run::RunId};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
@@ -51,6 +51,7 @@ pub enum View {
     Label(String),
     Editor(EditorId),
     Run(RunId),
+    Agent(AgentId),
 }
 
 /// How a pane is presented on screen.

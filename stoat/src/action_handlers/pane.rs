@@ -54,6 +54,11 @@ fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
                 state.dispose(ws);
             }
         },
+        View::Agent(id) => {
+            // FIXME: actively kill the PTY child on close. Dropping the
+            // session only closes the PTY master.
+            ws.agents.remove(id);
+        },
         View::Label(_) => {},
     }
     true
