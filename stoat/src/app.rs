@@ -1,6 +1,7 @@
 use crate::{
     action_handlers,
     agent_ipc::AgentEvent,
+    agent_session::AgentId,
     agent_status::AgentStatus,
     badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
@@ -26,6 +27,7 @@ use crate::{
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use futures::FutureExt;
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::{
@@ -1502,6 +1504,10 @@ impl Stoat {
             if self.mode == "run" {
                 return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
             }
+            if let Some(agent_id) = self.agent_input_target() {
+                self.write_to_agent(agent_id, &[0x03]);
+                return UpdateEffect::None;
+            }
             return UpdateEffect::Quit;
         }
 
@@ -1558,6 +1564,10 @@ impl Stoat {
 
         if self.global_search.is_some() {
             return self.dispatch_global_search_key(key);
+        }
+
+        if let Some(agent_id) = self.agent_input_target() {
+            return self.route_key_to_agent(agent_id, key);
         }
 
         if (self.mode == "insert"
@@ -1947,6 +1957,74 @@ impl Stoat {
             }
         }
         effect
+    }
+
+    /// The agent session that should receive raw keystrokes, if any.
+    ///
+    /// `Some` only while in normal mode with a focused `View::Agent` split
+    /// pane. Gating on normal mode keeps every other mode dispatching
+    /// normally, including the `space_pane_nav` mode the
+    /// [`Self::route_key_to_agent`] escape switches into, so the user can
+    /// navigate away while the agent pane still holds focus.
+    fn agent_input_target(&self) -> Option<AgentId> {
+        if self.mode != "normal" {
+            return None;
+        }
+
+        let ws = self.active_workspace();
+        let FocusTarget::SplitPane(_) = ws.focus else {
+            return None;
+        };
+        match &ws.panes.pane(ws.panes.focus()).view {
+            View::Agent(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Encode `key` and send it to the agent's PTY, or handle the focus escape.
+    ///
+    /// `Ctrl-W` leaves passthrough by switching to `space_pane_nav` so the user
+    /// can move focus, split, or close the pane. That keystroke is not
+    /// forwarded to the agent. Every other key is encoded by
+    /// [`encode_key_to_pty`] and written. Keys with no encoding are swallowed so
+    /// they neither reach the agent nor fall through to editor dispatch.
+    fn route_key_to_agent(&mut self, agent_id: AgentId, key: KeyEvent) -> UpdateEffect {
+        if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.transition_mode("space_pane_nav".to_string());
+            return UpdateEffect::Redraw;
+        }
+
+        if let Some(bytes) = encode_key_to_pty(&key) {
+            self.write_to_agent(agent_id, &bytes);
+        }
+        UpdateEffect::None
+    }
+
+    /// Write raw bytes to an agent's PTY.
+    ///
+    /// Uses `now_or_never` because the local PTY and the test fake complete
+    /// writes synchronously, so keystrokes reach the agent in order without
+    /// spawning a task. A write that errors or cannot complete synchronously is
+    /// dropped with a warning rather than stalling input.
+    fn write_to_agent(&self, agent_id: AgentId, bytes: &[u8]) {
+        let Some(session) = self
+            .active_workspace()
+            .agents
+            .get(agent_id)
+            .map(|agent| agent.session.clone())
+        else {
+            return;
+        };
+
+        match session.write(bytes).now_or_never() {
+            Some(Ok(())) => {},
+            Some(Err(err)) => {
+                tracing::warn!(target: "stoat::agent", %err, "failed to write to agent pty");
+            },
+            None => {
+                tracing::warn!(target: "stoat::agent", "agent pty write did not complete synchronously");
+            },
+        }
     }
 
     pub(crate) fn take_pending_count(&mut self) -> Option<u32> {
@@ -3138,6 +3216,43 @@ fn is_insert_run_mode(mode: &str) -> bool {
     mode == "insert" || mode == "reword_insert"
 }
 
+/// The byte sequence a VT terminal sends for `key`, or `None` when the key has
+/// no encoding here.
+///
+/// This encodes the printable characters (UTF-8), `Ctrl`+letter control bytes,
+/// and named keys (Enter, Tab, Backspace, Esc, the four arrows) an interactive
+/// agent pane needs. Backspace maps to `DEL` (`0x7f`), the xterm default.
+/// Modifiers other than `Ctrl` are ignored, so e.g. `Alt`+key encodes as the
+/// bare key.
+fn encode_key_to_pty(key: &KeyEvent) -> Option<Vec<u8>> {
+    match key.code {
+        KeyCode::Char(c) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                control_byte(c).map(|b| vec![b])
+            } else {
+                let mut buf = [0u8; 4];
+                Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+            }
+        },
+        KeyCode::Enter => Some(vec![b'\r']),
+        KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Esc => Some(vec![0x1b]),
+        KeyCode::Up => Some(b"\x1b[A".to_vec()),
+        KeyCode::Down => Some(b"\x1b[B".to_vec()),
+        KeyCode::Right => Some(b"\x1b[C".to_vec()),
+        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        _ => None,
+    }
+}
+
+/// The ASCII control byte for `Ctrl`+`c`, mapping `Ctrl-A`..`Ctrl-Z` to
+/// `0x01`..`0x1a`. `None` when `c` is not an ASCII letter.
+fn control_byte(c: char) -> Option<u8> {
+    c.is_ascii_alphabetic()
+        .then(|| (c.to_ascii_lowercase() as u8) - b'a' + 1)
+}
+
 pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
     if uri.scheme().map(|s| s.as_str()) != Some("file") {
         return None;
@@ -3325,6 +3440,120 @@ mod tests {
             fake.last_size(),
             Some((content.height, content.width)),
             "pty resized to the pane content area",
+        );
+    }
+
+    fn stoat_with_focused_agent() -> (Stoat, AgentId, Arc<crate::host::FakeTerminalSession>) {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
+        stoat.mode = "normal".to_string();
+
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let agent_id = ws.agents.insert(crate::agent_session::AgentSession {
+            term: crate::agent_term::AgentTerm::new(24, 80),
+            session,
+        });
+        ws.panes.pane_mut(focused).view = View::Agent(agent_id);
+        (stoat, agent_id, fake)
+    }
+
+    fn bare(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn encode_key_to_pty_covers_agent_keys() {
+        let enc = |k: KeyEvent| encode_key_to_pty(&k);
+        assert_eq!(enc(bare(KeyCode::Char('a'))), Some(b"a".to_vec()));
+        assert_eq!(enc(bare(KeyCode::Char('Z'))), Some(b"Z".to_vec()));
+        assert_eq!(enc(ctrl('c')), Some(vec![0x03]));
+        assert_eq!(enc(ctrl('a')), Some(vec![0x01]));
+        assert_eq!(enc(bare(KeyCode::Enter)), Some(vec![b'\r']));
+        assert_eq!(enc(bare(KeyCode::Tab)), Some(vec![b'\t']));
+        assert_eq!(enc(bare(KeyCode::Backspace)), Some(vec![0x7f]));
+        assert_eq!(enc(bare(KeyCode::Esc)), Some(vec![0x1b]));
+        assert_eq!(enc(bare(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
+        assert_eq!(enc(bare(KeyCode::Down)), Some(b"\x1b[B".to_vec()));
+        assert_eq!(enc(bare(KeyCode::Right)), Some(b"\x1b[C".to_vec()));
+        assert_eq!(enc(bare(KeyCode::Left)), Some(b"\x1b[D".to_vec()));
+        assert_eq!(enc(bare(KeyCode::F(1))), None);
+    }
+
+    #[test]
+    fn focused_agent_pane_routes_keys_to_pty() {
+        let (mut stoat, _id, fake) = stoat_with_focused_agent();
+
+        assert_eq!(
+            stoat.handle_key(bare(KeyCode::Char('h'))),
+            UpdateEffect::None
+        );
+        stoat.handle_key(bare(KeyCode::Char('i')));
+        stoat.handle_key(bare(KeyCode::Enter));
+        stoat.handle_key(ctrl('d'));
+
+        assert_eq!(
+            fake.sent_bytes(),
+            vec![b"h".to_vec(), b"i".to_vec(), vec![b'\r'], vec![0x04]],
+        );
+    }
+
+    #[test]
+    fn focused_agent_pane_sends_interrupt_on_ctrl_c() {
+        let (mut stoat, _id, fake) = stoat_with_focused_agent();
+
+        let effect = stoat.handle_key(ctrl('c'));
+
+        assert_eq!(effect, UpdateEffect::None);
+        assert_eq!(stoat.mode, "normal");
+        assert_eq!(fake.sent_bytes(), vec![vec![0x03]]);
+    }
+
+    #[test]
+    fn ctrl_w_escapes_agent_pane_without_forwarding() {
+        let (mut stoat, _id, fake) = stoat_with_focused_agent();
+
+        let effect = stoat.handle_key(ctrl('w'));
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(stoat.mode, "space_pane_nav");
+        assert!(
+            fake.sent_bytes().is_empty(),
+            "escape must not reach the agent"
+        );
+    }
+
+    #[test]
+    fn agent_input_requires_normal_mode() {
+        let (mut stoat, _id, fake) = stoat_with_focused_agent();
+        stoat.mode = "insert".to_string();
+
+        stoat.handle_key(bare(KeyCode::Char('x')));
+
+        assert!(
+            fake.sent_bytes().is_empty(),
+            "non-normal mode must not route"
+        );
+    }
+
+    #[test]
+    fn agent_input_requires_agent_focus() {
+        let (mut stoat, _id, fake) = stoat_with_focused_agent();
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        ws.panes.pane_mut(focused).view = View::Label("scratch".to_string());
+
+        stoat.handle_key(bare(KeyCode::Char('x')));
+
+        assert!(
+            fake.sent_bytes().is_empty(),
+            "non-agent focus must not route"
         );
     }
 
