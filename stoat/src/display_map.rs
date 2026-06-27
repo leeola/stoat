@@ -623,6 +623,26 @@ impl DisplaySnapshot {
         self.block_snapshot.chunks(display_rows, endpoints)
     }
 
+    /// Like [`Self::highlighted_chunks`] but memoizes the resolved endpoints in
+    /// `cache`, recomputing only when the buffer version, highlight identity, or
+    /// visible byte range changes.
+    pub fn highlighted_chunks_cached(
+        &self,
+        display_rows: std::ops::Range<u32>,
+        cache: &mut Option<CachedHighlightEndpoints>,
+    ) -> block_map::BlockChunks<'_> {
+        let highlights = Highlights {
+            text_highlights: Some(&self.text_highlights),
+            inlay_highlights: Some(&self.inlay_highlights),
+            semantic_token_highlights: Some(&self.semantic_token_highlights),
+        };
+        let byte_range = self
+            .block_snapshot
+            .row_range_to_buffer_byte_range(display_rows.clone());
+        let endpoints = self.build_endpoints_cached(highlights, byte_range, cache);
+        self.block_snapshot.chunks(display_rows, endpoints)
+    }
+
     fn build_endpoints(
         &self,
         highlights: Highlights<'_>,
@@ -640,6 +660,29 @@ impl DisplaySnapshot {
             &resolve,
         );
         Arc::from(eps)
+    }
+
+    /// Endpoint builder for [`Self::highlighted_chunks_cached`], routing through
+    /// the version-keyed [`highlights::create_highlight_endpoints_cached`].
+    fn build_endpoints_cached(
+        &self,
+        highlights: Highlights<'_>,
+        range: std::ops::Range<usize>,
+        cache: &mut Option<CachedHighlightEndpoints>,
+    ) -> Arc<[highlights::HighlightEndpoint]> {
+        let buffer = self.buffer_snapshot();
+        let empty: TextHighlights = Arc::new(HashMap::new());
+        let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
+        let semantic_ref = highlights.semantic_token_highlights;
+        let resolve = |a: &Anchor| buffer.resolve_anchor(a);
+        highlights::create_highlight_endpoints_cached(
+            buffer.version(),
+            &range,
+            text_highlights_ref,
+            semantic_ref,
+            &resolve,
+            cache,
+        )
     }
 
     pub fn is_line_folded(&self, buffer_row: u32) -> bool {

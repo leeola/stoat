@@ -1,6 +1,6 @@
 use crate::{
     buffer::{BufferId, SharedBuffer},
-    display_map::DisplayMap,
+    display_map::{CachedHighlightEndpoints, DisplayMap},
     jumplist::JumpList,
     multi_buffer::MultiBuffer,
     review_session::ReviewViewState,
@@ -64,6 +64,11 @@ pub(crate) struct EditorState {
     /// Cached search-match byte ranges for the current `(version, query)`.
     /// See [`SearchMatchCache`]. Transient render state, not persisted.
     pub(crate) search_match_cache: Option<SearchMatchCache>,
+    /// Cached visible syntax-highlight endpoints, keyed by buffer version,
+    /// highlight identity, and visible byte range. Lets `render_editor` reuse
+    /// resolved endpoints across repaints that change none of those. Transient
+    /// render state, not persisted.
+    pub(crate) highlight_endpoint_cache: Option<CachedHighlightEndpoints>,
     /// Cached diagnostic gutter severity map, keyed by the diagnostic-set
     /// version. Transient render state, not persisted.
     pub(crate) gutter_severity_cache: Option<crate::render::editor::GutterSeverityCache>,
@@ -99,6 +104,7 @@ impl EditorState {
             expansion_tip: None,
             jumplist: JumpList::new(),
             search_match_cache: None,
+            highlight_endpoint_cache: None,
             gutter_severity_cache: None,
         }
     }
@@ -121,6 +127,7 @@ impl EditorState {
             expansion_tip: None,
             jumplist: JumpList::new(),
             search_match_cache: None,
+            highlight_endpoint_cache: None,
             gutter_severity_cache: None,
         }
     }

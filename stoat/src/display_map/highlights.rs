@@ -242,8 +242,14 @@ impl PartialOrd for HighlightEndpoint {
     }
 }
 
+/// Visible-range highlight endpoints memoized across repaints.
+///
+/// The key carries the buffer content `version` because an in-place edit shifts
+/// the anchors these endpoints resolved from without necessarily swapping the
+/// highlight `Arc`s, so the pointer checks alone would return stale offsets.
 #[derive(Clone, Debug)]
 pub struct CachedHighlightEndpoints {
+    version: u64,
     text_ptr: usize,
     semantic_ptr: Option<usize>,
     range: Range<usize>,
@@ -253,11 +259,13 @@ pub struct CachedHighlightEndpoints {
 impl CachedHighlightEndpoints {
     fn is_valid(
         &self,
+        version: u64,
         highlights: &TextHighlights,
         semantic: Option<&SemanticTokensHighlights>,
         range: &Range<usize>,
     ) -> bool {
-        self.text_ptr == Arc::as_ptr(highlights) as usize
+        self.version == version
+            && self.text_ptr == Arc::as_ptr(highlights) as usize
             && self.semantic_ptr == semantic.map(|s| Arc::as_ptr(s) as usize)
             && self.range == *range
     }
@@ -268,6 +276,7 @@ impl CachedHighlightEndpoints {
 }
 
 pub fn create_highlight_endpoints_cached(
+    version: u64,
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
@@ -275,13 +284,14 @@ pub fn create_highlight_endpoints_cached(
     cache: &mut Option<CachedHighlightEndpoints>,
 ) -> Arc<[HighlightEndpoint]> {
     if let &mut Some(ref cached) = cache
-        && cached.is_valid(highlights, semantic_highlights, range)
+        && cached.is_valid(version, highlights, semantic_highlights, range)
     {
         return cached.endpoints.clone();
     }
     let endpoints = create_highlight_endpoints(range, highlights, semantic_highlights, resolve);
     let arc: Arc<[HighlightEndpoint]> = Arc::from(endpoints);
     *cache = Some(CachedHighlightEndpoints {
+        version,
         text_ptr: Arc::as_ptr(highlights) as usize,
         semantic_ptr: semantic_highlights.map(|s| Arc::as_ptr(s) as usize),
         range: range.clone(),

@@ -106,7 +106,10 @@ pub(crate) fn render_editor_with_overlay(
     {
         let mut x = inner.x;
         let mut y = inner.y;
-        'chunks: for chunk in snapshot.highlighted_chunks(editor.scroll_row..end_row) {
+        'chunks: for chunk in snapshot.highlighted_chunks_cached(
+            editor.scroll_row..end_row,
+            &mut editor.highlight_endpoint_cache,
+        ) {
             let style = chunk
                 .highlight_style
                 .as_ref()
