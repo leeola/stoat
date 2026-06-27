@@ -22,21 +22,21 @@ use crate::{
             GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
             GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
             GotoNextFunction, GotoNextParagraph, GotoPrevChange, GotoPrevClass, GotoPrevFunction,
-            GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord,
-            HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertRegister, JumpBackward,
-            JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd, MarkTrailStart,
-            MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
-            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
-            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
-            MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker,
-            OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter,
-            PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo,
-            RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro,
-            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
-            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectAllChildren,
-            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
-            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
-            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            GotoPrevParagraph, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
+            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertRegister,
+            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd,
+            MarkTrailStart, MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
+            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
+            MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch,
+            OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
+            PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
+            RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
+            ReplaceChar, ReplayMacro, RotateSelectionsBackward, RotateSelectionsForward,
+            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
+            SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
+            SelectPrevSibling, SelectRegister, SelectTextobjectAround, SelectTextobjectInner,
+            SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
             ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
             SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TillNextChar, TillPrevChar, ToggleComments, TrailNext, TrailPrev, TriggerCompletion,
@@ -397,6 +397,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoColumn::DEF, |_| Ok(Box::new(GotoColumn)));
     add(GotoCaller::DEF, |_| Ok(Box::new(GotoCaller)));
     add(GotoCallee::DEF, |_| Ok(Box::new(GotoCallee)));
+    add(GotoReferences::DEF, |_| Ok(Box::new(GotoReferences)));
     add(GotoDiffCallerUp::DEF, |_| Ok(Box::new(GotoDiffCallerUp)));
     add(GotoDiffCalleeDown::DEF, |_| {
         Ok(Box::new(GotoDiffCalleeDown))
@@ -656,6 +657,7 @@ mod tests {
         "GotoImplementation",
         "GotoCaller",
         "GotoCallee",
+        "GotoReferences",
         "GotoDiffCallerUp",
         "GotoDiffCalleeDown",
         "MarkTrailStart",
@@ -934,9 +936,10 @@ mod tests {
         // + 1 CommitUndoCheckpoint.
         // + 1 SpawnClaude.
         // + 2 GotoCaller, GotoCallee.
+        // + 1 GotoReferences.
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 4 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev.
-        assert_eq!(all().count(), 277);
+        assert_eq!(all().count(), 278);
     }
 
     #[test]

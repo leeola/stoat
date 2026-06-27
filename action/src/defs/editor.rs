@@ -1539,6 +1539,20 @@ define_action!(
 );
 
 define_action!(
+    GotoReferencesDef,
+    GotoReferences,
+    "GotoReferences",
+    ActionKind::GotoReferences,
+    "jump to a reference of the symbol",
+    "Step from the symbol under the cursor to a symbol that references it as \
+     a type, such as a struct, enum, trait, or type-alias use in a \
+     signature. Jumps directly to a lone reference, opening its file when it \
+     lies elsewhere, and opens the symbol picker to choose among several. \
+     No-op when the cursor is on no indexed symbol or nothing references it.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoDiffCallerUpDef,
     GotoDiffCallerUp,
     "GotoDiffCallerUp",

@@ -35,7 +35,7 @@ pub(crate) struct TrailState {
 ///
 /// A no-op when the cursor is on no indexed symbol or it has no callers.
 pub(crate) fn goto_caller(stoat: &mut Stoat) -> UpdateEffect {
-    goto_along_calls(stoat, Dir::Up)
+    goto_along(stoat, EdgeKind::Calls, Dir::Up)
 }
 
 /// Navigate to the nearest caller carrying a working-tree diff, skipping
@@ -121,19 +121,24 @@ fn has_diff(ws: &Workspace, git_root: &Path, key: SymbolKey) -> bool {
 ///
 /// A no-op when the cursor is on no indexed symbol or it has no callees.
 pub(crate) fn goto_callee(stoat: &mut Stoat) -> UpdateEffect {
-    goto_along_calls(stoat, Dir::Down)
+    goto_along(stoat, EdgeKind::Calls, Dir::Down)
 }
 
-/// Step one hop along the call axis from the cursor's symbol and navigate
-/// to the result, presenting a picker when several callers or callees tie.
-fn goto_along_calls(stoat: &mut Stoat, dir: Dir) -> UpdateEffect {
+/// Navigate from the symbol under the cursor to a symbol that references it.
+///
+/// Steps up the type-reference axis. A no-op when the cursor is on no indexed
+/// symbol or nothing references it.
+pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
+    goto_along(stoat, EdgeKind::References, Dir::Up)
+}
+
+/// Step one hop along the `kind` axis from the cursor's symbol and navigate
+/// to the result, presenting a picker when several neighbors tie.
+fn goto_along(stoat: &mut Stoat, kind: EdgeKind, dir: Dir) -> UpdateEffect {
     let Some(key) = symbol_at_cursor(stoat) else {
         return UpdateEffect::None;
     };
-    let targets = stoat
-        .active_workspace()
-        .code_graph
-        .step(key, EdgeKind::Calls, dir);
+    let targets = stoat.active_workspace().code_graph.step(key, kind, dir);
     present_or_pick(stoat, targets)
 }
 

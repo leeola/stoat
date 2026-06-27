@@ -198,6 +198,7 @@ pub enum ActionKind {
     GotoImplementation,
     GotoCaller,
     GotoCallee,
+    GotoReferences,
     GotoDiffCallerUp,
     GotoDiffCalleeDown,
     MarkTrailStart,
