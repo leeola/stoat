@@ -13,7 +13,10 @@
 
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 use stoat_language::{RefKind, SymbolKind};
 
 mod build;
@@ -122,9 +125,6 @@ pub struct FileShard {
 ///
 /// It is not serialized. It is rebuilt in RAM by merging [`FileShard`]s,
 /// which are what persist.
-// FIXME: drop this allow once the merge and query methods that read these
-// index fields are implemented.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct CodeGraph {
     symbols: HashMap<SymbolKey, Symbol>,
@@ -171,12 +171,147 @@ impl CodeGraph {
         }
         out
     }
+
+    /// Merge one file's [`FileShard`] into the graph.
+    ///
+    /// Symbols are registered first so a call within the shard resolves
+    /// immediately. Each edge is then resolved against the name index. An
+    /// edge that resolves to a unique symbol is rewritten to [`Target::Sym`]
+    /// and linked into the adjacency, while one whose target is not yet
+    /// known stays unresolved for [`Self::reresolve_unresolved`] to link.
+    pub fn insert_shard(&mut self, shard: FileShard) {
+        for sym in shard.symbols {
+            let key = sym.key;
+            self.by_name
+                .entry((sym.name.clone(), sym.kind))
+                .or_default()
+                .push(key);
+            self.by_file.entry(sym.file).or_default().push(key);
+            self.symbols.insert(key, sym);
+        }
+
+        for mut edge in shard.edges {
+            let (confidence, resolved) = self.resolve_target(&edge.to);
+            edge.confidence = confidence;
+            if let Some(key) = resolved {
+                edge.to = Target::Sym(key);
+                let idx = self.edges.len() as u32;
+                self.out.entry(edge.from).or_default().push(idx);
+                self.inn.entry(key).or_default().push(idx);
+            }
+            self.edges.push(edge);
+        }
+    }
+
+    /// Remove a file's symbols and edges from the graph.
+    ///
+    /// Edges originating in the file are dropped. A surviving edge from
+    /// another file that pointed at one of the removed symbols is degraded
+    /// back to [`Target::Unresolved`] so it can re-link to a future
+    /// definition rather than dangle at a missing key.
+    pub fn evict_file(&mut self, file: FileId) {
+        let Some(keys) = self.by_file.remove(&file) else {
+            return;
+        };
+        let evicted: HashSet<SymbolKey> = keys.iter().copied().collect();
+        let evicted_names: HashMap<SymbolKey, String> = keys
+            .iter()
+            .filter_map(|k| self.symbols.get(k).map(|s| (*k, s.name.clone())))
+            .collect();
+
+        for edge in &mut self.edges {
+            if evicted.contains(&edge.from) {
+                continue;
+            }
+            if let Target::Sym(key) = edge.to
+                && let Some(name) = evicted_names.get(&key)
+            {
+                edge.to = Target::Unresolved {
+                    name: name.clone(),
+                    kind: RefKind::Call,
+                };
+                edge.confidence = Confidence::NameMatch;
+            }
+        }
+
+        self.edges.retain(|edge| !evicted.contains(&edge.from));
+        for key in &keys {
+            if let Some(sym) = self.symbols.remove(key) {
+                remove_name_entry(&mut self.by_name, &sym.name, sym.kind, *key);
+            }
+        }
+
+        self.rebuild_adjacency();
+    }
+
+    /// Re-link every still-unresolved edge against the current name index.
+    ///
+    /// Insertion order does not affect the final graph. A call inserted
+    /// before its definition is left unresolved, and this pass resolves it
+    /// once the defining shard is present.
+    pub fn reresolve_unresolved(&mut self) {
+        let updates: Vec<(usize, SymbolKey, Confidence)> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| matches!(edge.to, Target::Unresolved { .. }))
+            .filter_map(|(idx, edge)| {
+                let (confidence, key) = self.resolve_target(&edge.to);
+                key.map(|key| (idx, key, confidence))
+            })
+            .collect();
+
+        for (idx, key, confidence) in updates {
+            self.edges[idx].to = Target::Sym(key);
+            self.edges[idx].confidence = confidence;
+        }
+
+        self.rebuild_adjacency();
+    }
+
+    /// Rebuild `out`/`inn` from the current edges, indexing only edges
+    /// whose target resolves to a present symbol.
+    fn rebuild_adjacency(&mut self) {
+        self.out.clear();
+        self.inn.clear();
+        for (idx, edge) in self.edges.iter().enumerate() {
+            if let Target::Sym(key) = edge.to
+                && self.symbols.contains_key(&key)
+            {
+                self.out.entry(edge.from).or_default().push(idx as u32);
+                self.inn.entry(key).or_default().push(idx as u32);
+            }
+        }
+    }
+}
+
+/// Remove `key` from the `(name, kind)` bucket, dropping the bucket when
+/// it empties so a stale name never lingers in the index.
+fn remove_name_entry(
+    by_name: &mut HashMap<(String, SymbolKind), SmallVec<[SymbolKey; 2]>>,
+    name: &str,
+    kind: SymbolKind,
+    key: SymbolKey,
+) {
+    let bucket_key = (name.to_string(), kind);
+    if let Some(keys) = by_name.get_mut(&bucket_key) {
+        keys.retain(|k| *k != key);
+        if keys.is_empty() {
+            by_name.remove(&bucket_key);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target};
-    use stoat_language::{RefKind, SymbolKind};
+    use super::{
+        build_shard, CodeGraph, Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey,
+        Target,
+    };
+    use stoat_language::{
+        extract_references, extract_symbols, parse_rope, LanguageRegistry, RefKind, SymbolKind,
+    };
+    use stoat_text::Rope;
 
     #[test]
     fn file_shard_round_trips_through_postcard() {
@@ -207,5 +342,64 @@ mod tests {
         let bytes = postcard::to_allocvec(&shard).unwrap();
         let decoded: FileShard = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, shard);
+    }
+
+    fn shard_of(file: FileId, file_rel: &str, text: &str) -> FileShard {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        let rope = Rope::from(text);
+        let tree = parse_rope(rust, &rope, None).unwrap();
+        let defs = extract_symbols(
+            rust.outline_query.as_ref().unwrap(),
+            tree.root_node(),
+            &rope,
+        );
+        let refs = extract_references(rust.tags_query.as_ref().unwrap(), tree.root_node(), &rope);
+        build_shard(file, file_rel, [0u8; 32], text, defs, refs)
+    }
+
+    fn call_edge(graph: &CodeGraph) -> Edge {
+        graph
+            .edges
+            .iter()
+            .find(|e| e.kind == EdgeKind::Calls)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn cross_file_call_resolves_after_reresolve_then_degrades_on_evict() {
+        let a = shard_of(FileId(0), "a.rs", "fn a() {\n    foo();\n}\n");
+        let b = shard_of(FileId(1), "b.rs", "fn foo() {}\n");
+
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(a);
+        graph.insert_shard(b);
+        graph.reresolve_unresolved();
+
+        let foo_key = graph
+            .by_name
+            .get(&("foo".to_string(), SymbolKind::Function))
+            .and_then(|keys| keys.first().copied())
+            .unwrap();
+        let resolved = call_edge(&graph);
+        assert_eq!(resolved.to, Target::Sym(foo_key));
+        assert_eq!(resolved.confidence, Confidence::Resolved);
+        assert_eq!(
+            graph.inn.get(&foo_key).map(|edges| edges.as_slice()),
+            Some(&[0u32][..])
+        );
+
+        graph.evict_file(FileId(1));
+        let degraded = call_edge(&graph);
+        assert_eq!(
+            degraded.to,
+            Target::Unresolved {
+                name: "foo".to_string(),
+                kind: RefKind::Call,
+            }
+        );
+        assert_eq!(degraded.confidence, Confidence::NameMatch);
+        assert!(!graph.symbols.contains_key(&foo_key));
     }
 }
