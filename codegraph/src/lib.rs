@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ops::Range,
 };
 use stoat_language::{RefKind, SymbolKind};
@@ -116,6 +116,17 @@ pub struct FileShard {
     pub edges: Vec<Edge>,
 }
 
+/// Which way to walk an edge axis during traversal.
+///
+/// [`Dir::Up`] follows edges in reverse to their sources, such as the
+/// callers of a function or the container of a symbol. [`Dir::Down`]
+/// follows them to their targets, the callees or contained symbols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    Up,
+    Down,
+}
+
 /// The in-RAM graph the navigation hot path reads.
 ///
 /// Forward (`out`) and reverse (`inn`) adjacency map a symbol to the
@@ -180,7 +191,9 @@ impl CodeGraph {
     /// and linked into the adjacency, while one whose target is not yet
     /// known stays unresolved for [`Self::reresolve_unresolved`] to link.
     pub fn insert_shard(&mut self, shard: FileShard) {
+        let mut files: HashSet<FileId> = HashSet::new();
         for sym in shard.symbols {
+            files.insert(sym.file);
             let key = sym.key;
             self.by_name
                 .entry((sym.name.clone(), sym.kind))
@@ -188,6 +201,9 @@ impl CodeGraph {
                 .push(key);
             self.by_file.entry(sym.file).or_default().push(key);
             self.symbols.insert(key, sym);
+        }
+        for file in files {
+            self.sort_file_index(file);
         }
 
         for mut edge in shard.edges {
@@ -283,6 +299,163 @@ impl CodeGraph {
             }
         }
     }
+
+    /// Order a file's symbol keys by definition start so [`Self::symbol_at`]
+    /// can binary-search them.
+    fn sort_file_index(&mut self, file: FileId) {
+        let Some(mut keys) = self.by_file.remove(&file) else {
+            return;
+        };
+        keys.sort_by_key(|key| self.symbols[key].def_range.start);
+        self.by_file.insert(file, keys);
+    }
+
+    /// The innermost symbol whose definition range contains `offset` in
+    /// `file`, or `None` when the offset lies in no definition.
+    ///
+    /// This is the cursor-to-symbol entry point for navigation. It reads
+    /// only the in-RAM index, binary-searching the file's start-ordered
+    /// symbols and then walking outward to the first enclosing range.
+    pub fn symbol_at(&self, file: FileId, offset: usize) -> Option<SymbolKey> {
+        let keys = self.by_file.get(&file)?;
+        let start_of = |key: &SymbolKey| self.symbols[key].def_range.start;
+        let mut hi = keys.partition_point(|key| start_of(key) <= offset);
+        while hi > 0 {
+            hi -= 1;
+            let range = &self.symbols[&keys[hi]].def_range;
+            if offset < range.end {
+                return Some(keys[hi]);
+            }
+        }
+        None
+    }
+
+    /// The neighbors of `from` along edges of `kind` in direction `dir`.
+    ///
+    /// [`Dir::Down`] yields the targets of `from`'s outgoing edges
+    /// (callees, contained symbols); [`Dir::Up`] yields the sources of its
+    /// incoming edges (callers, container). Only resolved edges are linked
+    /// into the adjacency, so an unresolved call contributes no neighbor.
+    pub fn step(&self, from: SymbolKey, kind: EdgeKind, dir: Dir) -> Vec<SymbolKey> {
+        let indices = match dir {
+            Dir::Up => self.inn.get(&from),
+            Dir::Down => self.out.get(&from),
+        };
+        let Some(indices) = indices else {
+            return Vec::new();
+        };
+        indices
+            .iter()
+            .filter_map(|&idx| {
+                let edge = &self.edges[idx as usize];
+                if edge.kind != kind {
+                    return None;
+                }
+                match dir {
+                    Dir::Up => Some(edge.from),
+                    Dir::Down => match edge.to {
+                        Target::Sym(key) => Some(key),
+                        Target::Unresolved { .. } => None,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// The path from `start` to the nearest symbol satisfying `pred`,
+    /// walking edges of `kind` in direction `dir`, bounded to `max_depth`
+    /// hops.
+    ///
+    /// `start` is the origin, not a candidate. `pred` is tested only on
+    /// reached symbols, so navigation always moves off the cursor. The
+    /// returned path runs `[start, .., match]`. `None` means no match
+    /// within `max_depth`. The closure keeps any diff or filter dependency
+    /// in the caller, leaving this crate IO-free.
+    pub fn nearest(
+        &self,
+        start: SymbolKey,
+        kind: EdgeKind,
+        dir: Dir,
+        pred: impl Fn(SymbolKey) -> bool,
+        max_depth: usize,
+    ) -> Option<Vec<SymbolKey>> {
+        let mut parent: HashMap<SymbolKey, SymbolKey> = HashMap::from([(start, start)]);
+        let mut frontier: VecDeque<(SymbolKey, usize)> = VecDeque::from([(start, 0)]);
+        while let Some((node, depth)) = frontier.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            for next in self.step(node, kind, dir) {
+                if parent.contains_key(&next) {
+                    continue;
+                }
+                parent.insert(next, node);
+                if pred(next) {
+                    return Some(reconstruct_path(&parent, start, next));
+                }
+                frontier.push_back((next, depth + 1));
+            }
+        }
+        None
+    }
+
+    /// The shortest path from `a` to `b` over edges of `kind`, or `None`
+    /// when none exists.
+    ///
+    /// Uses a bidirectional search, expanding forward from `a` over its
+    /// outgoing edges and backward from `b` over its incoming ones until
+    /// the two frontiers meet, which visits far fewer nodes than a
+    /// one-sided search on a wide graph.
+    pub fn path_between(
+        &self,
+        a: SymbolKey,
+        b: SymbolKey,
+        kind: EdgeKind,
+    ) -> Option<Vec<SymbolKey>> {
+        if a == b {
+            return Some(vec![a]);
+        }
+        let mut fwd: HashMap<SymbolKey, SymbolKey> = HashMap::from([(a, a)]);
+        let mut bwd: HashMap<SymbolKey, SymbolKey> = HashMap::from([(b, b)]);
+        let mut fq: VecDeque<SymbolKey> = VecDeque::from([a]);
+        let mut bq: VecDeque<SymbolKey> = VecDeque::from([b]);
+
+        while !fq.is_empty() && !bq.is_empty() {
+            if let Some(meet) = self.expand_frontier(&mut fq, &mut fwd, &bwd, kind, Dir::Down) {
+                return Some(stitch_path(&fwd, &bwd, meet));
+            }
+            if let Some(meet) = self.expand_frontier(&mut bq, &mut bwd, &fwd, kind, Dir::Up) {
+                return Some(stitch_path(&fwd, &bwd, meet));
+            }
+        }
+        None
+    }
+
+    /// Expand one BFS level of `queue`, recording parents in `near` and
+    /// returning the first node already reached by the `far` search.
+    fn expand_frontier(
+        &self,
+        queue: &mut VecDeque<SymbolKey>,
+        near: &mut HashMap<SymbolKey, SymbolKey>,
+        far: &HashMap<SymbolKey, SymbolKey>,
+        kind: EdgeKind,
+        dir: Dir,
+    ) -> Option<SymbolKey> {
+        for _ in 0..queue.len() {
+            let node = queue.pop_front()?;
+            for next in self.step(node, kind, dir) {
+                if near.contains_key(&next) {
+                    continue;
+                }
+                near.insert(next, node);
+                if far.contains_key(&next) {
+                    return Some(next);
+                }
+                queue.push_back(next);
+            }
+        }
+        None
+    }
 }
 
 /// Remove `key` from the `(name, kind)` bucket, dropping the bucket when
@@ -302,11 +475,52 @@ fn remove_name_entry(
     }
 }
 
+/// Follow parent pointers from `end` back to `start`, returning the path
+/// in forward order `[start, .., end]`.
+fn reconstruct_path(
+    parent: &HashMap<SymbolKey, SymbolKey>,
+    start: SymbolKey,
+    end: SymbolKey,
+) -> Vec<SymbolKey> {
+    let mut path = vec![end];
+    let mut cur = end;
+    while cur != start {
+        cur = parent[&cur];
+        path.push(cur);
+    }
+    path.reverse();
+    path
+}
+
+/// Join the forward chain from `a` and the backward chain from `b` at
+/// their shared `meet` node into one `[a, .., b]` path. The sentinel for
+/// each search is the start node pointing at itself.
+fn stitch_path(
+    fwd: &HashMap<SymbolKey, SymbolKey>,
+    bwd: &HashMap<SymbolKey, SymbolKey>,
+    meet: SymbolKey,
+) -> Vec<SymbolKey> {
+    let mut path = vec![meet];
+    let mut cur = meet;
+    while fwd[&cur] != cur {
+        cur = fwd[&cur];
+        path.push(cur);
+    }
+    path.reverse();
+
+    let mut cur = meet;
+    while bwd[&cur] != cur {
+        cur = bwd[&cur];
+        path.push(cur);
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_shard, CodeGraph, Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey,
-        Target,
+        build_shard, CodeGraph, Confidence, Dir, Edge, EdgeKind, FileId, FileShard, Symbol,
+        SymbolKey, Target,
     };
     use stoat_language::{
         extract_references, extract_symbols, parse_rope, LanguageRegistry, RefKind, SymbolKind,
@@ -401,5 +615,98 @@ mod tests {
         );
         assert_eq!(degraded.confidence, Confidence::NameMatch);
         assert!(!graph.symbols.contains_key(&foo_key));
+    }
+
+    #[test]
+    fn symbol_at_finds_innermost_definition() {
+        let shard = shard_of(FileId(0), "m.rs", "mod m {\n    fn helper() {}\n}\n");
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(shard);
+
+        let key_of = |name: &str, kind| graph.by_name.get(&(name.to_string(), kind)).unwrap()[0];
+        let helper = key_of("helper", SymbolKind::Function);
+        let m = key_of("m", SymbolKind::Module);
+        let helper_start = graph.symbols[&helper].def_range.start;
+        let m_range = graph.symbols[&m].def_range.clone();
+
+        assert_eq!(graph.symbol_at(FileId(0), helper_start), Some(helper));
+        assert_eq!(graph.symbol_at(FileId(0), m_range.start), Some(m));
+        assert_eq!(graph.symbol_at(FileId(0), m_range.end), None);
+        assert_eq!(graph.symbol_at(FileId(1), helper_start), None);
+    }
+
+    fn call_chain(n: usize) -> (CodeGraph, Vec<SymbolKey>) {
+        let keys: Vec<SymbolKey> = (0..n)
+            .map(|i| {
+                let mut bytes = [0u8; 16];
+                bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                SymbolKey(bytes)
+            })
+            .collect();
+        let symbols = keys
+            .iter()
+            .enumerate()
+            .map(|(i, &key)| Symbol {
+                key,
+                file: FileId(0),
+                name: format!("n{i}"),
+                kind: SymbolKind::Function,
+                container: vec![],
+                def_range: i * 10..i * 10 + 5,
+                name_range: i * 10..i * 10 + 2,
+                body_hash: [0u8; 32],
+            })
+            .collect();
+        let edges = (0..n.saturating_sub(1))
+            .map(|i| Edge {
+                from: keys[i],
+                to: Target::Sym(keys[i + 1]),
+                kind: EdgeKind::Calls,
+                site_range: 0..1,
+                confidence: Confidence::Resolved,
+            })
+            .collect();
+
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(FileShard {
+            content_hash: [0u8; 32],
+            symbols,
+            edges,
+        });
+        (graph, keys)
+    }
+
+    #[test]
+    fn bounded_traversal_over_a_long_chain() {
+        let (graph, k) = call_chain(10_000);
+
+        assert_eq!(graph.step(k[10], EdgeKind::Calls, Dir::Down), vec![k[11]]);
+        assert_eq!(graph.step(k[10], EdgeKind::Calls, Dir::Up), vec![k[9]]);
+
+        let down = graph
+            .nearest(
+                k[0],
+                EdgeKind::Calls,
+                Dir::Down,
+                |key| key == k[5000],
+                10_000,
+            )
+            .unwrap();
+        assert_eq!(down.first(), Some(&k[0]));
+        assert_eq!(down.last(), Some(&k[5000]));
+        assert_eq!(down.len(), 5001);
+
+        assert_eq!(
+            graph.nearest(k[0], EdgeKind::Calls, Dir::Down, |key| key == k[5000], 100),
+            None
+        );
+
+        let between = graph.path_between(k[3], k[8], EdgeKind::Calls).unwrap();
+        assert_eq!(between, (3..=8).map(|i| k[i]).collect::<Vec<_>>());
+
+        let full = graph.path_between(k[0], k[9999], EdgeKind::Calls).unwrap();
+        assert_eq!(full.len(), 10_000);
+
+        assert_eq!(graph.path_between(k[8], k[3], EdgeKind::Calls), None);
     }
 }
