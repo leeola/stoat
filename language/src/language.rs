@@ -44,6 +44,13 @@ pub struct Language {
     /// `select_textobject_inner`. `None` for languages without
     /// structural textobjects (json, markdown).
     pub textobjects_query: Option<Query>,
+    /// Outline query loaded from `outline.scm`. Captures `@item` (a
+    /// definition's full range), `@name` (its identifier), `@context`
+    /// (keyword and modifier tokens), and `@annotation` (attributes,
+    /// doc comments) for the symbols a file defines. Loaded but not yet
+    /// wired into a consumer. Reserved for symbol extraction. `None` for
+    /// languages without an `outline.scm` (e.g. toml).
+    pub outline_query: Option<Query>,
     /// Line-comment marker for languages that have one (e.g. `"//"`
     /// for rust, `"#"` for toml). `None` for languages without line
     /// comments (e.g. JSON, markdown). Used by the `ToggleComments`
@@ -132,6 +139,7 @@ struct AuxQuerySources {
     brackets: Option<&'static str>,
     indents: Option<&'static str>,
     textobjects: Option<&'static str>,
+    outline: Option<&'static str>,
     line_comment: Option<&'static str>,
 }
 
@@ -165,6 +173,9 @@ fn make_language_with_injections(
     let textobjects_query = aux
         .textobjects
         .and_then(|src| try_compile_query(name, "textobjects", &grammar, src));
+    let outline_query = aux
+        .outline
+        .and_then(|src| try_compile_query(name, "outline", &grammar, src));
     Language {
         name,
         extensions,
@@ -176,6 +187,7 @@ fn make_language_with_injections(
         bracket_query,
         indent_query,
         textobjects_query,
+        outline_query,
         line_comment: aux.line_comment,
     }
 }
@@ -232,6 +244,9 @@ fn make_rust() -> Language {
             textobjects: Some(include_str!(
                 "../../vendor/helix/runtime/queries/rust/textobjects.scm"
             )),
+            outline: Some(include_str!(
+                "../../vendor/zed/crates/languages/src/rust/outline.scm"
+            )),
             line_comment: Some("//"),
         },
     )
@@ -251,6 +266,9 @@ fn make_json() -> Language {
                 "../../vendor/zed/crates/languages/src/json/indents.scm"
             )),
             textobjects: None,
+            outline: Some(include_str!(
+                "../../vendor/zed/crates/languages/src/json/outline.scm"
+            )),
             line_comment: None,
         },
     )
@@ -287,6 +305,9 @@ fn make_markdown_with_injections(injections: Vec<LanguageInjection>) -> Language
                 "../../vendor/zed/crates/languages/src/markdown/indents.scm"
             )),
             textobjects: None,
+            outline: Some(include_str!(
+                "../../vendor/zed/crates/languages/src/markdown/outline.scm"
+            )),
             line_comment: None,
         },
     )
@@ -443,6 +464,28 @@ mod tests {
         assert!(
             json.textobjects_query.is_none(),
             "json has no textobjects.scm; query should be None"
+        );
+    }
+
+    #[test]
+    fn outline_query_loaded_for_rust_json_markdown() {
+        let reg = LanguageRegistry::standard();
+        for name in ["rust", "json", "markdown"] {
+            let lang = reg.languages().iter().find(|l| l.name == name).unwrap();
+            assert!(
+                lang.outline_query.is_some(),
+                "{name} outline.scm must compile against the bundled grammar"
+            );
+        }
+
+        let json = reg.languages().iter().find(|l| l.name == "json").unwrap();
+        assert!(
+            json.outline_query
+                .as_ref()
+                .unwrap()
+                .capture_index_for_name("name")
+                .is_some(),
+            "json outline.scm must expose a @name capture"
         );
     }
 }
