@@ -3949,12 +3949,9 @@ mod tests {
         stoat.set_fs_host(fs);
 
         let pane = stoat.active_workspace().panes.focus();
-        let buffer_id = crate::action_handlers::file::open_file_in_pane(
-            &mut stoat,
-            pane,
-            Path::new("/repo/src/a.rs"),
-        )
-        .expect("open the buffer");
+        let buffer_id =
+            action_handlers::file::open_file_in_pane(&mut stoat, pane, Path::new("/repo/src/a.rs"))
+                .expect("open the buffer");
 
         let drive = |stoat: &mut Stoat| {
             stoat.drive_parse_jobs();
