@@ -174,7 +174,7 @@ struct Atlas {
     size: u32,
     max_dim: u32,
     cache: LruCache<CacheId, CachedGlyph, FxBuildHasher>,
-    in_use: HashSet<CacheId>,
+    in_use: HashSet<CacheId, FxBuildHasher>,
 }
 
 impl Atlas {
@@ -191,7 +191,7 @@ impl Atlas {
             size,
             max_dim,
             cache: LruCache::unbounded_with_hasher(FxBuildHasher),
-            in_use: HashSet::new(),
+            in_use: HashSet::default(),
         }
     }
 
