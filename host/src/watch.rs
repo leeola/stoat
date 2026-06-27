@@ -40,6 +40,11 @@ pub trait FsWatchHost: Send + Sync {
     /// the watch active for the host's lifetime.
     fn watch(&self, path: &Path) -> io::Result<WatchToken>;
 
+    /// Begin watching `path` and everything beneath it. Like
+    /// [`Self::watch`] but recursive, for subscribing to a whole
+    /// directory tree from its root in a single call.
+    fn watch_recursive(&self, path: &Path) -> io::Result<WatchToken>;
+
     /// Drop the watch for `token`. Tokens from another host or
     /// already-released tokens are silently ignored.
     fn unwatch(&self, token: WatchToken);
@@ -99,23 +104,28 @@ impl LocalFsWatcher {
             queue,
         })
     }
-}
 
-impl FsWatchHost for LocalFsWatcher {
-    fn watch(&self, path: &Path) -> io::Result<WatchToken> {
+    fn watch_with_mode(&self, path: &Path, mode: RecursiveMode) -> io::Result<WatchToken> {
         let mut inner = self.inner.lock().expect("LocalFsWatcher poisoned");
         let prior = inner.refs.get(path).copied().unwrap_or(0);
         if prior == 0 {
-            inner
-                .watcher
-                .watch(path, RecursiveMode::NonRecursive)
-                .map_err(notify_to_io)?;
+            inner.watcher.watch(path, mode).map_err(notify_to_io)?;
         }
         inner.refs.insert(path.to_path_buf(), prior + 1);
         let token = WatchToken(inner.next_id);
         inner.next_id += 1;
         inner.tokens.insert(token, path.to_path_buf());
         Ok(token)
+    }
+}
+
+impl FsWatchHost for LocalFsWatcher {
+    fn watch(&self, path: &Path) -> io::Result<WatchToken> {
+        self.watch_with_mode(path, RecursiveMode::NonRecursive)
+    }
+
+    fn watch_recursive(&self, path: &Path) -> io::Result<WatchToken> {
+        self.watch_with_mode(path, RecursiveMode::Recursive)
     }
 
     fn unwatch(&self, token: WatchToken) {
@@ -173,6 +183,10 @@ impl FsWatchHost for NoopFsWatcher {
         let token = WatchToken(*next);
         *next += 1;
         Ok(token)
+    }
+
+    fn watch_recursive(&self, path: &Path) -> io::Result<WatchToken> {
+        self.watch(path)
     }
 
     fn unwatch(&self, _token: WatchToken) {}

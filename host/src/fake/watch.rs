@@ -99,6 +99,10 @@ impl FsWatchHost for FakeFsWatcher {
         Ok(token)
     }
 
+    fn watch_recursive(&self, path: &Path) -> io::Result<WatchToken> {
+        self.watch(path)
+    }
+
     fn unwatch(&self, token: WatchToken) {
         let mut state = self.state.lock().expect("FakeFsWatcher poisoned");
         let Some(path) = state.tokens.remove(&token) else {
@@ -160,6 +164,13 @@ mod tests {
         let mut paths = watcher.watched_paths();
         paths.sort();
         assert_eq!(paths, [PathBuf::from("/x"), PathBuf::from("/y")]);
+    }
+
+    #[test]
+    fn watch_recursive_records_path() {
+        let watcher = FakeFsWatcher::new();
+        watcher.watch_recursive(Path::new("/root")).unwrap();
+        assert_eq!(watcher.watched_paths(), [PathBuf::from("/root")]);
     }
 
     #[test]
