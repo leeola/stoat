@@ -37,6 +37,7 @@ pub(super) fn close_other_panes(stoat: &mut Stoat) {
 /// `false` when the pane tree refused to close (only one split pane
 /// remains); in that case no state is touched.
 fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
+    let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let view = ws.panes.pane(id).view.clone();
     if !ws.panes.close(id) {
@@ -55,9 +56,16 @@ fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
             }
         },
         View::Agent(id) => {
-            // FIXME: actively kill the PTY child on close. Dropping the
-            // session only closes the PTY master.
-            ws.agents.remove(id);
+            if let Some(agent) = ws.agents.remove(id) {
+                let session = agent.session;
+                executor
+                    .spawn(async move {
+                        if let Err(err) = session.kill().await {
+                            tracing::warn!(target: "stoat::agent", %err, "failed to kill agent pty child");
+                        }
+                    })
+                    .detach();
+            }
         },
         View::Label(_) => {},
     }

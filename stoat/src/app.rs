@@ -3447,6 +3447,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn closing_agent_pane_kills_pty_child() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        ws.panes.split(crate::pane::Axis::Vertical);
+        let focused = ws.panes.focus();
+
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
+        let agent_id = ws.agents.insert(crate::agent_session::AgentSession {
+            term: crate::agent_term::AgentTerm::new(24, 80),
+            session,
+        });
+        ws.panes.pane_mut(focused).view = View::Agent(agent_id);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+        h.settle();
+
+        assert!(
+            fake.was_killed(),
+            "closing the agent pane kills its PTY child"
+        );
+        assert!(
+            !h.stoat.active_workspace().agents.contains_key(agent_id),
+            "closing the agent pane drops its session",
+        );
+    }
+
     fn stoat_with_focused_agent() -> (Stoat, AgentId, Arc<crate::host::FakeTerminalSession>) {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
