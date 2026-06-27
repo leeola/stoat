@@ -1,3 +1,4 @@
+use crate::rope::Rope;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, ops::Range};
 
@@ -100,6 +101,24 @@ impl<T: Copy + Ord> Selection<T> {
             self.end = tail;
         }
         self.goal = new_goal;
+    }
+}
+
+/// Returns the offset of the block-cursor cell for a selection spanning
+/// `anchor` to `head`.
+///
+/// Under Helix's 1-width cursor convention a forward selection (`head >
+/// anchor`) draws its block cursor one character back from the head, on the
+/// last selected cell rather than the boundary past it. Collapsed and reversed
+/// selections place the cursor on the head, so `head` is returned unchanged.
+pub fn cursor_offset(rope: &Rope, anchor: usize, head: usize) -> usize {
+    if head > anchor {
+        rope.reversed_chars_at(head)
+            .next()
+            .map(|ch| head - ch.len_utf8())
+            .unwrap_or(head)
+    } else {
+        head
     }
 }
 
@@ -215,5 +234,13 @@ mod tests {
     fn range_returns_start_to_end() {
         assert_eq!(sel(2, 7, false).range(), 2..7);
         assert_eq!(sel(2, 7, true).range(), 2..7);
+    }
+
+    #[test]
+    fn cursor_offset_is_one_char_back_when_forward_else_head() {
+        assert_eq!(cursor_offset(&Rope::from("abcd"), 0, 4), 3);
+        assert_eq!(cursor_offset(&Rope::from("café"), 0, 5), 3);
+        assert_eq!(cursor_offset(&Rope::from("abcd"), 3, 3), 3);
+        assert_eq!(cursor_offset(&Rope::from("abcd"), 5, 1), 1);
     }
 }
