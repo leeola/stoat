@@ -5,7 +5,7 @@
 //! and a rename so a crash mid-write cannot leave a half-written index.
 
 use crate::{host::FsHost, workspace::anchor_state_dir};
-use codegraph::{decode_manifest, encode_manifest, Manifest};
+use codegraph::{decode_manifest, encode_manifest, FileEntry, Manifest, SCHEMA_VERSION};
 use std::{
     hash::{Hash, Hasher},
     io,
@@ -46,6 +46,30 @@ pub(crate) fn write_manifest(
 pub(crate) fn read_manifest(index_dir: &Path, fs: &dyn FsHost) -> io::Result<Manifest> {
     let bytes = read_bytes(&index_dir.join(MANIFEST_FILE), fs)?;
     decode_manifest(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// Update or insert the manifest entry for `rel_path`, preserving the rest.
+///
+/// Reads the current manifest, replaces any entry for `rel_path` with one
+/// carrying `content_hash`, and writes it back. Starts from an empty
+/// manifest when none exists yet, and re-stamps the current schema version.
+pub(crate) fn update_manifest_entry(
+    index_dir: &Path,
+    rel_path: &str,
+    content_hash: [u8; 32],
+    fs: &dyn FsHost,
+) -> io::Result<()> {
+    let mut manifest = read_manifest(index_dir, fs).unwrap_or_else(|_| Manifest {
+        schema_version: SCHEMA_VERSION,
+        files: Vec::new(),
+    });
+    manifest.schema_version = SCHEMA_VERSION;
+    manifest.files.retain(|entry| entry.rel_path != rel_path);
+    manifest.files.push(FileEntry {
+        rel_path: rel_path.to_string(),
+        content_hash,
+    });
+    write_manifest(index_dir, &manifest, fs)
 }
 
 /// Write a file's already-encoded shard bytes under `index_dir`.
@@ -96,7 +120,7 @@ fn read_bytes(path: &Path, fs: &dyn FsHost) -> io::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_manifest, read_shard, write_manifest, write_shard};
+    use super::{read_manifest, read_shard, update_manifest_entry, write_manifest, write_shard};
     use crate::{buffer_registry::fingerprint_bytes, host::FakeFs};
     use codegraph::{FileEntry, Manifest, SCHEMA_VERSION};
     use std::path::Path;
@@ -139,5 +163,31 @@ mod tests {
         let entry = &stored.files[0];
         assert_eq!(entry.content_hash, fingerprint_bytes("v1"));
         assert_ne!(entry.content_hash, fingerprint_bytes("v2"));
+    }
+
+    #[test]
+    fn update_manifest_entry_replaces_and_appends() {
+        let fs = FakeFs::new();
+        let dir = Path::new("/idx");
+
+        update_manifest_entry(dir, "a.rs", [1u8; 32], &fs).unwrap();
+        update_manifest_entry(dir, "b.rs", [2u8; 32], &fs).unwrap();
+        update_manifest_entry(dir, "a.rs", [9u8; 32], &fs).unwrap();
+
+        let mut files = read_manifest(dir, &fs).unwrap().files;
+        files.sort_by(|x, y| x.rel_path.cmp(&y.rel_path));
+        assert_eq!(
+            files,
+            vec![
+                FileEntry {
+                    rel_path: "a.rs".to_string(),
+                    content_hash: [9u8; 32],
+                },
+                FileEntry {
+                    rel_path: "b.rs".to_string(),
+                    content_hash: [2u8; 32],
+                },
+            ]
+        );
     }
 }

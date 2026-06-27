@@ -1091,6 +1091,44 @@ impl Stoat {
         }
     }
 
+    /// Persist a saved buffer's shard and manifest entry so a later open
+    /// warm-loads it instead of re-extracting.
+    ///
+    /// No-op when persistence is disabled or the buffer has no indexable
+    /// language. Re-extracts from the saved text on the calling thread,
+    /// which is acceptable on the infrequent save path.
+    pub(crate) fn persist_saved_shard(&self, buffer_id: BufferId, path: &Path, text: &str) {
+        if self.persistence_disabled {
+            return;
+        }
+        let ws = self.active_workspace();
+        let Some(language) = ws.buffers.language_for(buffer_id) else {
+            return;
+        };
+        let git_root = ws.git_root.clone();
+        let Some((rel_path, shard)) =
+            crate::code_index::build::extract_shard(&language, &git_root, path, text)
+        else {
+            return;
+        };
+        let Ok(dir) = crate::code_index::store::index_dir_for(&git_root, self.fs_host.as_ref())
+        else {
+            return;
+        };
+        let _ = crate::code_index::store::write_shard(
+            &dir,
+            &rel_path,
+            &codegraph::encode_shard(&shard),
+            self.fs_host.as_ref(),
+        );
+        let _ = crate::code_index::store::update_manifest_entry(
+            &dir,
+            &rel_path,
+            shard.content_hash,
+            self.fs_host.as_ref(),
+        );
+    }
+
     /// Rehydrate the active workspace from its most-recently-modified
     /// persisted file under `$XDG_STATE_HOME/stoat/workspaces/<hash>/`. The
     /// binary only invokes this when the user passes `--continue`; a bare

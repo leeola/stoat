@@ -281,7 +281,7 @@ fn index_file(
 ///
 /// Takes the source as a string so an open buffer can be re-indexed from
 /// its in-memory contents without a disk read.
-fn extract_shard(
+pub(crate) fn extract_shard(
     language: &Language,
     git_root: &Path,
     path: &Path,

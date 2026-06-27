@@ -39,6 +39,7 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.dirty = false;
     }
+    stoat.persist_saved_shard(buffer_id, &path, &text);
     let path_str = match path.to_str() {
         Some(s) => s,
         None => return UpdateEffect::Redraw,
