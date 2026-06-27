@@ -98,6 +98,13 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let path = stoat.active_workspace_mut().buffers.remove(buffer_id);
+    if let Some(done) = stoat
+        .active_workspace_mut()
+        .editor_bridge_waiters
+        .remove(&buffer_id)
+    {
+        let _ = done.send(());
+    }
     stoat.lsp_opened.remove(&buffer_id);
     stoat.lsp_buffer_versions.remove(&buffer_id);
     stoat.lsp_pending_changes.remove(&buffer_id);

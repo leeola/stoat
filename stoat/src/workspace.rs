@@ -32,7 +32,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::{Executor, Task};
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 new_key_type! {
     pub struct WorkspaceId;
@@ -122,6 +122,15 @@ pub struct Workspace {
     /// on paint without touching the agent's IPC path. The per-session hook
     /// server drives it via [`AgentStatus::apply`].
     pub(crate) agent: Option<AgentStatus>,
+    /// Open temp-file editors an owned agent is blocked on, keyed by the
+    /// buffer hosting each one.
+    ///
+    /// When Claude shells out to `$EDITOR`, the agent socket opens the temp
+    /// file as a buffer and parks the connection on a oneshot. The sender
+    /// lives here until the buffer or its pane closes, at which point either
+    /// close path fires it to unblock the waiting agent. It is not persisted,
+    /// because a oneshot cannot outlive the process.
+    pub(crate) editor_bridge_waiters: HashMap<BufferId, oneshot::Sender<()>>,
 }
 
 struct ParseJob {
@@ -161,6 +170,7 @@ impl Workspace {
             parse_jobs: HashMap::new(),
             badges: BadgeTray::new(),
             agent: None,
+            editor_bridge_waiters: HashMap::new(),
         }
     }
 

@@ -45,7 +45,13 @@ fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     }
     match view {
         View::Editor(id) => {
+            let buffer_id = ws.editors.get(id).map(|editor| editor.buffer_id);
             ws.editors.remove(id);
+            if let Some(buffer_id) = buffer_id
+                && let Some(done) = ws.editor_bridge_waiters.remove(&buffer_id)
+            {
+                let _ = done.send(());
+            }
         },
         View::Run(id) => {
             if let Some(mut state) = ws.runs.remove(id) {

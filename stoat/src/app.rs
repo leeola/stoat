@@ -1,6 +1,6 @@
 use crate::{
     action_handlers,
-    agent_ipc::AgentEvent,
+    agent_ipc::{AgentControl, AgentEvent},
     agent_session::AgentId,
     agent_status::AgentStatus,
     badge::BadgeTray,
@@ -170,6 +170,12 @@ pub struct Stoat {
     /// owning workspace's [`AgentStatus`] off the paint path.
     pub(crate) agent_event_tx: Sender<AgentEvent>,
     agent_event_rx: Receiver<AgentEvent>,
+    /// Control requests from the per-session agent IPC servers that expect a
+    /// reply, kept separate from [`Self::agent_event_tx`] because each carries a
+    /// oneshot the event loop fires on completion. [`Self::run`] drains the
+    /// receiver and routes each to [`Self::handle_agent_control`].
+    pub(crate) agent_control_tx: Sender<AgentControl>,
+    agent_control_rx: Receiver<AgentControl>,
     /// Wake-up signal for [`Self::run`]'s `tokio::select!`. Background
     /// tasks call `notify_one()` to kick the loop into a fresh
     /// `UpdateEffect::Redraw` once their result is ready, so the user
@@ -626,6 +632,7 @@ impl Stoat {
 
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
         let (agent_event_tx, agent_event_rx) = tokio::sync::mpsc::channel(256);
+        let (agent_control_tx, agent_control_rx) = tokio::sync::mpsc::channel(256);
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
@@ -663,6 +670,8 @@ impl Stoat {
             pty_rx,
             agent_event_tx,
             agent_event_rx,
+            agent_control_tx,
+            agent_control_rx,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
             pending_review_scan: None,
             modal_run: None,
@@ -893,6 +902,10 @@ impl Stoat {
                     let Some(ev) = ev else { continue };
                     self.handle_agent_event(ev)
                 }
+                ctl = self.agent_control_rx.recv() => {
+                    let Some(ctl) = ctl else { continue };
+                    self.handle_agent_control(ctl)
+                }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
             };
 
@@ -946,6 +959,9 @@ impl Stoat {
         }
         while let Ok(ev) = self.agent_event_rx.try_recv() {
             effect = effect.merge(self.handle_agent_event(ev));
+        }
+        while let Ok(ctl) = self.agent_control_rx.try_recv() {
+            effect = effect.merge(self.handle_agent_control(ctl));
         }
 
         effect
@@ -2414,6 +2430,45 @@ impl Stoat {
         UpdateEffect::Redraw
     }
 
+    /// Open a temp-file editor an owned agent shelled out to, in the workspace
+    /// whose session matches the request's `uid`, and register a waiter so
+    /// closing that buffer or its pane unblocks the agent.
+    ///
+    /// Switches the active workspace to the owning session so the editor lands
+    /// beside the agent pane, splits a new pane for the file, and stores the
+    /// request's oneshot in [`Workspace::editor_bridge_waiters`] keyed by the
+    /// opened buffer. Returns [`UpdateEffect::None`] when no live workspace owns
+    /// the session or the file cannot be opened. The dropped oneshot then
+    /// unblocks the agent so its `$EDITOR` invocation does not hang.
+    pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
+        let AgentControl::OpenEditor { uid, path, done } = ctl;
+        let Some(ws_id) = self
+            .workspaces
+            .iter()
+            .find(|(_, ws)| ws.uid == uid)
+            .map(|(id, _)| id)
+        else {
+            return UpdateEffect::None;
+        };
+        self.active_workspace = ws_id;
+
+        let new_pane = {
+            let ws = self.active_workspace_mut();
+            let new_pane = ws.panes.split(crate::pane::Axis::Vertical);
+            ws.focus = FocusTarget::SplitPane(new_pane);
+            new_pane
+        };
+
+        let Some(buffer_id) = action_handlers::file::open_file_in_pane(self, new_pane, &path)
+        else {
+            return UpdateEffect::None;
+        };
+        self.active_workspace_mut()
+            .editor_bridge_waiters
+            .insert(buffer_id, done);
+        UpdateEffect::Redraw
+    }
+
     /// Start the per-session agent hook server for `uid` on the executor.
     ///
     /// Binds the session's hook socket (see [`crate::run::agent_socket_path`])
@@ -2422,8 +2477,14 @@ impl Stoat {
     pub fn serve_agent_session(&self, uid: WorkspaceUid) -> io::Result<()> {
         let socket_path = crate::run::agent_socket_path(uid)?;
         let tx = self.agent_event_tx.clone();
+        let control_tx = self.agent_control_tx.clone();
         self.executor
-            .spawn(crate::agent_ipc::serve_agent_hooks(socket_path, uid, tx))
+            .spawn(crate::agent_ipc::serve_agent_hooks(
+                socket_path,
+                uid,
+                tx,
+                control_tx,
+            ))
             .detach();
         Ok(())
     }
@@ -5342,5 +5403,74 @@ mod tests {
 
         assert_eq!(effect, UpdateEffect::None);
         assert!(h.stoat.active_workspace().agent.is_none());
+    }
+
+    fn open_agent_editor(
+        h: &mut crate::test_harness::TestHarness,
+    ) -> (BufferId, tokio::sync::oneshot::Receiver<()>) {
+        let root = PathBuf::from("/bridge");
+        let path = root.join("msg.txt");
+        h.fake_fs().insert_file(&path, b"draft\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        let uid = h.stoat.active_workspace().uid;
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let effect = h.stoat.handle_agent_control(AgentControl::OpenEditor {
+            uid,
+            path,
+            done: done_tx,
+        });
+        h.settle();
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        (buffer_id, done_rx)
+    }
+
+    #[test]
+    fn agent_open_editor_waiter_fires_on_buffer_close() {
+        let mut h = Stoat::test();
+        let (buffer_id, mut done_rx) = open_agent_editor(&mut h);
+
+        assert!(
+            h.stoat
+                .active_workspace()
+                .editor_bridge_waiters
+                .contains_key(&buffer_id),
+            "a waiter is registered for the opened buffer",
+        );
+        assert!(done_rx.try_recv().is_err(), "waiter not fired before close");
+
+        assert_eq!(
+            action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer),
+            UpdateEffect::Redraw
+        );
+
+        assert!(
+            done_rx.try_recv().is_ok(),
+            "closing the buffer fires the waiter"
+        );
+        assert!(
+            !h.stoat
+                .active_workspace()
+                .editor_bridge_waiters
+                .contains_key(&buffer_id),
+            "the fired waiter is removed",
+        );
+    }
+
+    #[test]
+    fn agent_open_editor_waiter_fires_on_pane_close() {
+        let mut h = Stoat::test();
+        let (_buffer_id, mut done_rx) = open_agent_editor(&mut h);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+
+        assert!(
+            done_rx.try_recv().is_ok(),
+            "closing the pane fires the waiter"
+        );
     }
 }
