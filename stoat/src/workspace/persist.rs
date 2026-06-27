@@ -78,7 +78,7 @@ pub(crate) fn workspace_dir_for(git_root: &Path, fs: &dyn FsHost) -> io::Result<
 /// Hash-derived state directory for a single anchor under `state_dir`.
 /// Factored so callers (and tests) can supply a custom `state_dir`
 /// rather than always going through `stoat_log::workspace_state_dir`.
-fn anchor_state_dir(state_dir: &Path, anchor: &Path, fs: &dyn FsHost) -> PathBuf {
+pub(crate) fn anchor_state_dir(state_dir: &Path, anchor: &Path, fs: &dyn FsHost) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let canon = fs
         .canonicalize(anchor)

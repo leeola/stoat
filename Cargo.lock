@@ -3866,6 +3866,7 @@ dependencies = [
  "base64",
  "blake3",
  "brush-parser",
+ "codegraph",
  "compact_str",
  "crossterm",
  "etcetera",

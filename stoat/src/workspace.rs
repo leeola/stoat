@@ -18,7 +18,7 @@ use crate::{
     run::{RunId, RunState},
 };
 pub use persist::find_resume_anchor;
-pub(crate) use persist::{list_workspace_files, state_path_for};
+pub(crate) use persist::{anchor_state_dir, list_workspace_files, state_path_for};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};

@@ -7,6 +7,7 @@ pub mod app;
 pub mod badge;
 pub mod buffer;
 mod buffer_registry;
+mod code_index;
 pub mod command_palette;
 mod commit_list;
 pub mod completion;
