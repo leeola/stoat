@@ -204,6 +204,9 @@ impl Grid {
     /// lines above it, with any line past the declared heights counting as one
     /// row. With no expansions this is `line` itself.
     pub fn line_start_row(&self, line: usize) -> usize {
+        if self.line_heights.is_empty() {
+            return line;
+        }
         (0..line)
             .map(|above| self.line_heights.get(above).copied().unwrap_or(1) as usize)
             .sum()
