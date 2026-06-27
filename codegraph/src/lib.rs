@@ -252,6 +252,15 @@ impl CodeGraph {
     /// back to [`Target::Unresolved`] so it can re-link to a future
     /// definition rather than dangle at a missing key.
     pub fn evict_file(&mut self, file: FileId) {
+        self.evict_file_inner(file);
+        self.rebuild_adjacency();
+    }
+
+    /// Evict a file's symbols and edges without rebuilding adjacency.
+    ///
+    /// Shared by [`Self::evict_file`] and [`Self::reindex`], which rebuild the
+    /// adjacency once after the full sequence.
+    fn evict_file_inner(&mut self, file: FileId) {
         self.content_hashes.remove(&file);
         let Some(keys) = self.by_file.remove(&file) else {
             return;
@@ -284,8 +293,6 @@ impl CodeGraph {
                 remove_name_entry(&mut self.by_name, &sym.name, sym.kind, *key);
             }
         }
-
-        self.rebuild_adjacency();
     }
 
     /// Re-link every still-unresolved edge against the current name index.
@@ -294,6 +301,15 @@ impl CodeGraph {
     /// before its definition is left unresolved, and this pass resolves it
     /// once the defining shard is present.
     pub fn reresolve_unresolved(&mut self) {
+        self.reresolve_unresolved_inner();
+        self.rebuild_adjacency();
+    }
+
+    /// Re-link unresolved edges without rebuilding adjacency.
+    ///
+    /// Shared by [`Self::reresolve_unresolved`] and [`Self::reindex`], which
+    /// rebuild the adjacency once after the full sequence.
+    fn reresolve_unresolved_inner(&mut self) {
         let updates: Vec<(usize, SymbolKey, Confidence)> = self
             .edges
             .iter()
@@ -309,7 +325,17 @@ impl CodeGraph {
             self.edges[idx].to = Target::Sym(key);
             self.edges[idx].confidence = confidence;
         }
+    }
 
+    /// Re-index one file in a single adjacency rebuild.
+    ///
+    /// Combines [`Self::evict_file`], [`Self::insert_shard`], and
+    /// [`Self::reresolve_unresolved`] but rebuilds `out`/`inn` only once at the
+    /// end, where the per-step variants would each rebuild the whole project.
+    pub fn reindex(&mut self, file: FileId, shard: FileShard) {
+        self.evict_file_inner(file);
+        self.insert_shard(shard);
+        self.reresolve_unresolved_inner();
         self.rebuild_adjacency();
     }
 

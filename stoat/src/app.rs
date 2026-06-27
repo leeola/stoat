@@ -1106,9 +1106,7 @@ impl Stoat {
                     let Some(ws) = self.workspaces.get_mut(workspace) else {
                         continue;
                     };
-                    ws.code_graph.evict_file(file);
-                    ws.code_graph.insert_shard(shard);
-                    ws.code_graph.reresolve_unresolved();
+                    ws.code_graph.reindex(file, shard);
                     ws.file_paths.insert(file, PathBuf::from(&rel_path));
                     ws.index_generation += 1;
                     let git_root = ws.git_root.clone();
