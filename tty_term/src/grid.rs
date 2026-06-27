@@ -69,6 +69,30 @@ impl Grid {
         &mut self.cells[index]
     }
 
+    /// Borrow row `row` as a contiguous slice of its cells.
+    ///
+    /// Panics if `row` is not less than [`Self::rows`].
+    pub fn row(&self, row: usize) -> &[Cell] {
+        assert!(
+            row < self.rows,
+            "row {row} out of bounds for {} rows",
+            self.rows
+        );
+        &self.cells[row * self.cols..(row + 1) * self.cols]
+    }
+
+    /// Mutably borrow row `row` as a contiguous slice of its cells.
+    ///
+    /// Panics if `row` is not less than [`Self::rows`].
+    pub fn row_mut(&mut self, row: usize) -> &mut [Cell] {
+        assert!(
+            row < self.rows,
+            "row {row} out of bounds for {} rows",
+            self.rows
+        );
+        &mut self.cells[row * self.cols..(row + 1) * self.cols]
+    }
+
     /// Resize to `rows` by `cols`, resetting every cell to [`Cell::default`].
     ///
     /// Content is not preserved; the driver repopulates the grid afterward.
@@ -321,9 +345,7 @@ impl PagePool {
             };
 
             let cols = out.cols().min(page.cols());
-            for col in 0..cols {
-                *out.get_mut(out_row, col) = *page.get(row_in_page, col);
-            }
+            out.row_mut(out_row)[..cols].copy_from_slice(&page.row(row_in_page)[..cols]);
         }
 
         true
