@@ -1538,6 +1538,32 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    GotoDiffCallerUpDef,
+    GotoDiffCallerUp,
+    "GotoDiffCallerUp",
+    ActionKind::GotoDiffCallerUp,
+    "jump to the nearest changed caller",
+    "Walk up the call graph from the symbol under the cursor to the nearest \
+     caller that carries a working-tree diff, skipping unchanged symbols on \
+     the way. Jumps to that symbol, opening its file when it lies \
+     elsewhere. No-op when no caller within reach has a diff.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoDiffCalleeDownDef,
+    GotoDiffCalleeDown,
+    "GotoDiffCalleeDown",
+    ActionKind::GotoDiffCalleeDown,
+    "jump to the nearest changed callee",
+    "Walk down the call graph from the symbol under the cursor to the \
+     nearest callee that carries a working-tree diff, skipping unchanged \
+     symbols on the way. Jumps to that symbol, opening its file when it \
+     lies elsewhere. No-op when no callee within reach has a diff.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

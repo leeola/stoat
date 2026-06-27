@@ -18,13 +18,13 @@ use crate::{
             ExtendPrevWordStart, ExtendRight, ExtendSelectNextSibling, ExtendSelectPrevSibling,
             ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
             ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
-            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoFileStart,
-            GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart,
-            GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextFunction,
-            GotoNextParagraph, GotoPrevChange, GotoPrevClass, GotoPrevFunction, GotoPrevParagraph,
-            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp,
-            Increment, IndentSelection, InsertRegister, JumpBackward, JumpForward,
-            KeepPrimarySelection, KeepSelections, MatchBrackets, MoveDown, MoveLeft,
+            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
+            GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
+            GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
+            GotoNextFunction, GotoNextParagraph, GotoPrevChange, GotoPrevClass, GotoPrevFunction,
+            GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord,
+            HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertRegister, JumpBackward,
+            JumpForward, KeepPrimarySelection, KeepSelections, MatchBrackets, MoveDown, MoveLeft,
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
@@ -397,6 +397,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoColumn::DEF, |_| Ok(Box::new(GotoColumn)));
     add(GotoCaller::DEF, |_| Ok(Box::new(GotoCaller)));
     add(GotoCallee::DEF, |_| Ok(Box::new(GotoCallee)));
+    add(GotoDiffCallerUp::DEF, |_| Ok(Box::new(GotoDiffCallerUp)));
+    add(GotoDiffCalleeDown::DEF, |_| {
+        Ok(Box::new(GotoDiffCalleeDown))
+    });
     add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
@@ -648,6 +652,8 @@ mod tests {
         "GotoImplementation",
         "GotoCaller",
         "GotoCallee",
+        "GotoDiffCallerUp",
+        "GotoDiffCalleeDown",
         "Hover",
         "CodeAction",
         "RenameSymbol",
@@ -920,7 +926,8 @@ mod tests {
         // + 1 CommitUndoCheckpoint.
         // + 1 SpawnClaude.
         // + 2 GotoCaller, GotoCallee.
-        assert_eq!(all().count(), 271);
+        // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
+        assert_eq!(all().count(), 273);
     }
 
     #[test]

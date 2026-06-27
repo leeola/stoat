@@ -10,14 +10,98 @@ use crate::{
     app::{Stoat, UpdateEffect},
     code_index::build,
     editor_state::EditorState,
+    workspace::Workspace,
 };
 use codegraph::{Dir, EdgeKind, SymbolKey};
+use std::path::Path;
+
+/// How far the diff-filtered hops search before giving up.
+const MAX_DIFF_HOPS: usize = 64;
 
 /// Navigate from the symbol under the cursor to one of its callers.
 ///
 /// A no-op when the cursor is on no indexed symbol or it has no callers.
 pub(crate) fn goto_caller(stoat: &mut Stoat) -> UpdateEffect {
     goto_along_calls(stoat, Dir::Up)
+}
+
+/// Navigate to the nearest caller carrying a working-tree diff, skipping
+/// unchanged callers along the way.
+pub(crate) fn goto_diff_caller_up(stoat: &mut Stoat) -> UpdateEffect {
+    goto_nearest_diff(stoat, Dir::Up)
+}
+
+/// Navigate to the nearest callee carrying a working-tree diff, skipping
+/// unchanged callees along the way.
+pub(crate) fn goto_diff_callee_down(stoat: &mut Stoat) -> UpdateEffect {
+    goto_nearest_diff(stoat, Dir::Down)
+}
+
+/// Refresh the working-tree diff, then walk the call axis to the nearest
+/// changed symbol and jump there.
+fn goto_nearest_diff(stoat: &mut Stoat, dir: Dir) -> UpdateEffect {
+    let Some(start) = symbol_at_cursor(stoat) else {
+        return UpdateEffect::None;
+    };
+    {
+        let git = stoat.git_host.clone();
+        let fs = stoat.fs_host.clone();
+        let langs = stoat.language_registry.clone();
+        stoat
+            .active_workspace_mut()
+            .refresh_changed_ranges(git.as_ref(), fs.as_ref(), &langs);
+    }
+    let Some(target) = nearest_diff_target(stoat.active_workspace(), start, dir) else {
+        return UpdateEffect::None;
+    };
+    jump_to_symbol(stoat, target)
+}
+
+/// The nearest symbol along `dir` from `start` whose definition overlaps a
+/// working-tree diff, or `None` within [`MAX_DIFF_HOPS`].
+fn nearest_diff_target(ws: &Workspace, start: SymbolKey, dir: Dir) -> Option<SymbolKey> {
+    let git_root = ws.git_root.clone();
+    ws.code_graph
+        .nearest(
+            start,
+            EdgeKind::Calls,
+            dir,
+            |key| has_diff(ws, &git_root, key),
+            MAX_DIFF_HOPS,
+        )
+        .and_then(|path| path.last().copied())
+}
+
+/// Whether `key`'s definition overlaps a working-tree change.
+///
+/// An open buffer with a live diff map is consulted directly so unsaved
+/// edits count. Otherwise the cached [`Workspace::changed_ranges`] byte
+/// ranges are tested against the symbol's definition span.
+fn has_diff(ws: &Workspace, git_root: &Path, key: SymbolKey) -> bool {
+    let Some(symbol) = ws.code_graph.symbol(key) else {
+        return false;
+    };
+    let def = symbol.def_range.clone();
+    let file = symbol.file;
+
+    if let Some(rel) = ws.file_paths.get(&file)
+        && let Some(buffer_id) = ws.buffers.id_for_path(&git_root.join(rel))
+        && let Some(shared) = ws.buffers.get(buffer_id)
+    {
+        let guard = shared.read().expect("buffer poisoned");
+        if let Some(diff_map) = &guard.diff_map {
+            let rope = &guard.snapshot.visible_text;
+            let start_row = rope.offset_to_point(def.start).row;
+            let end_row = rope.offset_to_point(def.end).row;
+            return !diff_map.hunks_in_range(start_row..end_row + 1).is_empty();
+        }
+    }
+
+    ws.changed_ranges.get(&file).is_some_and(|ranges| {
+        ranges
+            .iter()
+            .any(|r| r.start < def.end && def.start < r.end)
+    })
 }
 
 /// Navigate from the symbol under the cursor to one of its callees.
@@ -141,13 +225,16 @@ fn focused_offset(editor: &mut EditorState) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        build, goto_callee, goto_caller, jump_to_symbol, present_or_pick, symbol_at_cursor,
+        build, goto_callee, goto_caller, jump_to_symbol, nearest_diff_target, present_or_pick,
+        symbol_at_cursor,
     };
     use crate::{
         app::{Stoat, UpdateEffect},
         host::FakeFs,
     };
-    use codegraph::{Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target};
+    use codegraph::{
+        Confidence, Dir, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target,
+    };
     use std::{ops::Range, path::PathBuf, sync::Arc};
     use stoat_config::Settings;
     use stoat_language::SymbolKind;
@@ -315,6 +402,46 @@ mod tests {
             symbol_at_cursor(&mut stoat),
             Some(callee),
             "GotoCallee steps down to the called symbol",
+        );
+    }
+
+    fn call_edge(from: SymbolKey, to: SymbolKey) -> Edge {
+        Edge {
+            from,
+            to: Target::Sym(to),
+            kind: EdgeKind::Calls,
+            site_range: 0..1,
+            confidence: Confidence::Resolved,
+        }
+    }
+
+    #[test]
+    fn nearest_diff_target_skips_unchanged_symbols() {
+        let mut stoat = stoat_with_repo();
+        let file = FileId(0);
+        let (foo, bar, baz) = (
+            SymbolKey([1u8; 16]),
+            SymbolKey([2u8; 16]),
+            SymbolKey([3u8; 16]),
+        );
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![
+                    sym(1, file, "foo", 0..10),
+                    sym(2, file, "bar", 10..20),
+                    sym(3, file, "baz", 20..30),
+                ],
+                edges: vec![call_edge(foo, bar), call_edge(bar, baz)],
+            });
+            ws.changed_ranges.insert(file, vec![0..10, 20..30]);
+        }
+
+        assert_eq!(
+            nearest_diff_target(stoat.active_workspace(), baz, Dir::Up),
+            Some(foo),
+            "skips the unchanged caller bar and lands on the changed caller foo",
         );
     }
 }

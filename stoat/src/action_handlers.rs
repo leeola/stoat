@@ -460,6 +460,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoImplementation => lsp::goto_implementation(stoat),
         ActionKind::GotoCaller => crate::code_index::nav::goto_caller(stoat),
         ActionKind::GotoCallee => crate::code_index::nav::goto_callee(stoat),
+        ActionKind::GotoDiffCallerUp => crate::code_index::nav::goto_diff_caller_up(stoat),
+        ActionKind::GotoDiffCalleeDown => crate::code_index::nav::goto_diff_callee_down(stoat),
         ActionKind::Hover => lsp::hover(stoat),
         ActionKind::CodeAction => lsp::code_action(stoat),
         ActionKind::RenameSymbol => lsp::rename_symbol(stoat),

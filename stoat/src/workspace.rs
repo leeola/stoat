@@ -8,13 +8,17 @@ use crate::{
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
-    code_index::build::{reindex_buffer, IndexUpdate, ReindexTarget},
+    code_index::build::{file_id, reindex_buffer, IndexUpdate, ReindexTarget},
     commit_list::CommitListState,
+    diff,
+    diff_map::DiffMap,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
+    host::{FsHost, GitHost},
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::layout::split_pane_status,
+    review::ReviewFileInput,
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
@@ -27,13 +31,16 @@ use slotmap::{new_key_type, SlotMap};
 use std::{
     collections::HashMap,
     future::Future,
+    ops::Range,
     path::PathBuf,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
     time::UNIX_EPOCH,
 };
+use stoat_language::{structural_diff, LanguageRegistry};
 use stoat_scheduler::{Executor, Task};
+use stoat_text::{Point, Rope};
 use tokio::sync::{mpsc::UnboundedSender, oneshot, Notify};
 
 new_key_type! {
@@ -111,6 +118,11 @@ pub struct Workspace {
     /// recover a symbol's file from its graph id. The graph keys files by a
     /// one-way hash, so this is the only way back to a path.
     pub(crate) file_paths: HashMap<FileId, PathBuf>,
+    /// Byte ranges changed against HEAD for each file with a working-tree
+    /// diff, in the working-tree text's byte space. Rebuilt by
+    /// [`Self::refresh_changed_ranges`] so diff-filtered navigation can ask
+    /// whether a symbol's definition overlaps a change.
+    pub(crate) changed_ranges: HashMap<FileId, Vec<Range<usize>>>,
     /// Active review session (if any). Owned at the workspace level because
     /// a review spans files and can be viewed by multiple panes in future
     /// multi-pane review flows. Dropped on `CloseReview`.
@@ -181,6 +193,7 @@ impl Workspace {
             code_graph: CodeGraph::new(),
             index_generation: 0,
             file_paths: HashMap::new(),
+            changed_ranges: HashMap::new(),
             review: None,
             commits: None,
             rebase: None,
@@ -399,6 +412,31 @@ impl Workspace {
         self.index_jobs.insert(buffer_id, task);
     }
 
+    /// Rebuild [`Self::changed_ranges`] from the working tree.
+    ///
+    /// Scans the changed files, diffs each against HEAD, and records the
+    /// byte ranges its hunks cover in the working-tree text, keyed by the
+    /// graph [`FileId`]. Clears prior state, so an empty map means no
+    /// working-tree diff.
+    pub(crate) fn refresh_changed_ranges(
+        &mut self,
+        git: &dyn GitHost,
+        fs: &dyn FsHost,
+        langs: &LanguageRegistry,
+    ) {
+        self.changed_ranges.clear();
+        let Some((_workdir, inputs)) = diff::scan_working_tree(git, fs, langs, &self.git_root)
+        else {
+            return;
+        };
+        for input in &inputs {
+            let ranges = changed_byte_ranges(input);
+            if !ranges.is_empty() {
+                self.changed_ranges.insert(file_id(&input.rel_path), ranges);
+            }
+        }
+    }
+
     pub(crate) fn layout(&mut self, total_area: Rect) {
         self.panes.resize(total_area);
 
@@ -452,5 +490,70 @@ impl Workspace {
                 agent.fit(rows, cols);
             }
         }
+    }
+}
+
+/// The working-tree byte ranges a file's hunks cover, diffing its HEAD text
+/// against its working-tree text.
+///
+/// Hunk line ranges are converted to byte ranges in the working-tree text
+/// so a symbol's byte def-range can be tested for overlap directly.
+fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
+    let result = match &input.language {
+        Some(language) => structural_diff::diff_with_language_or_lines(
+            language,
+            &input.base_text,
+            &input.buffer_text,
+        ),
+        None => structural_diff::diff(&input.base_text, &input.buffer_text),
+    };
+    let diff_map = DiffMap::from_structural_changes(result, &input.base_text, &input.buffer_text);
+    let rope = Rope::from(input.buffer_text.as_str());
+    diff_map
+        .hunks_in_range(0..u32::MAX)
+        .into_iter()
+        .map(|hunk| {
+            let lines = &hunk.buffer_line_range;
+            let start = rope.point_to_offset(Point {
+                row: lines.start,
+                column: 0,
+            });
+            let end = rope.point_to_offset(Point {
+                row: lines.end,
+                column: 0,
+            });
+            start..end
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::changed_byte_ranges;
+    use crate::review::ReviewFileInput;
+    use std::{path::PathBuf, sync::Arc};
+
+    fn input(base: &str, buffer: &str) -> ReviewFileInput {
+        ReviewFileInput {
+            path: PathBuf::from("/repo/a.rs"),
+            rel_path: "a.rs".to_string(),
+            language: None,
+            base_text: Arc::new(base.to_string()),
+            buffer_text: Arc::new(buffer.to_string()),
+        }
+    }
+
+    #[test]
+    fn changed_byte_ranges_covers_an_added_line() {
+        let ranges = changed_byte_ranges(&input("fn foo() {}\n", "fn foo() {}\nfn bar() {}\n"));
+        assert!(
+            ranges.iter().any(|r| r.contains(&15)),
+            "the added second line's bytes are reported changed, got {ranges:?}",
+        );
+    }
+
+    #[test]
+    fn changed_byte_ranges_empty_when_identical() {
+        assert!(changed_byte_ranges(&input("fn foo() {}\n", "fn foo() {}\n")).is_empty());
     }
 }
