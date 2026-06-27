@@ -29,7 +29,10 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use futures::FutureExt;
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::{Position, Rect},
+};
 use slotmap::SlotMap;
 use std::{
     collections::hash_map::DefaultHasher,
@@ -1497,6 +1500,9 @@ impl Stoat {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            self.focus_at(mouse.column, mouse.row);
+        }
         let Some((col, row)) = self.translate_mouse_to_focused(mouse.column, mouse.row) else {
             return UpdateEffect::None;
         };
@@ -1783,6 +1789,44 @@ impl Stoat {
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id)?.area,
         };
         Some((column.saturating_sub(area.x), row.saturating_sub(area.y)))
+    }
+
+    /// Hit-tests a terminal-global `(column, row)` against the active
+    /// workspace's focusable panels.
+    ///
+    /// Split panes are tested before docks. Returns `None` for a point in a
+    /// divider gap or over no panel. A hidden dock has a zero-width `area`, so
+    /// it never matches.
+    fn target_at(&self, column: u16, row: u16) -> Option<FocusTarget> {
+        let ws = self.active_workspace();
+        let pos = Position::new(column, row);
+        for (id, pane) in ws.panes.split_panes() {
+            if pane.area.contains(pos) {
+                return Some(FocusTarget::SplitPane(id));
+            }
+        }
+        ws.docks
+            .iter()
+            .find(|(_, dock)| dock.area.contains(pos))
+            .map(|(id, _)| FocusTarget::Dock(id))
+    }
+
+    /// Moves focus to the panel under a terminal-global `(column, row)`. A
+    /// point over no panel is a no-op.
+    ///
+    /// A split-pane target updates both the pane tree's focus and the
+    /// workspace focus so the two stay in sync, mirroring the keyboard focus
+    /// path. A dock target leaves the pane tree's focus at the last split
+    /// pane.
+    fn focus_at(&mut self, column: u16, row: u16) {
+        let Some(target) = self.target_at(column, row) else {
+            return;
+        };
+        let ws = self.active_workspace_mut();
+        ws.focus = target;
+        if let FocusTarget::SplitPane(id) = target {
+            ws.panes.set_focus(id);
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
