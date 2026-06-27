@@ -383,6 +383,14 @@ pub struct Stoat {
     /// [`Self::drain_pending_external_edits`].
     pub(crate) review_external_edit_tx: Sender<PathBuf>,
     review_external_edit_rx: Receiver<PathBuf>,
+    /// Per-path debounce tasks for reindexing files changed outside the
+    /// editor, mirroring [`Self::review_pending_external_edits`] but
+    /// feeding the code graph instead of the review session.
+    index_pending_external_edits: std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
+    /// Channel the index debounce tasks push onto when their timer fires,
+    /// drained by [`Self::drain_pending_index_edits`].
+    pub(crate) index_external_edit_tx: Sender<PathBuf>,
+    index_external_edit_rx: Receiver<PathBuf>,
     /// Git operations flow through this trait so tests can use
     /// [`crate::host::FakeGit`] without a real repository.
     pub(crate) git_host: Arc<dyn GitHost>,
@@ -644,6 +652,7 @@ impl Stoat {
         let (agent_control_tx, agent_control_rx) = tokio::sync::mpsc::channel(256);
         let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
+        let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
             size: Rect::default(),
@@ -727,6 +736,9 @@ impl Stoat {
             review_pending_external_edits: std::collections::HashMap::new(),
             review_external_edit_tx,
             review_external_edit_rx,
+            index_pending_external_edits: std::collections::HashMap::new(),
+            index_external_edit_tx,
+            index_external_edit_rx,
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
             lsp_host: Arc::new(NoopLsp),
@@ -987,6 +999,9 @@ impl Stoat {
         let workspace = self.active_workspace;
         let git_root = self.active_workspace().git_root.clone();
         let warm = self.warm_index_load(&git_root);
+        if !self.persistence_disabled {
+            let _ = self.fs_watch_host.watch_recursive(&git_root);
+        }
         let handles = crate::code_index::build::IndexBuild {
             fs: self.fs_host.clone(),
             languages: self.language_registry.clone(),
@@ -1078,13 +1093,69 @@ impl Stoat {
                 IndexUpdate::Reindex {
                     workspace,
                     file,
+                    rel_path,
                     shard,
+                    persist,
                 } => {
-                    if let Some(ws) = self.workspaces.get_mut(workspace) {
-                        ws.code_graph.evict_file(file);
-                        ws.code_graph.insert_shard(shard);
-                        ws.code_graph.reresolve_unresolved();
-                        ws.index_generation += 1;
+                    let to_persist =
+                        persist.then(|| (codegraph::encode_shard(&shard), shard.content_hash));
+                    let Some(ws) = self.workspaces.get_mut(workspace) else {
+                        continue;
+                    };
+                    ws.code_graph.evict_file(file);
+                    ws.code_graph.insert_shard(shard);
+                    ws.code_graph.reresolve_unresolved();
+                    ws.index_generation += 1;
+                    let git_root = ws.git_root.clone();
+                    if let Some((bytes, content_hash)) = to_persist
+                        && !self.persistence_disabled
+                        && let Ok(dir) = crate::code_index::store::index_dir_for(
+                            &git_root,
+                            self.fs_host.as_ref(),
+                        )
+                    {
+                        let _ = crate::code_index::store::write_shard(
+                            &dir,
+                            &rel_path,
+                            &bytes,
+                            self.fs_host.as_ref(),
+                        );
+                        let _ = crate::code_index::store::update_manifest_entry(
+                            &dir,
+                            &rel_path,
+                            content_hash,
+                            self.fs_host.as_ref(),
+                        );
+                    }
+                },
+                IndexUpdate::Remove {
+                    workspace,
+                    file,
+                    rel_path,
+                } => {
+                    let Some(ws) = self.workspaces.get_mut(workspace) else {
+                        continue;
+                    };
+                    ws.code_graph.evict_file(file);
+                    ws.code_graph.reresolve_unresolved();
+                    ws.index_generation += 1;
+                    let git_root = ws.git_root.clone();
+                    if !self.persistence_disabled
+                        && let Ok(dir) = crate::code_index::store::index_dir_for(
+                            &git_root,
+                            self.fs_host.as_ref(),
+                        )
+                    {
+                        let _ = crate::code_index::store::delete_shard(
+                            &dir,
+                            &rel_path,
+                            self.fs_host.as_ref(),
+                        );
+                        let _ = crate::code_index::store::remove_manifest_entry(
+                            &dir,
+                            &rel_path,
+                            self.fs_host.as_ref(),
+                        );
                     }
                 },
             }
@@ -1199,6 +1270,7 @@ impl Stoat {
         self.drain_lsp_notifications();
         self.drain_fs_watch_events();
         self.drain_pending_external_edits();
+        self.drain_pending_index_edits();
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -1239,11 +1311,18 @@ impl Stoat {
             paths.push(event.path);
         }
 
-        if paths.is_empty() || self.active_workspace().review.is_none() {
+        if paths.is_empty() {
             return;
         }
+        let review_active = self.active_workspace().review.is_some();
+        let git_root = self.active_workspace().git_root.clone();
         for path in paths {
-            self.arm_review_external_edit_debounce(path);
+            if review_active {
+                self.arm_review_external_edit_debounce(path.clone());
+            }
+            if path.starts_with(&git_root) && self.language_registry.for_path(&path).is_some() {
+                self.arm_index_external_edit_debounce(path);
+            }
         }
     }
 
@@ -1289,6 +1368,77 @@ impl Stoat {
             }
         }
         progressed
+    }
+
+    /// Schedule a debounced reindex of `path` after an external change.
+    ///
+    /// Mirrors [`Self::arm_review_external_edit_debounce`]. A new event for
+    /// the same path replaces the prior task, so only the latest of a burst
+    /// proceeds once the [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses.
+    fn arm_index_external_edit_debounce(&mut self, path: PathBuf) {
+        let executor = self.executor.clone();
+        let tx = self.index_external_edit_tx.clone();
+        let redraw = self.redraw_notify.clone();
+        let path_for_send = path.clone();
+        let task = self.executor.spawn_with_redraw(redraw, async move {
+            executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
+            let _ = tx.send(path_for_send).await;
+        });
+        self.index_pending_external_edits.insert(path, task);
+    }
+
+    /// Drain the debounced external-change paths and reindex each. Returns
+    /// `true` if any path was handled so the harness settle loop re-iterates.
+    pub(crate) fn drain_pending_index_edits(&mut self) -> bool {
+        let mut progressed = false;
+        for _ in 0..256 {
+            let Ok(path) = self.index_external_edit_rx.try_recv() else {
+                break;
+            };
+            self.index_pending_external_edits.remove(&path);
+            self.reindex_external_path(path);
+            progressed = true;
+        }
+        progressed
+    }
+
+    /// Reindex a file changed outside the editor.
+    ///
+    /// A still-present file whose on-disk content matches the graph's
+    /// recorded hash is skipped, since the editor's own save already
+    /// indexed it. A changed file is re-extracted from disk. A file that no
+    /// longer exists is removed from the graph.
+    fn reindex_external_path(&mut self, path: PathBuf) {
+        let workspace = self.active_workspace;
+        let git_root = self.active_workspace().git_root.clone();
+        let Some(rel_path) = crate::code_index::build::relpath(&git_root, &path) else {
+            return;
+        };
+        let file = crate::code_index::build::file_id(&rel_path);
+
+        let Some(hash) =
+            crate::code_index::build::current_fingerprint(self.fs_host.as_ref(), &path)
+        else {
+            let _ = self.index_update_tx.send(IndexUpdate::Remove {
+                workspace,
+                file,
+                rel_path,
+            });
+            self.redraw_notify.notify_one();
+            return;
+        };
+        if self.active_workspace().code_graph.content_hash(file) == Some(hash) {
+            return;
+        }
+
+        let handles = crate::code_index::build::IndexBuild {
+            fs: self.fs_host.clone(),
+            languages: self.language_registry.clone(),
+            tx: self.index_update_tx.clone(),
+            redraw: self.redraw_notify.clone(),
+        };
+        crate::code_index::build::reindex_path(&self.executor, handles, git_root, workspace, path)
+            .detach();
     }
 
     /// Drains every notification currently buffered on
@@ -3708,11 +3858,13 @@ mod tests {
             .send(IndexUpdate::Reindex {
                 workspace,
                 file,
+                rel_path: "a.rs".to_string(),
                 shard: codegraph::FileShard {
                     content_hash: [9u8; 32],
                     symbols: vec![symbol(2, "bar")],
                     edges: vec![],
                 },
+                persist: false,
             })
             .unwrap();
         stoat.drain_index_updates();
@@ -3724,6 +3876,55 @@ mod tests {
             "reindex evicts the old symbol and inserts the new one"
         );
         assert_eq!(ws.index_generation, 2);
+    }
+
+    #[test]
+    fn external_change_reindexes_and_remove_evicts() {
+        use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
+        stoat.set_fs_host(fs.clone());
+        let watcher = Arc::new(FakeFsWatcher::new());
+        stoat.set_fs_watch_host(watcher.clone());
+
+        let path = PathBuf::from("/repo/src/a.rs");
+        let file = crate::code_index::build::file_id("src/a.rs");
+
+        let drive = |stoat: &mut Stoat, kind: FsEventKind| {
+            watcher.inject(&path, kind);
+            stoat.drain_fs_watch_events();
+            scheduler.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+            stoat.drain_pending_index_edits();
+            scheduler.run_until_parked();
+            stoat.drain_index_updates();
+        };
+
+        drive(&mut stoat, FsEventKind::Modified);
+        assert!(
+            stoat
+                .active_workspace()
+                .code_graph
+                .symbol_at(file, 4)
+                .is_some(),
+            "an external modify indexes the file",
+        );
+
+        fs.remove_file(&path).unwrap();
+        drive(&mut stoat, FsEventKind::Removed);
+        assert_eq!(
+            stoat.active_workspace().code_graph.symbol_at(file, 4),
+            None,
+            "an external remove evicts the file",
+        );
     }
 
     #[test]

@@ -72,6 +72,22 @@ pub(crate) fn update_manifest_entry(
     write_manifest(index_dir, &manifest, fs)
 }
 
+/// Drop the manifest entry for `rel_path`, preserving the rest.
+///
+/// A no-op when no manifest exists. Used when a file is removed so its
+/// stale entry does not survive into the next load.
+pub(crate) fn remove_manifest_entry(
+    index_dir: &Path,
+    rel_path: &str,
+    fs: &dyn FsHost,
+) -> io::Result<()> {
+    let Ok(mut manifest) = read_manifest(index_dir, fs) else {
+        return Ok(());
+    };
+    manifest.files.retain(|entry| entry.rel_path != rel_path);
+    write_manifest(index_dir, &manifest, fs)
+}
+
 /// Write a file's already-encoded shard bytes under `index_dir`.
 pub(crate) fn write_shard(
     index_dir: &Path,

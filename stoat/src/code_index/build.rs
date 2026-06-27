@@ -42,13 +42,26 @@ pub(crate) enum IndexUpdate {
         workspace: WorkspaceId,
         manifest: Manifest,
     },
-    /// One edited buffer's freshly re-extracted shard. The drain evicts the
-    /// file's prior symbols, inserts these, and re-resolves so callers of
-    /// the changed file re-link. Not persisted until the buffer is saved.
+    /// One file's freshly re-extracted shard. The drain evicts the file's
+    /// prior symbols, inserts these, and re-resolves so callers of the
+    /// changed file re-link.
+    ///
+    /// `persist` writes the shard and manifest entry now, used for changes
+    /// that arrive without a later save (external edits); a buffer edit
+    /// sends `false` and defers persistence to the save path.
     Reindex {
         workspace: WorkspaceId,
         file: FileId,
+        rel_path: String,
         shard: FileShard,
+        persist: bool,
+    },
+    /// A file that vanished from disk. The drain evicts its symbols, deletes
+    /// its shard, drops its manifest entry, and re-resolves.
+    Remove {
+        workspace: WorkspaceId,
+        file: FileId,
+        rel_path: String,
     },
 }
 
@@ -186,7 +199,43 @@ pub(crate) fn reindex_buffer(
             let _ = tx.send(IndexUpdate::Reindex {
                 workspace,
                 file,
+                rel_path,
                 shard,
+                persist: false,
+            });
+            redraw.notify_one();
+        }
+    })
+}
+
+/// Spawn a job re-indexing one file from disk, delivering a persisting
+/// [`IndexUpdate::Reindex`].
+///
+/// Mirrors [`reindex_buffer`] but reads the file's current bytes from
+/// disk, for a change that arrived outside the editor. The returned
+/// [`Task`] must be kept alive until the job runs.
+pub(crate) fn reindex_path(
+    executor: &Executor,
+    handles: IndexBuild,
+    git_root: PathBuf,
+    workspace: WorkspaceId,
+    path: PathBuf,
+) -> Task<()> {
+    let IndexBuild {
+        fs,
+        languages,
+        tx,
+        redraw,
+    } = handles;
+    executor.spawn_blocking(move || {
+        if let Some((rel_path, shard)) = index_file(fs.as_ref(), &languages, &git_root, &path) {
+            let file = file_id(&rel_path);
+            let _ = tx.send(IndexUpdate::Reindex {
+                workspace,
+                file,
+                rel_path,
+                shard,
+                persist: true,
             });
             redraw.notify_one();
         }
@@ -229,7 +278,7 @@ fn load_or_extract(
 }
 
 /// A path's workspace-relative form, or `None` when it is not under `root`.
-fn relpath(git_root: &Path, path: &Path) -> Option<String> {
+pub(crate) fn relpath(git_root: &Path, path: &Path) -> Option<String> {
     Some(
         path.strip_prefix(git_root)
             .ok()?
@@ -243,7 +292,7 @@ fn relpath(git_root: &Path, path: &Path) -> Option<String> {
 /// Deriving from the path (rather than scan order) keeps a file's id
 /// constant across a cold build, a warm load, and a live re-extract, so a
 /// re-extract evicts and replaces exactly that file's symbols.
-fn file_id(rel_path: &str) -> FileId {
+pub(crate) fn file_id(rel_path: &str) -> FileId {
     let digest = blake3::hash(rel_path.as_bytes());
     let mut bytes = [0u8; 4];
     bytes.copy_from_slice(&digest.as_bytes()[..4]);
@@ -251,7 +300,7 @@ fn file_id(rel_path: &str) -> FileId {
 }
 
 /// The content fingerprint of a readable UTF-8 file, or `None` otherwise.
-fn current_fingerprint(fs: &dyn FsHost, path: &Path) -> Option<[u8; 32]> {
+pub(crate) fn current_fingerprint(fs: &dyn FsHost, path: &Path) -> Option<[u8; 32]> {
     let mut bytes = Vec::new();
     fs.read(path, &mut bytes).ok()?;
     let text = String::from_utf8(bytes).ok()?;
