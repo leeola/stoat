@@ -13,3 +13,6 @@ serde = { workspace = true }
 smallvec = { workspace = true }
 postcard = { workspace = true }
 blake3 = { workspace = true }
+
+[dev-dependencies]
+stoat_text = { path = "../text" }

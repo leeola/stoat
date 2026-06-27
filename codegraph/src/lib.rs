@@ -16,6 +16,10 @@ use smallvec::SmallVec;
 use std::{collections::HashMap, ops::Range};
 use stoat_language::{RefKind, SymbolKind};
 
+mod build;
+
+pub use build::build_shard;
+
 /// A workspace-relative file, interned to a small integer id.
 ///
 /// The id is meaningful only within the [`CodeGraph`] that assigned it.
@@ -135,6 +139,37 @@ impl CodeGraph {
     /// Create an empty graph. Populate it by merging [`FileShard`]s.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Resolve an edge target against the name index.
+    ///
+    /// A [`Target::Sym`] is already resolved. A [`Target::Unresolved`] call
+    /// is matched by name against the indexed functions and methods. A
+    /// unique hit returns [`Confidence::Resolved`] with its key, several
+    /// candidates return [`Confidence::Ambiguous`], and no match returns
+    /// [`Confidence::NameMatch`] with no key so the target stays unresolved.
+    pub fn resolve_target(&self, target: &Target) -> (Confidence, Option<SymbolKey>) {
+        let name = match target {
+            Target::Sym(key) => return (Confidence::Resolved, Some(*key)),
+            Target::Unresolved { name, .. } => name,
+        };
+
+        let mut candidates = self.callable_candidates(name);
+        match candidates.len() {
+            1 => (Confidence::Resolved, Some(candidates.remove(0))),
+            0 => (Confidence::NameMatch, None),
+            _ => (Confidence::Ambiguous, None),
+        }
+    }
+
+    fn callable_candidates(&self, name: &str) -> Vec<SymbolKey> {
+        let mut out = Vec::new();
+        for kind in [SymbolKind::Function, SymbolKind::Method] {
+            if let Some(keys) = self.by_name.get(&(name.to_string(), kind)) {
+                out.extend(keys.iter().copied());
+            }
+        }
+        out
     }
 }
 

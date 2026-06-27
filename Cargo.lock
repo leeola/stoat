@@ -664,6 +664,7 @@ dependencies = [
  "serde",
  "smallvec",
  "stoat_language",
+ "stoat_text",
 ]
 
 [[package]]
