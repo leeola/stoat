@@ -1983,13 +1983,17 @@ impl Stoat {
 
     /// Encode `key` and send it to the agent's PTY, or handle the focus escape.
     ///
-    /// `Ctrl-W` leaves passthrough by returning to normal mode, where the editor
+    /// `Esc` leaves passthrough by returning to normal mode, where the editor
     /// and pane-navigation bindings resume and the user can move focus, split,
     /// or close the pane. That keystroke is not forwarded. Every other key,
-    /// including Esc, is encoded by [`encode_key_to_pty`] and written, so the
-    /// agent still receives it. Keys with no encoding are swallowed.
+    /// including `Ctrl-W`, is encoded by [`encode_key_to_pty`] and written, so
+    /// the agent still receives it. Keys with no encoding are swallowed.
+    ///
+    /// As a result, a literal `Esc` no longer reaches the agent during
+    /// passthrough. The deferred per-agent normal-mode bindings would restore
+    /// a way to send it.
     fn route_key_to_agent(&mut self, agent_id: AgentId, key: KeyEvent) -> UpdateEffect {
-        if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Esc {
             self.transition_mode("normal".to_string());
             return UpdateEffect::Redraw;
         }
@@ -3497,7 +3501,7 @@ mod tests {
         stoat.handle_key(bare(KeyCode::Char('i')));
         stoat.handle_key(bare(KeyCode::Enter));
         stoat.handle_key(ctrl('d'));
-        stoat.handle_key(bare(KeyCode::Esc));
+        stoat.handle_key(ctrl('w'));
 
         assert_eq!(
             fake.sent_bytes(),
@@ -3506,12 +3510,12 @@ mod tests {
                 b"i".to_vec(),
                 vec![b'\r'],
                 vec![0x04],
-                vec![0x1b]
+                vec![0x17]
             ],
         );
         assert_eq!(
             stoat.mode, "insert",
-            "Esc passes through, does not leave insert"
+            "Ctrl-W passes through, does not leave insert"
         );
     }
 
@@ -3527,10 +3531,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_w_escapes_agent_pane_without_forwarding() {
+    fn esc_escapes_agent_pane_without_forwarding() {
         let (mut stoat, _id, fake) = stoat_with_focused_agent();
 
-        let effect = stoat.handle_key(ctrl('w'));
+        let effect = stoat.handle_key(bare(KeyCode::Esc));
 
         assert_eq!(effect, UpdateEffect::Redraw);
         assert_eq!(stoat.mode, "normal");
