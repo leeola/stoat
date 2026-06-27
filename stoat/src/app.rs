@@ -1051,6 +1051,10 @@ impl Stoat {
                         continue;
                     };
                     ws.code_graph.insert_shard(shard);
+                    ws.file_paths.insert(
+                        crate::code_index::build::file_id(&rel_path),
+                        PathBuf::from(&rel_path),
+                    );
                     ws.index_generation += 1;
                     if let Some(bytes) = bytes {
                         let git_root = ws.git_root.clone();
@@ -1105,6 +1109,7 @@ impl Stoat {
                     ws.code_graph.evict_file(file);
                     ws.code_graph.insert_shard(shard);
                     ws.code_graph.reresolve_unresolved();
+                    ws.file_paths.insert(file, PathBuf::from(&rel_path));
                     ws.index_generation += 1;
                     let git_root = ws.git_root.clone();
                     if let Some((bytes, content_hash)) = to_persist
@@ -1138,6 +1143,7 @@ impl Stoat {
                     };
                     ws.code_graph.evict_file(file);
                     ws.code_graph.reresolve_unresolved();
+                    ws.file_paths.remove(&file);
                     ws.index_generation += 1;
                     let git_root = ws.git_root.clone();
                     if !self.persistence_disabled

@@ -18,7 +18,7 @@ use crate::{
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
-use codegraph::CodeGraph;
+use codegraph::{CodeGraph, FileId};
 pub use persist::find_resume_anchor;
 pub(crate) use persist::{anchor_state_dir, list_workspace_files, state_path_for};
 use ratatui::layout::Rect;
@@ -107,6 +107,10 @@ pub struct Workspace {
     /// Bumped each time a shard is merged into [`Self::code_graph`], so a
     /// consumer can tell whether the graph changed since it last read it.
     pub(crate) index_generation: u64,
+    /// Workspace-relative path for each indexed [`FileId`], so navigation can
+    /// recover a symbol's file from its graph id. The graph keys files by a
+    /// one-way hash, so this is the only way back to a path.
+    pub(crate) file_paths: HashMap<FileId, PathBuf>,
     /// Active review session (if any). Owned at the workspace level because
     /// a review spans files and can be viewed by multiple panes in future
     /// multi-pane review flows. Dropped on `CloseReview`.
@@ -176,6 +180,7 @@ impl Workspace {
             agents: SlotMap::with_key(),
             code_graph: CodeGraph::new(),
             index_generation: 0,
+            file_paths: HashMap::new(),
             review: None,
             commits: None,
             rebase: None,
