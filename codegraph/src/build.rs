@@ -6,7 +6,7 @@
 //! targets unresolved for the merge step to link by name.
 
 use crate::{Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target};
-use stoat_language::{RefSite, SymbolDef, SymbolKind};
+use stoat_language::{RefKind, RefSite, SymbolDef, SymbolKind};
 
 /// Build the [`FileShard`] for one file from its extracted definitions
 /// and references.
@@ -43,7 +43,7 @@ pub fn build_shard(
         .collect();
 
     let mut edges = contains_edges(&symbols);
-    edges.extend(call_edges(&symbols, &refs));
+    edges.extend(reference_edges(&symbols, &refs));
 
     FileShard {
         content_hash,
@@ -70,9 +70,14 @@ fn contains_edges(symbols: &[Symbol]) -> Vec<Edge> {
         .collect()
 }
 
-/// One [`EdgeKind::Calls`] edge per reference whose site falls inside a
-/// definition, from that definition to the unresolved called name.
-fn call_edges(symbols: &[Symbol], refs: &[RefSite]) -> Vec<Edge> {
+/// One edge per reference whose site falls inside a definition, from that
+/// definition to the unresolved referenced name.
+///
+/// The edge kind follows the reference kind. A call site becomes an
+/// [`EdgeKind::Calls`] edge and a type-position use an [`EdgeKind::References`]
+/// edge. The target carries the same [`RefKind`] so resolution stays
+/// kind-aware.
+fn reference_edges(symbols: &[Symbol], refs: &[RefSite]) -> Vec<Edge> {
     refs.iter()
         .filter_map(|r| {
             let caller = enclosing_def(symbols, r.site_range.start)?;
@@ -82,7 +87,10 @@ fn call_edges(symbols: &[Symbol], refs: &[RefSite]) -> Vec<Edge> {
                     name: r.name.clone(),
                     kind: r.kind,
                 },
-                kind: EdgeKind::Calls,
+                kind: match r.kind {
+                    RefKind::Call => EdgeKind::Calls,
+                    RefKind::Type => EdgeKind::References,
+                },
                 site_range: r.site_range.clone(),
                 confidence: Confidence::NameMatch,
             })
@@ -175,9 +183,13 @@ fn main() {
 ";
 
     fn build() -> FileShard {
+        build_text(SNIPPET)
+    }
+
+    fn build_text(text: &str) -> FileShard {
         let reg = LanguageRegistry::standard();
         let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
-        let rope = Rope::from(SNIPPET);
+        let rope = Rope::from(text);
         let tree = parse_rope(rust, &rope, None).unwrap();
         let defs = extract_symbols(
             rust.outline_query.as_ref().unwrap(),
@@ -185,7 +197,7 @@ fn main() {
             &rope,
         );
         let refs = extract_references(rust.tags_query.as_ref().unwrap(), tree.root_node(), &rope);
-        build_shard(FileId(0), "m.rs", [0u8; 32], SNIPPET, defs, refs)
+        build_shard(FileId(0), "m.rs", [0u8; 32], text, defs, refs)
     }
 
     #[test]
@@ -267,6 +279,36 @@ fn main() {
         assert_eq!(
             graph.resolve_target(&call.to),
             (Confidence::Resolved, Some(helper_key))
+        );
+    }
+
+    #[test]
+    fn type_use_emits_references_edges() {
+        let shard = build_text("fn f(p: Point) -> Dir {}");
+
+        let name_of: HashMap<SymbolKey, &str> = shard
+            .symbols
+            .iter()
+            .map(|s| (s.key, s.name.as_str()))
+            .collect();
+        let mut edges: Vec<(&str, EdgeKind, String)> = shard
+            .edges
+            .iter()
+            .map(|e| {
+                let to = match &e.to {
+                    Target::Sym(k) => format!("sym:{}", name_of[k]),
+                    Target::Unresolved { name, .. } => format!("unresolved:{name}"),
+                };
+                (name_of[&e.from], e.kind, to)
+            })
+            .collect();
+        edges.sort_by(|a, b| (a.0, &a.2).cmp(&(b.0, &b.2)));
+        assert_eq!(
+            edges,
+            vec![
+                ("f", EdgeKind::References, "unresolved:Dir".to_string()),
+                ("f", EdgeKind::References, "unresolved:Point".to_string()),
+            ]
         );
     }
 }

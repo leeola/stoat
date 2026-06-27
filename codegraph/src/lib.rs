@@ -63,11 +63,13 @@ pub struct Symbol {
 
 /// The relationship an [`Edge`] encodes.
 ///
-/// Only calls and containment are modeled in v1. The set stays open for
-/// richer edge kinds later.
+/// [`EdgeKind::Calls`] is a call site, [`EdgeKind::References`] a
+/// type-position use, and [`EdgeKind::Contains`] the structural nesting of a
+/// definition inside another. The set stays open for richer edge kinds later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeKind {
     Calls,
+    References,
     Contains,
 }
 
@@ -160,18 +162,20 @@ impl CodeGraph {
 
     /// Resolve an edge target against the name index.
     ///
-    /// A [`Target::Sym`] is already resolved. A [`Target::Unresolved`] call
-    /// is matched by name against the indexed functions and methods. A
-    /// unique hit returns [`Confidence::Resolved`] with its key, several
-    /// candidates return [`Confidence::Ambiguous`], and no match returns
-    /// [`Confidence::NameMatch`] with no key so the target stays unresolved.
+    /// A [`Target::Sym`] is already resolved. A [`Target::Unresolved`] is
+    /// matched by name against the symbol kinds its [`RefKind`] can name: a
+    /// call against functions and methods, a type reference against structs,
+    /// enums, traits, and type aliases. A unique hit returns
+    /// [`Confidence::Resolved`] with its key, several candidates return
+    /// [`Confidence::Ambiguous`], and no match returns [`Confidence::NameMatch`]
+    /// with no key so the target stays unresolved.
     pub fn resolve_target(&self, target: &Target) -> (Confidence, Option<SymbolKey>) {
-        let name = match target {
+        let (name, kind) = match target {
             Target::Sym(key) => return (Confidence::Resolved, Some(*key)),
-            Target::Unresolved { name, .. } => name,
+            Target::Unresolved { name, kind } => (name, *kind),
         };
 
-        let mut candidates = self.callable_candidates(name);
+        let mut candidates = self.candidates_for(name, kind);
         match candidates.len() {
             1 => (Confidence::Resolved, Some(candidates.remove(0))),
             0 => (Confidence::NameMatch, None),
@@ -179,10 +183,20 @@ impl CodeGraph {
         }
     }
 
-    fn callable_candidates(&self, name: &str) -> Vec<SymbolKey> {
+    fn candidates_for(&self, name: &str, kind: RefKind) -> Vec<SymbolKey> {
+        let symbol_kinds: &[SymbolKind] = match kind {
+            RefKind::Call => &[SymbolKind::Function, SymbolKind::Method],
+            RefKind::Type => &[
+                SymbolKind::Struct,
+                SymbolKind::Enum,
+                SymbolKind::Trait,
+                SymbolKind::TypeAlias,
+            ],
+        };
+
         let mut out = Vec::new();
-        for kind in [SymbolKind::Function, SymbolKind::Method] {
-            if let Some(keys) = self.by_name.get(&(name.to_string(), kind)) {
+        for &symbol_kind in symbol_kinds {
+            if let Some(keys) = self.by_name.get(&(name.to_string(), symbol_kind)) {
                 out.extend(keys.iter().copied());
             }
         }
@@ -250,10 +264,11 @@ impl CodeGraph {
             }
             if let Target::Sym(key) = edge.to
                 && let Some(name) = evicted_names.get(&key)
+                && let Some(kind) = ref_kind_for(edge.kind)
             {
                 edge.to = Target::Unresolved {
                     name: name.clone(),
-                    kind: RefKind::Call,
+                    kind,
                 };
                 edge.confidence = Confidence::NameMatch;
             }
@@ -485,6 +500,20 @@ impl CodeGraph {
     }
 }
 
+/// The [`RefKind`] a degraded edge of this [`EdgeKind`] re-resolves as, or
+/// `None` for [`EdgeKind::Contains`].
+///
+/// Containment is structural rather than name-resolved, and a Contains edge's
+/// source is always evicted alongside its target, so it never degrades; `None`
+/// keeps the mapping total without inventing a reference kind for it.
+fn ref_kind_for(kind: EdgeKind) -> Option<RefKind> {
+    match kind {
+        EdgeKind::Calls => Some(RefKind::Call),
+        EdgeKind::References => Some(RefKind::Type),
+        EdgeKind::Contains => None,
+    }
+}
+
 /// Remove `key` from the `(name, kind)` bucket, dropping the bucket when
 /// it empties so a stale name never lingers in the index.
 fn remove_name_entry(
@@ -642,6 +671,35 @@ mod tests {
         );
         assert_eq!(degraded.confidence, Confidence::NameMatch);
         assert!(!graph.symbols.contains_key(&foo_key));
+    }
+
+    #[test]
+    fn type_reference_resolves_to_type_not_same_named_function() {
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(shard_of(FileId(0), "a.rs", "struct Foo;\n"));
+        graph.insert_shard(shard_of(FileId(1), "b.rs", "fn Foo() {}\n"));
+
+        let key_of = |kind| graph.by_name.get(&("Foo".to_string(), kind)).unwrap()[0];
+        let struct_key = key_of(SymbolKind::Struct);
+        let fn_key = key_of(SymbolKind::Function);
+
+        let type_ref = Target::Unresolved {
+            name: "Foo".to_string(),
+            kind: RefKind::Type,
+        };
+        assert_eq!(
+            graph.resolve_target(&type_ref),
+            (Confidence::Resolved, Some(struct_key))
+        );
+
+        let call_ref = Target::Unresolved {
+            name: "Foo".to_string(),
+            kind: RefKind::Call,
+        };
+        assert_eq!(
+            graph.resolve_target(&call_ref),
+            (Confidence::Resolved, Some(fn_key))
+        );
     }
 
     #[test]
