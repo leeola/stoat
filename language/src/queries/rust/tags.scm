@@ -15,3 +15,10 @@
   ])
 
 (type_identifier) @reference.type
+
+(impl_item
+  trait: [
+    (type_identifier) @reference.implements
+    (scoped_type_identifier
+      name: (type_identifier) @reference.implements)
+  ])

@@ -64,12 +64,15 @@ pub struct Symbol {
 /// The relationship an [`Edge`] encodes.
 ///
 /// [`EdgeKind::Calls`] is a call site, [`EdgeKind::References`] a
-/// type-position use, and [`EdgeKind::Contains`] the structural nesting of a
-/// definition inside another. The set stays open for richer edge kinds later.
+/// type-position use, [`EdgeKind::Implements`] an `impl Trait for Type`
+/// relation from the impl to the trait, and [`EdgeKind::Contains`] the
+/// structural nesting of a definition inside another. The set stays open for
+/// richer edge kinds later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeKind {
     Calls,
     References,
+    Implements,
     Contains,
 }
 
@@ -192,6 +195,7 @@ impl CodeGraph {
                 SymbolKind::Trait,
                 SymbolKind::TypeAlias,
             ],
+            RefKind::Implements => &[SymbolKind::Trait],
         };
 
         let mut out = Vec::new();
@@ -510,6 +514,7 @@ fn ref_kind_for(kind: EdgeKind) -> Option<RefKind> {
     match kind {
         EdgeKind::Calls => Some(RefKind::Call),
         EdgeKind::References => Some(RefKind::Type),
+        EdgeKind::Implements => Some(RefKind::Implements),
         EdgeKind::Contains => None,
     }
 }
@@ -700,6 +705,34 @@ mod tests {
             graph.resolve_target(&call_ref),
             (Confidence::Resolved, Some(fn_key))
         );
+    }
+
+    #[test]
+    fn impl_emits_implements_edge_to_trait() {
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(shard_of(
+            FileId(0),
+            "a.rs",
+            "trait Greet {}\nstruct Point;\nimpl Greet for Point {}\n",
+        ));
+        graph.reresolve_unresolved();
+
+        let greet = graph
+            .by_name
+            .get(&("Greet".to_string(), SymbolKind::Trait))
+            .unwrap()[0];
+        let impl_key = graph
+            .by_name
+            .get(&("Point".to_string(), SymbolKind::Impl))
+            .unwrap()[0];
+
+        let implements: Vec<(SymbolKey, Target)> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Implements)
+            .map(|e| (e.from, e.to.clone()))
+            .collect();
+        assert_eq!(implements, vec![(impl_key, Target::Sym(greet))]);
     }
 
     #[test]

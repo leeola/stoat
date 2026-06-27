@@ -74,11 +74,18 @@ pub struct RefSite {
 ///
 /// [`RefKind::Call`] is a function, method, or macro invocation;
 /// [`RefKind::Type`] is a type-position identifier use, such as a type name
-/// in a signature or field. Value-position identifier uses are not collected.
+/// in a signature or field; [`RefKind::Implements`] is the trait named in an
+/// `impl Trait for Type` header. Value-position identifier uses are not
+/// collected.
+///
+/// A trait name in an impl header matches both `Type` and `Implements`, so the
+/// same site yields two RefSites of different kinds. This coexistence is
+/// intended and not deduplicated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefKind {
     Call,
     Type,
+    Implements,
 }
 
 /// Extract every definition captured by `query` (an `outline.scm`) over
@@ -172,6 +179,7 @@ fn ref_kind(capture_name: &str) -> Option<RefKind> {
     match capture_name {
         "reference.call" => Some(RefKind::Call),
         "reference.type" => Some(RefKind::Type),
+        "reference.implements" => Some(RefKind::Implements),
         _ => None,
     }
 }
@@ -424,5 +432,49 @@ fn demo() {
 
         let got: Vec<(&str, RefKind)> = refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
         assert_eq!(got, vec![("Bar", RefKind::Type)]);
+    }
+
+    #[test]
+    fn impl_header_yields_implements_and_type_references() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        let query = rust.tags_query.as_ref().unwrap();
+        let rope = Rope::from("impl Greet for Point {}");
+        let tree = parse_rope(rust, &rope, None).unwrap();
+        let refs = extract_references(query, tree.root_node(), &rope);
+
+        let mut got: Vec<(&str, RefKind)> =
+            refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
+        got.sort_by_key(|(name, kind)| (name.to_string(), format!("{kind:?}")));
+        assert_eq!(
+            got,
+            vec![
+                ("Greet", RefKind::Implements),
+                ("Greet", RefKind::Type),
+                ("Point", RefKind::Type),
+            ]
+        );
+    }
+
+    #[test]
+    fn scoped_impl_captures_bare_trait_name() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        let query = rust.tags_query.as_ref().unwrap();
+        let rope = Rope::from("impl foo::Greet for Point {}");
+        let tree = parse_rope(rust, &rope, None).unwrap();
+        let refs = extract_references(query, tree.root_node(), &rope);
+
+        let mut got: Vec<(&str, RefKind)> =
+            refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
+        got.sort_by_key(|(name, kind)| (name.to_string(), format!("{kind:?}")));
+        assert_eq!(
+            got,
+            vec![
+                ("Greet", RefKind::Implements),
+                ("Greet", RefKind::Type),
+                ("Point", RefKind::Type),
+            ]
+        );
     }
 }

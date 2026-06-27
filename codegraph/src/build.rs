@@ -90,6 +90,7 @@ fn reference_edges(symbols: &[Symbol], refs: &[RefSite]) -> Vec<Edge> {
                 kind: match r.kind {
                     RefKind::Call => EdgeKind::Calls,
                     RefKind::Type => EdgeKind::References,
+                    RefKind::Implements => EdgeKind::Implements,
                 },
                 site_range: r.site_range.clone(),
                 confidence: Confidence::NameMatch,
