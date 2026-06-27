@@ -339,6 +339,15 @@ impl CodeGraph {
         None
     }
 
+    /// The symbol for `key`, or `None` when it is not in the graph.
+    ///
+    /// Resolves a key from [`Self::symbol_at`] or [`Self::step`] to the
+    /// symbol's definition range, name, and file so navigation can open the
+    /// file and place the cursor.
+    pub fn symbol(&self, key: SymbolKey) -> Option<&Symbol> {
+        self.symbols.get(&key)
+    }
+
     /// The content hash last recorded for `file`, or `None` when no shard
     /// for it is present.
     ///
@@ -676,6 +685,19 @@ mod tests {
 
         graph.evict_file(FileId(0));
         assert_eq!(graph.content_hash(FileId(0)), None);
+    }
+
+    #[test]
+    fn symbol_returns_the_symbol_for_a_key() {
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(shard_of(FileId(0), "m.rs", "fn helper() {}\n"));
+
+        let key = graph
+            .by_name
+            .get(&("helper".to_string(), SymbolKind::Function))
+            .unwrap()[0];
+        assert_eq!(graph.symbol(key).map(|s| s.name.as_str()), Some("helper"));
+        assert!(graph.symbol(SymbolKey([9u8; 16])).is_none());
     }
 
     fn call_chain(n: usize) -> (CodeGraph, Vec<SymbolKey>) {
