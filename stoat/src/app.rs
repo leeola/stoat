@@ -1961,13 +1961,13 @@ impl Stoat {
 
     /// The agent session that should receive raw keystrokes, if any.
     ///
-    /// `Some` only while in normal mode with a focused `View::Agent` split
-    /// pane. Gating on normal mode keeps every other mode dispatching
-    /// normally, including the `space_pane_nav` mode the
-    /// [`Self::route_key_to_agent`] escape switches into, so the user can
-    /// navigate away while the agent pane still holds focus.
+    /// `Some` only in insert mode with a focused `View::Agent` split pane. This
+    /// mirrors how insert mode sends typing to the focused editor, except the
+    /// bytes go to the agent's PTY. Normal mode keeps its editor and
+    /// pane-navigation bindings, so the user enters the agent with `i` and
+    /// leaves via the [`Self::route_key_to_agent`] escape.
     fn agent_input_target(&self) -> Option<AgentId> {
-        if self.mode != "normal" {
+        if self.mode != "insert" {
             return None;
         }
 
@@ -1983,14 +1983,14 @@ impl Stoat {
 
     /// Encode `key` and send it to the agent's PTY, or handle the focus escape.
     ///
-    /// `Ctrl-W` leaves passthrough by switching to `space_pane_nav` so the user
-    /// can move focus, split, or close the pane. That keystroke is not
-    /// forwarded to the agent. Every other key is encoded by
-    /// [`encode_key_to_pty`] and written. Keys with no encoding are swallowed so
-    /// they neither reach the agent nor fall through to editor dispatch.
+    /// `Ctrl-W` leaves passthrough by returning to normal mode, where the editor
+    /// and pane-navigation bindings resume and the user can move focus, split,
+    /// or close the pane. That keystroke is not forwarded. Every other key,
+    /// including Esc, is encoded by [`encode_key_to_pty`] and written, so the
+    /// agent still receives it. Keys with no encoding are swallowed.
     fn route_key_to_agent(&mut self, agent_id: AgentId, key: KeyEvent) -> UpdateEffect {
         if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.transition_mode("space_pane_nav".to_string());
+            self.transition_mode("normal".to_string());
             return UpdateEffect::Redraw;
         }
 
@@ -3446,7 +3446,7 @@ mod tests {
     fn stoat_with_focused_agent() -> (Stoat, AgentId, Arc<crate::host::FakeTerminalSession>) {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
-        stoat.mode = "normal".to_string();
+        stoat.mode = "insert".to_string();
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
@@ -3497,10 +3497,21 @@ mod tests {
         stoat.handle_key(bare(KeyCode::Char('i')));
         stoat.handle_key(bare(KeyCode::Enter));
         stoat.handle_key(ctrl('d'));
+        stoat.handle_key(bare(KeyCode::Esc));
 
         assert_eq!(
             fake.sent_bytes(),
-            vec![b"h".to_vec(), b"i".to_vec(), vec![b'\r'], vec![0x04]],
+            vec![
+                b"h".to_vec(),
+                b"i".to_vec(),
+                vec![b'\r'],
+                vec![0x04],
+                vec![0x1b]
+            ],
+        );
+        assert_eq!(
+            stoat.mode, "insert",
+            "Esc passes through, does not leave insert"
         );
     }
 
@@ -3511,7 +3522,7 @@ mod tests {
         let effect = stoat.handle_key(ctrl('c'));
 
         assert_eq!(effect, UpdateEffect::None);
-        assert_eq!(stoat.mode, "normal");
+        assert_eq!(stoat.mode, "insert");
         assert_eq!(fake.sent_bytes(), vec![vec![0x03]]);
     }
 
@@ -3522,7 +3533,7 @@ mod tests {
         let effect = stoat.handle_key(ctrl('w'));
 
         assert_eq!(effect, UpdateEffect::Redraw);
-        assert_eq!(stoat.mode, "space_pane_nav");
+        assert_eq!(stoat.mode, "normal");
         assert!(
             fake.sent_bytes().is_empty(),
             "escape must not reach the agent"
@@ -3530,15 +3541,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_input_requires_normal_mode() {
+    fn agent_input_ignored_outside_insert_mode() {
         let (mut stoat, _id, fake) = stoat_with_focused_agent();
-        stoat.mode = "insert".to_string();
+        stoat.mode = "normal".to_string();
 
         stoat.handle_key(bare(KeyCode::Char('x')));
 
         assert!(
             fake.sent_bytes().is_empty(),
-            "non-normal mode must not route"
+            "normal mode must not route to the agent"
         );
     }
 
