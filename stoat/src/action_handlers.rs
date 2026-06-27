@@ -458,6 +458,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoDefinition => lsp::goto_definition(stoat),
         ActionKind::GotoTypeDefinition => lsp::goto_type_definition(stoat),
         ActionKind::GotoImplementation => lsp::goto_implementation(stoat),
+        ActionKind::GotoCaller => crate::code_index::nav::goto_caller(stoat),
+        ActionKind::GotoCallee => crate::code_index::nav::goto_callee(stoat),
         ActionKind::Hover => lsp::hover(stoat),
         ActionKind::CodeAction => lsp::code_action(stoat),
         ActionKind::RenameSymbol => lsp::rename_symbol(stoat),

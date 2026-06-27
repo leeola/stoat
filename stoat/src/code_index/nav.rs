@@ -4,11 +4,6 @@
 //! They resolve the cursor to a [`SymbolKey`] and jump to a symbol's
 //! definition.
 
-// FIXME: drop this allow once the navigation actions (GotoCaller/Callee,
-// diff hops, trail) dispatch into these entry points. They are the shared
-// nav API, with no action wired to them yet.
-#![allow(dead_code)]
-
 use crate::{
     action_handlers,
     action_handlers::lsp::{SymbolEntry, SymbolPicker},
@@ -16,7 +11,34 @@ use crate::{
     code_index::build,
     editor_state::EditorState,
 };
-use codegraph::SymbolKey;
+use codegraph::{Dir, EdgeKind, SymbolKey};
+
+/// Navigate from the symbol under the cursor to one of its callers.
+///
+/// A no-op when the cursor is on no indexed symbol or it has no callers.
+pub(crate) fn goto_caller(stoat: &mut Stoat) -> UpdateEffect {
+    goto_along_calls(stoat, Dir::Up)
+}
+
+/// Navigate from the symbol under the cursor to one of its callees.
+///
+/// A no-op when the cursor is on no indexed symbol or it has no callees.
+pub(crate) fn goto_callee(stoat: &mut Stoat) -> UpdateEffect {
+    goto_along_calls(stoat, Dir::Down)
+}
+
+/// Step one hop along the call axis from the cursor's symbol and navigate
+/// to the result, presenting a picker when several callers or callees tie.
+fn goto_along_calls(stoat: &mut Stoat, dir: Dir) -> UpdateEffect {
+    let Some(key) = symbol_at_cursor(stoat) else {
+        return UpdateEffect::None;
+    };
+    let targets = stoat
+        .active_workspace()
+        .code_graph
+        .step(key, EdgeKind::Calls, dir);
+    present_or_pick(stoat, targets)
+}
 
 /// The graph symbol whose definition encloses the cursor.
 ///
@@ -118,12 +140,14 @@ fn focused_offset(editor: &mut EditorState) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{build, jump_to_symbol, present_or_pick, symbol_at_cursor};
+    use super::{
+        build, goto_callee, goto_caller, jump_to_symbol, present_or_pick, symbol_at_cursor,
+    };
     use crate::{
         app::{Stoat, UpdateEffect},
         host::FakeFs,
     };
-    use codegraph::{FileId, FileShard, Symbol, SymbolKey};
+    use codegraph::{Confidence, Edge, EdgeKind, FileId, FileShard, Symbol, SymbolKey, Target};
     use std::{ops::Range, path::PathBuf, sync::Arc};
     use stoat_config::Settings;
     use stoat_language::SymbolKind;
@@ -247,5 +271,50 @@ mod tests {
     fn present_or_pick_empty_is_noop() {
         let mut stoat = stoat_with_repo();
         assert_eq!(present_or_pick(&mut stoat, vec![]), UpdateEffect::None);
+    }
+
+    #[test]
+    fn goto_caller_and_callee_step_the_call_axis() {
+        let mut stoat = stoat_with_repo();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn caller() {}\nfn callee() {}\n");
+        stoat.set_fs_host(fs);
+
+        let file = build::file_id("src/a.rs");
+        let (caller, callee) = (SymbolKey([1u8; 16]), SymbolKey([2u8; 16]));
+        {
+            let ws = stoat.active_workspace_mut();
+            ws.code_graph.insert_shard(FileShard {
+                content_hash: [0u8; 32],
+                symbols: vec![
+                    sym(1, file, "caller", 0..14),
+                    sym(2, file, "callee", 15..29),
+                ],
+                edges: vec![Edge {
+                    from: caller,
+                    to: Target::Sym(callee),
+                    kind: EdgeKind::Calls,
+                    site_range: 4..10,
+                    confidence: Confidence::Resolved,
+                }],
+            });
+            ws.file_paths.insert(file, PathBuf::from("src/a.rs"));
+        }
+
+        jump_to_symbol(&mut stoat, callee);
+        assert_eq!(symbol_at_cursor(&mut stoat), Some(callee));
+        goto_caller(&mut stoat);
+        assert_eq!(
+            symbol_at_cursor(&mut stoat),
+            Some(caller),
+            "GotoCaller steps up to the calling symbol",
+        );
+
+        goto_callee(&mut stoat);
+        assert_eq!(
+            symbol_at_cursor(&mut stoat),
+            Some(callee),
+            "GotoCallee steps down to the called symbol",
+        );
     }
 }

@@ -1510,6 +1510,34 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    GotoCallerDef,
+    GotoCaller,
+    "GotoCaller",
+    ActionKind::GotoCaller,
+    "jump to a caller of the symbol",
+    "Step one hop up the call graph from the symbol under the cursor to a \
+     symbol that calls it. Jumps directly to a lone caller, opening its \
+     file when it lies elsewhere, and opens the symbol picker to choose \
+     among several. No-op when the cursor is on no indexed symbol or it \
+     has no callers.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoCalleeDef,
+    GotoCallee,
+    "GotoCallee",
+    ActionKind::GotoCallee,
+    "jump to a callee of the symbol",
+    "Step one hop down the call graph from the symbol under the cursor to a \
+     symbol it calls. Jumps directly to a lone callee, opening its file \
+     when it lies elsewhere, and opens the symbol picker to choose among \
+     several. No-op when the cursor is on no indexed symbol or it has no \
+     callees.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
