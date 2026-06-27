@@ -12,17 +12,22 @@ use stoat_scheduler::Executor;
 
 new_key_type! { pub struct EditorId; }
 
-/// Cached in-buffer search matches for one `(version, query)`.
+/// Cached in-buffer search matches for one `(version, query, visible span)`.
 ///
 /// Lets `render_editor` reuse match byte-ranges across frames instead of
-/// re-materializing the rope and re-scanning with the regex every frame a
-/// search is active. Recomputed only when the buffer content version or the
-/// query changes. The per-match display mapping stays per-frame, so folds and
-/// scroll still re-map without invalidating the cache.
+/// re-materializing the visible rope slice and re-scanning with the regex every
+/// frame a search is active. Recomputed when the buffer version, the query, or
+/// the visible byte span changes. The visible span covers scrolling and
+/// folding, which move the window. The per-match display mapping stays
+/// per-frame.
 pub(crate) struct SearchMatchCache {
     pub(crate) version: u64,
     pub(crate) query: String,
-    /// Byte ranges `[start, end)` of each non-empty match in the buffer.
+    /// Visible buffer byte span the matches were scanned over. Part of the key
+    /// because a scroll moves it without bumping `version`.
+    pub(crate) visible: std::ops::Range<usize>,
+    /// Byte ranges `[start, end)` of each non-empty match within `visible`,
+    /// stored as absolute buffer offsets.
     pub(crate) matches: Vec<(usize, usize)>,
 }
 

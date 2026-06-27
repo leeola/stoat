@@ -1,4 +1,5 @@
 use crate::{
+    display_map::DisplayPoint,
     editor_state::{EditorState, SearchMatchCache},
     render::review::render_review,
 };
@@ -137,18 +138,32 @@ pub(crate) fn render_editor_with_overlay(
 
     if let Some(query) = search_query.filter(|q| !q.is_empty()) {
         let version = buffer_snapshot.version();
+        let rope = buffer_snapshot.rope();
+        let visible = {
+            let rope_len = rope.len();
+            let row_offset = |row: u32| {
+                snapshot
+                    .display_to_buffer(DisplayPoint::new(row, 0))
+                    .map(|point| rope.point_to_offset(point))
+                    .unwrap_or(rope_len)
+                    .min(rope_len)
+            };
+            row_offset(editor.scroll_row)..row_offset(end_row)
+        };
         let stale = match &editor.search_match_cache {
-            Some(cache) => cache.version != version || cache.query != query,
+            Some(cache) => {
+                cache.version != version || cache.query != query || cache.visible != visible
+            },
             None => true,
         };
         if stale {
             let matches = match crate::action_handlers::search::compile_search_regex(query) {
                 Ok(regex) => {
-                    let text = buffer_snapshot.rope().to_string();
+                    let window = rope.slice(visible.clone()).to_string();
                     regex
-                        .find_iter(&text)
+                        .find_iter(&window)
                         .filter(|m| m.end() > m.start())
-                        .map(|m| (m.start(), m.end()))
+                        .map(|m| (m.start() + visible.start, m.end() + visible.start))
                         .collect()
                 },
                 Err(_) => Vec::new(),
@@ -156,12 +171,12 @@ pub(crate) fn render_editor_with_overlay(
             editor.search_match_cache = Some(SearchMatchCache {
                 version,
                 query: query.to_string(),
+                visible: visible.clone(),
                 matches,
             });
         }
 
         let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
-        let rope = buffer_snapshot.rope();
         let cache = editor.search_match_cache.as_ref().expect("set above");
         for &(match_start, match_end) in &cache.matches {
             let mut offset = match_start;
