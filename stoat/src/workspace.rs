@@ -17,6 +17,7 @@ use crate::{
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
+use codegraph::CodeGraph;
 pub use persist::find_resume_anchor;
 pub(crate) use persist::{anchor_state_dir, list_workspace_files, state_path_for};
 use ratatui::layout::Rect;
@@ -99,6 +100,12 @@ pub struct Workspace {
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
     pub(crate) agents: SlotMap<AgentId, AgentSession>,
+    /// In-RAM symbol-and-call graph for this workspace, merged from the
+    /// per-file shards the cold build and incremental reindex produce.
+    pub(crate) code_graph: CodeGraph,
+    /// Bumped each time a shard is merged into [`Self::code_graph`], so a
+    /// consumer can tell whether the graph changed since it last read it.
+    pub(crate) index_generation: u64,
     /// Active review session (if any). Owned at the workspace level because
     /// a review spans files and can be viewed by multiple panes in future
     /// multi-pane review flows. Dropped on `CloseReview`.
@@ -163,6 +170,8 @@ impl Workspace {
             editors,
             runs: SlotMap::with_key(),
             agents: SlotMap::with_key(),
+            code_graph: CodeGraph::new(),
+            index_generation: 0,
             review: None,
             commits: None,
             rebase: None,

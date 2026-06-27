@@ -5,6 +5,7 @@ use crate::{
     agent_status::AgentStatus,
     badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
+    code_index::build::IndexUpdate,
     command_palette::CommandPalette,
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
@@ -43,7 +44,7 @@ use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::Bias;
 use tokio::sync::{
-    mpsc::{Receiver, Sender},
+    mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
     watch,
 };
 
@@ -176,6 +177,14 @@ pub struct Stoat {
     /// receiver and routes each to [`Self::handle_agent_control`].
     pub(crate) agent_control_tx: Sender<AgentControl>,
     agent_control_rx: Receiver<AgentControl>,
+    /// Per-file shards from the cold-build scan, drained each tick into the
+    /// owning workspace's [`Workspace::code_graph`]. Unbounded so the
+    /// streaming build never blocks on a full channel.
+    pub(crate) index_update_tx: UnboundedSender<IndexUpdate>,
+    index_update_rx: UnboundedReceiver<IndexUpdate>,
+    /// Cold-build worker, held only to keep the spawned scan alive while it
+    /// runs. Progress arrives through [`Self::index_update_rx`].
+    _index_build_task: Option<stoat_scheduler::Task<()>>,
     /// Wake-up signal for [`Self::run`]'s `tokio::select!`. Background
     /// tasks call `notify_one()` to kick the loop into a fresh
     /// `UpdateEffect::Redraw` once their result is ready, so the user
@@ -541,7 +550,7 @@ pub struct Stoat {
     /// rendered frame. Separate from the latest-wins render watch because
     /// `fill` page content must not be coalesced or dropped. `None` outside
     /// stoatty or before [`Self::set_stoatty_apc`] is called.
-    pub(crate) apc_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    pub(crate) apc_tx: Option<UnboundedSender<Vec<u8>>>,
     /// Smooth-scroll pool emit state for the focused editor. Tracks the
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
@@ -633,6 +642,7 @@ impl Stoat {
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
         let (agent_event_tx, agent_event_rx) = tokio::sync::mpsc::channel(256);
         let (agent_control_tx, agent_control_rx) = tokio::sync::mpsc::channel(256);
+        let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
@@ -672,6 +682,9 @@ impl Stoat {
             agent_event_rx,
             agent_control_tx,
             agent_control_rx,
+            index_update_tx,
+            index_update_rx,
+            _index_build_task: None,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
             pending_review_scan: None,
             modal_run: None,
@@ -772,11 +785,7 @@ impl Stoat {
     /// is the ordered channel the app loop pushes APC byte batches onto for
     /// the UI thread to write after each frame. The bin layer calls this once
     /// at startup, before [`Self::run`].
-    pub fn set_stoatty_apc(
-        &mut self,
-        stoatty: bool,
-        apc_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    ) {
+    pub fn set_stoatty_apc(&mut self, stoatty: bool, apc_tx: UnboundedSender<Vec<u8>>) {
         self.stoatty = stoatty;
         self.apc_tx = Some(apc_tx);
     }
@@ -887,6 +896,7 @@ impl Stoat {
         render: watch::Sender<Option<Buffer>>,
     ) -> io::Result<()> {
         let mut frame_buf = Buffer::empty(self.size);
+        self.start_index_build();
         loop {
             let first = tokio::select! {
                 biased;
@@ -963,8 +973,90 @@ impl Stoat {
         while let Ok(ctl) = self.agent_control_rx.try_recv() {
             effect = effect.merge(self.handle_agent_control(ctl));
         }
+        self.drain_index_updates();
 
         effect
+    }
+
+    /// Kick off a background cold build of the active workspace's code index.
+    ///
+    /// The scan runs on the blocking pool and streams shards back through
+    /// [`Self::index_update_rx`], which [`Self::drain_index_updates`] merges
+    /// each tick. The worker task is held so the scan is not cancelled.
+    pub(crate) fn start_index_build(&mut self) {
+        let workspace = self.active_workspace;
+        let git_root = self.active_workspace().git_root.clone();
+        self._index_build_task = Some(crate::code_index::build::build_index(
+            &self.executor,
+            self.fs_host.clone(),
+            self.language_registry.clone(),
+            self.index_update_tx.clone(),
+            self.redraw_notify.clone(),
+            git_root,
+            workspace,
+        ));
+    }
+
+    /// Merge any pending cold-build shards into their workspace graphs.
+    ///
+    /// Each shard is inserted and, in non-test runs, written to disk. On
+    /// [`IndexUpdate::Complete`] the workspace's cross-file references are
+    /// re-resolved and the manifest is persisted.
+    fn drain_index_updates(&mut self) {
+        while let Ok(update) = self.index_update_rx.try_recv() {
+            match update {
+                IndexUpdate::Shard {
+                    workspace,
+                    rel_path,
+                    shard,
+                } => {
+                    let bytes =
+                        (!self.persistence_disabled).then(|| codegraph::encode_shard(&shard));
+                    let Some(ws) = self.workspaces.get_mut(workspace) else {
+                        continue;
+                    };
+                    ws.code_graph.insert_shard(shard);
+                    ws.index_generation += 1;
+                    if let Some(bytes) = bytes {
+                        let git_root = ws.git_root.clone();
+                        if let Ok(dir) = crate::code_index::store::index_dir_for(
+                            &git_root,
+                            self.fs_host.as_ref(),
+                        ) {
+                            let _ = crate::code_index::store::write_shard(
+                                &dir,
+                                &rel_path,
+                                &bytes,
+                                self.fs_host.as_ref(),
+                            );
+                        }
+                    }
+                },
+                IndexUpdate::Complete {
+                    workspace,
+                    manifest,
+                } => {
+                    if let Some(ws) = self.workspaces.get_mut(workspace) {
+                        ws.code_graph.reresolve_unresolved();
+                    }
+                    if !self.persistence_disabled {
+                        let git_root = self.workspaces.get(workspace).map(|ws| ws.git_root.clone());
+                        if let Some(git_root) = git_root
+                            && let Ok(dir) = crate::code_index::store::index_dir_for(
+                                &git_root,
+                                self.fs_host.as_ref(),
+                            )
+                        {
+                            let _ = crate::code_index::store::write_manifest(
+                                &dir,
+                                &manifest,
+                                self.fs_host.as_ref(),
+                            );
+                        }
+                    }
+                },
+            }
+        }
     }
 
     /// Rehydrate the active workspace from its most-recently-modified
@@ -3447,6 +3539,50 @@ mod tests {
     use super::*;
     use crate::{agent_status::AgentHookEvent, buffer::TextBuffer};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn cold_build_shard_merges_into_the_workspace_graph() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+
+        let workspace = stoat.active_workspace;
+        let shard = codegraph::FileShard {
+            content_hash: [0u8; 32],
+            symbols: vec![codegraph::Symbol {
+                key: codegraph::SymbolKey([1u8; 16]),
+                file: codegraph::FileId(0),
+                name: "foo".to_string(),
+                kind: stoat_language::SymbolKind::Function,
+                container: vec![],
+                def_range: 0..11,
+                name_range: 3..6,
+                body_hash: [0u8; 32],
+            }],
+            edges: vec![],
+        };
+        stoat
+            .index_update_tx
+            .send(IndexUpdate::Shard {
+                workspace,
+                rel_path: "a.rs".to_string(),
+                shard,
+            })
+            .unwrap();
+
+        stoat.drain_index_updates();
+
+        let ws = stoat.active_workspace();
+        assert_eq!(ws.index_generation, 1);
+        assert_eq!(
+            ws.code_graph.symbol_at(codegraph::FileId(0), 5),
+            Some(codegraph::SymbolKey([1u8; 16]))
+        );
+    }
 
     #[test]
     fn agent_output_feeds_emulator() {
