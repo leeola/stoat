@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Bump it whenever the persisted shard or manifest layout changes. The
 /// loader compares a manifest's stamp against this and discards a stale
 /// index rather than misreading bytes from an older layout.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The index manifest, recording the schema version it was written at and
 /// an entry for every file the index covers.

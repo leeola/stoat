@@ -92,7 +92,6 @@ pub(crate) fn build_index(
 
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
-        let mut next_file = 0u32;
         fs.walk_workspace_files_streaming(&git_root, &mut |batch| {
             for path in batch {
                 let Some((rel_path, shard, source)) = load_or_extract(
@@ -102,11 +101,9 @@ pub(crate) fn build_index(
                     index_dir.as_deref(),
                     &known,
                     &path,
-                    FileId(next_file),
                 ) else {
                     continue;
                 };
-                next_file += 1;
                 seen.insert(rel_path.clone());
                 entries.push(FileEntry {
                     rel_path: rel_path.clone(),
@@ -167,7 +164,6 @@ fn load_or_extract(
     index_dir: Option<&Path>,
     known: &HashMap<String, [u8; 32]>,
     path: &Path,
-    file: FileId,
 ) -> Option<(String, FileShard, ShardSource)> {
     if let Some(dir) = index_dir
         && let Some(rel_path) = relpath(git_root, path)
@@ -179,7 +175,7 @@ fn load_or_extract(
         return Some((rel_path, shard, ShardSource::Loaded));
     }
 
-    let (rel_path, shard) = index_file(fs, languages, git_root, path, file)?;
+    let (rel_path, shard) = index_file(fs, languages, git_root, path)?;
     Some((rel_path, shard, ShardSource::Extracted))
 }
 
@@ -191,6 +187,18 @@ fn relpath(git_root: &Path, path: &Path) -> Option<String> {
             .to_string_lossy()
             .into_owned(),
     )
+}
+
+/// A file's stable in-graph id, derived from its workspace-relative path.
+///
+/// Deriving from the path (rather than scan order) keeps a file's id
+/// constant across a cold build, a warm load, and a live re-extract, so a
+/// re-extract evicts and replaces exactly that file's symbols.
+fn file_id(rel_path: &str) -> FileId {
+    let digest = blake3::hash(rel_path.as_bytes());
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(&digest.as_bytes()[..4]);
+    FileId(u32::from_le_bytes(bytes))
 }
 
 /// The content fingerprint of a readable UTF-8 file, or `None` otherwise.
@@ -211,14 +219,10 @@ fn index_file(
     languages: &LanguageRegistry,
     git_root: &Path,
     path: &Path,
-    file: FileId,
 ) -> Option<(String, FileShard)> {
     let language = languages.for_path(path)?;
-    let rel_path = path
-        .strip_prefix(git_root)
-        .ok()?
-        .to_string_lossy()
-        .into_owned();
+    let rel_path = relpath(git_root, path)?;
+    let file = file_id(&rel_path);
 
     let mut bytes = Vec::new();
     fs.read(path, &mut bytes).ok()?;
@@ -251,7 +255,6 @@ mod tests {
         code_index::store,
         host::{FakeFs, FsHost},
     };
-    use codegraph::FileId;
     use std::{collections::HashMap, path::Path};
     use stoat_language::LanguageRegistry;
 
@@ -268,7 +271,6 @@ mod tests {
             &registry,
             Path::new("/repo"),
             Path::new("/repo/src/a.rs"),
-            FileId(0),
         )
         .unwrap();
 
@@ -296,8 +298,7 @@ mod tests {
             &fs,
             &registry,
             Path::new("/repo"),
-            Path::new("/repo/notes.xyz"),
-            FileId(0),
+            Path::new("/repo/notes.xyz")
         )
         .is_none());
     }
@@ -313,8 +314,7 @@ mod tests {
         let original = "fn helper() {}\n";
         fs.write(path, original.as_bytes()).unwrap();
 
-        let (rel_path, original_shard) =
-            index_file(&fs, &registry, git_root, path, FileId(0)).unwrap();
+        let (rel_path, original_shard) = index_file(&fs, &registry, git_root, path).unwrap();
         store::write_shard(
             index_dir,
             &rel_path,
@@ -325,30 +325,14 @@ mod tests {
         let mut known = HashMap::new();
         known.insert(rel_path.clone(), fingerprint_bytes(original));
 
-        let (_, loaded, source) = load_or_extract(
-            &fs,
-            &registry,
-            git_root,
-            Some(index_dir),
-            &known,
-            path,
-            FileId(0),
-        )
-        .unwrap();
+        let (_, loaded, source) =
+            load_or_extract(&fs, &registry, git_root, Some(index_dir), &known, path).unwrap();
         assert_eq!(source, ShardSource::Loaded);
         assert_eq!(loaded, original_shard);
 
         fs.write(path, b"fn helper() {}\nfn added() {}\n").unwrap();
-        let (_, _, source) = load_or_extract(
-            &fs,
-            &registry,
-            git_root,
-            Some(index_dir),
-            &known,
-            path,
-            FileId(0),
-        )
-        .unwrap();
+        let (_, _, source) =
+            load_or_extract(&fs, &registry, git_root, Some(index_dir), &known, path).unwrap();
         assert_eq!(source, ShardSource::Extracted);
 
         let (_, _, source) = load_or_extract(
@@ -358,7 +342,6 @@ mod tests {
             Some(index_dir),
             &HashMap::new(),
             path,
-            FileId(0),
         )
         .unwrap();
         assert_eq!(source, ShardSource::Extracted);
