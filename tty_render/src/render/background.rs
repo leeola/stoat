@@ -337,7 +337,7 @@ fn build_instances(grid: &Grid) -> Vec<BgInstance> {
 fn build_row_instances(grid: &Grid, row: usize) -> Vec<BgInstance> {
     (0..grid.cols())
         .map(|col| {
-            let bg = grid.get(row, col).bg;
+            let (_, bg) = grid.get(row, col).draw_colors();
             BgInstance {
                 cell: [col as f32, row as f32],
                 color: [
@@ -353,7 +353,7 @@ fn build_row_instances(grid: &Grid, row: usize) -> Vec<BgInstance> {
 #[cfg(test)]
 mod tests {
     use super::build_instances;
-    use stoatty_term::grid::{Grid, Rgb};
+    use stoatty_term::grid::{Flags, Grid, Rgb};
     use wgpu::naga::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
@@ -380,5 +380,17 @@ mod tests {
         assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
         assert_eq!(instances[3].cell, [1.0, 1.0]);
         assert_eq!(instances[3].color, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn inverse_cell_draws_foreground_as_background() {
+        let mut grid = Grid::new(1, 1);
+        grid.get_mut(0, 0).fg = Rgb::new(255, 0, 0);
+        grid.get_mut(0, 0).bg = Rgb::new(0, 0, 255);
+        grid.get_mut(0, 0).flags = Flags::INVERSE;
+
+        let instances = build_instances(&grid);
+
+        assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
     }
 }

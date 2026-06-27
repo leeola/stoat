@@ -405,6 +405,24 @@ pub struct Cell {
     pub scale: Scale,
 }
 
+impl Cell {
+    /// The foreground and background colors to draw this cell with, as
+    /// `(fg, bg)`.
+    ///
+    /// When [`Flags::INVERSE`] is set the pair is swapped, so a cell that asked
+    /// for reverse video paints its background color as text over its
+    /// foreground color. Render passes draw with this pair rather than reading
+    /// [`Self::fg`] and [`Self::bg`] directly, which is what makes a
+    /// reverse-video cell (such as the editor's block cursor) visible.
+    pub fn draw_colors(&self) -> (Rgb, Rgb) {
+        if self.flags.contains(Flags::INVERSE) {
+            (self.bg, self.fg)
+        } else {
+            (self.fg, self.bg)
+        }
+    }
+}
+
 impl Default for Cell {
     fn default() -> Cell {
         Cell {
@@ -673,6 +691,24 @@ mod tests {
         Bar, Cell, Flags, Grid, Icon, IconKind, Overlay, PagePool, Rgb, Scale, ScrollRegion,
         TextRun,
     };
+
+    #[test]
+    fn draw_colors_swaps_only_under_inverse() {
+        let fg = Rgb::new(10, 20, 30);
+        let bg = Rgb::new(40, 50, 60);
+        let cell = Cell {
+            fg,
+            bg,
+            ..Cell::default()
+        };
+        assert_eq!(cell.draw_colors(), (fg, bg));
+
+        let inverse = Cell {
+            flags: Flags::INVERSE,
+            ..cell
+        };
+        assert_eq!(inverse.draw_colors(), (bg, fg));
+    }
 
     #[test]
     fn grid_writes_are_addressable() {

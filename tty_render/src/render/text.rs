@@ -1141,6 +1141,7 @@ impl TextPass {
                 end += 1;
             }
 
+            let (fg, bg) = cell.draw_colors();
             let (text, col_of_byte) = run_text_and_columns(&run);
             for (offset, key) in
                 shape_run(&mut self.font_system, &text, self.metrics, shaping.primary)
@@ -1163,8 +1164,8 @@ impl TextPass {
                         row,
                         col: glyph_col,
                         source: GlyphSource::Font(key),
-                        fg: cell.fg,
-                        bg: cell.bg,
+                        fg,
+                        bg,
                         scale: 1.0,
                         cell_fill: false,
                     });
@@ -1191,6 +1192,7 @@ impl TextPass {
         col: usize,
         scale: f32,
     ) -> Option<PendingGlyph> {
+        let (fg, bg) = cell.draw_colors();
         let cp = u32::from(cell.ch);
         if powerline::is_geometric(cp) {
             let (width, height) = cell_fill_pixels(scale, self.metrics);
@@ -1208,8 +1210,8 @@ impl TextPass {
                 row,
                 col,
                 source: GlyphSource::Procedural { cp, width, height },
-                fg: cell.fg,
-                bg: cell.bg,
+                fg,
+                bg,
                 scale,
                 cell_fill: false,
             });
@@ -1227,8 +1229,8 @@ impl TextPass {
             row,
             col,
             source: GlyphSource::Font(key),
-            fg: cell.fg,
-            bg: cell.bg,
+            fg,
+            bg,
             scale,
             cell_fill: is_cell_fill(cell.ch),
         })
