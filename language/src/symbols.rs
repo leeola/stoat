@@ -53,6 +53,27 @@ pub enum SymbolKind {
     EnumVariant,
 }
 
+/// A single call site where one function, method, or macro is invoked.
+///
+/// `site_range` spans the invoked identifier (the `@reference.call`
+/// capture), and `name` is its text. This pass does not attribute the
+/// call to its enclosing definition. That attribution is resolved
+/// downstream by range containment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefSite {
+    pub name: String,
+    pub kind: RefKind,
+    pub site_range: Range<usize>,
+}
+
+/// The kind of reference a [`RefSite`] records. Only call sites are
+/// collected for now, but the taxonomy stays open for later reference
+/// kinds (e.g. type uses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    Call,
+}
+
 /// Extract every definition captured by `query` (an `outline.scm`) over
 /// the tree rooted at `root`, reading identifier text from `rope`.
 ///
@@ -97,6 +118,35 @@ pub fn extract_symbols(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<Symbol
             name_range: name.byte_range(),
             container: container_path(item, rope),
         });
+    }
+    out
+}
+
+/// Collect every call site captured by `query` (a `tags.scm`) over the
+/// tree rooted at `root`, reading identifier text from `rope`.
+///
+/// Returns an empty vector when `query` lacks a `@reference.call`
+/// capture. Each capture becomes one [`RefSite`]. The result is in the
+/// query cursor's match order, not sorted.
+pub fn extract_references(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<RefSite> {
+    let mut out = Vec::new();
+    let Some(call_idx) = query.capture_index_for_name("reference.call") else {
+        return out;
+    };
+
+    let provider = RopeTextProvider { rope };
+    let mut cursor_h = QueryCursorHandle::new();
+    let mut matches = cursor_h.matches(query, root, provider);
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            if cap.index == call_idx {
+                out.push(RefSite {
+                    name: text_of(cap.node, rope),
+                    kind: RefKind::Call,
+                    site_range: cap.node.byte_range(),
+                });
+            }
+        }
     }
     out
 }
@@ -162,7 +212,7 @@ fn text_of(node: Node<'_>, rope: &Rope) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_symbols, SymbolDef, SymbolKind};
+    use super::{extract_references, extract_symbols, RefKind, SymbolDef, SymbolKind};
     use crate::{language::LanguageRegistry, parse_rope};
     use stoat_text::Rope;
 
@@ -269,5 +319,47 @@ fn main() {
         assert_eq!(def("MAX"), "const MAX: u32 = 10;");
         assert_eq!(def("helper"), "fn helper() {}");
         assert_eq!(def("hello"), "fn hello(&self);");
+    }
+
+    const CALLS: &str = "\
+fn demo() {
+    free();
+    obj.method();
+    helper::scoped();
+    println!(\"x\");
+    vec![1, 2];
+}
+";
+
+    #[test]
+    fn extract_references_over_rust_snippet() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        let query = rust.tags_query.as_ref().unwrap();
+        let rope = Rope::from(CALLS);
+        let tree = parse_rope(rust, &rope, None).unwrap();
+        let mut refs = extract_references(query, tree.root_node(), &rope);
+        refs.sort_by_key(|r| r.site_range.start);
+
+        let got: Vec<(&str, RefKind)> = refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("free", RefKind::Call),
+                ("method", RefKind::Call),
+                ("scoped", RefKind::Call),
+                ("println", RefKind::Call),
+                ("vec", RefKind::Call),
+            ]
+        );
+
+        for r in &refs {
+            assert_eq!(
+                &CALLS[r.site_range.clone()],
+                r.name,
+                "site_range must slice to the call name {}",
+                r.name
+            );
+        }
     }
 }

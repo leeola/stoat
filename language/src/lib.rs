@@ -14,7 +14,7 @@ pub use highlight::{
 };
 pub use highlight_map::{HighlightId, HighlightMap};
 pub use language::{Language, LanguageRegistry};
-pub use symbols::{extract_symbols, SymbolDef, SymbolKind};
+pub use symbols::{extract_references, extract_symbols, RefKind, RefSite, SymbolDef, SymbolKind};
 pub use syntax_map::{LayerKey, SyntaxLayer, SyntaxMap, SyntaxSnapshot};
 pub use textobject::{collect_capture_starts, find_smallest_capture_at};
 pub use tree_sitter::{Node, Tree};
