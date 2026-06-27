@@ -84,6 +84,12 @@ enum Command {
         #[command(subcommand)]
         sub: crate::commands::agent_api::AgentApiCommand,
     },
+    /// Open a file in the owning Stoat instance and block until it is closed,
+    /// honoring the `$EDITOR <file>` contract. Set as the owned agent's editor.
+    Editor {
+        /// File to open in the parent instance.
+        file: PathBuf,
+    },
 }
 
 pub fn run(args: Args) -> Result<(), Whatever> {
@@ -100,6 +106,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
         Some(Command::AgentApi { sub }) => crate::commands::agent_api::run(sub),
+        Some(Command::Editor { file }) => crate::commands::editor::run(file),
         Some(Command::Review) => {
             run_tui(text_proto_log, files, continue_, resume, TuiStart::Review)
         },
