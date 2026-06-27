@@ -141,7 +141,7 @@ pub enum Dir {
 ///
 /// Forward (`out`) and reverse (`inn`) adjacency map a symbol to the
 /// indices of its outgoing and incoming edges in `edges`. `by_name`
-/// indexes symbols by name and kind for name-match resolution, and
+/// indexes symbols by name for name-match resolution, and
 /// `by_file` groups them per file for incremental eviction.
 ///
 /// It is not serialized. It is rebuilt in RAM by merging [`FileShard`]s,
@@ -152,7 +152,7 @@ pub struct CodeGraph {
     edges: Vec<Edge>,
     out: HashMap<SymbolKey, SmallVec<[u32; 4]>>,
     inn: HashMap<SymbolKey, SmallVec<[u32; 4]>>,
-    by_name: HashMap<(String, SymbolKind), SmallVec<[SymbolKey; 2]>>,
+    by_name: HashMap<String, SmallVec<[(SymbolKind, SymbolKey); 2]>>,
     by_file: HashMap<FileId, Vec<SymbolKey>>,
     content_hashes: HashMap<FileId, [u8; 32]>,
 }
@@ -198,13 +198,14 @@ impl CodeGraph {
             RefKind::Implements => &[SymbolKind::Trait],
         };
 
-        let mut out = Vec::new();
-        for &symbol_kind in symbol_kinds {
-            if let Some(keys) = self.by_name.get(&(name.to_string(), symbol_kind)) {
-                out.extend(keys.iter().copied());
-            }
-        }
-        out
+        let Some(entries) = self.by_name.get(name) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter(|e| symbol_kinds.contains(&e.0))
+            .map(|e| e.1)
+            .collect()
     }
 
     /// Merge one file's [`FileShard`] into the graph.
@@ -221,9 +222,9 @@ impl CodeGraph {
             files.insert(sym.file);
             let key = sym.key;
             self.by_name
-                .entry((sym.name.clone(), sym.kind))
+                .entry(sym.name.clone())
                 .or_default()
-                .push(key);
+                .push((sym.kind, key));
             self.by_file.entry(sym.file).or_default().push(key);
             self.symbols.insert(key, sym);
         }
@@ -290,7 +291,7 @@ impl CodeGraph {
         self.edges.retain(|edge| !evicted.contains(&edge.from));
         for key in &keys {
             if let Some(sym) = self.symbols.remove(key) {
-                remove_name_entry(&mut self.by_name, &sym.name, sym.kind, *key);
+                remove_name_entry(&mut self.by_name, &sym.name, *key);
             }
         }
     }
@@ -545,19 +546,17 @@ fn ref_kind_for(kind: EdgeKind) -> Option<RefKind> {
     }
 }
 
-/// Remove `key` from the `(name, kind)` bucket, dropping the bucket when
-/// it empties so a stale name never lingers in the index.
+/// Remove `key` from `name`'s bucket, dropping the bucket when it empties
+/// so a stale name never lingers in the index.
 fn remove_name_entry(
-    by_name: &mut HashMap<(String, SymbolKind), SmallVec<[SymbolKey; 2]>>,
+    by_name: &mut HashMap<String, SmallVec<[(SymbolKind, SymbolKey); 2]>>,
     name: &str,
-    kind: SymbolKind,
     key: SymbolKey,
 ) {
-    let bucket_key = (name.to_string(), kind);
-    if let Some(keys) = by_name.get_mut(&bucket_key) {
-        keys.retain(|k| *k != key);
-        if keys.is_empty() {
-            by_name.remove(&bucket_key);
+    if let Some(entries) = by_name.get_mut(name) {
+        entries.retain(|(_, k)| *k != key);
+        if entries.is_empty() {
+            by_name.remove(name);
         }
     }
 }
@@ -668,6 +667,17 @@ mod tests {
             .unwrap()
     }
 
+    fn key_for(graph: &CodeGraph, name: &str, kind: SymbolKind) -> SymbolKey {
+        graph
+            .by_name
+            .get(name)
+            .unwrap()
+            .iter()
+            .find(|e| e.0 == kind)
+            .unwrap()
+            .1
+    }
+
     #[test]
     fn cross_file_call_resolves_after_reresolve_then_degrades_on_evict() {
         let a = shard_of(FileId(0), "a.rs", "fn a() {\n    foo();\n}\n");
@@ -678,11 +688,7 @@ mod tests {
         graph.insert_shard(b);
         graph.reresolve_unresolved();
 
-        let foo_key = graph
-            .by_name
-            .get(&("foo".to_string(), SymbolKind::Function))
-            .and_then(|keys| keys.first().copied())
-            .unwrap();
+        let foo_key = key_for(&graph, "foo", SymbolKind::Function);
         let resolved = call_edge(&graph);
         assert_eq!(resolved.to, Target::Sym(foo_key));
         assert_eq!(resolved.confidence, Confidence::Resolved);
@@ -710,7 +716,7 @@ mod tests {
         graph.insert_shard(shard_of(FileId(0), "a.rs", "struct Foo;\n"));
         graph.insert_shard(shard_of(FileId(1), "b.rs", "fn Foo() {}\n"));
 
-        let key_of = |kind| graph.by_name.get(&("Foo".to_string(), kind)).unwrap()[0];
+        let key_of = |kind| key_for(&graph, "Foo", kind);
         let struct_key = key_of(SymbolKind::Struct);
         let fn_key = key_of(SymbolKind::Function);
 
@@ -743,14 +749,8 @@ mod tests {
         ));
         graph.reresolve_unresolved();
 
-        let greet = graph
-            .by_name
-            .get(&("Greet".to_string(), SymbolKind::Trait))
-            .unwrap()[0];
-        let impl_key = graph
-            .by_name
-            .get(&("Point".to_string(), SymbolKind::Impl))
-            .unwrap()[0];
+        let greet = key_for(&graph, "Greet", SymbolKind::Trait);
+        let impl_key = key_for(&graph, "Point", SymbolKind::Impl);
 
         let implements: Vec<(SymbolKey, Target)> = graph
             .edges
@@ -767,7 +767,7 @@ mod tests {
         let mut graph = CodeGraph::new();
         graph.insert_shard(shard);
 
-        let key_of = |name: &str, kind| graph.by_name.get(&(name.to_string(), kind)).unwrap()[0];
+        let key_of = |name: &str, kind| key_for(&graph, name, kind);
         let helper = key_of("helper", SymbolKind::Function);
         let m = key_of("m", SymbolKind::Module);
         let helper_start = graph.symbols[&helper].def_range.start;
@@ -809,10 +809,7 @@ mod tests {
         let mut graph = CodeGraph::new();
         graph.insert_shard(shard_of(FileId(0), "m.rs", "fn helper() {}\n"));
 
-        let key = graph
-            .by_name
-            .get(&("helper".to_string(), SymbolKind::Function))
-            .unwrap()[0];
+        let key = key_for(&graph, "helper", SymbolKind::Function);
         assert_eq!(graph.symbol(key).map(|s| s.name.as_str()), Some("helper"));
         assert!(graph.symbol(SymbolKey([9u8; 16])).is_none());
     }

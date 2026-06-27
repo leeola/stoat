@@ -260,9 +260,9 @@ fn main() {
         for s in &shard.symbols {
             graph
                 .by_name
-                .entry((s.name.clone(), s.kind))
+                .entry(s.name.clone())
                 .or_default()
-                .push(s.key);
+                .push((s.kind, s.key));
         }
 
         let call = shard
