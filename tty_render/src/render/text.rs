@@ -19,7 +19,7 @@ use cosmic_text::{
     SwashCache,
 };
 use rustc_hash::FxHashMap;
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 use stoatty_term::{
     grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle},
     term::Damage,
@@ -510,8 +510,9 @@ impl TextPass {
                             .into_iter()
                             .partition(|glyph| region.contains(glyph.row, glyph.col));
 
-                    let plain_instances = self.build_text_instances(device, queue, plain_pending);
-                    let region_instances = self.build_text_instances(device, queue, region_pending);
+                    let plain_instances = self.build_text_instances(device, queue, &plain_pending);
+                    let region_instances =
+                        self.build_text_instances(device, queue, &region_pending);
 
                     self.count = plain_instances.len() as u32;
                     self.region_count = region_instances.len() as u32;
@@ -560,7 +561,7 @@ impl TextPass {
         self.overlay_draws = Vec::with_capacity(overlay_groups.len());
         for (index, (overlay, group)) in grid.overlays().iter().zip(overlay_groups).enumerate() {
             let start = overlay_instances.len() as u32;
-            let mut group_instances = self.build_text_instances(device, queue, group);
+            let mut group_instances = self.build_text_instances(device, queue, &group);
 
             // The sub-cell pixel offset shifts the content with the box, and the
             // scroll offset slides it within the box.
@@ -630,7 +631,7 @@ impl TextPass {
         &mut self,
         device: &Device,
         queue: &Queue,
-        pending: Vec<PendingGlyph>,
+        pending: &[PendingGlyph],
     ) -> Vec<TextInstance> {
         let mut instances = Vec::with_capacity(pending.len());
         for glyph in pending {
@@ -1045,8 +1046,9 @@ impl TextPass {
         };
 
         for &row in &rows_to_build {
-            let glyphs = self.glyph_row_cache[row].clone();
-            self.plain_row_instances[row] = self.build_text_instances(device, queue, glyphs);
+            let glyphs = mem::take(&mut self.glyph_row_cache[row]);
+            self.plain_row_instances[row] = self.build_text_instances(device, queue, &glyphs);
+            self.glyph_row_cache[row] = glyphs;
         }
 
         let offset: usize = self.plain_row_instances[..first].iter().map(Vec::len).sum();
