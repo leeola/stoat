@@ -120,7 +120,9 @@ pub async fn spawn_claude(
     cwd: &Path,
 ) -> std::io::Result<Box<dyn TerminalSession>> {
     let socket_path = agent_socket_path(uid)?;
-    host.spawn(claude_spawn_args(uid, cwd, &socket_path)).await
+    let editor_command = editor_bridge_command();
+    host.spawn(claude_spawn_args(uid, cwd, &socket_path, &editor_command))
+        .await
 }
 
 /// Spawn the reader that pumps an agent session's PTY output into its
@@ -170,7 +172,12 @@ pub fn agent_socket_path(uid: WorkspaceUid) -> std::io::Result<PathBuf> {
     Ok(stoat_log::state_dir()?.join(format!("agent-{uid}.sock")))
 }
 
-fn claude_spawn_args(uid: WorkspaceUid, cwd: &Path, socket_path: &Path) -> SpawnArgs {
+fn claude_spawn_args(
+    uid: WorkspaceUid,
+    cwd: &Path,
+    socket_path: &Path,
+    editor_command: &str,
+) -> SpawnArgs {
     SpawnArgs {
         program: "claude".into(),
         args: Vec::new(),
@@ -180,10 +187,33 @@ fn claude_spawn_args(uid: WorkspaceUid, cwd: &Path, socket_path: &Path) -> Spawn
                 "STOAT_AGENT_SOCK".into(),
                 socket_path.to_string_lossy().into_owned(),
             ),
+            ("EDITOR".into(), editor_command.to_string()),
+            ("VISUAL".into(), editor_command.to_string()),
         ],
         cwd: cwd.to_path_buf(),
         width: 80,
         rows: 24,
+    }
+}
+
+/// The `$EDITOR` command the owned agent runs to compose prompts in the IDE.
+///
+/// Resolves the current executable so the agent invokes this same binary's
+/// `editor` subcommand even when a bare `stoat` is not on its PATH. The
+/// subcommand reads the socket from the already-injected `STOAT_AGENT_SOCK`, so
+/// no further arguments are baked in.
+fn editor_bridge_command() -> String {
+    editor_command_for(std::env::current_exe().ok().as_deref())
+}
+
+/// Format the editor command from a resolved executable path.
+///
+/// Falls back to a bare `stoat editor` when the path is unknown, relying on
+/// PATH resolution in that case.
+fn editor_command_for(exe: Option<&Path>) -> String {
+    match exe {
+        Some(exe) => format!("{} editor", exe.to_string_lossy()),
+        None => "stoat editor".to_string(),
     }
 }
 
@@ -262,9 +292,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_args_inject_session_and_socket_env() {
+    fn claude_args_inject_session_socket_and_editor_env() {
         let uid = WorkspaceUid(0xABCD);
-        let args = claude_spawn_args(uid, Path::new("/work"), Path::new("/run/agent.sock"));
+        let args = claude_spawn_args(
+            uid,
+            Path::new("/work"),
+            Path::new("/run/agent.sock"),
+            "/usr/bin/stoat editor",
+        );
         assert_eq!(args.program, "claude");
         assert_eq!(args.cwd, Path::new("/work"));
         assert_eq!(
@@ -275,7 +310,18 @@ mod tests {
                     "STOAT_AGENT_SOCK".to_string(),
                     "/run/agent.sock".to_string()
                 ),
+                ("EDITOR".to_string(), "/usr/bin/stoat editor".to_string()),
+                ("VISUAL".to_string(), "/usr/bin/stoat editor".to_string()),
             ],
         );
+    }
+
+    #[test]
+    fn editor_command_uses_exe_path_with_fallback() {
+        assert_eq!(
+            editor_command_for(Some(Path::new("/usr/bin/stoat"))),
+            "/usr/bin/stoat editor"
+        );
+        assert_eq!(editor_command_for(None), "stoat editor");
     }
 }
