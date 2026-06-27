@@ -54,12 +54,15 @@ pub enum SymbolKind {
     EnumVariant,
 }
 
-/// A single call site where one function, method, or macro is invoked.
+/// One use of a name the source does not define here, such as a call or a
+/// type-position identifier.
 ///
-/// `site_range` spans the invoked identifier (the `@reference.call`
-/// capture), and `name` is its text. This pass does not attribute the
-/// call to its enclosing definition. That attribution is resolved
-/// downstream by range containment.
+/// `site_range` spans the referenced identifier (the `@reference.*`
+/// capture) and `name` is its text. [`Self::kind`] records which kind of
+/// reference it is.
+///
+/// This pass does not attribute the reference to its enclosing definition;
+/// that attribution is resolved downstream by range containment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefSite {
     pub name: String,
@@ -67,12 +70,15 @@ pub struct RefSite {
     pub site_range: Range<usize>,
 }
 
-/// The kind of reference a [`RefSite`] records. Only call sites are
-/// collected for now, but the taxonomy stays open for later reference
-/// kinds (e.g. type uses).
+/// The kind of reference a [`RefSite`] records.
+///
+/// [`RefKind::Call`] is a function, method, or macro invocation;
+/// [`RefKind::Type`] is a type-position identifier use, such as a type name
+/// in a signature or field. Value-position identifier uses are not collected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefKind {
     Call,
+    Type,
 }
 
 /// Extract every definition captured by `query` (an `outline.scm`) over
@@ -123,33 +129,51 @@ pub fn extract_symbols(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<Symbol
     out
 }
 
-/// Collect every call site captured by `query` (a `tags.scm`) over the
+/// Collect every reference site captured by `query` (a `tags.scm`) over the
 /// tree rooted at `root`, reading identifier text from `rope`.
 ///
-/// Returns an empty vector when `query` lacks a `@reference.call`
-/// capture. Each capture becomes one [`RefSite`]. The result is in the
-/// query cursor's match order, not sorted.
+/// Each `@reference.*` capture becomes one [`RefSite`] tagged with the
+/// [`RefKind`] its capture name maps to. Returns an empty vector when `query`
+/// has no `@reference.*` capture. The result is in the query cursor's match
+/// order, not sorted.
 pub fn extract_references(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<RefSite> {
     let mut out = Vec::new();
-    let Some(call_idx) = query.capture_index_for_name("reference.call") else {
+
+    let kinds: Vec<(u32, RefKind)> = query
+        .capture_names()
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &name)| Some((idx as u32, ref_kind(name)?)))
+        .collect();
+    if kinds.is_empty() {
         return out;
-    };
+    }
 
     let provider = RopeTextProvider { rope };
     let mut cursor_h = QueryCursorHandle::new();
     let mut matches = cursor_h.matches(query, root, provider);
     while let Some(m) = matches.next() {
         for cap in m.captures {
-            if cap.index == call_idx {
+            if let Some(&(_, kind)) = kinds.iter().find(|&&(idx, _)| idx == cap.index) {
                 out.push(RefSite {
                     name: text_of(cap.node, rope),
-                    kind: RefKind::Call,
+                    kind,
                     site_range: cap.node.byte_range(),
                 });
             }
         }
     }
     out
+}
+
+/// Map a tags-query capture name to the [`RefKind`] it records, or `None`
+/// for any capture that is not a `@reference.*`.
+fn ref_kind(capture_name: &str) -> Option<RefKind> {
+    match capture_name {
+        "reference.call" => Some(RefKind::Call),
+        "reference.type" => Some(RefKind::Type),
+        _ => None,
+    }
 }
 
 fn symbol_kind(item: Node<'_>) -> Option<SymbolKind> {
@@ -359,6 +383,31 @@ fn demo() {
                 &CALLS[r.site_range.clone()],
                 r.name,
                 "site_range must slice to the call name {}",
+                r.name
+            );
+        }
+    }
+
+    const TYPE_USES: &str = "fn f(p: Point) -> Dir {}";
+
+    #[test]
+    fn extract_type_references_over_rust_snippet() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        let query = rust.tags_query.as_ref().unwrap();
+        let rope = Rope::from(TYPE_USES);
+        let tree = parse_rope(rust, &rope, None).unwrap();
+        let mut refs = extract_references(query, tree.root_node(), &rope);
+        refs.sort_by_key(|r| r.site_range.start);
+
+        let got: Vec<(&str, RefKind)> = refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
+        assert_eq!(got, vec![("Point", RefKind::Type), ("Dir", RefKind::Type)]);
+
+        for r in &refs {
+            assert_eq!(
+                &TYPE_USES[r.site_range.clone()],
+                r.name,
+                "site_range must slice to the type name {}",
                 r.name
             );
         }

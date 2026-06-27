@@ -13,3 +13,8 @@
     (scoped_identifier
       name: (identifier) @reference.call)
   ])
+
+(type_identifier) @reference.type
+
+(scoped_type_identifier
+  name: (type_identifier) @reference.type)
