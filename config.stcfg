@@ -515,6 +515,7 @@ on key {
         c -> [GotoCaller(), SetMode(normal)];
         C -> [GotoCallee(), SetMode(normal)];
         R -> [GotoReferences(), SetMode(normal)];
+        T -> [GotoImplementors(), SetMode(normal)];
         u -> [GotoDiffCallerUp(), SetMode(normal)];
         o -> [GotoDiffCalleeDown(), SetMode(normal)];
         m -> [MarkTrailStart(), SetMode(normal)];

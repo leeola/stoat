@@ -132,6 +132,14 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
     goto_along(stoat, EdgeKind::References, Dir::Up)
 }
 
+/// Navigate from the trait under the cursor to one of its implementors.
+///
+/// Steps up the implements axis. A no-op when the cursor is on no indexed
+/// symbol or nothing implements it.
+pub(crate) fn goto_implementors(stoat: &mut Stoat) -> UpdateEffect {
+    goto_along(stoat, EdgeKind::Implements, Dir::Up)
+}
+
 /// Step one hop along the `kind` axis from the cursor's symbol and navigate
 /// to the result, presenting a picker when several neighbors tie.
 fn goto_along(stoat: &mut Stoat, kind: EdgeKind, dir: Dir) -> UpdateEffect {

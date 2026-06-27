@@ -1553,6 +1553,19 @@ define_action!(
 );
 
 define_action!(
+    GotoImplementorsDef,
+    GotoImplementors,
+    "GotoImplementors",
+    ActionKind::GotoImplementors,
+    "jump to an implementor of the trait",
+    "Step from the trait under the cursor to an impl block that implements \
+     it. Jumps directly to a lone implementor, opening its file when it lies \
+     elsewhere, and opens the symbol picker to choose among several. No-op \
+     when the cursor is on no indexed symbol or nothing implements it.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoDiffCallerUpDef,
     GotoDiffCallerUp,
     "GotoDiffCallerUp",
