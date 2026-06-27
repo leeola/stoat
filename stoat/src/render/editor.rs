@@ -207,16 +207,29 @@ pub(crate) fn render_editor_with_overlay(
 
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
     let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
+    let rope = buffer_snapshot.rope();
+    let visible = {
+        let rope_len = rope.len();
+        let row_offset = |row: u32| {
+            snapshot
+                .display_to_buffer(DisplayPoint::new(row, 0))
+                .map(|point| rope.point_to_offset(point))
+                .unwrap_or(rope_len)
+                .min(rope_len)
+        };
+        row_offset(editor.scroll_row)..row_offset(end_row)
+    };
     for selection in editor.selections.all_anchors() {
         let start_offset = buffer_snapshot.resolve_anchor(&selection.start);
         let end_offset = buffer_snapshot.resolve_anchor(&selection.end);
         let head_offset = buffer_snapshot.resolve_anchor(&selection.head());
-        let rope = buffer_snapshot.rope();
 
-        if start_offset != end_offset {
-            let mut offset = start_offset;
-            let mut chars = rope.chars_at(offset);
-            while offset < end_offset {
+        let lo = start_offset.max(visible.start);
+        let hi = end_offset.min(visible.end);
+        if lo < hi {
+            let mut offset = lo;
+            let mut chars = rope.chars_at(lo);
+            while offset < hi {
                 let Some(ch) = chars.next() else {
                     break;
                 };
