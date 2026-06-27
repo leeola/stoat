@@ -8,6 +8,7 @@ use crate::{
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
+    code_index::build::{reindex_buffer, IndexUpdate, ReindexTarget},
     commit_list::CommitListState,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
@@ -33,7 +34,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::{Executor, Task};
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{mpsc::UnboundedSender, oneshot, Notify};
 
 new_key_type! {
     pub struct WorkspaceId;
@@ -123,6 +124,9 @@ pub struct Workspace {
     /// dropped when the plan completes or aborts.
     pub(crate) rebase_active: Option<ActiveRebase>,
     parse_jobs: HashMap<BufferId, ParseJob>,
+    /// In-flight live-reindex jobs, one per buffer, held so the spawned
+    /// extraction is not cancelled. Replaced when the buffer reparses.
+    index_jobs: HashMap<BufferId, Task<()>>,
     pub(crate) badges: BadgeTray,
     /// Status of the owned Claude subshell for this workspace's session, or
     /// `None` until one is spawned. Owned here so the render process reads it
@@ -177,6 +181,7 @@ impl Workspace {
             rebase: None,
             rebase_active: None,
             parse_jobs: HashMap::new(),
+            index_jobs: HashMap::new(),
             badges: BadgeTray::new(),
             agent: None,
             editor_bridge_waiters: HashMap::new(),
@@ -217,6 +222,7 @@ impl Workspace {
         executor: &Executor,
         syntax_styles: &SyntaxStyles,
         redraw_notify: &Arc<Notify>,
+        index_update_tx: &UnboundedSender<IndexUpdate>,
     ) {
         let waker = futures::task::noop_waker();
         let mut completed: Vec<ParseJobOutput> = Vec::new();
@@ -242,6 +248,23 @@ impl Workspace {
                         syntax_styles.interner.clone(),
                     );
                 }
+            }
+            let text = self.buffers.get(out.buffer_id).map(|shared| {
+                shared
+                    .read()
+                    .expect("buffer poisoned")
+                    .snapshot
+                    .visible_text
+                    .to_string()
+            });
+            if let Some(text) = text {
+                self.enqueue_reindex(
+                    executor,
+                    index_update_tx,
+                    redraw_notify,
+                    out.buffer_id,
+                    text,
+                );
             }
         }
 
@@ -311,6 +334,13 @@ impl Workspace {
                         );
                     }
                 }
+                self.enqueue_reindex(
+                    executor,
+                    index_update_tx,
+                    redraw_notify,
+                    buffer_id,
+                    snapshot.visible_text.to_string(),
+                );
                 continue;
             }
 
@@ -327,6 +357,41 @@ impl Workspace {
                 },
             );
         }
+    }
+
+    /// Spawn a live re-index of `buffer_id` from its current `text`.
+    ///
+    /// Skips buffers with no file path or no resolved language. The spawned
+    /// job is stored so it is not cancelled, replacing any prior one for the
+    /// buffer.
+    fn enqueue_reindex(
+        &mut self,
+        executor: &Executor,
+        index_update_tx: &UnboundedSender<IndexUpdate>,
+        redraw_notify: &Arc<Notify>,
+        buffer_id: BufferId,
+        text: String,
+    ) {
+        let Some(path) = self.buffers.path_for(buffer_id).map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let Some(language) = self.buffers.language_for(buffer_id) else {
+            return;
+        };
+        let target = ReindexTarget {
+            git_root: self.git_root.clone(),
+            workspace: self.id,
+            language,
+            path,
+            text,
+        };
+        let task = reindex_buffer(
+            executor,
+            index_update_tx.clone(),
+            redraw_notify.clone(),
+            target,
+        );
+        self.index_jobs.insert(buffer_id, task);
     }
 
     pub(crate) fn layout(&mut self, total_area: Rect) {

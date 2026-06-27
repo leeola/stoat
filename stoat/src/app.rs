@@ -1075,6 +1075,18 @@ impl Stoat {
                         }
                     }
                 },
+                IndexUpdate::Reindex {
+                    workspace,
+                    file,
+                    shard,
+                } => {
+                    if let Some(ws) = self.workspaces.get_mut(workspace) {
+                        ws.code_graph.evict_file(file);
+                        ws.code_graph.insert_shard(shard);
+                        ws.code_graph.reresolve_unresolved();
+                        ws.index_generation += 1;
+                    }
+                },
             }
         }
     }
@@ -2675,9 +2687,15 @@ impl Stoat {
             executor,
             syntax_styles,
             redraw_notify,
+            index_update_tx,
             ..
         } = self;
-        workspaces[*active_workspace].drive_parse_jobs(executor, syntax_styles, redraw_notify);
+        workspaces[*active_workspace].drive_parse_jobs(
+            executor,
+            syntax_styles,
+            redraw_notify,
+            index_update_tx,
+        );
     }
 
     /// Paint the current state into a fresh [`Buffer`] and return it.
@@ -3603,6 +3621,71 @@ mod tests {
             ws.code_graph.symbol_at(codegraph::FileId(0), 5),
             Some(codegraph::SymbolKey([1u8; 16]))
         );
+    }
+
+    #[test]
+    fn reindex_replaces_a_files_symbols_in_the_graph() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+        let workspace = stoat.active_workspace;
+        let file = codegraph::FileId(7);
+
+        let symbol = |key: u8, name: &str| codegraph::Symbol {
+            key: codegraph::SymbolKey([key; 16]),
+            file,
+            name: name.to_string(),
+            kind: stoat_language::SymbolKind::Function,
+            container: vec![],
+            def_range: 0..11,
+            name_range: 3..6,
+            body_hash: [0u8; 32],
+        };
+
+        stoat
+            .index_update_tx
+            .send(IndexUpdate::Shard {
+                workspace,
+                rel_path: "a.rs".to_string(),
+                shard: codegraph::FileShard {
+                    content_hash: [0u8; 32],
+                    symbols: vec![symbol(1, "foo")],
+                    edges: vec![],
+                },
+                persist: false,
+            })
+            .unwrap();
+        stoat.drain_index_updates();
+        assert_eq!(
+            stoat.active_workspace().code_graph.symbol_at(file, 5),
+            Some(codegraph::SymbolKey([1u8; 16]))
+        );
+
+        stoat
+            .index_update_tx
+            .send(IndexUpdate::Reindex {
+                workspace,
+                file,
+                shard: codegraph::FileShard {
+                    content_hash: [9u8; 32],
+                    symbols: vec![symbol(2, "bar")],
+                    edges: vec![],
+                },
+            })
+            .unwrap();
+        stoat.drain_index_updates();
+
+        let ws = stoat.active_workspace();
+        assert_eq!(
+            ws.code_graph.symbol_at(file, 5),
+            Some(codegraph::SymbolKey([2u8; 16])),
+            "reindex evicts the old symbol and inserts the new one"
+        );
+        assert_eq!(ws.index_generation, 2);
     }
 
     #[test]

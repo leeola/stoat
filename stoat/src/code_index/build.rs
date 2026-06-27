@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_language::{extract_references, extract_symbols, parse_rope, LanguageRegistry};
+use stoat_language::{extract_references, extract_symbols, parse_rope, Language, LanguageRegistry};
 use stoat_scheduler::{Executor, Task};
 use stoat_text::Rope;
 use tokio::sync::{mpsc::UnboundedSender, Notify};
@@ -41,6 +41,14 @@ pub(crate) enum IndexUpdate {
     Complete {
         workspace: WorkspaceId,
         manifest: Manifest,
+    },
+    /// One edited buffer's freshly re-extracted shard. The drain evicts the
+    /// file's prior symbols, inserts these, and re-resolves so callers of
+    /// the changed file re-link. Not persisted until the buffer is saved.
+    Reindex {
+        workspace: WorkspaceId,
+        file: FileId,
+        shard: FileShard,
     },
 }
 
@@ -144,6 +152,47 @@ pub(crate) fn build_index(
     })
 }
 
+/// Inputs for re-indexing one edited buffer off the main thread.
+pub(crate) struct ReindexTarget {
+    pub(crate) git_root: PathBuf,
+    pub(crate) workspace: WorkspaceId,
+    pub(crate) language: Arc<Language>,
+    pub(crate) path: PathBuf,
+    pub(crate) text: String,
+}
+
+/// Spawn a job to re-extract one edited buffer and deliver its
+/// [`IndexUpdate::Reindex`].
+///
+/// Extraction runs on the blocking pool from the buffer's in-memory text,
+/// so it never touches disk or stalls the parse tick. The returned [`Task`]
+/// must be kept alive until the job runs. Progress is reported through `tx`.
+pub(crate) fn reindex_buffer(
+    executor: &Executor,
+    tx: UnboundedSender<IndexUpdate>,
+    redraw: Arc<Notify>,
+    target: ReindexTarget,
+) -> Task<()> {
+    executor.spawn_blocking(move || {
+        let ReindexTarget {
+            git_root,
+            workspace,
+            language,
+            path,
+            text,
+        } = target;
+        if let Some((rel_path, shard)) = extract_shard(&language, &git_root, &path, &text) {
+            let file = file_id(&rel_path);
+            let _ = tx.send(IndexUpdate::Reindex {
+                workspace,
+                file,
+                shard,
+            });
+            redraw.notify_one();
+        }
+    })
+}
+
 /// Whether a file's shard was loaded from disk or freshly extracted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShardSource {
@@ -221,15 +270,27 @@ fn index_file(
     path: &Path,
 ) -> Option<(String, FileShard)> {
     let language = languages.for_path(path)?;
-    let rel_path = relpath(git_root, path)?;
-    let file = file_id(&rel_path);
-
     let mut bytes = Vec::new();
     fs.read(path, &mut bytes).ok()?;
     let text = String::from_utf8(bytes).ok()?;
+    extract_shard(&language, git_root, path, &text)
+}
 
-    let rope = Rope::from(text.as_str());
-    let tree = parse_rope(&language, &rope, None)?;
+/// Parse `text` as `language` and build the file's shard, or `None` when
+/// `path` is not under `git_root`.
+///
+/// Takes the source as a string so an open buffer can be re-indexed from
+/// its in-memory contents without a disk read.
+fn extract_shard(
+    language: &Language,
+    git_root: &Path,
+    path: &Path,
+    text: &str,
+) -> Option<(String, FileShard)> {
+    let rel_path = relpath(git_root, path)?;
+
+    let rope = Rope::from(text);
+    let tree = parse_rope(language, &rope, None)?;
     let root = tree.root_node();
 
     let defs = language
@@ -243,7 +304,14 @@ fn index_file(
         .map(|query| extract_references(query, root, &rope))
         .unwrap_or_default();
 
-    let shard = build_shard(file, &rel_path, fingerprint_bytes(&text), &text, defs, refs);
+    let shard = build_shard(
+        file_id(&rel_path),
+        &rel_path,
+        fingerprint_bytes(text),
+        text,
+        defs,
+        refs,
+    );
     Some((rel_path, shard))
 }
 
