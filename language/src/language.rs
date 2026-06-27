@@ -51,6 +51,12 @@ pub struct Language {
     /// wired into a consumer. Reserved for symbol extraction. `None` for
     /// languages without an `outline.scm` (e.g. toml).
     pub outline_query: Option<Query>,
+    /// Tags query loaded from `tags.scm`. Captures `@reference.call`
+    /// at each call site (free functions, method calls, and macro
+    /// invocations) for building a call graph. Loaded but not yet
+    /// wired into a consumer. Reserved for reference extraction.
+    /// `None` for languages without a `tags.scm` (only rust ships one).
+    pub tags_query: Option<Query>,
     /// Line-comment marker for languages that have one (e.g. `"//"`
     /// for rust, `"#"` for toml). `None` for languages without line
     /// comments (e.g. JSON, markdown). Used by the `ToggleComments`
@@ -140,6 +146,7 @@ struct AuxQuerySources {
     indents: Option<&'static str>,
     textobjects: Option<&'static str>,
     outline: Option<&'static str>,
+    tags: Option<&'static str>,
     line_comment: Option<&'static str>,
 }
 
@@ -176,6 +183,9 @@ fn make_language_with_injections(
     let outline_query = aux
         .outline
         .and_then(|src| try_compile_query(name, "outline", &grammar, src));
+    let tags_query = aux
+        .tags
+        .and_then(|src| try_compile_query(name, "tags", &grammar, src));
     Language {
         name,
         extensions,
@@ -188,6 +198,7 @@ fn make_language_with_injections(
         indent_query,
         textobjects_query,
         outline_query,
+        tags_query,
         line_comment: aux.line_comment,
     }
 }
@@ -247,6 +258,7 @@ fn make_rust() -> Language {
             outline: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/rust/outline.scm"
             )),
+            tags: Some(include_str!("queries/rust/tags.scm")),
             line_comment: Some("//"),
         },
     )
@@ -269,6 +281,7 @@ fn make_json() -> Language {
             outline: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/json/outline.scm"
             )),
+            tags: None,
             line_comment: None,
         },
     )
@@ -308,6 +321,7 @@ fn make_markdown_with_injections(injections: Vec<LanguageInjection>) -> Language
             outline: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/markdown/outline.scm"
             )),
+            tags: None,
             line_comment: None,
         },
     )
@@ -486,6 +500,26 @@ mod tests {
                 .capture_index_for_name("name")
                 .is_some(),
             "json outline.scm must expose a @name capture"
+        );
+    }
+
+    #[test]
+    fn tags_query_loaded_for_rust() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        assert!(
+            rust.tags_query
+                .as_ref()
+                .expect("rust tags.scm must compile against the bundled grammar")
+                .capture_index_for_name("reference.call")
+                .is_some(),
+            "rust tags.scm must expose a @reference.call capture"
+        );
+
+        let json = reg.languages().iter().find(|l| l.name == "json").unwrap();
+        assert!(
+            json.tags_query.is_none(),
+            "json has no tags.scm; query should be None"
         );
     }
 }
