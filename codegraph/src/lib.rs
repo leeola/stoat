@@ -20,8 +20,13 @@ use std::{
 use stoat_language::{RefKind, SymbolKind};
 
 mod build;
+mod codec;
 
 pub use build::build_shard;
+pub use codec::{
+    decode_manifest, decode_shard, encode_manifest, encode_shard, FileEntry, Manifest,
+    SCHEMA_VERSION,
+};
 
 /// A workspace-relative file, interned to a small integer id.
 ///
