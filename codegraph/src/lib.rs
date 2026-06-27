@@ -149,6 +149,7 @@ pub struct CodeGraph {
     inn: HashMap<SymbolKey, SmallVec<[u32; 4]>>,
     by_name: HashMap<(String, SymbolKind), SmallVec<[SymbolKey; 2]>>,
     by_file: HashMap<FileId, Vec<SymbolKey>>,
+    content_hashes: HashMap<FileId, [u8; 32]>,
 }
 
 impl CodeGraph {
@@ -196,6 +197,7 @@ impl CodeGraph {
     /// and linked into the adjacency, while one whose target is not yet
     /// known stays unresolved for [`Self::reresolve_unresolved`] to link.
     pub fn insert_shard(&mut self, shard: FileShard) {
+        let content_hash = shard.content_hash;
         let mut files: HashSet<FileId> = HashSet::new();
         for sym in shard.symbols {
             files.insert(sym.file);
@@ -207,8 +209,9 @@ impl CodeGraph {
             self.by_file.entry(sym.file).or_default().push(key);
             self.symbols.insert(key, sym);
         }
-        for file in files {
-            self.sort_file_index(file);
+        for file in &files {
+            self.content_hashes.insert(*file, content_hash);
+            self.sort_file_index(*file);
         }
 
         for mut edge in shard.edges {
@@ -231,6 +234,7 @@ impl CodeGraph {
     /// back to [`Target::Unresolved`] so it can re-link to a future
     /// definition rather than dangle at a missing key.
     pub fn evict_file(&mut self, file: FileId) {
+        self.content_hashes.remove(&file);
         let Some(keys) = self.by_file.remove(&file) else {
             return;
         };
@@ -333,6 +337,15 @@ impl CodeGraph {
             }
         }
         None
+    }
+
+    /// The content hash last recorded for `file`, or `None` when no shard
+    /// for it is present.
+    ///
+    /// Lets a caller detect that a file's on-disk content matches what the
+    /// graph already holds and skip re-extracting it.
+    pub fn content_hash(&self, file: FileId) -> Option<[u8; 32]> {
+        self.content_hashes.get(&file).copied()
     }
 
     /// The neighbors of `from` along edges of `kind` in direction `dir`.
@@ -638,6 +651,31 @@ mod tests {
         assert_eq!(graph.symbol_at(FileId(0), m_range.start), Some(m));
         assert_eq!(graph.symbol_at(FileId(0), m_range.end), None);
         assert_eq!(graph.symbol_at(FileId(1), helper_start), None);
+    }
+
+    #[test]
+    fn content_hash_tracks_inserted_and_evicted_shards() {
+        let mut graph = CodeGraph::new();
+        assert_eq!(graph.content_hash(FileId(0)), None);
+
+        graph.insert_shard(FileShard {
+            content_hash: [5u8; 32],
+            symbols: vec![Symbol {
+                key: SymbolKey([1u8; 16]),
+                file: FileId(0),
+                name: "foo".to_string(),
+                kind: SymbolKind::Function,
+                container: vec![],
+                def_range: 0..10,
+                name_range: 3..6,
+                body_hash: [0u8; 32],
+            }],
+            edges: vec![],
+        });
+        assert_eq!(graph.content_hash(FileId(0)), Some([5u8; 32]));
+
+        graph.evict_file(FileId(0));
+        assert_eq!(graph.content_hash(FileId(0)), None);
     }
 
     fn call_chain(n: usize) -> (CodeGraph, Vec<SymbolKey>) {
