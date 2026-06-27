@@ -3854,6 +3854,7 @@ name = "stoat_language"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "serde",
  "stoat_scheduler",
  "stoat_text",
  "tree-sitter",

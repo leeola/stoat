@@ -10,6 +10,7 @@
 //! fixed snippets.
 
 use crate::highlight::{QueryCursorHandle, RopeTextProvider};
+use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use stoat_text::Rope;
 use tree_sitter::{Node, Query, StreamingIterator};
@@ -36,7 +37,7 @@ pub struct SymbolDef {
 /// A function is [`SymbolKind::Method`] when enclosed by an impl or trait
 /// and [`SymbolKind::Function`] otherwise. The grammar has no distinct
 /// method node, so the container decides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymbolKind {
     Function,
     Method,
@@ -69,7 +70,7 @@ pub struct RefSite {
 /// The kind of reference a [`RefSite`] records. Only call sites are
 /// collected for now, but the taxonomy stays open for later reference
 /// kinds (e.g. type uses).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefKind {
     Call,
 }
