@@ -3934,6 +3934,69 @@ mod tests {
     }
 
     #[test]
+    fn editing_a_buffer_live_reindexes_a_new_calls_edge() {
+        use crate::host::FakeFs;
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn caller() {}\nfn callee() {}\n");
+        stoat.set_fs_host(fs);
+
+        let pane = stoat.active_workspace().panes.focus();
+        let buffer_id = crate::action_handlers::file::open_file_in_pane(
+            &mut stoat,
+            pane,
+            Path::new("/repo/src/a.rs"),
+        )
+        .expect("open the buffer");
+
+        let drive = |stoat: &mut Stoat| {
+            stoat.drive_parse_jobs();
+            scheduler.run_until_parked();
+            stoat.drain_index_updates();
+        };
+
+        drive(&mut stoat);
+        let file = crate::code_index::build::file_id("src/a.rs");
+        let caller = stoat
+            .active_workspace()
+            .code_graph
+            .symbol_at(file, 5)
+            .expect("caller indexed");
+        assert!(
+            stoat
+                .active_workspace()
+                .code_graph
+                .step(caller, codegraph::EdgeKind::Calls, codegraph::Dir::Down)
+                .is_empty(),
+            "caller has no callee edge before the edit",
+        );
+
+        {
+            let ws = stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            buffer.write().expect("poisoned").edit(13..13, "callee();");
+        }
+
+        drive(&mut stoat);
+        let ws = stoat.active_workspace();
+        let caller = ws.code_graph.symbol_at(file, 5).expect("caller reindexed");
+        let callee = ws.code_graph.symbol_at(file, 27).expect("callee reindexed");
+        assert_eq!(
+            ws.code_graph
+                .step(caller, codegraph::EdgeKind::Calls, codegraph::Dir::Down),
+            vec![callee],
+            "the edit's new call appears as a Calls edge in the graph",
+        );
+    }
+
+    #[test]
     fn agent_output_feeds_emulator() {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
