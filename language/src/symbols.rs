@@ -412,4 +412,17 @@ fn demo() {
             );
         }
     }
+
+    #[test]
+    fn scoped_type_yields_single_reference() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        let query = rust.tags_query.as_ref().unwrap();
+        let rope = Rope::from("fn f(p: foo::Bar) {}");
+        let tree = parse_rope(rust, &rope, None).unwrap();
+        let refs = extract_references(query, tree.root_node(), &rope);
+
+        let got: Vec<(&str, RefKind)> = refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
+        assert_eq!(got, vec![("Bar", RefKind::Type)]);
+    }
 }
