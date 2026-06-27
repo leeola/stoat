@@ -986,15 +986,34 @@ impl Stoat {
     pub(crate) fn start_index_build(&mut self) {
         let workspace = self.active_workspace;
         let git_root = self.active_workspace().git_root.clone();
+        let warm = self.warm_index_load(&git_root);
+        let handles = crate::code_index::build::IndexBuild {
+            fs: self.fs_host.clone(),
+            languages: self.language_registry.clone(),
+            tx: self.index_update_tx.clone(),
+            redraw: self.redraw_notify.clone(),
+        };
         self._index_build_task = Some(crate::code_index::build::build_index(
             &self.executor,
-            self.fs_host.clone(),
-            self.language_registry.clone(),
-            self.index_update_tx.clone(),
-            self.redraw_notify.clone(),
+            handles,
             git_root,
             workspace,
+            warm,
         ));
+    }
+
+    /// Read the persisted manifest for a warm index load.
+    ///
+    /// Returns `None` to fall through to a full cold build when persistence
+    /// is disabled, no manifest is present, or its [`codegraph::SCHEMA_VERSION`]
+    /// no longer matches.
+    fn warm_index_load(&self, git_root: &Path) -> Option<(PathBuf, codegraph::Manifest)> {
+        if self.persistence_disabled {
+            return None;
+        }
+        let dir = crate::code_index::store::index_dir_for(git_root, self.fs_host.as_ref()).ok()?;
+        let manifest = crate::code_index::store::read_manifest(&dir, self.fs_host.as_ref()).ok()?;
+        (manifest.schema_version == codegraph::SCHEMA_VERSION).then_some((dir, manifest))
     }
 
     /// Merge any pending cold-build shards into their workspace graphs.
@@ -1009,9 +1028,10 @@ impl Stoat {
                     workspace,
                     rel_path,
                     shard,
+                    persist,
                 } => {
-                    let bytes =
-                        (!self.persistence_disabled).then(|| codegraph::encode_shard(&shard));
+                    let bytes = (persist && !self.persistence_disabled)
+                        .then(|| codegraph::encode_shard(&shard));
                     let Some(ws) = self.workspaces.get_mut(workspace) else {
                         continue;
                     };
@@ -3571,6 +3591,7 @@ mod tests {
                 workspace,
                 rel_path: "a.rs".to_string(),
                 shard,
+                persist: true,
             })
             .unwrap();
 

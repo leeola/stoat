@@ -4,10 +4,6 @@
 //! how workspace state is persisted. Every write goes through a temp file
 //! and a rename so a crash mid-write cannot leave a half-written index.
 
-// FIXME: drop this allow once the cold-build and load paths call into the
-// store. These functions are the index persistence API, with no caller yet.
-#![allow(dead_code)]
-
 use crate::{host::FsHost, workspace::anchor_state_dir};
 use codegraph::{decode_manifest, encode_manifest, Manifest};
 use std::{
@@ -65,6 +61,12 @@ pub(crate) fn write_shard(
 /// Read a file's encoded shard bytes under `index_dir`.
 pub(crate) fn read_shard(index_dir: &Path, rel_path: &str, fs: &dyn FsHost) -> io::Result<Vec<u8>> {
     read_bytes(&shard_path(index_dir, rel_path), fs)
+}
+
+/// Delete a file's shard from `index_dir`, used when the source file is
+/// gone so its stale shard does not linger.
+pub(crate) fn delete_shard(index_dir: &Path, rel_path: &str, fs: &dyn FsHost) -> io::Result<()> {
+    fs.remove_file(&shard_path(index_dir, rel_path))
 }
 
 /// The shard path for a workspace-relative file, named by a hash of the path

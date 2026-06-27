@@ -9,9 +9,17 @@
 //! All parsing and extraction runs on the blocking pool. Only the cheap
 //! merge happens on the main thread, off the paint path.
 
-use crate::{buffer_registry::fingerprint_bytes, host::FsHost, workspace::WorkspaceId};
-use codegraph::{build_shard, FileEntry, FileId, FileShard, Manifest, SCHEMA_VERSION};
-use std::{path::Path, sync::Arc};
+use crate::{
+    buffer_registry::fingerprint_bytes, code_index::store, host::FsHost, workspace::WorkspaceId,
+};
+use codegraph::{
+    build_shard, decode_shard, FileEntry, FileId, FileShard, Manifest, SCHEMA_VERSION,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_language::{extract_references, extract_symbols, parse_rope, LanguageRegistry};
 use stoat_scheduler::{Executor, Task};
 use stoat_text::Rope;
@@ -19,11 +27,14 @@ use tokio::sync::{mpsc::UnboundedSender, Notify};
 
 /// A unit of index progress delivered from the build job to the event loop.
 pub(crate) enum IndexUpdate {
-    /// One file's freshly extracted shard, ready to merge into the graph.
+    /// One file's shard, ready to merge into the graph. `persist` is true
+    /// when the shard was freshly extracted and should be written to disk,
+    /// false when it was loaded from an existing on-disk shard.
     Shard {
         workspace: WorkspaceId,
         rel_path: String,
         shard: FileShard,
+        persist: bool,
     },
     /// The scan finished. Resolve cross-file references and persist the
     /// manifest listing every covered file.
@@ -33,31 +44,70 @@ pub(crate) enum IndexUpdate {
     },
 }
 
-/// Spawn the cold-build job for `workspace` rooted at `git_root`.
+/// The shared handles a build job captures while it runs. It holds the
+/// filesystem, the language registry, the update channel, and the loop's
+/// redraw signal.
+pub(crate) struct IndexBuild {
+    pub(crate) fs: Arc<dyn FsHost>,
+    pub(crate) languages: Arc<LanguageRegistry>,
+    pub(crate) tx: UnboundedSender<IndexUpdate>,
+    pub(crate) redraw: Arc<Notify>,
+}
+
+/// Spawn the index build job for `workspace` rooted at `git_root`.
+///
+/// With `warm` set, each file whose manifest fingerprint still matches is
+/// loaded from its on-disk shard rather than re-extracted, and shards for
+/// files that have since vanished are deleted. Without it, every file is
+/// extracted from scratch.
 ///
 /// The returned [`Task`] must be kept alive for the build to run to
 /// completion. Dropping it can cancel the in-flight scan. Progress is
 /// reported through `tx`, not the task value.
 pub(crate) fn build_index(
     executor: &Executor,
-    fs: Arc<dyn FsHost>,
-    languages: Arc<LanguageRegistry>,
-    tx: UnboundedSender<IndexUpdate>,
-    redraw: Arc<Notify>,
-    git_root: std::path::PathBuf,
+    handles: IndexBuild,
+    git_root: PathBuf,
     workspace: WorkspaceId,
+    warm: Option<(PathBuf, Manifest)>,
 ) -> Task<()> {
+    let IndexBuild {
+        fs,
+        languages,
+        tx,
+        redraw,
+    } = handles;
     executor.spawn_blocking(move || {
+        let (index_dir, known) = match warm {
+            Some((dir, manifest)) => {
+                let known: HashMap<String, [u8; 32]> = manifest
+                    .files
+                    .into_iter()
+                    .map(|entry| (entry.rel_path, entry.content_hash))
+                    .collect();
+                (Some(dir), known)
+            },
+            None => (None, HashMap::new()),
+        };
+
         let mut entries = Vec::new();
+        let mut seen = HashSet::new();
         let mut next_file = 0u32;
         fs.walk_workspace_files_streaming(&git_root, &mut |batch| {
             for path in batch {
-                let Some((rel_path, shard)) =
-                    index_file(fs.as_ref(), &languages, &git_root, &path, FileId(next_file))
-                else {
+                let Some((rel_path, shard, source)) = load_or_extract(
+                    fs.as_ref(),
+                    &languages,
+                    &git_root,
+                    index_dir.as_deref(),
+                    &known,
+                    &path,
+                    FileId(next_file),
+                ) else {
                     continue;
                 };
                 next_file += 1;
+                seen.insert(rel_path.clone());
                 entries.push(FileEntry {
                     rel_path: rel_path.clone(),
                     content_hash: shard.content_hash,
@@ -67,6 +117,7 @@ pub(crate) fn build_index(
                         workspace,
                         rel_path,
                         shard,
+                        persist: matches!(source, ShardSource::Extracted),
                     })
                     .is_err()
                 {
@@ -75,6 +126,14 @@ pub(crate) fn build_index(
                 redraw.notify_one();
             }
         });
+
+        if let Some(dir) = &index_dir {
+            for rel_path in known.keys() {
+                if !seen.contains(rel_path) {
+                    let _ = store::delete_shard(dir, rel_path, fs.as_ref());
+                }
+            }
+        }
 
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
@@ -86,6 +145,60 @@ pub(crate) fn build_index(
         });
         redraw.notify_one();
     })
+}
+
+/// Whether a file's shard was loaded from disk or freshly extracted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShardSource {
+    Loaded,
+    Extracted,
+}
+
+/// Load a file's shard from disk when its manifest fingerprint still
+/// matches, otherwise extract it fresh.
+///
+/// A file loads only when `index_dir` is present, `known` holds its
+/// rel-path, the current content fingerprint equals the stored one, and the
+/// on-disk shard decodes. Any miss falls back to extraction.
+fn load_or_extract(
+    fs: &dyn FsHost,
+    languages: &LanguageRegistry,
+    git_root: &Path,
+    index_dir: Option<&Path>,
+    known: &HashMap<String, [u8; 32]>,
+    path: &Path,
+    file: FileId,
+) -> Option<(String, FileShard, ShardSource)> {
+    if let Some(dir) = index_dir
+        && let Some(rel_path) = relpath(git_root, path)
+        && let Some(&known_hash) = known.get(&rel_path)
+        && current_fingerprint(fs, path) == Some(known_hash)
+        && let Ok(bytes) = store::read_shard(dir, &rel_path, fs)
+        && let Ok(shard) = decode_shard(&bytes)
+    {
+        return Some((rel_path, shard, ShardSource::Loaded));
+    }
+
+    let (rel_path, shard) = index_file(fs, languages, git_root, path, file)?;
+    Some((rel_path, shard, ShardSource::Extracted))
+}
+
+/// A path's workspace-relative form, or `None` when it is not under `root`.
+fn relpath(git_root: &Path, path: &Path) -> Option<String> {
+    Some(
+        path.strip_prefix(git_root)
+            .ok()?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// The content fingerprint of a readable UTF-8 file, or `None` otherwise.
+fn current_fingerprint(fs: &dyn FsHost, path: &Path) -> Option<[u8; 32]> {
+    let mut bytes = Vec::new();
+    fs.read(path, &mut bytes).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    Some(fingerprint_bytes(&text))
 }
 
 /// Extract one file's shard, or `None` when the file is not an indexable
@@ -132,13 +245,14 @@ fn index_file(
 
 #[cfg(test)]
 mod tests {
-    use super::index_file;
+    use super::{index_file, load_or_extract, ShardSource};
     use crate::{
         buffer_registry::fingerprint_bytes,
+        code_index::store,
         host::{FakeFs, FsHost},
     };
     use codegraph::FileId;
-    use std::path::Path;
+    use std::{collections::HashMap, path::Path};
     use stoat_language::LanguageRegistry;
 
     #[test]
@@ -186,5 +300,67 @@ mod tests {
             FileId(0),
         )
         .is_none());
+    }
+
+    #[test]
+    fn load_or_extract_loads_unchanged_reextracts_otherwise() {
+        let fs = FakeFs::new();
+        let git_root = Path::new("/repo");
+        let index_dir = Path::new("/idx");
+        let path = Path::new("/repo/src/a.rs");
+        let registry = LanguageRegistry::standard();
+
+        let original = "fn helper() {}\n";
+        fs.write(path, original.as_bytes()).unwrap();
+
+        let (rel_path, original_shard) =
+            index_file(&fs, &registry, git_root, path, FileId(0)).unwrap();
+        store::write_shard(
+            index_dir,
+            &rel_path,
+            &codegraph::encode_shard(&original_shard),
+            &fs,
+        )
+        .unwrap();
+        let mut known = HashMap::new();
+        known.insert(rel_path.clone(), fingerprint_bytes(original));
+
+        let (_, loaded, source) = load_or_extract(
+            &fs,
+            &registry,
+            git_root,
+            Some(index_dir),
+            &known,
+            path,
+            FileId(0),
+        )
+        .unwrap();
+        assert_eq!(source, ShardSource::Loaded);
+        assert_eq!(loaded, original_shard);
+
+        fs.write(path, b"fn helper() {}\nfn added() {}\n").unwrap();
+        let (_, _, source) = load_or_extract(
+            &fs,
+            &registry,
+            git_root,
+            Some(index_dir),
+            &known,
+            path,
+            FileId(0),
+        )
+        .unwrap();
+        assert_eq!(source, ShardSource::Extracted);
+
+        let (_, _, source) = load_or_extract(
+            &fs,
+            &registry,
+            git_root,
+            Some(index_dir),
+            &HashMap::new(),
+            path,
+            FileId(0),
+        )
+        .unwrap();
+        assert_eq!(source, ShardSource::Extracted);
     }
 }
