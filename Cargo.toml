@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "action",
   "bin",
+  "codegraph",
   "config",
   "host",
   "language",
@@ -77,6 +78,7 @@ time = { version = "0.3", features = [
   "serde",
 ] }
 blake3 = "1"
+postcard = { version = "1", features = ["alloc"] }
 arboard = "3"
 base64 = "0.22"
 regex = "1"

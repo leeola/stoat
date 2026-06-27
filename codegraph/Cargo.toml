@@ -1,0 +1,15 @@
+[package]
+name = "codegraph"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+stoat_language = { path = "../language" }
+serde = { workspace = true }
+smallvec = { workspace = true }
+postcard = { workspace = true }
+blake3 = { workspace = true }
