@@ -2709,6 +2709,17 @@ pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
+    if scroll_editor(editor, matches!(dir, ScrollDir::Down), count) {
+        UpdateEffect::Redraw
+    } else {
+        UpdateEffect::None
+    }
+}
+
+/// Scrolls `editor` by `count` display rows, down when `down` and up
+/// otherwise, clamping `scroll_row` so the last document row stays in view.
+/// Returns whether `scroll_row` changed.
+pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) -> bool {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
 
     let display_snapshot = editor.display_map.snapshot();
@@ -2716,15 +2727,16 @@ pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
     let max_row = buffer_snapshot.rope().max_point().row;
     let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
 
-    let new_scroll = match dir {
-        ScrollDir::Up => editor.scroll_row.saturating_sub(count),
-        ScrollDir::Down => editor.scroll_row.saturating_add(count).min(max_scroll),
+    let new_scroll = if down {
+        editor.scroll_row.saturating_add(count).min(max_scroll)
+    } else {
+        editor.scroll_row.saturating_sub(count)
     };
     if new_scroll == editor.scroll_row {
-        return UpdateEffect::None;
+        return false;
     }
     editor.scroll_row = new_scroll;
-    UpdateEffect::Redraw
+    true
 }
 
 /// Collapse every selection to a single point at `offset`. Returns

@@ -1500,6 +1500,12 @@ impl Stoat {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            return self.handle_mouse_scroll(mouse);
+        }
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             self.focus_at(mouse.column, mouse.row);
         }
@@ -1520,6 +1526,32 @@ impl Stoat {
             "mouse event routed to focused element"
         );
         UpdateEffect::None
+    }
+
+    /// Scrolls the editor pane under the wheel pointer by a fixed number of
+    /// rows per notch.
+    ///
+    /// Only `View::Editor` split panes scroll. Docks and run, agent, or label
+    /// panes are not editors, so the event is dropped.
+    fn handle_mouse_scroll(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        const WHEEL_LINES: u32 = 3;
+        let Some(FocusTarget::SplitPane(pid)) = self.target_at(mouse.column, mouse.row) else {
+            return UpdateEffect::None;
+        };
+        let ws = self.active_workspace_mut();
+        let id = match &ws.panes.pane(pid).view {
+            View::Editor(id) => *id,
+            _ => return UpdateEffect::None,
+        };
+        let Some(editor) = ws.editors.get_mut(id) else {
+            return UpdateEffect::None;
+        };
+        let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
+        if action_handlers::movement::scroll_editor(editor, down, WHEEL_LINES) {
+            UpdateEffect::Redraw
+        } else {
+            UpdateEffect::None
+        }
     }
 
     /// Routes left-button Down/Drag/Up events on a focused run pane into
