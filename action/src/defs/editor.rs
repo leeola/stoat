@@ -1564,6 +1564,54 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    MarkTrailStartDef,
+    MarkTrailStart,
+    "MarkTrailStart",
+    ActionKind::MarkTrailStart,
+    "mark the start of a call-graph trail",
+    "Drop the start anchor of a two-point trail at the cursor. Pair with \
+     MarkTrailEnd to compute the call-graph path between the two enclosing \
+     symbols, then step it with TrailNext and TrailPrev.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    MarkTrailEndDef,
+    MarkTrailEnd,
+    "MarkTrailEnd",
+    ActionKind::MarkTrailEnd,
+    "mark the end of a call-graph trail",
+    "Drop the end anchor of a trail at the cursor and compute the \
+     call-graph path between the symbols enclosing the start and end \
+     marks. Falls back to a direct two-point path when no call path \
+     connects them. No-op when no start has been marked.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    TrailNextDef,
+    TrailNext,
+    "TrailNext",
+    ActionKind::TrailNext,
+    "step forward along the trail",
+    "Jump to the next symbol along the marked trail, toward the end mark, \
+     opening its file when it lies elsewhere. No-op when no trail is set.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    TrailPrevDef,
+    TrailPrev,
+    "TrailPrev",
+    ActionKind::TrailPrev,
+    "step backward along the trail",
+    "Jump to the previous symbol along the marked trail, toward the start \
+     mark, opening its file when it lies elsewhere. No-op when no trail is \
+     set.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

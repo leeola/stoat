@@ -516,6 +516,10 @@ on key {
         C -> [GotoCallee(), SetMode(normal)];
         u -> [GotoDiffCallerUp(), SetMode(normal)];
         o -> [GotoDiffCalleeDown(), SetMode(normal)];
+        m -> [MarkTrailStart(), SetMode(normal)];
+        M -> [MarkTrailEnd(), SetMode(normal)];
+        n -> [TrailNext(), SetMode(normal)];
+        p -> [TrailPrev(), SetMode(normal)];
         i -> [Hover(), SetMode(normal)];
         a -> [CodeAction(), SetMode(normal)];
         r -> [RenameSymbol(), SetMode(normal)];

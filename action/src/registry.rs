@@ -24,23 +24,23 @@ use crate::{
             GotoNextFunction, GotoNextParagraph, GotoPrevChange, GotoPrevClass, GotoPrevFunction,
             GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord,
             HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertRegister, JumpBackward,
-            JumpForward, KeepPrimarySelection, KeepSelections, MatchBrackets, MoveDown, MoveLeft,
-            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
-            MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
-            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
-            OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput,
-            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
-            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
-            RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
-            RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
-            SearchPrev, SelectAll, SelectAllChildren, SelectAllSiblings, SelectLineBelow,
-            SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
-            SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
-            ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection,
-            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
-            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
-            YankToClipboard,
+            JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd, MarkTrailStart,
+            MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
+            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
+            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
+            MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker,
+            OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter,
+            PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo,
+            RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
+            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectAllChildren,
+            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
+            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
+            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
+            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TillNextChar, TillPrevChar, ToggleComments, TrailNext, TrailPrev, TriggerCompletion,
+            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -401,6 +401,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoDiffCalleeDown::DEF, |_| {
         Ok(Box::new(GotoDiffCalleeDown))
     });
+    add(MarkTrailStart::DEF, |_| Ok(Box::new(MarkTrailStart)));
+    add(MarkTrailEnd::DEF, |_| Ok(Box::new(MarkTrailEnd)));
+    add(TrailNext::DEF, |_| Ok(Box::new(TrailNext)));
+    add(TrailPrev::DEF, |_| Ok(Box::new(TrailPrev)));
     add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
@@ -654,6 +658,10 @@ mod tests {
         "GotoCallee",
         "GotoDiffCallerUp",
         "GotoDiffCalleeDown",
+        "MarkTrailStart",
+        "MarkTrailEnd",
+        "TrailNext",
+        "TrailPrev",
         "Hover",
         "CodeAction",
         "RenameSymbol",
@@ -927,7 +935,8 @@ mod tests {
         // + 1 SpawnClaude.
         // + 2 GotoCaller, GotoCallee.
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
-        assert_eq!(all().count(), 273);
+        // + 4 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev.
+        assert_eq!(all().count(), 277);
     }
 
     #[test]

@@ -8,7 +8,10 @@ use crate::{
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
-    code_index::build::{file_id, reindex_buffer, IndexUpdate, ReindexTarget},
+    code_index::{
+        build::{file_id, reindex_buffer, IndexUpdate, ReindexTarget},
+        nav::TrailState,
+    },
     commit_list::CommitListState,
     diff,
     diff_map::DiffMap,
@@ -123,6 +126,10 @@ pub struct Workspace {
     /// [`Self::refresh_changed_ranges`] so diff-filtered navigation can ask
     /// whether a symbol's definition overlaps a change.
     pub(crate) changed_ranges: HashMap<FileId, Vec<Range<usize>>>,
+    /// The active call-graph trail, if the user has marked a start. Holds
+    /// the marked anchors and, once both ends are set, the cached path that
+    /// [`crate::code_index::nav`]'s trail actions step along.
+    pub(crate) trail: Option<TrailState>,
     /// Active review session (if any). Owned at the workspace level because
     /// a review spans files and can be viewed by multiple panes in future
     /// multi-pane review flows. Dropped on `CloseReview`.
@@ -194,6 +201,7 @@ impl Workspace {
             index_generation: 0,
             file_paths: HashMap::new(),
             changed_ranges: HashMap::new(),
+            trail: None,
             review: None,
             commits: None,
             rebase: None,
