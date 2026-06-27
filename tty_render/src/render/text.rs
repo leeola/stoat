@@ -483,15 +483,20 @@ impl TextPass {
         );
         let overlay_groups = self.rasterize_overlays(device, queue, grid);
 
+        // Off-grid text runs are screen-anchored. No grid or region scroll
+        // offset is applied, so they sit at their declared position. They pack
+        // here, before atlas_grew, so a text-run atlas grow is reflected in the
+        // grid-instance build below instead of invalidating its UVs.
+        let text_run_instances = self.build_text_run_instances(device, queue, grid);
+
         let region = grid.scroll_region();
 
-        // The grid-glyph instances from last frame stay valid when nothing that
-        // feeds them changed: no row was rebuilt, the atlas did not grow (its size
-        // drives every UV), and no text runs are present (those rasterize below,
-        // after the grid instances are built, so a text-run grow could not be seen
-        // here). Scroll no longer counts -- it rides the globals uniform.
+        // The grid-glyph instances from last frame stay valid when no row was
+        // rebuilt and the atlas did not grow (its size drives every UV). Text
+        // runs are packed above, so a text-run grow shows up in atlas_grew.
+        // Scroll no longer counts -- it rides the globals uniform.
         let atlas_grew = self.atlas.texture_dims() != atlas_dims;
-        let grid_unchanged = rebuilt.is_empty() && !atlas_grew && grid.text_runs().is_empty();
+        let grid_unchanged = rebuilt.is_empty() && !atlas_grew;
 
         if !grid_unchanged {
             match region {
@@ -529,7 +534,7 @@ impl TextPass {
                     self.plain_row_instances.clear();
                 },
                 None => {
-                    let rebuild_all = atlas_grew || !grid.text_runs().is_empty();
+                    let rebuild_all = atlas_grew;
                     self.patch_plain_rows(device, queue, &rebuilt, rebuild_all);
                 },
             }
@@ -582,10 +587,6 @@ impl TextPass {
                 ),
             });
         }
-
-        // Off-grid text runs are screen-anchored: no grid or region scroll
-        // offset is applied, so they sit at their declared position.
-        let text_run_instances = self.build_text_run_instances(device, queue, grid);
 
         // The plain and region grid glyphs are built and uploaded above, only
         // when changed. Overlays and text runs change independently, so they
