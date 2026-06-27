@@ -14,6 +14,7 @@ use crate::{
     buffer::BufferId,
     host::{LanguageServerFeature, OffsetEncoding},
 };
+use codegraph::SymbolKey;
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
@@ -1275,6 +1276,10 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
 pub(crate) struct SymbolEntry {
     pub(crate) title: String,
     pub(crate) anchor_offset: usize,
+    /// Graph symbol to jump to when picked, for graph-navigation pickers.
+    /// `None` for LSP document-symbol entries, which jump to
+    /// [`Self::anchor_offset`] in the current buffer instead.
+    pub(crate) symbol: Option<SymbolKey>,
 }
 
 /// Cursor-anchored document-symbol picker. Painted as a numbered
@@ -1415,6 +1420,7 @@ fn symbol_picker_entries(
                 entries.push(SymbolEntry {
                     title: name,
                     anchor_offset: offset,
+                    symbol: None,
                 });
             }
         },
@@ -1440,6 +1446,7 @@ fn symbol_picker_entries(
                     out.push(SymbolEntry {
                         title,
                         anchor_offset: offset,
+                        symbol: None,
                     });
                     if let Some(children) = symbol.children {
                         ancestors.push(symbol.name);
@@ -1455,10 +1462,12 @@ fn symbol_picker_entries(
     entries
 }
 
-/// Apply the user's pick from the open symbol picker: jump the
-/// primary cursor to the selected entry's anchor offset and clear
-/// the picker. No-op when no picker is open or `index` is out of
-/// range.
+/// Apply the user's pick from the open symbol picker and clear the picker.
+///
+/// A graph-navigation entry jumps to its symbol (opening another file if
+/// needed); an LSP document-symbol entry jumps the primary cursor to the
+/// entry's anchor offset in the current buffer. No-op when no picker is
+/// open or `index` is out of range.
 pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
     let Some(picker) = stoat.pending_symbol_picker.take() else {
         return false;
@@ -1466,7 +1475,14 @@ pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
     let Some(entry) = picker.entries.into_iter().nth(index) else {
         return false;
     };
-    crate::action_handlers::movement::jump_to_offset(stoat, entry.anchor_offset);
+    match entry.symbol {
+        Some(key) => {
+            crate::code_index::nav::jump_to_symbol(stoat, key);
+        },
+        None => {
+            crate::action_handlers::movement::jump_to_offset(stoat, entry.anchor_offset);
+        },
+    }
     true
 }
 
