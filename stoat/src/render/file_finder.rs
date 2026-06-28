@@ -226,7 +226,7 @@ fn render_preview(
         return;
     }
     let fallback = theme.get(crate::theme::scope::UI_TEXT);
-    if let Some(editor) = ws.editors.get_mut(finder.preview_editor) {
+    if let Some(editor) = ws.editors.get_mut(finder.preview.editor) {
         render_editor(editor, area, fallback, theme, buf, false);
     }
 }

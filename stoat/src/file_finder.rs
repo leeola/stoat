@@ -1,20 +1,13 @@
 use crate::{
-    buffer::BufferId,
-    editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
-    picker::PickList,
+    picker::{PickList, Preview, PreviewSource},
     workspace::Workspace,
 };
 use std::path::{Path, PathBuf};
 use stoat_scheduler::{Executor, Task};
-use stoat_text::{Bias, SelectionGoal};
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
-
-/// Preview content cap. Keeps preview reads bounded so a stray large or binary
-/// file never stalls the render thread.
-pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 
 /// Which subset of files the finder currently lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,15 +77,10 @@ pub struct FileFinder {
     /// render loop ticks without any typing.
     pub(crate) last_filter_text: String,
     pub(crate) last_filter_scope: FinderScope,
-    /// Scratch buffer + editor used to render the preview pane. The buffer
-    /// is reused across selection changes: its rope is replaced with the
-    /// newly-selected file's content. Created at [`FileFinder::new`];
-    /// disposed in [`FileFinder::dispose`].
-    pub(crate) preview_editor: EditorId,
-    pub(crate) preview_buffer: BufferId,
-    /// Absolute path whose content currently lives in the preview buffer,
-    /// or `None` if the preview is still empty (first render).
-    pub(crate) preview_rendered_for: Option<PathBuf>,
+    /// Preview pane shown beside the result list, reused across selection
+    /// changes. Created at [`FileFinder::new`], disposed in
+    /// [`FileFinder::dispose`].
+    pub(crate) preview: Preview,
 }
 
 impl FileFinder {
@@ -117,9 +105,7 @@ impl FileFinder {
             "prompt",
             1,
         );
-        let (preview_buffer, shared_buffer) = ws.buffers.new_scratch_preview();
-        let preview_editor_state = EditorState::new(preview_buffer, shared_buffer, executor);
-        let preview_editor = ws.editors.insert(preview_editor_state);
+        let preview = Preview::new(ws, executor);
 
         let scope = initial_scope;
         let all_paths: Vec<PathBuf> = Vec::new();
@@ -148,9 +134,7 @@ impl FileFinder {
             viewport_rows: None,
             last_filter_text: String::new(),
             last_filter_scope: scope,
-            preview_editor,
-            preview_buffer,
-            preview_rendered_for: None,
+            preview,
         }
     }
 
@@ -252,44 +236,21 @@ impl FileFinder {
         self.last_filter_scope = self.scope;
     }
 
-    /// Copy the currently-selected file into the preview scratch buffer.
-    /// No-op when the selection already matches [`Self::preview_rendered_for`].
-    /// Reads through `fs_host`; errors are swallowed and surfaced as a
-    /// placeholder so the preview always renders something.
-    ///
-    /// Assigns the previewed file's language (resolved via
-    /// `language_registry`) so the existing parse pipeline picks the
-    /// preview buffer up and renders syntax highlighting. Stale
-    /// syntax / syntax_map are cleared on path change so the next
-    /// parse runs from scratch instead of merging into the prior
-    /// file's state.
+    /// Sync the preview pane to the current selection, reading the selected
+    /// file from disk. Clears the pane when nothing is selected.
     pub(crate) fn sync_preview(
         &mut self,
         ws: &mut Workspace,
         fs_host: &dyn FsHost,
         language_registry: &stoat_language::LanguageRegistry,
     ) {
-        let path = match self.selected_path() {
-            Some(p) => p.to_path_buf(),
-            None => {
-                if self.preview_rendered_for.is_some() {
-                    replace_preview_text(ws, self.preview_editor, self.preview_buffer, "");
-                    ws.reset_preview_syntax(self.preview_buffer);
-                    self.preview_rendered_for = None;
-                }
-                return;
-            },
-        };
-        if self.preview_rendered_for.as_deref() == Some(path.as_path()) {
-            return;
+        match self
+            .selected_path()
+            .map(|p| PreviewSource::File(p.to_path_buf()))
+        {
+            Some(source) => self.preview.sync(ws, fs_host, language_registry, source),
+            None => self.preview.clear(ws),
         }
-        let content = read_preview(fs_host, &path);
-        replace_preview_text(ws, self.preview_editor, self.preview_buffer, &content);
-        ws.reset_preview_syntax(self.preview_buffer);
-        if let Some(lang) = language_registry.for_path(&path) {
-            ws.buffers.set_language(self.preview_buffer, lang);
-        }
-        self.preview_rendered_for = Some(path);
     }
 
     /// Tear down owned editor slots. Called on every finder-close path.
@@ -299,55 +260,7 @@ impl FileFinder {
     /// across opens.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
-        ws.editors.remove(self.preview_editor);
-        ws.buffers.remove(self.preview_buffer);
-    }
-}
-
-/// Read `path` through `fs_host`, truncating at [`PREVIEW_BYTE_LIMIT`] on a
-/// UTF-8 char boundary. Returns a placeholder for read errors or non-UTF-8
-/// content so the preview pane always renders. Output is run through
-/// [`sanitize_preview_text`] so unsanitized bytes never reach the rope.
-fn read_preview(fs_host: &dyn FsHost, path: &Path) -> String {
-    let mut buf = Vec::new();
-    if fs_host.read(path, &mut buf).is_err() {
-        return "<unreadable>".to_string();
-    }
-    let limit = PREVIEW_BYTE_LIMIT.min(buf.len());
-    let raw = match std::str::from_utf8(&buf[..limit]) {
-        Ok(s) => s.to_string(),
-        Err(err) => {
-            let valid = err.valid_up_to();
-            String::from_utf8_lossy(&buf[..valid]).into_owned()
-        },
-    };
-    crate::render::sanitize::sanitize_preview_text(&raw)
-}
-
-/// Overwrite the preview scratch buffer with `text` and reset the editor's
-/// viewport to the top.
-fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: BufferId, text: &str) {
-    let Some(buffer) = ws.buffers.get(buffer_id) else {
-        return;
-    };
-    let old_len = {
-        let guard = buffer.read().expect("preview buffer poisoned");
-        guard.snapshot.visible_text.len()
-    };
-    {
-        let mut guard = buffer.write().expect("preview buffer poisoned");
-        guard.edit(0..old_len, text);
-    }
-    if let Some(editor) = ws.editors.get_mut(editor_id) {
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let anchor = buf_snap.anchor_at(0, Bias::Left);
-        editor.selections.transform(buf_snap, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, SelectionGoal::None);
-            new
-        });
-        editor.scroll_row = 0;
+        self.preview.dispose(ws);
     }
 }
 
@@ -881,7 +794,7 @@ mod tests {
         h.type_keys("space p");
         h.snapshot();
         let finder = h.stoat.file_finder.as_ref().expect("finder open");
-        let preview_id = finder.preview_buffer;
+        let preview_id = finder.preview.buffer;
         let ws = h.stoat.active_workspace();
         let lang = ws.buffers.language_for(preview_id).expect("language set");
         assert_eq!(lang.name, "rust");
@@ -899,7 +812,8 @@ mod tests {
             .file_finder
             .as_ref()
             .expect("finder open")
-            .preview_buffer;
+            .preview
+            .buffer;
         let lang_first = h
             .stoat
             .active_workspace()
@@ -932,7 +846,8 @@ mod tests {
             .file_finder
             .as_ref()
             .expect("finder open")
-            .preview_buffer;
+            .preview
+            .buffer;
         assert!(h.stoat.active_workspace().buffers.get(preview_id).is_some());
 
         h.type_keys("escape");
@@ -950,5 +865,36 @@ mod tests {
                 .is_empty(),
             "no preview buffers remain after close",
         );
+    }
+
+    #[test]
+    fn buffer_preview_source_shows_live_text_not_disk() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        // The fs is empty, so a stray disk read would render a placeholder.
+        // Matching the live text proves the Buffer source never touches disk.
+        let fs = crate::host::FakeFs::new();
+
+        let ws = h.stoat.active_workspace_mut();
+        let (id, _) = ws.buffers.open(&PathBuf::from("/mem/note.txt"), "saved\n");
+        {
+            let buffer = ws.buffers.get(id).expect("source buffer");
+            let mut guard = buffer.write().expect("source buffer poisoned");
+            let len = guard.snapshot.visible_text.len();
+            guard.edit(0..len, "edited in memory\n");
+        }
+
+        let mut preview = Preview::new(ws, executor);
+        preview.sync(ws, &fs, &language_registry, PreviewSource::Buffer(id));
+
+        let shown = {
+            let buffer = ws.buffers.get(preview.buffer).expect("preview buffer");
+            let guard = buffer.read().expect("preview buffer poisoned");
+            guard.rope().to_string()
+        };
+        assert_eq!(shown, "edited in memory\n");
+
+        preview.dispose(ws);
     }
 }

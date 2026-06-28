@@ -1,5 +1,20 @@
-use crate::{fuzzy, paths};
+use crate::{
+    buffer::BufferId,
+    editor_state::{EditorId, EditorState},
+    fuzzy,
+    host::FsHost,
+    paths,
+    render::sanitize,
+    workspace::Workspace,
+};
 use std::path::{Path, PathBuf};
+use stoat_language::LanguageRegistry;
+use stoat_scheduler::Executor;
+use stoat_text::{Bias, SelectionGoal};
+
+/// Preview content cap. Keeps preview reads bounded so a stray large or binary
+/// file never stalls the render thread.
+pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 
 /// Query-driven fuzzy result list over a fixed `base` set of paths, decoupled
 /// from any input widget.
@@ -92,6 +107,157 @@ impl PickList {
         } else if self.selected >= self.filtered.len() {
             self.selected = self.filtered.len() - 1;
         }
+    }
+}
+
+/// Where a [`Preview`] pulls its content from.
+///
+/// `File` reads the path from disk. `Buffer` reads a live, possibly modified
+/// in-memory buffer, so the preview reflects unsaved edits rather than the
+/// backing file.
+#[derive(PartialEq)]
+pub(crate) enum PreviewSource {
+    File(PathBuf),
+    /// Live in-memory buffer. The buffer picker that previews from it in
+    /// production lands later, so outside tests this variant is currently
+    /// unconstructed.
+    #[allow(dead_code)]
+    Buffer(BufferId),
+}
+
+/// Read-only preview pane backed by a reusable scratch buffer.
+///
+/// A picker drives this by calling [`Preview::sync`] with the selected source.
+/// The scratch buffer's rope is replaced with that source's content and the
+/// source's language is assigned so the parse pipeline highlights it.
+pub(crate) struct Preview {
+    pub(crate) editor: EditorId,
+    pub(crate) buffer: BufferId,
+    /// Source currently rendered into the scratch buffer, or `None` when empty.
+    /// Lets [`Preview::sync`] skip a redundant reload when the selection is
+    /// unchanged.
+    rendered_for: Option<PreviewSource>,
+}
+
+impl Preview {
+    /// Allocate the scratch preview buffer and its editor.
+    pub(crate) fn new(ws: &mut Workspace, executor: Executor) -> Self {
+        let (buffer, shared_buffer) = ws.buffers.new_scratch_preview();
+        let editor_state = EditorState::new(buffer, shared_buffer, executor);
+        let editor = ws.editors.insert(editor_state);
+        Self {
+            editor,
+            buffer,
+            rendered_for: None,
+        }
+    }
+
+    /// Load `source` into the scratch buffer, unless it is already shown.
+    ///
+    /// `File` reads disk through `fs_host` and resolves the language via
+    /// `language_registry`. `Buffer` reads the live in-memory text and copies
+    /// the source buffer's own language, ignoring both arguments. Stale syntax
+    /// state is reset on every swap so an in-flight parse of the previous
+    /// source cannot paint onto the new one. Read errors render a placeholder
+    /// so the pane always shows something.
+    pub(crate) fn sync(
+        &mut self,
+        ws: &mut Workspace,
+        fs_host: &dyn FsHost,
+        language_registry: &LanguageRegistry,
+        source: PreviewSource,
+    ) {
+        if self.rendered_for.as_ref() == Some(&source) {
+            return;
+        }
+        let (content, language) = match &source {
+            PreviewSource::File(path) => (
+                read_preview(fs_host, path),
+                language_registry.for_path(path),
+            ),
+            PreviewSource::Buffer(id) => {
+                let content = ws
+                    .buffers
+                    .get(*id)
+                    .map(|b| {
+                        b.read()
+                            .expect("preview source buffer poisoned")
+                            .rope()
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                (content, ws.buffers.language_for(*id))
+            },
+        };
+        replace_preview_text(ws, self.editor, self.buffer, &content);
+        ws.reset_preview_syntax(self.buffer);
+        if let Some(language) = language {
+            ws.buffers.set_language(self.buffer, language);
+        }
+        self.rendered_for = Some(source);
+    }
+
+    /// Blank the preview when nothing is selected. No-op when already empty.
+    pub(crate) fn clear(&mut self, ws: &mut Workspace) {
+        if self.rendered_for.is_some() {
+            replace_preview_text(ws, self.editor, self.buffer, "");
+            ws.reset_preview_syntax(self.buffer);
+            self.rendered_for = None;
+        }
+    }
+
+    /// Remove the owned editor and scratch buffer from the workspace.
+    pub(crate) fn dispose(&self, ws: &mut Workspace) {
+        ws.editors.remove(self.editor);
+        ws.buffers.remove(self.buffer);
+    }
+}
+
+/// Read `path` through `fs_host`, truncating at [`PREVIEW_BYTE_LIMIT`] on a
+/// UTF-8 char boundary. Returns a placeholder for read errors or non-UTF-8
+/// content so the preview pane always renders. Output is run through
+/// [`sanitize::sanitize_preview_text`] so unsanitized bytes never reach the
+/// rope.
+fn read_preview(fs_host: &dyn FsHost, path: &Path) -> String {
+    let mut buf = Vec::new();
+    if fs_host.read(path, &mut buf).is_err() {
+        return "<unreadable>".to_string();
+    }
+    let limit = PREVIEW_BYTE_LIMIT.min(buf.len());
+    let raw = match std::str::from_utf8(&buf[..limit]) {
+        Ok(s) => s.to_string(),
+        Err(err) => {
+            let valid = err.valid_up_to();
+            String::from_utf8_lossy(&buf[..valid]).into_owned()
+        },
+    };
+    sanitize::sanitize_preview_text(&raw)
+}
+
+/// Overwrite the preview scratch buffer with `text` and reset the editor's
+/// viewport to the top.
+fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: BufferId, text: &str) {
+    let Some(buffer) = ws.buffers.get(buffer_id) else {
+        return;
+    };
+    let old_len = {
+        let guard = buffer.read().expect("preview buffer poisoned");
+        guard.snapshot.visible_text.len()
+    };
+    {
+        let mut guard = buffer.write().expect("preview buffer poisoned");
+        guard.edit(0..old_len, text);
+    }
+    if let Some(editor) = ws.editors.get_mut(editor_id) {
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let anchor = buf_snap.anchor_at(0, Bias::Left);
+        editor.selections.transform(buf_snap, |s| {
+            let mut new = s.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        });
+        editor.scroll_row = 0;
     }
 }
 
