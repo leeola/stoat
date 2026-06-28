@@ -574,9 +574,10 @@ pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> Updat
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
     editor.selections.transform(buffer_snapshot, |sel| {
-        let head_anchor = sel.head();
-        let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
-        let row = head_point.row;
+        let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
+        let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head_cursor = cursor_offset(rope, tail_offset, head_offset);
+        let row = rope.offset_to_point(head_cursor).row;
         let line_start = rope.point_to_offset(Point::new(row, 0));
         let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
 
@@ -596,16 +597,16 @@ pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> Updat
             return sel.clone();
         };
 
-        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
         if extend {
-            extend_head(
+            extend_head_to_cursor(
                 sel,
-                anchor,
                 target_offset,
                 SelectionGoal::None,
+                rope,
                 buffer_snapshot,
             )
         } else {
+            let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
             let mut new = sel.clone();
             new.collapse_to(anchor, SelectionGoal::None);
             new
@@ -2638,9 +2639,10 @@ pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
-    let head = editor.selections.newest_anchor().head();
-    let head_point = buffer_snapshot.point_for_anchor(&head);
-    let row = head_point.row;
+    let head_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
+    let tail_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().tail());
+    let cursor = cursor_offset(rope, tail_offset, head_offset);
+    let row = rope.offset_to_point(cursor).row;
     let line_start = rope.point_to_offset(Point::new(row, 0));
     let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
 
@@ -2657,9 +2659,9 @@ pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     if extend {
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        let new_head = new_buf.anchor_at(target_offset, Bias::Right);
+        let new_rope = new_buf.rope();
         editor.selections.transform(new_buf, |sel| {
-            extend_head(sel, new_head, target_offset, sel.goal, new_buf)
+            extend_head_to_cursor(sel, target_offset, sel.goal, new_rope, new_buf)
         });
     } else {
         apply_primary_range(editor, target_offset..target_offset);

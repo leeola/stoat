@@ -746,6 +746,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_select_mode_goto_first_nonws_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "  abc\n");
+        h.open_file(&path);
+        h.type_keys("v g i");
+        h.assert_snapshot("select_mode_goto_first_nonws_cursor");
+    }
+
+    #[test]
     fn snapshot_word_forward() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "foo bar baz\n");
@@ -2031,8 +2040,8 @@ mod tests {
         let (start, end, reversed) = h.selection_spans()[0];
         assert_eq!(
             (start, end, reversed),
-            (0, 4, false),
-            "head extended to column 5 (offset 4) while tail stays at 0"
+            (0, 5, false),
+            "head one past column 5 while tail stays at 0, cursor on offset 4"
         );
         assert_eq!(h.stoat.mode, "select", "back to select after the chord");
     }
