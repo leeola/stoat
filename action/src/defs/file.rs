@@ -35,6 +35,10 @@ impl ActionDef for OpenFileDef {
     fn priority(&self) -> ActionPriority {
         ActionPriority::Common
     }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["o", "open", "edit"]
+    }
 }
 
 #[derive(Debug)]

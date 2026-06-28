@@ -35,6 +35,15 @@ pub trait ActionDef: Debug + Send + Sync + 'static {
         true
     }
 
+    /// Short alternative tokens that resolve to this action in the command
+    /// line, beyond its full `name`.
+    ///
+    /// Defaults to none. Aliases match case-insensitively. A full action name
+    /// always wins over an alias.
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     fn priority(&self) -> ActionPriority {
         ActionPriority::Normal
     }

@@ -624,6 +624,22 @@ pub fn all() -> impl Iterator<Item = &'static RegistryEntry> {
     REGISTRY.get_or_init(init).values()
 }
 
+/// Resolve `token` to a registered action by exact name first, then by a
+/// case-insensitive alias match. A full name always wins over an alias, so a
+/// command stays reachable even if another action lists its name as an alias.
+pub fn lookup_alias(token: &str) -> Option<&'static RegistryEntry> {
+    if let Some(entry) = lookup(token) {
+        return Some(entry);
+    }
+    all().find(|entry| {
+        entry
+            .def
+            .aliases()
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(token))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,6 +828,21 @@ mod tests {
     fn lookup_unknown_returns_none() {
         assert!(lookup("Foo").is_none());
         assert!(lookup("SetMode").is_none());
+    }
+
+    #[test]
+    fn lookup_alias_resolves_alias_and_exact_name_wins() {
+        // An alias resolves to its action, case-insensitively.
+        assert_eq!(lookup_alias("o").expect("o").def.name(), "OpenFile");
+        assert_eq!(lookup_alias("EDIT").expect("EDIT").def.name(), "OpenFile");
+        assert!(lookup_alias("not-a-command").is_none());
+
+        // Every exact action name resolves to that action, never to one that
+        // merely lists the name as an alias.
+        for entry in all() {
+            let name = entry.def.name();
+            assert_eq!(lookup_alias(name).expect(name).def.name(), name);
+        }
     }
 
     #[test]
