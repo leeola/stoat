@@ -1285,7 +1285,16 @@ impl Stoat {
                 self.active_workspace_mut().layout(size);
                 UpdateEffect::Redraw
             },
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let before = self.focused_cursor_pos();
+                let effect = self.handle_key(key);
+                if self.focused_cursor_pos() != before
+                    && let Some(editor) = action_handlers::focused_editor_mut(self)
+                {
+                    action_handlers::movement::ensure_cursor_in_view(editor);
+                }
+                effect
+            },
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => UpdateEffect::None,
         };
@@ -2451,6 +2460,22 @@ impl Stoat {
         self.selected_register
             .take()
             .unwrap_or(register::Register::Unnamed)
+    }
+
+    /// The focused document editor's buffer and primary cursor offset, or `None`
+    /// when no document editor has focus.
+    ///
+    /// Gates the post-key view-follow. Comparing this before and after a key
+    /// fires [`action_handlers::movement::ensure_cursor_in_view`] only when the
+    /// key actually moved the cursor, exempting pure view-scroll and modal input
+    /// without an action denylist.
+    fn focused_cursor_pos(&mut self) -> Option<(BufferId, usize)> {
+        let editor = action_handlers::focused_editor_mut(self)?;
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buffer_snapshot.resolve_anchor(&head);
+        Some((editor.buffer_id, offset))
     }
 
     pub(crate) fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {

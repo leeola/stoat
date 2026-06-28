@@ -2879,6 +2879,34 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Scroll the viewport the minimum amount to keep the primary cursor visible.
+///
+/// This is the central view-follow step run after every cursor-moving key, so a
+/// `50j` or `G` whose target leaves the viewport pulls the view along instead of
+/// dropping the cursor off screen.
+///
+/// `scroll_row` is a display row, so the cursor is resolved through the display
+/// map (folds and soft-wraps included) rather than its buffer row. The scrolloff
+/// is zero, so the view moves only when the cursor would fall outside it.
+pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState) {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let head = editor.selections.newest_anchor().head();
+    let head_offset = buffer_snapshot.resolve_anchor(&head);
+    let cursor_row = snapshot
+        .buffer_to_display(rope.offset_to_point(head_offset))
+        .row;
+
+    if cursor_row < editor.scroll_row {
+        editor.scroll_row = cursor_row;
+    } else if cursor_row > editor.scroll_row + viewport - 1 {
+        editor.scroll_row = cursor_row.saturating_sub(viewport - 1);
+    }
+}
+
 pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -2999,6 +3027,53 @@ mod tests {
         let head = editor.selections.newest_anchor().head();
         let offset = buffer_snapshot.resolve_anchor(&head);
         buffer_snapshot.rope().offset_to_point(offset).row
+    }
+
+    #[test]
+    fn ensure_cursor_in_view_follows_cursor_and_noops_when_visible() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        set_cursor_row(editor, 50);
+        editor.scroll_row = 0;
+        ensure_cursor_in_view(editor);
+        assert_eq!(
+            editor.scroll_row, 41,
+            "a below-viewport cursor pulls the view down to it",
+        );
+
+        set_cursor_row(editor, 45);
+        editor.scroll_row = 41;
+        ensure_cursor_in_view(editor);
+        assert_eq!(
+            editor.scroll_row, 41,
+            "an already-visible cursor leaves the view put",
+        );
+
+        set_cursor_row(editor, 8);
+        editor.scroll_row = 41;
+        ensure_cursor_in_view(editor);
+        assert_eq!(
+            editor.scroll_row, 8,
+            "an above-viewport cursor pulls the view up to it",
+        );
+    }
+
+    #[test]
+    fn snapshot_count_jump_keeps_cursor_visible() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..80).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        h.stoat.pending_count = Some(50);
+        h.type_keys("j");
+        h.assert_snapshot("count_jump_keeps_cursor_visible");
     }
 
     #[test]
