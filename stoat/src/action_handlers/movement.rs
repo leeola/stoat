@@ -2682,16 +2682,16 @@ pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     }
     let target_offset = rope.point_to_offset(Point::new(target_row, 0));
     editor.selections.transform(buffer_snapshot, |sel| {
-        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
         if extend {
-            extend_head(
+            extend_head_to_cursor(
                 sel,
-                anchor,
                 target_offset,
                 SelectionGoal::None,
+                rope,
                 buffer_snapshot,
             )
         } else {
+            let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
             let mut new = sel.clone();
             new.collapse_to(anchor, SelectionGoal::None);
             new
@@ -2899,17 +2899,17 @@ pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -
     let target_row = scroll_row.saturating_add(offset).min(max_row);
 
     let target_offset = rope.point_to_offset(Point::new(target_row, 0));
-    let target_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
     editor.selections.transform(buffer_snapshot, |sel| {
         if extend {
-            extend_head(
+            extend_head_to_cursor(
                 sel,
-                target_anchor,
                 target_offset,
                 SelectionGoal::None,
+                rope,
                 buffer_snapshot,
             )
         } else {
+            let target_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
             let mut new = sel.clone();
             new.collapse_to(target_anchor, SelectionGoal::None);
             new

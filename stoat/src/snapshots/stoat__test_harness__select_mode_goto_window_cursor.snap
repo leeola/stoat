@@ -2,14 +2,13 @@
 source: stoat/src/test_harness.rs
 expression: text
 ---
-actions: snapshot
+actions: b
 focused: #1 of 1
-mode: normal
-size: 20x6
+mode: select
+size: 30x5
 ---
 [0m[97m[100mabc[0m
 [0m[97m[100mdef[0m
 [0m[7m[97mg[0m[97mhi[0m
 
-
-[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m/tes[0m
+[0m[1m[30m[43m SEL [0m[1m[97m[100m (unnamed) [0m[97m[100m/test/s.txt   [0m

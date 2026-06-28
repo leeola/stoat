@@ -1600,7 +1600,7 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
         dispatch(&mut stoat, &ExtendToLastLine);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 9, false)]);
     }
 
     #[test]

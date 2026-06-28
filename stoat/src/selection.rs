@@ -755,6 +755,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_select_mode_goto_window_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\ndef\nghi");
+        h.open_file(&path);
+        h.type_keys("v g b");
+        h.assert_snapshot("select_mode_goto_window_cursor");
+    }
+
+    #[test]
     fn snapshot_word_forward() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "foo bar baz\n");
@@ -2076,7 +2085,10 @@ mod tests {
         h.type_keys("v");
         h.type_keys("g j");
         let head = h.primary_head_offset();
-        assert_eq!(head, 6, "head extended to start of last content line");
+        assert_eq!(
+            head, 7,
+            "cursor on start of last content line, head one past"
+        );
         assert_eq!(h.stoat.mode, "select");
     }
 
