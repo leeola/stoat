@@ -1,7 +1,11 @@
 use crate::{
-    command_palette::{CommandPalette, PaletteScope},
+    command_palette::{ArgPicker, CommandPalette, PaletteScope},
+    file_finder::display_row,
     input_view::InputView,
-    render::text::{wrap_text, write_str},
+    render::{
+        editor::render_editor,
+        text::{wrap_text, write_str, write_str_clipped},
+    },
     workspace::Workspace,
 };
 use ratatui::{
@@ -76,9 +80,12 @@ pub(crate) fn render_command_palette(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    palette.refilter_from_input(ws);
-    let scope = palette.scope();
+    if palette.arg_picker.is_some() && palette.in_files_arg_mode() {
+        render_palette_arg_picker(palette, ws, theme, area, buf);
+        return;
+    }
 
+    let scope = palette.scope();
     if palette.command.is_none()
         && let Some(layout) = palette_filter_layout(area)
     {
@@ -96,6 +103,163 @@ pub(crate) fn render_command_palette(
         area,
         buf,
     );
+}
+
+/// Render the inline file picker shown while collecting a `Files` argument
+/// (e.g. `:o `).
+///
+/// Reuses the filter modal's box and `:` input row unchanged, then replaces the
+/// command list + doc body with a result list beside a live preview, mirroring
+/// the standalone file finder. State is synced before the frame by
+/// [`crate::action_handlers::sync_palette_picker`], so this only paints.
+fn render_palette_arg_picker(
+    palette: &mut CommandPalette,
+    ws: &mut Workspace,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let Some(layout) = palette_filter_layout(area) else {
+        return;
+    };
+    let entry = palette.command.expect("arg picker requires a command");
+
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
+    let title = format!(" {} ", entry.def.name());
+    Clear.render(layout.modal, buf);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(modal_style)
+        .title(title)
+        .title_style(modal_style);
+    block.render(layout.modal, buf);
+
+    let inner = layout.inner;
+    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
+    let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+
+    let input_row = inner.y;
+    write_str(buf, inner.x, input_row, ":", prompt_style);
+    let input_area = Rect::new(inner.x + 2, input_row, inner.width.saturating_sub(2), 1);
+    palette.input.render(
+        &mut ws.editors,
+        input_area,
+        true,
+        "prompt",
+        theme,
+        &std::collections::BTreeMap::new(),
+        buf,
+    );
+
+    let separator_row = inner.y + 1;
+    for col in inner.x..inner.x + inner.width {
+        buf[(col, separator_row)]
+            .set_char('─')
+            .set_style(separator_style);
+    }
+
+    let body_top = inner.y + 2;
+    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    if body_height == 0 {
+        return;
+    }
+    let (list, preview) = arg_body_split(inner.x, body_top, inner.width, body_height);
+
+    let Some(picker) = palette.arg_picker.as_mut() else {
+        return;
+    };
+    if let Some(preview_rect) = preview {
+        for row in list.y..list.y + list.height {
+            buf[(list.x + list.width, row)]
+                .set_char('│')
+                .set_style(separator_style);
+        }
+        render_arg_preview(picker, preview_rect, theme, ws, buf);
+    }
+
+    picker.picklist.viewport_rows = Some(list.height as usize);
+    paint_arg_rows(picker, list, theme, buf);
+}
+
+/// Split the picker body into a result list and an optional preview pane.
+///
+/// The preview only appears when the body is wide enough to host a useful list
+/// and preview side by side. Below that the list takes the full width.
+fn arg_body_split(x: u16, y: u16, width: u16, height: u16) -> (Rect, Option<Rect>) {
+    if width >= 50 {
+        let list_width = (width * 40 / 100).max(20);
+        let preview_width = width.saturating_sub(list_width + 1);
+        (
+            Rect::new(x, y, list_width, height),
+            Some(Rect::new(x + list_width + 1, y, preview_width, height)),
+        )
+    } else {
+        (Rect::new(x, y, width, height), None)
+    }
+}
+
+/// Paint the picker's result rows into `area`, one repo-relative path per row,
+/// with the selected row and fuzzy-match characters highlighted.
+fn paint_arg_rows(picker: &ArgPicker, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
+    let rows = area.height as usize;
+    if rows == 0 {
+        return;
+    }
+    let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+
+    let picklist = &picker.picklist;
+    let start_row = picklist.selected.saturating_sub(rows.saturating_sub(1));
+    let end_x = area.x + area.width;
+    let label_x = area.x + 1;
+
+    for (row_idx, (&idx, indices)) in picklist
+        .filtered
+        .iter()
+        .zip(picklist.match_indices.iter())
+        .skip(start_row)
+        .take(rows)
+        .enumerate()
+    {
+        let row = area.y + row_idx as u16;
+        let is_selected = start_row + row_idx == picklist.selected;
+        let style = if is_selected {
+            selected_style
+        } else {
+            row_style
+        };
+        for col in area.x..end_x {
+            buf[(col, row)].set_char(' ').set_style(style);
+        }
+        let label = display_row(&picklist.base[idx], &picker.git_root);
+        write_str_clipped(buf, label_x, row, &label, style, end_x);
+        for (label_col, _) in label.chars().enumerate() {
+            let col = label_x + label_col as u16;
+            if col >= end_x {
+                break;
+            }
+            if indices.binary_search(&(label_col as u32)).is_ok() {
+                buf[(col, row)].set_style(match_style);
+            }
+        }
+    }
+}
+
+fn render_arg_preview(
+    picker: &ArgPicker,
+    area: Rect,
+    theme: &crate::theme::Theme,
+    ws: &mut Workspace,
+    buf: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let fallback = theme.get(crate::theme::scope::UI_TEXT);
+    if let Some(editor) = ws.editors.get_mut(picker.preview.editor) {
+        render_editor(editor, area, fallback, theme, buf, false);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

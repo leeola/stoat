@@ -38,6 +38,7 @@ use crate::{
 pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::close_file_finder;
 pub(crate) use lsp::pump_lsp_jumps;
+pub(crate) use palette::sync_palette_picker;
 #[cfg(test)]
 pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};

@@ -1,13 +1,18 @@
 use crate::{
     app::Stoat,
     fuzzy,
+    host::FsHost,
     input_view::{InputView, SubmitTarget},
     pane::{FocusTarget, View},
+    picker::{PickList, Preview, PreviewSource},
     rebase::RebasePause,
     workspace::Workspace,
 };
-use stoat_action::{registry, ActionKind, ParamValue};
-use stoat_scheduler::Executor;
+use std::path::{Path, PathBuf};
+use stoat_action::{registry, ActionKind, ParamValue, ValueSource};
+use stoat_language::LanguageRegistry;
+use stoat_scheduler::{Executor, Task};
+use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 pub struct CommandPalette {
     /// The single command-line input, holding the raw text typed after `:`.
@@ -41,6 +46,129 @@ pub struct CommandPalette {
     /// palette lists actions so the half-page handler can size its step.
     /// `None` before the first render, where the step is a single row.
     pub(crate) viewport_rows: Option<usize>,
+    /// Inline value-picker shown while collecting a [`ValueSource::Files`]
+    /// argument (e.g. `:o `). `Some` once the streaming workspace walk has been
+    /// spawned, and held until the palette closes, where it is disposed. `None`
+    /// while listing commands or collecting a non-file argument.
+    pub(crate) arg_picker: Option<ArgPicker>,
+}
+
+/// The inline file value-picker the palette shows while collecting a
+/// [`ValueSource::Files`] argument.
+///
+/// A trimmed mirror of [`crate::file_finder::FileFinder`]'s picker half: it owns
+/// the streaming workspace walk, the fuzzy [`PickList`] over discovered paths,
+/// and the live [`Preview`] pane. The palette parses the command's trailing
+/// argument and drives this list with it, so `:o src/ma` filters the same way
+/// the standalone finder does.
+pub(crate) struct ArgPicker {
+    /// Workspace root the walk is rooted at. Also the base for repo-relative
+    /// row display (read by the renderer) and fuzzy ranking.
+    pub(crate) git_root: PathBuf,
+    /// Every discovered path, grown by [`ArgPicker::pump_walk`] as walk batches
+    /// arrive. Copied into [`PickList::base`] on each refilter.
+    all_paths: Vec<PathBuf>,
+    /// Streaming receiver fed by the spawned walker. Cleared once the sender
+    /// drops, signalling the walk is exhausted.
+    walk_rx: Option<UnboundedReceiver<Vec<PathBuf>>>,
+    /// Held only to keep the spawned walker alive. Dropping it cancels the
+    /// in-flight walk on runtimes that propagate cancellation.
+    _walk_task: Task<()>,
+    /// Fuzzy result list over [`Self::all_paths`], read by the renderer.
+    pub(crate) picklist: PickList,
+    /// Last argument text run through the matcher, so the per-frame sync skips
+    /// re-running it when nothing changed.
+    last_filter_text: String,
+    /// Preview pane shown beside the result list.
+    pub(crate) preview: Preview,
+}
+
+impl ArgPicker {
+    fn new(
+        ws: &mut Workspace,
+        executor: Executor,
+        git_root: PathBuf,
+        walk_rx: UnboundedReceiver<Vec<PathBuf>>,
+        walk_task: Task<()>,
+    ) -> Self {
+        let preview = Preview::new(ws, executor);
+        Self {
+            git_root,
+            all_paths: Vec::new(),
+            walk_rx: Some(walk_rx),
+            _walk_task: walk_task,
+            picklist: PickList::default(),
+            last_filter_text: String::new(),
+            preview,
+        }
+    }
+
+    /// Absolute path of the currently selected filtered row, if any.
+    pub(crate) fn selected_path(&self) -> Option<&Path> {
+        self.picklist.selected_path()
+    }
+
+    /// Adjust the selection cursor by `delta`, saturating at list bounds.
+    pub(crate) fn move_selection(&mut self, delta: i32) {
+        self.picklist.move_selection(delta);
+    }
+
+    /// Drain every batch the walker emitted since the last call into
+    /// [`Self::all_paths`], invalidating the filter cache so the next
+    /// [`Self::refilter`] re-runs against the larger base.
+    fn pump_walk(&mut self) -> bool {
+        let Some(rx) = self.walk_rx.as_mut() else {
+            return false;
+        };
+        let mut received_any = false;
+        loop {
+            match rx.try_recv() {
+                Ok(batch) => {
+                    self.all_paths.extend(batch);
+                    received_any = true;
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.walk_rx = None;
+                    break;
+                },
+            }
+        }
+        if received_any {
+            self.last_filter_text.clear();
+            self.picklist.filtered.clear();
+            self.picklist.match_indices.clear();
+        }
+        received_any
+    }
+
+    /// Re-run the matcher for `query` over the discovered paths, short-circuiting
+    /// when the query is unchanged and the list is already populated.
+    fn refilter(&mut self, query: &str) {
+        if query == self.last_filter_text && !self.picklist.filtered.is_empty() {
+            return;
+        }
+        self.picklist.base = self.all_paths.clone();
+        self.picklist.refilter(query, &self.git_root);
+        self.last_filter_text = query.to_string();
+    }
+
+    /// Sync the preview pane to the selected path, reading it from disk, or
+    /// clear it when nothing is selected.
+    fn sync_preview(
+        &mut self,
+        ws: &mut Workspace,
+        fs_host: &dyn FsHost,
+        language_registry: &LanguageRegistry,
+    ) {
+        match self
+            .selected_path()
+            .map(|p| PreviewSource::File(p.to_path_buf()))
+        {
+            Some(source) => self.preview.sync(ws, fs_host, language_registry, source),
+            None => self.preview.clear(ws),
+        }
+    }
 }
 
 /// Palette listing mode.
@@ -198,6 +326,7 @@ impl CommandPalette {
             scope,
             availability,
             viewport_rows: None,
+            arg_picker: None,
         }
     }
 
@@ -223,18 +352,78 @@ impl CommandPalette {
         Some(&self.input)
     }
 
-    /// Tear down the editor slot owned by the palette. Called on any palette
+    /// Tear down the editor slots owned by the palette. Called on any palette
     /// close path (`CancelPromptInput`, `Ctrl-C`, or post-`Dispatch` cleanup)
-    /// so the scratch editor doesn't linger in the workspace's slotmap.
+    /// so neither the input scratch nor the inline picker's preview lingers in
+    /// the workspace's slotmaps.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
+        if let Some(picker) = &self.arg_picker {
+            picker.preview.dispose(ws);
+        }
+    }
+
+    /// Whether the input currently parses as a command whose first parameter
+    /// sources its value from [`ValueSource::Files`] (e.g. `:o `). Gates both
+    /// rendering the inline file picker and routing selection keys to it.
+    pub(crate) fn in_files_arg_mode(&self) -> bool {
+        self.command
+            .and_then(|entry| entry.def.params().first())
+            .is_some_and(|param| param.value_source == ValueSource::Files)
+    }
+
+    /// The trailing argument text in file-argument mode, or `None` otherwise.
+    /// Drives the inline file picker's filter. The tail is everything after the
+    /// command token, so a path argument may contain spaces.
+    pub(crate) fn files_arg_tail(&self, ws: &Workspace) -> Option<String> {
+        if !self.in_files_arg_mode() {
+            return None;
+        }
+        let text = self.input.text(ws);
+        let (_, tail) = text.split_once(' ')?;
+        Some(tail.to_string())
+    }
+
+    /// Install the inline file picker from an already-spawned workspace walk.
+    /// No-op when a picker already exists, so the per-frame sync can call this
+    /// unconditionally on entering file-argument mode.
+    pub(crate) fn install_arg_picker(
+        &mut self,
+        ws: &mut Workspace,
+        executor: Executor,
+        git_root: PathBuf,
+        walk_rx: UnboundedReceiver<Vec<PathBuf>>,
+        walk_task: Task<()>,
+    ) {
+        if self.arg_picker.is_none() {
+            self.arg_picker = Some(ArgPicker::new(ws, executor, git_root, walk_rx, walk_task));
+        }
+    }
+
+    /// Drive the inline file picker for one frame, draining walk batches,
+    /// refiltering against the argument `tail`, and syncing the preview to the
+    /// selection. No-op when no picker is installed.
+    pub(crate) fn sync_arg_picker(
+        &mut self,
+        tail: &str,
+        ws: &mut Workspace,
+        fs_host: &dyn FsHost,
+        language_registry: &LanguageRegistry,
+    ) {
+        let Some(picker) = self.arg_picker.as_mut() else {
+            return;
+        };
+        picker.pump_walk();
+        picker.refilter(tail);
+        picker.sync_preview(ws, fs_host, language_registry);
     }
 
     /// Re-parse the input into an optional command and refilter the action
     /// list. `ws` is required to read the [`InputView`]'s current rope
-    /// contents. Called every frame from the renderer so mutations picked up
-    /// by `handle_insert_key` (typing / backspace / cursor motion) are
-    /// reflected without a dedicated sync hook.
+    /// contents. Called every frame by
+    /// [`crate::action_handlers::sync_palette_picker`] before the palette is
+    /// painted, so mutations picked up by `handle_insert_key` (typing /
+    /// backspace / cursor motion) are reflected without a dedicated sync hook.
     ///
     /// When the input parses as `<command> <arg>` (see [`parse_command`]) the
     /// palette enters arg mode, setting [`Self::command`] and clearing the
@@ -271,7 +460,14 @@ impl CommandPalette {
         let text = self.input.text(ws);
         if let Some((entry, arg)) = parse_command(&text) {
             let param = &entry.def.params()[0];
-            return match ParamValue::parse(param.kind, arg) {
+            let chosen = self
+                .arg_picker
+                .as_ref()
+                .filter(|_| param.value_source == ValueSource::Files)
+                .and_then(|picker| picker.selected_path())
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| arg.to_string());
+            return match ParamValue::parse(param.kind, &chosen) {
                 Ok(value) => {
                     self.input.dispose(ws);
                     PaletteOutcome::Dispatch(entry, vec![value])
@@ -370,6 +566,31 @@ pub(crate) fn refilter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_harness::TestHarness;
+
+    /// Seed `files` into the harness' fake fs under a fixed virtual root and
+    /// point the active workspace at it, so the palette's inline file picker
+    /// walks a deterministic, cwd-independent file set. Returns the root.
+    fn seed_palette_workspace(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
+        let root = PathBuf::from("/stoat-palette-test");
+        h.fake_fs().insert_files(
+            files
+                .iter()
+                .map(|(rel, content)| (root.join(rel), content.as_bytes())),
+        );
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        root
+    }
+
+    fn arg_picker(h: &TestHarness) -> &ArgPicker {
+        h.stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .arg_picker
+            .as_ref()
+            .expect("arg picker active")
+    }
 
     fn names_for(text: &str) -> Vec<&'static str> {
         names_for_scope(text, PaletteScope::All, &Availability::default())
@@ -803,18 +1024,142 @@ mod tests {
         h.assert_snapshot("command_palette_filter_narrows_to_one");
     }
 
+    /// `:o ` with no query lists every workspace file beside a live preview of
+    /// the selected one.
     #[test]
     fn snapshot_command_palette_arg_empty() {
-        let mut h = Stoat::test();
+        let mut h = TestHarness::with_size(120, 30);
+        seed_palette_workspace(
+            &mut h,
+            &[
+                ("src/main.rs", "fn main() {\n    run();\n}\n"),
+                ("src/lib.rs", "pub fn run() {}\n"),
+                ("README.md", "# project\n"),
+            ],
+        );
         h.type_text(":o ");
         h.assert_snapshot("command_palette_arg_empty");
     }
 
+    /// Typing after `:o ` filters the file list and repoints the preview.
     #[test]
     fn snapshot_command_palette_arg_typing() {
-        let mut h = Stoat::test();
-        h.type_text(":o /tmp/example.rs");
+        let mut h = TestHarness::with_size(120, 30);
+        seed_palette_workspace(
+            &mut h,
+            &[
+                ("src/main.rs", "fn main() {\n    run();\n}\n"),
+                ("src/lib.rs", "pub fn run() {}\n"),
+                ("README.md", "# project\n"),
+            ],
+        );
+        h.type_text(":o main");
         h.assert_snapshot("command_palette_arg_typing");
+    }
+
+    #[test]
+    fn arg_picker_lists_workspace_files() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("sub/c.rs", "")]);
+        h.type_text(":o ");
+        h.snapshot();
+        assert_eq!(arg_picker(&h).picklist.filtered.len(), 3);
+    }
+
+    #[test]
+    fn arg_picker_narrows_on_typing() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(
+            &mut h,
+            &[("alpha.rs", ""), ("beta.rs", ""), ("gamma.rs", "")],
+        );
+        h.type_text(":o ");
+        h.snapshot();
+        assert_eq!(arg_picker(&h).picklist.filtered.len(), 3);
+
+        h.type_text("alp");
+        h.snapshot();
+        let picker = arg_picker(&h);
+        assert_eq!(picker.picklist.filtered.len(), 1);
+        let idx = picker.picklist.filtered[0];
+        assert!(picker.picklist.base[idx].ends_with("alpha.rs"));
+    }
+
+    #[test]
+    fn arg_picker_arrow_moves_selection() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("c.rs", "")]);
+        h.type_text(":o ");
+        h.snapshot();
+        assert_eq!(arg_picker(&h).picklist.selected, 0);
+
+        h.type_keys("down");
+        h.snapshot();
+        assert_eq!(arg_picker(&h).picklist.selected, 1);
+    }
+
+    #[test]
+    fn arg_submit_opens_selected_candidate() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(
+            &mut h,
+            &[
+                ("note.txt", "UNIQUE-PICKER-MARKER\n"),
+                ("other.txt", "nope\n"),
+            ],
+        );
+        h.type_text(":o note");
+        h.snapshot();
+        h.type_keys("enter");
+        assert!(h.stoat.command_palette.is_none());
+
+        let frame = h.snapshot();
+        assert!(
+            frame.content.contains("UNIQUE-PICKER-MARKER"),
+            "selected candidate not opened:\n{}",
+            frame.content
+        );
+    }
+
+    #[test]
+    fn arg_picker_preview_buffer_evicted_on_close() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("a.rs", "fn a() {}\n")]);
+        h.type_text(":o ");
+        h.snapshot();
+        let preview_id = arg_picker(&h).preview.buffer;
+        assert!(h.stoat.active_workspace().buffers.get(preview_id).is_some());
+
+        h.type_keys("escape");
+        assert!(h.stoat.command_palette.is_none());
+        assert!(
+            h.stoat.active_workspace().buffers.get(preview_id).is_none(),
+            "preview buffer should be evicted on close",
+        );
+        assert!(h
+            .stoat
+            .active_workspace()
+            .buffers
+            .preview_buffer_ids()
+            .is_empty(),);
+    }
+
+    #[test]
+    fn arg_picker_scratch_not_left_dirty_on_close() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("main.rs", "fn main() {}\n")]);
+        let baseline = h.stoat.active_workspace().buffers.dirty_buffers().len();
+
+        h.type_text(":o main");
+        h.snapshot();
+        h.type_keys("escape");
+
+        assert!(h.stoat.command_palette.is_none());
+        assert_eq!(
+            h.stoat.active_workspace().buffers.dirty_buffers().len(),
+            baseline,
+            "no dirty scratch should linger after the palette closes",
+        );
     }
 
     #[test]

@@ -2989,6 +2989,7 @@ impl Stoat {
         self.render_tick += 1;
         buf.resize(self.size);
         buf.reset();
+        action_handlers::sync_palette_picker(self);
         crate::render::frame(self, buf);
     }
 

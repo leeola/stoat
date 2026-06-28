@@ -9,7 +9,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 /// Candidates feeding a palette argument's inline value-picker, resolved from a
 /// [`ValueSource`] by [`arg_candidates`].
-#[allow(dead_code)]
 pub(super) enum ArgCandidates {
     /// Streaming workspace file walk. Paths arrive in batches on `rx` while
     /// `task` runs the blocking walk. The task must be held to keep it alive.
@@ -17,7 +16,9 @@ pub(super) enum ArgCandidates {
         rx: UnboundedReceiver<Vec<PathBuf>>,
         task: Task<()>,
     },
-    /// Fully-known path set, such as the currently-open buffer paths.
+    /// Fully-known path set, such as the currently-open buffer paths. Consumed
+    /// by the buffer picker that lands with the `OpenBuffer` action.
+    #[allow(dead_code)]
     Paths(Vec<PathBuf>),
 }
 
@@ -39,6 +40,56 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
         ValueSource::Buffers => Some(ArgCandidates::Paths(
             stoat.active_workspace().buffers.open_paths(),
         )),
+    }
+}
+
+/// Sync the palette's inline file picker once per frame, before the palette is
+/// painted.
+///
+/// Refilters the command list from the input, and when the input parses as a
+/// command whose trailing argument sources files (e.g. `:o `), lazily spawns the
+/// workspace walk on first entry, then drains it, refilters the path list, and
+/// syncs the preview. A no-op when no palette is open or the input is not in
+/// file-argument mode.
+///
+/// Lives here rather than on [`crate::command_palette::CommandPalette`] because
+/// spawning the walk needs [`Stoat`]-level resources (the executor, fs host, and
+/// redraw notifier) that a palette method does not see.
+pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
+    if stoat.command_palette.is_none() {
+        return;
+    }
+    let active_idx = stoat.active_workspace;
+
+    let tail = {
+        let ws = &mut stoat.workspaces[active_idx];
+        let palette = stoat.command_palette.as_mut().expect("palette present");
+        palette.refilter_from_input(ws);
+        palette.files_arg_tail(ws)
+    };
+    let Some(tail) = tail else {
+        return;
+    };
+
+    let needs_walk = stoat
+        .command_palette
+        .as_ref()
+        .is_some_and(|palette| palette.arg_picker.is_none());
+    if needs_walk
+        && let Some(ArgCandidates::Walk { rx, task }) = arg_candidates(stoat, ValueSource::Files)
+    {
+        let executor = stoat.executor.clone();
+        let git_root = stoat.workspaces[active_idx].git_root.clone();
+        let ws = &mut stoat.workspaces[active_idx];
+        if let Some(palette) = stoat.command_palette.as_mut() {
+            palette.install_arg_picker(ws, executor, git_root, rx, task);
+        }
+    }
+
+    let fs_host = stoat.fs_host.clone();
+    let ws = &mut stoat.workspaces[active_idx];
+    if let Some(palette) = stoat.command_palette.as_mut() {
+        palette.sync_arg_picker(&tail, ws, &*fs_host, &stoat.language_registry);
     }
 }
 
@@ -79,6 +130,12 @@ pub(super) fn palette_insert_newline(stoat: &mut Stoat) -> Option<UpdateEffect> 
 /// Move the action-list selection. Returns `None` when the palette is closed.
 pub(super) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<UpdateEffect> {
     let palette = stoat.command_palette.as_mut()?;
+    if palette.in_files_arg_mode()
+        && let Some(picker) = palette.arg_picker.as_mut()
+    {
+        picker.move_selection(delta);
+        return Some(UpdateEffect::Redraw);
+    }
     if palette.filtered.is_empty() {
         palette.selected = 0;
         return Some(UpdateEffect::Redraw);
@@ -93,6 +150,13 @@ pub(super) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
 /// (-1 up, 1 down). Before the first render the viewport is unset and the step
 /// falls back to a single row. Delegates to [`palette_move_selection`].
 pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if let Some(palette) = stoat.command_palette.as_mut()
+        && palette.in_files_arg_mode()
+        && let Some(picker) = palette.arg_picker.as_mut()
+    {
+        picker.picklist.page(dir);
+        return UpdateEffect::Redraw;
+    }
     let step = match stoat.command_palette.as_ref() {
         Some(p) => p.viewport_rows.map(|v| v.div_ceil(2).max(1)).unwrap_or(1),
         None => return UpdateEffect::None,
