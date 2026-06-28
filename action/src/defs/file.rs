@@ -1,9 +1,10 @@
-use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
+use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource};
 use std::{any::Any, path::PathBuf};
 
 const PARAMS: &[ParamDef] = &[ParamDef {
     name: "path",
     kind: ParamKind::String,
+    value_source: ValueSource::Files,
     required: true,
     description: "Filesystem path of the file to open. Relative paths resolve against the current working directory.",
 }];
@@ -73,6 +74,7 @@ mod tests {
         assert_eq!(action.def().name(), "OpenFile");
         assert_eq!(action.def().params().len(), 1);
         assert_eq!(action.def().params()[0].name, "path");
+        assert_eq!(action.def().params()[0].value_source, ValueSource::Files);
     }
 
     #[test]

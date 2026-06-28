@@ -19,9 +19,27 @@ impl fmt::Display for ParamKind {
     }
 }
 
+/// Where an interactive value picker sources candidates for an argument.
+///
+/// This is orthogonal to [`ParamKind`]. A path argument still parses as a
+/// [`ParamKind::String`] regardless of source. The source only decides what an
+/// interactive picker lists beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueSource {
+    /// No candidate list. The argument is typed freely.
+    None,
+    /// Workspace files.
+    Files,
+    /// Currently-open buffers.
+    Buffers,
+}
+
 pub struct ParamDef {
     pub name: &'static str,
     pub kind: ParamKind,
+    /// Where an interactive picker sources candidate values for this argument,
+    /// orthogonal to [`kind`](Self::kind)'s parse type.
+    pub value_source: ValueSource,
     pub required: bool,
     pub description: &'static str,
 }

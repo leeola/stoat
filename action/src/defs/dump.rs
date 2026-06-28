@@ -1,9 +1,10 @@
-use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
+use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource};
 use std::any::Any;
 
 const PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,
+    value_source: ValueSource::None,
     required: true,
     description: "Human-readable name for the dump. Sanitized into a path-friendly slug (lowercase, whitespace becomes '-', invalid chars dropped, truncated to 64 chars).",
 }];

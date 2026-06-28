@@ -47,6 +47,7 @@ static SET_MODE_DEF: SetModeHelpDef = SetModeHelpDef;
 static SET_MODE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "mode",
     kind: stoat_action::ParamKind::String,
+    value_source: stoat_action::ValueSource::None,
     required: true,
     description: "Name of the target mode (e.g. `normal`, `insert`, `space`).",
 }];

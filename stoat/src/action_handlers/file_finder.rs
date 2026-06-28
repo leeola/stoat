@@ -4,6 +4,8 @@ use crate::{
 };
 use std::path::PathBuf;
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
+use stoat_scheduler::Task;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 /// Open the file finder. No-op if one is already open so that a second
 /// `space p` keystroke cannot stack modals or reset progress the user has
@@ -23,20 +25,7 @@ pub(super) fn open_file_finder(
     let previous_mode = "normal".to_string();
     let executor = stoat.executor.clone();
     let git_root = stoat.active_workspace().git_root.clone();
-    let (walk_tx, walk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let walk_task = {
-        let fs_host = stoat.fs_host.clone();
-        let walk_root = git_root.clone();
-        let redraw_notify = stoat.redraw_notify.clone();
-        executor.spawn_blocking(move || {
-            fs_host.walk_workspace_files_streaming(&walk_root, &mut |batch| {
-                if walk_tx.send(batch).is_err() {
-                    return;
-                }
-                redraw_notify.notify_one();
-            });
-        })
-    };
+    let (walk_rx, walk_task) = spawn_workspace_walk(stoat, git_root.clone());
     let modified_paths = crate::file_finder::query_modified(&*stoat.git_host, &git_root);
     let buffer_paths = stoat.active_workspace().buffers.open_paths();
 
@@ -55,6 +44,31 @@ pub(super) fn open_file_finder(
     ));
     stoat.mode = "prompt".into();
     UpdateEffect::Redraw
+}
+
+/// Spawn the streaming workspace-file walker rooted at `git_root`.
+///
+/// Returns the receiver yielding batches of discovered paths and the task
+/// running the blocking walk. The task must be held to keep the walk alive:
+/// dropping it cancels the in-flight walk on runtimes that propagate
+/// cancellation. Each batch pings the redraw notifier so a live picker repaints
+/// as paths stream in.
+pub(super) fn spawn_workspace_walk(
+    stoat: &Stoat,
+    git_root: PathBuf,
+) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
+    let (walk_tx, walk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let fs_host = stoat.fs_host.clone();
+    let redraw_notify = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_blocking(move || {
+        fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
+            if walk_tx.send(batch).is_err() {
+                return;
+            }
+            redraw_notify.notify_one();
+        });
+    });
+    (walk_rx, task)
 }
 
 /// Handle a submit keypress while the finder is open. Returns `Some(effect)`

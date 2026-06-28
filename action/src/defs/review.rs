@@ -182,19 +182,21 @@ define_action!(
     ActionPriority::Rare
 );
 
-use crate::{Action, ActionDef, ParamDef, ParamKind};
+use crate::{Action, ActionDef, ParamDef, ParamKind, ValueSource};
 use std::{any::Any, path::PathBuf};
 
 const OPEN_REVIEW_COMMIT_PARAMS: &[ParamDef] = &[
     ParamDef {
         name: "workdir",
         kind: ParamKind::String,
+        value_source: ValueSource::None,
         required: true,
         description: "Absolute path of a directory inside the target repository.",
     },
     ParamDef {
         name: "sha",
         kind: ParamKind::String,
+        value_source: ValueSource::None,
         required: true,
         description: "Commit sha to review against its first parent.",
     },
@@ -250,18 +252,21 @@ const OPEN_REVIEW_COMMIT_RANGE_PARAMS: &[ParamDef] = &[
     ParamDef {
         name: "workdir",
         kind: ParamKind::String,
+        value_source: ValueSource::None,
         required: true,
         description: "Absolute path of a directory inside the target repository.",
     },
     ParamDef {
         name: "from",
         kind: ParamKind::String,
+        value_source: ValueSource::None,
         required: true,
         description: "Base commit sha (exclusive in git-diff semantics).",
     },
     ParamDef {
         name: "to",
         kind: ParamKind::String,
+        value_source: ValueSource::None,
         required: true,
         description: "Tip commit sha.",
     },

@@ -2,6 +2,45 @@ use crate::{
     app::{Stoat, UpdateEffect},
     command_palette::{PaletteOutcome, PalettePhase},
 };
+use std::path::PathBuf;
+use stoat_action::ValueSource;
+use stoat_scheduler::Task;
+use tokio::sync::mpsc::UnboundedReceiver;
+
+/// Candidates feeding a palette argument's inline value-picker, resolved from a
+/// [`ValueSource`] by [`arg_candidates`].
+#[allow(dead_code)]
+pub(super) enum ArgCandidates {
+    /// Streaming workspace file walk. Paths arrive in batches on `rx` while
+    /// `task` runs the blocking walk. The task must be held to keep it alive.
+    Walk {
+        rx: UnboundedReceiver<Vec<PathBuf>>,
+        task: Task<()>,
+    },
+    /// Fully-known path set, such as the currently-open buffer paths.
+    Paths(Vec<PathBuf>),
+}
+
+/// Resolve an argument's [`ValueSource`] into the candidates its inline picker
+/// lists.
+///
+/// `Files` streams workspace paths via the same background walk the file finder
+/// uses. `Buffers` returns the currently-open buffer paths. `None` yields no
+/// picker.
+#[allow(dead_code)]
+pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCandidates> {
+    match source {
+        ValueSource::None => None,
+        ValueSource::Files => {
+            let git_root = stoat.active_workspace().git_root.clone();
+            let (rx, task) = super::file_finder::spawn_workspace_walk(stoat, git_root);
+            Some(ArgCandidates::Walk { rx, task })
+        },
+        ValueSource::Buffers => Some(ArgCandidates::Paths(
+            stoat.active_workspace().buffers.open_paths(),
+        )),
+    }
+}
 
 /// Advance the command palette on a submit keypress. Returns `Some(effect)`
 /// when the palette consumed the submission (even if the outcome is a redraw

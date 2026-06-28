@@ -85,4 +85,4 @@ pub use defs::{
     workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace},
 };
 pub use kind::ActionKind;
-pub use param::{ParamDef, ParamError, ParamKind, ParamValue};
+pub use param::{ParamDef, ParamError, ParamKind, ParamValue, ValueSource};

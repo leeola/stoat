@@ -1,5 +1,6 @@
 use crate::{
     action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    ValueSource,
 };
 use std::any::Any;
 
@@ -44,6 +45,7 @@ define_action!(
 const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,
+    value_source: ValueSource::None,
     required: true,
     description: "New display name for the active workspace. Empty string re-engages the default basename fallback.",
 }];

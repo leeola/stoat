@@ -1,5 +1,6 @@
 use crate::{
     action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    ValueSource,
 };
 use std::any::Any;
 
@@ -52,6 +53,7 @@ define_action!(
 const RUN_PARAMS: &[ParamDef] = &[ParamDef {
     name: "command",
     kind: ParamKind::String,
+    value_source: ValueSource::None,
     required: true,
     description: "Shell command to execute in a modal overlay.",
 }];
