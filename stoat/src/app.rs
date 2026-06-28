@@ -3034,12 +3034,13 @@ impl Stoat {
             .map(|layout| layout.list);
 
         // The command palette is a modal over normal mode like the finder; its
-        // fixed list region pools as a non-pane surface. Only the Filter phase
-        // has a list -- CollectArgs walks parameters with no scrolling list.
+        // fixed list region pools as a non-pane surface. Only command-filter
+        // mode has a list -- arg mode shows the inline picker, not a list.
         let palette_list = (!overlay
-            && self.command_palette.as_ref().is_some_and(|p| {
-                matches!(p.phase, crate::command_palette::PalettePhase::Filter { .. })
-            }))
+            && self
+                .command_palette
+                .as_ref()
+                .is_some_and(|p| p.command.is_none()))
         .then(|| crate::render::command_palette::palette_filter_layout(self.size()))
         .flatten()
         .map(|layout| layout.list);
@@ -3172,14 +3173,10 @@ impl Stoat {
             );
         }
 
-        if let (Some(list), Some(palette)) = (palette_list, self.command_palette.as_ref())
-            && let crate::command_palette::PalettePhase::Filter {
-                filtered,
-                match_indices,
-                selected,
-                ..
-            } = &palette.phase
-        {
+        if let (Some(list), Some(palette)) = (palette_list, self.command_palette.as_ref()) {
+            let filtered = &palette.filtered;
+            let match_indices = &palette.match_indices;
+            let selected = &palette.selected;
             let region = stoatty_protocol::command::PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::PALETTE,
                 top: list.y,

@@ -47,7 +47,6 @@ pub(crate) struct InputView {
 #[allow(dead_code)]
 pub(crate) enum SubmitTarget {
     PaletteFilter,
-    PaletteArg,
     HelpSearch,
     Run,
     Reword,

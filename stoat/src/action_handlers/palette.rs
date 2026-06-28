@@ -1,6 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    command_palette::{PaletteOutcome, PalettePhase},
+    command_palette::PaletteOutcome,
 };
 use std::path::PathBuf;
 use stoat_action::ValueSource;
@@ -44,16 +44,15 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
 
 /// Advance the command palette on a submit keypress. Returns `Some(effect)`
 /// when the palette consumed the submission (even if the outcome is a redraw
-/// with no phase change), or `None` if no palette is open so the caller can
+/// without a dispatch), or `None` if no palette is open so the caller can
 /// fall through to other prompt consumers.
 pub(super) fn palette_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     stoat.command_palette.as_ref()?;
     let outcome = {
         let active_idx = stoat.active_workspace;
-        let executor = stoat.executor.clone();
         let workspaces = &mut stoat.workspaces;
         let palette = stoat.command_palette.as_mut()?;
-        palette.handle_submit(&mut workspaces[active_idx], executor)
+        palette.handle_submit(&mut workspaces[active_idx])
     };
     Some(apply_outcome(stoat, outcome))
 }
@@ -70,41 +69,29 @@ pub(super) fn palette_insert_newline(stoat: &mut Stoat) -> Option<UpdateEffect> 
     let active_idx = stoat.active_workspace;
     let workspaces = &mut stoat.workspaces;
     let palette = stoat.command_palette.as_mut()?;
-    let input = match &mut palette.phase {
-        PalettePhase::Filter { input, .. } => input,
-        PalettePhase::CollectArgs { input, .. } => input,
-    };
     let ws = &mut workspaces[active_idx];
-    let current = input.text(ws);
+    let current = palette.input.text(ws);
     let new_text = format!("{current}\n");
-    input.replace_text(ws, &new_text);
+    palette.input.replace_text(ws, &new_text);
     Some(UpdateEffect::Redraw)
 }
 
-/// Move the filter selection. Returns `None` when the palette is not open or
-/// not in the filter phase.
+/// Move the action-list selection. Returns `None` when the palette is closed.
 pub(super) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<UpdateEffect> {
     let palette = stoat.command_palette.as_mut()?;
-    let PalettePhase::Filter {
-        filtered, selected, ..
-    } = &mut palette.phase
-    else {
-        return None;
-    };
-    if filtered.is_empty() {
-        *selected = 0;
+    if palette.filtered.is_empty() {
+        palette.selected = 0;
         return Some(UpdateEffect::Redraw);
     }
-    let max = (filtered.len() - 1) as i32;
-    let next = (*selected as i32 + delta).clamp(0, max);
-    *selected = next as usize;
+    let max = (palette.filtered.len() - 1) as i32;
+    let next = (palette.selected as i32 + delta).clamp(0, max);
+    palette.selected = next as usize;
     Some(UpdateEffect::Redraw)
 }
 
-/// Page the palette filter selection by half its rendered list height in `dir`
+/// Page the action-list selection by half its rendered list height in `dir`
 /// (-1 up, 1 down). Before the first render the viewport is unset and the step
-/// falls back to a single row. No-op when the palette is not in the filter
-/// phase, deferring to [`palette_move_selection`].
+/// falls back to a single row. Delegates to [`palette_move_selection`].
 pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     let step = match stoat.command_palette.as_ref() {
         Some(p) => p.viewport_rows.map(|v| v.div_ceil(2).max(1)).unwrap_or(1),
@@ -113,8 +100,8 @@ pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     palette_move_selection(stoat, dir * step as i32).unwrap_or(UpdateEffect::None)
 }
 
-/// Flip the palette's [`crate::command_palette::PaletteScope`]. No-op when the
-/// palette is closed or is past the filter phase (args collection).
+/// Flip the palette's [`crate::command_palette::PaletteScope`] and re-filter.
+/// No-op when the palette is closed.
 pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
     let workspaces = &mut stoat.workspaces;

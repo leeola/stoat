@@ -3,7 +3,7 @@ source: stoat/src/test_harness.rs
 assertion_line: 579
 expression: text
 ---
-actions: n
+actions: space
 focused: #1 of 1
 mode: prompt
 size: 80x24
@@ -11,20 +11,20 @@ size: 80x24
 [0m[7m [0m
 
   [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
-  [0m[35m│[0m[33m:[0m [0m[97mfile open[0m[7m [0m                                                              [0m[35m│[0m
+  [0m[35m│[0m[33m:[0m [0m[97mo [0m[7m [0m                                                                     [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[30m[46m [0m[30m[43mOpenFile[0m[30m[46m               open a file                                       [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mOpen[0m[97mChanged[0m[30m[43mFile[0m[97mPicker  [0m[90mopen the changed-file picker[0m[97m                      [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mOpenFile[0m[97mFinder         [0m[90mopen the file finder[0m[97m                              [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mOpenFile[0m[97mFinderHSplit   [0m[90mopen file finder, split horizontally on select[0m[97m    [0m[35m│[0m
-  [0m[35m│[0m[97m [0m[30m[43mOpenFile[0m[97mFinderVSplit   [0m[90mopen file finder, split vertically on select[0m[97m      [0m[35m│[0m
+  [0m[35m│[0m                                                                          [0m[35m│[0m
+  [0m[35m│[0m                                                                          [0m[35m│[0m
+  [0m[35m│[0m                                                                          [0m[35m│[0m
+  [0m[35m│[0m                                                                          [0m[35m│[0m
+  [0m[35m│[0m                                                                          [0m[35m│[0m
   [0m[35m│[0m                                                                          [0m[35m│[0m
   [0m[35m│[0m                                                                          [0m[35m│[0m
   [0m[35m│[0m                                                                          [0m[35m│[0m
   [0m[35m│[0m                                                                          [0m[35m│[0m
   [0m[35m│[0m                                                                          [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mRead a file from disk into a buffer [0m[33m┌ palette ──────────────────────────────┐[0m
+  [0m[35m│[0m                                    [0m[33m┌ palette ──────────────────────────────┐[0m
   [0m[35m│[0m                                    [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
   [0m[35m│[0m                                    [0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m  [0m[35m│[0m [0m[33m│[0m
   [0m[35m│[0m                                    [0m[33m│[0m[36m    C-f[0m[97m   page palette down[0m          [0m[35m│[0m [0m[33m│[0m

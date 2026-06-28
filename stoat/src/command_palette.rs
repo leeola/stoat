@@ -10,7 +10,22 @@ use stoat_action::{registry, ActionKind, ParamValue};
 use stoat_scheduler::Executor;
 
 pub struct CommandPalette {
-    pub(crate) phase: PalettePhase,
+    /// The single command-line input, holding the raw text typed after `:`.
+    /// Parsed each frame into an optional command plus a trailing argument
+    /// by [`CommandPalette::refilter_from_input`].
+    pub(crate) input: InputView,
+    /// Action entries matching the current filter text, in display order.
+    /// Empty while [`Self::command`] is set, since arg mode replaces the
+    /// action list with the argument picker.
+    pub(crate) filtered: Vec<&'static registry::RegistryEntry>,
+    /// Per-row matched character offsets into each entry's name, parallel to
+    /// [`Self::filtered`], used by the renderer to highlight matched cells.
+    pub(crate) match_indices: Vec<Vec<u32>>,
+    pub(crate) selected: usize,
+    /// `Some` once the input parses as a known command followed by a space:
+    /// the palette is collecting that command's trailing argument inline. The
+    /// argument text is the input tail after the command token.
+    pub(crate) command: Option<&'static registry::RegistryEntry>,
     /// Mode to restore when the palette closes. Saved at `new()` time so
     /// the palette can transition [`crate::app::Stoat::mode`] back to whatever
     /// the user was in before `:` was pressed.
@@ -23,8 +38,8 @@ pub struct CommandPalette {
     /// call because the workspace cannot mutate while the palette is modal.
     pub(crate) availability: Availability,
     /// Rendered filter-list height in rows, refreshed each frame while the
-    /// palette is in the Filter phase so the half-page handler can size its
-    /// step. `None` before the first render, where the step is a single row.
+    /// palette lists actions so the half-page handler can size its step.
+    /// `None` before the first render, where the step is a single row.
     pub(crate) viewport_rows: Option<usize>,
 }
 
@@ -138,42 +153,18 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
     }
 }
 
-pub(crate) enum PalettePhase {
-    /// Filtering the action list. The user is typing to narrow candidates and
-    /// using Up/Down (or Ctrl-P/N) to navigate. `match_indices` is parallel
-    /// to `filtered`: each element is the sorted, deduplicated character
-    /// offsets of the query match within the entry's name, used by the
-    /// renderer to highlight matched cells. Empty when no pattern is
-    /// active.
-    Filter {
-        input: InputView,
-        filtered: Vec<&'static registry::RegistryEntry>,
-        match_indices: Vec<Vec<u32>>,
-        selected: usize,
-    },
-    /// A param-taking action has been chosen and the palette is walking the
-    /// user through providing each parameter in sequence. Each parameter
-    /// step owns its own [`InputView`]; disposed and replaced when the step
-    /// advances so each param has independent edit/undo history.
-    CollectArgs {
-        entry: &'static registry::RegistryEntry,
-        collected: Vec<ParamValue>,
-        current: usize,
-        input: InputView,
-        error: Option<String>,
-    },
-}
-
 pub(crate) enum PaletteOutcome {
     /// Re-render but keep the palette open.
     None,
     /// User cancelled. Currently unused because `CancelPromptInput` closes
-    /// the palette directly via `close_palette`; retained as a shape that
-    /// future submit paths may want when a per-phase cancel becomes distinct
-    /// from a global cancel (e.g. "back up one arg step" vs "close palette").
+    /// the palette directly via `close_palette`. Retained as a shape that a
+    /// future submit path may want when a context-specific cancel becomes
+    /// distinct from a global cancel (e.g. "clear the typed argument" vs
+    /// "close the palette").
     #[allow(dead_code)]
     Close,
-    /// User selected an action with all required parameters collected.
+    /// An action is ready to dispatch, with any inline argument parsed into
+    /// its parameter list.
     Dispatch(&'static registry::RegistryEntry, Vec<ParamValue>),
 }
 
@@ -186,33 +177,28 @@ impl CommandPalette {
     ) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "prompt", 1);
         let scope = PaletteScope::Active;
-        let mut phase = PalettePhase::Filter {
+        let mut filtered = Vec::new();
+        let mut match_indices = Vec::new();
+        let mut selected = 0;
+        refilter(
+            "",
+            scope,
+            &availability,
+            &mut filtered,
+            &mut match_indices,
+            &mut selected,
+        );
+        Self {
             input,
-            filtered: Vec::new(),
-            match_indices: Vec::new(),
-            selected: 0,
-        };
-        if let PalettePhase::Filter {
             filtered,
             match_indices,
             selected,
-            ..
-        } = &mut phase
-        {
-            refilter("", scope, &availability, filtered, match_indices, selected);
-        }
-        Self {
-            phase,
+            command: None,
             previous_mode,
             scope,
             availability,
             viewport_rows: None,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn phase(&self) -> &PalettePhase {
-        &self.phase
     }
 
     pub(crate) fn scope(&self) -> PaletteScope {
@@ -230,140 +216,98 @@ impl CommandPalette {
         self.refilter_from_input(ws);
     }
 
-    /// Returns the palette's focused [`InputView`], which is always present
-    /// since every palette phase is backed by an [`InputView`]. Used by the
-    /// focus-resolution path in `Stoat::focused_editor_ids` so keymap-routed
-    /// typing hits the correct scratch buffer.
+    /// Returns the palette's [`InputView`]. Used by the focus-resolution path
+    /// in `Stoat::focused_editor_ids` so keymap-routed typing hits the correct
+    /// scratch buffer.
     pub(crate) fn focused_input(&self) -> Option<&InputView> {
-        match &self.phase {
-            PalettePhase::Filter { input, .. } => Some(input),
-            PalettePhase::CollectArgs { input, .. } => Some(input),
-        }
+        Some(&self.input)
     }
 
-    /// Tear down all editor slots owned by the palette. Called on any palette
+    /// Tear down the editor slot owned by the palette. Called on any palette
     /// close path (`CancelPromptInput`, `Ctrl-C`, or post-`Dispatch` cleanup)
-    /// so the scratch editor for the current phase doesn't linger in the
-    /// workspace's slotmap.
+    /// so the scratch editor doesn't linger in the workspace's slotmap.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
-        match &self.phase {
-            PalettePhase::Filter { input, .. } => input.dispose(ws),
-            PalettePhase::CollectArgs { input, .. } => input.dispose(ws),
-        }
+        self.input.dispose(ws);
     }
 
-    /// Refilter the action list against the current filter text. `ws` is
-    /// required to read the [`InputView`]'s current rope contents. Called
-    /// every frame from the renderer so mutations picked up by
-    /// `handle_insert_key` (typing / backspace / cursor motion) are reflected
-    /// without a dedicated sync hook.
+    /// Re-parse the input into an optional command and refilter the action
+    /// list. `ws` is required to read the [`InputView`]'s current rope
+    /// contents. Called every frame from the renderer so mutations picked up
+    /// by `handle_insert_key` (typing / backspace / cursor motion) are
+    /// reflected without a dedicated sync hook.
+    ///
+    /// When the input parses as `<command> <arg>` (see [`parse_command`]) the
+    /// palette enters arg mode, setting [`Self::command`] and clearing the
+    /// action list since the argument picker replaces it. Otherwise the action
+    /// list is refiltered against the full text.
     pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) {
-        if let PalettePhase::Filter {
-            input,
-            filtered,
-            match_indices,
-            selected,
-        } = &mut self.phase
-        {
-            let text = input.text(ws);
+        let text = self.input.text(ws);
+        self.command = parse_command(&text).map(|(entry, _)| entry);
+        if self.command.is_some() {
+            self.filtered.clear();
+            self.match_indices.clear();
+            self.selected = 0;
+        } else {
             refilter(
                 &text,
                 self.scope,
                 &self.availability,
-                filtered,
-                match_indices,
-                selected,
+                &mut self.filtered,
+                &mut self.match_indices,
+                &mut self.selected,
             );
         }
     }
 
-    /// Invoke the effective "submit" step for the palette's current phase.
-    /// In [`PalettePhase::Filter`] this either dispatches a zero-arg action
-    /// or transitions to [`PalettePhase::CollectArgs`] when the chosen action
-    /// takes parameters. In [`PalettePhase::CollectArgs`] it parses the
-    /// current parameter value and either advances to the next parameter or
-    /// dispatches with the fully collected argument list. Called from the
+    /// Invoke the effective "submit" step for the palette.
+    ///
+    /// In arg mode (the input parses as `<command> <arg>`) the trailing
+    /// argument is parsed into the command's first parameter and dispatched.
+    /// Otherwise the selected action is taken. A zero-arg action dispatches
+    /// immediately, while a parameter-taking action rewrites the input to
+    /// `"<name> "` to begin inline argument entry. Called from the
     /// `SubmitPromptInput` action handler while the palette is open.
-    pub(crate) fn handle_submit(
-        &mut self,
-        ws: &mut Workspace,
-        executor: Executor,
-    ) -> PaletteOutcome {
-        match &mut self.phase {
-            PalettePhase::Filter {
-                input,
-                filtered,
-                match_indices: _,
-                selected,
-            } => {
-                let picked = filtered.get(*selected).copied();
-                match picked {
-                    Some(entry) if entry.def.params().is_empty() => {
-                        input.dispose(ws);
-                        PaletteOutcome::Dispatch(entry, Vec::new())
-                    },
-                    Some(entry) => {
-                        input.dispose(ws);
-                        let arg_input = InputView::create(
-                            ws,
-                            executor,
-                            SubmitTarget::PaletteArg,
-                            "",
-                            "prompt",
-                            1,
-                        );
-                        self.phase = PalettePhase::CollectArgs {
-                            entry,
-                            collected: Vec::new(),
-                            current: 0,
-                            input: arg_input,
-                            error: None,
-                        };
-                        PaletteOutcome::None
-                    },
-                    None => PaletteOutcome::None,
-                }
+    pub(crate) fn handle_submit(&mut self, ws: &mut Workspace) -> PaletteOutcome {
+        let text = self.input.text(ws);
+        if let Some((entry, arg)) = parse_command(&text) {
+            let param = &entry.def.params()[0];
+            return match ParamValue::parse(param.kind, arg) {
+                Ok(value) => {
+                    self.input.dispose(ws);
+                    PaletteOutcome::Dispatch(entry, vec![value])
+                },
+                Err(_) => PaletteOutcome::None,
+            };
+        }
+
+        match self.filtered.get(self.selected).copied() {
+            Some(entry) if entry.def.params().is_empty() => {
+                self.input.dispose(ws);
+                PaletteOutcome::Dispatch(entry, Vec::new())
             },
-            PalettePhase::CollectArgs {
-                entry,
-                collected,
-                current,
-                input,
-                error,
-            } => {
-                let params = entry.def.params();
-                let kind = params[*current].kind;
-                let text = input.text(ws);
-                match ParamValue::parse(kind, &text) {
-                    Ok(value) => {
-                        collected.push(value);
-                        *current += 1;
-                        if *current == params.len() {
-                            input.dispose(ws);
-                            let entry = *entry;
-                            let collected = std::mem::take(collected);
-                            return PaletteOutcome::Dispatch(entry, collected);
-                        }
-                        input.dispose(ws);
-                        *input = InputView::create(
-                            ws,
-                            executor,
-                            SubmitTarget::PaletteArg,
-                            "",
-                            "prompt",
-                            1,
-                        );
-                        *error = None;
-                        PaletteOutcome::None
-                    },
-                    Err(e) => {
-                        *error = Some(e.to_string());
-                        PaletteOutcome::None
-                    },
-                }
+            Some(entry) => {
+                self.input
+                    .replace_text(ws, &format!("{} ", entry.def.name()));
+                PaletteOutcome::None
             },
+            None => PaletteOutcome::None,
         }
     }
+}
+
+/// Split palette input into a resolved command and its trailing argument text.
+///
+/// Returns `Some((entry, arg))` only when the text is a command token followed
+/// by a space. The token is a command name or alias (resolved by
+/// [`registry::lookup_alias`]) and the command must take at least one
+/// parameter. `arg` is everything after the first space, so a path argument may
+/// itself contain spaces. Returns `None` for plain filter text, an unknown
+/// head, or a zero-argument command, keeping the palette in command-filter
+/// mode.
+fn parse_command(text: &str) -> Option<(&'static registry::RegistryEntry, &str)> {
+    let (head, arg) = text.split_once(' ')?;
+    let entry = registry::lookup_alias(head)?;
+    (!entry.def.params().is_empty()).then_some((entry, arg))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -756,9 +700,7 @@ mod tests {
         let path = h.write_file("palette_target.txt", "loaded via palette");
         let path_str = path.to_str().expect("utf8 path");
 
-        h.type_text(":OpenFile");
-        h.type_keys("enter");
-        h.type_text(path_str);
+        h.type_text(&format!(":o {path_str}"));
         h.type_keys("enter");
         let frame = h.snapshot();
         assert_eq!(frame.pane_count, 1);
@@ -836,19 +778,13 @@ mod tests {
         h.type_text(":Abort");
         {
             let palette = h.stoat.command_palette.as_ref().unwrap();
-            let PalettePhase::Filter { filtered, .. } = &palette.phase else {
-                panic!("expected filter phase");
-            };
-            let names: Vec<_> = filtered.iter().map(|e| e.def.name()).collect();
+            let names: Vec<_> = palette.filtered.iter().map(|e| e.def.name()).collect();
             assert!(!names.contains(&"AbortRebase"), "got {names:?}");
         }
         h.type_keys("backtab");
         {
             let palette = h.stoat.command_palette.as_ref().unwrap();
-            let PalettePhase::Filter { filtered, .. } = &palette.phase else {
-                panic!("expected filter phase");
-            };
-            let names: Vec<_> = filtered.iter().map(|e| e.def.name()).collect();
+            let names: Vec<_> = palette.filtered.iter().map(|e| e.def.name()).collect();
             assert!(names.contains(&"AbortRebase"), "got {names:?}");
         }
     }
@@ -868,26 +804,23 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_command_palette_collect_args_empty() {
+    fn snapshot_command_palette_arg_empty() {
         let mut h = Stoat::test();
-        h.type_text(":OpenFile");
-        h.type_keys("enter");
-        h.assert_snapshot("command_palette_collect_args_empty");
+        h.type_text(":o ");
+        h.assert_snapshot("command_palette_arg_empty");
     }
 
     #[test]
-    fn snapshot_command_palette_collect_args_typing() {
+    fn snapshot_command_palette_arg_typing() {
         let mut h = Stoat::test();
-        h.type_text(":OpenFile");
-        h.type_keys("enter");
-        h.type_text("/tmp/example.rs");
-        h.assert_snapshot("command_palette_collect_args_typing");
+        h.type_text(":o /tmp/example.rs");
+        h.assert_snapshot("command_palette_arg_typing");
     }
 
     #[test]
     fn snapshot_command_palette_multi_token_highlight() {
         let mut h = Stoat::test();
-        h.type_text(":open file");
+        h.type_text(":file open");
         h.assert_snapshot("command_palette_multi_token_highlight");
     }
 
