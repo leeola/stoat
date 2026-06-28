@@ -3143,6 +3143,7 @@ impl Stoat {
                 height: list.height,
             };
             let scroll_row = finder
+                .picklist
                 .selected
                 .saturating_sub(list.height.saturating_sub(1) as usize)
                 as u32;
@@ -3150,7 +3151,7 @@ impl Stoat {
             // changes it, so its hash is the pool's content version.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
-                finder.filtered.hash(&mut hasher);
+                finder.picklist.filtered.hash(&mut hasher);
                 hasher.finish()
             };
             crate::smooth_scroll::emit_into(

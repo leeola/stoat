@@ -149,7 +149,10 @@ pub(crate) fn render_file_finder(
 
 fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
     let rows = area.height as usize;
-    let start_row = finder.selected.saturating_sub(rows.saturating_sub(1));
+    let start_row = finder
+        .picklist
+        .selected
+        .saturating_sub(rows.saturating_sub(1));
     paint_finder_rows(finder, area, start_row, theme, buf);
 }
 
@@ -179,15 +182,16 @@ pub(crate) fn paint_finder_rows(
     let label_x = area.x + 1;
 
     for (row_idx, (&idx, indices)) in finder
+        .picklist
         .filtered
         .iter()
-        .zip(finder.match_indices.iter())
+        .zip(finder.picklist.match_indices.iter())
         .skip(start_row)
         .take(rows)
         .enumerate()
     {
         let row = area.y + row_idx as u16;
-        let is_selected = start_row + row_idx == finder.selected;
+        let is_selected = start_row + row_idx == finder.picklist.selected;
         let style = if is_selected {
             selected_style
         } else {

@@ -1,10 +1,10 @@
 use crate::{
     buffer::BufferId,
     editor_state::{EditorId, EditorState},
-    fuzzy,
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
+    picker::PickList,
     workspace::Workspace,
 };
 use std::path::{Path, PathBuf};
@@ -71,14 +71,10 @@ pub struct FileFinder {
     /// Absolute paths of currently-open buffers. Captured once at open time;
     /// not re-queried on scope toggle.
     pub(crate) buffer_paths: Vec<PathBuf>,
-    /// Indices into the currently active scope's `Vec`, after filtering.
-    pub(crate) filtered: Vec<usize>,
-    /// Per-row matched character offsets into the row's display string,
-    /// parallel to [`Self::filtered`]. Empty for empty/whitespace-only
-    /// queries (no highlighting). Indices are sorted and deduplicated so
-    /// the renderer can do `contains` lookups without further work.
-    pub(crate) match_indices: Vec<Vec<u32>>,
-    pub(crate) selected: usize,
+    /// Fuzzy result list over the active scope's paths. The active scope's
+    /// path `Vec` is copied into [`PickList::base`] on each refilter. The
+    /// renderer reads its `filtered`/`match_indices`/`selected`.
+    pub(crate) picklist: PickList,
     /// Rendered list height in rows, refreshed each frame by the finder
     /// render so the half-page handler can size its step. `None` before the
     /// first render, where the step falls back to a single row.
@@ -127,20 +123,15 @@ impl FileFinder {
 
         let scope = initial_scope;
         let all_paths: Vec<PathBuf> = Vec::new();
-        let mut filtered = Vec::new();
-        let mut match_indices = Vec::new();
-        let mut selected = 0;
-        refilter(
-            "",
-            scope,
-            &all_paths,
-            &modified_paths,
-            &buffer_paths,
-            &git_root,
-            &mut filtered,
-            &mut match_indices,
-            &mut selected,
-        );
+        let mut picklist = PickList {
+            base: match scope {
+                FinderScope::All => all_paths.clone(),
+                FinderScope::Modified => modified_paths.clone(),
+                FinderScope::Buffers => buffer_paths.clone(),
+            },
+            ..PickList::default()
+        };
+        picklist.refilter("", &git_root);
 
         Self {
             input,
@@ -153,9 +144,7 @@ impl FileFinder {
             _walk_task: walk_task,
             modified_paths,
             buffer_paths,
-            filtered,
-            match_indices,
-            selected,
+            picklist,
             viewport_rows: None,
             last_filter_text: String::new(),
             last_filter_scope: scope,
@@ -180,22 +169,12 @@ impl FileFinder {
 
     /// Absolute path of the currently selected filtered row, if any.
     pub(crate) fn selected_path(&self) -> Option<&Path> {
-        let base = self.base_paths();
-        self.filtered
-            .get(self.selected)
-            .and_then(|i| base.get(*i))
-            .map(|p| p.as_path())
+        self.picklist.selected_path()
     }
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let max = (self.filtered.len() - 1) as i32;
-        let next = (self.selected as i32 + delta).clamp(0, max);
-        self.selected = next as usize;
+        self.picklist.move_selection(delta);
     }
 
     /// Flip the scope, optionally refreshing the Modified list before
@@ -214,11 +193,11 @@ impl FileFinder {
             FinderScope::Modified => FinderScope::All,
             FinderScope::Buffers => FinderScope::All,
         };
-        self.selected = 0;
+        self.picklist.selected = 0;
         self.last_filter_text = String::new();
         // Force refilter + preview resync on next render.
-        self.filtered.clear();
-        self.match_indices.clear();
+        self.picklist.filtered.clear();
+        self.picklist.match_indices.clear();
     }
 
     /// Drain every batch the walker has emitted since the last call,
@@ -248,8 +227,8 @@ impl FileFinder {
         }
         if received_any {
             self.last_filter_text.clear();
-            self.filtered.clear();
-            self.match_indices.clear();
+            self.picklist.filtered.clear();
+            self.picklist.match_indices.clear();
         }
         received_any
     }
@@ -263,21 +242,12 @@ impl FileFinder {
         let text = self.input.text(ws);
         if text == self.last_filter_text
             && self.scope == self.last_filter_scope
-            && !self.filtered.is_empty()
+            && !self.picklist.filtered.is_empty()
         {
             return;
         }
-        refilter(
-            &text,
-            self.scope,
-            &self.all_paths,
-            &self.modified_paths,
-            &self.buffer_paths,
-            &self.git_root,
-            &mut self.filtered,
-            &mut self.match_indices,
-            &mut self.selected,
-        );
+        self.picklist.base = self.base_paths().to_vec();
+        self.picklist.refilter(&text, &self.git_root);
         self.last_filter_text = text;
         self.last_filter_scope = self.scope;
     }
@@ -400,75 +370,6 @@ fn display_for(path: &Path, git_root: &Path) -> String {
     paths::display_relative(path, git_root)
 }
 
-/// Core matcher. With a non-empty pattern, scores every candidate
-/// against its repo-relative display form via
-/// [`crate::fuzzy::match_and_rank`] and orders matches by score
-/// descending, ties alphabetical. Empty or whitespace-only input
-/// lists every candidate alphabetically.
-///
-/// `match_indices` is filled in parallel to `filtered`: each element
-/// is the sorted, deduplicated set of matched character offsets in
-/// that row's display string, or empty when no pattern is active.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn refilter(
-    text: &str,
-    scope: FinderScope,
-    all_paths: &[PathBuf],
-    modified_paths: &[PathBuf],
-    buffer_paths: &[PathBuf],
-    git_root: &Path,
-    filtered: &mut Vec<usize>,
-    match_indices: &mut Vec<Vec<u32>>,
-    selected: &mut usize,
-) {
-    let base: &[PathBuf] = match scope {
-        FinderScope::All => all_paths,
-        FinderScope::Modified => modified_paths,
-        FinderScope::Buffers => buffer_paths,
-    };
-
-    filtered.clear();
-    match_indices.clear();
-
-    let items = base
-        .iter()
-        .enumerate()
-        .map(|(idx, path)| (idx, display_for(path, git_root)));
-    let Some(mut matches) = fuzzy::match_and_rank(text, items) else {
-        let mut rows: Vec<(usize, String)> = base
-            .iter()
-            .enumerate()
-            .map(|(idx, path)| (idx, display_for(path, git_root)))
-            .collect();
-        rows.sort_by(|a, b| a.1.cmp(&b.1));
-        for (idx, _) in &rows {
-            filtered.push(*idx);
-            match_indices.push(Vec::new());
-        }
-        clamp_selected(filtered, selected);
-        return;
-    };
-
-    matches.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.haystack.cmp(&b.haystack))
-    });
-    for m in matches {
-        filtered.push(m.item);
-        match_indices.push(m.matched_indices);
-    }
-    clamp_selected(filtered, selected);
-}
-
-fn clamp_selected(filtered: &[usize], selected: &mut usize) {
-    if filtered.is_empty() {
-        *selected = 0;
-    } else if *selected >= filtered.len() {
-        *selected = filtered.len() - 1;
-    }
-}
-
 /// Display string for a filtered row: the repo-relative path. Used by the
 /// renderer and by tests.
 pub(crate) fn display_row(path: &Path, git_root: &Path) -> String {
@@ -481,153 +382,6 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
-    }
-
-    fn names(
-        text: &str,
-        scope: FinderScope,
-        all: &[PathBuf],
-        modified: &[PathBuf],
-        buffers: &[PathBuf],
-        git_root: &Path,
-    ) -> Vec<String> {
-        let mut filtered = Vec::new();
-        let mut match_indices = Vec::new();
-        let mut selected = 0;
-        refilter(
-            text,
-            scope,
-            all,
-            modified,
-            buffers,
-            git_root,
-            &mut filtered,
-            &mut match_indices,
-            &mut selected,
-        );
-        let base: &[PathBuf] = match scope {
-            FinderScope::All => all,
-            FinderScope::Modified => modified,
-            FinderScope::Buffers => buffers,
-        };
-        filtered
-            .iter()
-            .map(|i| display_for(&base[*i], git_root))
-            .collect()
-    }
-
-    #[test]
-    fn empty_input_lists_all_base_paths_sorted() {
-        let git_root = p("/r");
-        let all = vec![p("/r/b.rs"), p("/r/a.rs"), p("/r/sub/c.rs")];
-        let modified = vec![];
-        let buffers = vec![];
-        let listed = names("", FinderScope::All, &all, &modified, &buffers, &git_root);
-        assert_eq!(listed, vec!["a.rs", "b.rs", "sub/c.rs"]);
-    }
-
-    #[test]
-    fn prefix_ranks_before_substring_before_fuzzy() {
-        let git_root = p("/r");
-        let all = vec![
-            p("/r/file.rs"),      // prefix
-            p("/r/sub/file.rs"),  // substring
-            p("/r/fee/nile.rs"),  // fuzzy (f..i..l..e)
-            p("/r/unrelated.rs"), // filtered out
-        ];
-        let listed = names("file", FinderScope::All, &all, &[], &[], &git_root);
-        assert_eq!(listed, vec!["file.rs", "sub/file.rs", "fee/nile.rs"]);
-    }
-
-    #[test]
-    fn case_insensitive_filter() {
-        let git_root = p("/r");
-        let all = vec![p("/r/Foo.rs"), p("/r/bar.rs")];
-        let listed = names("foo", FinderScope::All, &all, &[], &[], &git_root);
-        assert_eq!(listed, vec!["Foo.rs"]);
-    }
-
-    #[test]
-    fn trailing_space_does_not_eliminate_matches() {
-        let git_root = p("/r");
-        let all = vec![p("/r/foo.rs"), p("/r/bar.rs")];
-        let listed = names(".rs ", FinderScope::All, &all, &[], &[], &git_root);
-        assert_eq!(listed, vec!["bar.rs", "foo.rs"]);
-    }
-
-    #[test]
-    fn multi_token_query_matches_in_either_order() {
-        let git_root = p("/r");
-        let all = vec![p("/r/src/foo.rs"), p("/r/src/bar.rs")];
-        let forward = names(".rs foo", FinderScope::All, &all, &[], &[], &git_root);
-        let reverse = names("foo .rs", FinderScope::All, &all, &[], &[], &git_root);
-        assert_eq!(forward, vec!["src/foo.rs"]);
-        assert_eq!(forward, reverse);
-    }
-
-    #[test]
-    fn whitespace_only_query_lists_all_paths() {
-        let git_root = p("/r");
-        let all = vec![p("/r/b.rs"), p("/r/a.rs")];
-        let listed = names("   ", FinderScope::All, &all, &[], &[], &git_root);
-        assert_eq!(listed, vec!["a.rs", "b.rs"]);
-    }
-
-    #[test]
-    fn exact_basename_match_outranks_longer_prefix_match() {
-        let git_root = p("/r");
-        let all = vec![p("/r/food_handler.rs"), p("/r/foo.rs")];
-        let listed = names("foo", FinderScope::All, &all, &[], &[], &git_root);
-        assert_eq!(listed, vec!["foo.rs", "food_handler.rs"]);
-    }
-
-    #[test]
-    fn modified_scope_filters_against_modified_list() {
-        let git_root = p("/r");
-        let all = vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")];
-        let modified = vec![p("/r/b.rs")];
-        let listed = names("", FinderScope::Modified, &all, &modified, &[], &git_root);
-        assert_eq!(listed, vec!["b.rs"]);
-    }
-
-    #[test]
-    fn modified_scope_empty_when_no_modifications() {
-        let git_root = p("/r");
-        let all = vec![p("/r/a.rs"), p("/r/b.rs")];
-        let modified = vec![];
-        let listed = names("", FinderScope::Modified, &all, &modified, &[], &git_root);
-        assert!(listed.is_empty());
-    }
-
-    #[test]
-    fn buffers_scope_filters_against_buffer_list() {
-        let git_root = p("/r");
-        let all = vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")];
-        let buffers = vec![p("/r/a.rs"), p("/r/c.rs")];
-        let listed = names("", FinderScope::Buffers, &all, &[], &buffers, &git_root);
-        assert_eq!(listed, vec!["a.rs", "c.rs"]);
-    }
-
-    #[test]
-    fn refilter_clamps_selected_when_results_shrink() {
-        let git_root = p("/r");
-        let all = vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")];
-        let mut filtered = Vec::new();
-        let mut match_indices = Vec::new();
-        let mut selected = 2;
-        refilter(
-            "b",
-            FinderScope::All,
-            &all,
-            &[],
-            &[],
-            &git_root,
-            &mut filtered,
-            &mut match_indices,
-            &mut selected,
-        );
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(selected, 0);
     }
 
     #[test]
@@ -1034,12 +788,21 @@ mod tests {
         // refilter is driven by the render loop; force a snapshot so
         // filtered reflects the current (empty) query.
         let _ = h.snapshot();
-        assert_eq!(h.stoat.file_finder.as_ref().unwrap().filtered.len(), 3);
+        assert_eq!(
+            h.stoat
+                .file_finder
+                .as_ref()
+                .unwrap()
+                .picklist
+                .filtered
+                .len(),
+            3
+        );
         h.type_text("alp");
         let _ = h.snapshot();
         let finder = h.stoat.file_finder.as_ref().unwrap();
-        assert_eq!(finder.filtered.len(), 1);
-        let idx = finder.filtered[0];
+        assert_eq!(finder.picklist.filtered.len(), 1);
+        let idx = finder.picklist.filtered[0];
         assert!(finder.base_paths()[idx].ends_with("alpha.rs"));
     }
 
