@@ -1258,8 +1258,8 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
-        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![4]);
     }
 
     #[test]
@@ -1267,9 +1267,9 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar baz");
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 7, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 8, false)]);
     }
 
     #[test]
@@ -1277,7 +1277,7 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MoveNextWordEnd);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
     }
 
     #[test]
@@ -1353,7 +1353,7 @@ mod tests {
         dispatch(&mut stoat, &MoveNextWordStart);
         assert_eq!(
             editor::selection_spans(&mut stoat),
-            vec![(0, 3, false), (8, 11, false)]
+            vec![(0, 4, false), (8, 12, false)]
         );
     }
 
@@ -1483,9 +1483,9 @@ mod tests {
         }
         assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 7)]);
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 2)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 1)]);
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(2, 7)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(2, 6)]);
     }
 
     #[test]
@@ -1512,7 +1512,7 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &ExtendNextWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
     }
 
     #[test]
@@ -1520,9 +1520,9 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar baz");
         dispatch(&mut stoat, &ExtendNextWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
         dispatch(&mut stoat, &ExtendNextWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 7, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
     }
 
     #[test]
@@ -1530,7 +1530,7 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &ExtendNextWordEnd);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
     }
 
     #[test]

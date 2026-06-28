@@ -3418,9 +3418,9 @@ mod tests {
         );
         assert_eq!(
             h.primary_head_offset(),
-            15,
+            16,
             "long-word treats `foo.bar` as one word, so 3W from offset 0 \
-             advances past `baz qux ` to the space before `quux`"
+             advances past `baz qux ` to the start of `quux`"
         );
     }
 

@@ -7,8 +7,8 @@ focused: #1 of 1
 mode: normal
 size: 20x6
 ---
-[0m[97m[100mabc[0m
-[0m[7m[97md[0m[97mef[0m
+[0m[97m[100mabc[0m[7m [0m
+[0m[97mdef[0m
 [0m[97mghi[0m
 
 

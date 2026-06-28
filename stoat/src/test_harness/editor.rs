@@ -1,4 +1,5 @@
 use crate::{app::Stoat, editor_state::EditorId, pane::PaneId, View};
+use stoat_text::cursor_offset;
 
 /// Append `text` at offset 0 in the focused editor's buffer. Panics
 /// if the focused pane is not an editor.
@@ -128,13 +129,18 @@ pub(crate) fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
     let editor = ws.editors.get_mut(editor_id).expect("focused editor");
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
     editor
         .selections
         .all_anchors()
         .iter()
         .map(|sel| {
-            let head = sel.head();
-            let point = buffer_snapshot.point_for_anchor(&head);
+            let cursor = cursor_offset(
+                rope,
+                buffer_snapshot.resolve_anchor(&sel.tail()),
+                buffer_snapshot.resolve_anchor(&sel.head()),
+            );
+            let point = rope.offset_to_point(cursor);
             let display = snapshot.buffer_to_display(point);
             (display.row, display.column)
         })

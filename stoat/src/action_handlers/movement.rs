@@ -379,12 +379,11 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
         };
 
         if extend {
-            let new_head_offset =
-                if target_offset > head_offset || matches!(target, WordTarget::PrevEnd) {
-                    shift_to_prev_char()
-                } else {
-                    target_offset
-                };
+            let new_head_offset = if matches!(target, WordTarget::PrevEnd) {
+                shift_to_prev_char()
+            } else {
+                target_offset
+            };
             let head_anchor = buffer_snapshot.anchor_at(new_head_offset, Bias::Right);
             return extend_head(
                 sel,
@@ -396,7 +395,7 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
         }
 
         if target_offset > head_offset {
-            let end_offset = shift_to_prev_char();
+            let end_offset = target_offset;
             let tail_anchor = buffer_snapshot.anchor_at(head_offset, Bias::Right);
             let head_anchor = buffer_snapshot.anchor_at(end_offset, Bias::Right);
             Selection {
