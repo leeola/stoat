@@ -100,11 +100,7 @@ pub(super) fn file_finder_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     let Some(finder) = stoat.file_finder.as_mut() else {
         return UpdateEffect::None;
     };
-    let step = finder
-        .viewport_rows
-        .map(|v| v.div_ceil(2).max(1))
-        .unwrap_or(1) as i32;
-    finder.move_selection(dir * step);
+    finder.picklist.page(dir);
     UpdateEffect::Redraw
 }
 

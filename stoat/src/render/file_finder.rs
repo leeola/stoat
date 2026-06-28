@@ -143,7 +143,7 @@ pub(crate) fn render_file_finder(
         render_preview(finder, preview_rect, theme, ws, buf);
     }
 
-    finder.viewport_rows = Some(layout.list.height as usize);
+    finder.picklist.viewport_rows = Some(layout.list.height as usize);
     render_list(finder, layout.list, theme, buf);
 }
 

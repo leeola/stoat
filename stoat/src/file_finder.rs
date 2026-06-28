@@ -68,10 +68,6 @@ pub struct FileFinder {
     /// path `Vec` is copied into [`PickList::base`] on each refilter. The
     /// renderer reads its `filtered`/`match_indices`/`selected`.
     pub(crate) picklist: PickList,
-    /// Rendered list height in rows, refreshed each frame by the finder
-    /// render so the half-page handler can size its step. `None` before the
-    /// first render, where the step falls back to a single row.
-    pub(crate) viewport_rows: Option<usize>,
     /// Last input text that was run through the matcher. Lets
     /// [`FileFinder::refilter_from_input`] short-circuit when the
     /// render loop ticks without any typing.
@@ -131,7 +127,6 @@ impl FileFinder {
             modified_paths,
             buffer_paths,
             picklist,
-            viewport_rows: None,
             last_filter_text: String::new(),
             last_filter_scope: scope,
             preview,

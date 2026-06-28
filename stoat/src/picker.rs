@@ -34,6 +34,10 @@ pub(crate) struct PickList {
     /// without further work.
     pub(crate) match_indices: Vec<Vec<u32>>,
     pub(crate) selected: usize,
+    /// Rendered list height in rows, refreshed each frame by the owner's render
+    /// so [`PickList::page`] can size its half-page step. `None` before the
+    /// first render, where the step falls back to a single row.
+    pub(crate) viewport_rows: Option<usize>,
 }
 
 impl PickList {
@@ -54,6 +58,17 @@ impl PickList {
         let max = (self.filtered.len() - 1) as i32;
         let next = (self.selected as i32 + delta).clamp(0, max);
         self.selected = next as usize;
+    }
+
+    /// Page the selection by half the rendered list height in `dir` (negative
+    /// up, positive down). Before the first render sets [`Self::viewport_rows`]
+    /// the step falls back to a single row.
+    pub(crate) fn page(&mut self, dir: i32) {
+        let step = self
+            .viewport_rows
+            .map(|v| v.div_ceil(2).max(1))
+            .unwrap_or(1) as i32;
+        self.move_selection(dir * step);
     }
 
     /// Re-run the matcher over `base` for `query` via
