@@ -231,21 +231,31 @@ impl FileFinder {
         self.last_filter_scope = self.scope;
     }
 
-    /// Sync the preview pane to the current selection, reading the selected
-    /// file from disk. Clears the pane when nothing is selected.
+    /// Sync the preview pane to the current selection. Clears the pane when
+    /// nothing is selected.
+    ///
+    /// In [`FinderScope::Buffers`] the selection previews the live, possibly
+    /// modified in-memory buffer. Every other scope reads the file from disk. A
+    /// buffer selection whose path has no open buffer falls back to the disk
+    /// file.
     pub(crate) fn sync_preview(
         &mut self,
         ws: &mut Workspace,
         fs_host: &dyn FsHost,
         language_registry: &stoat_language::LanguageRegistry,
     ) {
-        match self
-            .selected_path()
-            .map(|p| PreviewSource::File(p.to_path_buf()))
-        {
-            Some(source) => self.preview.sync(ws, fs_host, language_registry, source),
-            None => self.preview.clear(ws),
-        }
+        let Some(path) = self.selected_path().map(|p| p.to_path_buf()) else {
+            self.preview.clear(ws);
+            return;
+        };
+        let source = match self.scope {
+            FinderScope::Buffers => match ws.buffers.id_for_path(&path) {
+                Some(id) => PreviewSource::Buffer(id),
+                None => PreviewSource::File(path),
+            },
+            _ => PreviewSource::File(path),
+        };
+        self.preview.sync(ws, fs_host, language_registry, source);
     }
 
     /// Tear down owned editor slots. Called on every finder-close path.
@@ -591,6 +601,56 @@ mod tests {
         assert!(base.iter().any(|p| p.ends_with("c.rs")));
         assert!(!base.iter().any(|p| p.ends_with("b.rs")));
         assert_eq!(h.snapshot().mode, "prompt");
+    }
+
+    #[test]
+    fn space_b_b_previews_live_buffer_not_disk() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("note.txt", "on disk\n")]);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("note.txt"),
+            },
+        );
+        h.settle();
+
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("note.txt"))
+            .expect("open buffer");
+        {
+            let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
+            let mut guard = buffer.write().expect("poisoned");
+            let len = guard.snapshot.visible_text.len();
+            guard.edit(0..len, "edited in memory\n");
+        }
+
+        h.type_keys("space b b");
+        h.snapshot();
+        let preview_id = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .preview
+            .buffer;
+        let shown = {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(preview_id)
+                .expect("preview buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard.rope().to_string()
+        };
+        assert_eq!(
+            shown, "edited in memory\n",
+            "buffers-scope finder previews the live in-memory buffer, not the disk file",
+        );
     }
 
     #[test]
