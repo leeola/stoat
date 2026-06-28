@@ -35,7 +35,7 @@ use stoatty_term::{
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
@@ -956,6 +956,31 @@ impl ApplicationHandler<PtyEvent> for App {
                 let (rows, cols) = state.gpu.grid_size();
                 state.pointer_cell = cell_at(position.x, position.y, cell_size, rows, cols);
             },
+            WindowEvent::MouseInput {
+                state: element_state,
+                button,
+                ..
+            } => {
+                let code = match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => return,
+                };
+                let report = {
+                    let terminal = state.terminal.lock();
+                    terminal.mouse_mode() && terminal.sgr_mouse()
+                };
+                if report {
+                    let (col, row) = state.pointer_cell;
+                    let _ = state.pty.write(&sgr_button_bytes(
+                        code,
+                        element_state == ElementState::Pressed,
+                        col,
+                        row,
+                    ));
+                }
+            },
             _ => {},
         }
     }
@@ -1096,6 +1121,15 @@ fn sgr_wheel_bytes(lines: i32, col: usize, row: usize) -> Vec<u8> {
     let button = if lines > 0 { 64 } else { 65 };
     let report = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
     report.repeat(lines.unsigned_abs() as usize).into_bytes()
+}
+
+/// Encode a mouse button press or release at cell (`col`, `row`) as an SGR
+/// (1006) report: `button` (0 left, 1 middle, 2 right) with 1-based
+/// coordinates, terminated by `M` on press and `m` on release. SGR reports the
+/// real button on release, unlike legacy mouse encodings.
+fn sgr_button_bytes(button: u8, pressed: bool, col: usize, row: usize) -> Vec<u8> {
+    let terminator = if pressed { 'M' } else { 'm' };
+    format!("\x1b[<{button};{};{}{terminator}", col + 1, row + 1).into_bytes()
 }
 
 /// The grid cell `(col, row)` under physical pixel (`x`, `y`), clamped to the
@@ -1242,8 +1276,9 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
 mod tests {
     use super::{
         alternate_scroll_bytes, cell_at, ease, encode_key, font_step, popover_overflow,
-        sgr_wheel_bytes, step_document_scroll, step_grid_scroll, step_popover_scroll,
-        step_region_scroll, step_scrollback_scroll, wheel_lines, SCROLLBACK_MIN_STEP,
+        sgr_button_bytes, sgr_wheel_bytes, step_document_scroll, step_grid_scroll,
+        step_popover_scroll, step_region_scroll, step_scrollback_scroll, wheel_lines,
+        SCROLLBACK_MIN_STEP,
     };
     use stoatty_term::grid::{Overlay, Rgb};
     use winit::{
@@ -1417,6 +1452,21 @@ mod tests {
             sgr_wheel_bytes(-1, 0, 0),
             b"\x1b[<65;1;1M".to_vec(),
             "wheel down at the origin cell reports button 65"
+        );
+    }
+
+    #[test]
+    fn sgr_button_bytes_reports_press_and_release_at_the_cell() {
+        // Left button (0) at 1-based cell (3,7)->(4,8): M on press, m on release.
+        assert_eq!(
+            sgr_button_bytes(0, true, 3, 7),
+            b"\x1b[<0;4;8M".to_vec(),
+            "press reports the button with a trailing M"
+        );
+        assert_eq!(
+            sgr_button_bytes(0, false, 3, 7),
+            b"\x1b[<0;4;8m".to_vec(),
+            "release reports the same button with a trailing m"
         );
     }
 
