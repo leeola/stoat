@@ -445,6 +445,8 @@ on key {
         Down -> FileFinderSelectNext();
         Ctrl-p -> FileFinderSelectPrev();
         Ctrl-n -> FileFinderSelectNext();
+        Ctrl-f -> FileFinderPageDown();
+        Ctrl-b -> FileFinderPageUp();
         BackTab -> FileFinderScopeToggle();
     }
     mode == prompt && palette_open {

@@ -22,6 +22,8 @@ pub enum ActionKind {
     OpenBufferPicker,
     FileFinderSelectPrev,
     FileFinderSelectNext,
+    FileFinderPageUp,
+    FileFinderPageDown,
     FileFinderScopeToggle,
     OpenCommandPalette,
     OpenHelp,

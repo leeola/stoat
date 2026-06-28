@@ -79,6 +79,10 @@ pub struct FileFinder {
     /// the renderer can do `contains` lookups without further work.
     pub(crate) match_indices: Vec<Vec<u32>>,
     pub(crate) selected: usize,
+    /// Rendered list height in rows, refreshed each frame by the finder
+    /// render so the half-page handler can size its step. `None` before the
+    /// first render, where the step falls back to a single row.
+    pub(crate) viewport_rows: Option<usize>,
     /// Last input text that was run through the matcher. Lets
     /// [`FileFinder::refilter_from_input`] short-circuit when the
     /// render loop ticks without any typing.
@@ -152,6 +156,7 @@ impl FileFinder {
             filtered,
             match_indices,
             selected,
+            viewport_rows: None,
             last_filter_text: String::new(),
             last_filter_scope: scope,
             preview_editor,

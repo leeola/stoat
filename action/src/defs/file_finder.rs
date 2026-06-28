@@ -383,6 +383,100 @@ impl Action for FileFinderScopeToggle {
     }
 }
 
+#[derive(Debug)]
+pub struct FileFinderPageUpDef;
+
+impl ActionDef for FileFinderPageUpDef {
+    fn name(&self) -> &'static str {
+        "FileFinderPageUp"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::FileFinderPageUp
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "page file finder up"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Move the file finder selection up by half the visible list height. \
+         Bound by default to Ctrl-B while the file finder is open."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct FileFinderPageUp;
+
+impl FileFinderPageUp {
+    pub const DEF: &FileFinderPageUpDef = &FileFinderPageUpDef;
+}
+
+impl Action for FileFinderPageUp {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct FileFinderPageDownDef;
+
+impl ActionDef for FileFinderPageDownDef {
+    fn name(&self) -> &'static str {
+        "FileFinderPageDown"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::FileFinderPageDown
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "page file finder down"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Move the file finder selection down by half the visible list height. \
+         Bound by default to Ctrl-F while the file finder is open."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct FileFinderPageDown;
+
+impl FileFinderPageDown {
+    pub const DEF: &FileFinderPageDownDef = &FileFinderPageDownDef;
+}
+
+impl Action for FileFinderPageDown {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +521,8 @@ mod tests {
             FileFinderSelectNext.kind(),
             ActionKind::FileFinderSelectNext
         );
+        assert_eq!(FileFinderPageUp.kind(), ActionKind::FileFinderPageUp);
+        assert_eq!(FileFinderPageDown.kind(), ActionKind::FileFinderPageDown);
         assert_eq!(
             FileFinderScopeToggle.kind(),
             ActionKind::FileFinderScopeToggle
@@ -435,6 +531,8 @@ mod tests {
         for def in [
             FileFinderSelectPrev.def(),
             FileFinderSelectNext.def(),
+            FileFinderPageUp.def(),
+            FileFinderPageDown.def(),
             FileFinderScopeToggle.def(),
         ] {
             assert!(!def.palette_visible());

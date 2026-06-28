@@ -93,6 +93,21 @@ pub(super) fn file_finder_move_selection(stoat: &mut Stoat, delta: i32) -> Updat
     UpdateEffect::Redraw
 }
 
+/// Page the file finder selection by half its rendered list height in `dir`
+/// (-1 up, 1 down). Before the first render the viewport is unset and the
+/// step falls back to a single row.
+pub(super) fn file_finder_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    let Some(finder) = stoat.file_finder.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let step = finder
+        .viewport_rows
+        .map(|v| v.div_ceil(2).max(1))
+        .unwrap_or(1) as i32;
+    finder.move_selection(dir * step);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn file_finder_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     let git_host = stoat.git_host.clone();
     let Some(finder) = stoat.file_finder.as_mut() else {

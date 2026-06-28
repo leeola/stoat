@@ -45,8 +45,9 @@ use crate::{
         },
         file::OpenFile,
         file_finder::{
-            FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker,
-            OpenChangedFilePicker, OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit,
+            FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
+            FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
+            OpenFileFinderHSplit, OpenFileFinderVSplit,
         },
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
@@ -140,6 +141,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(FileFinderSelectNext::DEF, |_| {
         Ok(Box::new(FileFinderSelectNext))
+    });
+    add(FileFinderPageUp::DEF, |_| Ok(Box::new(FileFinderPageUp)));
+    add(FileFinderPageDown::DEF, |_| {
+        Ok(Box::new(FileFinderPageDown))
     });
     add(FileFinderScopeToggle::DEF, |_| {
         Ok(Box::new(FileFinderScopeToggle))
@@ -644,6 +649,8 @@ mod tests {
         "OpenBufferPicker",
         "FileFinderSelectPrev",
         "FileFinderSelectNext",
+        "FileFinderPageUp",
+        "FileFinderPageDown",
         "FileFinderScopeToggle",
         "OpenHelp",
         "OpenReview",
@@ -943,7 +950,8 @@ mod tests {
         // + 1 GotoImplementors.
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 4 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev.
-        assert_eq!(all().count(), 279);
+        // + 2 FileFinderPageUp, FileFinderPageDown.
+        assert_eq!(all().count(), 281);
     }
 
     #[test]
