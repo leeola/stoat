@@ -19,15 +19,15 @@ size: 80x24
   [0m[35m│[0m[97m Hover                  [0m[90mshow hover documentation[0m[97m                          [0m[35m│[0m
   [0m[35m│[0m[97m KeepSelections         [0m[90mkeep selections matching regex[0m[97m                    [0m[35m│[0m
   [0m[35m│[0m[97m NewWorkspace           [0m[90mcreate a new workspace[0m[97m                            [0m[35m│[0m
+  [0m[35m│[0m[97m OpenBuffer             [0m[90mswitch to an open buffer[0m[97m                          [0m[35m│[0m
   [0m[35m│[0m[97m OpenCommits            [0m[90mbrowse commit history[0m[97m                             [0m[35m│[0m
-  [0m[35m│[0m[97m OpenDiagnosticsPicker  [0m[90mopen the diagnostics picker for the focused buffer[0m[35m│[0m
-  [0m[35m│[0m[30m[46m OpenFile               open a file                                       [0m[35m│[0m
+  [0m[35m│[0m[30m[46m OpenDiagnosticsPicker  open the diagnostics picker for the focused buffer[0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mRead a file from disk into a buffer [0m[33m┌ palette ──────────────────────────────┐[0m
-  [0m[35m│[0m                                    [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
-  [0m[35m│[0m                                    [0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m  [0m[35m│[0m [0m[33m│[0m
-  [0m[35m│[0m                                    [0m[33m│[0m[36m    C-f[0m[97m   page palette down[0m          [0m[35m│[0m [0m[33m│[0m
-  [0m[35m│[0m                                    [0m[33m│[0m[36m    C-b[0m[97m   page palette up[0m            [0m[35m│[0m [0m[33m│[0m
+  [0m[35m│[0m[37mOpen a modal listing every diagnosti[0m[33m┌ palette ──────────────────────────────┐[0m
+  [0m[35m│[0m[37mset. Each row shows the diagnostic's[0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
+  [0m[35m│[0m[37mmessage snippet; selecting an entry [0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m  [0m[35m│[0m [0m[33m│[0m
+  [0m[35m│[0m[37mdiagnostic's range start. No-op when[0m[33m│[0m[36m    C-f[0m[97m   page palette down[0m[37meditor or[0m [0m[35m│[0m [0m[33m│[0m
+  [0m[35m│[0m[37mthe buffer has no diagnostics.[0m      [0m[33m│[0m[36m    C-b[0m[97m   page palette up[0m            [0m[35m│[0m [0m[33m│[0m
   [0m[35m└────────────────────────────────────[0m[33m│[0m[36m  S-Tab[0m[97m   toggle command palette scope[0m [0m[33m│[0m
                                        [0m[33m└───────────────────────────────────────┘[0m
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

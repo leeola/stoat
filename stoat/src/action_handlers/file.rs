@@ -218,7 +218,7 @@ pub(crate) fn open_file_in_pane(
 mod tests {
     use crate::{action_handlers::dispatch, app::UpdateEffect, host::FsHost, Stoat};
     use std::path::PathBuf;
-    use stoat_action::{CloseBuffer, OpenFile, SaveBuffer};
+    use stoat_action::{CloseBuffer, OpenBuffer, OpenFile, SaveBuffer};
 
     fn focused_dirty(stoat: &Stoat) -> bool {
         let editor_id = match stoat
@@ -315,6 +315,79 @@ mod tests {
         assert!(
             focused_dirty(&h.stoat),
             "scratch buffer dirty flag preserved when no path",
+        );
+    }
+
+    fn focused_buffer_id(stoat: &mut Stoat) -> crate::buffer::BufferId {
+        crate::action_handlers::focused_editor_mut(stoat)
+            .expect("editor")
+            .buffer_id
+    }
+
+    #[test]
+    fn open_buffer_activates_live_modified_buffer() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/open-buffer-test");
+        h.fake_fs().insert_file(root.join("a.txt"), b"disk-a\n");
+        h.fake_fs().insert_file(root.join("b.txt"), b"disk-b\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("a.txt"),
+            },
+        );
+        h.settle();
+        let a_id = focused_buffer_id(&mut h.stoat);
+        {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(a_id)
+                .expect("buffer");
+            buffer.write().expect("poisoned").edit(0..0, "live-edit ");
+        }
+
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("b.txt"),
+            },
+        );
+        h.settle();
+        assert_ne!(
+            focused_buffer_id(&mut h.stoat),
+            a_id,
+            "focus moved to b.txt"
+        );
+
+        dispatch(
+            &mut h.stoat,
+            &OpenBuffer {
+                path: root.join("a.txt"),
+            },
+        );
+        h.settle();
+        assert_eq!(
+            focused_buffer_id(&mut h.stoat),
+            a_id,
+            "OpenBuffer activates the existing buffer rather than creating a new one",
+        );
+        let text = {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(a_id)
+                .expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard.rope().to_string()
+        };
+        assert_eq!(
+            text, "live-edit disk-a\n",
+            "the live in-memory edit must survive, proving no disk reload",
         );
     }
 

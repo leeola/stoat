@@ -44,7 +44,7 @@ pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::path::Path;
 use stoat_action::{
-    Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
+    Action, ActionKind, Dump, OpenBuffer, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
     OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run,
 };
 
@@ -105,6 +105,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .as_any()
                 .downcast_ref::<OpenFile>()
                 .expect("OpenFile action downcast");
+            file::open_file(stoat, &open.path);
+            UpdateEffect::Redraw
+        },
+        ActionKind::OpenBuffer => {
+            let open = action
+                .as_any()
+                .downcast_ref::<OpenBuffer>()
+                .expect("OpenBuffer action downcast");
             file::open_file(stoat, &open.path);
             UpdateEffect::Redraw
         },

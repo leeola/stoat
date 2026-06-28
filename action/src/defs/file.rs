@@ -61,6 +61,66 @@ impl Action for OpenFile {
     }
 }
 
+const OPEN_BUFFER_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "path",
+    kind: ParamKind::String,
+    value_source: ValueSource::Buffers,
+    required: true,
+    description: "Path of an already-open buffer to switch to.",
+}];
+
+#[derive(Debug)]
+pub struct OpenBufferDef;
+
+impl ActionDef for OpenBufferDef {
+    fn name(&self) -> &'static str {
+        "OpenBuffer"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenBuffer
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        OPEN_BUFFER_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "switch to an open buffer"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Show an already-open buffer in the focused pane, preserving its unsaved edits."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["b", "buffer"]
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenBuffer {
+    pub path: PathBuf,
+}
+
+impl OpenBuffer {
+    pub const DEF: &OpenBufferDef = &OpenBufferDef;
+}
+
+impl Action for OpenBuffer {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +143,30 @@ mod tests {
             path: PathBuf::from("/a/b.rs"),
         });
         let recovered = boxed.as_any().downcast_ref::<OpenFile>().expect("downcast");
+        assert_eq!(recovered.path, PathBuf::from("/a/b.rs"));
+    }
+
+    #[test]
+    fn open_buffer_kind_and_name() {
+        let action = OpenBuffer {
+            path: PathBuf::from("/tmp/x.rs"),
+        };
+        assert_eq!(action.kind(), ActionKind::OpenBuffer);
+        assert_eq!(action.def().name(), "OpenBuffer");
+        assert_eq!(action.def().params().len(), 1);
+        assert_eq!(action.def().params()[0].name, "path");
+        assert_eq!(action.def().params()[0].value_source, ValueSource::Buffers);
+    }
+
+    #[test]
+    fn open_buffer_downcast_preserves_path() {
+        let boxed: Box<dyn Action> = Box::new(OpenBuffer {
+            path: PathBuf::from("/a/b.rs"),
+        });
+        let recovered = boxed
+            .as_any()
+            .downcast_ref::<OpenBuffer>()
+            .expect("downcast");
         assert_eq!(recovered.path, PathBuf::from("/a/b.rs"));
     }
 }

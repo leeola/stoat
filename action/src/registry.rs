@@ -43,7 +43,7 @@ use crate::{
             TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank,
             YankMainToClipboard, YankToClipboard,
         },
-        file::OpenFile,
+        file::{OpenBuffer, OpenFile},
         file_finder::{
             FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
             FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
@@ -499,6 +499,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
                 expected: ParamKind::String,
             })?;
         Ok(Box::new(OpenFile {
+            path: PathBuf::from(raw),
+        }))
+    });
+    add(OpenBuffer::DEF, |params| {
+        let raw = params
+            .first()
+            .context(MissingSnafu { name: "path" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "path",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(OpenBuffer {
             path: PathBuf::from(raw),
         }))
     });
@@ -987,7 +1000,8 @@ mod tests {
         // + 4 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev.
         // + 2 FileFinderPageUp, FileFinderPageDown.
         // + 2 PalettePageUp, PalettePageDown.
-        assert_eq!(all().count(), 283);
+        // + 1 OpenBuffer.
+        assert_eq!(all().count(), 284);
     }
 
     #[test]
