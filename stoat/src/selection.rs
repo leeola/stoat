@@ -944,6 +944,33 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_select_line_cursor_on_line_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("x");
+        h.assert_snapshot("snapshot_select_line_cursor_on_line_end");
+    }
+
+    #[test]
+    fn snapshot_select_line_last_line_no_trailing_newline() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abc");
+        h.open_file(&path);
+        h.type_keys("x");
+        h.assert_snapshot("snapshot_select_line_last_line_no_trailing_newline");
+    }
+
+    #[test]
+    fn snapshot_select_line_on_blank_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abc\n\nxyz\n");
+        h.open_file(&path);
+        h.type_keys("j x");
+        h.assert_snapshot("snapshot_select_line_on_blank_line");
+    }
+
+    #[test]
     fn snapshot_keep_primary_selection() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
         let path = h.write_file("s.txt", "abc\ndef\nghi\n");
