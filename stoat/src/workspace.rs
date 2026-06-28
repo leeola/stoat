@@ -234,6 +234,18 @@ impl Workspace {
             && self.buffers.only_empty_scratch()
     }
 
+    /// Clear the preview buffer's syntax and cancel any in-flight parse for it.
+    ///
+    /// The file finder reuses one preview buffer id for every file it shows, so
+    /// an unfinished parse of the previously-previewed file would otherwise
+    /// complete and paint its anchored tokens onto the swapped-in content.
+    /// Removing the parse job drops its task, which cancels the parse, so the
+    /// stale result is never applied.
+    pub(crate) fn reset_preview_syntax(&mut self, id: BufferId) {
+        self.buffers.clear_syntax(id);
+        self.parse_jobs.remove(&id);
+    }
+
     /// Drive background parse jobs: poll any in-flight tasks for completion,
     /// install their results, then spawn new jobs for visible buffers whose
     /// stored syntax version is stale.
@@ -537,9 +549,10 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::changed_byte_ranges;
+    use super::{changed_byte_ranges, ParseJob, Workspace};
     use crate::review::ReviewFileInput;
     use std::{path::PathBuf, sync::Arc};
+    use stoat_scheduler::{Task, TestScheduler};
 
     fn input(base: &str, buffer: &str) -> ReviewFileInput {
         ReviewFileInput {
@@ -563,5 +576,26 @@ mod tests {
     #[test]
     fn changed_byte_ranges_empty_when_identical() {
         assert!(changed_byte_ranges(&input("fn foo() {}\n", "fn foo() {}\n")).is_empty());
+    }
+
+    #[test]
+    fn reset_preview_syntax_cancels_in_flight_parse() {
+        let executor = Arc::new(TestScheduler::new()).executor();
+        let mut ws = Workspace::new(PathBuf::new(), &executor);
+        let (id, _) = ws.buffers.new_scratch_preview();
+        ws.parse_jobs.insert(
+            id,
+            ParseJob {
+                target_version: 1,
+                task: Task::Ready(None),
+            },
+        );
+
+        ws.reset_preview_syntax(id);
+
+        assert!(
+            !ws.parse_jobs.contains_key(&id),
+            "swapping preview content drops the prior file's parse job"
+        );
     }
 }

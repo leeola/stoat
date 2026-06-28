@@ -299,7 +299,7 @@ impl FileFinder {
             None => {
                 if self.preview_rendered_for.is_some() {
                     replace_preview_text(ws, self.preview_editor, self.preview_buffer, "");
-                    ws.buffers.clear_syntax(self.preview_buffer);
+                    ws.reset_preview_syntax(self.preview_buffer);
                     self.preview_rendered_for = None;
                 }
                 return;
@@ -310,7 +310,7 @@ impl FileFinder {
         }
         let content = read_preview(fs_host, &path);
         replace_preview_text(ws, self.preview_editor, self.preview_buffer, &content);
-        ws.buffers.clear_syntax(self.preview_buffer);
+        ws.reset_preview_syntax(self.preview_buffer);
         if let Some(lang) = language_registry.for_path(&path) {
             ws.buffers.set_language(self.preview_buffer, lang);
         }
