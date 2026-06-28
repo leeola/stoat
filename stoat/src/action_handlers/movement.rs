@@ -2166,7 +2166,9 @@ pub(crate) fn execute_find(
     let rope = buffer_snapshot.rope();
 
     let head_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
-    let head_point = rope.offset_to_point(head_offset);
+    let tail_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().tail());
+    let cursor = cursor_offset(rope, tail_offset, head_offset);
+    let head_point = rope.offset_to_point(cursor);
     let line_start = rope.point_to_offset(Point::new(head_point.row, 0));
     let max_row = rope.max_point().row;
     let line_end = if head_point.row >= max_row {
@@ -2179,11 +2181,8 @@ pub(crate) fn execute_find(
     let count = count.max(1);
     let target = match kind {
         FindKind::NextChar | FindKind::TillNextChar => {
-            let scan_start = head_offset.saturating_add(
-                rope.chars_at(head_offset)
-                    .next()
-                    .map_or(0, |c| c.len_utf8()),
-            );
+            let scan_start =
+                cursor.saturating_add(rope.chars_at(cursor).next().map_or(0, |c| c.len_utf8()));
             let mut offset = scan_start;
             let mut found = None;
             let mut remaining = count;
@@ -2213,10 +2212,10 @@ pub(crate) fn execute_find(
             }
         },
         FindKind::PrevChar | FindKind::TillPrevChar => {
-            let mut offset = head_offset;
+            let mut offset = cursor;
             let mut found = None;
             let mut remaining = count;
-            for c in rope.reversed_chars_at(head_offset) {
+            for c in rope.reversed_chars_at(cursor) {
                 if offset == 0 {
                     break;
                 }
@@ -2247,9 +2246,9 @@ pub(crate) fn execute_find(
     if extend {
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        let new_head = new_buf.anchor_at(target, Bias::Right);
+        let new_rope = new_buf.rope();
         editor.selections.transform(new_buf, |sel| {
-            extend_head(sel, new_head, target, sel.goal, new_buf)
+            extend_head_to_cursor(sel, target, sel.goal, new_rope, new_buf)
         });
     } else {
         apply_primary_range(editor, target..target);

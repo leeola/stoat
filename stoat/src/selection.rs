@@ -728,6 +728,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_select_mode_find_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v f e");
+        h.assert_snapshot("select_mode_find_cursor");
+    }
+
+    #[test]
     fn snapshot_word_forward() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "foo bar baz\n");
@@ -1862,7 +1871,7 @@ mod tests {
         h.type_keys("v");
         h.type_keys("f e");
         let (start, end, reversed) = h.selection_spans()[0];
-        assert_eq!((start, end, reversed), (0, 4, false));
+        assert_eq!((start, end, reversed), (0, 5, false));
     }
 
     #[test]
@@ -1884,7 +1893,7 @@ mod tests {
         h.type_keys("v");
         h.type_keys("t e");
         let (start, end, reversed) = h.selection_spans()[0];
-        assert_eq!((start, end, reversed), (0, 3, false));
+        assert_eq!((start, end, reversed), (0, 4, false));
     }
 
     #[test]
