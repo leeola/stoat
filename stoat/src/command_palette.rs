@@ -53,27 +53,33 @@ pub struct CommandPalette {
     pub(crate) arg_picker: Option<ArgPicker>,
 }
 
-/// The inline file value-picker the palette shows while collecting a
-/// [`ValueSource::Files`] argument.
+/// The inline value-picker the palette shows while collecting a
+/// [`ValueSource::Files`] or [`ValueSource::Buffers`] argument.
 ///
 /// A trimmed mirror of [`crate::file_finder::FileFinder`]'s picker half: it owns
-/// the streaming workspace walk, the fuzzy [`PickList`] over discovered paths,
-/// and the live [`Preview`] pane. The palette parses the command's trailing
-/// argument and drives this list with it, so `:o src/ma` filters the same way
-/// the standalone finder does.
+/// the candidate path set, the fuzzy [`PickList`] over it, and the live
+/// [`Preview`] pane. The palette parses the command's trailing argument and
+/// drives this list with it, so `:o src/ma` filters the same way the standalone
+/// finder does.
 pub(crate) struct ArgPicker {
-    /// Workspace root the walk is rooted at. Also the base for repo-relative
-    /// row display (read by the renderer) and fuzzy ranking.
+    /// Whether this picker lists workspace files or open buffers. Selects the
+    /// preview source and whether a streaming walk feeds the list.
+    source: ValueSource,
+    /// Workspace root. The base for repo-relative row display (read by the
+    /// renderer) and fuzzy ranking, and the root a file walk runs from.
     pub(crate) git_root: PathBuf,
-    /// Every discovered path, grown by [`ArgPicker::pump_walk`] as walk batches
-    /// arrive. Copied into [`PickList::base`] on each refilter.
+    /// Every candidate path. For a file picker it grows as walk batches arrive
+    /// via [`ArgPicker::pump_walk`]. For a buffer picker it is the fixed
+    /// open-buffer set captured at construction. Copied into [`PickList::base`]
+    /// on each refilter.
     all_paths: Vec<PathBuf>,
-    /// Streaming receiver fed by the spawned walker. Cleared once the sender
-    /// drops, signalling the walk is exhausted.
+    /// Streaming receiver fed by the spawned walker, or `None` for a buffer
+    /// picker, which has no walk. Cleared once the sender drops.
     walk_rx: Option<UnboundedReceiver<Vec<PathBuf>>>,
-    /// Held only to keep the spawned walker alive. Dropping it cancels the
-    /// in-flight walk on runtimes that propagate cancellation.
-    _walk_task: Task<()>,
+    /// Held only to keep the spawned walker alive, or `None` for a buffer
+    /// picker. Dropping it cancels the in-flight walk on runtimes that propagate
+    /// cancellation.
+    _walk_task: Option<Task<()>>,
     /// Fuzzy result list over [`Self::all_paths`], read by the renderer.
     pub(crate) picklist: PickList,
     /// Last argument text run through the matcher, so the per-frame sync skips
@@ -87,15 +93,21 @@ impl ArgPicker {
     fn new(
         ws: &mut Workspace,
         executor: Executor,
+        source: ValueSource,
         git_root: PathBuf,
-        walk_rx: UnboundedReceiver<Vec<PathBuf>>,
-        walk_task: Task<()>,
+        walk: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
+        all_paths: Vec<PathBuf>,
     ) -> Self {
+        let (walk_rx, walk_task) = match walk {
+            Some((rx, task)) => (Some(rx), Some(task)),
+            None => (None, None),
+        };
         let preview = Preview::new(ws, executor);
         Self {
+            source,
             git_root,
-            all_paths: Vec::new(),
-            walk_rx: Some(walk_rx),
+            all_paths,
+            walk_rx,
             _walk_task: walk_task,
             picklist: PickList::default(),
             last_filter_text: String::new(),
@@ -153,18 +165,25 @@ impl ArgPicker {
         self.last_filter_text = query.to_string();
     }
 
-    /// Sync the preview pane to the selected path, reading it from disk, or
-    /// clear it when nothing is selected.
+    /// Sync the preview pane to the selected path, or clear it when nothing is
+    /// selected. A file picker previews the file on disk. A buffer picker
+    /// previews the live, possibly modified in-memory buffer, falling back to a
+    /// cleared pane when the path has no open buffer.
     fn sync_preview(
         &mut self,
         ws: &mut Workspace,
         fs_host: &dyn FsHost,
         language_registry: &LanguageRegistry,
     ) {
-        match self
-            .selected_path()
-            .map(|p| PreviewSource::File(p.to_path_buf()))
-        {
+        let Some(path) = self.selected_path().map(|p| p.to_path_buf()) else {
+            self.preview.clear(ws);
+            return;
+        };
+        let preview_source = match self.source {
+            ValueSource::Buffers => ws.buffers.id_for_path(&path).map(PreviewSource::Buffer),
+            _ => Some(PreviewSource::File(path)),
+        };
+        match preview_source {
             Some(source) => self.preview.sync(ws, fs_host, language_registry, source),
             None => self.preview.clear(ws),
         }
@@ -363,40 +382,46 @@ impl CommandPalette {
         }
     }
 
-    /// Whether the input currently parses as a command whose first parameter
-    /// sources its value from [`ValueSource::Files`] (e.g. `:o `). Gates both
-    /// rendering the inline file picker and routing selection keys to it.
-    pub(crate) fn in_files_arg_mode(&self) -> bool {
-        self.command
-            .and_then(|entry| entry.def.params().first())
-            .is_some_and(|param| param.value_source == ValueSource::Files)
+    /// The value source of the current command's first argument when it drives
+    /// an inline picker ([`ValueSource::Files`] or [`ValueSource::Buffers`], e.g.
+    /// `:o ` or `:b `), or `None` otherwise. Gates rendering the picker and
+    /// routing selection keys to it.
+    pub(crate) fn arg_source(&self) -> Option<ValueSource> {
+        let param = self.command?.def.params().first()?;
+        matches!(
+            param.value_source,
+            ValueSource::Files | ValueSource::Buffers
+        )
+        .then_some(param.value_source)
     }
 
-    /// The trailing argument text in file-argument mode, or `None` otherwise.
-    /// Drives the inline file picker's filter. The tail is everything after the
+    /// The trailing argument text in picker-argument mode, or `None` otherwise.
+    /// Drives the inline picker's filter. The tail is everything after the
     /// command token, so a path argument may contain spaces.
-    pub(crate) fn files_arg_tail(&self, ws: &Workspace) -> Option<String> {
-        if !self.in_files_arg_mode() {
-            return None;
-        }
+    pub(crate) fn arg_tail(&self, ws: &Workspace) -> Option<String> {
+        self.arg_source()?;
         let text = self.input.text(ws);
         let (_, tail) = text.split_once(' ')?;
         Some(tail.to_string())
     }
 
-    /// Install the inline file picker from an already-spawned workspace walk.
-    /// No-op when a picker already exists, so the per-frame sync can call this
-    /// unconditionally on entering file-argument mode.
+    /// Install the inline picker for `source`. A file picker is fed by an
+    /// already-spawned workspace `walk`. A buffer picker is fed by the fixed
+    /// `all_paths` set with no walk. No-op when a picker already exists, so the
+    /// per-frame sync can call this unconditionally on entering argument mode.
     pub(crate) fn install_arg_picker(
         &mut self,
         ws: &mut Workspace,
         executor: Executor,
+        source: ValueSource,
         git_root: PathBuf,
-        walk_rx: UnboundedReceiver<Vec<PathBuf>>,
-        walk_task: Task<()>,
+        walk: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
+        all_paths: Vec<PathBuf>,
     ) {
         if self.arg_picker.is_none() {
-            self.arg_picker = Some(ArgPicker::new(ws, executor, git_root, walk_rx, walk_task));
+            self.arg_picker = Some(ArgPicker::new(
+                ws, executor, source, git_root, walk, all_paths,
+            ));
         }
     }
 
@@ -463,7 +488,12 @@ impl CommandPalette {
             let chosen = self
                 .arg_picker
                 .as_ref()
-                .filter(|_| param.value_source == ValueSource::Files)
+                .filter(|_| {
+                    matches!(
+                        param.value_source,
+                        ValueSource::Files | ValueSource::Buffers
+                    )
+                })
                 .and_then(|picker| picker.selected_path())
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_else(|| arg.to_string());
@@ -1160,6 +1190,106 @@ mod tests {
             baseline,
             "no dirty scratch should linger after the palette closes",
         );
+    }
+
+    fn open_buffers(h: &mut TestHarness, root: &Path, rels: &[&str]) {
+        for rel in rels {
+            crate::action_handlers::dispatch(
+                &mut h.stoat,
+                &stoat_action::OpenFile {
+                    path: root.join(rel),
+                },
+            );
+        }
+        h.settle();
+    }
+
+    #[test]
+    fn buffer_arg_picker_lists_open_buffers() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("c.rs", "")]);
+        open_buffers(&mut h, &root, &["a.rs", "b.rs"]);
+        h.type_text(":b ");
+        h.snapshot();
+        assert_eq!(
+            arg_picker(&h).picklist.filtered.len(),
+            2,
+            "lists only the two open buffers, not every workspace file",
+        );
+    }
+
+    #[test]
+    fn buffer_arg_picker_previews_live_modified_text() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("note.txt", "on disk\n")]);
+        open_buffers(&mut h, &root, &["note.txt"]);
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("note.txt"))
+            .expect("open buffer");
+        {
+            let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
+            let mut guard = buffer.write().expect("poisoned");
+            let len = guard.snapshot.visible_text.len();
+            guard.edit(0..len, "edited in memory\n");
+        }
+
+        h.type_text(":b ");
+        h.snapshot();
+        let preview_id = arg_picker(&h).preview.buffer;
+        let shown = {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(preview_id)
+                .expect("preview buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard.rope().to_string()
+        };
+        assert_eq!(
+            shown, "edited in memory\n",
+            "buffer preview shows live in-memory text, not the disk file",
+        );
+    }
+
+    #[test]
+    fn buffer_arg_submit_activates_selected_buffer() {
+        let mut h = Stoat::test();
+        let root =
+            seed_palette_workspace(&mut h, &[("alpha.rs", "ALPHA\n"), ("beta.rs", "BETA\n")]);
+        open_buffers(&mut h, &root, &["alpha.rs", "beta.rs"]);
+
+        h.type_text(":b alpha");
+        h.snapshot();
+        h.type_keys("enter");
+        assert!(h.stoat.command_palette.is_none());
+
+        let frame = h.snapshot();
+        assert!(
+            frame.content.contains("ALPHA"),
+            "selected buffer not activated:\n{}",
+            frame.content
+        );
+    }
+
+    /// `:b ` lists the open buffers beside a live preview, mirroring `:o ` but
+    /// sourced from buffers rather than disk files.
+    #[test]
+    fn snapshot_command_palette_buffer_arg() {
+        let mut h = TestHarness::with_size(120, 30);
+        let root = seed_palette_workspace(
+            &mut h,
+            &[
+                ("src/main.rs", "fn main() {\n    run();\n}\n"),
+                ("README.md", "# project\n"),
+            ],
+        );
+        open_buffers(&mut h, &root, &["src/main.rs", "README.md"]);
+        h.type_text(":b ");
+        h.assert_snapshot("command_palette_buffer_arg");
     }
 
     #[test]

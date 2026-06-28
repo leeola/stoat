@@ -61,28 +61,40 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     }
     let active_idx = stoat.active_workspace;
 
-    let tail = {
+    let resolved = {
         let ws = &mut stoat.workspaces[active_idx];
         let palette = stoat.command_palette.as_mut().expect("palette present");
         palette.refilter_from_input(ws);
-        palette.files_arg_tail(ws)
+        palette.arg_source().zip(palette.arg_tail(ws))
     };
-    let Some(tail) = tail else {
+    let Some((source, tail)) = resolved else {
         return;
     };
 
-    let needs_walk = stoat
+    let needs_picker = stoat
         .command_palette
         .as_ref()
         .is_some_and(|palette| palette.arg_picker.is_none());
-    if needs_walk
-        && let Some(ArgCandidates::Walk { rx, task }) = arg_candidates(stoat, ValueSource::Files)
-    {
-        let executor = stoat.executor.clone();
+    if needs_picker {
         let git_root = stoat.workspaces[active_idx].git_root.clone();
+        let candidates = arg_candidates(stoat, source);
+        let executor = stoat.executor.clone();
         let ws = &mut stoat.workspaces[active_idx];
         if let Some(palette) = stoat.command_palette.as_mut() {
-            palette.install_arg_picker(ws, executor, git_root, rx, task);
+            match candidates {
+                Some(ArgCandidates::Walk { rx, task }) => palette.install_arg_picker(
+                    ws,
+                    executor,
+                    source,
+                    git_root,
+                    Some((rx, task)),
+                    Vec::new(),
+                ),
+                Some(ArgCandidates::Paths(paths)) => {
+                    palette.install_arg_picker(ws, executor, source, git_root, None, paths)
+                },
+                None => {},
+            }
         }
     }
 
@@ -130,7 +142,7 @@ pub(super) fn palette_insert_newline(stoat: &mut Stoat) -> Option<UpdateEffect> 
 /// Move the action-list selection. Returns `None` when the palette is closed.
 pub(super) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<UpdateEffect> {
     let palette = stoat.command_palette.as_mut()?;
-    if palette.in_files_arg_mode()
+    if palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()
     {
         picker.move_selection(delta);
@@ -151,7 +163,7 @@ pub(super) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
 /// falls back to a single row. Delegates to [`palette_move_selection`].
 pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     if let Some(palette) = stoat.command_palette.as_mut()
-        && palette.in_files_arg_mode()
+        && palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()
     {
         picker.picklist.page(dir);

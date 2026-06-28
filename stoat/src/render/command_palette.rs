@@ -80,7 +80,7 @@ pub(crate) fn render_command_palette(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    if palette.arg_picker.is_some() && palette.in_files_arg_mode() {
+    if palette.arg_picker.is_some() && palette.arg_source().is_some() {
         render_palette_arg_picker(palette, ws, theme, area, buf);
         return;
     }
