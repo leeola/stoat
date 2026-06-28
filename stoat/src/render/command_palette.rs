@@ -79,6 +79,12 @@ pub(crate) fn render_command_palette(
     palette.refilter_from_input(ws);
     let scope = palette.scope();
 
+    if matches!(palette.phase, PalettePhase::Filter { .. })
+        && let Some(layout) = palette_filter_layout(area)
+    {
+        palette.viewport_rows = Some(layout.list.height as usize);
+    }
+
     match &mut palette.phase {
         PalettePhase::Filter {
             input,

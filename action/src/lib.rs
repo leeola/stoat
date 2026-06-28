@@ -64,8 +64,8 @@ pub use defs::{
         SplitNewDown, SplitNewRight, SplitRight, ToggleDockLeft, ToggleDockRight,
     },
     prompt::{
-        CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
-        PromptInsertNewline, SubmitPromptInput,
+        CancelPromptInput, PalettePageDown, PalettePageUp, PaletteScopeToggle, PaletteSelectNext,
+        PaletteSelectPrev, PromptInsertNewline, SubmitPromptInput,
     },
     rebase::{
         AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,

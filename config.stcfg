@@ -454,6 +454,8 @@ on key {
         Down -> PaletteSelectNext();
         Ctrl-p -> PaletteSelectPrev();
         Ctrl-n -> PaletteSelectNext();
+        Ctrl-f -> PalettePageDown();
+        Ctrl-b -> PalettePageUp();
         BackTab -> PaletteScopeToggle();
     }
     mode == prompt && help_open {

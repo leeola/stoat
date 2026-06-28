@@ -62,6 +62,18 @@ pub(super) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
     Some(UpdateEffect::Redraw)
 }
 
+/// Page the palette filter selection by half its rendered list height in `dir`
+/// (-1 up, 1 down). Before the first render the viewport is unset and the step
+/// falls back to a single row. No-op when the palette is not in the filter
+/// phase, deferring to [`palette_move_selection`].
+pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    let step = match stoat.command_palette.as_ref() {
+        Some(p) => p.viewport_rows.map(|v| v.div_ceil(2).max(1)).unwrap_or(1),
+        None => return UpdateEffect::None,
+    };
+    palette_move_selection(stoat, dir * step as i32).unwrap_or(UpdateEffect::None)
+}
+
 /// Flip the palette's [`crate::command_palette::PaletteScope`]. No-op when the
 /// palette is closed or is past the filter phase (args collection).
 pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {

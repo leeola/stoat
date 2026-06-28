@@ -238,6 +238,100 @@ impl Action for PaletteSelectNext {
 }
 
 #[derive(Debug)]
+pub struct PalettePageUpDef;
+
+impl ActionDef for PalettePageUpDef {
+    fn name(&self) -> &'static str {
+        "PalettePageUp"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::PalettePageUp
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "page palette up"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Move the palette selection up by half the visible list height. \
+         Bound by default to Ctrl-B while the command palette is open."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct PalettePageUp;
+
+impl PalettePageUp {
+    pub const DEF: &PalettePageUpDef = &PalettePageUpDef;
+}
+
+impl Action for PalettePageUp {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct PalettePageDownDef;
+
+impl ActionDef for PalettePageDownDef {
+    fn name(&self) -> &'static str {
+        "PalettePageDown"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::PalettePageDown
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "page palette down"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Move the palette selection down by half the visible list height. \
+         Bound by default to Ctrl-F while the command palette is open."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct PalettePageDown;
+
+impl PalettePageDown {
+    pub const DEF: &PalettePageDownDef = &PalettePageDownDef;
+}
+
+impl Action for PalettePageDown {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct PaletteScopeToggleDef;
 
 impl ActionDef for PaletteScopeToggleDef {

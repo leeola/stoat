@@ -65,8 +65,8 @@ use crate::{
             ToggleDockRight,
         },
         prompt::{
-            CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
-            PromptInsertNewline, SubmitPromptInput,
+            CancelPromptInput, PalettePageDown, PalettePageUp, PaletteScopeToggle,
+            PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
             AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
@@ -607,6 +607,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(PaletteSelectPrev::DEF, |_| Ok(Box::new(PaletteSelectPrev)));
     add(PaletteSelectNext::DEF, |_| Ok(Box::new(PaletteSelectNext)));
+    add(PalettePageUp::DEF, |_| Ok(Box::new(PalettePageUp)));
+    add(PalettePageDown::DEF, |_| Ok(Box::new(PalettePageDown)));
     add(PaletteScopeToggle::DEF, |_| {
         Ok(Box::new(PaletteScopeToggle))
     });
@@ -793,6 +795,8 @@ mod tests {
         "PromptInsertNewline",
         "PaletteSelectPrev",
         "PaletteSelectNext",
+        "PalettePageUp",
+        "PalettePageDown",
         "PaletteScopeToggle",
     ];
 
@@ -951,7 +955,8 @@ mod tests {
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 4 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev.
         // + 2 FileFinderPageUp, FileFinderPageDown.
-        assert_eq!(all().count(), 281);
+        // + 2 PalettePageUp, PalettePageDown.
+        assert_eq!(all().count(), 283);
     }
 
     #[test]

@@ -22,6 +22,10 @@ pub struct CommandPalette {
     /// opened. Reused across every [`CommandPalette::refilter_from_input`]
     /// call because the workspace cannot mutate while the palette is modal.
     pub(crate) availability: Availability,
+    /// Rendered filter-list height in rows, refreshed each frame while the
+    /// palette is in the Filter phase so the half-page handler can size its
+    /// step. `None` before the first render, where the step is a single row.
+    pub(crate) viewport_rows: Option<usize>,
 }
 
 /// Palette listing mode.
@@ -202,6 +206,7 @@ impl CommandPalette {
             previous_mode,
             scope,
             availability,
+            viewport_rows: None,
         }
     }
 
