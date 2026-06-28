@@ -99,11 +99,15 @@ impl InputView {
         }
     }
 
-    /// Remove the underlying editor slot. Scratch buffers stay in the registry
-    /// (no public removal API today); this matches the existing reword
-    /// teardown and is safe for transient inputs.
+    /// Remove the editor slot and the owned scratch buffer.
+    ///
+    /// The scratch buffer is path-less and gets dirtied by a non-empty seed or
+    /// by typing, so leaving it in the registry would make it count as an
+    /// unsaved buffer and surface in the quit-all confirmation. Both slots are
+    /// dropped so a closed transient input leaves no trace.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         ws.editors.remove(self.editor_id);
+        ws.buffers.remove(self.buffer_id);
     }
 
     pub(crate) fn text(&self, ws: &Workspace) -> String {

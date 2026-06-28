@@ -863,6 +863,24 @@ mod tests {
     }
 
     #[test]
+    fn finder_input_scratch_not_left_dirty_on_close() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("main.rs", "fn main() {}\n")]);
+        let baseline = h.stoat.active_workspace().buffers.dirty_buffers().len();
+
+        h.type_keys("space p");
+        h.type_text("main");
+        h.type_keys("escape");
+
+        assert!(h.stoat.file_finder.is_none());
+        assert_eq!(
+            h.stoat.active_workspace().buffers.dirty_buffers().len(),
+            baseline,
+            "input scratch must not linger as a dirty buffer after the finder closes",
+        );
+    }
+
+    #[test]
     fn buffer_preview_source_shows_live_text_not_disk() {
         let mut h = crate::Stoat::test();
         let executor = h.stoat.executor.clone();
