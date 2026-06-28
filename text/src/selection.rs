@@ -122,6 +122,18 @@ pub fn cursor_offset(rope: &Rope, anchor: usize, head: usize) -> usize {
     }
 }
 
+/// Offset one character past `offset`, or `offset` itself at the rope end.
+///
+/// Forward mirror of the back-step in [`cursor_offset`]. A forward selection
+/// whose block cursor should sit on the character at `offset` stores its head
+/// here, one cell past it, so [`cursor_offset`] recovers that character.
+pub fn next_char_boundary(rope: &Rope, offset: usize) -> usize {
+    rope.chars_at(offset)
+        .next()
+        .map(|ch| offset + ch.len_utf8())
+        .unwrap_or(offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

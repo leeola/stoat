@@ -5427,7 +5427,7 @@ mod tests {
         h.type_keys("c");
         assert_eq!(h.stoat.mode, "insert");
         h.type_text("XYZ");
-        assert_eq!(buffer_text(&h, &path), "XYZdef");
+        assert_eq!(buffer_text(&h, &path), "XYZef");
     }
 
     #[test]
@@ -5437,7 +5437,7 @@ mod tests {
         h.type_keys("v l l l");
         h.type_keys("r");
         h.type_keys("X");
-        assert_eq!(buffer_text(&h, &path), "XXXdef");
+        assert_eq!(buffer_text(&h, &path), "XXXXef");
         assert_eq!(h.stoat.mode, "select");
     }
 
@@ -5459,7 +5459,7 @@ mod tests {
         h.type_keys("v l l");
         h.type_keys("r");
         h.type_text("é");
-        assert_eq!(buffer_text(&h, &path), "ééc");
+        assert_eq!(buffer_text(&h, &path), "ééé");
     }
 
     #[test]

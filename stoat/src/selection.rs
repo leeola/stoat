@@ -719,6 +719,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_select_mode_forward_char_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v l l");
+        h.assert_snapshot("select_mode_forward_char_cursor");
+    }
+
+    #[test]
     fn snapshot_word_forward() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "foo bar baz\n");
@@ -1764,7 +1773,7 @@ mod tests {
         h.open_file(&path);
         h.type_keys("v l l l");
         h.type_keys("d");
-        assert_eq!(focused_buffer_text(&mut h), "def\n");
+        assert_eq!(focused_buffer_text(&mut h), "ef\n");
     }
 
     #[test]
@@ -1774,7 +1783,7 @@ mod tests {
         h.open_file(&path);
         h.type_keys("v l l l");
         h.type_keys("~");
-        assert_eq!(focused_buffer_text(&mut h), "ABCdef\n");
+        assert_eq!(focused_buffer_text(&mut h), "ABCDef\n");
     }
 
     #[test]
@@ -1784,7 +1793,7 @@ mod tests {
         h.open_file(&path);
         h.type_keys("v l l l");
         h.type_keys("d");
-        assert_eq!(focused_buffer_text(&mut h), "def\n");
+        assert_eq!(focused_buffer_text(&mut h), "ef\n");
         h.type_keys("u");
         assert_eq!(focused_buffer_text(&mut h), "abcdef\n");
     }

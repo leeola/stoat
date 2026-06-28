@@ -1437,7 +1437,7 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
     }
 
     #[test]
@@ -1447,7 +1447,7 @@ mod tests {
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
     }
 
     #[test]
@@ -1469,6 +1469,8 @@ mod tests {
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 5, false)]);
+        dispatch(&mut stoat, &ExtendLeft);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 4, false)]);
         dispatch(&mut stoat, &ExtendLeft);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
@@ -1570,7 +1572,7 @@ mod tests {
         dispatch(&mut stoat, &ExtendRight);
         assert_eq!(
             editor::selection_spans(&mut stoat),
-            vec![(0, 1, false), (4, 5, false)]
+            vec![(0, 2, false), (4, 6, false)]
         );
     }
 
@@ -1618,9 +1620,9 @@ mod tests {
         editor::seed_focused_buffer(&mut stoat, "abcdef");
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
         dispatch(&mut stoat, &CollapseSelection);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 3, false)]);
     }
 
     #[test]
@@ -1644,12 +1646,12 @@ mod tests {
         dispatch(&mut stoat, &ExtendRight);
         assert_eq!(
             editor::selection_spans(&mut stoat),
-            vec![(0, 1, false), (4, 5, false)]
+            vec![(0, 2, false), (4, 6, false)]
         );
         dispatch(&mut stoat, &CollapseSelection);
         assert_eq!(
             editor::selection_spans(&mut stoat),
-            vec![(1, 1, false), (5, 5, false)]
+            vec![(2, 2, false), (6, 6, false)]
         );
     }
 
@@ -1659,11 +1661,11 @@ mod tests {
         editor::seed_focused_buffer(&mut stoat, "abcdef");
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
         dispatch(&mut stoat, &FlipSelections);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
         dispatch(&mut stoat, &FlipSelections);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
     }
 
     #[test]

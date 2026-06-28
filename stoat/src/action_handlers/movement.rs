@@ -8,9 +8,10 @@ use crate::{
 };
 use stoat_language::structural_diff::BufferRef;
 use stoat_text::{
-    find_number_seeking, next_long_word_end, next_long_word_start, next_word_end, next_word_start,
-    prev_long_word_end, prev_long_word_start, prev_word_end, prev_word_start, Anchor, Bias,
-    NumberKind, Point, Selection, SelectionGoal,
+    cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end,
+    next_long_word_start, next_word_end, next_word_start, prev_long_word_end, prev_long_word_start,
+    prev_word_end, prev_word_start, Anchor, Bias, NumberKind, Point, Rope, Selection,
+    SelectionGoal,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -259,6 +260,15 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
     let rope = buffer_snapshot.rope();
     editor.selections.transform(buffer_snapshot, |sel| {
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
+        if delta > 0 && extend {
+            let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
+            let cursor = cursor_offset(rope, tail_offset, head_offset);
+            let target = step_cursor_right(rope, cursor, count);
+            if target == cursor {
+                return sel.clone();
+            }
+            return extend_head_to_cursor(sel, target, SelectionGoal::None, rope, buffer_snapshot);
+        }
         let new_offset = if delta > 0 {
             let mut offset = head_offset;
             for ch in rope.chars_at(head_offset).take(count) {
@@ -450,6 +460,52 @@ fn extend_head(
         new.reversed = false;
     }
     new
+}
+
+/// Step a cursor offset right by `count` cells, clamping at the line's last
+/// character.
+///
+/// The cursor never lands on the trailing newline or past the buffer end, so a
+/// select-mode forward motion stops at the last character of the line rather
+/// than crossing onto the next.
+fn step_cursor_right(rope: &Rope, cursor: usize, count: usize) -> usize {
+    let mut target = cursor;
+    for _ in 0..count {
+        let Some(ch) = rope.chars_at(target).next() else {
+            break;
+        };
+        let next = target + ch.len_utf8();
+        if rope.chars_at(next).next().is_none_or(|c| c == '\n') {
+            break;
+        }
+        target = next;
+    }
+    target
+}
+
+/// Extend `sel` so its block cursor lands on the cell at `target_cursor`.
+///
+/// A forward result stores the head one cell past `target_cursor`, so the
+/// paint-site [`cursor_offset`] recovers the cell. A reversed result keeps the
+/// head on `target_cursor`, where `cursor_offset` is identity. Forward on-cell
+/// motions re-base their step on [`cursor_offset`] and route the landing cell
+/// through this, so the block cursor renders on the cell moved to rather than
+/// one short of it.
+fn extend_head_to_cursor(
+    sel: &Selection<Anchor>,
+    target_cursor: usize,
+    goal: SelectionGoal,
+    rope: &Rope,
+    buffer: &MultiBufferSnapshot,
+) -> Selection<Anchor> {
+    let tail_offset = buffer.resolve_anchor(&sel.tail());
+    let new_head_offset = if target_cursor >= tail_offset {
+        next_char_boundary(rope, target_cursor)
+    } else {
+        target_cursor
+    };
+    let new_head = buffer.anchor_at(new_head_offset, Bias::Right);
+    extend_head(sel, new_head, new_head_offset, goal, buffer)
 }
 
 pub(super) fn goto_line_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
@@ -1710,7 +1766,7 @@ pub(super) fn trim_selections(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Skip leading and trailing whitespace within `[start, end)`. Returns
 /// `None` if the range is empty or contains only whitespace.
-fn trim_whitespace(rope: &stoat_text::Rope, start: usize, end: usize) -> Option<(usize, usize)> {
+fn trim_whitespace(rope: &Rope, start: usize, end: usize) -> Option<(usize, usize)> {
     if start >= end {
         return None;
     }
@@ -2494,7 +2550,7 @@ pub(crate) fn is_in_string_or_comment(tree: &stoat_language::Tree, offset: usize
 }
 
 fn scan_bracket_match(
-    rope: &stoat_text::Rope,
+    rope: &Rope,
     start: usize,
     start_ch: char,
     open: char,

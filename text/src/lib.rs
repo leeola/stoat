@@ -30,7 +30,7 @@ pub use rope::{
     BytesInRange, CharsAt, ChunksInLine, ChunksInRange, FindIter, Lines, ReversedCharsAt, Rope,
     TextSummary,
 };
-pub use selection::{cursor_offset, Selection, SelectionGoal};
+pub use selection::{cursor_offset, next_char_boundary, Selection, SelectionGoal};
 pub use sum_tree::{
     Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Edit, FilterCursor, Item, Iter,
     KeyedItem, NoSummary, SeekTarget, SumTree, Summary,
