@@ -1491,7 +1491,7 @@ mod tests {
         dispatch(&mut stoat, &ExtendDown);
         assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 1)]);
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(2, 6)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(2, 7)]);
     }
 
     #[test]

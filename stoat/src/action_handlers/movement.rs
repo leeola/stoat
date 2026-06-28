@@ -312,15 +312,17 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let max_row = display_snapshot.max_point().row;
+    let rope = buffer_snapshot.rope();
     editor.selections.transform(buffer_snapshot, |sel| {
-        let head_anchor = sel.head();
-        let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
-        let head_display = display_snapshot.buffer_to_display(head_point);
+        let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
+        let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
+        let cursor = cursor_offset(rope, tail_offset, head_offset);
+        let cursor_display = display_snapshot.buffer_to_display(rope.offset_to_point(cursor));
         let goal_col = match sel.goal {
             SelectionGoal::Column(c) => c,
-            SelectionGoal::None => head_display.column,
+            SelectionGoal::None => cursor_display.column,
         };
-        let new_row_i = (head_display.row as i64).saturating_add(delta);
+        let new_row_i = (cursor_display.row as i64).saturating_add(delta);
         if new_row_i < 0 || new_row_i > max_row as i64 {
             return sel.clone();
         }
@@ -331,17 +333,26 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
         let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
             return sel.clone();
         };
-        let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
-        let anchor = buffer_snapshot.anchor_at(offset, Bias::Right);
+        let offset = rope.point_to_offset(buffer_pt);
         if extend {
-            extend_head(
+            // Keep the block cursor on the last character when the goal column
+            // overruns the line, rather than on the line break past it.
+            let cursor_target = if clamped_col > 0 && rope.chars_at(offset).next() == Some('\n') {
+                rope.reversed_chars_at(offset)
+                    .next()
+                    .map_or(offset, |c| offset - c.len_utf8())
+            } else {
+                offset
+            };
+            extend_head_to_cursor(
                 sel,
-                anchor,
-                offset,
+                cursor_target,
                 SelectionGoal::Column(goal_col),
+                rope,
                 buffer_snapshot,
             )
         } else {
+            let anchor = buffer_snapshot.anchor_at(offset, Bias::Right);
             let mut new = sel.clone();
             new.collapse_to(anchor, SelectionGoal::Column(goal_col));
             new

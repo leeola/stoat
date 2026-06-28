@@ -737,6 +737,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_select_mode_vertical_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\nghijkl\n");
+        h.open_file(&path);
+        h.type_keys("l l v j");
+        h.assert_snapshot("select_mode_vertical_cursor");
+    }
+
+    #[test]
     fn snapshot_word_forward() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "foo bar baz\n");
@@ -1622,7 +1631,7 @@ mod tests {
             "anchor stays at byte 0 while head extends down"
         );
         assert_eq!(
-            spans[0].1, 6,
+            spans[0].1, 7,
             "3 j in select mode should extend the head three lines down"
         );
     }
