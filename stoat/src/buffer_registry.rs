@@ -272,6 +272,22 @@ impl BufferRegistry {
             .collect()
     }
 
+    /// Path-bearing buffers with no language assigned yet.
+    ///
+    /// Session restore rebuilds every buffer with `language: None`
+    /// because the language is regenerable and deliberately not
+    /// persisted. Restored file buffers therefore need their language
+    /// re-detected from the path before the parse pipeline will
+    /// highlight them, since it skips any buffer whose language is
+    /// `None`. Scratch buffers, lacking a path, are excluded.
+    pub(crate) fn buffers_needing_language(&self) -> Vec<(BufferId, PathBuf)> {
+        self.buffers
+            .iter()
+            .filter(|(_, entry)| entry.language.is_none())
+            .filter_map(|(id, entry)| entry.path.clone().map(|path| (*id, path)))
+            .collect()
+    }
+
     /// Drop any cached syntax / syntax_map for `id`. Used by callers
     /// that swap a preview buffer's content -- the new content's
     /// syntax must be parsed from scratch, not merged into stale

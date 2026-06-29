@@ -1241,15 +1241,19 @@ impl Stoat {
         };
         let executor = self.executor.clone();
         let fs_host = self.fs_host.clone();
-        if let Err(err) = self
+        let registry = self.language_registry.clone();
+        match self
             .active_workspace_mut()
             .restore_state(&path, &*fs_host, &executor)
         {
-            tracing::warn!(
+            Ok(()) => self
+                .active_workspace_mut()
+                .assign_languages_from_paths(&registry),
+            Err(err) => tracing::warn!(
                 ?path,
                 ?err,
                 "failed to restore workspace state; starting fresh"
-            );
+            ),
         }
     }
 

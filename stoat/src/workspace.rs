@@ -397,6 +397,23 @@ impl Workspace {
         }
     }
 
+    /// Detect and assign a language to every path-bearing buffer that
+    /// lacks one, resolving the path's extension through `registry`.
+    ///
+    /// Session restore (via [`Self::restore_state`]) rebuilds buffers
+    /// with no language, and the parse pipeline only highlights buffers
+    /// that have one, so this runs once after a restore to re-detect
+    /// them. Idempotent and safe to call unconditionally -- buffers that
+    /// already have a language are left untouched, so buffers opened
+    /// during the session are unaffected.
+    pub(crate) fn assign_languages_from_paths(&mut self, registry: &LanguageRegistry) {
+        for (id, path) in self.buffers.buffers_needing_language() {
+            if let Some(lang) = registry.for_path(&path) {
+                self.buffers.set_language(id, lang);
+            }
+        }
+    }
+
     /// Spawn a live re-index of `buffer_id` from its current `text`.
     ///
     /// Skips buffers with no file path or no resolved language. The spawned
@@ -551,7 +568,11 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 mod tests {
     use super::{changed_byte_ranges, ParseJob, Workspace};
     use crate::review::ReviewFileInput;
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+    use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
 
     fn input(base: &str, buffer: &str) -> ReviewFileInput {
@@ -576,6 +597,19 @@ mod tests {
     #[test]
     fn changed_byte_ranges_empty_when_identical() {
         assert!(changed_byte_ranges(&input("fn foo() {}\n", "fn foo() {}\n")).is_empty());
+    }
+
+    #[test]
+    fn assign_languages_from_paths_detects_rust() {
+        let executor = Arc::new(TestScheduler::new()).executor();
+        let mut ws = Workspace::new(PathBuf::new(), &executor);
+        let (id, _) = ws.buffers.open(Path::new("/repo/foo.rs"), "fn main() {}");
+
+        assert_eq!(ws.buffers.language_for(id).map(|l| l.name), None);
+
+        ws.assign_languages_from_paths(&LanguageRegistry::standard());
+
+        assert_eq!(ws.buffers.language_for(id).map(|l| l.name), Some("rust"));
     }
 
     #[test]
