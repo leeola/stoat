@@ -165,7 +165,7 @@ impl Renderer {
             grid,
             resolution,
             CursorState {
-                pos: frame.cursor,
+                corners: frame.cursor_corners,
                 color: self.cursor_color,
             },
             frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
@@ -257,7 +257,7 @@ impl Renderer {
             pool_grid,
             resolution,
             CursorState {
-                pos: None,
+                corners: None,
                 color: self.cursor_color,
             },
             shift_rows,
@@ -266,6 +266,7 @@ impl Renderer {
 
         let frame = Frame {
             cursor: None,
+            cursor_corners: None,
             scroll: Scroll {
                 grid: 0.0,
                 document: shift_rows,

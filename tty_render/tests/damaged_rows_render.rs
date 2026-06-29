@@ -96,6 +96,7 @@ fn patched_rows_match_a_full_rebuild() {
                 grid,
                 Frame {
                     cursor: None,
+                    cursor_corners: None,
                     scroll: Scroll {
                         grid: 0.0,
                         document: 0.0,

@@ -39,28 +39,36 @@ struct BgInstance {
     color: [f32; 3],
 }
 
-/// Uniform shared by the cell and cursor pipelines: the screen resolution and
-/// cell size that map cell coordinates to clip space, the cursor's eased
-/// position in (fractional) cell coordinates and its color, and the grid's eased
-/// vertical scroll offset in pixels.
+/// Uniform shared by the cell and cursor pipelines.
 ///
-/// `pad` aligns `cursor_color` to a 16-byte offset for the uniform layout.
+/// Carries the screen resolution and cell size that map cell coordinates to
+/// clip space, the cursor block's four eased corners (two `vec4`s holding
+/// [TL, TR] then [BL, BR] in fractional cell coordinates), the cursor color,
+/// and the grid's eased vertical scroll offset in pixels.
+///
+/// `scroll_y` and the three `pad` floats fill one 16-byte slot so the following
+/// `cursor_color` lands on the 16-byte offset the uniform layout requires. The
+/// `vec4` corner pairs already sit on 16-byte boundaries.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
-    cursor_pos: [f32; 2],
+    cursor_corners_01: [f32; 4],
+    cursor_corners_23: [f32; 4],
     scroll_y: f32,
     pad: f32,
+    pad2: f32,
+    pad3: f32,
     cursor_color: [f32; 4],
 }
 
-/// The cursor block's eased position and color for the frame.
+/// The cursor block's eased corners and color for the frame.
 #[derive(Clone, Copy)]
 pub struct CursorState {
-    /// Fractional cell position, or `None` when the cursor is hidden.
-    pub pos: Option<[f32; 2]>,
+    /// The block's four corners [TL, TR, BL, BR] in fractional cell
+    /// coordinates, or `None` when the cursor is hidden.
+    pub corners: Option<[[f32; 2]; 4]>,
     /// Block color. The pass applies its own blend alpha.
     pub color: Rgb,
 }
@@ -182,7 +190,7 @@ impl BackgroundPass {
     /// Upload the frame's uniform and per-cell instances for `grid`.
     ///
     /// `resolution` is the surface size in physical pixels. `cursor` carries the
-    /// cursor block's eased position and color. `grid_scroll` shifts the whole
+    /// cursor block's eased corners and color. `grid_scroll` shifts the whole
     /// grid up by that many rows.
     ///
     /// Reallocates the instance buffer only when the grid outgrows the current
@@ -198,12 +206,16 @@ impl BackgroundPass {
         grid_scroll: f32,
         damage: &Damage,
     ) {
+        let c = cursor.corners.unwrap_or([[0.0; 2]; 4]);
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
-            cursor_pos: cursor.pos.unwrap_or([0.0, 0.0]),
+            cursor_corners_01: [c[0][0], c[0][1], c[1][0], c[1][1]],
+            cursor_corners_23: [c[2][0], c[2][1], c[3][0], c[3][1]],
             scroll_y: grid_scroll * self.metrics.height,
             pad: 0.0,
+            pad2: 0.0,
+            pad3: 0.0,
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
@@ -212,7 +224,7 @@ impl BackgroundPass {
             ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        self.cursor_visible = cursor.pos.is_some();
+        self.cursor_visible = cursor.corners.is_some();
 
         let cols = grid.cols();
         let total = grid.rows() * cols;
@@ -285,8 +297,8 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 
 /// Build the cursor pipeline sharing `globals_layout` with the cell pass.
 ///
-/// It has no vertex buffer: the single quad reads the cursor position from the
-/// globals uniform, and alpha blends so the block tints whatever it covers.
+/// It has no vertex buffer. The single quad reads the cursor's four corners
+/// from the globals uniform, and alpha blends so the block tints what it covers.
 fn build_cursor_pipeline(
     device: &Device,
     shader: &ShaderModule,

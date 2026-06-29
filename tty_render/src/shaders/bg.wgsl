@@ -5,9 +5,12 @@
 struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
-    cursor_pos: vec2<f32>,
+    cursor_corners_01: vec4<f32>,
+    cursor_corners_23: vec4<f32>,
     scroll_y: f32,
     pad: f32,
+    pad2: f32,
+    pad3: f32,
     cursor_color: vec4<f32>,
 }
 
@@ -56,9 +59,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color, 1.0);
 }
 
-// Cursor block. One quad, no instance data: its position rides in the globals
-// uniform as fractional cell coordinates, so it can sit between cells while it
-// eases. Drawn after the glyphs and alpha-blended, it tints the cell it covers.
+// Cursor block. One quad, no instance data: its four corners ride in the
+// globals uniform as fractional cell coordinates, so it can sit between cells
+// while it eases and need not stay rectangular. Drawn after the glyphs and
+// alpha-blended, it tints the cells it covers.
 
 struct CursorVsOut {
     @builtin(position) clip: vec4<f32>,
@@ -66,17 +70,17 @@ struct CursorVsOut {
 
 @vertex
 fn vs_cursor(@builtin(vertex_index) vertex_index: u32) -> CursorVsOut {
-    var corners = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(1.0, 1.0)
+    var corners = array<vec2<f32>, 4>(
+        globals.cursor_corners_01.xy,
+        globals.cursor_corners_01.zw,
+        globals.cursor_corners_23.xy,
+        globals.cursor_corners_23.zw
     );
+    // Two triangles over [TL, TR, BL, BR], matching vs_main's winding.
+    var indices = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
 
-    let pixel = (globals.cursor_pos + corners[vertex_index]) * globals.cell_size
-        + vec2<f32>(0.0, globals.scroll_y);
+    let cell = corners[indices[vertex_index]];
+    let pixel = cell * globals.cell_size + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0

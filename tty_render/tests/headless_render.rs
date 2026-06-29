@@ -176,6 +176,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         &grid,
         Frame {
             cursor: Some([0.0, 0.0]),
+            cursor_corners: Some([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]),
             scroll: Scroll {
                 grid: 0.0,
                 document: 0.0,

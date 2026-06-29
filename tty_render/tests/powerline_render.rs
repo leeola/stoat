@@ -82,6 +82,7 @@ fn powerline_separator_fills_the_cell() {
         &grid,
         Frame {
             cursor: None,
+            cursor_corners: None,
             scroll: Scroll {
                 grid: 0.0,
                 document: 0.0,

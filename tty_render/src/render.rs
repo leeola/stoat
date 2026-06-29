@@ -41,12 +41,23 @@ pub struct Scroll<'a> {
 
 /// The per-frame dynamic inputs to render a grid.
 ///
-/// Bundles the state that changes every frame: where the cursor block sits, the
-/// eased scroll offsets, and which rows the terminal changed since the previous
-/// frame. The damaged rows let the text pass rebuild only changed rows; the
-/// cursor position drives the cursor block and breaks ligatures on its cell.
+/// Bundles the state that changes every frame, such as the cursor position, the
+/// eased scroll offsets, and the rows the terminal changed since the previous
+/// frame. The damaged rows let the text pass rebuild only changed rows.
+/// [`Self::cursor_corners`] draws the cursor block, and [`Self::cursor`] breaks
+/// ligatures on the cursor's cell.
 pub struct Frame<'a> {
+    /// Cursor cell origin in fractional cell coordinates, or `None` when
+    /// hidden. Breaks the ligature on the cell it lands on. The drawn block
+    /// comes from [`Self::cursor_corners`].
     pub cursor: Option<[f32; 2]>,
+    /// The cursor block's four corners [TL, TR, BL, BR] in fractional cell
+    /// coordinates, or `None` when hidden.
+    ///
+    /// Independent corners let the block be non-rectangular -- a warp stretches
+    /// it along the motion path -- where a single position could only ever
+    /// describe a rectangle. A rigid block sets the corners to one whole cell.
+    pub cursor_corners: Option<[[f32; 2]; 4]>,
     pub scroll: Scroll<'a>,
     pub damage: &'a Damage,
     /// Rows where an APC cell decoration (border or scale) changed since the

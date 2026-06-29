@@ -2621,6 +2621,7 @@ mod tests {
         let idle_damage = Damage::Partial(vec![false; rows]);
         let frame = |damage| Frame {
             cursor: None,
+            cursor_corners: None,
             scroll: Scroll {
                 grid: 0.0,
                 document: 0.0,
@@ -2673,6 +2674,7 @@ mod tests {
         let idle_damage = Damage::Partial(vec![false; rows]);
         let frame = |scroll, damage| Frame {
             cursor: None,
+            cursor_corners: None,
             scroll,
             damage,
             decoration_damage: &idle_damage,

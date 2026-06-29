@@ -85,6 +85,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
     let no_decoration = Damage::Partial(Vec::new());
     let frame = |grid_scroll, damage| Frame {
         cursor: None,
+        cursor_corners: None,
         scroll: Scroll {
             grid: grid_scroll,
             document: 0.0,
@@ -191,6 +192,7 @@ fn document_scroll_shifts_the_grid_like_grid_scroll() {
     let no_decoration = Damage::Partial(Vec::new());
     let frame = |document, damage| Frame {
         cursor: None,
+        cursor_corners: None,
         scroll: Scroll {
             grid: 0.0,
             document,

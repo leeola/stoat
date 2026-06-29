@@ -706,6 +706,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 &state.scrollback_grid,
                                 Frame {
                                     cursor: None,
+                                    cursor_corners: None,
                                     scroll: Scroll {
                                         grid: 0.0,
                                         document: 0.0,
@@ -743,6 +744,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                         &state.grid,
                                         Frame {
                                             cursor: Some(next),
+                                            cursor_corners: block_corners(Some(next)),
                                             scroll: Scroll {
                                                 grid: state.grid_scroll,
                                                 document: 0.0,
@@ -761,6 +763,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                         &state.grid,
                                         Frame {
                                             cursor: None,
+                                            cursor_corners: None,
                                             scroll: Scroll {
                                                 grid: state.grid_scroll,
                                                 document: 0.0,
@@ -840,6 +843,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         &state.grid,
                         Frame {
                             cursor: base_cursor,
+                            cursor_corners: block_corners(base_cursor),
                             scroll: Scroll {
                                 grid: state.grid_scroll,
                                 document: 0.0,
@@ -1030,6 +1034,15 @@ fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
     } else {
         Some([cursor.col as f32, cursor.row as f32])
     }
+}
+
+/// The four block corners [TL, TR, BL, BR] for a cursor at fractional cell
+/// origin `cursor`, or `None` when it is hidden.
+///
+/// The rigid block spans one whole cell, so each corner is the origin offset by
+/// the unit cell. A warp eases these corners independently instead.
+fn block_corners(cursor: Option<[f32; 2]>) -> Option<[[f32; 2]; 4]> {
+    cursor.map(|[x, y]| [[x, y], [x + 1.0, y], [x, y + 1.0], [x + 1.0, y + 1.0]])
 }
 
 /// The font-size step a key press maps to, or `None` when it is not the
