@@ -3947,6 +3947,7 @@ dependencies = [
  "compact_str",
  "ignore",
  "notify",
+ "tempfile",
 ]
 
 [[package]]

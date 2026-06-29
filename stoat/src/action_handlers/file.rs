@@ -9,7 +9,7 @@ use lsp_types::{DidCloseTextDocumentParams, DidSaveTextDocumentParams, TextDocum
 use std::{path::Path, str::FromStr};
 
 /// Write the focused buffer's rope text to its backing file via
-/// [`crate::host::FsHost::write`], clear the buffer's dirty flag,
+/// [`crate::host::FsHost::write_atomic`], clear the buffer's dirty flag,
 /// and notify the LSP server via [`crate::host::LspHost::did_save`].
 /// No-op for scratch buffers (no path) or when no editor is
 /// focused. Write errors leave the dirty flag set so the user can
@@ -31,7 +31,7 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
         let guard = buffer.read().expect("buffer poisoned");
         guard.rope().to_string()
     };
-    if let Err(err) = stoat.fs_host.write(&path, text.as_bytes()) {
+    if let Err(err) = stoat.fs_host.write_atomic(&path, text.as_bytes()) {
         tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
         return UpdateEffect::None;
     }
@@ -216,7 +216,12 @@ pub(crate) fn open_file_in_pane(
 
 #[cfg(test)]
 mod tests {
-    use crate::{action_handlers::dispatch, app::UpdateEffect, host::FsHost, Stoat};
+    use crate::{
+        action_handlers::dispatch,
+        app::UpdateEffect,
+        host::{FakeFsOp, FsHost},
+        Stoat,
+    };
     use std::path::PathBuf;
     use stoat_action::{CloseBuffer, OpenBuffer, OpenFile, SaveBuffer};
 
@@ -266,11 +271,66 @@ mod tests {
 
         assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
 
+        let writes: Vec<_> = h
+            .fake_fs()
+            .ops()
+            .into_iter()
+            .filter(|op| matches!(op, FakeFsOp::WriteAtomic { .. }))
+            .collect();
+        assert_eq!(
+            writes,
+            [FakeFsOp::WriteAtomic {
+                path: path.clone(),
+                len: b"edited original\n".len(),
+            }],
+            "save must go through the atomic write path exactly once",
+        );
+
         let mut written = Vec::new();
         h.fake_fs()
             .read(&path, &mut written)
             .expect("file readable");
         assert_eq!(written, b"edited original\n");
+    }
+
+    #[test]
+    fn save_buffer_failed_write_keeps_file_and_dirty() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-fail");
+        h.fake_fs().insert_file(root.join("a.txt"), b"original\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        let path = root.join("a.txt");
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(0..0, "edited ");
+        }
+        assert!(focused_dirty(&h.stoat));
+
+        h.fake_fs()
+            .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
+        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::None);
+
+        let mut written = Vec::new();
+        h.fake_fs()
+            .read(&path, &mut written)
+            .expect("file readable");
+        assert_eq!(
+            written, b"original\n",
+            "failed save leaves disk bytes intact"
+        );
+        assert!(focused_dirty(&h.stoat), "failed save keeps buffer dirty");
     }
 
     #[test]

@@ -23,6 +23,7 @@ enum FakeEntry {
 pub enum FakeFsOp {
     Read { path: PathBuf },
     Write { path: PathBuf, len: usize },
+    WriteAtomic { path: PathBuf, len: usize },
     Metadata { path: PathBuf },
     ListDir { path: PathBuf },
     CreateDirAll { path: PathBuf },
@@ -353,6 +354,43 @@ impl FakeFs {
     pub fn ops(&self) -> Vec<FakeFsOp> {
         self.state.lock().expect("FakeFs lock poisoned").ops.clone()
     }
+
+    /// Shared body of [`FsHost::write`] and [`FsHost::write_atomic`].
+    /// Records `op`, honours an armed sticky write failure, resolves
+    /// symlinks, writes the file entry, and fires the write hook. An
+    /// armed failure returns before any mutation, so a failed write
+    /// leaves the prior entry intact -- the atomicity the real
+    /// [`FsHost::write_atomic`] provides via temp-file-plus-rename.
+    fn write_entry(&self, path: &Path, data: &[u8], op: FakeFsOp) -> io::Result<()> {
+        let mut state = self.state.lock().expect("FakeFs lock poisoned");
+        state.ops.push(op);
+        if let Some(kind) = state.write_failures.get(path) {
+            return Err(io::Error::new(
+                *kind,
+                format!("{}: injected write failure", path.display()),
+            ));
+        }
+        let resolved = resolve_symlink(&state, path)?;
+        state.ensure_ancestors(&resolved);
+        let mtime = state.tick();
+        state.entries.insert(
+            resolved,
+            FakeEntry::File {
+                content: data.to_vec(),
+                mtime,
+            },
+        );
+        drop(state);
+        if let Some(hook) = self
+            .write_hook
+            .lock()
+            .expect("FakeFs lock poisoned")
+            .as_ref()
+        {
+            hook(path);
+        }
+        Ok(())
+    }
 }
 
 impl FsHost for FakeFs {
@@ -403,37 +441,25 @@ impl FsHost for FakeFs {
     }
 
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        let mut state = self.state.lock().expect("FakeFs lock poisoned");
-        state.ops.push(FakeFsOp::Write {
-            path: path.to_path_buf(),
-            len: data.len(),
-        });
-        if let Some(kind) = state.write_failures.get(path) {
-            return Err(io::Error::new(
-                *kind,
-                format!("{}: injected write failure", path.display()),
-            ));
-        }
-        let resolved = resolve_symlink(&state, path)?;
-        state.ensure_ancestors(&resolved);
-        let mtime = state.tick();
-        state.entries.insert(
-            resolved,
-            FakeEntry::File {
-                content: data.to_vec(),
-                mtime,
+        self.write_entry(
+            path,
+            data,
+            FakeFsOp::Write {
+                path: path.to_path_buf(),
+                len: data.len(),
             },
-        );
-        drop(state);
-        if let Some(hook) = self
-            .write_hook
-            .lock()
-            .expect("FakeFs lock poisoned")
-            .as_ref()
-        {
-            hook(path);
-        }
-        Ok(())
+        )
+    }
+
+    fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.write_entry(
+            path,
+            data,
+            FakeFsOp::WriteAtomic {
+                path: path.to_path_buf(),
+                len: data.len(),
+            },
+        )
     }
 
     fn metadata(&self, path: &Path) -> io::Result<Option<FsMetadata>> {
@@ -900,6 +926,40 @@ mod tests {
         assert_eq!(first.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(second.kind(), io::ErrorKind::PermissionDenied);
         assert!(!fs.exists(Path::new("/locked")));
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_and_records_op() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "old");
+        fs.write_atomic(Path::new("/x.txt"), b"new").unwrap();
+        let mut buf = Vec::new();
+        fs.read(Path::new("/x.txt"), &mut buf).unwrap();
+        assert_eq!(buf, b"new");
+        assert_eq!(
+            fs.ops(),
+            [
+                FakeFsOp::WriteAtomic {
+                    path: PathBuf::from("/x.txt"),
+                    len: 3,
+                },
+                FakeFsOp::Read {
+                    path: PathBuf::from("/x.txt"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn write_atomic_failure_keeps_prior_content() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "original");
+        fs.fail_writes_to("/x.txt", io::ErrorKind::PermissionDenied);
+        let err = fs.write_atomic(Path::new("/x.txt"), b"new").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let mut buf = Vec::new();
+        fs.read(Path::new("/x.txt"), &mut buf).unwrap();
+        assert_eq!(buf, b"original");
     }
 
     #[test]

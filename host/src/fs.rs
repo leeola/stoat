@@ -5,10 +5,11 @@ use ignore::{
 };
 use std::{
     io,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::SystemTime,
 };
+use tempfile::NamedTempFile;
 
 /// Baked-in default ignore patterns applied to every workspace's file
 /// finder. Parsed with gitignore semantics; treated as an unconditional
@@ -47,6 +48,21 @@ pub trait FsHost: Send + Sync {
 
     /// Writes `data` to `path`, creating or truncating the file.
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
+
+    /// Atomically replaces `path` with `data`.
+    ///
+    /// On success `path` holds exactly `data`. On failure the file at
+    /// `path` is left intact, never truncated or partially written.
+    /// Preserves the existing file's permissions. When `path` is a
+    /// symlink, the link's target is rewritten and the link itself is
+    /// left in place rather than replaced by a regular file.
+    ///
+    /// The default delegates to [`Self::write`], which is not
+    /// crash-atomic. Implementations backed by a real filesystem
+    /// override it with a temp-file-plus-rename sequence.
+    fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.write(path, data)
+    }
 
     /// Returns metadata, or `None` if the path doesn't exist. Errors
     /// only on real IO failures (permission denied, etc.), not NotFound.
@@ -266,6 +282,24 @@ impl FsHost for LocalFs {
 
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         std::fs::write(path, data)
+    }
+
+    fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        let dest = match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)?,
+            _ => path.to_path_buf(),
+        };
+        let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+
+        let mut tmp = NamedTempFile::new_in(dir)?;
+        tmp.write_all(data)?;
+        tmp.as_file().sync_all()?;
+
+        if let Ok(meta) = std::fs::metadata(&dest) {
+            std::fs::set_permissions(tmp.path(), meta.permissions())?;
+        }
+        tmp.persist(&dest).map_err(|e| e.error)?;
+        Ok(())
     }
 
     fn metadata(&self, path: &Path) -> io::Result<Option<FsMetadata>> {
