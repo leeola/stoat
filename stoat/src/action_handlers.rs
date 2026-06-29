@@ -36,7 +36,7 @@ use crate::{
     workspace_picker::WorkspacePicker,
 };
 pub(crate) use commits::pump_commits;
-pub(crate) use file_finder::close_file_finder;
+pub(crate) use file_finder::{close_file_finder, sync_file_finder_preview};
 pub(crate) use lsp::pump_lsp_jumps;
 pub(crate) use palette::sync_palette_picker;
 #[cfg(test)]

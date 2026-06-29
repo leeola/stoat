@@ -579,6 +579,31 @@ impl TestHarness {
         insta::assert_snapshot!(name, text);
     }
 
+    /// Snapshot one production-style frame from a single `drive_background`
+    /// and one `render`, with no settle loop or second frame.
+    ///
+    /// The real event loop runs one `drive_background` plus one paint per
+    /// redraw, so this reflects what the user sees on the first idle frame
+    /// after a state change. [`Self::assert_snapshot`] instead settles the
+    /// scheduler and renders twice, which hides work that only completes once
+    /// the parse scheduler has been pumped past the first frame.
+    pub fn assert_snapshot_one_frame(&mut self, name: &str) {
+        self.stoat.drive_background();
+        let buf = self.stoat.render();
+        let (pane_count, focused_pane) = self.pane_metadata();
+        let frame = Frame {
+            number: self.step + self.sub_frame,
+            actions: vec!["one_frame".to_string()],
+            mode: self.stoat.mode.clone(),
+            size: (buf.area.width, buf.area.height),
+            pane_count,
+            focused_pane,
+            content: buffer_to_text(&buf),
+        };
+        let text = format_styled(&frame, &buf);
+        insta::assert_snapshot!(name, text);
+    }
+
     /// Edit the focused buffer at the given byte range, replacing it with
     /// `text`. Triggers a capture so the next render reflects the edit.
     /// Test-only helper for exercising the incremental reparse path.

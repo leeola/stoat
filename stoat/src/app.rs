@@ -3046,7 +3046,6 @@ impl Stoat {
         self.render_tick += 1;
         buf.resize(self.size);
         buf.reset();
-        action_handlers::sync_palette_picker(self);
         crate::render::frame(self, buf);
     }
 
@@ -3474,6 +3473,8 @@ impl Stoat {
     /// keeping [`Self::render`] a pure paint. Tests that previously relied on
     /// `render` to drive this call it directly.
     pub(crate) fn drive_background(&mut self) {
+        action_handlers::sync_palette_picker(self);
+        action_handlers::sync_file_finder_preview(self);
         self.drive_parse_jobs();
         action_handlers::pump_commits(self);
         action_handlers::pump_review_scan(self);

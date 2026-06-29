@@ -1087,6 +1087,36 @@ mod tests {
         h.assert_snapshot("command_palette_arg_typing");
     }
 
+    /// The `:o ` arg-picker preview is syntax-highlighted on the first idle
+    /// frame after the selection changes. Like the file finder, the preview
+    /// parse runs in `drive_background` ahead of the scheduler rather than
+    /// during the paint pass, so it is not left in `fallback_style` until the
+    /// next unrelated event.
+    #[test]
+    fn snapshot_palette_arg_preview_highlighted_on_first_idle_frame() {
+        let mut h = TestHarness::with_size(120, 16);
+        seed_palette_workspace(
+            &mut h,
+            &[
+                ("aaa.rs", "fn aaa() {}\n"),
+                ("zzz.rs", "fn zzz() -> u32 { 0 }\n"),
+            ],
+        );
+        h.type_text(":o ");
+        h.settle();
+
+        h.stoat
+            .command_palette
+            .as_mut()
+            .expect("palette open")
+            .arg_picker
+            .as_mut()
+            .expect("arg picker active")
+            .picklist
+            .move_selection(1);
+        h.assert_snapshot_one_frame("palette_arg_preview_highlighted_first_frame");
+    }
+
     #[test]
     fn arg_picker_lists_workspace_files() {
         let mut h = Stoat::test();

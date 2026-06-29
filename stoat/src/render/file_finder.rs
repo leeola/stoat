@@ -1,6 +1,5 @@
 use crate::{
     file_finder::{display_row, FileFinder, FinderScope},
-    host::FsHost,
     render::{
         editor::render_editor,
         text::{write_str, write_str_clipped},
@@ -82,15 +81,10 @@ pub(crate) fn file_finder_layout(area: Rect) -> Option<FinderLayout> {
 pub(crate) fn render_file_finder(
     finder: &mut FileFinder,
     ws: &mut Workspace,
-    fs_host: &dyn FsHost,
-    language_registry: &stoat_language::LanguageRegistry,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    finder.refilter_from_input(ws);
-    finder.sync_preview(ws, fs_host, language_registry);
-
     let Some(layout) = file_finder_layout(area) else {
         return;
     };

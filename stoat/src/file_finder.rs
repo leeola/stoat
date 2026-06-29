@@ -842,6 +842,31 @@ mod tests {
         h.assert_snapshot("finder_preview_clears_short_file_background");
     }
 
+    /// The preview pane is syntax-highlighted on the first idle frame after the
+    /// selection changes. The parse runs in `drive_background` ahead of the
+    /// scheduler rather than during the paint pass, so the freshly selected
+    /// file is not left in `fallback_style` until the next unrelated event.
+    #[test]
+    fn snapshot_finder_preview_highlighted_on_first_idle_frame() {
+        let mut h = TestHarness::with_size(120, 16);
+        seed_finder_workspace(
+            &mut h,
+            &[
+                ("aaa.rs", "fn aaa() {}\n"),
+                ("zzz.rs", "fn zzz() -> u32 { 0 }\n"),
+            ],
+        );
+        h.type_keys("space p");
+        h.settle();
+
+        h.stoat
+            .file_finder
+            .as_mut()
+            .expect("finder open")
+            .move_selection(1);
+        h.assert_snapshot_one_frame("finder_preview_highlighted_first_frame");
+    }
+
     #[test]
     fn preview_buffer_assigned_language_for_selected_path() {
         let mut h = crate::Stoat::test();

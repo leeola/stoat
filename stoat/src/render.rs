@@ -288,15 +288,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             buf,
         );
     } else if let Some(finder) = &mut stoat.file_finder {
-        file_finder::render_file_finder(
-            finder,
-            ws,
-            &*stoat.fs_host,
-            &stoat.language_registry,
-            &stoat.theme,
-            size,
-            buf,
-        );
+        file_finder::render_file_finder(finder, ws, &stoat.theme, size, buf);
         let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true);
         let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
         let bindings: Vec<_> = raw

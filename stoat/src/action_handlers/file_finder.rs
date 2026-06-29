@@ -7,6 +7,26 @@ use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+/// Load the open file finder's preview content ahead of the parse scheduler.
+///
+/// A no-op when no finder is open. Mirrors [`super::sync_palette_picker`]:
+/// preview content has to be synced during `drive_background`, before
+/// `drive_parse_jobs` runs, not during the paint pass. Synced later, the parse
+/// for the newly selected file is never driven while the modal sits idle, so
+/// the preview stays unhighlighted until the next unrelated event.
+pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
+    if stoat.file_finder.is_none() {
+        return;
+    }
+    let active_idx = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[active_idx];
+    let fs_host = &*stoat.fs_host;
+    let language_registry = &stoat.language_registry;
+    let finder = stoat.file_finder.as_mut().expect("file_finder present");
+    finder.refilter_from_input(ws);
+    finder.sync_preview(ws, fs_host, language_registry);
+}
+
 /// Open the file finder. No-op if one is already open so that a second
 /// `space p` keystroke cannot stack modals or reset progress the user has
 /// made. Snapshots the workspace file list and the current git-modified
