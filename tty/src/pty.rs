@@ -109,22 +109,50 @@ impl Drop for Pty {
     }
 }
 
-/// Build the shell command with the stoatty environment, running in `cwd` when
-/// given.
-///
-/// `TERM` selects the terminfo the shell and its children load. `STOATTY` marks
-/// the shell as running under stoatty, so a child can gate stoatty-only output on
-/// its presence synchronously at startup, without the `XTVERSION` query round
-/// trip.
+/// Build the shell command to launch under stoatty, running in `cwd` when
+/// given. [`configure_child_env`] sets the environment the child inherits.
 fn shell_command(program: &str, args: &[String], cwd: Option<&Path>) -> CommandBuilder {
     let mut command = CommandBuilder::new(program);
     command.args(args);
     if let Some(dir) = cwd {
         command.cwd(dir);
     }
+    configure_child_env(&mut command);
+    command
+}
+
+/// Multiplexer markers stripped from the child environment so a program run
+/// under stoatty detects stoatty rather than an outer `tmux`/`zellij`. `TMUX`
+/// and `ZELLIJ` are the markers consumers check. The companions are stripped
+/// too so the child environment is coherent rather than half-cleared.
+const MULTIPLEXER_ENV_VARS: [&str; 5] = [
+    "TMUX",
+    "TMUX_PANE",
+    "ZELLIJ",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ_PANE_ID",
+];
+
+/// Set the environment a stoatty child shell inherits.
+///
+/// `TERM` selects the terminfo the shell and its children load. `STOATTY` marks
+/// the shell as running under stoatty, so a child can gate stoatty-only output
+/// on its presence synchronously at startup, without the `XTVERSION` query round
+/// trip.
+///
+/// Inherited multiplexer markers ([`MULTIPLEXER_ENV_VARS`]) are removed because
+/// stoatty presents a fresh terminal that owns and forwards its own window's
+/// mouse, so a program inside it must detect stoatty and enable mouse
+/// reporting rather than stand down for an outer `tmux`/`zellij` that does not
+/// control this window. A real multiplexer launched inside stoatty re-sets
+/// these for its own children, so in-stoatty-mux detection still stands down as
+/// intended.
+fn configure_child_env(command: &mut CommandBuilder) {
     command.env("TERM", "xterm-256color");
     command.env("STOATTY", "1");
-    command
+    for var in MULTIPLEXER_ENV_VARS {
+        command.env_remove(var);
+    }
 }
 
 /// Size of the reader thread's buffer. Each read fills up to this many bytes
@@ -212,7 +240,10 @@ fn passwd_shell() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_loop, shell_command, shell_or_default, PtyOutput, READ_BUF_SIZE};
+    use super::{
+        configure_child_env, read_loop, shell_command, shell_or_default, CommandBuilder, PtyOutput,
+        MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
+    };
     use std::{
         ffi::OsStr,
         io::{self, Cursor, Write},
@@ -246,6 +277,24 @@ mod tests {
     #[test]
     fn shell_command_sets_term_and_stoatty_env() {
         let command = shell_command("/bin/sh", &[], None);
+        assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
+        assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
+    }
+
+    #[test]
+    fn configure_child_env_strips_multiplexer_vars() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.env("TMUX", "/tmp/tmux-1000/default,1,0");
+        command.env("TMUX_PANE", "%3");
+        command.env("ZELLIJ", "0");
+        command.env("ZELLIJ_SESSION_NAME", "main");
+        command.env("ZELLIJ_PANE_ID", "71");
+
+        configure_child_env(&mut command);
+
+        for var in MULTIPLEXER_ENV_VARS {
+            assert_eq!(command.get_env(var), None, "{var} not stripped");
+        }
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
     }
