@@ -346,15 +346,12 @@ pub fn create_highlight_endpoints(
 
     if let Some(semantic) = semantic_highlights {
         for (_buffer_id, (tokens, interner)) in semantic.iter() {
-            let start_ix = tokens
-                .binary_search_by(|probe| {
-                    resolve(&probe.range.end)
-                        .cmp(&range.start)
-                        .then(std::cmp::Ordering::Less)
-                })
-                .unwrap_or_else(|i| i);
-
-            for (offset_in_slice, token) in tokens[start_ix..].iter().enumerate() {
+            // Tokens are sorted by `range.start`, not `range.end`, so an
+            // end-keyed binary search would drop enclosing tokens whose nested
+            // children end before the viewport. Walk the whole slice and skip
+            // tokens that end at or before the viewport. The `s >= range.end`
+            // break still holds because `start` is the sort key.
+            for (i, token) in tokens.iter().enumerate() {
                 let s = resolve(&token.range.start);
                 let e = resolve(&token.range.end);
                 if s >= range.end {
@@ -363,12 +360,12 @@ pub fn create_highlight_endpoints(
                 if s == e {
                     continue;
                 }
+                if e <= range.start {
+                    continue;
+                }
                 // Unique slot per token keeps nested captures (e.g. escape
                 // inside string) in distinct entries of the merger's active map.
-                let key = HighlightKey::new(
-                    HighlightLayer::SemanticToken,
-                    (start_ix + offset_in_slice) as u32,
-                );
+                let key = HighlightKey::new(HighlightLayer::SemanticToken, i as u32);
                 endpoints.push(HighlightEndpoint {
                     offset: s,
                     is_start: true,
@@ -779,6 +776,71 @@ mod tests {
 
         assert_eq!(chunks[4].text, "ij");
         assert!(chunks[4].style.is_none());
+    }
+
+    #[test]
+    fn enclosing_semantic_token_styles_scrolled_viewport() {
+        use super::{
+            BufferChunks, HighlightEndpoint, HighlightStyleInterner, SemanticTokenHighlight,
+            SemanticTokensHighlights,
+        };
+        use crate::buffer::BufferId;
+        use stoat_text::Rope;
+
+        let text = "abcdefghij".repeat(4);
+        let rope = Rope::from(text.as_str());
+
+        let outer_style = HighlightStyle {
+            foreground: Some(Color::Blue),
+            bold: Some(true),
+            ..Default::default()
+        };
+        let inner_style = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let mut interner = HighlightStyleInterner::default();
+        let outer_id = interner.intern(outer_style);
+        let inner_id = interner.intern(inner_style);
+
+        // Start-sorted, with the enclosing 0..40 token first and three short
+        // leading tokens that all end before byte 20.
+        let tokens: Arc<[SemanticTokenHighlight]> = Arc::from(vec![
+            SemanticTokenHighlight {
+                range: anchor(0)..anchor(40),
+                style: outer_id,
+            },
+            SemanticTokenHighlight {
+                range: anchor(1)..anchor(5),
+                style: inner_id,
+            },
+            SemanticTokenHighlight {
+                range: anchor(2)..anchor(8),
+                style: inner_id,
+            },
+            SemanticTokenHighlight {
+                range: anchor(3)..anchor(10),
+                style: inner_id,
+            },
+        ]);
+
+        let mut semantic_map = HashMap::new();
+        semantic_map.insert(BufferId::new(0), (tokens, Arc::new(interner)));
+        let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
+        let text_hl: TextHighlights = Arc::new(HashMap::new());
+        let resolve = |a: &Anchor| a.offset as usize;
+
+        let eps = create_highlight_endpoints(&(20..40), &text_hl, Some(&semantic), &resolve);
+        let endpoints: Arc<[HighlightEndpoint]> = Arc::from(eps);
+        let chunks: Vec<Chunk<'_>> = BufferChunks::new(&rope, 20..40, endpoints).collect();
+
+        let first = chunks.first().expect("scrolled viewport must emit chunks");
+        let style = first
+            .highlight_style
+            .as_ref()
+            .expect("enclosing token must style the scrolled viewport");
+        assert_eq!(style.foreground, Some(Color::Blue));
+        assert_eq!(style.bold, Some(true));
     }
 
     #[test]
