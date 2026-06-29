@@ -42,6 +42,11 @@ pub struct Config {
     #[serde(default)]
     pub ligatures: bool,
 
+    /// Selected cursor motion style. The default `block` is today's rigid
+    /// square. `warp` stretches the cursor along its path between cells.
+    #[serde(default = "default_cursor_animation")]
+    pub cursor_animation: CursorAnimation,
+
     /// Program to launch over the PTY instead of the default shell, with its
     /// arguments. `None`, the default, launches the default shell.
     #[serde(default)]
@@ -101,6 +106,25 @@ impl Config {
 
         theme
     }
+}
+
+/// Cursor motion style selectable in the config.
+///
+/// [`Block`](Self::Block) keeps today's rigid square that slides between cells.
+/// [`Warp`](Self::Warp) stretches the cursor along the path from its old cell to
+/// its new one, Neovide-style, then snaps back to a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorAnimation {
+    #[default]
+    Block,
+    Warp,
+}
+
+/// The cursor animation used when the config omits the key, for the
+/// `serde(default)` on [`Config::cursor_animation`].
+fn default_cursor_animation() -> CursorAnimation {
+    CursorAnimation::Block
 }
 
 /// A program to launch over the PTY instead of the default shell, with its
@@ -293,7 +317,9 @@ fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
 
 #[cfg(test)]
 mod tests {
-    use super::{embedded_default, merge_tables, settle, ShellConfig, DEFAULT_CONFIG};
+    use super::{
+        embedded_default, merge_tables, settle, CursorAnimation, ShellConfig, DEFAULT_CONFIG,
+    };
     use stoatty_term::grid::Rgb;
 
     #[test]
@@ -353,6 +379,22 @@ mod tests {
                 .unwrap()
                 .ligatures,
             "a user file turns ligatures off"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_default_block_and_user_can_warp() {
+        assert_eq!(
+            settle(DEFAULT_CONFIG, None).unwrap().cursor_animation,
+            CursorAnimation::Block,
+            "the embedded default ships the block cursor animation"
+        );
+        assert_eq!(
+            settle(DEFAULT_CONFIG, Some("cursor_animation = \"warp\"\n"))
+                .unwrap()
+                .cursor_animation,
+            CursorAnimation::Warp,
+            "a user file selects the warp cursor animation"
         );
     }
 

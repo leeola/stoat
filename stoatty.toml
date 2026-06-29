@@ -22,6 +22,10 @@ theme = "zed"
 # no ligatures appear.
 ligatures = true
 
+# Cursor motion style. "block" is the rigid square that slides between cells.
+# "warp" stretches the cursor along its path, then snaps back to a block.
+cursor_animation = "block"
+
 # Program to launch over the PTY instead of your default shell. Uncomment and
 # set `program` to override; `args` is optional and defaults to none. Left out,
 # stoatty runs your default shell.
