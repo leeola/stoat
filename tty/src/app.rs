@@ -9,7 +9,7 @@
 //! toolkit-agnostic.
 
 use crate::{
-    config::{self, Config},
+    config::{self, Config, CursorAnimation},
     pty::{self, Pty, PtyOutput},
 };
 use alacritty_terminal::sync::FairMutex;
@@ -126,6 +126,7 @@ fn run_with_config(
             family: config.font_family,
             ligatures: config.ligatures,
         },
+        config.cursor_animation,
         size,
         working_directory,
     );
@@ -182,6 +183,8 @@ struct App {
     /// Whether the renderer shapes cell runs together so ligatures form. Read
     /// once in `resumed` into the renderer's [`FontConfig`].
     ligatures: bool,
+    /// Selected cursor motion style, read once into [`State`] at window creation.
+    cursor_animation: CursorAnimation,
     /// The window's content size in cells (`[cols, rows]`) to open sized to, or
     /// `None` for the winit default window. Read once at window creation.
     size: Option<[u16; 2]>,
@@ -189,12 +192,14 @@ struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         proxy: EventLoopProxy<PtyEvent>,
         program: String,
         args: Vec<String>,
         theme: Theme,
         font: FontSettings,
+        cursor_animation: CursorAnimation,
         size: Option<[u16; 2]>,
         working_directory: Option<PathBuf>,
     ) -> App {
@@ -207,6 +212,7 @@ impl App {
             font_size: font.size,
             font_family: font.family,
             ligatures: font.ligatures,
+            cursor_animation,
             size,
             state: None,
         }
@@ -243,8 +249,17 @@ struct State {
     /// press can tell whether the platform zoom modifier is held.
     modifiers: ModifiersState,
     /// The cursor's animated position in fractional cell coordinates, eased
-    /// toward the terminal's actual cursor cell each frame.
+    /// toward the terminal's actual cursor cell each frame. Drives the
+    /// [`CursorAnimation::Block`] motion.
     cursor_anim: [f32; 2],
+    /// Cursor motion style, copied from [`App`] at construction. Selects which
+    /// animation [`Self::step_cursor`] advances each frame.
+    cursor_animation: CursorAnimation,
+    /// The warp cursor's four animated corners [TL, TR, BL, BR] in fractional
+    /// cell coordinates, eased independently toward the target cell's block so
+    /// the cursor stretches along its path. Drives the
+    /// [`CursorAnimation::Warp`] motion.
+    cursor_corner_anim: [[f32; 2]; 4],
     /// Each overlay's eased vertical scroll offset, in rows, indexed by overlay
     /// order. An entry ping-pongs between the top and its overflow bottom while
     /// that popover overflows its box, so several scroll independently.
@@ -440,6 +455,8 @@ impl ApplicationHandler<PtyEvent> for App {
             scale_factor,
             modifiers: ModifiersState::empty(),
             cursor_anim: [0.0, 0.0],
+            cursor_animation: self.cursor_animation,
+            cursor_corner_anim: [[0.0, 0.0]; 4],
             popover_scrolls: Vec::new(),
             popover_scroll_downs: Vec::new(),
             grid_scroll: 0.0,
@@ -736,48 +753,29 @@ impl ApplicationHandler<PtyEvent> for App {
                             } else {
                                 (&damage, &decoration_damage)
                             };
-                            match cursor_position(cursor) {
-                                Some(target) => {
-                                    let (next, settled) = ease(state.cursor_anim, target);
-                                    state.cursor_anim = next;
-                                    state.gpu.render(
-                                        &state.grid,
-                                        Frame {
-                                            cursor: Some(next),
-                                            cursor_corners: block_corners(Some(next)),
-                                            scroll: Scroll {
-                                                grid: state.grid_scroll,
-                                                document: 0.0,
-                                                scrollback: 0.0,
-                                                region: state.region_scroll,
-                                                popovers: &state.popover_scrolls,
-                                            },
-                                            damage: live_damage,
-                                            decoration_damage: live_decoration_damage,
-                                        },
-                                    );
-                                    !settled
+                            let (cursor, cursor_corners, easing) = step_cursor(
+                                state.cursor_animation,
+                                &mut state.cursor_anim,
+                                &mut state.cursor_corner_anim,
+                                cursor_position(cursor),
+                            );
+                            state.gpu.render(
+                                &state.grid,
+                                Frame {
+                                    cursor,
+                                    cursor_corners,
+                                    scroll: Scroll {
+                                        grid: state.grid_scroll,
+                                        document: 0.0,
+                                        scrollback: 0.0,
+                                        region: state.region_scroll,
+                                        popovers: &state.popover_scrolls,
+                                    },
+                                    damage: live_damage,
+                                    decoration_damage: live_decoration_damage,
                                 },
-                                None => {
-                                    state.gpu.render(
-                                        &state.grid,
-                                        Frame {
-                                            cursor: None,
-                                            cursor_corners: None,
-                                            scroll: Scroll {
-                                                grid: state.grid_scroll,
-                                                document: 0.0,
-                                                scrollback: 0.0,
-                                                region: state.region_scroll,
-                                                popovers: &state.popover_scrolls,
-                                            },
-                                            damage: live_damage,
-                                            decoration_damage: live_decoration_damage,
-                                        },
-                                    );
-                                    false
-                                },
-                            }
+                            );
+                            easing
                         },
                     }
                 } else {
@@ -826,14 +824,12 @@ impl ApplicationHandler<PtyEvent> for App {
                         })
                         .collect::<Vec<_>>();
 
-                    let (base_cursor, cursor_easing) = match cursor_position(cursor) {
-                        Some(target) => {
-                            let (next, settled) = ease(state.cursor_anim, target);
-                            state.cursor_anim = next;
-                            (Some(next), !settled)
-                        },
-                        None => (None, false),
-                    };
+                    let (base_cursor, base_corners, cursor_easing) = step_cursor(
+                        state.cursor_animation,
+                        &mut state.cursor_anim,
+                        &mut state.cursor_corner_anim,
+                        cursor_position(cursor),
+                    );
 
                     // Force a full rebuild: composite_pool prepares the shared
                     // background/text instance buffers with each pool's cells, so
@@ -843,7 +839,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         &state.grid,
                         Frame {
                             cursor: base_cursor,
-                            cursor_corners: block_corners(base_cursor),
+                            cursor_corners: base_corners,
                             scroll: Scroll {
                                 grid: state.grid_scroll,
                                 document: 0.0,
@@ -1036,13 +1032,19 @@ fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
     }
 }
 
-/// The four block corners [TL, TR, BL, BR] for a cursor at fractional cell
-/// origin `cursor`, or `None` when it is hidden.
-///
-/// The rigid block spans one whole cell, so each corner is the origin offset by
-/// the unit cell. A warp eases these corners independently instead.
-fn block_corners(cursor: Option<[f32; 2]>) -> Option<[[f32; 2]; 4]> {
-    cursor.map(|[x, y]| [[x, y], [x + 1.0, y], [x, y + 1.0], [x + 1.0, y + 1.0]])
+/// The four block corners [TL, TR, BL, BR] for a one-cell cursor block at
+/// fractional cell origin `origin`.
+fn block_corners(origin: [f32; 2]) -> [[f32; 2]; 4] {
+    let [x, y] = origin;
+    [[x, y], [x + 1.0, y], [x, y + 1.0], [x + 1.0, y + 1.0]]
+}
+
+/// The centroid of a quad's four corners.
+fn centroid(corners: [[f32; 2]; 4]) -> [f32; 2] {
+    [
+        (corners[0][0] + corners[1][0] + corners[2][0] + corners[3][0]) / 4.0,
+        (corners[0][1] + corners[1][1] + corners[2][1] + corners[3][1]) / 4.0,
+    ]
 }
 
 /// The font-size step a key press maps to, or `None` when it is not the
@@ -1172,6 +1174,89 @@ fn ease(current: [f32; 2], target: [f32; 2]) -> ([f32; 2], bool) {
     ([current[0] + dx * FACTOR, current[1] + dy * FACTOR], false)
 }
 
+/// Step the warp cursor's four corners one frame toward the block at
+/// `target_cell`, returning the new corners and whether they have settled.
+///
+/// Each corner eases toward the corresponding corner of the target cell's
+/// block. A corner on the leading side of travel, its offset from the current
+/// centroid pointing the same way as the centroid's path to the target, closes
+/// a larger fraction of its gap than a trailing one, so the quad stretches along
+/// the motion path and collapses back to a square as it arrives. Snaps onto the
+/// exact target block and reports settled once every corner is within `EPSILON`.
+fn ease_corners(current: [[f32; 2]; 4], target_cell: [f32; 2]) -> ([[f32; 2]; 4], bool) {
+    const LEADING: f32 = 0.45;
+    const TRAILING: f32 = 0.22;
+    const EPSILON: f32 = 0.01;
+
+    let target = block_corners(target_cell);
+
+    let settled = (0..4).all(|i| {
+        (target[i][0] - current[i][0]).abs() < EPSILON
+            && (target[i][1] - current[i][1]).abs() < EPSILON
+    });
+    if settled {
+        return (target, true);
+    }
+
+    let cur_centroid = centroid(current);
+    let travel = [
+        centroid(target)[0] - cur_centroid[0],
+        centroid(target)[1] - cur_centroid[1],
+    ];
+
+    let mut next = current;
+    for i in 0..4 {
+        let offset = [
+            current[i][0] - cur_centroid[0],
+            current[i][1] - cur_centroid[1],
+        ];
+        let leading = offset[0] * travel[0] + offset[1] * travel[1] > 0.0;
+        let factor = if leading { LEADING } else { TRAILING };
+        next[i] = [
+            current[i][0] + (target[i][0] - current[i][0]) * factor,
+            current[i][1] + (target[i][1] - current[i][1]) * factor,
+        ];
+    }
+    (next, false)
+}
+
+/// One frame's cursor render inputs from [`step_cursor`]. Holds the
+/// ligature-break cell, the cursor block's four corners, and whether the
+/// animation is still moving, all absent when the cursor is hidden.
+type CursorStep = (Option<[f32; 2]>, Option<[[f32; 2]; 4]>, bool);
+
+/// Advance the cursor animation one frame toward `target` (the cursor's cell
+/// origin, or `None` when hidden), returning the cell for the ligature break,
+/// the cursor block's four corners, and whether the animation is still moving.
+///
+/// [`CursorAnimation::Block`] eases the single point `point` and derives a rigid
+/// one-cell quad from it. [`CursorAnimation::Warp`] eases the four `corners`
+/// independently so the block stretches along its path and collapses back to a
+/// square as it arrives, taking the eased centroid as the ligature-break cell.
+/// Only the state matching `animation` is advanced.
+fn step_cursor(
+    animation: CursorAnimation,
+    point: &mut [f32; 2],
+    corners: &mut [[f32; 2]; 4],
+    target: Option<[f32; 2]>,
+) -> CursorStep {
+    let Some(target) = target else {
+        return (None, None, false);
+    };
+    match animation {
+        CursorAnimation::Block => {
+            let (next, settled) = ease(*point, target);
+            *point = next;
+            (Some(next), Some(block_corners(next)), !settled)
+        },
+        CursorAnimation::Warp => {
+            let (next, settled) = ease_corners(*corners, target);
+            *corners = next;
+            (Some(centroid(next)), Some(next), !settled)
+        },
+    }
+}
+
 /// A popover's content overflow height in rows, or `None` when its content fits
 /// its box.
 ///
@@ -1288,10 +1373,10 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, cell_at, ease, encode_key, font_step, popover_overflow,
-        sgr_button_bytes, sgr_wheel_bytes, step_document_scroll, step_grid_scroll,
-        step_popover_scroll, step_region_scroll, step_scrollback_scroll, wheel_lines,
-        SCROLLBACK_MIN_STEP,
+        alternate_scroll_bytes, cell_at, ease, ease_corners, encode_key, font_step,
+        popover_overflow, sgr_button_bytes, sgr_wheel_bytes, step_document_scroll,
+        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
+        wheel_lines, SCROLLBACK_MIN_STEP,
     };
     use stoatty_term::grid::{Overlay, Rgb};
     use winit::{
@@ -1309,6 +1394,38 @@ mod tests {
         let (next, settled) = ease([3.999, 2.0], [4.0, 2.0]);
         assert_eq!(next, [4.0, 2.0]);
         assert!(settled);
+    }
+
+    #[test]
+    fn ease_corners_leading_edge_outruns_trailing() {
+        let rest = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let (stepped, settled) = ease_corners(rest, [5.0, 0.0]);
+
+        assert!(!settled, "a step toward a distant cell has not settled");
+
+        let trailing = stepped[0][0] - rest[0][0];
+        let leading = stepped[1][0] - rest[1][0];
+        assert!(
+            leading > trailing,
+            "leading edge {leading} outruns trailing {trailing}"
+        );
+        assert!(
+            stepped[1][0] - stepped[0][0] > 1.0,
+            "the quad spans wider than one cell along the motion axis"
+        );
+    }
+
+    #[test]
+    fn ease_corners_snaps_onto_the_target_block() {
+        let near = [[3.0, 2.0], [4.0, 2.0], [3.0, 3.0], [4.0, 2.995]];
+        let (snapped, settled) = ease_corners(near, [3.0, 2.0]);
+
+        assert!(settled, "within epsilon of the target reports settled");
+        assert_eq!(
+            snapped,
+            [[3.0, 2.0], [4.0, 2.0], [3.0, 3.0], [4.0, 3.0]],
+            "snaps onto the exact target block"
+        );
     }
 
     fn popover(height: u16, scale: u8, content: &str) -> Overlay {
