@@ -84,6 +84,7 @@ pub enum ActionKind {
     ShellAppendOutput,
     ShellKeepPipe,
     SaveBuffer,
+    ForceSaveBuffer,
     CloseBuffer,
     AcceptCompletion,
     SmartTab,

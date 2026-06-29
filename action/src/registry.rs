@@ -43,7 +43,7 @@ use crate::{
             TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank,
             YankMainToClipboard, YankToClipboard,
         },
-        file::{OpenBuffer, OpenFile},
+        file::{ForceSaveBuffer, OpenBuffer, OpenFile},
         file_finder::{
             FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
             FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
@@ -331,6 +331,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShellAppendOutput::DEF, |_| Ok(Box::new(ShellAppendOutput)));
     add(ShellKeepPipe::DEF, |_| Ok(Box::new(ShellKeepPipe)));
     add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
+    add(ForceSaveBuffer::DEF, |_| Ok(Box::new(ForceSaveBuffer)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
     add(SmartTab::DEF, |_| Ok(Box::new(SmartTab)));
@@ -859,6 +860,16 @@ mod tests {
     }
 
     #[test]
+    fn force_save_buffer_aliases_resolve() {
+        for token in ["w!", "write!", "W!"] {
+            assert_eq!(
+                lookup_alias(token).expect(token).def.name(),
+                "ForceSaveBuffer",
+            );
+        }
+    }
+
+    #[test]
     fn factory_creates_correct_kind() {
         for name in ZERO_ARG_NAMES {
             let entry = lookup(name).expect(name);
@@ -949,6 +960,7 @@ mod tests {
         // + 2 RecordMacro / ReplayMacro.
         // + 5 ShellPipe / ShellPipeTo / ShellInsertOutput / ShellAppendOutput / ShellKeepPipe.
         // + 1 SaveBuffer.
+        // + 1 ForceSaveBuffer.
         // + 1 CloseBuffer.
         // + 1 AcceptCompletion.
         // + 2 SmartTab/TriggerCompletion.
@@ -1001,7 +1013,7 @@ mod tests {
         // + 2 FileFinderPageUp, FileFinderPageDown.
         // + 2 PalettePageUp, PalettePageDown.
         // + 1 OpenBuffer.
-        assert_eq!(all().count(), 284);
+        assert_eq!(all().count(), 285);
     }
 
     #[test]

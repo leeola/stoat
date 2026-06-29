@@ -121,6 +121,56 @@ impl Action for OpenBuffer {
     }
 }
 
+#[derive(Debug)]
+pub struct ForceSaveBufferDef;
+
+impl ActionDef for ForceSaveBufferDef {
+    fn name(&self) -> &'static str {
+        "ForceSaveBuffer"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ForceSaveBuffer
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "save the focused buffer, overwriting external changes"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Write the focused buffer to its backing file even when the file changed on disk since it was opened, overwriting the external edit. The unforced SaveBuffer refuses in that case. No-op for scratch buffers (no path)."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["w!", "write!"]
+    }
+}
+
+#[derive(Debug)]
+pub struct ForceSaveBuffer;
+
+impl ForceSaveBuffer {
+    pub const DEF: &ForceSaveBufferDef = &ForceSaveBufferDef;
+}
+
+impl Action for ForceSaveBuffer {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

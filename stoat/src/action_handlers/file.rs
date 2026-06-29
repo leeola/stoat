@@ -8,14 +8,27 @@ use crate::{
 use lsp_types::{DidCloseTextDocumentParams, DidSaveTextDocumentParams, TextDocumentIdentifier};
 use std::{path::Path, str::FromStr};
 
-/// Write the focused buffer's rope text to its backing file via
-/// [`crate::host::FsHost::write_atomic`], clear the buffer's dirty flag,
-/// and notify the LSP server via [`crate::host::LspHost::did_save`].
-/// No-op for scratch buffers (no path) or when no editor is
-/// focused. Write errors leave the dirty flag set so the user can
-/// retry, and set [`Stoat::pending_message`] so the failure is
-/// surfaced in the bottom message row rather than silently logged.
+/// Write the focused buffer to its backing file via
+/// [`crate::host::FsHost::write_atomic`], clear the dirty flag, and notify the
+/// LSP server via [`crate::host::LspHost::did_save`].
+///
+/// No-op for scratch buffers (no path) or when no editor is focused. Refuses to
+/// write when the file changed on disk since it was opened, leaving the buffer
+/// dirty and setting [`Stoat::pending_message`]. Use [`force_save_buffer`] to
+/// override. Write errors likewise leave the dirty flag set and surface the
+/// failure in the bottom message row rather than logging it silently.
 pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
+    save_buffer_inner(stoat, false)
+}
+
+/// Save the focused buffer even when it changed on disk since it was opened,
+/// overwriting the external edit. Backs the `:w!` command. See [`save_buffer`]
+/// for the guarded variant.
+pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
+    save_buffer_inner(stoat, true)
+}
+
+fn save_buffer_inner(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -32,6 +45,12 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
         let guard = buffer.read().expect("buffer poisoned");
         guard.rope().to_string()
     };
+
+    if !force && disk_changed_since_open(stoat, buffer_id, &path) {
+        stoat.pending_message = Some("file changed on disk; use :w! to overwrite".to_string());
+        return UpdateEffect::Redraw;
+    }
+
     if let Err(err) = stoat.fs_host.write_atomic(&path, text.as_bytes()) {
         tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
         stoat.pending_message = Some(format!("save failed: {err}"));
@@ -40,6 +59,18 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
     {
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.dirty = false;
+    }
+    if let Some(mtime) = stoat
+        .fs_host
+        .metadata(&path)
+        .ok()
+        .flatten()
+        .map(|m| m.modified)
+    {
+        stoat
+            .active_workspace_mut()
+            .buffers
+            .set_disk_mtime(buffer_id, mtime);
     }
     stoat.persist_saved_shard(buffer_id, &path, &text);
     let path_str = match path.to_str() {
@@ -63,6 +94,28 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
         })
         .detach();
     UpdateEffect::Redraw
+}
+
+/// True when the file at `path` has an on-disk mtime newer than the baseline
+/// recorded for `buffer_id` at open or last save.
+///
+/// A buffer with no recorded baseline (e.g. opened for a not-yet-existing file)
+/// or a file whose metadata cannot be read is treated as unchanged. This
+/// matches Helix, which never blocks a save it cannot justify.
+fn disk_changed_since_open(stoat: &Stoat, buffer_id: BufferId, path: &Path) -> bool {
+    let Some(recorded) = stoat.active_workspace().buffers.disk_mtime(buffer_id) else {
+        return false;
+    };
+    let Some(current) = stoat
+        .fs_host
+        .metadata(path)
+        .ok()
+        .flatten()
+        .map(|m| m.modified)
+    else {
+        return false;
+    };
+    current > recorded
 }
 
 /// Drop the focused buffer from the workspace's
@@ -166,6 +219,12 @@ pub(crate) fn open_file_in_pane(
             return None;
         },
     };
+    let disk_mtime = stoat
+        .fs_host
+        .metadata(&absolute)
+        .ok()
+        .flatten()
+        .map(|m| m.modified);
 
     let lang = stoat.language_registry.for_path(&absolute);
     let executor = stoat.executor.clone();
@@ -173,6 +232,9 @@ pub(crate) fn open_file_in_pane(
     let (buffer_id, buffer) = {
         let ws = stoat.active_workspace_mut();
         let (buffer_id, buffer) = ws.buffers.open(&absolute, &content);
+        if let Some(mtime) = disk_mtime {
+            ws.buffers.set_disk_mtime(buffer_id, mtime);
+        }
         if let Some(lang) = lang
             && ws.buffers.language_for(buffer_id).is_none()
         {
@@ -222,10 +284,33 @@ mod tests {
         action_handlers::dispatch,
         app::UpdateEffect,
         host::{FakeFsOp, FsHost},
+        test_harness::TestHarness,
         Stoat,
     };
-    use std::path::PathBuf;
-    use stoat_action::{CloseBuffer, OpenBuffer, OpenFile, SaveBuffer};
+    use std::path::{Path, PathBuf};
+    use stoat_action::{CloseBuffer, ForceSaveBuffer, OpenBuffer, OpenFile, SaveBuffer};
+
+    /// Open `name` (seeded with `seed`) under `root`, dirty the buffer with a
+    /// leading insert, and return its absolute path. The open records the disk
+    /// mtime baseline the save guard checks against.
+    fn open_edited(h: &mut TestHarness, root: &Path, name: &str, seed: &[u8]) -> PathBuf {
+        let path = root.join(name);
+        h.fake_fs().insert_file(&path, seed);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        buffer.write().expect("poisoned").edit(0..0, "edited ");
+        path
+    }
 
     fn focused_dirty(stoat: &Stoat) -> bool {
         let editor_id = match stoat
@@ -387,6 +472,74 @@ mod tests {
     }
 
     #[test]
+    fn save_buffer_refuses_when_disk_changed() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-guard");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+        h.fake_fs().insert_file(&path, b"external\n");
+
+        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("file changed on disk; use :w! to overwrite"),
+        );
+        assert!(focused_dirty(&h.stoat), "refused save keeps buffer dirty");
+        let mut written = Vec::new();
+        h.fake_fs().read(&path, &mut written).expect("readable");
+        assert_eq!(written, b"external\n", "refused save leaves disk untouched");
+    }
+
+    #[test]
+    fn force_save_buffer_overwrites_disk_change() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/force-guard");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+        h.fake_fs().insert_file(&path, b"external\n");
+
+        assert_eq!(
+            dispatch(&mut h.stoat, &ForceSaveBuffer),
+            UpdateEffect::Redraw
+        );
+        assert!(!focused_dirty(&h.stoat), "force save clears dirty");
+        let mut written = Vec::new();
+        h.fake_fs().read(&path, &mut written).expect("readable");
+        assert_eq!(
+            written, b"edited original\n",
+            "force save overwrites the external edit",
+        );
+    }
+
+    #[test]
+    fn save_refreshes_disk_mtime_so_next_save_succeeds() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-restat");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+
+        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
+        assert!(!focused_dirty(&h.stoat));
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        buffer.write().expect("poisoned").edit(0..0, "more ");
+
+        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
+        assert!(
+            !focused_dirty(&h.stoat),
+            "second save succeeds because the first refreshed the mtime baseline",
+        );
+        let mut written = Vec::new();
+        h.fake_fs().read(&path, &mut written).expect("readable");
+        assert_eq!(written, b"more edited original\n");
+    }
+
+    #[test]
     fn save_buffer_clears_dirty_flag() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/save-dirty");
@@ -504,10 +657,7 @@ mod tests {
         );
     }
 
-    fn open_path(
-        h: &mut crate::test_harness::TestHarness,
-        content: &[u8],
-    ) -> (PathBuf, crate::buffer::BufferId) {
+    fn open_path(h: &mut TestHarness, content: &[u8]) -> (PathBuf, crate::buffer::BufferId) {
         let root = PathBuf::from("/close-test");
         let path = root.join("file.txt");
         h.fake_fs().insert_file(&path, content);

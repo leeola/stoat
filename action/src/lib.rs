@@ -43,7 +43,7 @@ pub use defs::{
         TillNextChar, TillPrevChar, ToggleComments, TriggerCompletion, TrimSelections, Undo,
         UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
     },
-    file::{OpenBuffer, OpenFile},
+    file::{ForceSaveBuffer, OpenBuffer, OpenFile},
     file_finder::{
         FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
         FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,

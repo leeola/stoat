@@ -18,10 +18,10 @@ size: 80x24
   [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musPrev                     [0m[90mfocus previous pane[0m[97m                        [0m[35m│[0m
   [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musRight                    [0m[90mfocus pane right[0m[97m                           [0m[35m│[0m
   [0m[35m│[0m[97m [0m[30m[43mFoc[0m[97musUp                       [0m[90mfocus pane up[0m[97m                              [0m[35m│[0m
+  [0m[35m│[0m[97m [0m[30m[43mFo[0m[97mr[0m[30m[43mc[0m[97meSaveBuffer               [0m[90msave the focused buffer, overwriting external [0m
   [0m[35m│[0m[97m [0m[30m[43mFo[0m[97mrmatSele[0m[30m[43mc[0m[97mtions              [0m[90mformat selection via LSP[0m[97m                   [0m[35m│[0m
   [0m[35m│[0m[97m ExtendGoto[0m[30m[43mF[0m[97mirstN[0m[30m[43mo[0m[97mnwhitespa[0m[30m[43mc[0m[97me  [0m[90mextend to first non-whitespace[0m[97m             [0m[35m│[0m
   [0m[35m│[0m[97m Goto[0m[30m[43mF[0m[97mirstN[0m[30m[43mo[0m[97mnwhitespa[0m[30m[43mc[0m[97me        [0m[90mgoto first nonwhitespace[0m[97m                   [0m[35m│[0m
-  [0m[35m│[0m                                                                          [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[37mMove focus to the pane below the cur[0m[33m┌ palette ──────────────────────────────┐[0m
   [0m[35m│[0m                                    [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m

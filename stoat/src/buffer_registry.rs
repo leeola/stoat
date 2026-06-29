@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time::SystemTime,
 };
 use stoat_language::{
     drop_syntax_in_background, structural_diff::DiffResult, Language, SyntaxMap, SyntaxState,
@@ -48,6 +49,12 @@ struct BufferEntry {
     /// callers evict the buffer via [`BufferRegistry::remove`] on
     /// close so registry growth stays bounded.
     preview: bool,
+    /// On-disk modification time recorded when the file was last read
+    /// into or written from this buffer. The save path compares it to
+    /// the file's current mtime to detect an external edit and refuse
+    /// to clobber it. `None` for scratch buffers and for files whose
+    /// metadata could not be read.
+    disk_mtime: Option<SystemTime>,
 }
 
 pub(crate) struct BufferRegistry {
@@ -124,6 +131,7 @@ impl BufferRegistry {
                 syntax_map: None,
                 diff: None,
                 preview,
+                disk_mtime: None,
             },
         );
         (id, buffer)
@@ -151,6 +159,7 @@ impl BufferRegistry {
                 syntax_map: None,
                 diff: None,
                 preview: false,
+                disk_mtime: None,
             },
         );
         (id, buffer)
@@ -193,6 +202,20 @@ impl BufferRegistry {
     #[allow(dead_code)]
     pub(crate) fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
+    }
+
+    /// Record the on-disk mtime baseline the save path checks against to
+    /// detect an external edit. No-op for an unknown buffer id.
+    pub(crate) fn set_disk_mtime(&mut self, id: BufferId, mtime: SystemTime) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.disk_mtime = Some(mtime);
+        }
+    }
+
+    /// The on-disk mtime recorded at the last open or save, or `None` for a
+    /// scratch buffer, an unknown id, or a file whose metadata never read.
+    pub(crate) fn disk_mtime(&self, id: BufferId) -> Option<SystemTime> {
+        self.buffers.get(&id).and_then(|e| e.disk_mtime)
     }
 
     /// Returns paths of currently-open path-bound buffers in lexicographic
@@ -410,6 +433,7 @@ impl BufferRegistry {
                     syntax_map: None,
                     diff: None,
                     preview: false,
+                    disk_mtime: None,
                 },
             );
         }

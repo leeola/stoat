@@ -516,7 +516,16 @@ impl CommandPalette {
                     .replace_text(ws, &format!("{} ", entry.def.name()));
                 PaletteOutcome::None
             },
-            None => PaletteOutcome::None,
+            // The fuzzy filter only matches action names, so a name-free alias
+            // like `w!` produces no candidates. Fall back to resolving the raw
+            // input as a no-argument command alias so those stay dispatchable.
+            None => match registry::lookup_alias(text.trim()) {
+                Some(entry) if entry.def.params().is_empty() => {
+                    self.input.dispose(ws);
+                    PaletteOutcome::Dispatch(entry, Vec::new())
+                },
+                _ => PaletteOutcome::None,
+            },
         }
     }
 }
@@ -986,6 +995,48 @@ mod tests {
         h.type_text(":Focus");
         h.type_keys("down enter");
         assert!(h.stoat.command_palette.is_none());
+    }
+
+    #[test]
+    fn palette_w_bang_routes_to_force_save_buffer() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/palette-force");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"original\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile { path: path.clone() },
+        );
+        h.settle();
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        buffer.write().expect("poisoned").edit(0..0, "edited ");
+        // Advance the on-disk mtime so plain SaveBuffer would refuse. Only
+        // ForceSaveBuffer clears the dirty flag here.
+        h.fake_fs().insert_file(&path, b"external\n");
+
+        h.type_text(":w!");
+        h.type_keys("enter");
+
+        let dirty = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .dirty;
+        assert!(!dirty, ":w! force-saves despite the disk change");
     }
 
     #[test]
