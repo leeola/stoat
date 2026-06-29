@@ -413,6 +413,7 @@ pub mod scope {
     pub const UI_KEY_LABEL: &str = "ui.key_label";
     pub const UI_HEADING: &str = "ui.heading";
     pub const UI_ERROR: &str = "ui.error";
+    pub const UI_MESSAGE_ERROR: &str = "ui.message.error";
 
     pub const UI_BADGE_ACTIVE: &str = "ui.badge.active";
     pub const UI_BADGE_COMPLETE: &str = "ui.badge.complete";

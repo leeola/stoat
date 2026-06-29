@@ -38,7 +38,11 @@ use crate::{
     rebase::RebasePause,
     run::{RunId, RunState},
 };
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
 use slotmap::SlotMap;
 use std::path::Path;
 
@@ -115,8 +119,35 @@ pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
 
 /// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
 /// tick after the parse pipeline and commits pump have run.
+///
+/// When [`Stoat::pending_message`] is set the bottom row is reserved for it and
+/// the body layout shrinks by one row. Otherwise the panes keep full height.
 pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
-    let size = stoat.size();
+    let full = stoat.size();
+    let message = if full.height >= 2 {
+        stoat.pending_message.clone()
+    } else {
+        None
+    };
+    let message_style = stoat
+        .theme
+        .try_get(crate::theme::scope::UI_MESSAGE_ERROR)
+        .unwrap_or_else(|| Style::default().fg(Color::Red));
+    let (size, message_row) = if message.is_some() {
+        let body = Rect {
+            height: full.height - 1,
+            ..full
+        };
+        let row = Rect {
+            y: full.y + full.height - 1,
+            height: 1,
+            ..full
+        };
+        (body, Some(row))
+    } else {
+        (full, None)
+    };
+
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
     ws.layout(size);
@@ -433,5 +464,22 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             hints_overlay_area(size),
             buf,
         );
+    }
+
+    if let (Some(message), Some(row)) = (message, message_row) {
+        render_message_row(&message, message_style, row, buf);
+    }
+}
+
+/// Paint the transient bottom-row `message` into the single `row` reserved by
+/// [`frame`]. Truncates to the row width. The row is otherwise blank because
+/// the body layout was shrunk to exclude it.
+fn render_message_row(message: &str, style: Style, row: Rect, buf: &mut Buffer) {
+    for (i, ch) in message.chars().enumerate() {
+        let col = row.x + i as u16;
+        if col >= row.x + row.width {
+            break;
+        }
+        buf[(col, row.y)].set_char(ch).set_style(style);
     }
 }

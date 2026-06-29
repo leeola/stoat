@@ -13,7 +13,8 @@ use std::{path::Path, str::FromStr};
 /// and notify the LSP server via [`crate::host::LspHost::did_save`].
 /// No-op for scratch buffers (no path) or when no editor is
 /// focused. Write errors leave the dirty flag set so the user can
-/// retry.
+/// retry, and set [`Stoat::pending_message`] so the failure is
+/// surfaced in the bottom message row rather than silently logged.
 pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -33,7 +34,8 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
     };
     if let Err(err) = stoat.fs_host.write_atomic(&path, text.as_bytes()) {
         tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
-        return UpdateEffect::None;
+        stoat.pending_message = Some(format!("save failed: {err}"));
+        return UpdateEffect::Redraw;
     }
     {
         let mut guard = buffer.write().expect("buffer poisoned");
@@ -320,7 +322,7 @@ mod tests {
 
         h.fake_fs()
             .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
-        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::None);
+        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
 
         let mut written = Vec::new();
         h.fake_fs()
@@ -331,6 +333,57 @@ mod tests {
             "failed save leaves disk bytes intact"
         );
         assert!(focused_dirty(&h.stoat), "failed save keeps buffer dirty");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("save failed: /save-fail/a.txt: injected write failure"),
+            "failed save surfaces an error message",
+        );
+    }
+
+    #[test]
+    fn snapshot_save_failure_shows_message_row() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-fail");
+        h.fake_fs().insert_file(root.join("a.txt"), b"original\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        let path = root.join("a.txt");
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(0..0, "edited ");
+        }
+
+        h.fake_fs()
+            .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.assert_snapshot("save_failure_shows_message_row");
+    }
+
+    #[test]
+    fn snapshot_clean_frame_has_no_message_row() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-clean");
+        h.fake_fs().insert_file(root.join("a.txt"), b"original\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("a.txt"),
+            },
+        );
+        h.settle();
+        h.assert_snapshot("clean_frame_has_no_message_row");
     }
 
     #[test]

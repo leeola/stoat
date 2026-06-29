@@ -205,6 +205,11 @@ pub struct Stoat {
     pub(crate) pending_review_scan: Option<action_handlers::PendingReviewScan>,
     pub(crate) modal_run: Option<RunId>,
     pub(crate) render_tick: u64,
+    /// Transient one-line message painted in a reserved bottom row,
+    /// such as a failed-save error. An action sets it during event
+    /// handling; [`Self::update`] clears it at the start of the next
+    /// event, so it stays visible exactly until the next input event.
+    pub(crate) pending_message: Option<String>,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
     /// hits an unbound key in normal mode; consumed once via
@@ -702,6 +707,7 @@ impl Stoat {
             pending_review_scan: None,
             modal_run: None,
             render_tick: 0,
+            pending_message: None,
             pending_count: None,
             pending_find: None,
             pending_mark: None,
@@ -1286,6 +1292,7 @@ impl Stoat {
         self.drain_fs_watch_events();
         self.drain_pending_external_edits();
         self.drain_pending_index_edits();
+        self.pending_message = None;
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
