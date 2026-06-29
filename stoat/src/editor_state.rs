@@ -77,6 +77,12 @@ pub(crate) struct EditorState {
     /// Cached diagnostic gutter severity map, keyed by the diagnostic-set
     /// version. Transient render state, not persisted.
     pub(crate) gutter_severity_cache: Option<crate::render::editor::GutterSeverityCache>,
+    /// Absolute terminal cell `(col, row)` where the last render painted this
+    /// editor's primary cursor, set only while running inside stoatty so the
+    /// terminal cursor can be positioned there instead of a styled grid cell.
+    /// `None` when not focused, off-screen, or outside stoatty. Transient
+    /// render state, not persisted.
+    pub(crate) cursor_screen_cell: Option<(u16, u16)>,
 }
 
 /// Snapshot of an [`EditorState`] suitable for workspace save/load.
@@ -111,6 +117,7 @@ impl EditorState {
             search_match_cache: None,
             highlight_endpoint_cache: None,
             gutter_severity_cache: None,
+            cursor_screen_cell: None,
         }
     }
 
@@ -134,6 +141,7 @@ impl EditorState {
             search_match_cache: None,
             highlight_endpoint_cache: None,
             gutter_severity_cache: None,
+            cursor_screen_cell: None,
         }
     }
 

@@ -66,6 +66,7 @@ pub(crate) fn render_pane(
                     theme,
                     buf,
                     is_focused,
+                    frame.stoatty,
                     labels,
                     frame.search_query,
                     diagnostic_info,

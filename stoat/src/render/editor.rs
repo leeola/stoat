@@ -27,6 +27,7 @@ pub(crate) fn render_editor(
         theme,
         buf,
         is_focused,
+        false,
         None,
         None,
         None,
@@ -41,11 +42,13 @@ pub(crate) fn render_editor_with_overlay(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     is_focused: bool,
+    stoatty: bool,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
+    editor.cursor_screen_cell = None;
 
     if editor.review_view.is_some() {
         render_review(editor, inner, fallback_style, theme, buf);
@@ -208,6 +211,8 @@ pub(crate) fn render_editor_with_overlay(
 
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
     let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
+    let primary_id = editor.selections.newest_anchor().id;
+    let mut primary_cell: Option<(u16, u16)> = None;
     let rope = buffer_snapshot.rope();
     let visible = {
         let rope_len = rope.len();
@@ -261,18 +266,24 @@ pub(crate) fn render_editor_with_overlay(
             let y = inner.y + (display.row - editor.scroll_row) as u16;
             let x = inner.x + display.column as u16;
             if x < right && y < bottom {
-                let cell = &mut buf[(x, y)];
-                let existing_char = cell.symbol().chars().next().unwrap_or(' ');
-                let char_to_paint = if existing_char == '\0' {
-                    ' '
+                if stoatty && selection.id == primary_id {
+                    primary_cell = Some((x, y));
                 } else {
-                    existing_char
-                };
-                cell.set_char(char_to_paint);
-                cell.set_style(cursor_style);
+                    let cell = &mut buf[(x, y)];
+                    let existing_char = cell.symbol().chars().next().unwrap_or(' ');
+                    let char_to_paint = if existing_char == '\0' {
+                        ' '
+                    } else {
+                        existing_char
+                    };
+                    cell.set_char(char_to_paint);
+                    cell.set_style(cursor_style);
+                }
             }
         }
     }
+
+    editor.cursor_screen_cell = primary_cell;
 
     if let Some(labels) = goto_word_labels {
         let label_style = fallback_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -393,10 +404,14 @@ pub(crate) fn editor_cursor_position(editor: &mut EditorState) -> Option<(u32, u
 
 #[cfg(test)]
 mod tests {
-    use crate::{action_handlers::dispatch, Stoat};
+    use crate::{
+        action_handlers::{self, dispatch},
+        Stoat,
+    };
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
     use std::path::PathBuf;
-    use stoat_action::OpenFile;
+    use stoat_action::{MoveRight, OpenFile, OpenFileFinder};
+    use stoat_text::{Bias, SelectionGoal};
 
     fn diag(line: u32, severity: DiagnosticSeverity) -> Diagnostic {
         Diagnostic {
@@ -449,5 +464,76 @@ mod tests {
             ],
         );
         h.assert_snapshot("diagnostic_gutter_worst_severity_wins");
+    }
+
+    fn add_cursor_at(stoat: &mut Stoat, offset: usize) {
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
+        editor
+            .selections
+            .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
+    }
+
+    #[test]
+    fn snapshot_stoatty_delegates_only_primary_cursor() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/cursor-stoatty");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha bravo charlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        add_cursor_at(&mut h.stoat, 6);
+        h.stoat.stoatty = true;
+
+        h.assert_snapshot("stoatty_primary_cursor_delegated");
+    }
+
+    #[test]
+    fn primary_cursor_screen_pos_matches_painted_cell() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/cursor-pos");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha bravo\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        h.stoat.stoatty = true;
+        h.snapshot();
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((0, 0)));
+
+        for _ in 0..6 {
+            dispatch(&mut h.stoat, &MoveRight);
+        }
+        h.snapshot();
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((6, 0)));
+
+        h.stoat.stoatty = false;
+        h.snapshot();
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), None);
+    }
+
+    #[test]
+    fn primary_cursor_screen_pos_none_when_finder_open() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/cursor-finder");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        h.stoat.stoatty = true;
+        h.snapshot();
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((0, 0)));
+
+        dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        h.snapshot();
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), None);
     }
 }

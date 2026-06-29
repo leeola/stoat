@@ -84,6 +84,10 @@ pub(crate) struct FrameCtx<'a> {
     /// every editor pane paints visible matches with the
     /// `ui.search.match` style so users see all hits at once.
     pub(crate) search_query: Option<&'a str>,
+    /// Whether stoat is running inside stoatty. When set, the focused
+    /// document editor delegates its primary cursor to the terminal cursor
+    /// (which stoatty eases) instead of painting a styled grid cell.
+    pub(crate) stoatty: bool,
 }
 
 pub(crate) const PRIMARY_MODES: &[&str] = &[
@@ -151,6 +155,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         mode_badges: &stoat.settings.mode_badges,
         diagnostics: &stoat.diagnostics,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
+        stoatty: stoat.stoatty,
     };
 
     let split_focused = ws.panes.focus();

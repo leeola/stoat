@@ -22,6 +22,7 @@ use crate::{
     rebase::RebasePause,
     register,
     run::{GridSelection, PtyNotification, RunId},
+    ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::{PickerOutcome, WorkspacePicker},
 };
@@ -908,7 +909,7 @@ impl Stoat {
     pub async fn run(
         &mut self,
         mut events: Receiver<Event>,
-        render: watch::Sender<Option<Buffer>>,
+        render: watch::Sender<Option<RenderFrame>>,
     ) -> io::Result<()> {
         let mut frame_buf = Buffer::empty(self.size);
         self.start_index_build();
@@ -940,12 +941,19 @@ impl Stoat {
                 UpdateEffect::Redraw => {
                     self.drive_background();
                     self.paint_into(&mut frame_buf);
+                    let cursor = self.primary_cursor_screen_pos();
                     render.send_modify(|slot| match slot {
-                        Some(buf) => {
-                            buf.area = frame_buf.area;
-                            buf.content.clone_from(&frame_buf.content);
+                        Some(rf) => {
+                            rf.buffer.area = frame_buf.area;
+                            rf.buffer.content.clone_from(&frame_buf.content);
+                            rf.cursor = cursor;
                         },
-                        None => *slot = Some(frame_buf.clone()),
+                        None => {
+                            *slot = Some(RenderFrame {
+                                buffer: frame_buf.clone(),
+                                cursor,
+                            })
+                        },
                     });
                     self.emit_smooth_scroll();
                     if render.is_closed() {
@@ -2556,6 +2564,30 @@ impl Stoat {
             },
             _ => None,
         }
+    }
+
+    /// Absolute terminal cell `(col, row)` of the primary cursor when the
+    /// focused pane is a document editor running inside stoatty, else `None`.
+    ///
+    /// Returns the position [`crate::render::editor::render_editor_with_overlay`]
+    /// recorded while painting the current frame, so it is exactly where the
+    /// cursor cell would otherwise be drawn. `None` for finder/palette/dock/run
+    /// focus and outside stoatty, where the editor paints its own cursor cell
+    /// and the terminal cursor stays hidden. Must be called after a render.
+    pub(crate) fn primary_cursor_screen_pos(&self) -> Option<(u16, u16)> {
+        let (focused_id, _) = self.focused_editor_ids()?;
+        let ws = self.active_workspace();
+        let FocusTarget::SplitPane(_) = ws.focus else {
+            return None;
+        };
+        let pane_editor = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => return None,
+        };
+        if focused_id != pane_editor {
+            return None;
+        }
+        ws.editors.get(pane_editor)?.cursor_screen_cell
     }
 
     fn handle_insert_key(&mut self, key: KeyEvent) -> Option<UpdateEffect> {

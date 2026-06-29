@@ -23,6 +23,18 @@ use tokio::sync::{
     watch,
 };
 
+/// One rendered frame published from the main thread to the UI thread.
+///
+/// Carries the painted grid plus the optional terminal-cursor cell. `cursor`
+/// is `Some((col, row))` only when running inside stoatty and the focused
+/// document editor delegates its primary cursor to the terminal cursor;
+/// otherwise it is `None` and the cursor stays hidden, with the editor
+/// painting its own cursor cell into `buffer`.
+pub struct RenderFrame {
+    pub buffer: Buffer,
+    pub cursor: Option<(u16, u16)>,
+}
+
 /// Install a process-global panic hook that restores the terminal before the
 /// default hook runs, so a panic in either the main thread or the UI thread
 /// leaves cooked mode + the main screen + the panic message visible to the
@@ -58,7 +70,7 @@ pub fn install_panic_hook() {
 
 pub fn spawn(
     event_tx: Sender<Event>,
-    mut render_rx: watch::Receiver<Option<Buffer>>,
+    mut render_rx: watch::Receiver<Option<RenderFrame>>,
     mut apc_rx: UnboundedReceiver<Vec<u8>>,
     mouse_captured: bool,
 ) -> thread::JoinHandle<io::Result<()>> {
@@ -85,7 +97,7 @@ pub fn spawn(
 
 async fn run(
     event_tx: &Sender<Event>,
-    render_rx: &mut watch::Receiver<Option<Buffer>>,
+    render_rx: &mut watch::Receiver<Option<RenderFrame>>,
     apc_rx: &mut UnboundedReceiver<Vec<u8>>,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> io::Result<()> {
@@ -126,24 +138,27 @@ async fn run(
                 // Copy the latest frame into `frame` and drop the watch borrow
                 // before drawing, so the slow terminal flush never holds the
                 // lock the render thread needs to publish the next frame.
-                let has_frame = {
+                let cursor = {
                     let latest = render_rx.borrow_and_update();
                     match latest.as_ref() {
                         Some(src) => {
-                            frame.resize(src.area);
-                            frame.content.clone_from(&src.content);
-                            true
+                            frame.resize(src.buffer.area);
+                            frame.content.clone_from(&src.buffer.content);
+                            Some(src.cursor)
                         },
-                        None => false,
+                        None => None,
                     }
                 };
-                if has_frame {
+                if let Some(cursor) = cursor {
                     terminal.draw(|f| {
                         let dst = f.buffer_mut();
                         if dst.area == frame.area {
                             dst.content.clone_from(&frame.content);
                         } else {
                             copy_clamped(dst, &frame);
+                        }
+                        if let Some((col, row)) = cursor {
+                            f.set_cursor_position((col, row));
                         }
                     })?;
                 }
