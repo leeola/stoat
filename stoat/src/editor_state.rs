@@ -38,11 +38,9 @@ pub(crate) struct EditorState {
     /// Fractional top row for inertial scroll. [`Self::scroll_row`] stays
     /// equal to `scroll_offset.floor()` and drives the integer-row render and
     /// pool paths. The fraction carries sub-row glide between animation frames.
-    #[allow(dead_code)]
     pub(crate) scroll_offset: f32,
     /// Inertial scroll velocity in rows per second. Nonzero only while a wheel
     /// flick is coasting. The momentum step decays it to zero at rest.
-    #[allow(dead_code)]
     pub(crate) scroll_velocity: f32,
     /// Last-rendered viewport height in rows. Page-motion handlers read
     /// this to compute scroll distance without taking a dependency on

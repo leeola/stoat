@@ -2804,7 +2804,7 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
 /// Largest top-row position that keeps the last document row in view, as a
 /// float so the integer scroll path and the momentum path clamp to one shared
 /// bound.
-fn max_scroll_offset(editor: &mut EditorState) -> f32 {
+pub(crate) fn max_scroll_offset(editor: &mut EditorState) -> f32 {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
@@ -2819,7 +2819,6 @@ fn max_scroll_offset(editor: &mut EditorState) -> f32 {
 /// Returns the new offset, the new velocity (zero once the glide has settled),
 /// and whether it settled. Settled is true when the decayed speed falls below
 /// the minimum or the offset reaches a bound, so the caller can stop ticking.
-#[allow(dead_code)]
 pub(crate) fn step_scroll_momentum(
     offset: f32,
     velocity: f32,

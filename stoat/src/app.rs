@@ -62,6 +62,11 @@ pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(50);
 
+/// Frame interval for scroll-animation ticks, about 120 fps. [`Stoat::run`]
+/// arms a timer at this cadence while a scroll glide is active, advancing the
+/// inertial scroll one step per fire.
+const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(8);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateEffect {
     Redraw,
@@ -919,6 +924,7 @@ impl Stoat {
     ) -> io::Result<()> {
         self.start_index_build();
         loop {
+            let animating = self.is_animating();
             let first = tokio::select! {
                 biased;
                 event = events.recv() => {
@@ -938,6 +944,10 @@ impl Stoat {
                     self.handle_agent_control(ctl)
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
+                _ = self.executor.timer(SCROLL_FRAME), if animating => {
+                    self.tick_scroll_anim();
+                    UpdateEffect::Redraw
+                }
             };
 
             let effect = first.merge(self.drain_pending(&mut events));
@@ -965,6 +975,45 @@ impl Stoat {
             }
         }
         Ok(())
+    }
+
+    /// Whether the active workspace has an in-flight animation that needs a
+    /// per-frame tick.
+    ///
+    /// True while any editor is mid scroll-glide. Future animation sources
+    /// should OR their own condition in here so [`Self::run`]'s frame timer
+    /// covers them.
+    fn is_animating(&self) -> bool {
+        self.active_workspace()
+            .editors
+            .values()
+            .any(|editor| editor.scroll_velocity != 0.0)
+    }
+
+    /// Advance every animating editor's inertial scroll by one [`SCROLL_FRAME`].
+    ///
+    /// Steps each editor with a nonzero velocity through
+    /// [`step_scroll_momentum`](action_handlers::movement::step_scroll_momentum),
+    /// writes back the decayed velocity and new offset, and keeps `scroll_row`
+    /// at `floor(scroll_offset)` so the integer-row render and pool paths track
+    /// the glide.
+    fn tick_scroll_anim(&mut self) {
+        let dt = SCROLL_FRAME.as_secs_f32();
+        for editor in self.active_workspace_mut().editors.values_mut() {
+            if editor.scroll_velocity == 0.0 {
+                continue;
+            }
+            let max_offset = action_handlers::movement::max_scroll_offset(editor);
+            let (offset, velocity, _settled) = action_handlers::movement::step_scroll_momentum(
+                editor.scroll_offset,
+                editor.scroll_velocity,
+                dt,
+                max_offset,
+            );
+            editor.scroll_offset = offset;
+            editor.scroll_velocity = velocity;
+            editor.scroll_row = offset.floor() as u32;
+        }
     }
 
     /// Apply every message already queued on the input and notification
@@ -3904,6 +3953,53 @@ mod tests {
     use super::*;
     use crate::{agent_status::AgentHookEvent, buffer::TextBuffer};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn scroll_anim_tick_advances_offset_then_settles() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let path = h.write_file("glide.rs", &body);
+        h.open_file(&path);
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .scroll_velocity = 200.0;
+        assert!(
+            h.stoat.is_animating(),
+            "seeded velocity makes the editor animate"
+        );
+
+        h.stoat.tick_scroll_anim();
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            assert!(
+                editor.scroll_offset > 0.0,
+                "tick advances the fractional offset"
+            );
+            assert_eq!(
+                editor.scroll_row,
+                editor.scroll_offset.floor() as u32,
+                "scroll_row tracks floor(scroll_offset)"
+            );
+        }
+
+        for _ in 0..1000 {
+            if !h.stoat.is_animating() {
+                break;
+            }
+            h.stoat.tick_scroll_anim();
+        }
+        assert!(!h.stoat.is_animating(), "repeated ticks settle to rest");
+        assert_eq!(
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("focused editor")
+                .scroll_velocity,
+            0.0,
+            "settled velocity is zero"
+        );
+    }
 
     #[test]
     fn cold_build_shard_merges_into_the_workspace_graph() {
