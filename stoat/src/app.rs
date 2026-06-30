@@ -3239,6 +3239,12 @@ impl Stoat {
         }
         self.smooth_scroll.drop_absent(&mut out, &active);
 
+        // Plain editor pages render off the run loop. The loop collects a snapshot
+        // and the newly-entered page indices per pane, then spawns the renders after
+        // the APC batch ships, so region and scroll always reach the terminal before
+        // any fill.
+        let mut async_jobs: Vec<(crate::display_map::DisplaySnapshot, Vec<u64>, u32, u16, u16)> =
+            Vec::new();
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -3264,7 +3270,7 @@ impl Stoat {
                 .review_view
                 .as_ref()
                 .map_or(0, |view| view.rows.len() as u64);
-            crate::smooth_scroll::emit_into(
+            let entered = crate::smooth_scroll::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
@@ -3281,16 +3287,22 @@ impl Stoat {
                             region.height,
                         )
                     } else {
-                        crate::smooth_scroll::render_editor_page(
-                            editor,
-                            page,
-                            fallback_style,
-                            region.width,
-                            region.height,
-                        )
+                        // Plain editor pages fill asynchronously below. The empty
+                        // render skips a synchronous fill frame here.
+                        Vec::new()
                     }
                 },
             );
+
+            if !is_review && !entered.is_empty() {
+                async_jobs.push((
+                    editor.display_map.snapshot(),
+                    entered,
+                    region.pool,
+                    region.width,
+                    region.height,
+                ));
+            }
         }
 
         if let (Some(list), Some(finder)) = (finder_list, self.file_finder.as_ref()) {
@@ -3520,6 +3532,30 @@ impl Stoat {
 
         if !out.is_empty() {
             let _ = apc_tx.send(out);
+        }
+
+        // The batch (regions, scrolls) has shipped, so the terminal has every pool's
+        // geometry before a fill lands. Render each newly-entered plain editor page on
+        // a blocking worker and deliver its fill frame through the same channel, off
+        // the run loop.
+        for (snapshot, pages, pool, width, height) in async_jobs {
+            for index in pages {
+                let snapshot = snapshot.clone();
+                let apc_tx = apc_tx.clone();
+                self.executor
+                    .spawn_blocking(move || {
+                        let fill = crate::smooth_scroll::render_page_fill(
+                            &snapshot,
+                            pool,
+                            index,
+                            fallback_style,
+                            width,
+                            height,
+                        );
+                        let _ = apc_tx.send(fill);
+                    })
+                    .detach();
+            }
         }
     }
 
@@ -4715,16 +4751,75 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let _ = rx.try_recv().expect("first emit declares the editor pool");
+        let first = drain_apc(&mut rx);
+        assert!(
+            first
+                .iter()
+                .any(|cmd| matches!(cmd, Command::PoolRegion(_))),
+            "first emit declares the editor pool, got {first:?}"
+        );
 
         // Entering a full-screen overlay mode retires the editor pool.
         h.stoat.mode = "rebase".into();
         h.stoat.emit_smooth_scroll();
-        let bytes = rx.try_recv().expect("overlay emit retires the pool");
-        let cmds = decode_apc_stream(&bytes);
+        let cmds = drain_apc(&mut rx);
         assert!(
             !cmds.is_empty() && cmds.iter().all(|cmd| matches!(cmd, Command::PoolDrop(_))),
             "overlay mode only drops pools, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn editor_pool_pages_fill_asynchronously() {
+        use stoatty_protocol::command::{Command, FillCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/async-pool");
+        let path = root.join("a.txt");
+        let body = (0..150).map(|i| format!("line {i}\n")).collect::<String>();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.emit_smooth_scroll();
+
+        // The first batch carries the pool geometry and scroll, but no editor fill:
+        // plain editor pages are rendered off the run loop, not inline.
+        let first = rx.try_recv().expect("region/scroll batch");
+        let first_cmds = decode_apc_stream(&first);
+        assert!(
+            first_cmds
+                .iter()
+                .any(|c| matches!(c, Command::PoolRegion(_))),
+            "first batch declares the pool, got {first_cmds:?}"
+        );
+        assert!(
+            !first_cmds.iter().any(|c| matches!(c, Command::Fill(_))),
+            "first batch carries no synchronous editor fill, got {first_cmds:?}"
+        );
+
+        // The blocking renders run inline under the test scheduler, so their fills
+        // arrive as later batches on the same channel. The initial visible page is 0,
+        // whose buffered window is pages 0..5.
+        let mut filled = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            for cmd in decode_apc_stream(&batch) {
+                if let Command::Fill(FillCommand { index, .. }) = cmd {
+                    filled.push(index);
+                }
+            }
+        }
+        filled.sort_unstable();
+        assert_eq!(
+            filled,
+            vec![0, 1, 2, 3, 4],
+            "the initial window's pages fill asynchronously, got {filled:?}"
         );
     }
 
@@ -4776,7 +4871,6 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let bytes = rx.try_recv().expect("the open finder emits an APC batch");
         let list = crate::render::file_finder::file_finder_layout(size)
             .expect("finder fits the test terminal")
             .list;
@@ -4788,15 +4882,14 @@ mod tests {
             height: list.height,
         };
         assert!(
-            decode_apc_stream(&bytes).contains(&Command::PoolRegion(expected)),
+            drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
             "the finder list declares a pool at its list rect"
         );
 
         h.stoat.file_finder = None;
         h.stoat.emit_smooth_scroll();
-        let bytes = rx.try_recv().expect("closing the finder emits a drop");
         assert!(
-            decode_apc_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
+            drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
                 pool: crate::smooth_scroll::non_pane_pool::FINDER,
             })),
             "closing the finder retires its pool"
@@ -4818,7 +4911,6 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let bytes = rx.try_recv().expect("the open palette emits an APC batch");
         let list = crate::render::command_palette::palette_filter_layout(size)
             .expect("the palette fits the test terminal")
             .list;
@@ -4830,15 +4922,14 @@ mod tests {
             height: list.height,
         };
         assert!(
-            decode_apc_stream(&bytes).contains(&Command::PoolRegion(expected)),
+            drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
             "the palette list declares a pool at its list rect"
         );
 
         h.stoat.command_palette = None;
         h.stoat.emit_smooth_scroll();
-        let bytes = rx.try_recv().expect("closing the palette emits a drop");
         assert!(
-            decode_apc_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
+            drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
                 pool: crate::smooth_scroll::non_pane_pool::PALETTE,
             })),
             "closing the palette retires its pool"
@@ -4883,17 +4974,15 @@ mod tests {
             width: layout.inner.width,
             height: layout.inner.height,
         };
-        let bytes = rx.try_recv().expect("the open popup emits an APC batch");
         assert!(
-            decode_apc_stream(&bytes).contains(&Command::PoolRegion(expected)),
+            drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
             "the completion popup declares a pool at its inner rect"
         );
 
         h.stoat.pending_completion = None;
         h.stoat.emit_smooth_scroll();
-        let bytes = rx.try_recv().expect("closing the popup emits a drop");
         assert!(
-            decode_apc_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
+            drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
             })),
             "closing the popup retires its pool"
@@ -4930,7 +5019,7 @@ mod tests {
             width: layout.detail.width,
             height: layout.detail.height,
         };
-        let cmds = decode_apc_stream(&rx.try_recv().expect("the open help emits an APC batch"));
+        let cmds = drain_apc(&mut rx);
         assert!(
             cmds.contains(&Command::PoolRegion(list)),
             "the help list declares a pool at its rect"
@@ -4942,7 +5031,7 @@ mod tests {
 
         h.stoat.help = None;
         h.stoat.emit_smooth_scroll();
-        let cmds = decode_apc_stream(&rx.try_recv().expect("closing help emits drops"));
+        let cmds = drain_apc(&mut rx);
         assert!(
             cmds.contains(&Command::PoolDrop(PoolDropCommand {
                 pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
@@ -5073,6 +5162,18 @@ mod tests {
             rest = &after[end + 2..];
         }
         out
+    }
+
+    /// Drain every APC batch currently queued on `rx` into one decoded command
+    /// list. A plain editor pane fills its pages asynchronously, so one
+    /// `emit_smooth_scroll` pushes the region/scroll batch plus a fill batch per
+    /// page. Draining folds them together so a test reads the whole emit at once.
+    fn drain_apc(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<stoatty_protocol::command::Command> {
+        let mut cmds = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            cmds.extend(decode_apc_stream(&batch));
+        }
+        cmds
     }
 
     #[test]

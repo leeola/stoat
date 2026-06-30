@@ -101,9 +101,15 @@ struct PoolEmitState {
     /// until first declared. Re-emitted only when the rectangle changes (resize,
     /// split, focus move).
     region: Option<PoolRegionCommand>,
-    /// Half-open page range `[start, end)` currently filled into the pool. `None`
-    /// until the first fill.
-    filled: Option<Range<u64>>,
+    /// Half-open page range `[start, end)` whose fills have been requested for the
+    /// pool, `None` until the first request.
+    ///
+    /// Non-pane callers fill synchronously, so this equals what is filled. The
+    /// editor caller fills asynchronously off-thread, so it tracks requests, not
+    /// completions. The window is always contiguous, so a `Range` suffices.
+    /// Re-requesting a page when it re-enters the window is correct -- it matches
+    /// the terminal recycling slots that fall outside the window.
+    requested: Option<Range<u64>>,
     /// `scroll_offset` the most recent [`ScrollCommand`] was computed from.
     /// Skips re-emitting an unchanged scroll target.
     last_scroll_offset: Option<f32>,
@@ -158,6 +164,11 @@ impl SmoothScrollState {
 /// a far jump re-anchors near the destination instead of easing across the gap;
 /// then a `scroll` frame carrying the precise target. A frame that needs none of
 /// these appends nothing.
+///
+/// Returns the page indices that newly entered the buffered window this call, in
+/// ascending order. A caller filling synchronously ignores them (the fill bytes
+/// are already in `out`); the editor caller passes an empty-returning `render_page`
+/// and fills these pages asynchronously off-thread instead.
 pub(crate) fn emit_into(
     out: &mut Vec<u8>,
     state: &mut SmoothScrollState,
@@ -165,7 +176,7 @@ pub(crate) fn emit_into(
     scroll_offset: f32,
     content_version: u64,
     mut render_page: impl FnMut(u64) -> Vec<u8>,
-) {
+) -> Vec<u64> {
     let pool = region.pool;
     let entry = state.pools.entry(pool).or_default();
 
@@ -173,13 +184,13 @@ pub(crate) fn emit_into(
         encode_pool_region_into(out, &region);
         entry.region = Some(region);
         // A fresh region invalidates the pool's slot contents; force a refill.
-        entry.filled = None;
+        entry.requested = None;
         entry.last_scroll_offset = None;
     }
 
     if entry.content_version != content_version {
         // The surface changed under the pool; the buffered pages are stale.
-        entry.filled = None;
+        entry.requested = None;
         entry.last_scroll_offset = None;
         entry.content_version = content_version;
     }
@@ -188,10 +199,10 @@ pub(crate) fn emit_into(
     let page = scroll_offset.floor() as u64 / region_height;
     let window = window_range(page);
 
-    let prev = entry.filled.clone();
+    let prev = entry.requested.clone();
     let jumped = prev.is_some_and(|p| p.end <= window.start || window.end <= p.start);
 
-    refill(out, entry, pool, window, &mut render_page);
+    let entered = refill(out, entry, pool, window, &mut render_page);
 
     // A jump whose new window does not overlap the old one is too far to ease
     // across an unbuffered gap. The reposition re-anchors the terminal's offset
@@ -206,31 +217,45 @@ pub(crate) fn emit_into(
         encode_scroll_into(out, &scroll_target(pool, scroll_offset, region.height));
         entry.last_scroll_offset = Some(scroll_offset);
     }
+
+    entered
 }
 
-/// Fill every page in `window` not already present in `entry.filled`, then record
-/// `window` as the filled range.
+/// Request a fill for every page in `window` not already requested, record `window`
+/// as the requested range, and return the newly-entered page indices in ascending
+/// order.
 ///
 /// Pages already covered by the previous window are not re-pushed, so a sub-page
-/// scroll that does not change the window emits no fills and a one-page step
-/// pushes only the single page entering at the edge.
+/// scroll that does not change the window enters no pages and a one-page step enters
+/// only the single page at the edge.
+///
+/// `render_page(index)` returning empty bytes requests the page without emitting a
+/// fill frame. The editor caller fills asynchronously, so an empty render means "no
+/// synchronous fill". A real render is never empty -- the serialized buffer always
+/// carries cursor moves and cells -- so empty is an unambiguous sentinel.
 fn refill(
     out: &mut Vec<u8>,
     entry: &mut PoolEmitState,
     pool: u32,
     window: Range<u64>,
     render_page: &mut impl FnMut(u64) -> Vec<u8>,
-) {
-    let already = entry.filled.clone().unwrap_or(0..0);
+) -> Vec<u64> {
+    let already = entry.requested.clone().unwrap_or(0..0);
+    let mut entered = Vec::new();
     for index in window.clone() {
         if already.contains(&index) {
             continue;
         }
-        encode_fill_into(out, pool, index);
-        out.extend_from_slice(&render_page(index));
-        encode_fill_end_into(out);
+        entered.push(index);
+        let bytes = render_page(index);
+        if !bytes.is_empty() {
+            encode_fill_into(out, pool, index);
+            out.extend_from_slice(&bytes);
+            encode_fill_end_into(out);
+        }
     }
-    entry.filled = Some(window);
+    entry.requested = Some(window);
+    entered
 }
 
 /// The half-open page window centered on `page`, clamped at the document start.
@@ -261,31 +286,37 @@ fn scroll_target(pool: u32, scroll_offset: f32, region_height: u16) -> ScrollCom
     }
 }
 
-/// Render `region_height` document rows of `editor` starting at row
-/// `page * region_height` into a self-contained VT byte stream.
+/// Render page `index` from `snapshot` and wrap it in the pool fill frames, so the
+/// returned bytes are a self-contained fill the terminal applies to slot `index`.
 ///
-/// Snapshots the editor's display once and delegates to
-/// [`render_page_from_snapshot`], leaving the live scroll position and every
-/// editor cache untouched. The page carries text and syntax highlights only. The
-/// cursor and selection belong to the focused live grid, not a pooled page.
-pub(crate) fn render_editor_page(
-    editor: &mut EditorState,
-    page: u64,
+/// The asynchronous editor-fill path runs this on a blocking worker and delivers
+/// the frame through the APC channel, off the run loop. The bytes are an
+/// `encode_fill_into` marker, the [`render_page_from_snapshot`] page, then an
+/// `encode_fill_end_into` terminator.
+pub(crate) fn render_page_fill(
+    snapshot: &DisplaySnapshot,
+    pool: u32,
+    index: u64,
     fallback_style: Style,
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let snapshot = editor.display_map.snapshot();
-    let top_row = page
+    let top_row = index
         .saturating_mul(region_height as u64)
         .min(u32::MAX as u64) as u32;
-    render_page_from_snapshot(
-        &snapshot,
+    let bytes = render_page_from_snapshot(
+        snapshot,
         top_row,
         fallback_style,
         region_width,
         region_height,
-    )
+    );
+
+    let mut frame = Vec::with_capacity(bytes.len() + 16);
+    encode_fill_into(&mut frame, pool, index);
+    frame.extend_from_slice(&bytes);
+    encode_fill_end_into(&mut frame);
+    frame
 }
 
 /// Paint `region_height` document rows starting at display row `top_row` from an
@@ -712,6 +743,86 @@ mod tests {
                 page: 0,
                 fraction: 0
             }))
+        );
+    }
+
+    #[test]
+    fn emit_into_returns_newly_entered_pages() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        // page 2 (offset 40 / height 20) buffers window 0..5.
+        let first = emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, |_| Vec::new());
+        assert_eq!(first, (0..WINDOW_PAGES).collect::<Vec<_>>());
+
+        // A sub-page scroll within page 2 enters no new page.
+        let same = emit_into(&mut out, &mut state, region(1, 20), 41.0, 0, |_| Vec::new());
+        assert!(same.is_empty(), "sub-page scroll entered {same:?}");
+
+        // Stepping to page 3 shifts the window to 1..6, entering only page 5.
+        let stepped = emit_into(&mut out, &mut state, region(1, 20), 60.0, 0, |_| Vec::new());
+        assert_eq!(stepped, vec![5]);
+    }
+
+    #[test]
+    fn empty_render_requests_pages_without_emitting_fills() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        let entered = emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, |_| Vec::new());
+
+        assert_eq!(entered, (0..WINDOW_PAGES).collect::<Vec<_>>());
+        let cmds = commands(&out);
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::Fill(_))),
+            "an empty render emits no fill frame, got {cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::PoolRegion(_))),
+            "the region is still declared, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn render_page_fill_wraps_the_page_in_fill_frames() {
+        use super::{render_page_fill, render_page_from_snapshot};
+        use crate::{
+            action_handlers::{self, dispatch},
+            theme::{scope, Theme},
+            Stoat,
+        };
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::command::FillCommand;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-fill");
+        let path = root.join("doc.txt");
+        h.fake_fs()
+            .insert_file(&path, b"alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let fallback = Theme::empty().get(scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+
+        let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3);
+
+        let cmds = commands(&frame);
+        assert!(
+            cmds.contains(&Command::Fill(FillCommand { pool: 7, index: 2 })),
+            "frame opens with the slot's fill, got {cmds:?}"
+        );
+        assert!(
+            cmds.contains(&Command::FillEnd),
+            "frame closes the fill, got {cmds:?}"
+        );
+
+        let page = render_page_from_snapshot(&snapshot, 2 * 3, fallback, 12, 3);
+        assert!(
+            find(&frame, &page).is_some(),
+            "the page bytes ride between the fill markers"
         );
     }
 
