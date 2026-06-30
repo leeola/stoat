@@ -3202,9 +3202,18 @@ impl Stoat {
             let Some(editor) = ws.editors.get_mut(*editor_id) else {
                 continue;
             };
-            let scroll_row = editor.scroll_row;
+            // scroll_row is the source of truth for the pool page. The wheel
+            // glide refines it sub-row through scroll_offset, but cursor-follow
+            // and jumps move scroll_row without the fraction, so trust the
+            // offset only while it still floors to scroll_row, else fall back to
+            // the integer row.
+            let scroll_offset = if editor.scroll_offset.floor() as u32 == editor.scroll_row {
+                editor.scroll_offset
+            } else {
+                editor.scroll_row as f32
+            };
             // Review rows regenerate on accept/reject, so their count is the
-            // pool's content version; plain editors stay stable while scrolling.
+            // pool's content version. Plain editors stay stable while scrolling.
             let is_review = editor.review_view.is_some();
             let content_version = editor
                 .review_view
@@ -3214,7 +3223,7 @@ impl Stoat {
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
-                scroll_row,
+                scroll_offset,
                 content_version,
                 |page| {
                     if is_review {
@@ -3264,7 +3273,7 @@ impl Stoat {
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
-                scroll_row,
+                scroll_row as f32,
                 content_version,
                 |page| {
                     crate::smooth_scroll::render_finder_page(
@@ -3303,7 +3312,7 @@ impl Stoat {
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
-                scroll_row,
+                scroll_row as f32,
                 content_version,
                 |page| {
                     crate::smooth_scroll::render_palette_page(
@@ -3340,7 +3349,7 @@ impl Stoat {
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
-                scroll_row,
+                scroll_row as f32,
                 content_version,
                 |page| {
                     crate::smooth_scroll::render_commits_page(
@@ -3376,7 +3385,7 @@ impl Stoat {
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
-                scroll_row,
+                scroll_row as f32,
                 content_version,
                 |page| {
                     crate::smooth_scroll::render_completion_page(
@@ -3415,7 +3424,7 @@ impl Stoat {
                 &mut out,
                 &mut self.smooth_scroll,
                 list_region,
-                list_scroll,
+                list_scroll as f32,
                 list_version,
                 |page| {
                     crate::smooth_scroll::render_help_list_page(
@@ -3451,7 +3460,7 @@ impl Stoat {
                 &mut out,
                 &mut self.smooth_scroll,
                 detail_region,
-                detail_scroll,
+                detail_scroll as f32,
                 detail_version,
                 |page| {
                     crate::smooth_scroll::render_help_detail_page(
