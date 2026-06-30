@@ -82,6 +82,9 @@ pub struct BackgroundPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    composite_instances: Buffer,
+    composite_capacity: usize,
+    composite_count: u32,
     cursor_pipeline: RenderPipeline,
     cursor_visible: bool,
     metrics: CellMetrics,
@@ -168,6 +171,7 @@ impl BackgroundPass {
         });
 
         let instances = alloc_instances(device, INITIAL_CAPACITY);
+        let composite_instances = alloc_instances(device, INITIAL_CAPACITY);
 
         BackgroundPass {
             pipeline,
@@ -176,6 +180,9 @@ impl BackgroundPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            composite_instances,
+            composite_capacity: INITIAL_CAPACITY,
+            composite_count: 0,
             cursor_pipeline,
             cursor_visible: false,
             metrics,
@@ -257,6 +264,55 @@ impl BackgroundPass {
         }
     }
 
+    /// Upload the uniform and per-cell instances for a pool grid being
+    /// composited over the live grid, into buffers separate from the live ones.
+    ///
+    /// A pool composite paints a pooled page over the live grid mid-glide.
+    /// Building its cells into [`Self::instances`] would erase the live grid's
+    /// damage-tracked instances, so the pool builds into a dedicated buffer that
+    /// [`Self::draw_composite`] reads, leaving the live buffer intact for the
+    /// next live frame.
+    ///
+    /// `grid_scroll` shifts the grid up by that many rows. The pool grid changes
+    /// wholesale each frame, so every cell is rebuilt with no per-row damage
+    /// path. No cursor draws over a composite, so the shared globals carry none.
+    pub fn prepare_composite(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        resolution: [f32; 2],
+        grid_scroll: f32,
+    ) {
+        let globals = Globals {
+            resolution,
+            cell_size: [self.metrics.width, self.metrics.height],
+            cursor_corners_01: [0.0; 4],
+            cursor_corners_23: [0.0; 4],
+            scroll_y: grid_scroll * self.metrics.height,
+            pad: 0.0,
+            pad2: 0.0,
+            pad3: 0.0,
+            cursor_color: [0.0; 4],
+        };
+        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+
+        let instances = build_instances(grid);
+        self.composite_count = instances.len() as u32;
+        if instances.is_empty() {
+            return;
+        }
+        if instances.len() > self.composite_capacity {
+            self.composite_capacity = instances.len().next_power_of_two();
+            self.composite_instances = alloc_instances(device, self.composite_capacity);
+        }
+        queue.write_buffer(
+            &self.composite_instances,
+            0,
+            bytemuck::cast_slice(&instances),
+        );
+    }
+
     /// Upload the cursor block's corners and scroll offset, leaving the cell
     /// instances a prior [`Self::prepare`] uploaded in place.
     ///
@@ -303,6 +359,22 @@ impl BackgroundPass {
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
         render_pass.draw(0..6, 0..self.count);
+    }
+
+    /// Record a composited pool's background draw into `render_pass`.
+    ///
+    /// A no-op until [`Self::prepare_composite`] has run with a non-empty grid.
+    /// Reads the composite instance buffer, so drawing a pool leaves the live
+    /// cell instances a prior [`Self::prepare`] uploaded untouched.
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>) {
+        if self.composite_count == 0 {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.composite_instances.slice(..));
+        render_pass.draw(0..6, 0..self.composite_count);
     }
 
     /// Record the cursor-block draw into `render_pass`.
