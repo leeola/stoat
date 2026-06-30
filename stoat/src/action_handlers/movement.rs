@@ -2786,6 +2786,11 @@ pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
 /// Scrolls `editor` by `count` display rows, down when `down` and up
 /// otherwise, clamping `scroll_row` so the last document row stays in view.
 /// Returns whether `scroll_row` changed.
+///
+/// When `scroll_row` changes, resets `scroll_offset` to the new integer row
+/// and zeroes `scroll_velocity`, so a keyboard scroll cancels any in-flight
+/// momentum glide and keeps the fractional position in step with the integer
+/// row.
 pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) -> bool {
     let max_scroll = max_scroll_offset(editor) as u32;
 
@@ -2798,7 +2803,29 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
         return false;
     }
     editor.scroll_row = new_scroll;
+    editor.scroll_offset = new_scroll as f32;
+    editor.scroll_velocity = 0.0;
     true
+}
+
+/// Impart an inertial scroll impulse to `editor` from one wheel notch, down
+/// when `down` and up otherwise.
+///
+/// Adds a fixed impulse to `scroll_velocity` (clamped), so rapid notches
+/// accumulate into a faster glide that the per-frame tick integrates. Re-seeds
+/// `scroll_offset` from `scroll_row` first when another path moved the integer
+/// row out from under the fraction, so the glide starts from the visible
+/// position. Never touches the cursor or `scroll_row`, so a coast never drags
+/// the selection.
+pub(crate) fn wheel_impulse(editor: &mut EditorState, down: bool) {
+    const IMPULSE: f32 = 60.0;
+    const MAX_VEL: f32 = 240.0;
+
+    if editor.scroll_offset.floor() as u32 != editor.scroll_row {
+        editor.scroll_offset = editor.scroll_row as f32;
+    }
+    let delta = if down { IMPULSE } else { -IMPULSE };
+    editor.scroll_velocity = (editor.scroll_velocity + delta).clamp(-MAX_VEL, MAX_VEL);
 }
 
 /// Largest top-row position that keeps the last document row in view, as a
@@ -3228,6 +3255,78 @@ mod tests {
         assert_eq!(
             step_scroll_momentum(95.0, 50.0, 1.0, 100.0),
             (100.0, 0.0, true)
+        );
+    }
+
+    fn harness_with_long_buffer() -> TestHarness {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let path = h.write_file("glide.rs", &body);
+        h.open_file(&path);
+        h
+    }
+
+    #[test]
+    fn wheel_impulse_builds_clamped_velocity() {
+        let mut h = harness_with_long_buffer();
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+
+        wheel_impulse(editor, true);
+        let v1 = editor.scroll_velocity;
+        assert!(v1 > 0.0, "a down notch imparts positive velocity");
+
+        wheel_impulse(editor, true);
+        assert!(editor.scroll_velocity > v1, "rapid notches accumulate");
+
+        for _ in 0..50 {
+            wheel_impulse(editor, true);
+        }
+        let saturated = editor.scroll_velocity;
+        wheel_impulse(editor, true);
+        assert!(
+            editor.scroll_velocity <= saturated,
+            "velocity saturates at the clamp"
+        );
+
+        editor.scroll_velocity = 0.0;
+        wheel_impulse(editor, false);
+        assert!(
+            editor.scroll_velocity < 0.0,
+            "an up notch imparts negative velocity"
+        );
+    }
+
+    #[test]
+    fn wheel_impulse_reseeds_offset_when_scroll_row_drifted() {
+        let mut h = harness_with_long_buffer();
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+
+        editor.scroll_row = 10;
+        editor.scroll_offset = 0.0;
+        wheel_impulse(editor, true);
+        assert_eq!(
+            editor.scroll_offset as u32, 10,
+            "a drifted offset reseeds from scroll_row before gliding"
+        );
+    }
+
+    #[test]
+    fn keyboard_scroll_syncs_offset_and_clears_momentum() {
+        let mut h = harness_with_long_buffer();
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+
+        editor.scroll_velocity = 50.0;
+        assert!(
+            scroll_editor(editor, true, 3),
+            "scrolling down moves scroll_row"
+        );
+        assert_eq!(
+            editor.scroll_velocity, 0.0,
+            "keyboard scroll clears momentum"
+        );
+        assert_eq!(
+            editor.scroll_offset as u32, editor.scroll_row,
+            "offset syncs to the integer row"
         );
     }
 }
