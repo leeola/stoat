@@ -35,6 +35,15 @@ pub(crate) struct EditorState {
     pub(crate) buffer_id: BufferId,
     pub(crate) display_map: DisplayMap,
     pub(crate) scroll_row: u32,
+    /// Fractional top row for inertial scroll. [`Self::scroll_row`] stays
+    /// equal to `scroll_offset.floor()` and drives the integer-row render and
+    /// pool paths. The fraction carries sub-row glide between animation frames.
+    #[allow(dead_code)]
+    pub(crate) scroll_offset: f32,
+    /// Inertial scroll velocity in rows per second. Nonzero only while a wheel
+    /// flick is coasting. The momentum step decays it to zero at rest.
+    #[allow(dead_code)]
+    pub(crate) scroll_velocity: f32,
     /// Last-rendered viewport height in rows. Page-motion handlers read
     /// this to compute scroll distance without taking a dependency on
     /// the render pipeline's layout `Rect`. `None` until the editor has
@@ -107,6 +116,8 @@ impl EditorState {
             buffer_id,
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
+            scroll_offset: 0.0,
+            scroll_velocity: 0.0,
             viewport_rows: None,
             review_view: None,
             selections: SelectionsCollection::new(),
@@ -131,6 +142,8 @@ impl EditorState {
             buffer_id,
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
+            scroll_offset: 0.0,
+            scroll_velocity: 0.0,
             viewport_rows: None,
             review_view: None,
             selections: SelectionsCollection::new(),

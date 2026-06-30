@@ -2787,12 +2787,7 @@ pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
 /// otherwise, clamping `scroll_row` so the last document row stays in view.
 /// Returns whether `scroll_row` changed.
 pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) -> bool {
-    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
-
-    let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let max_row = buffer_snapshot.rope().max_point().row;
-    let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
+    let max_scroll = max_scroll_offset(editor) as u32;
 
     let new_scroll = if down {
         editor.scroll_row.saturating_add(count).min(max_scroll)
@@ -2804,6 +2799,42 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
     }
     editor.scroll_row = new_scroll;
     true
+}
+
+/// Largest top-row position that keeps the last document row in view, as a
+/// float so the integer scroll path and the momentum path clamp to one shared
+/// bound.
+fn max_scroll_offset(editor: &mut EditorState) -> f32 {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let max_row = buffer_snapshot.rope().max_point().row;
+    max_row.saturating_sub(viewport.saturating_sub(1)) as f32
+}
+
+/// Advance an inertial scroll by one frame, integrating `offset` by
+/// `velocity * dt` clamped to `[0, max_offset]`, then decaying `velocity` by
+/// friction.
+///
+/// Returns the new offset, the new velocity (zero once the glide has settled),
+/// and whether it settled. Settled is true when the decayed speed falls below
+/// the minimum or the offset reaches a bound, so the caller can stop ticking.
+#[allow(dead_code)]
+pub(crate) fn step_scroll_momentum(
+    offset: f32,
+    velocity: f32,
+    dt: f32,
+    max_offset: f32,
+) -> (f32, f32, bool) {
+    const FRICTION: f32 = 0.85;
+    const MIN_VEL: f32 = 0.1;
+
+    let next = (offset + velocity * dt).clamp(0.0, max_offset);
+    let at_bound = next <= 0.0 || next >= max_offset;
+    let velocity = velocity * FRICTION;
+    let settled = velocity.abs() < MIN_VEL || at_bound;
+
+    (next, if settled { 0.0 } else { velocity }, settled)
 }
 
 /// Collapse every selection to a single point at `offset`. Returns
@@ -3169,6 +3200,35 @@ mod tests {
             focused_head_row(&mut h),
             4,
             "cursor on the source line in a.rs"
+        );
+    }
+
+    #[test]
+    fn momentum_from_rest_advances_and_decays_to_settled_rest() {
+        let (mut offset, mut velocity) = (0.0_f32, 20.0_f32);
+        let mut last_speed = f32::INFINITY;
+        loop {
+            let (next, vel, settled) = step_scroll_momentum(offset, velocity, 0.05, 1000.0);
+            assert!(next > offset, "offset advances under positive velocity");
+            assert!(
+                vel.abs() < last_speed,
+                "velocity magnitude decays each step"
+            );
+            offset = next;
+            velocity = vel;
+            last_speed = vel.abs();
+            if settled {
+                break;
+            }
+        }
+        assert_eq!(velocity, 0.0, "settled state has zero velocity");
+    }
+
+    #[test]
+    fn momentum_into_bound_clamps_offset_and_settles() {
+        assert_eq!(
+            step_scroll_momentum(95.0, 50.0, 1.0, 100.0),
+            (100.0, 0.0, true)
         );
     }
 }
