@@ -28,7 +28,7 @@ use stoatty_render::{
     render,
 };
 use stoatty_term::{
-    grid::{Cell, Grid, Overlay},
+    grid::{Grid, Overlay},
     term::{Cursor, CursorShape, Damage, Terminal},
     theme::Theme,
 };
@@ -1021,16 +1021,20 @@ impl ApplicationHandler<PtyEvent> for App {
     }
 }
 
-/// Build the full-viewport `pool_grid` for a region composite: sized to
-/// `live_grid`, blank, with `document_grid`'s composed rows copied into the
-/// `region` sub-rectangle.
+/// Build the full-viewport `pool_grid` for a region composite, sized to
+/// `live_grid`, with `document_grid`'s composed rows copied into the `region`
+/// sub-rectangle.
 ///
 /// `document_grid` holds the pooled `region.height + 1` rows by `region.width`
-/// columns (one straddle row past the region) the term composed; they land at
+/// columns (one straddle row past the region, covering the sliver a sub-cell
+/// glide reveals at the bottom edge) the term composed; they land at
 /// (`region.top`, `region.left`). Cells of `document_grid` that would fall
 /// outside `pool_grid` are skipped, so a region declared past the viewport
-/// clips rather than panicking. The scissor the renderer applies clips the
-/// composite to the region, so the blank surround is never drawn.
+/// clips rather than panicking.
+///
+/// The scissor the renderer applies clips the composite to the region, so the
+/// surround outside it is never drawn and is left as it was rather than
+/// recleared each frame. Only a size change reblanks, via `Grid::resize`.
 fn copy_pool_region(
     pool_grid: &mut Grid,
     document_grid: &Grid,
@@ -1039,12 +1043,6 @@ fn copy_pool_region(
 ) {
     if pool_grid.rows() != live_grid.rows() || pool_grid.cols() != live_grid.cols() {
         pool_grid.resize(live_grid.rows(), live_grid.cols());
-    } else {
-        for row in 0..pool_grid.rows() {
-            for col in 0..pool_grid.cols() {
-                *pool_grid.get_mut(row, col) = Cell::default();
-            }
-        }
     }
 
     for r in 0..document_grid.rows() {
@@ -1435,14 +1433,14 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, cell_at, cursor_in_region, ease, ease_corners, encode_key,
-        font_step, popover_overflow, sgr_button_bytes, sgr_wheel_bytes, step_document_scroll,
-        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
-        sweep_launch_shift, wheel_lines, SCROLLBACK_MIN_STEP,
+        alternate_scroll_bytes, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners,
+        encode_key, font_step, popover_overflow, sgr_button_bytes, sgr_wheel_bytes,
+        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
+        step_scrollback_scroll, sweep_launch_shift, wheel_lines, SCROLLBACK_MIN_STEP,
     };
     use stoatty_protocol::command::PoolRegionCommand;
     use stoatty_term::{
-        grid::{Overlay, Rgb},
+        grid::{Grid, Overlay, Rgb},
         term::{Cursor, CursorShape},
     };
     use winit::{
@@ -1475,6 +1473,57 @@ mod tests {
         assert!(!at(2, 2), "a column left of the region is outside");
         assert!(!at(7, 2), "the right edge is exclusive");
         assert!(!at(3, 7), "the bottom edge is exclusive");
+    }
+
+    #[test]
+    fn copy_pool_region_fills_region_and_leaves_surround() {
+        let region = PoolRegionCommand {
+            pool: 0,
+            top: 1,
+            left: 1,
+            width: 2,
+            height: 2,
+        };
+
+        // The term composes region.height + 1 rows (one straddle row) by width.
+        let mut document = Grid::new(region.height as usize + 1, region.width as usize);
+        for r in 0..document.rows() {
+            for c in 0..document.cols() {
+                document.get_mut(r, c).ch = 'd';
+            }
+        }
+
+        let live = Grid::new(5, 5);
+
+        // A sentinel in every cell distinguishes copied cells from untouched ones.
+        let mut pool = Grid::new(5, 5);
+        for r in 0..pool.rows() {
+            for c in 0..pool.cols() {
+                pool.get_mut(r, c).ch = 's';
+            }
+        }
+
+        copy_pool_region(&mut pool, &document, &live, region);
+
+        for r in 1..4 {
+            for c in 1..3 {
+                assert_eq!(
+                    pool.get(r, c).ch,
+                    'd',
+                    "region cell ({r}, {c}) holds the document"
+                );
+            }
+        }
+        assert_eq!(
+            pool.get(0, 0).ch,
+            's',
+            "the surround is left untouched, not blanked"
+        );
+        assert_eq!(
+            pool.get(4, 4).ch,
+            's',
+            "the surround is left untouched, not blanked"
+        );
     }
 
     #[test]
