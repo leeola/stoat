@@ -67,6 +67,11 @@ pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
 /// inertial scroll one step per fire.
 const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(8);
 
+/// Upper bound on one scroll-animation step's `dt`. A render that runs long, or
+/// a glide resumed after an idle gap, advances by at most this much rather than
+/// a single large jump.
+const MAX_FRAME_DT: f32 = 0.1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateEffect {
     Redraw,
@@ -923,8 +928,20 @@ impl Stoat {
         render: watch::Sender<Option<RenderFrame>>,
     ) -> io::Result<()> {
         self.start_index_build();
+
+        // Frame clock for scroll-animation ticks. A single persistent interval,
+        // polled directly in the select! below, keeps the glide at frame rate.
+        // Re-creating an Executor::timer each iteration instead ran far below
+        // frame rate on the production current-thread runtime.
+        let mut frame_timer = tokio::time::interval(SCROLL_FRAME);
+        frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_tick: Option<std::time::Instant> = None;
+
         loop {
             let animating = self.is_animating();
+            if !animating {
+                last_tick = None;
+            }
             let first = tokio::select! {
                 biased;
                 event = events.recv() => {
@@ -944,9 +961,29 @@ impl Stoat {
                     self.handle_agent_control(ctl)
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
-                _ = self.executor.timer(SCROLL_FRAME), if animating => {
-                    self.tick_scroll_anim();
-                    UpdateEffect::Redraw
+                _ = frame_timer.tick(), if animating => {
+                    let now = std::time::Instant::now();
+                    let dt = last_tick
+                        .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
+                        .unwrap_or_else(|| SCROLL_FRAME.as_secs_f32());
+                    let effect = if self.tick_scroll_anim(dt) {
+                        // While the glide continues, push the eased scroll
+                        // target to stoatty's pool and skip the full live-grid
+                        // repaint. The pool composites the smooth position over
+                        // the live grid, which only needs repainting once the
+                        // glide settles, so a glide frame costs microseconds
+                        // rather than a full editor re-render.
+                        self.emit_smooth_scroll();
+                        UpdateEffect::None
+                    } else {
+                        UpdateEffect::Redraw
+                    };
+                    // Measure the next dt from here, after any synchronous page
+                    // refill inside emit_smooth_scroll. Otherwise a refill's
+                    // render time inflates the following step into a visible
+                    // multi-row jump instead of smooth motion.
+                    last_tick = Some(std::time::Instant::now());
+                    effect
                 }
             };
 
@@ -990,15 +1027,17 @@ impl Stoat {
             .any(|editor| editor.scroll_velocity != 0.0)
     }
 
-    /// Advance every animating editor's inertial scroll by one [`SCROLL_FRAME`].
+    /// Advance every animating editor's inertial scroll by `dt` seconds, the
+    /// real time elapsed since the previous tick. Returns whether any editor is
+    /// still gliding after the step.
     ///
     /// Steps each editor with a nonzero velocity through
     /// [`step_scroll_momentum`](action_handlers::movement::step_scroll_momentum),
     /// writes back the decayed velocity and new offset, and keeps `scroll_row`
     /// at `floor(scroll_offset)` so the integer-row render and pool paths track
     /// the glide.
-    fn tick_scroll_anim(&mut self) {
-        let dt = SCROLL_FRAME.as_secs_f32();
+    fn tick_scroll_anim(&mut self, dt: f32) -> bool {
+        let mut animating = false;
         for editor in self.active_workspace_mut().editors.values_mut() {
             if editor.scroll_velocity == 0.0 {
                 continue;
@@ -1013,7 +1052,9 @@ impl Stoat {
             editor.scroll_offset = offset;
             editor.scroll_velocity = velocity;
             editor.scroll_row = offset.floor() as u32;
+            animating |= velocity != 0.0;
         }
+        animating
     }
 
     /// Apply every message already queued on the input and notification
@@ -1616,7 +1657,11 @@ impl Stoat {
         };
         let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
         action_handlers::movement::wheel_impulse(editor, down);
-        UpdateEffect::Redraw
+        // No repaint here. The wheel only imparts velocity, and the frame tick
+        // drives the glide and its renders. A trackpad sends ~100 events per
+        // flick, so repainting per event would saturate the loop with full
+        // re-renders of an unscrolled view and starve the tick.
+        UpdateEffect::None
     }
 
     /// Routes left-button Down/Drag/Up events on a focused run pane into
@@ -3977,7 +4022,7 @@ mod tests {
             "seeded velocity makes the editor animate"
         );
 
-        h.stoat.tick_scroll_anim();
+        h.stoat.tick_scroll_anim(0.016);
         {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             assert!(
@@ -3995,7 +4040,7 @@ mod tests {
             if !h.stoat.is_animating() {
                 break;
             }
-            h.stoat.tick_scroll_anim();
+            h.stoat.tick_scroll_anim(0.016);
         }
         assert!(!h.stoat.is_animating(), "repeated ticks settle to rest");
         assert_eq!(

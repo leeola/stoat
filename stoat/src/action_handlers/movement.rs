@@ -2839,9 +2839,14 @@ pub(crate) fn max_scroll_offset(editor: &mut EditorState) -> f32 {
     max_row.saturating_sub(viewport.saturating_sub(1)) as f32
 }
 
-/// Advance an inertial scroll by one frame, integrating `offset` by
-/// `velocity * dt` clamped to `[0, max_offset]`, then decaying `velocity` by
-/// friction.
+/// Advance an inertial scroll by `dt` seconds, integrating `offset` by
+/// `velocity * dt` clamped to `[0, max_offset]`, then decaying `velocity`.
+///
+/// The decay is frame-rate-independent. `FRICTION` is the fraction of velocity
+/// kept per `NOMINAL_DT`, raised to `dt / NOMINAL_DT`, so a long frame decays
+/// proportionally more and a glide lasts the same wall-clock time however often
+/// it ticks. Decaying by a fixed amount per tick instead runs the glide in slow
+/// motion whenever the real frame interval overruns `NOMINAL_DT`.
 ///
 /// Returns the new offset, the new velocity (zero once the glide has settled),
 /// and whether it settled. Settled is true when the decayed speed falls below
@@ -2854,10 +2859,11 @@ pub(crate) fn step_scroll_momentum(
 ) -> (f32, f32, bool) {
     const FRICTION: f32 = 0.85;
     const MIN_VEL: f32 = 0.1;
+    const NOMINAL_DT: f32 = 0.008;
 
     let next = (offset + velocity * dt).clamp(0.0, max_offset);
     let at_bound = next <= 0.0 || next >= max_offset;
-    let velocity = velocity * FRICTION;
+    let velocity = velocity * FRICTION.powf(dt / NOMINAL_DT);
     let settled = velocity.abs() < MIN_VEL || at_bound;
 
     (next, if settled { 0.0 } else { velocity }, settled)
@@ -3255,6 +3261,17 @@ mod tests {
         assert_eq!(
             step_scroll_momentum(95.0, 50.0, 1.0, 100.0),
             (100.0, 0.0, true)
+        );
+    }
+
+    #[test]
+    fn momentum_decay_is_frame_rate_independent() {
+        let (_, one_step, _) = step_scroll_momentum(0.0, 100.0, 0.016, 1000.0);
+        let (_, half, _) = step_scroll_momentum(0.0, 100.0, 0.008, 1000.0);
+        let (_, two_steps, _) = step_scroll_momentum(0.0, half, 0.008, 1000.0);
+        assert!(
+            (one_step - two_steps).abs() < 0.01,
+            "one 16ms decay {one_step} should equal two 8ms decays {two_steps}"
         );
     }
 
