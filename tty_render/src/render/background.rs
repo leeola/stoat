@@ -257,6 +257,40 @@ impl BackgroundPass {
         }
     }
 
+    /// Upload the cursor block's corners and scroll offset, leaving the cell
+    /// instances a prior [`Self::prepare`] uploaded in place.
+    ///
+    /// Draws the cursor over content another pass already composited, where the
+    /// cell instances must not be rebuilt. `grid_scroll` shifts the cursor up by
+    /// that many rows to match the cell passes.
+    pub(crate) fn prepare_cursor(
+        &mut self,
+        queue: &Queue,
+        resolution: [f32; 2],
+        cursor: CursorState,
+        grid_scroll: f32,
+    ) {
+        let c = cursor.corners.unwrap_or([[0.0; 2]; 4]);
+        let globals = Globals {
+            resolution,
+            cell_size: [self.metrics.width, self.metrics.height],
+            cursor_corners_01: [c[0][0], c[0][1], c[1][0], c[1][1]],
+            cursor_corners_23: [c[2][0], c[2][1], c[3][0], c[3][1]],
+            scroll_y: grid_scroll * self.metrics.height,
+            pad: 0.0,
+            pad2: 0.0,
+            pad3: 0.0,
+            cursor_color: [
+                cursor.color.r as f32 / 255.0,
+                cursor.color.g as f32 / 255.0,
+                cursor.color.b as f32 / 255.0,
+                CURSOR_ALPHA,
+            ],
+        };
+        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        self.cursor_visible = cursor.corners.is_some();
+    }
+
     /// Record the background draw into `render_pass`.
     ///
     /// A no-op until [`Self::prepare`] has run with a non-empty grid.

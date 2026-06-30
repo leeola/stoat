@@ -308,6 +308,64 @@ impl Renderer {
         queue.submit([encoder.finish()]);
     }
 
+    /// Draw the cursor block over an already-composited `view`, clipped to
+    /// `scissor` when set.
+    ///
+    /// Loads `view` and draws only the cursor quad, so the block sits above the
+    /// pool composites [`Self::composite_pool`] painted over the cursor's cell.
+    /// `corners` is the eased block and `grid_scroll` matches the cell passes'
+    /// offset. `scissor` is the cursor's pool region in physical pixels, holding
+    /// the block to that surface as it sweeps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_cursor_over(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        view: &TextureView,
+        resolution: [f32; 2],
+        corners: Option<[[f32; 2]; 4]>,
+        grid_scroll: f32,
+        scissor: Option<[u32; 4]>,
+    ) {
+        self.background.prepare_cursor(
+            queue,
+            resolution,
+            CursorState {
+                corners,
+                color: self.cursor_color,
+            },
+            grid_scroll,
+        );
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("cursor over pools"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            if let Some(s) = scissor {
+                render_pass.set_scissor_rect(s[0], s[1], s[2], s[3]);
+            }
+            self.background.draw_cursor(&mut render_pass);
+        }
+
+        queue.submit([encoder.finish()]);
+    }
+
     fn set_size(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
@@ -553,6 +611,7 @@ impl GpuContext {
         live_grid: &Grid,
         frame: Frame<'_>,
         pools: &[PoolComposite<'_>],
+        cursor_scissor: Option<[u32; 4]>,
     ) {
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -571,8 +630,25 @@ impl GpuContext {
             format: Some(self.view_format),
             ..Default::default()
         });
-        self.renderer
-            .render_into(&self.device, &self.queue, &view, live_grid, frame);
+
+        let resolution = [self.config.width as f32, self.config.height as f32];
+        let cursor_corners = frame.cursor_corners;
+        let cursor_scroll = frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback;
+
+        // The pool composites paint over the cursor's cell, so the base draws
+        // without its cursor block and the block is drawn on top afterward. The
+        // ligature-break cell (`frame.cursor`) stays, keeping the live grid's
+        // glyph under a chrome cursor broken out of any ligature.
+        self.renderer.render_into(
+            &self.device,
+            &self.queue,
+            &view,
+            live_grid,
+            Frame {
+                cursor_corners: None,
+                ..frame
+            },
+        );
         for pool in pools {
             self.renderer.composite_pool(
                 &self.device,
@@ -581,6 +657,17 @@ impl GpuContext {
                 pool.grid,
                 pool.scissor,
                 pool.shift_rows,
+            );
+        }
+        if cursor_corners.is_some() {
+            self.renderer.draw_cursor_over(
+                &self.device,
+                &self.queue,
+                &view,
+                resolution,
+                cursor_corners,
+                cursor_scroll,
+                cursor_scissor,
             );
         }
         surface_frame.present();

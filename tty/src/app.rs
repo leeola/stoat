@@ -326,6 +326,10 @@ struct PoolAnim {
     /// The live eased offset, in document pages, easing toward the pool's
     /// app-declared target. Tracks an absolute position rather than decaying.
     scroll: f32,
+    /// The scroll target seen the previous frame, in document pages. A frame
+    /// that changed it scrolled the document, so the change feeds the cursor
+    /// sweep. Seeded to the creation target so a fresh pool does not sweep.
+    last_scroll_target: f32,
     /// The region's pooled rows composed at [`Self::scroll`], sized to the
     /// region plus one straddle row. Reused across frames.
     document_grid: Grid,
@@ -341,6 +345,7 @@ impl PoolAnim {
     fn new(scroll: f32) -> PoolAnim {
         PoolAnim {
             scroll,
+            last_scroll_target: scroll,
             document_grid: Grid::new(0, 0),
             pool_grid: Grid::new(0, 0),
         }
@@ -571,6 +576,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     display_offset,
                     active,
                     pool_easing,
+                    cursor_launch_shift,
                 ) = {
                     let mut terminal = state.terminal.lock();
                     let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
@@ -592,12 +598,36 @@ impl ApplicationHandler<PtyEvent> for App {
                     // `pool_easing` until the app fills its window.
                     let mut active: Vec<ActivePool> = Vec::new();
                     let mut pool_easing = false;
+                    let mut cursor_launch_shift: Option<f32> = None;
                     for pool in &pools {
                         let page_rows = (pool.region.height as f32).max(1.0);
                         let anim = state
                             .pool_anims
                             .entry(pool.id)
                             .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
+
+                        // A scrolling jump moves the cursor's document line while
+                        // its screen cell barely shifts, so the cursor would not
+                        // appear to travel. Launch its animation back along the
+                        // jump by the scrolled distance, clamped into the region,
+                        // so it sweeps to the destination as the pool glides under
+                        // it. Small motions stay below the threshold and do not
+                        // launch.
+                        let target_pages = pool.scroll_target.pages();
+                        let jump_rows = (target_pages - anim.last_scroll_target) * page_rows;
+                        anim.last_scroll_target = target_pages;
+                        if jump_rows.abs() >= CURSOR_SWEEP_MIN_ROWS
+                            && cursor_in_region(cursor, pool.region)
+                        {
+                            let top = pool.region.top as f32;
+                            let bottom = top + pool.region.height as f32;
+                            cursor_launch_shift = Some(sweep_launch_shift(
+                                jump_rows,
+                                cursor.row as f32,
+                                top,
+                                bottom,
+                            ));
+                        }
 
                         // A reposition jump re-anchors the offset to a local
                         // neighbour of the destination, so the ease lands softly
@@ -636,8 +666,19 @@ impl ApplicationHandler<PtyEvent> for App {
                         display_offset,
                         active,
                         pool_easing,
+                        cursor_launch_shift,
                     )
                 };
+
+                // Throw the cursor back along a scrolling jump so its ease sweeps
+                // it to the destination. Shifts both the block point and the warp
+                // corners so whichever animation the mode advances starts launched.
+                if let Some(shift) = cursor_launch_shift {
+                    state.cursor_anim[1] += shift;
+                    for corner in &mut state.cursor_corner_anim {
+                        corner[1] += shift;
+                    }
+                }
 
                 let overflows: Vec<Option<f32>> =
                     state.grid.overlays().iter().map(popover_overflow).collect();
@@ -831,6 +872,23 @@ impl ApplicationHandler<PtyEvent> for App {
                         cursor_position(cursor),
                     );
 
+                    // The pool composites paint over the cursor's cell, so the
+                    // cursor draws on top of them, clipped to the pool it sits in
+                    // (topmost when they stack) so its swept block does not bleed
+                    // past that pane.
+                    let cursor_scissor = active
+                        .iter()
+                        .rev()
+                        .find(|pool| cursor_in_region(cursor, pool.region))
+                        .map(|pool| {
+                            let region = pool.region;
+                            let x0 = (region.left as f32 * cw) as u32;
+                            let y0 = (region.top as f32 * ch) as u32;
+                            let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
+                            let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
+                            [x0, y0, x1 - x0, y1 - y0]
+                        });
+
                     // Force a full rebuild: composite_pool prepares the shared
                     // background/text instance buffers with each pool's cells, so
                     // the live grid must rebuild every frame rather than reuse those
@@ -851,6 +909,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             decoration_damage: &Damage::Full,
                         },
                         &composites,
+                        cursor_scissor,
                     );
                     state.pool_dirty = true;
                     cursor_easing
@@ -1030,6 +1089,28 @@ fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
     } else {
         Some([cursor.col as f32, cursor.row as f32])
     }
+}
+
+/// Whether the cursor cell falls within `region`.
+fn cursor_in_region(cursor: Cursor, region: PoolRegionCommand) -> bool {
+    let col = cursor.col;
+    let row = cursor.row;
+    col >= region.left as usize
+        && col < region.left as usize + region.width as usize
+        && row >= region.top as usize
+        && row < region.top as usize + region.height as usize
+}
+
+/// The vertical shift, in rows, that launches the cursor back along a scrolling
+/// jump so its ease sweeps it onto the destination cell at `target_y`.
+///
+/// `jump_rows` is how far the document scrolled, positive when the content
+/// scrolled up under a downward jump. The cursor launches that far back toward
+/// where its old line went -- up the screen for a downward jump -- clamped to
+/// the region `[top, bottom)` so the launch lands within the pane and the sweep
+/// stays on-screen however far the jump was.
+fn sweep_launch_shift(jump_rows: f32, target_y: f32, top: f32, bottom: f32) -> f32 {
+    (-jump_rows).clamp(top - target_y, bottom - target_y)
 }
 
 /// The four block corners [TL, TR, BL, BR] for a one-cell cursor block at
@@ -1343,6 +1424,11 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
 /// the target so the landing glide draws pooled content.
 const REPOSITION_LAND_PAGES: f32 = 1.0;
 
+/// Rows a scrolling jump must move the document before the cursor sweep fires,
+/// so single-line motion and small wheel nudges leave the cursor pinned while a
+/// real jump (a page, `G`, a multi-line motion) launches it.
+const CURSOR_SWEEP_MIN_ROWS: f32 = 2.0;
+
 /// Advance the document's eased smooth-scroll offset one frame toward `target`.
 ///
 /// `scroll` and `target` are app-declared absolute positions in document pages;
@@ -1373,17 +1459,58 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, cell_at, ease, ease_corners, encode_key, font_step,
-        popover_overflow, sgr_button_bytes, sgr_wheel_bytes, step_document_scroll,
+        alternate_scroll_bytes, cell_at, cursor_in_region, ease, ease_corners, encode_key,
+        font_step, popover_overflow, sgr_button_bytes, sgr_wheel_bytes, step_document_scroll,
         step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
-        wheel_lines, SCROLLBACK_MIN_STEP,
+        sweep_launch_shift, wheel_lines, SCROLLBACK_MIN_STEP,
     };
-    use stoatty_term::grid::{Overlay, Rgb};
+    use stoatty_protocol::command::PoolRegionCommand;
+    use stoatty_term::{
+        grid::{Overlay, Rgb},
+        term::{Cursor, CursorShape},
+    };
     use winit::{
         dpi::PhysicalPosition,
         event::MouseScrollDelta,
         keyboard::{Key, NamedKey},
     };
+
+    #[test]
+    fn cursor_in_region_uses_exclusive_far_edges() {
+        let region = PoolRegionCommand {
+            pool: 0,
+            top: 2,
+            left: 3,
+            width: 4,
+            height: 5,
+        };
+        let at = |col, row| {
+            cursor_in_region(
+                Cursor {
+                    row,
+                    col,
+                    shape: CursorShape::Block,
+                },
+                region,
+            )
+        };
+        assert!(at(3, 2), "near corner is inside");
+        assert!(at(6, 6), "far interior cell is inside");
+        assert!(!at(2, 2), "a column left of the region is outside");
+        assert!(!at(7, 2), "the right edge is exclusive");
+        assert!(!at(3, 7), "the bottom edge is exclusive");
+    }
+
+    #[test]
+    fn sweep_launch_shift_throws_back_and_clamps_to_pane() {
+        // A 50-row downward jump with the cursor resting on the bottom row of a
+        // 40-row pane launches it to the pane top, not 50 rows above it.
+        assert_eq!(sweep_launch_shift(50.0, 39.0, 0.0, 40.0), -39.0);
+        // An upward jump clamps to the bottom edge.
+        assert_eq!(sweep_launch_shift(-50.0, 1.0, 0.0, 40.0), 39.0);
+        // A jump shorter than the pane launches by its own distance.
+        assert_eq!(sweep_launch_shift(5.0, 20.0, 0.0, 40.0), -5.0);
+    }
 
     #[test]
     fn ease_steps_toward_then_settles() {
