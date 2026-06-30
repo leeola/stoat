@@ -135,6 +135,13 @@ pub struct TextPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    /// Plain-glyph instances of a pool grid being composited over the live
+    /// grid, built by [`Self::prepare_composite`] into a buffer separate from
+    /// [`Self::instances`] so a pool draw leaves the live grid's damage-tracked
+    /// rows intact.
+    composite_instances: Buffer,
+    composite_capacity: usize,
+    composite_count: u32,
     overlay_instances: Buffer,
     overlay_capacity: usize,
     overlay_count: u32,
@@ -156,6 +163,12 @@ pub struct TextPass {
     underline_instances: Buffer,
     underline_capacity: usize,
     underline_count: u32,
+    /// Underline instances of a composited pool grid, kept separate from
+    /// [`Self::underline_instances`] for the same reason as
+    /// [`Self::composite_instances`].
+    composite_underline_instances: Buffer,
+    composite_underline_capacity: usize,
+    composite_underline_count: u32,
     atlas: GlyphAtlas,
     font_system: FontSystem,
     /// The resolved primary shaping family: the first configured `font_family`
@@ -331,6 +344,11 @@ impl TextPass {
             "text instances",
             instance_bytes::<TextInstance>(INITIAL_CAPACITY),
         );
+        let composite_instances = alloc_instances(
+            device,
+            "composite text instances",
+            instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+        );
         let overlay_instances = alloc_instances(
             device,
             "overlay text instances",
@@ -351,6 +369,11 @@ impl TextPass {
             "underline instances",
             instance_bytes::<UnderlineInstance>(INITIAL_CAPACITY),
         );
+        let composite_underline_instances = alloc_instances(
+            device,
+            "composite underline instances",
+            instance_bytes::<UnderlineInstance>(INITIAL_CAPACITY),
+        );
 
         TextPass {
             pipeline,
@@ -366,6 +389,9 @@ impl TextPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            composite_instances,
+            composite_capacity: INITIAL_CAPACITY,
+            composite_count: 0,
             overlay_instances,
             overlay_capacity: INITIAL_CAPACITY,
             overlay_count: 0,
@@ -381,6 +407,9 @@ impl TextPass {
             underline_instances,
             underline_capacity: INITIAL_CAPACITY,
             underline_count: 0,
+            composite_underline_instances,
+            composite_underline_capacity: INITIAL_CAPACITY,
+            composite_underline_count: 0,
             atlas,
             font_system,
             family,
@@ -614,6 +643,116 @@ impl TextPass {
         // The bind group references only the atlas texture views, which are
         // recreated solely when an atlas grows. Reuse last frame's group unless
         // a grow this frame moved the views.
+        if self.atlas.texture_dims() != atlas_dims {
+            self.atlas_bind_group = create_atlas_bind_group(
+                device,
+                &self.atlas_layout,
+                &self.sampler,
+                self.atlas.mask_view(),
+                self.atlas.color_view(),
+            );
+        }
+    }
+
+    /// Shape, rasterize, and upload a pool grid's plain glyphs and underlines
+    /// for compositing over the live grid, into buffers separate from the live
+    /// ones.
+    ///
+    /// Routing a pool through [`Self::prepare`] would rebuild the live glyph and
+    /// underline buffers from the pool's cells, erasing the live grid's
+    /// damage-tracked rows. This builds into dedicated buffers
+    /// [`Self::draw_composite`] reads, leaving every live buffer and shaping
+    /// cache intact, so the next live frame still patches only its damaged rows.
+    ///
+    /// `shift_rows` shifts the grid up by that many rows. The pool grid changes
+    /// wholesale each frame, so every row is rebuilt with no per-row cache. The
+    /// pool is shaped fresh into local storage rather than through
+    /// [`Self::glyph_row_cache`], whose length and the sibling
+    /// `glyph_cache_cols`/`last_cursor_cell` drive the live frame's incremental
+    /// rebuild and so must not be disturbed.
+    ///
+    /// Pool glyphs rasterize into the shared atlas. A grow moves every UV, so
+    /// the atlas bind group the live draw also binds is recreated afterward.
+    /// Covers only plain glyphs and underlines, the two buffers [`Self::draw`]
+    /// reads.
+    pub fn prepare_composite(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        resolution: [f32; 2],
+        shift_rows: f32,
+    ) {
+        queue.write_buffer(
+            &self.globals,
+            0,
+            bytemuck::bytes_of(&TextGlobals {
+                resolution,
+                cell_size: [self.metrics.width, self.metrics.height],
+                scroll_y: shift_rows * self.metrics.height,
+                _pad: [0.0; 3],
+            }),
+        );
+
+        let underlines: Vec<UnderlineInstance> = (0..grid.rows())
+            .flat_map(|row| build_underline_row(grid, row, self.metrics))
+            .collect();
+        self.composite_underline_count = underlines.len() as u32;
+        if !underlines.is_empty() {
+            if underlines.len() > self.composite_underline_capacity {
+                self.composite_underline_capacity = underlines.len().next_power_of_two();
+                self.composite_underline_instances = alloc_instances(
+                    device,
+                    "composite underline instances",
+                    instance_bytes::<UnderlineInstance>(self.composite_underline_capacity),
+                );
+            }
+            queue.write_buffer(
+                &self.composite_underline_instances,
+                0,
+                bytemuck::cast_slice(&underlines),
+            );
+        }
+
+        // Shape every pool row fresh through the same per-row primitive
+        // rasterize_visible uses, but into a local vec, so glyph_row_cache and
+        // its sibling shaping state stay the live frame's. rasterize_row inserts
+        // each glyph into the shared atlas, so build_text_instances below reads
+        // final UVs once the atlas has reached its size for this pool.
+        let atlas_dims = self.atlas.texture_dims();
+        let pending = {
+            let primary_name = self.family.clone();
+            let primary = shape_family(&primary_name);
+            let primary_font = self.primary_font.clone();
+            let covers = |ch: char| {
+                primary_font
+                    .as_ref()
+                    .is_some_and(|font| font_covers(font, ch))
+            };
+            let shaping = RowShaping {
+                primary,
+                covers: &covers,
+                cursor_cell: None,
+            };
+
+            let mut pending = Vec::new();
+            for row in 0..grid.rows() {
+                pending.extend(self.rasterize_row(device, queue, grid, row, &shaping));
+            }
+            pending
+        };
+
+        let instances = self.build_text_instances(device, queue, &pending);
+        self.composite_count = instances.len() as u32;
+        upload_instances(
+            device,
+            queue,
+            &instances,
+            &mut self.composite_instances,
+            &mut self.composite_capacity,
+            "composite text instances",
+        );
+
         if self.atlas.texture_dims() != atlas_dims {
             self.atlas_bind_group = create_atlas_bind_group(
                 device,
@@ -860,6 +999,30 @@ impl TextPass {
             render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.underline_instances.slice(..));
             render_pass.draw(0..6, 0..self.underline_count);
+        }
+    }
+
+    /// Record a composited pool's glyph draw, then its underline draw, into
+    /// `render_pass`.
+    ///
+    /// A no-op until [`Self::prepare_composite`] has run. Reads the composite
+    /// buffers, so a pool draw leaves the live glyph and underline instances a
+    /// prior [`Self::prepare`] uploaded untouched. Binds the grid-scroll globals
+    /// [`Self::prepare_composite`] wrote, so the pool scrolls by its shift.
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>) {
+        if self.composite_count > 0 {
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.composite_instances.slice(..));
+            render_pass.draw(0..6, 0..self.composite_count);
+        }
+
+        if self.composite_underline_count > 0 {
+            render_pass.set_pipeline(&self.underline_pipeline);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.composite_underline_instances.slice(..));
+            render_pass.draw(0..6, 0..self.composite_underline_count);
         }
     }
 
