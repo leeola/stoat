@@ -917,7 +917,6 @@ impl Stoat {
         mut events: Receiver<Event>,
         render: watch::Sender<Option<RenderFrame>>,
     ) -> io::Result<()> {
-        let mut frame_buf = Buffer::empty(self.size);
         self.start_index_build();
         loop {
             let first = tokio::select! {
@@ -946,21 +945,13 @@ impl Stoat {
             match effect {
                 UpdateEffect::Redraw => {
                     self.drive_background();
-                    self.paint_into(&mut frame_buf);
+                    let buffer = {
+                        let mut b = Buffer::empty(self.size);
+                        self.paint_into(&mut b);
+                        Arc::new(b)
+                    };
                     let cursor = self.primary_cursor_screen_pos();
-                    render.send_modify(|slot| match slot {
-                        Some(rf) => {
-                            rf.buffer.area = frame_buf.area;
-                            rf.buffer.content.clone_from(&frame_buf.content);
-                            rf.cursor = cursor;
-                        },
-                        None => {
-                            *slot = Some(RenderFrame {
-                                buffer: frame_buf.clone(),
-                                cursor,
-                            })
-                        },
-                    });
+                    render.send_replace(Some(RenderFrame { buffer, cursor }));
                     self.emit_smooth_scroll();
                     if render.is_closed() {
                         break;

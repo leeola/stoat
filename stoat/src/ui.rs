@@ -15,7 +15,7 @@ use std::{
     backtrace::Backtrace,
     io::{self, Write},
     panic,
-    sync::Once,
+    sync::{Arc, Once},
     thread,
 };
 use tokio::sync::{
@@ -31,7 +31,7 @@ use tokio::sync::{
 /// otherwise it is `None` and the cursor stays hidden, with the editor
 /// painting its own cursor cell into `buffer`.
 pub struct RenderFrame {
-    pub buffer: Buffer,
+    pub buffer: Arc<Buffer>,
     pub cursor: Option<(u16, u16)>,
 }
 
