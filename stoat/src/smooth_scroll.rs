@@ -28,6 +28,7 @@
 use crate::{
     commit_list::CommitListState,
     completion::CompletionItem,
+    display_map::DisplaySnapshot,
     editor_state::EditorState,
     file_finder::FileFinder,
     help::Help,
@@ -35,7 +36,6 @@ use crate::{
         command_palette::paint_palette_rows,
         commits::paint_commit_rows,
         completion::paint_completion_rows,
-        editor::render_editor,
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
         review::render_review,
@@ -262,31 +262,85 @@ fn scroll_target(pool: u32, scroll_offset: f32, region_height: u16) -> ScrollCom
 }
 
 /// Render `region_height` document rows of `editor` starting at row
-/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
-/// page's self-contained VT byte stream.
+/// `page * region_height` into a self-contained VT byte stream.
 ///
-/// Drives the editor through the same [`render_editor`] path the live frame
-/// uses, so a pooled page matches what the editor would paint at that scroll
-/// position. The editor's `scroll_row` is saved and restored around the render,
-/// so this leaves the live scroll position unchanged; the render is unfocused so
-/// no cursor or selection is painted into the pooled page.
+/// Snapshots the editor's display once and delegates to
+/// [`render_page_from_snapshot`], leaving the live scroll position and every
+/// editor cache untouched. The page carries text and syntax highlights only. The
+/// cursor and selection belong to the focused live grid, not a pooled page.
 pub(crate) fn render_editor_page(
     editor: &mut EditorState,
     page: u64,
     fallback_style: Style,
-    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let snapshot = editor.display_map.snapshot();
+    let top_row = page
+        .saturating_mul(region_height as u64)
+        .min(u32::MAX as u64) as u32;
+    render_page_from_snapshot(
+        &snapshot,
+        top_row,
+        fallback_style,
+        region_width,
+        region_height,
+    )
+}
+
+/// Paint `region_height` document rows starting at display row `top_row` from an
+/// owned [`DisplaySnapshot`] into a self-contained VT byte stream.
+///
+/// Takes a snapshot rather than `&mut EditorState` so a page can render off the
+/// run-loop thread. A [`DisplaySnapshot`] is `Send` and carries everything the
+/// text needs, and the uncached [`DisplaySnapshot::highlighted_chunks`] keeps the
+/// render from touching the editor's shared endpoint cache.
+///
+/// Paints text and syntax highlights only -- the same cells the unfocused live
+/// grid paints for these rows, minus the cursor and selection a pooled page never
+/// carries. Rows past the document end stay blank, and the [`serialize_buffer`]
+/// bytes fully repaint the slot regardless of its prior contents.
+pub(crate) fn render_page_from_snapshot(
+    snapshot: &DisplaySnapshot,
+    top_row: u32,
+    fallback_style: Style,
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
     let mut buf = Buffer::empty(area);
 
-    let saved_scroll = editor.scroll_row;
-    editor.scroll_row = page
-        .saturating_mul(region_height as u64)
-        .min(u32::MAX as u64) as u32;
-    render_editor(editor, area, fallback_style, theme, &mut buf, false);
-    editor.scroll_row = saved_scroll;
+    let end_row = top_row
+        .saturating_add(region_height as u32)
+        .min(snapshot.line_count());
+    if end_row > top_row {
+        let right = area.x + area.width;
+        let bottom = area.y + area.height;
+        let mut x = area.x;
+        let mut y = area.y;
+        'chunks: for chunk in snapshot.highlighted_chunks(top_row..end_row) {
+            let style = chunk
+                .highlight_style
+                .as_ref()
+                .map(|hs| hs.to_ratatui_style())
+                .unwrap_or(fallback_style);
+            for ch in chunk.text.chars() {
+                if ch == '\n' {
+                    y += 1;
+                    x = area.x;
+                    if y >= bottom {
+                        break 'chunks;
+                    }
+                    continue;
+                }
+                if x >= right {
+                    continue;
+                }
+                buf[(x, y)].set_char(ch).set_style(style);
+                x += 1;
+            }
+        }
+    }
 
     serialize_buffer(&buf)
 }
@@ -516,6 +570,53 @@ mod tests {
     use stoatty_protocol::command::{
         decode, Command, PoolDropCommand, PoolRegionCommand, RepositionCommand, ScrollCommand,
     };
+
+    /// `render_page_from_snapshot` must paint the same bytes as the existing pool
+    /// path, an unfocused `render_editor` over the same rows. Covers the first
+    /// page, a mid page, the partial last page, and a page past the document end,
+    /// exercising the page offset and the bottom/right clipping.
+    #[test]
+    fn page_from_snapshot_matches_unfocused_render_editor() {
+        use super::{render_page_from_snapshot, serialize_buffer, Buffer, Rect};
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::render_editor,
+            theme::{scope, Theme},
+            Stoat,
+        };
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-snapshot");
+        let path = root.join("doc.txt");
+        h.fake_fs().insert_file(
+            &path,
+            b"line zero\nline one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\n",
+        );
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = Theme::empty();
+        let fallback = theme.get(scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+
+        for top_row in [0u32, 4, 8, 40] {
+            let area = Rect::new(0, 0, 12, 4);
+            let mut expected = Buffer::empty(area);
+            let saved = editor.scroll_row;
+            editor.scroll_row = top_row;
+            render_editor(editor, area, fallback, &theme, &mut expected, false);
+            editor.scroll_row = saved;
+            let expected = serialize_buffer(&expected);
+
+            let snapshot = editor.display_map.snapshot();
+            let got = render_page_from_snapshot(&snapshot, top_row, fallback, 12, 4);
+
+            assert_eq!(got, expected, "page at top_row {top_row}");
+        }
+    }
 
     fn region(pool: u32, height: u16) -> PoolRegionCommand {
         PoolRegionCommand {

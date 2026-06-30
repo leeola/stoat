@@ -3285,7 +3285,6 @@ impl Stoat {
                             editor,
                             page,
                             fallback_style,
-                            theme,
                             region.width,
                             region.height,
                         )
