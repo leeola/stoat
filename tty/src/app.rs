@@ -306,12 +306,6 @@ struct State {
     /// ascending-id z-order. An entry is created when a pool first appears and
     /// dropped when the app retires it.
     pool_anims: BTreeMap<u32, PoolAnim>,
-    /// Whether the previous frame composited the document pool, leaving the
-    /// shared background and text instance buffers holding its cells. The next
-    /// live-grid render rebuilds fully rather than reuse them, so the rows the
-    /// pool did not cover (the static chrome) are not painted with its blanks.
-    /// Cleared by that rebuild.
-    pool_dirty: bool,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -472,7 +466,6 @@ impl ApplicationHandler<PtyEvent> for App {
             region_scroll: 0.0,
             last_region_offset: 0.0,
             pool_anims: BTreeMap::new(),
-            pool_dirty: false,
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
         });
@@ -782,18 +775,6 @@ impl ApplicationHandler<PtyEvent> for App {
                             // At the live bottom: render the projected live grid
                             // (cursor and decorations), cursor easing as usual.
                             state.last_scrollback_offset = None;
-                            // A pool composite on the previous frame left the shared
-                            // instance buffers holding its cells, so rebuild the
-                            // whole live grid once -- otherwise the rows no pool
-                            // covered (the static chrome) reuse its blank cells and
-                            // render black.
-                            let full = Damage::Full;
-                            let (live_damage, live_decoration_damage) = if state.pool_dirty {
-                                state.pool_dirty = false;
-                                (&full, &full)
-                            } else {
-                                (&damage, &decoration_damage)
-                            };
                             let (cursor, cursor_corners, easing) = step_cursor(
                                 state.cursor_animation,
                                 &mut state.cursor_anim,
@@ -812,8 +793,8 @@ impl ApplicationHandler<PtyEvent> for App {
                                         region: state.region_scroll,
                                         popovers: &state.popover_scrolls,
                                     },
-                                    damage: live_damage,
-                                    decoration_damage: live_decoration_damage,
+                                    damage: &damage,
+                                    decoration_damage: &decoration_damage,
                                 },
                             );
                             easing
@@ -889,10 +870,6 @@ impl ApplicationHandler<PtyEvent> for App {
                             [x0, y0, x1 - x0, y1 - y0]
                         });
 
-                    // Force a full rebuild: composite_pool prepares the shared
-                    // background/text instance buffers with each pool's cells, so
-                    // the live grid must rebuild every frame rather than reuse those
-                    // polluted instances and paint a pool over the chrome.
                     state.gpu.render_with_pools(
                         &state.grid,
                         Frame {
@@ -905,13 +882,12 @@ impl ApplicationHandler<PtyEvent> for App {
                                 region: state.region_scroll,
                                 popovers: &state.popover_scrolls,
                             },
-                            damage: &Damage::Full,
-                            decoration_damage: &Damage::Full,
+                            damage: &damage,
+                            decoration_damage: &decoration_damage,
                         },
                         &composites,
                         cursor_scissor,
                     );
-                    state.pool_dirty = true;
                     cursor_easing
                 };
 

@@ -23,10 +23,7 @@ use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::thread;
-use stoatty_term::{
-    grid::{Grid, Rgb},
-    term::Damage,
-};
+use stoatty_term::grid::{Grid, Rgb};
 use wgpu::{
     Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
     DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations, PowerPreference,
@@ -251,34 +248,10 @@ impl Renderer {
         shift_rows: f32,
     ) {
         let resolution = [self.width as f32, self.height as f32];
-        self.background.prepare(
-            device,
-            queue,
-            pool_grid,
-            resolution,
-            CursorState {
-                corners: None,
-                color: self.cursor_color,
-            },
-            shift_rows,
-            &Damage::Full,
-        );
-
-        let frame = Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: shift_rows,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Full,
-        };
+        self.background
+            .prepare_composite(device, queue, pool_grid, resolution, shift_rows);
         self.text
-            .prepare(device, queue, pool_grid, resolution, &frame);
+            .prepare_composite(device, queue, pool_grid, resolution, shift_rows);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
 
@@ -301,8 +274,8 @@ impl Renderer {
             });
 
             render_pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
-            self.background.draw(&mut render_pass);
-            self.text.draw(&mut render_pass);
+            self.background.draw_composite(&mut render_pass);
+            self.text.draw_composite(&mut render_pass);
         }
 
         queue.submit([encoder.finish()]);
