@@ -42,6 +42,13 @@ pub(crate) struct EditorState {
     /// Inertial scroll velocity in rows per second. Nonzero only while a wheel
     /// flick is coasting. The momentum step decays it to zero at rest.
     pub(crate) scroll_velocity: f32,
+    /// Set when a mouse-wheel scroll moves the view off the cursor, consumed by
+    /// the next key. The post-key view-follow re-couples the view to the cursor
+    /// while this is set, so a wheel scroll that stranded the cursor snaps back
+    /// on the next key even if that key is a clamped no-op. A keyboard scroll
+    /// (`z j`/`z k`) leaves this `false`, so it moves the view without the next
+    /// key snapping it back. Transient, not persisted.
+    pub(crate) scroll_decoupled: bool,
     /// Last-rendered viewport height in rows. Page-motion handlers read
     /// this to compute scroll distance without taking a dependency on
     /// the render pipeline's layout `Rect`. `None` until the editor has
@@ -116,6 +123,7 @@ impl EditorState {
             scroll_row: 0,
             scroll_offset: 0.0,
             scroll_velocity: 0.0,
+            scroll_decoupled: false,
             viewport_rows: None,
             review_view: None,
             selections: SelectionsCollection::new(),
@@ -142,6 +150,7 @@ impl EditorState {
             scroll_row: 0,
             scroll_offset: 0.0,
             scroll_velocity: 0.0,
+            scroll_decoupled: false,
             viewport_rows: None,
             review_view: None,
             selections: SelectionsCollection::new(),

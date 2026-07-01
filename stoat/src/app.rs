@@ -1398,12 +1398,28 @@ impl Stoat {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let before = self.focused_cursor_pos();
                 let effect = self.handle_key(key);
-                if self.focused_cursor_pos() != before
-                    && let Some(editor) = action_handlers::focused_editor_mut(self)
-                {
-                    action_handlers::movement::ensure_cursor_in_view(editor);
+                let cursor_moved = self.focused_cursor_pos() != before;
+
+                // Re-follow the cursor when the key moved it (the normal
+                // view-follow) or when a mouse-wheel scroll had decoupled the
+                // view. The decoupled case snaps a stranded view back to the
+                // cursor even on a clamped no-op key. The wheel flag is consumed
+                // either way. A keyboard scroll (z j / z k) never sets it, so
+                // the view it deliberately moved stays put.
+                let scrolled = match action_handlers::focused_editor_mut(self) {
+                    Some(editor) => {
+                        let decoupled = std::mem::take(&mut editor.scroll_decoupled);
+                        (cursor_moved || decoupled)
+                            && action_handlers::movement::ensure_cursor_in_view(editor)
+                    },
+                    None => false,
+                };
+
+                if scrolled {
+                    effect.merge(UpdateEffect::Redraw)
+                } else {
+                    effect
                 }
-                effect
             },
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => UpdateEffect::None,
@@ -2576,10 +2592,8 @@ impl Stoat {
     /// The focused document editor's buffer and primary cursor offset, or `None`
     /// when no document editor has focus.
     ///
-    /// Gates the post-key view-follow. Comparing this before and after a key
-    /// fires [`action_handlers::movement::ensure_cursor_in_view`] only when the
-    /// key actually moved the cursor, exempting pure view-scroll and modal input
-    /// without an action denylist.
+    /// Sampled before and after a key so the post-key view-follow can tell when
+    /// the key moved the cursor and the view must follow it.
     fn focused_cursor_pos(&mut self) -> Option<(BufferId, usize)> {
         let editor = action_handlers::focused_editor_mut(self)?;
         let snapshot = editor.display_map.snapshot();

@@ -2817,6 +2817,9 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
 /// row out from under the fraction, so the glide starts from the visible
 /// position. Never touches the cursor or `scroll_row`, so a coast never drags
 /// the selection.
+///
+/// Marks the view [`EditorState::scroll_decoupled`], so the next key re-couples
+/// the view to the cursor even when the wheel scrolled the cursor off screen.
 pub(crate) fn wheel_impulse(editor: &mut EditorState, down: bool) {
     const IMPULSE: f32 = 60.0;
     const MAX_VEL: f32 = 240.0;
@@ -2826,6 +2829,7 @@ pub(crate) fn wheel_impulse(editor: &mut EditorState, down: bool) {
     }
     let delta = if down { IMPULSE } else { -IMPULSE };
     editor.scroll_velocity = (editor.scroll_velocity + delta).clamp(-MAX_VEL, MAX_VEL);
+    editor.scroll_decoupled = true;
 }
 
 /// Largest top-row position that keeps the last document row in view, as a
@@ -2942,16 +2946,23 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Scroll the viewport the minimum amount to keep the primary cursor visible.
+/// Scroll the viewport the minimum amount to keep the primary cursor visible,
+/// returning whether the view actually moved.
 ///
-/// This is the central view-follow step run after every cursor-moving key, so a
-/// `50j` or `G` whose target leaves the viewport pulls the view along instead of
-/// dropping the cursor off screen.
+/// The central view-follow step. The key loop runs it after a key moves the
+/// cursor, so a `50j` or `G` whose target leaves the viewport pulls the view
+/// along instead of dropping the cursor off screen, and also to re-couple a view
+/// a mouse-wheel scroll stranded. The clamp self-gates to a no-op when the
+/// cursor is already visible.
+///
+/// The returned bool lets the caller force a repaint when a wheel-stranded view
+/// re-couples on a key that left the cursor put, which a cursor-position gate
+/// would miss.
 ///
 /// `scroll_row` is a display row, so the cursor is resolved through the display
 /// map (folds and soft-wraps included) rather than its buffer row. The scrolloff
 /// is zero, so the view moves only when the cursor would fall outside it.
-pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState) {
+pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState) -> bool {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
 
     let snapshot = editor.display_map.snapshot();
@@ -2963,11 +2974,13 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState) {
         .buffer_to_display(rope.offset_to_point(head_offset))
         .row;
 
+    let before = editor.scroll_row;
     if cursor_row < editor.scroll_row {
         editor.scroll_row = cursor_row;
     } else if cursor_row > editor.scroll_row + viewport - 1 {
         editor.scroll_row = cursor_row.saturating_sub(viewport - 1);
     }
+    editor.scroll_row != before
 }
 
 pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -> UpdateEffect {
@@ -3104,7 +3117,10 @@ mod tests {
 
         set_cursor_row(editor, 50);
         editor.scroll_row = 0;
-        ensure_cursor_in_view(editor);
+        assert!(
+            ensure_cursor_in_view(editor),
+            "a below-viewport cursor scrolls the view",
+        );
         assert_eq!(
             editor.scroll_row, 41,
             "a below-viewport cursor pulls the view down to it",
@@ -3112,7 +3128,10 @@ mod tests {
 
         set_cursor_row(editor, 45);
         editor.scroll_row = 41;
-        ensure_cursor_in_view(editor);
+        assert!(
+            !ensure_cursor_in_view(editor),
+            "an already-visible cursor does not scroll",
+        );
         assert_eq!(
             editor.scroll_row, 41,
             "an already-visible cursor leaves the view put",
@@ -3120,10 +3139,42 @@ mod tests {
 
         set_cursor_row(editor, 8);
         editor.scroll_row = 41;
-        ensure_cursor_in_view(editor);
+        assert!(
+            ensure_cursor_in_view(editor),
+            "an above-viewport cursor scrolls the view",
+        );
         assert_eq!(
             editor.scroll_row, 8,
             "an above-viewport cursor pulls the view up to it",
+        );
+    }
+
+    #[test]
+    fn wheel_stranded_view_refollows_on_clamped_key() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            // Simulate a settled mouse-wheel scroll. The view moved down and is
+            // marked decoupled, stranding the row-0 cursor off screen above it.
+            editor.scroll_row = 40;
+            wheel_impulse(editor, true);
+        }
+
+        // The cursor is on row 0, off-screen above the stranded view, so `k` is
+        // a clamped no-op that never moves it -- the view must re-follow anyway.
+        h.type_keys("k");
+
+        assert_eq!(
+            focused_editor_mut(&mut h.stoat)
+                .expect("focused editor")
+                .scroll_row,
+            0,
+            "a clamped no-op key re-couples a wheel-stranded view to the cursor",
         );
     }
 
