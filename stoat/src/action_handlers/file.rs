@@ -58,7 +58,7 @@ fn save_buffer_inner(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     }
     {
         let mut guard = buffer.write().expect("buffer poisoned");
-        guard.dirty = false;
+        guard.mark_clean();
     }
     if let Some(mtime) = stoat
         .fs_host

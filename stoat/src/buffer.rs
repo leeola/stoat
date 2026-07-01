@@ -11,6 +11,12 @@ use stoat_text::{
 pub struct TextBuffer {
     pub snapshot: TextBufferSnapshot,
     pub dirty: bool,
+    /// Edit-frontier timestamp (the `edit_history` top) captured at the last
+    /// clean point, whether a save or the seeded/pristine baseline. `None` is
+    /// the pristine empty state. [`Self::dirty`] caches
+    /// `edit_history.last() != saved_marker`, so undo/redo back to this
+    /// frontier reads as clean again while moving off it reads as modified.
+    saved_marker: Option<u64>,
     pub diff_map: Option<DiffMap>,
     next_timestamp: u64,
     buffer_id: BufferId,
@@ -43,12 +49,18 @@ pub enum BufferOp {
     Redo,
 }
 
-/// Serializable buffer state: the op log plus the `dirty` flag. Replay via
-/// [`TextBuffer::from_history`].
+/// Serializable buffer state for persistence. Holds the op log plus the
+/// last-clean edit frontier, replayed via [`TextBuffer::from_history`].
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BufferHistory {
     pub ops: Vec<BufferOp>,
-    pub dirty: bool,
+    /// Persisted [`TextBuffer::saved_marker`], the last-clean edit frontier.
+    /// Deterministic replay reassigns identical timestamps, so it identifies
+    /// the same frontier on restore. `#[serde(default)]` reads an older state
+    /// file (which stored a `dirty` bool) as `None`, so a clean buffer restores
+    /// dirty once and self-heals on the next save.
+    #[serde(default)]
+    pub saved_marker: Option<u64>,
 }
 
 /// Stable identifier for a [`Checkpoint`] within a single [`TextBuffer`].
@@ -106,6 +118,7 @@ impl TextBuffer {
                 buffer_id,
             },
             dirty: false,
+            saved_marker: None,
             diff_map: None,
             next_timestamp: 1,
             buffer_id,
@@ -121,7 +134,7 @@ impl TextBuffer {
         let mut buf = Self::new(buffer_id);
         if !text.is_empty() {
             buf.edit(0..0, text);
-            buf.dirty = false;
+            buf.mark_clean();
         }
         buf
     }
@@ -362,12 +375,25 @@ impl TextBuffer {
         self.edit_history.push(timestamp);
     }
 
+    /// Record the current edit frontier as the clean baseline, marking the
+    /// buffer unmodified. Call at every clean point (save, seeded content) so a
+    /// later undo/redo back to this frontier clears [`Self::dirty`] again.
+    pub(crate) fn mark_clean(&mut self) {
+        self.saved_marker = self.edit_history.last().copied();
+        self.dirty = false;
+    }
+
+    fn recompute_dirty(&mut self) {
+        self.dirty = self.edit_history.last().copied() != self.saved_marker;
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(edit_timestamp) = self.edit_history.pop() else {
             return false;
         };
         self.apply_undo_toggle(edit_timestamp, BufferOp::Undo);
         self.redo_history.push(edit_timestamp);
+        self.recompute_dirty();
         true
     }
 
@@ -377,6 +403,7 @@ impl TextBuffer {
         };
         self.apply_undo_toggle(edit_timestamp, BufferOp::Redo);
         self.edit_history.push(edit_timestamp);
+        self.recompute_dirty();
         true
     }
 
@@ -490,12 +517,13 @@ impl TextBuffer {
         self.buffer_id
     }
 
-    /// Snapshot the op log and dirty flag for persistence. Replay the result
-    /// with [`Self::from_history`] to reconstruct an identical buffer.
+    /// Snapshot the op log and clean-frontier marker for persistence. Replay
+    /// the result with [`Self::from_history`] to reconstruct an identical
+    /// buffer.
     pub fn history(&self) -> BufferHistory {
         BufferHistory {
             ops: self.ops.clone(),
-            dirty: self.dirty,
+            saved_marker: self.saved_marker,
         }
     }
 
@@ -515,7 +543,8 @@ impl TextBuffer {
                 },
             }
         }
-        buf.dirty = history.dirty;
+        buf.saved_marker = history.saved_marker;
+        buf.recompute_dirty();
         buf
     }
 }
@@ -1093,6 +1122,44 @@ mod tests {
         assert_eq!(b.snapshot.visible_text.to_string(), "aX");
         assert!(!b.redo(), "redo stack cleared by new edit");
         assert_eq!(b.snapshot.visible_text.to_string(), "aX");
+    }
+
+    #[test]
+    fn undo_back_to_saved_clears_dirty() {
+        let mut b = buf("hello");
+        assert!(!b.dirty);
+        b.edit(5..5, " world");
+        assert!(b.dirty);
+        b.undo();
+        assert!(!b.dirty, "undo back to saved content clears dirty");
+        b.redo();
+        assert!(b.dirty, "redo away from saved content sets dirty");
+    }
+
+    #[test]
+    fn undo_to_pristine_empty_clears_dirty() {
+        let mut b = TextBuffer::new(BufferId::new(0));
+        b.edit(0..0, "x");
+        assert!(b.dirty);
+        b.undo();
+        assert!(
+            !b.dirty,
+            "undo back to the pristine empty state clears dirty"
+        );
+    }
+
+    #[test]
+    fn mark_clean_rebaselines_dirty() {
+        let mut b = buf("a");
+        b.edit(1..1, "b");
+        b.mark_clean();
+        assert!(!b.dirty);
+        b.edit(2..2, "c");
+        assert!(b.dirty);
+        b.undo();
+        assert!(!b.dirty, "undo to the marked frontier is clean");
+        b.undo();
+        assert!(b.dirty, "undo past the marked frontier is dirty");
     }
 
     #[test]

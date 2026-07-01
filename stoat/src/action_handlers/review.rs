@@ -1069,7 +1069,7 @@ pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSessi
     {
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.edit(0..0, &placeholder);
-        guard.dirty = false;
+        guard.mark_clean();
     }
 
     let mut editor = EditorState::new(buffer_id, buffer, executor);
