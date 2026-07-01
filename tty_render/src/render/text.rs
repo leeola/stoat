@@ -142,6 +142,11 @@ pub struct TextPass {
     composite_instances: Buffer,
     composite_capacity: usize,
     composite_count: u32,
+    /// The atlas content-epoch [`Self::composite_instances`] was built against.
+    /// A shift-only composite reuses those instances only while the atlas still
+    /// matches this. A grow or eviction since means their UVs moved, so the pool
+    /// must be reshaped even though its grid content held steady.
+    composite_epoch: u64,
     overlay_instances: Buffer,
     overlay_capacity: usize,
     overlay_count: u32,
@@ -392,6 +397,7 @@ impl TextPass {
             composite_instances,
             composite_capacity: INITIAL_CAPACITY,
             composite_count: 0,
+            composite_epoch: 0,
             overlay_instances,
             overlay_capacity: INITIAL_CAPACITY,
             overlay_count: 0,
@@ -682,6 +688,7 @@ impl TextPass {
         grid: &Grid,
         resolution: [f32; 2],
         shift_rows: f32,
+        content_changed: bool,
     ) {
         queue.write_buffer(
             &self.globals,
@@ -693,6 +700,14 @@ impl TextPass {
                 _pad: [0.0; 3],
             }),
         );
+
+        // During a pure sub-cell glide the composed rows are identical and only
+        // the shift moved, which the globals write above already carried. Reuse
+        // the instances built for these rows on an earlier frame, unless the
+        // atlas has since relocated their UVs.
+        if !content_changed && self.atlas.content_epoch() == self.composite_epoch {
+            return;
+        }
 
         let underlines: Vec<UnderlineInstance> = (0..grid.rows())
             .flat_map(|row| build_underline_row(grid, row, self.metrics))
@@ -762,6 +777,10 @@ impl TextPass {
                 self.atlas.color_view(),
             );
         }
+
+        // Record the atlas state these instances resolved against, so a later
+        // shift-only frame can tell whether their UVs still hold.
+        self.composite_epoch = self.atlas.content_epoch();
     }
 
     /// Build the glyph instances for `pending`, reading each glyph's final atlas

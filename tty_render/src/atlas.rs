@@ -164,6 +164,17 @@ impl GlyphAtlas {
     pub fn texture_dims(&self) -> (u32, u32) {
         (self.mask.size, self.color.size)
     }
+
+    /// A generation counter that changes whenever any packed glyph's UV moves,
+    /// across both the mask and color atlases.
+    ///
+    /// A grow or an eviction in either atlas bumps it. A caller that cached
+    /// glyph instances against an earlier frame's atlas may reuse them only
+    /// while this is unchanged. A difference means some UV moved, so the cached
+    /// instances now point at the wrong pixels and must be rebuilt.
+    pub fn content_epoch(&self) -> u64 {
+        self.mask.epoch.wrapping_add(self.color.epoch)
+    }
 }
 
 struct Atlas {
@@ -175,6 +186,11 @@ struct Atlas {
     max_dim: u32,
     cache: LruCache<CacheId, CachedGlyph, FxBuildHasher>,
     in_use: HashSet<CacheId, FxBuildHasher>,
+    /// Bumped whenever a packed glyph's UV changes: a grow rescales every
+    /// normalized coordinate, and an eviction frees a slot another glyph then
+    /// reuses. A caller reusing glyph instances across frames compares it to
+    /// tell whether the UVs it cached still point at the right pixels.
+    epoch: u64,
 }
 
 impl Atlas {
@@ -192,6 +208,7 @@ impl Atlas {
             max_dim,
             cache: LruCache::unbounded_with_hasher(FxBuildHasher),
             in_use: HashSet::default(),
+            epoch: 0,
         }
     }
 
@@ -352,6 +369,7 @@ impl Atlas {
             let (_, evicted) = self.cache.pop_lru().expect("peeked entry is present");
             self.packer
                 .deallocate(evicted.alloc.expect("sized glyph has an allocation"));
+            self.epoch = self.epoch.wrapping_add(1);
         }
     }
 
@@ -393,6 +411,7 @@ impl Atlas {
 
         self.view = self.texture.create_view(&TextureViewDescriptor::default());
         self.size = new_size;
+        self.epoch = self.epoch.wrapping_add(1);
         true
     }
 }

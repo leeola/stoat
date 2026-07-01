@@ -105,7 +105,7 @@ fn cursor_draws_over_pool_and_obeys_its_scissor() {
             decoration_damage: &no_decoration,
         };
         renderer.render_into(&device, &queue, &view, &base, plain);
-        renderer.composite_pool(&device, &queue, &view, &pool, full, 0.0);
+        renderer.composite_pool(&device, &queue, &view, &pool, full, 0.0, true);
         renderer.draw_cursor_over(&device, &queue, &view, resolution, cursor, 0.0, scissor);
         read_back(&device, &queue, &target, width, height)
     };

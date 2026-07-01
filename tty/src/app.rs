@@ -338,6 +338,21 @@ struct PoolAnim {
     /// rows copied into the declared sub-rectangle, the rest blank since the
     /// scissor clips the composite to that rectangle over the live grid.
     pool_grid: Grid,
+    /// The integer document top row [`Self::document_grid`] was last composed
+    /// at. With [`Self::last_version`] and [`Self::last_region_dims`] unchanged,
+    /// the composed rows are identical this frame and only the sub-cell fraction
+    /// moved, so the recompose is skipped. `None` until the first composed frame.
+    last_top: Option<i64>,
+    /// The pool content-version the grids were last composed at, so a fill that
+    /// committed since forces a recompose even when the top row held steady.
+    last_version: Option<u64>,
+    /// The region dimensions (width, height) last composed at, so a resize that
+    /// reshapes the grids forces a recompose.
+    last_region_dims: Option<(u16, u16)>,
+    /// Whether the last composed window was buffered. A skip frame reuses this
+    /// verdict rather than re-testing, so an unbuffered pool stays degraded to
+    /// the live grid without recomposing.
+    last_buffered: bool,
 }
 
 impl PoolAnim {
@@ -350,6 +365,10 @@ impl PoolAnim {
             frames_since_target_change: HANDOFF_STABLE_FRAMES,
             document_grid: Grid::new(0, 0),
             pool_grid: Grid::new(0, 0),
+            last_top: None,
+            last_version: None,
+            last_region_dims: None,
+            last_buffered: false,
         }
     }
 }
@@ -360,6 +379,11 @@ struct ActivePool {
     id: u32,
     region: PoolRegionCommand,
     frac: f32,
+    /// Whether the pool's composed rows changed since the previous frame. When
+    /// `false` the glide only advanced the sub-cell fraction, so the copy into
+    /// the pool grid and the composite's instance rebuild are both skipped and
+    /// only the shift is re-applied.
+    content_changed: bool,
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -656,13 +680,42 @@ impl ApplicationHandler<PtyEvent> for App {
                             continue;
                         }
                         pool_easing = true;
-                        if let Some((frac, _)) =
-                            terminal.project_pool(pool.id, &mut anim.document_grid, scroll)
-                        {
+
+                        // The composed rows depend only on the integer top
+                        // document row, the pooled page bytes, and the region
+                        // size. While all three hold, the glide has advanced only
+                        // the sub-cell fraction, so the recompose here and the
+                        // copy downstream are skipped and last frame's grids and
+                        // buffered verdict are reused. `top` and `frac` mirror the
+                        // arithmetic `project_pool` runs before it composes.
+                        let doc_rows = scroll * page_rows;
+                        let top = doc_rows.floor() as i64;
+                        let frac = doc_rows - top as f32;
+                        let version = terminal.pool_content_version(pool.id);
+                        let region_dims = (pool.region.width, pool.region.height);
+                        let content_changed = anim.last_top != Some(top)
+                            || anim.last_version != version
+                            || anim.last_region_dims != Some(region_dims);
+
+                        let buffered = if content_changed {
+                            let composed = terminal
+                                .project_pool(pool.id, &mut anim.document_grid, scroll)
+                                .is_some();
+                            anim.last_top = Some(top);
+                            anim.last_version = version;
+                            anim.last_region_dims = Some(region_dims);
+                            anim.last_buffered = composed;
+                            composed
+                        } else {
+                            anim.last_buffered
+                        };
+
+                        if buffered {
                             active.push(ActivePool {
                                 id: pool.id,
                                 region: pool.region,
                                 frac,
+                                content_changed,
                             });
                         }
                     }
@@ -829,6 +882,12 @@ impl ApplicationHandler<PtyEvent> for App {
                     let [cw, ch] = render::cell_size(state.font_size, state.scale_factor as f32);
 
                     for pool in &active {
+                        // A shift-only frame reuses the pool grid copied on the
+                        // last content-changed frame, so only recopy when the
+                        // composed rows actually changed.
+                        if !pool.content_changed {
+                            continue;
+                        }
                         let anim = state
                             .pool_anims
                             .get_mut(&pool.id)
@@ -858,6 +917,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 grid: &state.pool_anims[&pool.id].pool_grid,
                                 scissor: [x0, y0, x1 - x0, y1 - y0],
                                 shift_rows: -pool.frac,
+                                content_changed: pool.content_changed,
                             }
                         })
                         .collect::<Vec<_>>();

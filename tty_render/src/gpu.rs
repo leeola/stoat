@@ -238,6 +238,7 @@ impl Renderer {
     /// Draws only the background and text passes: no cursor, decorations,
     /// regions, overlays, icons, or bars, since the pool carries plain composed
     /// page rows.
+    #[allow(clippy::too_many_arguments)]
     pub fn composite_pool(
         &mut self,
         device: &Device,
@@ -246,12 +247,25 @@ impl Renderer {
         pool_grid: &Grid,
         scissor: [u32; 4],
         shift_rows: f32,
+        content_changed: bool,
     ) {
         let resolution = [self.width as f32, self.height as f32];
-        self.background
-            .prepare_composite(device, queue, pool_grid, resolution, shift_rows);
-        self.text
-            .prepare_composite(device, queue, pool_grid, resolution, shift_rows);
+        self.background.prepare_composite(
+            device,
+            queue,
+            pool_grid,
+            resolution,
+            shift_rows,
+            content_changed,
+        );
+        self.text.prepare_composite(
+            device,
+            queue,
+            pool_grid,
+            resolution,
+            shift_rows,
+            content_changed,
+        );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
 
@@ -360,6 +374,11 @@ pub struct PoolComposite<'a> {
     /// The sub-cell document scroll, in rows; a negative value shifts the rows
     /// up.
     pub shift_rows: f32,
+    /// Whether the pool's composed rows differ from the previous frame. `false`
+    /// during a pure sub-cell glide, letting the composite reuse the instances
+    /// it built last frame and only re-apply the shift, rather than reshape and
+    /// re-upload identical rows.
+    pub content_changed: bool,
 }
 
 /// The GPU swapchain wrapping a [`Renderer`] for an on-screen window.
@@ -642,6 +661,7 @@ impl GpuContext {
                 pool.grid,
                 pool.scissor,
                 pool.shift_rows,
+                pool.content_changed,
             );
         }
         if cursor_corners.is_some() {

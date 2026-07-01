@@ -231,6 +231,11 @@ struct Pool {
     /// A pending discontinuous-jump destination from `Gstoatty;reposition`,
     /// taken once via [`Terminal::take_reposition`].
     reposition: Option<u64>,
+    /// Bumped whenever the pooled page bytes change (a fill commits, a resize
+    /// empties the window). A renderer easing this pool sub-cell compares it
+    /// across frames to tell a pure glide, where only the fraction moved and the
+    /// composed rows are identical, from a frame whose content actually changed.
+    content_version: u64,
 }
 
 impl Pool {
@@ -245,6 +250,7 @@ impl Pool {
             region,
             scroll_target: DocumentOffset::default(),
             reposition: None,
+            content_version: 0,
         }
     }
 }
@@ -607,6 +613,16 @@ impl Terminal {
         self.pools.get_mut(&id)?.reposition.take()
     }
 
+    /// Pool `id`'s content-version, or `None` for an unknown pool.
+    ///
+    /// The version bumps whenever the pool's composed rows would differ (a fill
+    /// commits, a resize empties the window). Paired with the composed top row,
+    /// it lets a caller easing this pool sub-cell skip recomposing a frame whose
+    /// version and top both held steady, since only the sub-cell fraction moved.
+    pub fn pool_content_version(&self, id: u32) -> Option<u64> {
+        Some(self.pools.get(&id)?.content_version)
+    }
+
     /// Compose pool `id`'s visible region into `out` at the eased page offset,
     /// or `None` to fall back to the live grid.
     ///
@@ -736,6 +752,7 @@ impl Terminal {
 
         let grid = pool.page_pool.fill(fill.index);
         project_term_cells(grid, &fill.term, &self.theme, &self.palette);
+        pool.content_version = pool.content_version.wrapping_add(1);
     }
 
     /// Open a content capture for the command described by `target`.
@@ -834,6 +851,7 @@ impl Terminal {
                 pool.region.height.max(1) as usize,
                 pool.region.width.max(1) as usize,
             );
+            pool.content_version = pool.content_version.wrapping_add(1);
         }
         self.fill = None;
     }

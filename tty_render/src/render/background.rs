@@ -283,6 +283,7 @@ impl BackgroundPass {
         grid: &Grid,
         resolution: [f32; 2],
         grid_scroll: f32,
+        content_changed: bool,
     ) {
         let globals = Globals {
             resolution,
@@ -296,6 +297,13 @@ impl BackgroundPass {
             cursor_color: [0.0; 4],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+
+        // Cell quads carry no atlas UVs, so a sub-cell glide over unchanged rows
+        // reuses last frame's instances once the globals write above has
+        // re-applied the shift.
+        if !content_changed {
+            return;
+        }
 
         let instances = build_instances(grid);
         self.composite_count = instances.len() as u32;
