@@ -1406,11 +1406,12 @@ impl Stoat {
                 // cursor even on a clamped no-op key. The wheel flag is consumed
                 // either way. A keyboard scroll (z j / z k) never sets it, so
                 // the view it deliberately moved stays put.
+                let scrolloff = self.settings.scrolloff.unwrap_or(3);
                 let scrolled = match action_handlers::focused_editor_mut(self) {
                     Some(editor) => {
                         let decoupled = std::mem::take(&mut editor.scroll_decoupled);
                         (cursor_moved || decoupled)
-                            && action_handlers::movement::ensure_cursor_in_view(editor)
+                            && action_handlers::movement::ensure_cursor_in_view(editor, scrolloff)
                     },
                     None => false,
                 };

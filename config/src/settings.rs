@@ -31,6 +31,10 @@ pub struct Settings {
     /// Mouse-capture policy at terminal startup. `None` falls back to
     /// [`MouseCapturePolicy::Auto`].
     pub mouse_capture: Option<MouseCapturePolicy>,
+    /// Rows the view keeps between the primary cursor and the top or bottom
+    /// edge when following it. `None` falls back to 3. Set via
+    /// `editor.scrolloff = N;` in stcfg.
+    pub scrolloff: Option<u32>,
     /// Per-mode status-line badge label overrides, keyed by mode name.
     /// Set via `ui.mode_badge.<name> = "ABC";` in stcfg. Renderer
     /// consults this map before falling back to its hardcoded badge
@@ -67,6 +71,7 @@ impl Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
+            scrolloff: other.scrolloff.or(self.scrolloff),
             mode_badges,
         }
     }
@@ -104,6 +109,11 @@ impl Settings {
                     self.mouse_capture = Some(p);
                 }
             },
+            ["editor", "scrolloff"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.scrolloff = Some(n as u32);
+                }
+            },
             _ => {},
         }
     }
@@ -129,6 +139,7 @@ mod tests {
                 text_proto_log: Some(true),
                 theme: None,
                 mouse_capture: None,
+                scrolloff: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -143,6 +154,7 @@ mod tests {
                 text_proto_log: Some(false),
                 theme: None,
                 mouse_capture: None,
+                scrolloff: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -157,6 +169,7 @@ mod tests {
                 text_proto_log: Some(true),
                 theme: None,
                 mouse_capture: None,
+                scrolloff: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -180,12 +193,14 @@ mod tests {
             text_proto_log: Some(false),
             theme: None,
             mouse_capture: None,
+            scrolloff: None,
             mode_badges: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: Some(true),
             theme: None,
             mouse_capture: None,
+            scrolloff: None,
             mode_badges: BTreeMap::new(),
         };
         assert_eq!(
@@ -194,6 +209,7 @@ mod tests {
                 text_proto_log: Some(true),
                 theme: None,
                 mouse_capture: None,
+                scrolloff: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -205,6 +221,7 @@ mod tests {
             text_proto_log: Some(true),
             theme: None,
             mouse_capture: None,
+            scrolloff: None,
             mode_badges: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -214,6 +231,7 @@ mod tests {
                 text_proto_log: Some(true),
                 theme: None,
                 mouse_capture: None,
+                scrolloff: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -236,6 +254,7 @@ mod tests {
                 text_proto_log: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
+                scrolloff: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -250,6 +269,7 @@ mod tests {
                 text_proto_log: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
+                scrolloff: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -261,12 +281,14 @@ mod tests {
             text_proto_log: None,
             theme: Some("a".into()),
             mouse_capture: None,
+            scrolloff: None,
             mode_badges: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
             theme: Some("b".into()),
             mouse_capture: None,
+            scrolloff: None,
             mode_badges: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));

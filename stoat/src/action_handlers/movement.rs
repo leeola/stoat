@@ -2946,23 +2946,26 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Scroll the viewport the minimum amount to keep the primary cursor visible,
-/// returning whether the view actually moved.
+/// Scroll the viewport the minimum amount to keep the primary cursor at least
+/// `scrolloff` display rows from the top and bottom edges, returning whether the
+/// view actually moved.
 ///
 /// The central view-follow step. The key loop runs it after a key moves the
-/// cursor, so a `50j` or `G` whose target leaves the viewport pulls the view
-/// along instead of dropping the cursor off screen, and also to re-couple a view
-/// a mouse-wheel scroll stranded. The clamp self-gates to a no-op when the
-/// cursor is already visible.
+/// cursor, so a `50j` or `G` whose target leaves the margin pulls the view along
+/// instead of dropping the cursor onto the edge, and also to re-couple a view a
+/// mouse-wheel scroll stranded. The clamp self-gates to a no-op when the cursor
+/// already sits inside the margin.
 ///
 /// The returned bool lets the caller force a repaint when a wheel-stranded view
 /// re-couples on a key that left the cursor put, which a cursor-position gate
 /// would miss.
 ///
 /// `scroll_row` is a display row, so the cursor is resolved through the display
-/// map (folds and soft-wraps included) rather than its buffer row. The scrolloff
-/// is zero, so the view moves only when the cursor would fall outside it.
-pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState) -> bool {
+/// map (folds and soft-wraps included) rather than its buffer row. The margin is
+/// capped to half the viewport so it cannot exceed the space available, and the
+/// bottom branch clamps to `max_scroll` so the last document row pins to the
+/// bottom rather than scrolling blank space into view.
+pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) -> bool {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
 
     let snapshot = editor.display_map.snapshot();
@@ -2974,11 +2977,20 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState) -> bool {
         .buffer_to_display(rope.offset_to_point(head_offset))
         .row;
 
+    let top = scrolloff.min(viewport.saturating_sub(1) / 2);
+    let bottom = scrolloff.min(viewport / 2);
+    let max_scroll = rope
+        .max_point()
+        .row
+        .saturating_sub(viewport.saturating_sub(1));
+
     let before = editor.scroll_row;
-    if cursor_row < editor.scroll_row {
-        editor.scroll_row = cursor_row;
-    } else if cursor_row > editor.scroll_row + viewport - 1 {
-        editor.scroll_row = cursor_row.saturating_sub(viewport - 1);
+    if cursor_row < editor.scroll_row + top {
+        editor.scroll_row = cursor_row.saturating_sub(top);
+    } else if cursor_row + bottom >= editor.scroll_row + viewport {
+        editor.scroll_row = (cursor_row + bottom + 1)
+            .saturating_sub(viewport)
+            .min(max_scroll);
     }
     editor.scroll_row != before
 }
@@ -3118,7 +3130,7 @@ mod tests {
         set_cursor_row(editor, 50);
         editor.scroll_row = 0;
         assert!(
-            ensure_cursor_in_view(editor),
+            ensure_cursor_in_view(editor, 0),
             "a below-viewport cursor scrolls the view",
         );
         assert_eq!(
@@ -3129,7 +3141,7 @@ mod tests {
         set_cursor_row(editor, 45);
         editor.scroll_row = 41;
         assert!(
-            !ensure_cursor_in_view(editor),
+            !ensure_cursor_in_view(editor, 0),
             "an already-visible cursor does not scroll",
         );
         assert_eq!(
@@ -3140,12 +3152,42 @@ mod tests {
         set_cursor_row(editor, 8);
         editor.scroll_row = 41;
         assert!(
-            ensure_cursor_in_view(editor),
+            ensure_cursor_in_view(editor, 0),
             "an above-viewport cursor scrolls the view",
         );
         assert_eq!(
             editor.scroll_row, 8,
             "an above-viewport cursor pulls the view up to it",
+        );
+    }
+
+    #[test]
+    fn ensure_cursor_in_view_holds_scrolloff_margin() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        // A downward jump past the viewport keeps 3 rows below the cursor, so
+        // the cursor lands on row 6 of the 10-row view (scroll_row = 50 - 6).
+        set_cursor_row(editor, 50);
+        editor.scroll_row = 0;
+        assert!(ensure_cursor_in_view(editor, 3));
+        assert_eq!(
+            editor.scroll_row, 44,
+            "downward jump keeps a 3-row margin below the cursor",
+        );
+
+        // An upward jump keeps 3 rows above the cursor (scroll_row = 8 - 3).
+        set_cursor_row(editor, 8);
+        editor.scroll_row = 44;
+        assert!(ensure_cursor_in_view(editor, 3));
+        assert_eq!(
+            editor.scroll_row, 5,
+            "upward jump keeps a 3-row margin above the cursor",
         );
     }
 

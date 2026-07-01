@@ -1402,7 +1402,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
-        h.type_keys("ctrl-f");
+        h.type_keys("3 z j");
         let scroll_before = h.editor_scroll_rows()[0];
         assert!(scroll_before >= 3);
         h.type_keys("3 z k");
