@@ -1024,45 +1024,72 @@ impl Stoat {
         self.active_workspace()
             .editors
             .values()
-            .any(|editor| editor.scroll_velocity != 0.0)
+            .any(|editor| editor.scroll_velocity != 0.0 || editor.scroll_glide)
     }
 
     /// Advance every animating editor's inertial scroll by `dt` seconds, the
     /// real time elapsed since the previous tick. Returns whether any editor is
     /// still gliding after the step.
     ///
-    /// Steps each editor with a nonzero velocity through
+    /// A wheel coast (nonzero velocity) steps through
     /// [`step_scroll_momentum`](action_handlers::movement::step_scroll_momentum),
-    /// writes back the decayed velocity and new offset, and keeps `scroll_row`
+    /// writing back the decayed velocity and new offset and keeping `scroll_row`
     /// at `floor(scroll_offset)` so the integer-row render and pool paths track
     /// the glide.
+    ///
+    /// A keyboard page glide (`scroll_glide`, zero velocity) eases `scroll_offset`
+    /// toward the `scroll_row` target the jump already set, clearing the flag on
+    /// settle. It never writes `scroll_row` -- that is the fixed target the offset
+    /// glides up to. A gap wider than three viewports (a big count-jump or a jump
+    /// landing mid-glide) snaps instead so the offset never drags across the
+    /// pool's buffered window.
     fn tick_scroll_anim(&mut self, dt: f32) -> bool {
         let mut animating = false;
         for editor in self.active_workspace_mut().editors.values_mut() {
-            if editor.scroll_velocity == 0.0 {
-                continue;
+            if editor.scroll_velocity != 0.0 {
+                let max_offset = action_handlers::movement::max_scroll_offset(editor);
+                let (offset, velocity, settled) = action_handlers::movement::step_scroll_momentum(
+                    editor.scroll_offset,
+                    editor.scroll_velocity,
+                    dt,
+                    max_offset,
+                );
+                // Come to rest exactly on a row. The pool eases to the fractional
+                // offset, but the live grid can only repaint at the integer row,
+                // so a fractional resting offset snaps by its remainder when the
+                // pool hands back to the live grid. Rounding on the final step
+                // lands both on the same row.
+                let offset = if settled {
+                    offset.round().clamp(0.0, max_offset)
+                } else {
+                    offset
+                };
+                editor.scroll_offset = offset;
+                editor.scroll_velocity = velocity;
+                editor.scroll_row = offset.floor() as u32;
+                animating |= velocity != 0.0;
+            } else if editor.scroll_glide {
+                let target = editor.scroll_row as f32;
+                let viewport = editor
+                    .viewport_rows
+                    .unwrap_or(action_handlers::movement::DEFAULT_VIEWPORT_ROWS)
+                    .max(1);
+                if (target - editor.scroll_offset).abs() > viewport as f32 * 3.0 {
+                    editor.scroll_offset = target;
+                    editor.scroll_glide = false;
+                } else {
+                    let (offset, settled) = action_handlers::movement::step_scroll_ease(
+                        editor.scroll_offset,
+                        target,
+                        dt,
+                    );
+                    editor.scroll_offset = offset;
+                    if settled {
+                        editor.scroll_glide = false;
+                    }
+                }
+                animating |= editor.scroll_glide;
             }
-            let max_offset = action_handlers::movement::max_scroll_offset(editor);
-            let (offset, velocity, settled) = action_handlers::movement::step_scroll_momentum(
-                editor.scroll_offset,
-                editor.scroll_velocity,
-                dt,
-                max_offset,
-            );
-            // Come to rest exactly on a row. The pool eases to the fractional
-            // offset, but the live grid can only repaint at the integer row, so a
-            // fractional resting offset snaps by its remainder when the pool hands
-            // back to the live grid. Rounding on the final step lands both on the
-            // same row.
-            let offset = if settled {
-                offset.round().clamp(0.0, max_offset)
-            } else {
-                offset
-            };
-            editor.scroll_offset = offset;
-            editor.scroll_velocity = velocity;
-            editor.scroll_row = offset.floor() as u32;
-            animating |= velocity != 0.0;
         }
         animating
     }
@@ -3280,10 +3307,14 @@ impl Stoat {
             };
             // scroll_row is the source of truth for the pool page. The wheel
             // glide refines it sub-row through scroll_offset, but cursor-follow
-            // and jumps move scroll_row without the fraction, so trust the
-            // offset only while it still floors to scroll_row, else fall back to
-            // the integer row.
-            let scroll_offset = if editor.scroll_offset.floor() as u32 == editor.scroll_row {
+            // and jumps move scroll_row without the fraction, so trust the offset
+            // only while it still floors to scroll_row. A page glide is the
+            // exception. scroll_row jumped to the target and the offset lags
+            // behind easing up to it, so trust the fraction throughout the glide
+            // and let the pool ease from the lagging offset to the target.
+            let scroll_offset = if editor.scroll_glide
+                || editor.scroll_offset.floor() as u32 == editor.scroll_row
+            {
                 editor.scroll_offset
             } else {
                 editor.scroll_row as f32
@@ -4110,6 +4141,73 @@ mod tests {
             0.0,
             "settled velocity is zero"
         );
+    }
+
+    #[test]
+    fn glide_tick_eases_offset_to_target_and_clears_glide() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let path = h.write_file("glide.rs", &body);
+        h.open_file(&path);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            editor.scroll_row = 10;
+            editor.scroll_offset = 0.0;
+            editor.scroll_glide = true;
+        }
+        assert!(h.stoat.is_animating(), "a page glide animates");
+
+        h.stoat.tick_scroll_anim(0.016);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            assert!(
+                editor.scroll_offset > 0.0 && editor.scroll_offset < 10.0,
+                "tick eases the offset toward the target"
+            );
+            assert_eq!(editor.scroll_row, 10, "scroll_row stays the fixed target");
+        }
+
+        for _ in 0..1000 {
+            if !h.stoat.is_animating() {
+                break;
+            }
+            h.stoat.tick_scroll_anim(0.016);
+        }
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        assert!(!editor.scroll_glide, "the glide clears on settle");
+        assert_eq!(
+            editor.scroll_offset, 10.0,
+            "the offset settles on the target"
+        );
+    }
+
+    #[test]
+    fn glide_tick_snaps_a_gap_wider_than_three_viewports() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        let path = h.write_file("glide.rs", &body);
+        h.open_file(&path);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            editor.scroll_row = 100;
+            editor.scroll_offset = 0.0;
+            editor.scroll_glide = true;
+        }
+
+        h.stoat.tick_scroll_anim(0.016);
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        assert_eq!(
+            editor.scroll_offset, 100.0,
+            "a gap wider than three viewports snaps straight to the target"
+        );
+        assert!(!editor.scroll_glide, "and clears the glide");
     }
 
     #[test]
@@ -5149,6 +5247,52 @@ mod tests {
         assert!(
             matches!(cmds.last(), Some(Command::Scroll(_))),
             "last frame should be the scroll target, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn emit_smooth_scroll_glide_uses_the_eased_offset() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        // Simulate a page glide. scroll_row jumped to a distant row while
+        // scroll_offset still lags near the top. The emit must carry the lagging
+        // offset (its page is 0), not the target row's page, so the pool eases
+        // up to it.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_row = 50;
+            editor.scroll_offset = 1.0;
+            editor.scroll_glide = true;
+        }
+
+        h.stoat.emit_smooth_scroll();
+
+        let bytes = rx.try_recv().expect("an APC batch was pushed");
+        let cmds = decode_apc_stream(&bytes);
+        let scroll = cmds
+            .iter()
+            .find_map(|c| match c {
+                Command::Scroll(s) => Some(*s),
+                _ => None,
+            })
+            .expect("a scroll command");
+        assert_eq!(
+            scroll.page, 0,
+            "a glide emits the eased offset's page (1.0 -> page 0), not scroll_row 50's page"
         );
     }
 

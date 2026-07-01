@@ -2709,7 +2709,7 @@ pub(super) enum PageDir {
 /// Fallback viewport height when the focused editor has not been
 /// rendered yet (e.g. a unit test that dispatches a page action
 /// without running a render pass).
-const DEFAULT_VIEWPORT_ROWS: u32 = 20;
+pub(crate) const DEFAULT_VIEWPORT_ROWS: u32 = 20;
 
 pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
@@ -2735,6 +2735,7 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
         return UpdateEffect::None;
     }
 
+    let prev = editor.scroll_row;
     let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
     editor.scroll_row = match dir {
         PageDir::Up => editor.scroll_row.saturating_sub(delta),
@@ -2748,6 +2749,16 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
         new.collapse_to(target_anchor, SelectionGoal::None);
         new
     });
+
+    // Ease scroll_offset from the visible position up to the scroll_row target
+    // the jump set, so a page motion glides instead of teleporting. The cursor
+    // moved with scroll_row by the same delta, so it stays pinned to its screen
+    // row and the post-key view-follow is a no-op.
+    if editor.scroll_offset.floor() as u32 != prev {
+        editor.scroll_offset = prev as f32;
+    }
+    editor.scroll_velocity = 0.0;
+    editor.scroll_glide = true;
     UpdateEffect::Redraw
 }
 
@@ -2787,10 +2798,10 @@ pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
 /// otherwise, clamping `scroll_row` so the last document row stays in view.
 /// Returns whether `scroll_row` changed.
 ///
-/// When `scroll_row` changes, resets `scroll_offset` to the new integer row
-/// and zeroes `scroll_velocity`, so a keyboard scroll cancels any in-flight
-/// momentum glide and keeps the fractional position in step with the integer
-/// row.
+/// When `scroll_row` changes, resets `scroll_offset` to the new integer row and
+/// zeroes `scroll_velocity` and `scroll_glide`, so a keyboard line scroll cancels
+/// any in-flight momentum or page glide and keeps the fractional position in step
+/// with the integer row.
 pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) -> bool {
     let max_scroll = max_scroll_offset(editor) as u32;
 
@@ -2805,6 +2816,7 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
     editor.scroll_row = new_scroll;
     editor.scroll_offset = new_scroll as f32;
     editor.scroll_velocity = 0.0;
+    editor.scroll_glide = false;
     true
 }
 
@@ -2871,6 +2883,29 @@ pub(crate) fn step_scroll_momentum(
     let settled = velocity.abs() < MIN_VEL || at_bound;
 
     (next, if settled { 0.0 } else { velocity }, settled)
+}
+
+/// Ease `offset` toward `target` by `dt` seconds, returning the new offset and
+/// whether it settled onto the target.
+///
+/// A keyboard page motion jumps `scroll_row` to the destination and lets
+/// `scroll_offset` glide up to it. Each `NOMINAL_DT` closes `EASE_PER_NOMINAL`
+/// of the remaining gap, raised to `dt / NOMINAL_DT` so the glide lasts the same
+/// wall-clock time however often it ticks (the frame-rate independence
+/// [`step_scroll_momentum`] uses for its decay). Within `EPSILON` of the target
+/// it snaps exactly onto it and reports settled, so the caller can stop ticking.
+pub(crate) fn step_scroll_ease(offset: f32, target: f32, dt: f32) -> (f32, bool) {
+    const EASE_PER_NOMINAL: f32 = 0.35;
+    const NOMINAL_DT: f32 = 0.008;
+    const EPSILON: f32 = 0.01;
+
+    let kept = (1.0 - EASE_PER_NOMINAL).powf(dt / NOMINAL_DT);
+    let next = target - (target - offset) * kept;
+    if (target - next).abs() < EPSILON {
+        (target, true)
+    } else {
+        (next, false)
+    }
 }
 
 /// Collapse every selection to a single point at `offset`. Returns
@@ -3365,6 +3400,38 @@ mod tests {
         assert!(
             (one_step - two_steps).abs() < 0.01,
             "one 16ms decay {one_step} should equal two 8ms decays {two_steps}"
+        );
+    }
+
+    #[test]
+    fn ease_advances_toward_target_and_settles() {
+        let mut offset = 0.0_f32;
+        let target = 10.0_f32;
+        let mut last_gap = f32::INFINITY;
+        let mut settled = false;
+        for _ in 0..1000 {
+            let (next, done) = step_scroll_ease(offset, target, 0.016);
+            let gap = (target - next).abs();
+            assert!(gap < last_gap, "each ease step closes the gap");
+            offset = next;
+            last_gap = gap;
+            if done {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "the ease settles");
+        assert_eq!(offset, target, "it settles exactly on the target");
+    }
+
+    #[test]
+    fn ease_is_frame_rate_independent() {
+        let (one_step, _) = step_scroll_ease(0.0, 10.0, 0.016);
+        let (half, _) = step_scroll_ease(0.0, 10.0, 0.008);
+        let (two_steps, _) = step_scroll_ease(half, 10.0, 0.008);
+        assert!(
+            (one_step - two_steps).abs() < 0.01,
+            "one 16ms ease {one_step} should equal two 8ms eases {two_steps}"
         );
     }
 

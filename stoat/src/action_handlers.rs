@@ -2070,6 +2070,27 @@ mod tests {
     }
 
     #[test]
+    fn page_down_arms_a_scroll_glide() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+
+        dispatch(&mut stoat, &PageDown);
+
+        let editor = focused_editor_mut(&mut stoat).expect("focused editor");
+        assert_eq!(
+            editor.scroll_row, 10,
+            "PageDown jumps scroll_row a full viewport"
+        );
+        assert_eq!(
+            editor.scroll_offset, 0.0,
+            "scroll_offset lags at the pre-jump row so the pool eases up to it"
+        );
+        assert!(editor.scroll_glide, "a page glide is armed");
+    }
+
+    #[test]
     fn count_prefix_half_page_down_moves_n_half_pages() {
         let mut stoat = stoat();
         let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();

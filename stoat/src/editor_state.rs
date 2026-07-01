@@ -49,6 +49,12 @@ pub(crate) struct EditorState {
     /// (`z j`/`z k`) leaves this `false`, so it moves the view without the next
     /// key snapping it back. Transient, not persisted.
     pub(crate) scroll_decoupled: bool,
+    /// Set while a keyboard page motion eases `scroll_offset` toward the
+    /// `scroll_row` target it jumped to. The animation tick eases the offset up
+    /// and clears this on settle, and the pool emit trusts the fractional offset
+    /// while it is set so the glide reaches the terminal. Transient, not
+    /// persisted.
+    pub(crate) scroll_glide: bool,
     /// Last-rendered viewport height in rows. Page-motion handlers read
     /// this to compute scroll distance without taking a dependency on
     /// the render pipeline's layout `Rect`. `None` until the editor has
@@ -124,6 +130,7 @@ impl EditorState {
             scroll_offset: 0.0,
             scroll_velocity: 0.0,
             scroll_decoupled: false,
+            scroll_glide: false,
             viewport_rows: None,
             review_view: None,
             selections: SelectionsCollection::new(),
@@ -151,6 +158,7 @@ impl EditorState {
             scroll_offset: 0.0,
             scroll_velocity: 0.0,
             scroll_decoupled: false,
+            scroll_glide: false,
             viewport_rows: None,
             review_view: None,
             selections: SelectionsCollection::new(),
