@@ -1043,12 +1043,22 @@ impl Stoat {
                 continue;
             }
             let max_offset = action_handlers::movement::max_scroll_offset(editor);
-            let (offset, velocity, _settled) = action_handlers::movement::step_scroll_momentum(
+            let (offset, velocity, settled) = action_handlers::movement::step_scroll_momentum(
                 editor.scroll_offset,
                 editor.scroll_velocity,
                 dt,
                 max_offset,
             );
+            // Come to rest exactly on a row. The pool eases to the fractional
+            // offset, but the live grid can only repaint at the integer row, so a
+            // fractional resting offset snaps by its remainder when the pool hands
+            // back to the live grid. Rounding on the final step lands both on the
+            // same row.
+            let offset = if settled {
+                offset.round().clamp(0.0, max_offset)
+            } else {
+                offset
+            };
             editor.scroll_offset = offset;
             editor.scroll_velocity = velocity;
             editor.scroll_row = offset.floor() as u32;

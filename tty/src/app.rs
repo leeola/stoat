@@ -324,6 +324,13 @@ struct PoolAnim {
     /// that changed it scrolled the document, so the change feeds the cursor
     /// sweep. Seeded to the creation target so a fresh pool does not sweep.
     last_scroll_target: f32,
+    /// Frames since [`Self::last_scroll_target`] last changed. The follower
+    /// converges to a still-moving target every frame in the momentum tail, so
+    /// convergence alone cannot separate an active glide from a settled pool.
+    /// Once this reaches [`HANDOFF_STABLE_FRAMES`] the target has held steady
+    /// and the region hands back to the live grid. A target still moving holds
+    /// the pool composited. Seeded so a fresh at-rest pool hands off at once.
+    frames_since_target_change: u32,
     /// The region's pooled rows composed at [`Self::scroll`], sized to the
     /// region plus one straddle row. Reused across frames.
     document_grid: Grid,
@@ -340,6 +347,7 @@ impl PoolAnim {
         PoolAnim {
             scroll,
             last_scroll_target: scroll,
+            frames_since_target_change: HANDOFF_STABLE_FRAMES,
             document_grid: Grid::new(0, 0),
             pool_grid: Grid::new(0, 0),
         }
@@ -609,6 +617,12 @@ impl ApplicationHandler<PtyEvent> for App {
                         let target_pages = pool.scroll_target.pages();
                         let jump_rows = (target_pages - anim.last_scroll_target) * page_rows;
                         anim.last_scroll_target = target_pages;
+                        if jump_rows == 0.0 {
+                            anim.frames_since_target_change =
+                                anim.frames_since_target_change.saturating_add(1);
+                        } else {
+                            anim.frames_since_target_change = 0;
+                        }
                         if jump_rows.abs() >= CURSOR_SWEEP_MIN_ROWS
                             && cursor_in_region(cursor, pool.region)
                         {
@@ -635,8 +649,10 @@ impl ApplicationHandler<PtyEvent> for App {
                             pool.scroll_target.pages(),
                             page_rows,
                         );
+                        let scroll_settled =
+                            anim.frames_since_target_change >= HANDOFF_STABLE_FRAMES;
                         anim.scroll = scroll;
-                        if !easing {
+                        if !easing && scroll_settled {
                             continue;
                         }
                         pool_easing = true;
@@ -1403,6 +1419,17 @@ const REPOSITION_LAND_PAGES: f32 = 1.0;
 /// real jump (a page, `G`, a multi-line motion) launches it.
 const CURSOR_SWEEP_MIN_ROWS: f32 = 2.0;
 
+/// Frames the scroll target must hold steady before the pool hands its region
+/// back to the live grid.
+///
+/// The follower catches a still-moving target every frame through the momentum
+/// tail, so a bare convergence test reads as "settled" mid-glide. The live grid
+/// stays frozen at its pre-scroll row until the app repaints at the true settle,
+/// so handing off then snaps the view back to that stale row. Waiting for the
+/// target to hold steady a few frames lets the settle repaint arrive first, so
+/// the region only returns to a live grid that already matches the pool.
+const HANDOFF_STABLE_FRAMES: u32 = 3;
+
 /// Advance the document's eased smooth-scroll offset one frame toward `target`.
 ///
 /// `scroll` and `target` are app-declared absolute positions in document pages;
@@ -1415,7 +1442,7 @@ const CURSOR_SWEEP_MIN_ROWS: f32 = 2.0;
 /// grid, reading as a one-line jump at the end of the glide. Returns the new
 /// offset and whether it is still easing.
 fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool) {
-    const FACTOR: f32 = 0.35;
+    const FACTOR: f32 = 0.7;
     const EPSILON_ROWS: f32 = 0.01;
     const MIN_STEP_ROWS: f32 = 0.15;
 

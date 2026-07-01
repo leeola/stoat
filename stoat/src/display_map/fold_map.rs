@@ -1052,6 +1052,15 @@ impl FoldSnapshot {
         if fold_row >= line_count {
             return self.len();
         }
+        // With no folds, fold space mirrors inlay space one-to-one, so the inlay
+        // layer resolves the row's offset in O(log n) through its rope cursor.
+        // This is the hot path for deep scrolling. The folded path below instead
+        // walks every preceding row's characters, an O(bytes) cost that is
+        // tolerable only because folds collapse the text they cover.
+        if self.fold_count() == 0 {
+            return FoldOffset(self.inlay_snapshot.inlay_offset_at_row(fold_row).0);
+        }
+
         let target = FoldPoint::new(fold_row, 0);
         let mut cursor = self
             .transforms
@@ -1068,16 +1077,15 @@ impl FoldSnapshot {
         let Some(transform) = cursor.item() else {
             return transform_start_offset;
         };
-        // For isomorphic transforms, output.len == input.len and the text
-        // mirrors the inlay bytes. Walk the characters of the transform's
-        // fold-line chars until we've crossed `rows_into_transform` newlines.
-        let mut byte_offset = 0u32;
-        let mut newlines_seen = 0u32;
         if transform.placeholder.is_some() {
             // Folded transforms span 0 or 1 output row, so multi-row advance
             // isn't possible here. Return transform start.
             return transform_start_offset;
         }
+        // For isomorphic transforms, output.len == input.len and the text
+        // mirrors the inlay bytes. Walk the characters of the transform's
+        // fold-line chars until we've crossed `rows_into_transform` newlines.
+        let mut byte_offset = 0u32;
         let first_tab_row = transform_start_point.row();
         for row_within in 0..rows_into_transform {
             let absolute_row = first_tab_row + row_within;
@@ -1086,9 +1094,7 @@ impl FoldSnapshot {
             }
             // Account for the newline separating rows.
             byte_offset += 1;
-            newlines_seen += 1;
         }
-        let _ = newlines_seen;
         FoldOffset(transform_start_offset.0 + byte_offset as usize)
     }
 
