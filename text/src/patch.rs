@@ -81,6 +81,11 @@ where
     }
 
     pub fn push(&mut self, edit: Edit<T>) {
+        debug_assert!(
+            edit.old.start <= edit.old.end && edit.new.start <= edit.new.end,
+            "inverted edit range would underflow old_len/new_len",
+        );
+
         if edit.is_empty() {
             return;
         }

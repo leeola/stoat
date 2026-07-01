@@ -675,7 +675,7 @@ impl TextBufferSnapshot {
         let mut old_offset = 0usize;
         let mut new_offset = 0usize;
         let mut new_offset_from_skipped = 0usize;
-        let mut result = Patch::empty();
+        let mut edits: Vec<Edit<usize>> = Vec::new();
 
         let mut cursor = self
             .fragments
@@ -700,14 +700,14 @@ impl TextBufferSnapshot {
                     old: old_offset..old_offset,
                     new: new_offset..(new_offset + len),
                 };
-                result = result.compose([edit]);
+                edits.push(edit);
                 new_offset += len;
             } else if !fragment.visible && was_visible {
                 let edit = Edit {
                     old: old_offset..(old_offset + len),
                     new: new_offset..new_offset,
                 };
-                result = result.compose([edit]);
+                edits.push(edit);
                 old_offset += len;
             } else if fragment.visible {
                 old_offset += len;
@@ -718,7 +718,13 @@ impl TextBufferSnapshot {
             cursor.next();
         }
 
-        result
+        // The per-fragment edits are already sorted and monotonic in a single
+        // old->new coordinate space, so composing them onto an empty patch
+        // consolidates adjacent edits without ever taking compose's overlap
+        // branch. Composing them one at a time instead would feed each edit's
+        // absolute-old range into the running result's shifted new space,
+        // mis-sequencing them and underflowing Edit::old_len.
+        Patch::empty().compose(edits)
     }
 
     pub fn len(&self) -> usize {
@@ -743,6 +749,7 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 #[cfg(test)]
 mod tests {
     use super::TextBuffer;
+    use std::ops::Range;
     use stoat_text::{Bias, BufferId, Point};
 
     fn buf(content: &str) -> TextBuffer {
@@ -932,6 +939,51 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].old, 5..11);
         assert_eq!(edits[0].new, 5..11);
+    }
+
+    #[test]
+    fn edits_since_reconstructs_multi_region_changes() {
+        // Applying the patch in reverse to the pre-edit text must reproduce the
+        // post-edit text. These multi-region edits shift new-coordinates past a
+        // later change's absolute-old offset, which the accumulation must keep
+        // monotonic rather than compose edits across the shifted region -- the
+        // last case otherwise underflows Edit::old_len.
+        let cases: &[(&str, &[(Range<usize>, &str)])] = &[
+            ("0123456789", &[(2..2, "ABCDEFGHIJKLMNOPQR"), (23..26, "")]),
+            ("0123456789", &[(1..1, "ABCDEFGHIJ"), (13..17, "")]),
+            (
+                "aaaa bbbb cccc dddd",
+                &[(0..0, "X"), (5..5, "Y"), (10..10, "Z")],
+            ),
+            (
+                "abcdefghijklmnopqrstuvwxyz",
+                &[
+                    (22..22, "ABCDEFGHIJKLMN"),
+                    (18..20, "ABCDEFGHIJKLMNOPQRS"),
+                    (1..6, "ABCDEFGHIJKLM"),
+                ],
+            ),
+        ];
+        for (initial, edits) in cases {
+            let mut b = buf(initial);
+            let old_text = b.snapshot.visible_text.to_string();
+            let v0 = b.version();
+            for (range, text) in *edits {
+                b.edit(range.clone(), text);
+            }
+            let new_text = b.snapshot.visible_text.to_string();
+            let patch = b.snapshot.edits_since(v0);
+            let mut reconstructed = old_text;
+            for edit in patch.edits().iter().rev() {
+                reconstructed.replace_range(edit.old.clone(), &new_text[edit.new.clone()]);
+            }
+            assert_eq!(
+                reconstructed,
+                new_text,
+                "edits={edits:?} patch={:?}",
+                patch.edits()
+            );
+        }
     }
 
     #[test]
