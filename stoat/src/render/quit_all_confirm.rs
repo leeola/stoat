@@ -2,7 +2,7 @@ use crate::{quit_all_confirm::QuitAllConfirm, render::text::write_str};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 pub(crate) fn render_quit_all_confirm(
@@ -39,6 +39,7 @@ pub(crate) fn render_quit_all_confirm(
         .title(" unsaved buffers ")
         .title_style(modal_style);
     let inner = block.inner(modal_area);
+    Clear.render(modal_area, buf);
     block.render(modal_area, buf);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);

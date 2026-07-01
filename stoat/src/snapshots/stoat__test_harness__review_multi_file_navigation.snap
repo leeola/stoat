@@ -10,8 +10,8 @@ size: 80x20
 [0m[33ma.rs --- 1/1 --- rust[0m                  [0m[90m│[0m
 [0m[90m    1 [0m[97mfn [0m[31ma[0m[97m() {}[0m                        [0m[90m│    1 [0m[97mfn [0m[32ma_renamed[0m[97m() {}[0m
 [0m[33mb.rs --- 1/1 --- rust[0m    [0m[33m┌ review ─────────────────────────────────────────────┐[0m
-[0m[1m[36m│[0m[90m   1 [0m[97mlet x = 1;[0m         [0m[33m│[0m[36m     ?[0m[97m   open [0m[1m[97mt[0m[97mhe help modal1;[0m                       [0m[33m│[0m
-[0m[1m[36m│[0m[90m.....[0m                   [0m[33m│[0m[36mEsc, q[0m[97m   close[0m[1m[97m [0m[97mthe active review[0m                     [0m[33m│[0m
+[0m[1m[36m│[0m[90m   1 [0m[97mlet x = 1;[0m         [0m[33m│[0m[36m     ?[0m[97m   open the help modal[0m                         [0m[33m│[0m
+[0m[1m[36m│[0m[90m.....[0m                   [0m[33m│[0m[36mEsc, q[0m[97m   close the active review[0m                     [0m[33m│[0m
                          [0m[33m│[0m[36m  n, j[0m[97m   advance to the next review chunk[0m            [0m[33m│[0m
                          [0m[33m│[0m[36m  p, k[0m[97m   step back to the previous review chunk[0m      [0m[33m│[0m
                          [0m[33m│[0m[36m     s[0m[97m   mark the current chunk as staged[0m            [0m[33m│[0m

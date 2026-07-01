@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 /// Paint the rename input modal anchored to the focused editor's
@@ -69,6 +69,7 @@ pub(crate) fn render_rename_input(stoat: &mut Stoat, buf: &mut Buffer) {
         .title(" rename ")
         .title_style(modal_style);
     let inner = block.inner(popup_area);
+    Clear.render(popup_area, buf);
     block.render(popup_area, buf);
 
     let editor_id = stoat

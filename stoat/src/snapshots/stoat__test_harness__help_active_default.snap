@@ -24,10 +24,10 @@ size: 80x24
   [0m[36m│[0m[97m [0m[36m0[0m[97m  GotoLineStart  [0m[90mgoto line st│[0m [0m[1m[33mExample:[0m                                 [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m:[0m[97m  OpenCommandPalette  [0m[90mopen th│[0m [0m[90m  ShellInsertOutput()[0m                    [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m;[0m[97m  CollapseSelection  [0m[90mcollapse│[0m        [0m[33m┌ help ─────────────────────────────┐[0m
-  [0m[36m│[0m[97m [0m[36m<[0m[97m  UnindentSelection  [0m[90munindent│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m  [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m=[0m[97m  FormatSelections  [0m[90mformat se│[0m        [0m[33m│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m>[0m[97m  IndentSelection  [0m[90mindent sel│[0m        [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m<[0m[97m  UnindentSelection  [0m[90munindent│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m    [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m=[0m[97m  FormatSelections  [0m[90mformat se│[0m        [0m[33m│[0m[36m  Dn, C-n[0m[97m   next help entry[0m        [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m>[0m[97m  IndentSelection  [0m[90mindent sel│[0m        [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m  [0m[33m│[0m
   [0m[36m│[0m[97m [0m[36m?[0m[97m  OpenReverseSearchInput  [0m[90mope│[0m        [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m[33m│[0m
-  [0m[36m└────────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m[36m────┘[0m [0m[33m│[0m
+  [0m[36m└────────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m      [0m[33m│[0m
                                            [0m[33m└───────────────────────────────────┘[0m
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

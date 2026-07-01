@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 /// Paint the code-action picker, if any, anchored to the focused
@@ -114,6 +114,7 @@ pub(crate) fn render_code_action(stoat: &mut Stoat, buf: &mut Buffer) {
         .title(" code action ")
         .title_style(modal_style);
     let inner = block.inner(popup_area);
+    Clear.render(popup_area, buf);
     block.render(popup_area, buf);
 
     for (row_idx, line) in body.iter().enumerate() {

@@ -154,4 +154,16 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::QuitAll);
         h.assert_snapshot("quit_all_confirm_modal");
     }
+
+    #[test]
+    fn snapshot_quit_all_confirm_over_full_editor() {
+        let mut h = crate::Stoat::test();
+        // Fill the editor so the modal overlaps buffer text. Without a cleared
+        // background the interior gaps would show these X's bleeding through.
+        let line = "X".repeat(78);
+        let filled: String = (0..30).map(|_| format!("{line}\n")).collect();
+        h.seed_focused_buffer(&filled);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::QuitAll);
+        h.assert_snapshot("quit_all_confirm_over_full_editor");
+    }
 }

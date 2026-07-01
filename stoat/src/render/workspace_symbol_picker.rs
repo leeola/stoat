@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 /// Paint either the workspace-symbol input modal or the result
@@ -70,6 +70,7 @@ fn render_input(stoat: &mut Stoat, buf: &mut Buffer) {
         .title(" workspace symbol ")
         .title_style(modal_style);
     let inner = block.inner(popup_area);
+    Clear.render(popup_area, buf);
     block.render(popup_area, buf);
 
     let editor_id = stoat
@@ -168,6 +169,7 @@ fn render_picker(stoat: &mut Stoat, buf: &mut Buffer) {
         .title(" workspace symbols ")
         .title_style(modal_style);
     let inner = block.inner(popup_area);
+    Clear.render(popup_area, buf);
     block.render(popup_area, buf);
 
     for (row_idx, line) in body.iter().enumerate() {

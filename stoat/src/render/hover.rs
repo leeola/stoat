@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 /// Paint the hover popup, if any, anchored to the focused editor's
@@ -84,6 +84,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer) {
         .title(" hover ")
         .title_style(modal_style);
     let inner = block.inner(popup_area);
+    Clear.render(popup_area, buf);
     block.render(popup_area, buf);
 
     for (row_idx, line) in body.iter().enumerate() {

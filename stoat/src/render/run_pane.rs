@@ -6,7 +6,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 pub(crate) fn render_run_pane(
@@ -175,6 +175,7 @@ pub(crate) fn render_modal_run(
         .title(title)
         .title_style(modal_style);
     let inner = border.inner(modal_area);
+    Clear.render(modal_area, buf);
     border.render(modal_area, buf);
 
     let Some(active) = run_state.active_block() else {

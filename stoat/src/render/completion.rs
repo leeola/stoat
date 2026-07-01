@@ -9,7 +9,7 @@ use nucleo::Utf32Str;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 /// Maximum number of completion rows visible at once. Larger lists
@@ -129,6 +129,7 @@ pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    Clear.render(layout.popup_area, buf);
     Block::default()
         .borders(Borders::ALL)
         .border_style(modal_style)

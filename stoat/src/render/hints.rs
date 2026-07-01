@@ -2,7 +2,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 use std::collections::HashMap;
 
@@ -52,6 +52,7 @@ pub(crate) fn render_hints(
         .title(format!(" {mode} "))
         .title_style(modal_style);
     let inner = block.inner(help_area);
+    Clear.render(help_area, buf);
     block.render(help_area, buf);
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);

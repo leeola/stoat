@@ -19,15 +19,15 @@ size: 80x24
   [0m[36m│[0m[97m [0m[36m&[0m[97m  AlignSelections  [0m[90malign sele│[0m [0m[97mOpen an input modal for a shell command.[0m [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m([0m[97m  RotateSelectionsBackward  [0m[90mr│[0m [0m[97mOn submit, run the command once with[0m     [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m)[0m[97m  RotateSelectionsForward  [0m[90mro│[0m [0m[97mempty [0m[33m┌ help ──────────────────────────────┐[0m
-  [0m[36m│[0m[97m [0m[36m,[0m[97m  KeepPrimarySelection  [0m[90mkeep │[0m [0m[97mevery [0m[33m│[0m[36m      Esc[0m[97m   close help[0m            [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m/[0m[97m  OpenSearchInput  [0m[90mopen forwa│[0m       [0m[33m│[0m[36m     i, a[0m[97m   prompt mode[0m           [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m0[0m[97m  GotoLineStart  [0m[90mgoto line st│[0m [0m[1m[33mExampl│[0m[1m[36m [0m[36m     Ret[0m[97m   submit prompt input[0m   [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m:[0m[97m  OpenCommandPalette  [0m[90mopen th│[0m [0m[90m  Shel[0m[33m│[0m[36m    j, Dn[0m[97m   next help entry[0m       [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m;[0m[97m  CollapseSelection  [0m[90mcollapse│[0m       [0m[33m│[0m[36m    k, Up[0m[97m   previous help entry[0m   [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m,[0m[97m  KeepPrimarySelection  [0m[90mkeep │[0m [0m[97mevery [0m[33m│[0m[36m      Esc[0m[97m   close help[0m              [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m/[0m[97m  OpenSearchInput  [0m[90mopen forwa│[0m       [0m[33m│[0m[36m     i, a[0m[97m   prompt mode[0m             [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m0[0m[97m  GotoLineStart  [0m[90mgoto line st│[0m [0m[1m[33mExampl[0m[33m│[0m[36m      Ret[0m[97m   submit prompt input[0m     [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m:[0m[97m  OpenCommandPalette  [0m[90mopen th│[0m [0m[90m  Shel[0m[33m│[0m[36m    j, Dn[0m[97m   next help entry[0m         [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m;[0m[97m  CollapseSelection  [0m[90mcollapse│[0m       [0m[33m│[0m[36m    k, Up[0m[97m   previous help entry[0m     [0m[33m│[0m
   [0m[36m│[0m[97m [0m[36m<[0m[97m  UnindentSelection  [0m[90munindent│[0m       [0m[33m│[0m[36m        g[0m[97m   jump to first help entry[0m[33m│[0m
   [0m[36m│[0m[97m [0m[36m=[0m[97m  FormatSelections  [0m[90mformat se│[0m       [0m[33m│[0m[36m        G[0m[97m   jump to last help entry[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m>[0m[97m  IndentSelection  [0m[90mindent sel│[0m       [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m>[0m[97m  IndentSelection  [0m[90mindent sel│[0m       [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m   [0m[33m│[0m
   [0m[36m│[0m[97m [0m[36m?[0m[97m  OpenReverseSearchInput  [0m[90mope│[0m       [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m [0m[33m│[0m
-  [0m[36m└───────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m[36m─────┘[0m [0m[33m│[0m
+  [0m[36m└───────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m       [0m[33m│[0m
                                           [0m[33m└────────────────────────────────────┘[0m
 [0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m
