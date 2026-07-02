@@ -1820,31 +1820,59 @@ impl Stoat {
         UpdateEffect::None
     }
 
-    /// Imparts inertial scroll velocity to the editor pane under the wheel
-    /// pointer, so a notch starts or accelerates a momentum glide instead of
-    /// jumping a fixed number of rows.
+    /// Scrolls the pane under the wheel pointer.
     ///
-    /// Only `View::Editor` split panes scroll. Docks and run, agent, or label
-    /// panes are not editors, so the event is dropped.
+    /// A `View::Editor` split pane gets inertial velocity, so a notch starts
+    /// or accelerates a momentum glide. A `View::Run` pane (split or dock) does
+    /// plain stepped scrolling of its output, three rows per notch, clamped to
+    /// the top. Anything else drops the event.
     fn handle_mouse_scroll(&mut self, mouse: MouseEvent) -> UpdateEffect {
-        let Some(FocusTarget::SplitPane(pid)) = self.target_at(mouse.column, mouse.row) else {
+        let Some(target) = self.target_at(mouse.column, mouse.row) else {
             return UpdateEffect::None;
         };
         let ws = self.active_workspace_mut();
-        let id = match &ws.panes.pane(pid).view {
-            View::Editor(id) => *id,
-            _ => return UpdateEffect::None,
+
+        // Snapshot the view and pane area under the cursor so the scroll below
+        // can take a fresh mutable borrow of the run or editor state.
+        let (view, area) = match target {
+            FocusTarget::SplitPane(pid) => {
+                let pane = ws.panes.pane(pid);
+                (pane.view.clone(), pane.area)
+            },
+            FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
+                Some(dock) => (dock.view.clone(), dock.area),
+                None => return UpdateEffect::None,
+            },
         };
-        let Some(editor) = ws.editors.get_mut(id) else {
-            return UpdateEffect::None;
-        };
-        let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
-        action_handlers::movement::wheel_impulse(editor, down);
-        // No repaint here. The wheel only imparts velocity, and the frame tick
-        // drives the glide and its renders. A trackpad sends ~100 events per
-        // flick, so repainting per event would saturate the loop with full
-        // re-renders of an unscrolled view and starve the tick.
-        UpdateEffect::None
+
+        match view {
+            View::Editor(id) => {
+                let Some(editor) = ws.editors.get_mut(id) else {
+                    return UpdateEffect::None;
+                };
+                let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
+                action_handlers::movement::wheel_impulse(editor, down);
+                // No repaint here. The wheel only imparts velocity, and the
+                // frame tick drives the glide and its renders. A trackpad sends
+                // ~100 events per flick, so repainting per event would saturate
+                // the loop with re-renders of an unscrolled view.
+                UpdateEffect::None
+            },
+            View::Run(id) => {
+                let Some(run_state) = ws.runs.get_mut(id) else {
+                    return UpdateEffect::None;
+                };
+                let page = (area.height as usize).saturating_sub(1);
+                let max = run_state.output_line_total().saturating_sub(page);
+                run_state.scroll_offset = match mouse.kind {
+                    MouseEventKind::ScrollUp => (run_state.scroll_offset + 3).min(max),
+                    MouseEventKind::ScrollDown => run_state.scroll_offset.saturating_sub(3),
+                    _ => return UpdateEffect::None,
+                };
+                UpdateEffect::Redraw
+            },
+            _ => UpdateEffect::None,
+        }
     }
 
     /// Routes left-button Down/Drag/Up events on a focused run pane into
@@ -6086,6 +6114,89 @@ mod tests {
             run_state.input.text(ws),
             "ls",
             "Up recalls the last command"
+        );
+    }
+
+    #[test]
+    fn run_wheel_scrolls_output_and_clamps() {
+        let mut h = Stoat::test();
+        // 15 output rows in a 10-row pane (9 visible): output_line_total is 16
+        // (prompt + 15 rows), so the top is reachable at offset 16 - 9 = 7.
+        let output: Vec<u8> = (0..15)
+            .flat_map(|i| format!("line{i}\n").into_bytes())
+            .collect();
+        let run_id = open_run_with_output(&mut h, &output);
+        // Pin a short pane (the captures inside the helper re-layout it to the
+        // full terminal) so the 16 output rows overflow the 9 visible rows.
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
+        let offset = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .active_workspace()
+                .runs
+                .get(run_id)
+                .unwrap()
+                .scroll_offset
+        };
+
+        h.stoat.update(mouse_event(MouseEventKind::ScrollUp, 1, 1));
+        h.stoat.update(mouse_event(MouseEventKind::ScrollUp, 1, 1));
+        h.stoat.update(mouse_event(MouseEventKind::ScrollUp, 1, 1));
+        assert_eq!(offset(&h), 7, "scroll up steps by 3 and clamps at the top");
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 1, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 1, 1));
+        assert_eq!(offset(&h), 1, "scroll down steps by 3");
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 1, 1));
+        assert_eq!(offset(&h), 0, "scroll down floors at the tail");
+    }
+
+    #[test]
+    fn run_submit_resets_scroll_offset() {
+        let mut h = Stoat::test();
+        let output: Vec<u8> = (0..15)
+            .flat_map(|i| format!("line{i}\n").into_bytes())
+            .collect();
+        let run_id = open_run_with_output(&mut h, &output);
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
+
+        h.stoat.update(mouse_event(MouseEventKind::ScrollUp, 1, 1));
+        assert!(
+            h.stoat
+                .active_workspace()
+                .runs
+                .get(run_id)
+                .unwrap()
+                .scroll_offset
+                > 0,
+            "precondition: scrolled up off the tail",
+        );
+
+        let input = h
+            .stoat
+            .active_workspace()
+            .runs
+            .get(run_id)
+            .unwrap()
+            .input
+            .clone();
+        input.replace_text(h.stoat.active_workspace_mut(), "pwd");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
+
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .runs
+                .get(run_id)
+                .unwrap()
+                .scroll_offset,
+            0,
+            "submitting snaps the output back to the prompt",
         );
     }
 

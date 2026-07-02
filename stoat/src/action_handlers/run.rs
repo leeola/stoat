@@ -71,6 +71,8 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         Some(s) => s,
         None => return UpdateEffect::None,
     };
+    // Submitting snaps the output back to the prompt, like a terminal.
+    run_state.scroll_offset = 0;
     run_state
         .blocks
         .push(OutputBlock::new(text.clone(), run_state.cwd.clone(), width));

@@ -94,6 +94,19 @@ impl RunState {
         self.input.dispose(ws);
     }
 
+    /// Total run-pane output rows across every block, matching what the
+    /// renderer draws.
+    ///
+    /// The wheel-scroll clamp and [`Self::active_block_grid_pos`] both size the
+    /// output by this, so the drawn rows, the scrollable range, and the
+    /// mouse-hit rows stay in lockstep.
+    pub fn output_line_total(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(OutputBlock::rendered_line_span)
+            .sum()
+    }
+
     /// Translates a focused-pane-relative `(col, row)` cell into the active
     /// block's `(grid_col, grid_row)`. Returns `None` when the position falls
     /// on the input row, on a non-active block's region, on a header / status
@@ -115,21 +128,14 @@ impl RunState {
         let active_idx = self.blocks.len().checked_sub(1)?;
         let active = &self.blocks[active_idx];
 
-        let mut idx = 0usize;
-        for block in &self.blocks[..active_idx] {
-            idx += 1;
-            idx += block.grid.rendered_line_count();
-            if block.error.is_some() {
-                idx += 1;
-            }
-        }
+        let idx: usize = self.blocks[..active_idx]
+            .iter()
+            .map(OutputBlock::rendered_line_span)
+            .sum();
         let active_grid_start = idx + 1;
         let active_grid_end = active_grid_start + active.grid.rendered_line_count();
 
-        let mut total = active_grid_end;
-        if active.error.is_some() {
-            total += 1;
-        }
+        let total = self.output_line_total();
 
         let start = total.saturating_sub(output_height + self.scroll_offset);
         let line_idx = start + row as usize;

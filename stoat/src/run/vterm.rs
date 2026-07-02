@@ -583,4 +583,10 @@ impl OutputBlock {
     pub fn feed(&mut self, bytes: &[u8]) {
         self.grid.feed(bytes);
     }
+
+    /// Rows this block occupies in the run pane, counting its prompt line, its
+    /// grid rows (trailing all-default row dropped), and an optional error line.
+    pub fn rendered_line_span(&self) -> usize {
+        1 + self.grid.rendered_line_count() + usize::from(self.error.is_some())
+    }
 }

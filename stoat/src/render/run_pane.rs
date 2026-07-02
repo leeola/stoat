@@ -48,7 +48,7 @@ pub(crate) fn render_run_pane(
         }
     }
 
-    let total = output_lines.len();
+    let total = run_state.output_line_total();
     let visible = output_height as usize;
     let start = total.saturating_sub(visible + run_state.scroll_offset);
     for (i, line) in output_lines.iter().skip(start).take(visible).enumerate() {
