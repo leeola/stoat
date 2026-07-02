@@ -1853,6 +1853,23 @@ impl Stoat {
     /// row-major selection text and pushing it to the
     /// [`crate::host::ClipboardHost`]; the selection itself persists in
     /// place. Click-without-drag (`anchor == head`) is a no-op.
+    /// The focused run pane's [`RunId`], if the focus (a split pane or a dock)
+    /// currently holds a [`View::Run`].
+    ///
+    /// Run input now rides the standard insert/normal modes, so keys gate on
+    /// run focus rather than a bespoke `"run"` mode.
+    fn focused_run_pane(&self) -> Option<RunId> {
+        let ws = self.active_workspace();
+        let view = match ws.focus {
+            FocusTarget::SplitPane(pane_id) => &ws.panes.pane(pane_id).view,
+            FocusTarget::Dock(dock_id) => &ws.docks.get(dock_id)?.view,
+        };
+        match view {
+            View::Run(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     fn handle_run_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
         let target = {
             let ws = self.active_workspace();
@@ -2205,7 +2222,7 @@ impl Stoat {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
             }
-            if self.mode == "run" {
+            if self.focused_run_pane().is_some() {
                 return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
             }
             if let Some(agent_id) = self.term_input_target() {
@@ -2274,10 +2291,7 @@ impl Stoat {
             return self.route_key_to_term(agent_id, key);
         }
 
-        if (self.mode == "insert"
-            || self.mode == "reword_insert"
-            || self.mode == "prompt"
-            || self.mode == "run")
+        if (self.mode == "insert" || self.mode == "reword_insert" || self.mode == "prompt")
             && let Some(effect) = self.handle_insert_key(key)
         {
             // If help is open, keep its filtered list in sync after every
@@ -2921,7 +2935,9 @@ impl Stoat {
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Enter if key.modifiers.is_empty() => {
-                if self.mode == "prompt" || self.mode == "run" {
+                if self.focused_run_pane().is_some() {
+                    Some(action_handlers::dispatch(self, &stoat_action::RunSubmit))
+                } else if self.mode == "prompt" {
                     None
                 } else {
                     self.editor_insert(editor_id, buffer_id, "\n");
@@ -2949,11 +2965,19 @@ impl Stoat {
                 }
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Up if self.mode != "run" && self.mode != "prompt" => {
+            KeyCode::Up if self.focused_run_pane().is_some() => Some(action_handlers::dispatch(
+                self,
+                &stoat_action::RunHistoryPrev,
+            )),
+            KeyCode::Down if self.focused_run_pane().is_some() => Some(action_handlers::dispatch(
+                self,
+                &stoat_action::RunHistoryNext,
+            )),
+            KeyCode::Up if self.mode != "prompt" => {
                 action_handlers::dispatch(self, &stoat_action::MoveUp);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Down if self.mode != "run" && self.mode != "prompt" => {
+            KeyCode::Down if self.mode != "prompt" => {
                 action_handlers::dispatch(self, &stoat_action::MoveDown);
                 Some(UpdateEffect::Redraw)
             },
@@ -6010,6 +6034,59 @@ mod tests {
         h.submit_run("retry");
 
         h.assert_snapshot("run_pane_prompt_blocks");
+    }
+
+    #[test]
+    fn open_run_lands_in_insert_mode() {
+        let mut h = Stoat::test();
+        h.open_run();
+        assert_eq!(
+            h.stoat.mode, "insert",
+            "opening a run pane enters insert mode"
+        );
+    }
+
+    #[test]
+    fn run_enter_submits_from_insert_and_normal() {
+        let mut h = Stoat::test();
+        let fake = h.fake_terminal().clone();
+        h.open_run();
+
+        h.type_text("ls");
+        h.type_keys("enter");
+        assert!(
+            fake.sent_strings().iter().any(|s| s.starts_with("ls\n")),
+            "insert-mode Enter submits, sent {:?}",
+            fake.sent_strings(),
+        );
+
+        h.type_text("pwd");
+        h.type_keys("esc");
+        assert_eq!(h.stoat.mode, "normal", "Escape leaves insert mode");
+        h.type_keys("enter");
+        assert!(
+            fake.sent_strings().iter().any(|s| s.starts_with("pwd\n")),
+            "normal-mode Enter submits, sent {:?}",
+            fake.sent_strings(),
+        );
+    }
+
+    #[test]
+    fn run_up_recalls_history() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+
+        h.type_text("ls");
+        h.type_keys("enter");
+        h.type_keys("up");
+
+        let ws = h.stoat.active_workspace();
+        let run_state = ws.runs.get(run_id).expect("run state exists");
+        assert_eq!(
+            run_state.input.text(ws),
+            "ls",
+            "Up recalls the last command"
+        );
     }
 
     fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8]) -> RunId {

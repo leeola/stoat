@@ -45,7 +45,6 @@ theme default_dark {
     ui.statusline.normal.fg   = primary;
     ui.statusline.insert.fg   = success;
     ui.statusline.prompt.fg   = success;
-    ui.statusline.run.fg      = special;
     ui.statusline.commits.fg  = warning;
     ui.statusline.rebase.fg   = danger;
     ui.statusline.reword.fg   = danger;
@@ -147,6 +146,7 @@ on key {
         BackTab -> HelpScopeToggle();
     }
     mode == normal {
+        Enter -> RunSubmit();
         q -> ReplayMacro();
         Space -> SetMode(space);
         : -> OpenCommandPalette();
@@ -481,7 +481,7 @@ on key {
         Escape -> SetMode(normal);
         q -> Quit();
         a -> SetMode(space_pane_nav);
-        t -> [OpenRun(), SetMode(run)];
+        t -> [OpenRun()];
         c -> [SpawnClaude(), SetMode(normal)];
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
@@ -542,12 +542,6 @@ on key {
         s -> [SwitchWorkspace(), SetMode(normal)];
         x -> [CloseWorkspace(), SetMode(normal)];
         : -> OpenCommandPalette();
-    }
-    mode == run {
-        Escape -> SetMode(normal);
-        Enter -> RunSubmit();
-        Up -> RunHistoryPrev();
-        Down -> RunHistoryNext();
     }
     mode == space_pane_nav {
         Escape -> SetMode(normal);

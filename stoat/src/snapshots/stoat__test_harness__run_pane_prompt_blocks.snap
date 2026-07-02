@@ -4,7 +4,7 @@ expression: text
 ---
 actions: submit_run
 focused: #1 of 1
-mode: run
+mode: insert
 size: 40x12
 ---
 [0m[36m/w/proj[0m ❯ true
@@ -18,4 +18,4 @@ boom
 
 
 [0m[36m/w/proj[0m [0m[31m[5][0m❯ [0m[7m [0m
-[0m[1m[30m[45m RUN [0m[1m[97m[100m (unnamed) [0m[97m[100m[run]                   [0m
+[0m[1m[30m[42m INS [0m[1m[97m[100m (unnamed) [0m[97m[100m[run]                   [0m

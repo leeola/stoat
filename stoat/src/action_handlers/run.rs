@@ -23,7 +23,7 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     ws.panes.pane_mut(focused).view = View::Run(run_id);
-    stoat.mode = "run".into();
+    stoat.transition_mode("insert".into());
     UpdateEffect::Redraw
 }
 
