@@ -323,10 +323,12 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
             SelectionGoal::None => cursor_display.column,
         };
         let new_row_i = (cursor_display.row as i64).saturating_add(delta);
-        if new_row_i < 0 || new_row_i > max_row as i64 {
+        let new_row = new_row_i.clamp(0, max_row as i64) as u32;
+        // A plain j/k at the file edge stays a no-op. An overshooting count
+        // jump lands on the clamped edge row rather than doing nothing.
+        if new_row == cursor_display.row {
             return sel.clone();
         }
-        let new_row = new_row_i as u32;
         let clamped_col = goal_col.min(display_snapshot.line_len(new_row));
         let raw = DisplayPoint::new(new_row, clamped_col);
         let clipped = display_snapshot.clip_point(raw, Bias::Left);
@@ -3265,6 +3267,29 @@ mod tests {
         h.stoat.pending_count = Some(50);
         h.type_keys("j");
         h.assert_snapshot("count_jump_keeps_cursor_visible");
+    }
+
+    #[test]
+    fn count_vertical_motion_clamps_at_buffer_edge() {
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file("short.rs", "a\nb\nc");
+        h.open_file(&path);
+
+        h.stoat.pending_count = Some(10000);
+        h.type_keys("j");
+        assert_eq!(
+            focused_head_row(&mut h),
+            2,
+            "an overshooting count-down clamps to the last line",
+        );
+
+        h.stoat.pending_count = Some(10000);
+        h.type_keys("k");
+        assert_eq!(
+            focused_head_row(&mut h),
+            0,
+            "an overshooting count-up clamps to the first line",
+        );
     }
 
     #[test]
