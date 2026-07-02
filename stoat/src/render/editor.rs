@@ -154,15 +154,21 @@ pub(crate) fn render_editor_with_overlay(
             None => true,
         };
         if stale {
+            let mut window = editor
+                .search_match_cache
+                .take()
+                .map(|c| c.window)
+                .unwrap_or_default();
+            window.clear();
+            for chunk in rope.chunks_in_range(visible.clone()) {
+                window.push_str(chunk);
+            }
             let matches = match crate::action_handlers::search::compile_search_regex(query) {
-                Ok(regex) => {
-                    let window = rope.slice(visible.clone()).to_string();
-                    regex
-                        .find_iter(&window)
-                        .filter(|m| m.end() > m.start())
-                        .map(|m| (m.start() + visible.start, m.end() + visible.start))
-                        .collect()
-                },
+                Ok(regex) => regex
+                    .find_iter(&window)
+                    .filter(|m| m.end() > m.start())
+                    .map(|m| (m.start() + visible.start, m.end() + visible.start))
+                    .collect(),
                 Err(_) => Vec::new(),
             };
             editor.search_match_cache = Some(SearchMatchCache {
@@ -170,6 +176,7 @@ pub(crate) fn render_editor_with_overlay(
                 query: query.to_string(),
                 visible: visible.clone(),
                 matches,
+                window,
             });
         }
 

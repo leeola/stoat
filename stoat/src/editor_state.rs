@@ -29,6 +29,9 @@ pub(crate) struct SearchMatchCache {
     /// Byte ranges `[start, end)` of each non-empty match within `visible`,
     /// stored as absolute buffer offsets.
     pub(crate) matches: Vec<(usize, usize)>,
+    /// Scratch holding the scanned window text, retained across rebuilds to
+    /// reuse the allocation. Not part of the cache key.
+    pub(crate) window: String,
 }
 
 pub(crate) struct EditorState {
