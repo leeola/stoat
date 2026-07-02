@@ -1123,6 +1123,12 @@ impl Terminal {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
+    /// Whether focus reporting (DECSET 1004) is on, so the app should send a
+    /// focus-in or focus-out report as the window gains or loses focus.
+    pub fn report_focus_in_out(&self) -> bool {
+        self.term.mode().contains(TermMode::FOCUS_IN_OUT)
+    }
+
     /// Copy the parsed screen onto `grid` and return the cursor, the number of
     /// rows the content scrolled since the previous call, and which rows changed.
     ///
@@ -2334,6 +2340,18 @@ mod tests {
 
         terminal.advance(b"\x1b[?2004l");
         assert!(!terminal.bracketed_paste(), "DECRST 2004 disables it");
+    }
+
+    #[test]
+    fn tracks_focus_reporting_mode() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        assert!(!terminal.report_focus_in_out(), "off by default");
+
+        terminal.advance(b"\x1b[?1004h");
+        assert!(terminal.report_focus_in_out(), "DECSET 1004 enables it");
+
+        terminal.advance(b"\x1b[?1004l");
+        assert!(!terminal.report_focus_in_out(), "DECRST 1004 disables it");
     }
 
     #[test]

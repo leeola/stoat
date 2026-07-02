@@ -294,6 +294,9 @@ struct State {
     /// The most recent modifier state, tracked from `ModifiersChanged` so a key
     /// press can tell whether the platform zoom modifier is held.
     modifiers: ModifiersState,
+    /// Whether the window currently holds focus, tracked from
+    /// `WindowEvent::Focused`. Drives the DECSET 1004 focus report to the child.
+    focused: bool,
     /// The cursor's animated position in fractional cell coordinates, eased
     /// toward the terminal's actual cursor cell each frame. Drives the
     /// [`CursorAnimation::Block`] motion.
@@ -546,6 +549,7 @@ impl ApplicationHandler<PtyEvent> for App {
             font_size: self.font_size,
             scale_factor,
             modifiers: ModifiersState::empty(),
+            focused: true,
             cursor_anim: [0.0, 0.0],
             cursor_animation: self.cursor_animation,
             cursor_corner_anim: [[0.0, 0.0]; 4],
@@ -648,6 +652,18 @@ impl ApplicationHandler<PtyEvent> for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Focused(gained) => {
+                state.focused = gained;
+                if state.terminal.lock().report_focus_in_out() {
+                    let report: &[u8] = if state.focused { b"\x1b[I" } else { b"\x1b[O" };
+                    let _ = state.pty.write(report);
+                }
+                if state.focused {
+                    // Regaining focus clears any pending attention request, e.g.
+                    // a dock bounce a bell raised while the window was in back.
+                    state.window.request_user_attention(None);
+                }
+            },
             WindowEvent::Resized(size) => {
                 state.gpu.resize(size.width, size.height);
 
