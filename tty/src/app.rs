@@ -142,6 +142,11 @@ fn run_with_config(
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
+    // portable_pty defaults an unset cwd to $HOME, so resolve stoatty's own
+    // working directory here (the choke point for run() and run_with_shell())
+    // to honor run()'s documented fallback and keep env IO out of the PTY layer.
+    let working_directory = working_directory.or_else(|| std::env::current_dir().ok());
+
     let mut app = App::new(
         event_loop.create_proxy(),
         program,

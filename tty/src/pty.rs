@@ -46,8 +46,9 @@ pub(crate) struct Pty {
 
 impl Pty {
     /// Spawn `program` with `args` over a fresh PTY sized `rows` by `cols` and
-    /// start reading. Runs the command in `cwd` when given, otherwise inheriting
-    /// the caller's working directory.
+    /// start reading. Runs the command in `cwd` when given. A `None` cwd lets
+    /// portable_pty default the working directory to the home directory, so
+    /// callers that want a specific cwd resolve it before calling here.
     ///
     /// When `stoat_dir` is set, that directory is prepended to the child's
     /// `PATH`, so a nested bare-`stoat` call from inside the child resolves to
