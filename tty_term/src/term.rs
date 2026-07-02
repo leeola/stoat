@@ -908,6 +908,20 @@ impl Terminal {
         self.term.mode().contains(TermMode::SGR_MOUSE)
     }
 
+    /// Whether pointer motion should be reported while a button is held, i.e.
+    /// the program enabled button-event (1002) or any-motion (1003) tracking.
+    pub fn mouse_drag(&self) -> bool {
+        self.term
+            .mode()
+            .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+    }
+
+    /// Whether pointer motion should be reported with no button held, i.e. the
+    /// program enabled any-motion (1003) tracking.
+    pub fn mouse_motion(&self) -> bool {
+        self.term.mode().contains(TermMode::MOUSE_MOTION)
+    }
+
     /// Copy the parsed screen onto `grid` and return the cursor, the number of
     /// rows the content scrolled since the previous call, and which rows changed.
     ///
@@ -2052,6 +2066,18 @@ mod tests {
         assert!(!terminal.alternate_scroll(), "alternate scroll off");
         assert!(terminal.mouse_mode(), "mouse reporting on");
         assert!(terminal.sgr_mouse(), "sgr mouse on");
+        assert!(!terminal.mouse_drag(), "click reporting is not drag");
+        assert!(!terminal.mouse_motion(), "click reporting is not motion");
+
+        // Button-event tracking (1002) reports motion during a drag. Any-motion
+        // tracking (1003) reports motion with no button held.
+        terminal.advance(b"\x1b[?1002h");
+        assert!(terminal.mouse_drag(), "1002 enables drag reporting");
+        assert!(!terminal.mouse_motion(), "1002 is not buttonless motion");
+
+        terminal.advance(b"\x1b[?1003h");
+        assert!(terminal.mouse_motion(), "1003 enables motion reporting");
+        assert!(terminal.mouse_drag(), "1003 also satisfies drag reporting");
     }
 
     #[test]

@@ -313,6 +313,10 @@ struct State {
     /// The grid cell `(col, row)` under the pointer, tracked from `CursorMoved`,
     /// so a mouse-reporting app receives wheel reports at the pointer position.
     pointer_cell: (usize, usize),
+    /// The SGR code (0 left, 1 middle, 2 right) of the button currently held,
+    /// or `None` when none is, tracked from `MouseInput` so a drag-motion report
+    /// can encode which button is being dragged.
+    pressed_button: Option<u8>,
 }
 
 /// One pool's smooth-scroll animation state, held by [`State::pool_anims`].
@@ -500,6 +504,7 @@ impl ApplicationHandler<PtyEvent> for App {
             pool_anims: BTreeMap::new(),
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
+            pressed_button: None,
         });
     }
 
@@ -1065,7 +1070,28 @@ impl ApplicationHandler<PtyEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let cell_size = render::cell_size(state.font_size, state.scale_factor as f32);
                 let (rows, cols) = state.gpu.grid_size();
+                let previous = state.pointer_cell;
                 state.pointer_cell = cell_at(position.x, position.y, cell_size, rows, cols);
+                if state.pointer_cell == previous {
+                    return;
+                }
+
+                // Snapshot the motion-routing modes under one lock, matching the
+                // wheel path, so the branch reads a consistent terminal state.
+                let (sgr, drag, motion) = {
+                    let terminal = state.terminal.lock();
+                    (
+                        terminal.mouse_mode() && terminal.sgr_mouse(),
+                        terminal.mouse_drag(),
+                        terminal.mouse_motion(),
+                    )
+                };
+                let button = state.pressed_button;
+                let report = sgr && ((button.is_some() && drag) || (button.is_none() && motion));
+                if report {
+                    let (col, row) = state.pointer_cell;
+                    let _ = state.pty.write(&sgr_motion_bytes(button, col, row));
+                }
             },
             WindowEvent::MouseInput {
                 state: element_state,
@@ -1078,18 +1104,15 @@ impl ApplicationHandler<PtyEvent> for App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                let pressed = element_state == ElementState::Pressed;
+                state.pressed_button = pressed.then_some(code);
                 let report = {
                     let terminal = state.terminal.lock();
                     terminal.mouse_mode() && terminal.sgr_mouse()
                 };
                 if report {
                     let (col, row) = state.pointer_cell;
-                    let _ = state.pty.write(&sgr_button_bytes(
-                        code,
-                        element_state == ElementState::Pressed,
-                        col,
-                        row,
-                    ));
+                    let _ = state.pty.write(&sgr_button_bytes(code, pressed, col, row));
                 }
             },
             _ => {},
@@ -1276,6 +1299,16 @@ fn sgr_wheel_bytes(lines: i32, col: usize, row: usize) -> Vec<u8> {
 fn sgr_button_bytes(button: u8, pressed: bool, col: usize, row: usize) -> Vec<u8> {
     let terminator = if pressed { 'M' } else { 'm' };
     format!("\x1b[<{button};{};{}{terminator}", col + 1, row + 1).into_bytes()
+}
+
+/// Encode pointer motion at cell (`col`, `row`) as an SGR (1006) motion report.
+///
+/// The code is the held button (0 left, 1 middle, 2 right) plus the 32 motion
+/// flag, or code 3 (no button) plus 32 for buttonless any-motion (1003)
+/// tracking, with 1-based coordinates and a trailing `M`.
+fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize) -> Vec<u8> {
+    let code = button.unwrap_or(3) + 32;
+    format!("\x1b[<{code};{};{}M", col + 1, row + 1).into_bytes()
 }
 
 /// The grid cell `(col, row)` under physical pixel (`x`, `y`), clamped to the
@@ -1521,9 +1554,10 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
 mod tests {
     use super::{
         alternate_scroll_bytes, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners,
-        encode_key, font_step, popover_overflow, sgr_button_bytes, sgr_wheel_bytes,
-        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
-        step_scrollback_scroll, sweep_launch_shift, wheel_lines, SCROLLBACK_MIN_STEP,
+        encode_key, font_step, popover_overflow, sgr_button_bytes, sgr_motion_bytes,
+        sgr_wheel_bytes, step_document_scroll, step_grid_scroll, step_popover_scroll,
+        step_region_scroll, step_scrollback_scroll, sweep_launch_shift, wheel_lines,
+        SCROLLBACK_MIN_STEP,
     };
     use stoatty_protocol::command::PoolRegionCommand;
     use stoatty_term::{
@@ -1836,6 +1870,20 @@ mod tests {
             sgr_button_bytes(0, false, 3, 7),
             b"\x1b[<0;4;8m".to_vec(),
             "release reports the same button with a trailing m"
+        );
+    }
+
+    #[test]
+    fn sgr_motion_bytes_encodes_button_and_motion_flag() {
+        assert_eq!(
+            sgr_motion_bytes(Some(0), 3, 7),
+            b"\x1b[<32;4;8M".to_vec(),
+            "held left button (0) drags as code 0+32=32 at 1-based (4,8)"
+        );
+        assert_eq!(
+            sgr_motion_bytes(None, 0, 0),
+            b"\x1b[<35;1;1M".to_vec(),
+            "buttonless any-motion is the no-button code 3+32=35 at the origin"
         );
     }
 
