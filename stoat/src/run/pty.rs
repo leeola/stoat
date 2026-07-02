@@ -60,12 +60,15 @@ impl ShellHandle {
 }
 
 pub fn spawn_shell(
+    host: &dyn TerminalHost,
     executor: &Executor,
     cwd: &Path,
     width: u16,
     pty_tx: mpsc::Sender<PtyNotification>,
     run_id: RunId,
 ) -> std::io::Result<ShellHandle> {
+    use futures::FutureExt;
+
     let args = SpawnArgs {
         program: "bash".into(),
         args: vec!["--noediting".into(), "--noprofile".into(), "--norc".into()],
@@ -78,10 +81,22 @@ pub fn spawn_shell(
         width,
         rows: 24,
     };
-    let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
+    let session = match host.spawn(args).now_or_never() {
+        Some(result) => result?,
+        None => {
+            return Err(std::io::Error::other(
+                "terminal host did not spawn the run shell synchronously",
+            ))
+        },
+    };
+    let session: Arc<dyn TerminalSession> = Arc::from(session);
     executor
         .spawn(reader_task(session.clone(), run_id, pty_tx))
         .detach();
+
+    // bash --noediting echoes injected lines back into the grid. Turn the
+    // tty's echo off so only real command output is rendered.
+    let _ = session.write(b"stty -echo\n").now_or_never();
 
     Ok(ShellHandle::new(session))
 }

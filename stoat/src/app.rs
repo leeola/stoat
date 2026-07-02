@@ -5920,6 +5920,35 @@ mod tests {
         assert!(rx.try_recv().is_err(), "drain must empty the channel");
     }
 
+    #[test]
+    fn open_run_spawns_shell_with_echo_disabled() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+
+        assert_eq!(
+            h.fake_terminal().sent_bytes().first().map(Vec::as_slice),
+            Some(b"stty -echo\n".as_slice()),
+            "eager spawn disables tty echo before anything else",
+        );
+
+        let input = h
+            .stoat
+            .active_workspace()
+            .runs
+            .get(run_id)
+            .expect("run state exists")
+            .input
+            .clone();
+        input.replace_text(h.stoat.active_workspace_mut(), "ls");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
+
+        let sent = h.fake_terminal().sent_strings();
+        assert!(
+            sent.get(1).is_some_and(|s| s.starts_with("ls\n")),
+            "submit reuses the eager shell to send the command, got {sent:?}",
+        );
+    }
+
     fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8]) -> RunId {
         let run_id = h.open_run();
         let pane_id = h.stoat.active_workspace().panes.focus();

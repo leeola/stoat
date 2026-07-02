@@ -6,11 +6,22 @@ use crate::{
 
 pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     let executor = stoat.executor.clone();
+    let pty_tx = stoat.pty_tx.clone();
+    let host = stoat.terminal_host.clone();
     let ws = stoat.active_workspace_mut();
     let cwd = ws.git_root.clone();
-    let state = RunState::new(cwd, ws, executor);
-    let run_id = ws.runs.insert(state);
     let focused = ws.panes.focus();
+    let width = ws.panes.pane(focused).area.width.saturating_sub(2).max(20);
+
+    let state = RunState::new(cwd.clone(), ws, executor.clone());
+    let run_id = ws.runs.insert(state);
+
+    if let Ok(handle) = crate::run::spawn_shell(&*host, &executor, &cwd, width, pty_tx, run_id)
+        && let Some(run_state) = ws.runs.get_mut(run_id)
+    {
+        run_state.shell_handle = Some(handle);
+    }
+
     ws.panes.pane_mut(focused).view = View::Run(run_id);
     stoat.mode = "run".into();
     UpdateEffect::Redraw
@@ -19,6 +30,7 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
 pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     let pty_tx = stoat.pty_tx.clone();
     let executor = stoat.executor.clone();
+    let host = stoat.terminal_host.clone();
     let active_idx = stoat.active_workspace;
     let ws = &mut stoat.workspaces[active_idx];
     let focused = ws.panes.focus();
@@ -64,7 +76,9 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
         handle.send_command(&text, &sentinel);
     } else {
-        if let Ok(handle) = crate::run::spawn_shell(&executor, &run_state.cwd, width, pty_tx, id) {
+        if let Ok(handle) =
+            crate::run::spawn_shell(&*host, &executor, &run_state.cwd, width, pty_tx, id)
+        {
             let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
             run_state.shell_handle = Some(handle);
             if let Some(h) = &mut run_state.shell_handle {

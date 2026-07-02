@@ -52,6 +52,7 @@ pub struct TestHarness {
     pub(crate) fake_env: Arc<crate::host::FakeEnv>,
     pub(crate) fake_lsp: Arc<crate::host::FakeLsp>,
     pub(crate) fake_clipboard: Arc<crate::host::FakeClipboard>,
+    pub(crate) fake_terminal: Arc<crate::host::FakeTerminalSession>,
     frames: Vec<Frame>,
     last_buffer: Option<Buffer>,
     step: usize,
@@ -74,6 +75,7 @@ impl TestHarness {
         let fake_lsp = Arc::new(crate::host::FakeLsp::new());
         fake_lsp.set_executor(executor.clone());
         let fake_clipboard = Arc::new(crate::host::FakeClipboard::new());
+        let fake_terminal = Arc::new(crate::host::FakeTerminalSession::new());
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;
         stoat.active_workspace_mut().name = String::new();
@@ -83,6 +85,7 @@ impl TestHarness {
         stoat.set_env_host(fake_env.clone());
         stoat.set_lsp_host(fake_lsp.clone());
         stoat.set_clipboard_host(fake_clipboard.clone());
+        stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake_terminal.clone()));
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {
@@ -94,6 +97,7 @@ impl TestHarness {
             fake_env,
             fake_lsp,
             fake_clipboard,
+            fake_terminal,
             frames: Vec::new(),
             last_buffer: None,
             step: 0,
@@ -163,6 +167,13 @@ impl TestHarness {
     /// `stoat.clipboard_host()`.
     pub fn fake_clipboard(&self) -> &Arc<crate::host::FakeClipboard> {
         &self.fake_clipboard
+    }
+
+    /// Expose the [`crate::host::FakeTerminalSession`] the harness installs as
+    /// the default terminal host, so tests can read the bytes the run shell
+    /// and terminal panes wrote to their PTY.
+    pub fn fake_terminal(&self) -> &Arc<crate::host::FakeTerminalSession> {
+        &self.fake_terminal
     }
 
     /// Assert that every host installed on [`Stoat`] still points at the
