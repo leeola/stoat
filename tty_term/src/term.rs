@@ -16,11 +16,12 @@ use crate::{
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::{Dimensions, Scroll},
-    index::{Column, Line},
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionRange, SelectionType},
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
         color::Colors,
-        Config, RenderableCursor, TermDamage, TermMode,
+        viewport_to_point, Config, RenderableCursor, TermDamage, TermMode,
     },
     vte::ansi::{Color, CursorShape as TermCursorShape, NamedColor, Processor},
     Term,
@@ -109,6 +110,11 @@ pub struct Terminal {
     /// the previous [`Self::project`], so a moved or cleared decoration can damage
     /// the rows it used to cover and erase its stale footprint.
     last_decoration_footprint: Vec<bool>,
+    /// The inclusive viewport row span the selection covered at the previous
+    /// [`Self::project`], so a growing or shrinking drag can damage the rows it
+    /// entered or left and repaint their INVERSE overlay. `None` when there was
+    /// no selection.
+    last_selection_span: Option<(usize, usize)>,
     /// Accumulated renderer-facing decoration row-damage since the renderer last
     /// drained it via [`Self::take_decoration_damage`]. Distinct from VT
     /// [`Damage`]: it marks rows where an APC border or scale changed, which the
@@ -333,6 +339,7 @@ impl Terminal {
             line_layout: None,
             decorations_dirty: DecorationDirty::default(),
             last_decoration_footprint: Vec::new(),
+            last_selection_span: None,
             decoration_damage: Vec::new(),
             last_history: 0,
             pools: BTreeMap::new(),
@@ -883,6 +890,39 @@ impl Terminal {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// Begin a simple text selection anchored at viewport cell `(row, col)`.
+    ///
+    /// `side_right` picks the right half of the cell for the anchor, so a drag
+    /// that starts past a glyph's midpoint excludes it, matching the usual
+    /// terminal feel. Replaces any prior selection.
+    pub fn start_selection(&mut self, row: usize, col: usize, side_right: bool) {
+        let point = viewport_to_point(self.display_offset(), Point::new(row, Column(col)));
+        let side = if side_right { Side::Right } else { Side::Left };
+        self.term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+    }
+
+    /// Extend the active selection to viewport cell `(row, col)`. A no-op when
+    /// no selection is active.
+    pub fn update_selection(&mut self, row: usize, col: usize, side_right: bool) {
+        let point = viewport_to_point(self.display_offset(), Point::new(row, Column(col)));
+        let side = if side_right { Side::Right } else { Side::Left };
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    /// Drop any active selection, so the next [`Self::project`] repaints without
+    /// the INVERSE overlay.
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// The selected text, or `None` when there is no selection or it is empty
+    /// (a click without a drag).
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string()
+    }
+
     /// Whether the alternate screen is active: a fullscreen app (a pager, an
     /// editor) holds it and owns its own scrolling.
     pub fn is_alt_screen(&self) -> bool {
@@ -950,10 +990,26 @@ impl Terminal {
             grid.resize(rows, cols);
         }
 
-        let dirty = self.collect_damage(rows, resized);
+        let mut dirty = self.collect_damage(rows, resized);
 
         let content = self.term.renderable_content();
         let offset = content.display_offset as i32;
+        let selection = content.selection;
+
+        // Repaint rows the selection entered or left since the last projection,
+        // so its INVERSE overlay tracks a drag even on rows VT damage did not
+        // touch. A `Damage::Full` frame already covers every row.
+        let span = selection.and_then(|s| selection_span(&s, offset, rows));
+        if span != self.last_selection_span
+            && let Damage::Partial(rows_dirty) = &mut dirty
+        {
+            for (lo, hi) in span.into_iter().chain(self.last_selection_span) {
+                for slot in rows_dirty.iter_mut().skip(lo).take(hi - lo + 1) {
+                    *slot = true;
+                }
+            }
+        }
+        self.last_selection_span = span;
 
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + offset;
@@ -966,8 +1022,11 @@ impl Terminal {
                 continue;
             }
 
-            *grid.get_mut(row, col) =
-                project_cell(indexed.cell, content.colors, &self.theme, &self.palette);
+            let cell = grid.get_mut(row, col);
+            *cell = project_cell(indexed.cell, content.colors, &self.theme, &self.palette);
+            if selection.is_some_and(|s| s.contains(indexed.point)) {
+                cell.flags = cell.flags.toggle(Flags::INVERSE);
+            }
         }
 
         let cursor = project_cursor(content.cursor, offset);
@@ -1363,6 +1422,20 @@ fn project_term_cells(
 
         *grid.get_mut(row, col) = project_cell(indexed.cell, content.colors, theme, palette);
     }
+}
+
+/// The inclusive viewport row span a selection covers, clamped to the grid, or
+/// `None` when it falls entirely below the viewport.
+///
+/// `offset` is the display offset the projection ran at, converting the
+/// selection's terminal lines to viewport rows the same way the cell loop does.
+fn selection_span(range: &SelectionRange, offset: i32, rows: usize) -> Option<(usize, usize)> {
+    let top = (range.start.line.0 + offset).max(0) as usize;
+    let bottom = (range.end.line.0 + offset).max(0) as usize;
+    if top >= rows {
+        return None;
+    }
+    Some((top, bottom.min(rows - 1)))
 }
 
 fn project_cell(
@@ -3099,5 +3172,55 @@ mod tests {
         let per = start.elapsed() / iterations;
 
         eprintln!("advance() {}KB ESC-free: {per:?}/call", buf.len() / 1024);
+    }
+
+    #[test]
+    fn selection_text_returns_the_dragged_range() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.advance(b"hello");
+        terminal.start_selection(0, 0, false);
+        terminal.update_selection(0, 4, true);
+        assert_eq!(terminal.selection_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn project_inverts_selected_cells() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let mut grid = Grid::new(4, 8);
+        terminal.advance(b"hello");
+        terminal.start_selection(0, 0, false);
+        terminal.update_selection(0, 2, true);
+        terminal.project(&mut grid);
+
+        for col in 0..=2 {
+            assert!(
+                grid.get(0, col).flags.contains(Flags::INVERSE),
+                "selected col {col} is inverted"
+            );
+        }
+        assert!(
+            !grid.get(0, 3).flags.contains(Flags::INVERSE),
+            "col past the selection is not inverted"
+        );
+    }
+
+    #[test]
+    fn selection_growth_damages_the_entered_rows() {
+        let mut terminal = Terminal::new(6, 8, Theme::default());
+        let mut grid = Grid::new(6, 8);
+        terminal.advance(b"a\r\nb\r\nc");
+        terminal.start_selection(0, 0, false);
+        terminal.update_selection(0, 0, true);
+        terminal.project(&mut grid);
+
+        // Grow the selection to row 1. That row is neither the anchor nor the
+        // cursor row, so it repaints only because the selection reached it.
+        terminal.update_selection(1, 0, true);
+        let (_, _, damage) = terminal.project(&mut grid);
+        assert!(damage.is_dirty(1), "row 1 newly entered the selection");
+        assert!(
+            !damage.is_dirty(5),
+            "a row outside the selection stays clean"
+        );
     }
 }

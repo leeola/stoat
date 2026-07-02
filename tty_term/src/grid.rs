@@ -694,6 +694,13 @@ impl Flags {
     pub const fn contains(self, other: Flags) -> bool {
         (self.0 & other.0) == other.0
     }
+
+    /// Flip every attribute in `other`, so a selection overlay inverts a cell
+    /// and composes correctly over an already-inverse one (double-invert
+    /// cancels back to normal video).
+    pub const fn toggle(self, other: Flags) -> Flags {
+        Flags(self.0 ^ other.0)
+    }
 }
 
 impl BitOr for Flags {
