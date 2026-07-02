@@ -14,6 +14,8 @@ use crate::{
     stoat_bin,
 };
 use alacritty_terminal::sync::FairMutex;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -21,7 +23,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use stoat_cli::CommonArgs;
 use stoatty_protocol::command::PoolRegionCommand;
@@ -40,7 +42,7 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{Window, WindowId},
+    window::{UserAttentionType, Window, WindowId},
 };
 
 /// Window title shown before a program sets one, and restored when a program
@@ -297,6 +299,10 @@ struct State {
     /// Whether the window currently holds focus, tracked from
     /// `WindowEvent::Focused`. Drives the DECSET 1004 focus report to the child.
     focused: bool,
+    /// Instant of the last bell that rang, so a burst of BELs from a catted
+    /// binary makes one beep and attention request rather than a storm. `None`
+    /// until the first bell.
+    last_bell: Option<Instant>,
     /// The cursor's animated position in fractional cell coordinates, eased
     /// toward the terminal's actual cursor cell each frame. Drives the
     /// [`CursorAnimation::Block`] motion.
@@ -550,6 +556,7 @@ impl ApplicationHandler<PtyEvent> for App {
             scale_factor,
             modifiers: ModifiersState::empty(),
             focused: true,
+            last_bell: None,
             cursor_anim: [0.0, 0.0],
             cursor_animation: self.cursor_animation,
             cursor_corner_anim: [[0.0, 0.0]; 4],
@@ -1509,15 +1516,74 @@ fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize) -> Vec<u8> {
 /// Apply host-facing terminal notifications off the grid.
 ///
 /// Title and reset-title set the window title. Clipboard-store copies to the
-/// system clipboard. Bell has no handler yet.
+/// system clipboard. Bell rings the terminal bell.
 fn handle_term_events(state: &mut State, events: Vec<TermEvent>) {
     for event in events {
         match event {
             TermEvent::Title(title) => state.window.set_title(&title),
             TermEvent::ResetTitle => state.window.set_title(DEFAULT_TITLE),
             TermEvent::ClipboardStore(text) => copy_to_clipboard(&text),
-            TermEvent::Bell => {},
+            TermEvent::Bell => ring_bell(state, Instant::now()),
         }
+    }
+}
+
+/// Minimum spacing between bells, so a catted binary's burst of BELs rings once
+/// rather than storming the speakers and the dock.
+const BELL_MIN_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Ring the terminal bell for a BEL byte.
+///
+/// Requests window attention while unfocused (a dock bounce on macOS, an urgency
+/// hint on X11/Wayland) and, on macOS, plays the system alert sound. Rate-limited
+/// via [`bell_should_ring`], so a burst makes one beep and one attention request.
+fn ring_bell(state: &mut State, now: Instant) {
+    if !bell_should_ring(state.last_bell, now) {
+        return;
+    }
+    state.last_bell = Some(now);
+
+    if !state.focused {
+        state
+            .window
+            .request_user_attention(Some(UserAttentionType::Informational));
+    }
+
+    play_system_bell();
+}
+
+/// Whether a bell should ring now, given the instant the previous one rang.
+///
+/// Rings when none has rung yet, or when at least [`BELL_MIN_INTERVAL`] has
+/// passed since the last, collapsing a BEL burst to a single ring.
+fn bell_should_ring(last_bell: Option<Instant>, now: Instant) -> bool {
+    match last_bell {
+        Some(prev) => now.duration_since(prev) >= BELL_MIN_INTERVAL,
+        None => true,
+    }
+}
+
+/// Play the system alert sound. macOS runs `osascript -e beep`, honoring the
+/// user's chosen alert sound and volume. Other platforms have no portable beep
+/// without an audio dependency, so this is a no-op there.
+#[cfg(target_os = "macos")]
+fn play_system_bell() {
+    let mut command = Command::new("osascript");
+    command.args(["-e", "beep"]);
+    spawn_reaped(command);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn play_system_bell() {}
+
+/// Spawn `command` and reap it on a detached thread, so a short-lived helper
+/// process leaves no zombie once it exits.
+#[cfg(target_os = "macos")]
+fn spawn_reaped(mut command: Command) {
+    if let Ok(mut child) = command.spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }
 
@@ -1773,12 +1839,13 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners,
-        encode_key, font_step, paste_bytes, popover_overflow, sgr_button_bytes, sgr_motion_bytes,
-        sgr_wheel_bytes, step_document_scroll, step_grid_scroll, step_popover_scroll,
-        step_region_scroll, step_scrollback_scroll, sweep_launch_shift, wheel_lines,
-        SCROLLBACK_MIN_STEP,
+        alternate_scroll_bytes, bell_should_ring, cell_at, copy_pool_region, cursor_in_region,
+        ease, ease_corners, encode_key, font_step, paste_bytes, popover_overflow, sgr_button_bytes,
+        sgr_motion_bytes, sgr_wheel_bytes, step_document_scroll, step_grid_scroll,
+        step_popover_scroll, step_region_scroll, step_scrollback_scroll, sweep_launch_shift,
+        wheel_lines, SCROLLBACK_MIN_STEP,
     };
+    use std::time::{Duration, Instant};
     use stoatty_protocol::command::PoolRegionCommand;
     use stoatty_term::{
         grid::{Grid, Overlay, Rgb},
@@ -2214,6 +2281,20 @@ mod tests {
     #[test]
     fn paste_bytes_normalizes_newlines_when_unbracketed() {
         assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc".to_vec());
+    }
+
+    #[test]
+    fn bell_rate_limits_a_burst() {
+        let t0 = Instant::now();
+        assert!(bell_should_ring(None, t0), "the first bell rings");
+        assert!(
+            !bell_should_ring(Some(t0), t0 + Duration::from_millis(199)),
+            "a bell within the interval is suppressed"
+        );
+        assert!(
+            bell_should_ring(Some(t0), t0 + Duration::from_millis(200)),
+            "a bell at the interval boundary rings again"
+        );
     }
 
     #[test]
