@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "action",
   "bin",
+  "cli",
   "codegraph",
   "config",
   "host",

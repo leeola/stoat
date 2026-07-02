@@ -3921,6 +3921,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "stoat",
+ "stoat_cli",
  "stoat_host",
  "stoat_language",
  "stoat_scheduler",
@@ -3930,6 +3931,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "viewport",
+]
+
+[[package]]
+name = "stoat_cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
 ]
 
 [[package]]
@@ -4004,6 +4012,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "snafu",
+ "stoat_cli",
  "stoatty_protocol",
  "stoatty_render",
  "stoatty_term",

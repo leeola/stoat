@@ -20,6 +20,7 @@ workspace = true
 
 [dependencies]
 stoat = { path = "../stoat" }
+stoat_cli = { path = "../cli" }
 stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler" }
 viewport = { path = "../viewport" }

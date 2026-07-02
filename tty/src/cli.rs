@@ -1,5 +1,6 @@
 use clap::{Parser, ValueHint};
 use std::path::PathBuf;
+use stoat_cli::CommonArgs;
 
 /// Per-invocation launch overrides for the stoatty terminal, parsed from argv.
 ///
@@ -29,11 +30,11 @@ pub struct Cli {
     #[arg(long = "working-directory", value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub working_directory: Option<PathBuf>,
 
-    /// Files to open, forwarded as arguments to the stoat editor when it is the
-    /// launched child. Ignored under `-e`/`--command`, which consumes its own
-    /// trailing arguments.
-    #[arg(value_name = "FILE", value_hint = ValueHint::FilePath)]
-    pub files: Vec<PathBuf>,
+    /// Files to open and the session-restore flags, forwarded to the stoat
+    /// editor when it is the launched child. Ignored under `-e`/`--command` and
+    /// `--terminal`, which run their own program.
+    #[command(flatten)]
+    pub common: CommonArgs,
 
     /// Run the login shell instead of the stoat editor, so stoatty opens as a
     /// plain terminal. Cannot combine with `-e`/`--command`, which already
@@ -93,7 +94,7 @@ mod tests {
 
         let cli = Cli::parse_from(["stoatty", "a.rs", "b.rs"]);
         assert_eq!(
-            cli.files,
+            cli.common.files,
             vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
         );
         assert_eq!(cli.command(), None);
@@ -108,7 +109,7 @@ mod tests {
             cli.command(),
             Some(("nvim".to_string(), vec!["a.rs".to_string()]))
         );
-        assert_eq!(cli.files, Vec::<PathBuf>::new());
+        assert_eq!(cli.common.files, Vec::<PathBuf>::new());
     }
 
     #[test]

@@ -23,6 +23,7 @@ use std::{
     },
     time::Instant,
 };
+use stoat_cli::CommonArgs;
 use stoatty_protocol::command::PoolRegionCommand;
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll},
@@ -58,11 +59,11 @@ const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
 /// The launch program and arguments follow a precedence. `command` (the
 /// `-e`/`--command` CLI override) wins first, then `--terminal` runs the login
 /// shell, then the `[shell]` config, then the stoat editor resolved by
-/// [`stoat_bin::resolve`], opening the positional `files` as its arguments.
-/// When the editor is the chosen default, its directory is prepended to the
-/// child's `PATH` so nested bare-`stoat` calls resolve to the same binary.
-/// `files` are ignored under `-e` and a `[shell]` child, which take their own
-/// arguments.
+/// [`stoat_bin::resolve`], forwarding the shared `common` arguments (files,
+/// `--continue`, `--resume`) to it. When the editor is the chosen default, its
+/// directory is prepended to the child's `PATH` so nested bare-`stoat` calls
+/// resolve to the same binary. The `common` arguments are ignored under `-e`,
+/// `--terminal`, and a `[shell]` child, which take their own arguments.
 ///
 /// The command runs in `working_directory` when it names an existing directory.
 /// A non-directory is warned about and ignored, falling back to stoatty's own
@@ -73,7 +74,7 @@ const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
 pub fn run(
     command: Option<(String, Vec<String>)>,
     working_directory: Option<PathBuf>,
-    files: Vec<PathBuf>,
+    common: CommonArgs,
     terminal: bool,
 ) {
     let mut config = load_config();
@@ -89,11 +90,7 @@ pub fn run(
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .map(Path::to_path_buf);
-        let file_args = files
-            .iter()
-            .map(|file| file.to_string_lossy().into_owned())
-            .collect();
-        (stoat.to_string_lossy().into_owned(), file_args, dir)
+        (stoat.to_string_lossy().into_owned(), common.to_argv(), dir)
     };
     let working_directory = working_directory.and_then(|dir| {
         if dir.is_dir() {

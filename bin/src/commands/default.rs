@@ -5,6 +5,7 @@ use stoat::{
     host::{LocalFs, LocalFsWatcher},
     Axis, Settings, Stoat,
 };
+use stoat_cli::CommonArgs;
 use stoat_scheduler::TokioScheduler;
 
 const VERSION_INFO: &str = concat!(
@@ -25,23 +26,8 @@ pub struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
-    #[arg(help = "Files to open")]
-    pub files: Vec<PathBuf>,
-
-    /// Restore the most-recently-used workspace for this repository instead
-    /// of starting in a fresh one. `continue` is a Rust keyword so the field
-    /// is named `continue_`; clap exposes it as `--continue` / `-c`.
-    #[arg(short = 'c', long = "continue")]
-    pub continue_: bool,
-
-    /// Walk ancestors of the current directory and reopen the workspace
-    /// whose state is the most recently modified. So a session run from
-    /// `~/foo/bar/baz/bang` reopens whichever ancestor (cwd itself, its
-    /// parent, ...) most recently saved a workspace; falls back to a
-    /// fresh workspace anchored at cwd when no ancestor has any state.
-    /// Mutually exclusive with `--continue`.
-    #[arg(short = 'r', long = "resume", conflicts_with = "continue_")]
-    pub resume: bool,
+    #[command(flatten)]
+    pub common: CommonArgs,
 
     /// Enable the LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
@@ -95,9 +81,7 @@ enum Command {
 pub fn run(args: Args) -> Result<(), Whatever> {
     let Args {
         command,
-        files,
-        continue_,
-        resume,
+        common,
         text_proto_log,
         ..
     } = args;
@@ -107,10 +91,20 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
         Some(Command::AgentApi { sub }) => crate::commands::agent_api::run(sub),
         Some(Command::Editor { file }) => crate::commands::editor::run(file),
-        Some(Command::Review) => {
-            run_tui(text_proto_log, files, continue_, resume, TuiStart::Review)
-        },
-        None => run_tui(text_proto_log, files, continue_, resume, TuiStart::Files),
+        Some(Command::Review) => run_tui(
+            text_proto_log,
+            common.files,
+            common.continue_,
+            common.resume,
+            TuiStart::Review,
+        ),
+        None => run_tui(
+            text_proto_log,
+            common.files,
+            common.continue_,
+            common.resume,
+            TuiStart::Files,
+        ),
     }
 }
 

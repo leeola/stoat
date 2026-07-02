@@ -9,7 +9,7 @@ fn main() {
     stoatty::app::run(
         cli.command(),
         cli.working_directory,
-        cli.files,
+        cli.common,
         cli.terminal,
     );
 }
