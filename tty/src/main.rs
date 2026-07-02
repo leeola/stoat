@@ -6,5 +6,10 @@ use clap::Parser;
 
 fn main() {
     let cli = stoatty::cli::Cli::parse();
-    stoatty::app::run(cli.command(), cli.working_directory, cli.files);
+    stoatty::app::run(
+        cli.command(),
+        cli.working_directory,
+        cli.files,
+        cli.terminal,
+    );
 }

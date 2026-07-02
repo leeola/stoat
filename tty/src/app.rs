@@ -10,7 +10,7 @@
 
 use crate::{
     config::{self, Config, CursorAnimation},
-    pty::{Pty, PtyOutput},
+    pty::{self, Pty, PtyOutput},
     stoat_bin,
 };
 use alacritty_terminal::sync::FairMutex;
@@ -56,12 +56,13 @@ const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
 /// editor when none is given, at the winit default window size.
 ///
 /// The launch program and arguments follow a precedence. `command` (the
-/// `-e`/`--command` CLI override) wins first, then the `[shell]` config, then
-/// the stoat editor resolved by [`stoat_bin::resolve`], opening the positional
-/// `files` as its arguments. When the editor is the chosen default, its
-/// directory is prepended to the child's `PATH` so nested bare-`stoat` calls
-/// resolve to the same binary. `files` are ignored under `-e` and a `[shell]`
-/// child, which take their own arguments.
+/// `-e`/`--command` CLI override) wins first, then `--terminal` runs the login
+/// shell, then the `[shell]` config, then the stoat editor resolved by
+/// [`stoat_bin::resolve`], opening the positional `files` as its arguments.
+/// When the editor is the chosen default, its directory is prepended to the
+/// child's `PATH` so nested bare-`stoat` calls resolve to the same binary.
+/// `files` are ignored under `-e` and a `[shell]` child, which take their own
+/// arguments.
 ///
 /// The command runs in `working_directory` when it names an existing directory.
 /// A non-directory is warned about and ignored, falling back to stoatty's own
@@ -73,25 +74,26 @@ pub fn run(
     command: Option<(String, Vec<String>)>,
     working_directory: Option<PathBuf>,
     files: Vec<PathBuf>,
+    terminal: bool,
 ) {
     let mut config = load_config();
-    let (program, args, stoat_dir) = match command {
-        Some((program, args)) => (program, args, None),
-        None => match config.shell.take() {
-            Some(shell) => (shell.program, shell.args, None),
-            None => {
-                let stoat = stoat_bin::resolve(&config);
-                let dir = stoat
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .map(Path::to_path_buf);
-                let file_args = files
-                    .iter()
-                    .map(|file| file.to_string_lossy().into_owned())
-                    .collect();
-                (stoat.to_string_lossy().into_owned(), file_args, dir)
-            },
-        },
+    let (program, args, stoat_dir) = if let Some((program, args)) = command {
+        (program, args, None)
+    } else if terminal {
+        (pty::default_shell(), Vec::new(), None)
+    } else if let Some(shell) = config.shell.take() {
+        (shell.program, shell.args, None)
+    } else {
+        let stoat = stoat_bin::resolve(&config);
+        let dir = stoat
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+        let file_args = files
+            .iter()
+            .map(|file| file.to_string_lossy().into_owned())
+            .collect();
+        (stoat.to_string_lossy().into_owned(), file_args, dir)
     };
     let working_directory = working_directory.and_then(|dir| {
         if dir.is_dir() {

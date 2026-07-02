@@ -34,6 +34,12 @@ pub struct Cli {
     /// trailing arguments.
     #[arg(value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub files: Vec<PathBuf>,
+
+    /// Run the login shell instead of the stoat editor, so stoatty opens as a
+    /// plain terminal. Cannot combine with `-e`/`--command`, which already
+    /// names its own program.
+    #[arg(long = "terminal", conflicts_with = "command")]
+    pub terminal: bool,
 }
 
 impl Cli {
@@ -103,5 +109,16 @@ mod tests {
             Some(("nvim".to_string(), vec!["a.rs".to_string()]))
         );
         assert_eq!(cli.files, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn terminal_flag_parses() {
+        assert!(Cli::parse_from(["stoatty", "--terminal"]).terminal);
+        assert!(!Cli::parse_from(["stoatty"]).terminal);
+    }
+
+    #[test]
+    fn terminal_conflicts_with_command() {
+        assert!(Cli::try_parse_from(["stoatty", "--terminal", "-e", "sh"]).is_err());
     }
 }

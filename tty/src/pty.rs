@@ -210,9 +210,8 @@ fn read_loop(mut reader: impl Read, mut sink: impl FnMut(PtyOutput<'_>)) {
 /// The shell to launch, in order of preference: `$SHELL`, the passwd entry's
 /// login shell, then `/bin/sh`.
 ///
-/// Unused since stoatty defaults to launching the stoat editor. Retained for
-/// the plain-terminal launch mode that runs the login shell instead.
-#[allow(dead_code)]
+/// Used for the `--terminal` opt-out, which runs the login shell instead of the
+/// stoat editor.
 pub(crate) fn default_shell() -> String {
     shell_or_default(std::env::var("SHELL").ok(), passwd_shell())
 }
