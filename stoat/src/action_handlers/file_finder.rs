@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     file_finder::{FileFinder, FinderScope, OpenIntent},
 };
-use std::path::PathBuf;
+use std::{ops::ControlFlow, path::PathBuf};
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -83,9 +83,10 @@ pub(super) fn spawn_workspace_walk(
     let task = stoat.executor.spawn_blocking(move || {
         fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
             if walk_tx.send(batch).is_err() {
-                return;
+                return ControlFlow::Break(());
             }
             redraw_notify.notify_one();
+            ControlFlow::Continue(())
         });
     });
     (walk_rx, task)

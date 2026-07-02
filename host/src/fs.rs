@@ -6,6 +6,7 @@ use ignore::{
 use std::{
     io,
     io::{Read, Write},
+    ops::ControlFlow,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -107,10 +108,18 @@ pub trait FsHost: Send + Sync {
     /// so callers must order results themselves if they need a stable
     /// presentation. The default impl emits the full sorted list as one
     /// batch so non-streaming hosts still satisfy the contract.
-    fn walk_workspace_files_streaming(&self, root: &Path, on_batch: &mut dyn FnMut(Vec<PathBuf>)) {
+    ///
+    /// Returning [`ControlFlow::Break`] from `on_batch` stops the walk before
+    /// the next batch, so a consumer whose receiver has gone can abandon a
+    /// long scan promptly instead of enumerating the rest of the tree.
+    fn walk_workspace_files_streaming(
+        &self,
+        root: &Path,
+        on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+    ) {
         let paths = self.walk_workspace_files(root);
         if !paths.is_empty() {
-            on_batch(paths);
+            let _ = on_batch(paths);
         }
     }
 }
@@ -139,13 +148,17 @@ pub fn manual_walk(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
 /// Streaming counterpart to [`manual_walk`]. Calls `on_batch` whenever
 /// the in-flight buffer reaches [`WALK_BATCH_SIZE`] paths and once more
 /// for any remainder. Does not sort; batches arrive in walker order.
-pub fn manual_walk_streaming(fs: &dyn FsHost, root: &Path, on_batch: &mut dyn FnMut(Vec<PathBuf>)) {
+pub fn manual_walk_streaming(
+    fs: &dyn FsHost,
+    root: &Path,
+    on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+) {
     let defaults = build_default_ignore(root);
     let mut stack: Vec<Gitignore> = Vec::new();
     let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
-    walk_dir_streaming(fs, root, &defaults, &mut stack, &mut buffer, on_batch);
-    if !buffer.is_empty() {
-        on_batch(buffer);
+    let flow = walk_dir_streaming(fs, root, &defaults, &mut stack, &mut buffer, on_batch);
+    if flow.is_continue() && !buffer.is_empty() {
+        let _ = on_batch(buffer);
     }
 }
 
@@ -200,35 +213,40 @@ fn walk_dir_streaming(
     defaults: &Gitignore,
     stack: &mut Vec<Gitignore>,
     buffer: &mut Vec<PathBuf>,
-    on_batch: &mut dyn FnMut(Vec<PathBuf>),
-) {
+    on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
     let pushed = push_dir_ignores(fs, dir, stack);
 
     let entries = match fs.list_dir(dir) {
         Ok(e) => e,
         Err(_) => {
             stack.truncate(stack.len() - pushed);
-            return;
+            return ControlFlow::Continue(());
         },
     };
 
+    let mut flow = ControlFlow::Continue(());
     for entry in entries {
         let path = dir.join(entry.name.as_str());
         if path_is_ignored(defaults, stack, &path, entry.is_dir) {
             continue;
         }
         if entry.is_dir {
-            walk_dir_streaming(fs, &path, defaults, stack, buffer, on_batch);
+            flow = walk_dir_streaming(fs, &path, defaults, stack, buffer, on_batch);
         } else {
             buffer.push(path);
             if buffer.len() >= WALK_BATCH_SIZE {
                 let batch = std::mem::replace(buffer, Vec::with_capacity(WALK_BATCH_SIZE));
-                on_batch(batch);
+                flow = on_batch(batch);
             }
+        }
+        if flow.is_break() {
+            break;
         }
     }
 
     stack.truncate(stack.len() - pushed);
+    flow
 }
 
 fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> usize {
@@ -370,7 +388,11 @@ impl FsHost for LocalFs {
         out
     }
 
-    fn walk_workspace_files_streaming(&self, root: &Path, on_batch: &mut dyn FnMut(Vec<PathBuf>)) {
+    fn walk_workspace_files_streaming(
+        &self,
+        root: &Path,
+        on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+    ) {
         let defaults = build_default_ignore(root);
         let walker = WalkBuilder::new(root)
             .hidden(false)
@@ -388,12 +410,14 @@ impl FsHost for LocalFs {
                 buffer.push(entry.into_path());
                 if buffer.len() >= WALK_BATCH_SIZE {
                     let batch = std::mem::replace(&mut buffer, Vec::with_capacity(WALK_BATCH_SIZE));
-                    on_batch(batch);
+                    if on_batch(batch).is_break() {
+                        return;
+                    }
                 }
             }
         }
         if !buffer.is_empty() {
-            on_batch(buffer);
+            let _ = on_batch(buffer);
         }
     }
 }

@@ -17,6 +17,7 @@ use codegraph::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    ops::ControlFlow,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -113,8 +114,15 @@ pub(crate) fn build_index(
 
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
+        let mut cancelled = false;
         fs.walk_workspace_files_streaming(&git_root, &mut |batch| {
             for path in batch {
+                // The receiver drops on quit. Stop the walk instead of scanning
+                // the rest of the tree while the runtime blocks on shutdown.
+                if tx.is_closed() {
+                    cancelled = true;
+                    return ControlFlow::Break(());
+                }
                 let Some((rel_path, shard, source)) = load_or_extract(
                     fs.as_ref(),
                     &languages,
@@ -139,11 +147,19 @@ pub(crate) fn build_index(
                     })
                     .is_err()
                 {
-                    return;
+                    cancelled = true;
+                    return ControlFlow::Break(());
                 }
                 redraw.notify_one();
             }
+            ControlFlow::Continue(())
         });
+
+        // A cancelled build must not prune shards or send Complete. Its receiver
+        // is gone, and its partial `seen` set would delete live shards.
+        if cancelled {
+            return;
+        }
 
         if let Some(dir) = &index_dir {
             for rel_path in known.keys() {

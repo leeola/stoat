@@ -3,6 +3,7 @@ use compact_str::CompactString;
 use std::{
     collections::{BTreeMap, HashMap},
     io,
+    ops::ControlFlow,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, SystemTime},
@@ -658,7 +659,11 @@ impl FsHost for FakeFs {
         crate::fs::manual_walk(self, root)
     }
 
-    fn walk_workspace_files_streaming(&self, root: &Path, on_batch: &mut dyn FnMut(Vec<PathBuf>)) {
+    fn walk_workspace_files_streaming(
+        &self,
+        root: &Path,
+        on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
+    ) {
         crate::fs::manual_walk_streaming(self, root, on_batch);
     }
 }
@@ -1195,7 +1200,10 @@ mod tests {
         );
 
         let mut batches: Vec<Vec<PathBuf>> = Vec::new();
-        fs.walk_workspace_files_streaming(&root, &mut |batch| batches.push(batch));
+        fs.walk_workspace_files_streaming(&root, &mut |batch| {
+            batches.push(batch);
+            ControlFlow::Continue(())
+        });
 
         assert!(
             batches.len() > 1,
@@ -1210,5 +1218,23 @@ mod tests {
         combined.sort();
         let expected = fs.walk_workspace_files(&root);
         assert_eq!(combined, expected);
+    }
+
+    #[test]
+    fn walk_workspace_files_streaming_stops_on_break() {
+        let fs = FakeFs::new();
+        let root = PathBuf::from("/repo");
+        let count = crate::fs::WALK_BATCH_SIZE * 2 + 5;
+        fs.insert_files(
+            (0..count).map(|i| (root.join(format!("file_{i:05}.rs")), b"x".as_slice())),
+        );
+
+        let mut batches = 0;
+        fs.walk_workspace_files_streaming(&root, &mut |_batch| {
+            batches += 1;
+            ControlFlow::Break(())
+        });
+
+        assert_eq!(batches, 1, "Break after the first batch stops the walk");
     }
 }
