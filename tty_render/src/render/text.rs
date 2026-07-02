@@ -949,18 +949,17 @@ impl TextPass {
             self.underline_row_instances = vec![Vec::new(); rows];
         }
 
-        let rows_to_build: Vec<usize> = if matches!(damage, Damage::Full) || stale {
-            (0..rows).collect()
-        } else {
-            (0..rows).filter(|&row| damage.is_dirty(row)).collect()
-        };
-        let Some(&first) = rows_to_build.iter().min() else {
+        let build_all = matches!(damage, Damage::Full) || stale;
+        let mut first = None;
+        for row in 0..rows {
+            if build_all || damage.is_dirty(row) {
+                self.underline_row_instances[row] = build_underline_row(grid, row, self.metrics);
+                first.get_or_insert(row);
+            }
+        }
+        let Some(first) = first else {
             return;
         };
-
-        for &row in &rows_to_build {
-            self.underline_row_instances[row] = build_underline_row(grid, row, self.metrics);
-        }
 
         let offset: usize = self.underline_row_instances[..first]
             .iter()
@@ -1227,20 +1226,20 @@ impl TextPass {
             self.plain_row_instances = vec![Vec::new(); rows];
         }
 
-        let rows_to_build: Vec<usize> = if rebuild_all || stale {
-            (0..rows).collect()
+        let first = if rebuild_all || stale {
+            for row in 0..rows {
+                self.rebuild_plain_row(device, queue, row);
+            }
+            (rows > 0).then_some(0)
         } else {
-            rebuilt.to_vec()
+            for &row in rebuilt {
+                self.rebuild_plain_row(device, queue, row);
+            }
+            rebuilt.first().copied()
         };
-        let Some(&first) = rows_to_build.iter().min() else {
+        let Some(first) = first else {
             return;
         };
-
-        for &row in &rows_to_build {
-            let glyphs = mem::take(&mut self.glyph_row_cache[row]);
-            self.plain_row_instances[row] = self.build_text_instances(device, queue, &glyphs);
-            self.glyph_row_cache[row] = glyphs;
-        }
 
         let offset: usize = self.plain_row_instances[..first].iter().map(Vec::len).sum();
         let tail_len: usize = self.plain_row_instances[first..].iter().map(Vec::len).sum();
@@ -1276,6 +1275,14 @@ impl TextPass {
                 bytemuck::cast_slice(&self.plain_upload_scratch),
             );
         }
+    }
+
+    /// Rebuild one plain row's text instances from its cached glyphs, leaving
+    /// the glyph cache intact for the next frame.
+    fn rebuild_plain_row(&mut self, device: &Device, queue: &Queue, row: usize) {
+        let glyphs = mem::take(&mut self.glyph_row_cache[row]);
+        self.plain_row_instances[row] = self.build_text_instances(device, queue, &glyphs);
+        self.glyph_row_cache[row] = glyphs;
     }
 
     /// Shape and rasterize one grid row's glyphs, returning its placements.
