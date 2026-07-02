@@ -18,9 +18,15 @@ use std::{
 };
 
 /// A chunk of PTY activity handed to the [`Pty::spawn`] sink.
-pub(crate) enum PtyOutput {
-    /// Bytes read from the shell, to feed into the parser.
-    Data(Vec<u8>),
+///
+/// [`PtyOutput::Data`] borrows the reader thread's read buffer, so it is valid
+/// only for the duration of the sink call. The sink must consume it before
+/// returning and must not retain the slice, since the next read overwrites the
+/// buffer.
+pub(crate) enum PtyOutput<'a> {
+    /// Bytes read from the shell, borrowed from the reader buffer, to feed into
+    /// the parser.
+    Data(&'a [u8]),
     /// The shell closed its end; no more data will follow.
     Eof,
 }
@@ -52,7 +58,7 @@ impl Pty {
         cwd: Option<&Path>,
         rows: u16,
         cols: u16,
-        sink: impl FnMut(PtyOutput) + Send + 'static,
+        sink: impl FnMut(PtyOutput<'_>) + Send + 'static,
     ) -> io::Result<Pty> {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
@@ -165,12 +171,12 @@ const READ_BUF_SIZE: usize = 64 * 1024;
 /// Pump `reader` to `sink` until end of input: read into a reused buffer and
 /// hand each fill on as a [`PtyOutput::Data`] chunk, then one [`PtyOutput::Eof`]
 /// once the shell closes its end or the read errors.
-fn read_loop(mut reader: impl Read, mut sink: impl FnMut(PtyOutput)) {
+fn read_loop(mut reader: impl Read, mut sink: impl FnMut(PtyOutput<'_>)) {
     let mut buf = [0u8; READ_BUF_SIZE];
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => sink(PtyOutput::Data(buf[..n].to_vec())),
+            Ok(n) => sink(PtyOutput::Data(&buf[..n])),
         }
     }
     sink(PtyOutput::Eof);

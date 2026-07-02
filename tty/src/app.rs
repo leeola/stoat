@@ -456,7 +456,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         // Parse on the reader thread under the shared lock.
                         let (redraw, responses) = {
                             let mut terminal = terminal.lock();
-                            let redraw = terminal.advance(&bytes);
+                            let redraw = terminal.advance(bytes);
                             // A buffering synchronized update needs the main
                             // thread to arm and drive its timeout flush.
                             sync_pending
