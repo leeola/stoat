@@ -9,16 +9,19 @@
 //! draws into any texture view, so a frame can target an off-screen texture as
 //! well as the window surface that [`GpuContext`] wraps.
 
-use crate::render::{
-    background::{BackgroundPass, CursorState},
-    bar::BarPass,
-    decoration::DecorationPass,
-    icon::IconPass,
-    overlay::OverlayPass,
-    text::TextPass,
-    CellMetrics,
-};
 pub use crate::render::{text::build_font_system, Frame, Scroll};
+use crate::{
+    perf::FrameProfiler,
+    render::{
+        background::{BackgroundPass, CursorState},
+        bar::BarPass,
+        decoration::DecorationPass,
+        icon::IconPass,
+        overlay::OverlayPass,
+        text::TextPass,
+        CellMetrics,
+    },
+};
 use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -397,6 +400,7 @@ pub struct GpuContext {
     /// surface format is available.
     view_format: TextureFormat,
     renderer: Renderer,
+    perf: FrameProfiler,
 }
 
 /// A [`FontSystem`] being built on a background thread, handed to
@@ -530,6 +534,7 @@ impl GpuContext {
             config,
             view_format,
             renderer,
+            perf: FrameProfiler::new(),
         }
     }
 
@@ -575,6 +580,7 @@ impl GpuContext {
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
     pub fn render(&mut self, grid: &Grid, frame: Frame<'_>) {
+        self.perf.begin_frame();
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -587,6 +593,7 @@ impl GpuContext {
             | CurrentSurfaceTexture::Occluded
             | CurrentSurfaceTexture::Validation => return,
         };
+        self.perf.mark_acquired();
 
         let view = surface_frame.texture.create_view(&TextureViewDescriptor {
             format: Some(self.view_format),
@@ -594,7 +601,9 @@ impl GpuContext {
         });
         self.renderer
             .render_into(&self.device, &self.queue, &view, grid, frame);
+        self.perf.mark_submitted();
         surface_frame.present();
+        self.perf.end_frame();
     }
 
     /// Draw `live_grid` to the window surface, then composite each pool in
@@ -617,6 +626,7 @@ impl GpuContext {
         pools: &[PoolComposite<'_>],
         cursor_scissor: Option<[u32; 4]>,
     ) {
+        self.perf.begin_frame();
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -629,6 +639,7 @@ impl GpuContext {
             | CurrentSurfaceTexture::Occluded
             | CurrentSurfaceTexture::Validation => return,
         };
+        self.perf.mark_acquired();
 
         let view = surface_frame.texture.create_view(&TextureViewDescriptor {
             format: Some(self.view_format),
@@ -675,7 +686,15 @@ impl GpuContext {
                 cursor_scissor,
             );
         }
+        self.perf.mark_submitted();
         surface_frame.present();
+        self.perf.end_frame();
+    }
+
+    /// The per-frame timing recorder, read by the perf HUD.
+    #[cfg(feature = "perf")]
+    pub fn perf(&self) -> &FrameProfiler {
+        &self.perf
     }
 }
 

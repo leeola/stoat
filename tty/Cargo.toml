@@ -11,6 +11,10 @@ workspace = true
 name = "stoatty"
 path = "src/main.rs"
 
+[features]
+# Forward the renderer's per-frame timing and perf HUD. Off by default.
+perf = ["stoatty_render/perf"]
+
 [dependencies]
 stoatty_protocol = { path = "../tty_protocol" }
 stoatty_term = { path = "../tty_term" }

@@ -8,4 +8,5 @@
 
 pub mod atlas;
 pub mod gpu;
+pub mod perf;
 pub mod render;
