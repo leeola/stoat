@@ -23,7 +23,7 @@ use alacritty_terminal::{
         color::Colors,
         viewport_to_point, Config, RenderableCursor, TermDamage, TermMode,
     },
-    vte::ansi::{Color, CursorShape as TermCursorShape, NamedColor, Processor},
+    vte::ansi::{Color, CursorShape as TermCursorShape, NamedColor, Processor, Rgb as VteRgb},
     Term,
 };
 use parking_lot::Mutex;
@@ -562,9 +562,9 @@ impl Terminal {
     /// Project the listener's queued `alacritty_terminal` events into
     /// [`TermEvent`]s, appending them to [`Self::pending_events`].
     ///
-    /// Color and text-area-size queries are queued by the listener but consumed
-    /// by the color-reply and pixel-size features, so they are dropped here
-    /// until those land.
+    /// A color query is answered in place by pushing the formatter's reply into
+    /// the response bytes. A text-area-size query is still queued but dropped
+    /// here until the pixel-size feature consumes it.
     fn drain_listener_events(&mut self) {
         for event in self.responses.take_events() {
             match event {
@@ -574,9 +574,56 @@ impl Terminal {
                 Event::ClipboardStore(_, text) => {
                     self.pending_events.push(TermEvent::ClipboardStore(text))
                 },
+                Event::ColorRequest(index, formatter) => {
+                    if let Some(rgb) = self.query_color(index) {
+                        self.responses.push(formatter(rgb).as_bytes());
+                    }
+                },
                 _ => {},
             }
         }
+    }
+
+    /// Resolve a color-query index to the concrete channels for its reply.
+    ///
+    /// An OSC 4 query carries a palette index below [`PALETTE_LEN`]; OSC 10, 11,
+    /// and 12 carry the [`NamedColor`] foreground, background, and cursor slots
+    /// (256, 257, 258). Each honors the program's OSC override first, then the
+    /// theme or palette, so a reply reflects what the cell projection would
+    /// actually draw. An index outside those ranges has no answer and yields
+    /// `None`.
+    fn query_color(&self, index: usize) -> Option<VteRgb> {
+        let overrides = self.term.colors();
+        let rgb = if index < PALETTE_LEN {
+            indexed(index, overrides, &self.palette)
+        } else if index == NamedColor::Foreground as usize {
+            named_color(
+                NamedColor::Foreground,
+                overrides,
+                &self.theme,
+                &self.palette,
+            )
+        } else if index == NamedColor::Background as usize {
+            named_color(
+                NamedColor::Background,
+                overrides,
+                &self.theme,
+                &self.palette,
+            )
+        } else if index == NamedColor::Cursor as usize {
+            match overrides[index] {
+                Some(over) => Rgb::new(over.r, over.g, over.b),
+                None => self.theme.cursor,
+            }
+        } else {
+            return None;
+        };
+
+        Some(VteRgb {
+            r: rgb.r,
+            g: rgb.g,
+            b: rgb.b,
+        })
     }
 
     /// Drain the decoration row-damage accumulated since the last drain.
@@ -2176,6 +2223,51 @@ mod tests {
                 TermEvent::Title("A".into()),
             ],
             "push saves A, B replaces it, pop restores A"
+        );
+    }
+
+    #[test]
+    fn answers_osc11_background_query() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            terminal.take_responses(),
+            b"\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec(),
+            "OSC 11 answers the default background with the ST terminator echoed"
+        );
+    }
+
+    #[test]
+    fn answers_osc4_palette_query() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(
+            terminal.take_responses(),
+            b"\x1b]4;1;rgb:cdcd/0000/0000\x07".to_vec(),
+            "OSC 4 answers palette entry 1 (ANSI red) with the BEL terminator echoed"
+        );
+    }
+
+    #[test]
+    fn osc10_query_reflects_override_then_reset() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]10;#ff0000\x07");
+        terminal.advance(b"\x1b]10;?\x07");
+        assert_eq!(
+            terminal.take_responses(),
+            b"\x1b]10;rgb:ffff/0000/0000\x07".to_vec(),
+            "the OSC 10 override wins over the theme foreground"
+        );
+
+        terminal.advance(b"\x1b]110\x07");
+        terminal.advance(b"\x1b]10;?\x07");
+        assert_eq!(
+            terminal.take_responses(),
+            b"\x1b]10;rgb:cccc/cccc/cccc\x07".to_vec(),
+            "OSC 110 reset restores the theme foreground"
         );
     }
 
