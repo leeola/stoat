@@ -24,6 +24,7 @@ pub(crate) mod global_search;
 pub(crate) mod goto_word;
 pub mod help;
 pub mod host;
+pub mod input_parse;
 mod input_view;
 mod jumplist;
 pub(crate) mod jumplist_picker;
