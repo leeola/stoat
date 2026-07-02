@@ -7,8 +7,9 @@
 //! allocator, and cached by [`CacheKey`] so repeated lookups are free.
 //!
 //! When an atlas fills, least-recently-used glyphs not needed this frame are
-//! evicted; if eviction cannot free enough room the texture grows (doubling,
-//! re-uploading every retained glyph at its preserved coordinates).
+//! evicted. If eviction cannot free enough room the texture grows: it doubles
+//! and copies the old texture into the new one, which preserves every glyph's
+//! coordinates.
 
 use cosmic_text::{CacheKey, FontSystem, SwashCache, SwashImage};
 use etagere::{size2, AllocId, Allocation, BucketedAtlasAllocator};
@@ -17,9 +18,9 @@ use rustc_hash::FxBuildHasher;
 use std::collections::HashSet;
 use swash::scale::image::Content;
 use wgpu::{
-    Device, Extent3d, Origin3d, Queue, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
-    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
-    TextureViewDescriptor,
+    CommandEncoderDescriptor, Device, Extent3d, Origin3d, Queue, TexelCopyBufferLayout,
+    TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
 /// Edge length, in texels, of a freshly created atlas texture. Atlases double
@@ -46,12 +47,12 @@ pub struct GlyphInfo {
     pub placement: [i32; 2],
 }
 
-/// What a cached glyph was rasterized from.
+/// The identity a glyph is cached under.
 ///
-/// Font glyphs are re-rasterizable through swash from their [`CacheKey`], while
-/// procedurally drawn glyphs are sized to a specific cell and kept as pixels.
-/// Both share one atlas, packer, and eviction order; the distinct variants keep
-/// a procedural glyph from colliding with the font glyph for the same codepoint.
+/// A font glyph is keyed by its [`CacheKey`] and a procedural glyph by its
+/// codepoint and cell size. Both share one atlas, packer, and eviction order.
+/// The distinct variants keep a procedural glyph from colliding with the font
+/// glyph for the same codepoint.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum CacheId {
     Font(CacheKey),
@@ -108,24 +109,21 @@ impl GlyphAtlas {
             AtlasKind::Color => &mut self.color,
         };
 
-        atlas.insert_image(device, queue, font_system, swash_cache, id, &image)
+        atlas.insert_image(device, queue, id, &image)
     }
 
     /// Look up a procedurally drawn glyph, rasterizing and caching it on first
     /// use.
     ///
-    /// `render` produces the `width`x`height` R8 coverage only on a cache miss;
-    /// the glyph is stored with those pixels so an atlas grow re-uploads it
-    /// without re-running `render`. Procedural glyphs always live in the mask
-    /// atlas. `None` when the atlas is full and nothing can be evicted, or when
-    /// `render` yields no pixels.
-    #[allow(clippy::too_many_arguments)]
+    /// `render` produces the `width`x`height` R8 coverage only on a cache miss
+    /// and is uploaded once. A later atlas grow copies it forward from the old
+    /// texture, so `render` never re-runs. Procedural glyphs always live in the
+    /// mask atlas. `None` when the atlas is full and nothing can be evicted, or
+    /// when `render` yields no pixels.
     pub fn get_or_insert_procedural(
         &mut self,
         device: &Device,
         queue: &Queue,
-        font_system: &mut FontSystem,
-        swash_cache: &mut SwashCache,
         cp: u32,
         width: u32,
         height: u32,
@@ -136,16 +134,8 @@ impl GlyphAtlas {
             return hit;
         }
 
-        self.mask.insert_pixels(
-            device,
-            queue,
-            font_system,
-            swash_cache,
-            id,
-            width,
-            height,
-            render(),
-        )
+        self.mask
+            .insert_pixels(device, queue, id, width, height, render())
     }
 
     pub fn mask_view(&self) -> &TextureView {
@@ -221,14 +211,12 @@ impl Atlas {
         Some(info)
     }
 
-    /// Pack and cache a font glyph's swash bitmap, with no retained pixels: a
-    /// later grow re-rasterizes it through swash from its [`CacheKey`].
+    /// Pack and cache a font glyph's swash bitmap. A later grow copies it
+    /// forward from the old texture, so no pixels are retained.
     fn insert_image(
         &mut self,
         device: &Device,
         queue: &Queue,
-        font_system: &mut FontSystem,
-        swash_cache: &mut SwashCache,
         id: CacheId,
         image: &SwashImage,
     ) -> Option<GlyphInfo> {
@@ -244,7 +232,7 @@ impl Atlas {
             return None;
         }
 
-        let allocation = self.allocate(device, queue, font_system, swash_cache, width, height)?;
+        let allocation = self.allocate(device, queue, width, height)?;
         let x = allocation.rectangle.min.x as u32;
         let y = allocation.rectangle.min.y as u32;
         write_glyph(
@@ -264,7 +252,6 @@ impl Atlas {
             height,
             left: image.placement.left,
             top: image.placement.top,
-            pixels: None,
         };
         let info = glyph_info(&cached, self.kind, self.size);
         self.cache.put(id, cached);
@@ -273,15 +260,13 @@ impl Atlas {
         info
     }
 
-    /// Pack and cache a procedurally drawn glyph, retaining its `pixels` so a
-    /// grow re-uploads them rather than re-rasterizing through swash.
-    #[allow(clippy::too_many_arguments)]
+    /// Pack and cache a procedurally drawn glyph. A later grow copies it
+    /// forward from the old texture, so `pixels` is uploaded once and not
+    /// retained.
     fn insert_pixels(
         &mut self,
         device: &Device,
         queue: &Queue,
-        font_system: &mut FontSystem,
-        swash_cache: &mut SwashCache,
         id: CacheId,
         width: u32,
         height: u32,
@@ -291,7 +276,7 @@ impl Atlas {
             return None;
         }
 
-        let allocation = self.allocate(device, queue, font_system, swash_cache, width, height)?;
+        let allocation = self.allocate(device, queue, width, height)?;
         let x = allocation.rectangle.min.x as u32;
         let y = allocation.rectangle.min.y as u32;
         write_glyph(
@@ -311,7 +296,6 @@ impl Atlas {
             height,
             left: 0,
             top: 0,
-            pixels: Some(pixels),
         };
         let info = glyph_info(&cached, self.kind, self.size);
         self.cache.put(id, cached);
@@ -327,8 +311,6 @@ impl Atlas {
         &mut self,
         device: &Device,
         queue: &Queue,
-        font_system: &mut FontSystem,
-        swash_cache: &mut SwashCache,
         width: u32,
         height: u32,
     ) -> Option<Allocation> {
@@ -336,7 +318,7 @@ impl Atlas {
             if let Some(allocation) = self.try_allocate(width, height) {
                 return Some(allocation);
             }
-            if !self.grow(device, queue, font_system, swash_cache) {
+            if !self.grow(device, queue) {
                 return None;
             }
         }
@@ -373,41 +355,38 @@ impl Atlas {
         }
     }
 
-    /// Double the atlas (up to the device limit) and re-upload every retained
-    /// glyph; etagere preserves existing coordinates across the grow, so only
-    /// the texture and size change. `false` if already at the device limit.
-    fn grow(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        font_system: &mut FontSystem,
-        swash_cache: &mut SwashCache,
-    ) -> bool {
+    /// Double the atlas (up to the device limit) and copy the old texture into
+    /// the new one. etagere preserves existing coordinates across the grow, so
+    /// a single GPU texture-to-texture copy relocates every packed glyph. The
+    /// epoch still bumps because the larger texture rescales every normalized
+    /// UV. `false` if already at the device limit.
+    fn grow(&mut self, device: &Device, queue: &Queue) -> bool {
         if self.size >= self.max_dim {
             return false;
         }
 
         let new_size = (self.size * 2).min(self.max_dim);
         self.packer.grow(size2(new_size as i32, new_size as i32));
-        self.texture = create_texture(device, self.kind, new_size);
 
-        let channels = num_channels(self.kind);
-        for (id, glyph) in &self.cache {
-            if glyph.alloc.is_none() {
-                continue;
-            }
-
-            let origin = [glyph.x, glyph.y];
-            let size = [glyph.width, glyph.height];
-            if let Some(pixels) = &glyph.pixels {
-                write_glyph(queue, &self.texture, channels, origin, size, pixels);
-            } else if let CacheId::Font(key) = id {
-                let Some(image) = swash_cache.get_image_uncached(font_system, *key) else {
-                    continue;
-                };
-                write_glyph(queue, &self.texture, channels, origin, size, &image.data);
-            }
-        }
+        // The old texture already holds every retained glyph at its preserved
+        // coordinates, so copy it wholesale into the new one. A pending
+        // write_texture staging copy flushes before this later-submitted
+        // command buffer, so in-flight glyph uploads land first.
+        let old = std::mem::replace(
+            &mut self.texture,
+            create_texture(device, self.kind, new_size),
+        );
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_texture(
+            old.as_image_copy(),
+            self.texture.as_image_copy(),
+            Extent3d {
+                width: self.size,
+                height: self.size,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
 
         self.view = self.texture.create_view(&TextureViewDescriptor::default());
         self.size = new_size;
@@ -425,10 +404,6 @@ struct CachedGlyph {
     height: u32,
     left: i32,
     top: i32,
-    /// `Some` for a procedurally drawn glyph, holding its coverage bytes so a
-    /// grow re-uploads it without a font; `None` for a font glyph, which is
-    /// re-rasterized through swash on grow.
-    pixels: Option<Vec<u8>>,
 }
 
 impl CachedGlyph {
@@ -441,7 +416,6 @@ impl CachedGlyph {
             height: 0,
             left,
             top,
-            pixels: None,
         }
     }
 }
@@ -490,7 +464,7 @@ fn create_texture(device: &Device, kind: AtlasKind, size: u32) -> Texture {
         sample_count: 1,
         dimension: TextureDimension::D2,
         format: texture_format(kind),
-        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::COPY_SRC,
         view_formats: &[],
     })
 }
@@ -544,11 +518,100 @@ fn num_channels(kind: AtlasKind) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::uv_rect;
+    use super::{uv_rect, GlyphAtlas};
+    use crate::gpu::headless_device;
+    use wgpu::{
+        BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode,
+        Origin3d, PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout,
+        TexelCopyTextureInfo, Texture, TextureAspect,
+    };
 
     #[test]
     fn uv_rect_normalizes_to_atlas_size() {
         assert_eq!(uv_rect(64, 32, 16, 8, 256), [0.25, 0.125, 0.3125, 0.15625]);
         assert_eq!(uv_rect(0, 0, 256, 256, 256), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn grow_copies_existing_glyphs_into_the_larger_texture() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("atlas grow test: no wgpu adapter, skipping");
+            return;
+        };
+
+        let mut atlas = GlyphAtlas::new(&device);
+        let (initial, _) = atlas.texture_dims();
+
+        // Insert 20x20 solid glyphs in one frame (no begin_frame, so none are
+        // evictable) until the mask atlas overflows and grows.
+        let glyph = 20u32;
+        let coverage = (glyph * glyph) as usize;
+        let mut first = None;
+        for cp in 0..300u32 {
+            let info = atlas.get_or_insert_procedural(&device, &queue, cp, glyph, glyph, || {
+                vec![255u8; coverage]
+            });
+            if cp == 0 {
+                first = info;
+            }
+        }
+
+        let (grown, _) = atlas.texture_dims();
+        assert_eq!(grown, initial * 2, "mask atlas doubled to fit the glyphs");
+
+        // The first glyph's coordinates are preserved across the grow, so its
+        // solid coverage must survive the texture-to-texture copy. Its pixel
+        // position is the pre-grow uv scaled by the pre-grow size.
+        let first = first.expect("first glyph packed");
+        let x = (first.uv[0] * initial as f32).round() as u32;
+        let y = (first.uv[1] * initial as f32).round() as u32;
+
+        let pixels = read_mask(&device, &queue, &atlas.mask.texture, grown);
+        let at = |x: u32, y: u32| pixels[(y * grown + x) as usize];
+        assert_eq!(at(x + 2, y + 2), 255, "copied glyph coverage intact");
+        assert_eq!(
+            at(x + glyph / 2, y + glyph / 2),
+            255,
+            "copied glyph centre intact"
+        );
+    }
+
+    fn read_mask(device: &Device, queue: &Queue, texture: &Texture, size: u32) -> Vec<u8> {
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("atlas grow readback"),
+            size: u64::from(size) * u64::from(size),
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size),
+                    rows_per_image: None,
+                },
+            },
+            Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        buffer.slice(..).map_async(MapMode::Read, |_| {});
+        device
+            .poll(PollType::wait_indefinitely())
+            .expect("poll readback");
+        buffer.slice(..).get_mapped_range().to_vec()
     }
 }

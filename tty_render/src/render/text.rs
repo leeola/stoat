@@ -857,16 +857,12 @@ impl TextPass {
                 &mut self.swash_cache,
                 key,
             ),
-            GlyphSource::Procedural { cp, width, height } => self.atlas.get_or_insert_procedural(
-                device,
-                queue,
-                &mut self.font_system,
-                &mut self.swash_cache,
-                cp,
-                width,
-                height,
-                || powerline::rasterize(cp, width, height).unwrap_or_default(),
-            ),
+            GlyphSource::Procedural { cp, width, height } => {
+                self.atlas
+                    .get_or_insert_procedural(device, queue, cp, width, height, || {
+                        powerline::rasterize(cp, width, height).unwrap_or_default()
+                    })
+            },
         }
     }
 
@@ -1381,16 +1377,10 @@ impl TextPass {
         let cp = u32::from(cell.ch);
         if powerline::is_geometric(cp) {
             let (width, height) = cell_fill_pixels(scale, self.metrics);
-            self.atlas.get_or_insert_procedural(
-                device,
-                queue,
-                &mut self.font_system,
-                &mut self.swash_cache,
-                cp,
-                width,
-                height,
-                || powerline::rasterize(cp, width, height).unwrap_or_default(),
-            )?;
+            self.atlas
+                .get_or_insert_procedural(device, queue, cp, width, height, || {
+                    powerline::rasterize(cp, width, height).unwrap_or_default()
+                })?;
             return Some(PendingGlyph {
                 row,
                 col,
