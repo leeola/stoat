@@ -2,12 +2,19 @@ use crate::{
     display_map::BlockRowKind,
     editor_state::EditorState,
     review::{MoveProvenance, ReviewRow},
+    review_session::ChunkStatus,
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
+    widgets::StatefulWidget,
 };
+use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
+
+/// Line-number glyph size in 256ths of a cell, so the number reads smaller than
+/// the body text. Matches the gutter demo's `NUMBER_SCALE`.
+const NUMBER_SCALE: u16 = 160;
 
 pub(crate) fn render_review(
     editor: &mut EditorState,
@@ -15,6 +22,7 @@ pub(crate) fn render_review(
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
 ) {
     let snapshot = editor.display_map.snapshot();
     let view = match editor.review_view.as_ref() {
@@ -46,6 +54,14 @@ pub(crate) fn render_review(
     let move_hl = theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC);
     let current_style = theme.get(s::DIFF_CURRENT_HUNK);
 
+    // Rich mode replaces the ASCII gutter (status glyph, line number, gap dots,
+    // separator) with sub-cell APC components. It engages only when a scene is
+    // threaded and every gutter color resolves to RGB, so the two paths never
+    // mix within one frame.
+    let mut rich = scene.and_then(|scene| {
+        resolve_rich_colors(theme, fallback_style).map(|colors| RichGutter { scene, colors })
+    });
+
     for display_row in editor.scroll_row..end_row {
         let y = inner.y + (display_row - editor.scroll_row) as u16;
         if y >= inner.y + inner.height {
@@ -53,7 +69,7 @@ pub(crate) fn render_review(
         }
 
         let sep_x = inner.x + half_w as u16;
-        if sep_x < inner.x + inner.width {
+        if rich.is_none() && sep_x < inner.x + inner.width {
             buf[(sep_x, y)].set_char('│').set_style(dim_style);
         }
 
@@ -64,9 +80,21 @@ pub(crate) fn render_review(
                 };
                 if let Some((chunk_id, status)) = view.chunk_and_status_at_row(buffer_row) {
                     let is_current = Some(chunk_id) == view.current_chunk;
-                    paint_status_gutter(buf, inner.x, y, status, is_current, current_style, theme);
-                    paint_status_gutter(
+                    draw_status_gutter(
+                        &mut rich,
                         buf,
+                        inner,
+                        inner.x,
+                        y,
+                        status,
+                        is_current,
+                        current_style,
+                        theme,
+                    );
+                    draw_status_gutter(
+                        &mut rich,
+                        buf,
+                        inner,
                         right_start,
                         y,
                         status,
@@ -81,7 +109,15 @@ pub(crate) fn render_review(
                 let right_text_x = right_num_x + num_w as u16;
                 match row {
                     ReviewRow::Context { left, right } => {
-                        render_side_num(buf, left_num_x, y, left.line_num, dim_style);
+                        draw_side_num(
+                            &mut rich,
+                            buf,
+                            inner,
+                            left_num_x,
+                            y,
+                            left.line_num,
+                            dim_style,
+                        );
                         render_side_text(
                             buf,
                             left_text_x,
@@ -94,7 +130,15 @@ pub(crate) fn render_review(
                             &[],
                             move_hl,
                         );
-                        render_side_num(buf, right_num_x, y, right.line_num, dim_style);
+                        draw_side_num(
+                            &mut rich,
+                            buf,
+                            inner,
+                            right_num_x,
+                            y,
+                            right.line_num,
+                            dim_style,
+                        );
                         render_side_text(
                             buf,
                             right_text_x,
@@ -110,7 +154,9 @@ pub(crate) fn render_review(
                     },
                     ReviewRow::Changed { left, right } => {
                         if let Some(l) = left {
-                            render_side_num(buf, left_num_x, y, l.line_num, dim_style);
+                            draw_side_num(
+                                &mut rich, buf, inner, left_num_x, y, l.line_num, dim_style,
+                            );
                             render_side_text(
                                 buf,
                                 left_text_x,
@@ -135,10 +181,18 @@ pub(crate) fn render_review(
                                 );
                             }
                         } else {
-                            render_empty_num(buf, left_num_x, y, dim_style);
+                            draw_empty_num(&rich, buf, left_num_x, y, dim_style);
                         }
                         if let Some(r) = right {
-                            render_side_num(buf, right_num_x, y, r.line_num, dim_style);
+                            draw_side_num(
+                                &mut rich,
+                                buf,
+                                inner,
+                                right_num_x,
+                                y,
+                                r.line_num,
+                                dim_style,
+                            );
                             render_side_text(
                                 buf,
                                 right_text_x,
@@ -163,7 +217,7 @@ pub(crate) fn render_review(
                                 );
                             }
                         } else {
-                            render_empty_num(buf, right_num_x, y, dim_style);
+                            draw_empty_num(&rich, buf, right_num_x, y, dim_style);
                         }
                     },
                 }
@@ -180,6 +234,154 @@ pub(crate) fn render_review(
                 }
             },
         }
+    }
+
+    // One hairline separator spanning the visible rows, replacing the per-row
+    // glyph. Centered in its cell via the +8 sixteenths offset.
+    if let Some(rg) = rich.as_mut() {
+        let sep_x = inner.x + half_w as u16;
+        Bar {
+            x: (sep_x - inner.x) * 16 + 8,
+            y: 0,
+            width: 1,
+            height: (end_row - editor.scroll_row) as u16 * 16,
+            color: rg.colors.dim,
+        }
+        .render(inner, buf, &mut *rg.scene);
+    }
+}
+
+/// Emit a chunk-status bar (rich) or paint the ASCII status glyph.
+///
+/// A [`ChunkStatus::Pending`] chunk has no bar in rich mode, matching the blank
+/// glyph the ASCII path draws for it.
+#[allow(clippy::too_many_arguments)]
+fn draw_status_gutter(
+    rich: &mut Option<RichGutter<'_>>,
+    buf: &mut Buffer,
+    inner: Rect,
+    col: u16,
+    y: u16,
+    status: ChunkStatus,
+    is_current: bool,
+    current_style: Style,
+    theme: &crate::theme::Theme,
+) {
+    match rich {
+        Some(rg) => {
+            if let Some(color) = status_bar_color(status, is_current, &rg.colors) {
+                Bar {
+                    x: (col - inner.x) * 16,
+                    y: (y - inner.y) * 16,
+                    width: 6,
+                    height: 16,
+                    color,
+                }
+                .render(inner, buf, &mut *rg.scene);
+            }
+        },
+        None => paint_status_gutter(buf, col, y, status, is_current, current_style, theme),
+    }
+}
+
+/// Emit a right-aligned line number as a sub-cell run (rich) or paint the ASCII
+/// number.
+fn draw_side_num(
+    rich: &mut Option<RichGutter<'_>>,
+    buf: &mut Buffer,
+    inner: Rect,
+    num_x: u16,
+    y: u16,
+    num: u32,
+    dim_style: Style,
+) {
+    match rich {
+        Some(rg) => {
+            let text = num.to_string();
+            let digits = text.len() as u16;
+            let right_edge = (num_x - inner.x + 4) * 16;
+            TextRun {
+                col: right_edge.saturating_sub(digits * NUMBER_SCALE / 16),
+                row: (y - inner.y) * 16,
+                scale: NUMBER_SCALE,
+                color: rg.colors.dim,
+                bg: rg.colors.bg,
+                text: &text,
+            }
+            .render(inner, buf, &mut *rg.scene);
+        },
+        None => render_side_num(buf, num_x, y, num, dim_style),
+    }
+}
+
+/// Paint the ASCII gap marker (`.....`) for a side with no line on this row. In
+/// rich mode the gap is simply the absence of a run, so this is a no-op.
+fn draw_empty_num(
+    rich: &Option<RichGutter<'_>>,
+    buf: &mut Buffer,
+    num_x: u16,
+    y: u16,
+    dim_style: Style,
+) {
+    if rich.is_none() {
+        render_empty_num(buf, num_x, y, dim_style);
+    }
+}
+
+/// The RGB gutter colors extracted from the theme, plus the reused scene the
+/// sub-cell components append into.
+struct RichGutter<'a> {
+    scene: &'a mut ApcScene,
+    colors: RichColors,
+}
+
+struct RichColors {
+    /// Line-number and separator color (`diff.context` fg).
+    dim: [u8; 3],
+    /// Background the line-number runs composite over.
+    bg: [u8; 3],
+    staged: [u8; 3],
+    unstaged: [u8; 3],
+    skipped: [u8; 3],
+    current: [u8; 3],
+}
+
+/// Extract every gutter color as RGB, or `None` if any is missing or not an RGB
+/// color. A `None` here disables rich mode for the whole frame, so the gutter
+/// falls back to ASCII rather than mixing the two.
+fn resolve_rich_colors(theme: &crate::theme::Theme, fallback_style: Style) -> Option<RichColors> {
+    use crate::theme::scope as s;
+    let bg = fallback_style
+        .bg
+        .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg));
+    Some(RichColors {
+        dim: style_rgb(theme.get(s::DIFF_CONTEXT).fg)?,
+        bg: style_rgb(bg)?,
+        staged: style_rgb(theme.get(s::DIFF_ADDED).fg)?,
+        unstaged: style_rgb(theme.get(s::DIFF_DELETED).fg)?,
+        skipped: style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?,
+        current: style_rgb(theme.get(s::DIFF_CURRENT_HUNK).fg)?,
+    })
+}
+
+/// The bar color for a chunk status, or `None` when the status draws no bar. A
+/// current chunk always takes the current-hunk color, mirroring the ASCII glyph.
+fn status_bar_color(status: ChunkStatus, is_current: bool, colors: &RichColors) -> Option<[u8; 3]> {
+    if is_current {
+        return Some(colors.current);
+    }
+    match status {
+        ChunkStatus::Staged => Some(colors.staged),
+        ChunkStatus::Unstaged => Some(colors.unstaged),
+        ChunkStatus::Skipped => Some(colors.skipped),
+        ChunkStatus::Pending => None,
+    }
+}
+
+fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
+    match color {
+        Some(Color::Rgb(r, g, b)) => Some([r, g, b]),
+        _ => None,
     }
 }
 
@@ -198,12 +400,12 @@ pub(crate) fn paint_status_gutter(
     buf: &mut Buffer,
     x: u16,
     y: u16,
-    status: crate::review_session::ChunkStatus,
+    status: ChunkStatus,
     is_current: bool,
     current_style: Style,
     theme: &crate::theme::Theme,
 ) {
-    use crate::{review_session::ChunkStatus, theme::scope as s};
+    use crate::theme::scope as s;
 
     if x >= buf.area.x + buf.area.width {
         return;

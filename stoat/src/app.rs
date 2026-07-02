@@ -5565,6 +5565,48 @@ mod tests {
         );
     }
 
+    /// The rich review gutter engages only when every color resolves to RGB, so
+    /// tests need a hex theme. The default theme uses named colors.
+    fn rgb_review_theme() -> crate::theme::Theme {
+        let src = r##"theme rgbtest {
+            diff.context.fg = "#808080";
+            diff.added.fg = "#00ff00";
+            diff.deleted.fg = "#ff0000";
+            diff.current_hunk.fg = "#00ffff";
+            ui.text.muted.fg = "#606060";
+            ui.background.bg = "#282c34";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbtest")
+            .expect("rgb theme builds")
+    }
+
+    #[test]
+    fn review_gutter_emits_sub_cell_components_inside_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_review_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        h.open_review_from_texts(&[("a.rs", "fn a() {}\n", "fn a_renamed() {}\n")]);
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::TextRun(_))),
+            "line numbers emit as sub-cell text runs, got {cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::Bar(_))),
+            "status marks and the separator emit as sub-cell bars, got {cmds:?}"
+        );
+    }
+
     #[test]
     fn editor_pool_pages_fill_asynchronously() {
         use stoatty_protocol::command::{Command, FillCommand};

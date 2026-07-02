@@ -398,7 +398,7 @@ pub(crate) fn render_review_page(
     editor.scroll_row = page
         .saturating_mul(region_height as u64)
         .min(u32::MAX as u64) as u32;
-    render_review(editor, area, fallback_style, theme, &mut buf);
+    render_review(editor, area, fallback_style, theme, &mut buf, None);
     editor.scroll_row = saved_scroll;
 
     serialize_buffer(&buf)

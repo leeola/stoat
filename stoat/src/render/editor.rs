@@ -48,13 +48,14 @@ pub(crate) fn render_editor_with_overlay(
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
-    _scene: Option<&mut ApcScene>,
+    scene: Option<&mut ApcScene>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
 
     if editor.review_view.is_some() {
-        render_review(editor, inner, fallback_style, theme, buf);
+        let scene = if stoatty { scene } else { None };
+        render_review(editor, inner, fallback_style, theme, buf, scene);
         return;
     }
 
