@@ -14,7 +14,7 @@ use crate::{
     stoat_bin,
 };
 use alacritty_terminal::sync::FairMutex;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::process::Command;
 use std::{
     collections::BTreeMap,
@@ -1516,7 +1516,8 @@ fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize) -> Vec<u8> {
 /// Apply host-facing terminal notifications off the grid.
 ///
 /// Title and reset-title set the window title. Clipboard-store copies to the
-/// system clipboard. Bell rings the terminal bell.
+/// system clipboard. Bell rings the terminal bell. Notification raises a desktop
+/// notification.
 fn handle_term_events(state: &mut State, events: Vec<TermEvent>) {
     for event in events {
         match event {
@@ -1524,6 +1525,9 @@ fn handle_term_events(state: &mut State, events: Vec<TermEvent>) {
             TermEvent::ResetTitle => state.window.set_title(DEFAULT_TITLE),
             TermEvent::ClipboardStore(text) => copy_to_clipboard(&text),
             TermEvent::Bell => ring_bell(state, Instant::now()),
+            TermEvent::Notification { title, body } => {
+                deliver_notification(title.as_deref(), &body)
+            },
         }
     }
 }
@@ -1578,7 +1582,7 @@ fn play_system_bell() {}
 
 /// Spawn `command` and reap it on a detached thread, so a short-lived helper
 /// process leaves no zombie once it exits.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn spawn_reaped(mut command: Command) {
     if let Ok(mut child) = command.spawn() {
         std::thread::spawn(move || {
@@ -1586,6 +1590,39 @@ fn spawn_reaped(mut command: Command) {
         });
     }
 }
+
+/// Show a desktop notification for an OSC 9 / OSC 777 sequence.
+///
+/// macOS runs `osascript`, passing the title and body as argv items the script
+/// reads back, so the payload is never interpolated into the script text and
+/// cannot inject AppleScript. Other unix runs `notify-send`. The notification
+/// shows regardless of window focus, and a spawn failure is ignored.
+#[cfg(target_os = "macos")]
+fn deliver_notification(title: Option<&str>, body: &str) {
+    let mut command = Command::new("osascript");
+    command.args([
+        "-e",
+        "on run argv",
+        "-e",
+        "display notification (item 1 of argv) with title (item 2 of argv)",
+        "-e",
+        "end run",
+        body,
+        title.unwrap_or(DEFAULT_TITLE),
+    ]);
+    spawn_reaped(command);
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn deliver_notification(title: Option<&str>, body: &str) {
+    let mut command = Command::new("notify-send");
+    command.arg(title.unwrap_or(DEFAULT_TITLE));
+    command.arg(body);
+    spawn_reaped(command);
+}
+
+#[cfg(not(unix))]
+fn deliver_notification(_title: Option<&str>, _body: &str) {}
 
 /// Copy `text` to the OS clipboard, reporting a failure rather than crashing.
 ///

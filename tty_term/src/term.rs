@@ -69,6 +69,9 @@ pub struct Terminal {
     /// Recognizes XTVERSION queries the vte parser leaves unanswered, so
     /// [`Self::advance`] can reply with [`XTVERSION_REPLY`].
     xtversion: XtVersionScanner,
+    /// Recognizes OSC 9 / OSC 777 desktop-notification sequences the vte parser
+    /// drops, so [`Self::advance`] surfaces them as [`TermEvent::Notification`].
+    osc_notify: OscNotifyScanner,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
     /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
     /// them, since the VT projection resets each cell's borders every frame.
@@ -235,10 +238,12 @@ pub enum CursorShape {
 /// A host-facing notification the running program emitted that the app must act
 /// on outside the cell grid.
 ///
-/// A stoatty-owned projection of the `alacritty_terminal` events that carry no
-/// reply bytes but still need handling. These retitle the window, ring the
-/// bell, and copy to the system clipboard. Keeping a local enum means the
-/// public API does not leak the upstream event type. Drained by
+/// A stoatty-owned projection of the terminal notifications the app acts on off
+/// the grid. These retitle the window, ring the bell, copy to the system
+/// clipboard, and raise desktop notifications. Most come from the
+/// `alacritty_terminal` listener. The desktop notification is scanned out of the
+/// stream directly, since vte drops OSC 9 / OSC 777. Keeping a local enum means
+/// the public API does not leak the upstream event type. Drained by
 /// [`Terminal::take_events`] after each parse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TermEvent {
@@ -252,6 +257,9 @@ pub enum TermEvent {
     /// Copy the given text to the system clipboard (OSC 52), already
     /// base64-decoded upstream.
     ClipboardStore(String),
+    /// Raise a desktop notification (OSC 9, or OSC 777;notify). `title` is
+    /// `None` for OSC 9, which carries only a body.
+    Notification { title: Option<String>, body: String },
 }
 
 /// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
@@ -371,6 +379,7 @@ impl Terminal {
             palette,
             apc: ApcScanner::default(),
             xtversion: XtVersionScanner::default(),
+            osc_notify: OscNotifyScanner::default(),
             borders: Vec::new(),
             scales: Vec::new(),
             popovers: Vec::new(),
@@ -436,7 +445,11 @@ impl Terminal {
         // (cat, yes) skip the two per-byte scans, leaving only the vte parse. A
         // fill or content redirect must route every byte (captured content is
         // plain text with no ESC), so it forgoes the fast path.
-        let scan = if !redirecting && self.apc.is_idle() && self.xtversion.is_idle() {
+        let scan = if !redirecting
+            && self.apc.is_idle()
+            && self.xtversion.is_idle()
+            && self.osc_notify.is_idle()
+        {
             memchr::memchr(ESC, bytes).map(|esc| &bytes[esc..])
         } else {
             Some(bytes)
@@ -456,6 +469,12 @@ impl Terminal {
 
         for _ in 0..self.xtversion.scan(scan) {
             self.responses.push(XTVERSION_REPLY.as_bytes());
+        }
+
+        for (code, payload) in self.osc_notify.scan(scan) {
+            if let Some(event) = notification_from_osc(code, &payload) {
+                self.pending_events.push(event);
+            }
         }
 
         // Without a redirect every byte targets the live screen, so apply the
@@ -1551,6 +1570,173 @@ impl XtVersionScanner {
     }
 }
 
+/// Byte after `ESC` that opens an OSC string (`ESC ]`).
+const OSC_INTRODUCER: u8 = b']';
+
+/// Cap on a buffered OSC 9 / OSC 777 notification payload, bounding memory
+/// against a sequence that never terminates. A larger notification is discarded.
+const MAX_OSC_NOTIFY_BYTES: usize = 4096;
+
+/// Recognizes OSC 9 and OSC 777 desktop-notification sequences the vte parser
+/// drops.
+///
+/// vte handles OSC 0/1/2/4/52 but ignores OSC 9 (iTerm2) and OSC 777 (urxvt), so
+/// the driver watches the bytes for them the way [`ApcScanner`] watches APC
+/// frames, tracking `ESC ] <code> ; <payload>` across [`Terminal::advance`]
+/// calls. Only codes 9 and 777 buffer a payload, the bytes after the code's `;`.
+/// Any other OSC is skipped unbuffered to its terminator, so a large OSC 52
+/// clipboard write is never copied. A payload past [`MAX_OSC_NOTIFY_BYTES`] is
+/// discarded. Both `ESC \` and BEL terminate.
+#[derive(Default)]
+struct OscNotifyScanner {
+    state: OscNotifyState,
+    code: u32,
+    payload: Vec<u8>,
+    overflow: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+enum OscNotifyState {
+    #[default]
+    Ground,
+    Escape,
+    Prefix,
+    Buffer,
+    BufferEscape,
+    Skip,
+    SkipEscape,
+}
+
+impl OscNotifyScanner {
+    /// Whether the scanner holds no partial sequence, so a caller may skip a
+    /// chunk with no `ESC` without missing a notification.
+    fn is_idle(&self) -> bool {
+        matches!(self.state, OscNotifyState::Ground)
+    }
+
+    /// Feed `bytes`, returning every completed OSC 9 / OSC 777 sequence as its
+    /// `(code, payload)`, the payload being the bytes after the code's `;`.
+    ///
+    /// A sequence split across calls is retained until its terminator arrives.
+    fn scan(&mut self, bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
+        let mut out = Vec::new();
+
+        for &byte in bytes {
+            match self.state {
+                OscNotifyState::Ground => {
+                    if byte == ESC {
+                        self.state = OscNotifyState::Escape;
+                    }
+                },
+                OscNotifyState::Escape => {
+                    self.state = match byte {
+                        OSC_INTRODUCER => {
+                            self.code = 0;
+                            self.payload.clear();
+                            self.overflow = false;
+                            OscNotifyState::Prefix
+                        },
+                        ESC => OscNotifyState::Escape,
+                        _ => OscNotifyState::Ground,
+                    };
+                },
+                OscNotifyState::Prefix => match byte {
+                    b'0'..=b'9' => {
+                        self.code = self
+                            .code
+                            .saturating_mul(10)
+                            .saturating_add(u32::from(byte - b'0'));
+                    },
+                    b';' => {
+                        self.state = if self.code == 9 || self.code == 777 {
+                            OscNotifyState::Buffer
+                        } else {
+                            OscNotifyState::Skip
+                        };
+                    },
+                    ESC => self.state = OscNotifyState::SkipEscape,
+                    BEL => self.state = OscNotifyState::Ground,
+                    _ => self.state = OscNotifyState::Skip,
+                },
+                OscNotifyState::Buffer => match byte {
+                    ESC => self.state = OscNotifyState::BufferEscape,
+                    BEL => self.finish(&mut out),
+                    _ => self.push(byte),
+                },
+                OscNotifyState::BufferEscape => match byte {
+                    STRING_TERMINATOR => self.finish(&mut out),
+                    ESC => self.state = OscNotifyState::BufferEscape,
+                    _ => {
+                        self.payload.clear();
+                        self.state = OscNotifyState::Ground;
+                    },
+                },
+                OscNotifyState::Skip => match byte {
+                    ESC => self.state = OscNotifyState::SkipEscape,
+                    BEL => self.state = OscNotifyState::Ground,
+                    _ => {},
+                },
+                OscNotifyState::SkipEscape => match byte {
+                    STRING_TERMINATOR => self.state = OscNotifyState::Ground,
+                    ESC => self.state = OscNotifyState::SkipEscape,
+                    _ => self.state = OscNotifyState::Skip,
+                },
+            }
+        }
+
+        out
+    }
+
+    /// Buffer one payload byte, marking overflow past the cap so the sequence is
+    /// dropped at its terminator rather than copied whole.
+    fn push(&mut self, byte: u8) {
+        if self.payload.len() < MAX_OSC_NOTIFY_BYTES {
+            self.payload.push(byte);
+        } else {
+            self.overflow = true;
+        }
+    }
+
+    /// Emit the buffered payload as a completed sequence unless it overran the
+    /// cap, then reset to ground for the next one.
+    fn finish(&mut self, out: &mut Vec<(u32, Vec<u8>)>) {
+        if !self.overflow {
+            out.push((self.code, mem::take(&mut self.payload)));
+        }
+        self.payload.clear();
+        self.overflow = false;
+        self.state = OscNotifyState::Ground;
+    }
+}
+
+/// Map a scanned OSC notification `(code, payload)` to a [`TermEvent::Notification`].
+///
+/// OSC 9 carries only a body. OSC 777's payload is `kind;title;body`, where only
+/// the `notify` kind yields an event and a `;` inside the body is preserved. A
+/// code or kind that is not a notification yields `None`.
+fn notification_from_osc(code: u32, payload: &[u8]) -> Option<TermEvent> {
+    match code {
+        9 => Some(TermEvent::Notification {
+            title: None,
+            body: String::from_utf8_lossy(payload).into_owned(),
+        }),
+        777 => {
+            let text = String::from_utf8_lossy(payload);
+            let mut parts = text.splitn(3, ';');
+            if parts.next()? != "notify" {
+                return None;
+            }
+            let title = parts.next()?.to_owned();
+            let body = parts.next().unwrap_or_default().to_owned();
+            Some(TermEvent::Notification {
+                title: Some(title),
+                body,
+            })
+        },
+        _ => None,
+    }
+}
+
 /// The set of viewport rows a projection rewrote, returned by
 /// [`Terminal::project`] so a renderer can rebuild only the rows that changed.
 ///
@@ -2050,7 +2236,10 @@ fn cube_channel(level: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApcScanner, Cursor, CursorShape, TermEvent, Terminal, XTVERSION_REPLY};
+    use super::{
+        ApcScanner, Cursor, CursorShape, OscNotifyScanner, TermEvent, Terminal,
+        MAX_OSC_NOTIFY_BYTES, XTVERSION_REPLY,
+    };
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Overlay,
@@ -2352,6 +2541,89 @@ mod tests {
 
         terminal.advance(b"\x1b[?1004l");
         assert!(!terminal.report_focus_in_out(), "DECRST 1004 disables it");
+    }
+
+    #[test]
+    fn osc_notify_scan_takes_both_terminators() {
+        let mut bel = OscNotifyScanner::default();
+        assert_eq!(bel.scan(b"\x1b]9;hi\x07"), vec![(9, b"hi".to_vec())]);
+
+        let mut st = OscNotifyScanner::default();
+        assert_eq!(st.scan(b"\x1b]9;hi\x1b\\"), vec![(9, b"hi".to_vec())]);
+    }
+
+    #[test]
+    fn osc_notify_scan_retains_a_split_sequence() {
+        let mut scanner = OscNotifyScanner::default();
+        assert!(scanner.scan(b"\x1b]9;he").is_empty());
+        assert_eq!(scanner.scan(b"llo\x07"), vec![(9, b"hello".to_vec())]);
+    }
+
+    #[test]
+    fn osc_notify_scan_skips_other_codes_unbuffered() {
+        let mut scanner = OscNotifyScanner::default();
+        assert_eq!(
+            scanner.scan(b"\x1b]52;c;QUJD\x07\x1b]9;ping\x07"),
+            vec![(9, b"ping".to_vec())],
+            "an OSC 52 write is skipped and the following OSC 9 is still found"
+        );
+    }
+
+    #[test]
+    fn osc_notify_scan_discards_over_the_cap() {
+        let mut scanner = OscNotifyScanner::default();
+        let mut seq = b"\x1b]9;".to_vec();
+        seq.resize(seq.len() + MAX_OSC_NOTIFY_BYTES + 1, b'a');
+        seq.push(0x07);
+        assert!(
+            scanner.scan(&seq).is_empty(),
+            "a payload past the cap is dropped"
+        );
+        assert_eq!(
+            scanner.scan(b"\x1b]9;ok\x07"),
+            vec![(9, b"ok".to_vec())],
+            "the scanner recovers for the next sequence"
+        );
+    }
+
+    #[test]
+    fn surfaces_osc9_notification() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]9;build done\x07");
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::Notification {
+                title: None,
+                body: "build done".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn surfaces_osc777_notification_keeping_semicolons_in_body() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]777;notify;Done;a;b;c\x07");
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::Notification {
+                title: Some("Done".into()),
+                body: "a;b;c".into()
+            }],
+            "OSC 777 splits kind/title/body but keeps later semicolons in the body"
+        );
+    }
+
+    #[test]
+    fn ignores_non_notify_osc777() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]777;precmd;ignored\x07");
+        assert!(
+            terminal.take_events().is_empty(),
+            "only the notify kind of OSC 777 delivers"
+        );
     }
 
     #[test]
