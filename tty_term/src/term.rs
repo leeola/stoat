@@ -156,6 +156,14 @@ pub struct Terminal {
     /// command is committed onto its decoration list. `None` while writing the
     /// live grid.
     capture: Option<ContentCapture>,
+    /// Host-facing notifications projected from the listener's queued events,
+    /// accumulated across parses until the app drains them via
+    /// [`Self::take_events`].
+    ///
+    /// Only the live terminal's listener feeds this. A [`FillTarget`] carries
+    /// its own throwaway [`ResponseSink`] that is never drained, so a title or
+    /// bell emitted by page-fill content is intentionally ignored.
+    pending_events: Vec<TermEvent>,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -216,6 +224,28 @@ pub enum CursorShape {
     Beam,
     HollowBlock,
     Hidden,
+}
+
+/// A host-facing notification the running program emitted that the app must act
+/// on outside the cell grid.
+///
+/// A stoatty-owned projection of the `alacritty_terminal` events that carry no
+/// reply bytes but still need handling. These retitle the window, ring the
+/// bell, and copy to the system clipboard. Keeping a local enum means the
+/// public API does not leak the upstream event type. Drained by
+/// [`Terminal::take_events`] after each parse.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TermEvent {
+    /// Set the window title (OSC 0 / OSC 2, or a restored entry from the title
+    /// stack).
+    Title(String),
+    /// Reset the window title to its default (OSC with an empty title).
+    ResetTitle,
+    /// Ring the bell (BEL).
+    Bell,
+    /// Copy the given text to the system clipboard (OSC 52), already
+    /// base64-decoded upstream.
+    ClipboardStore(String),
 }
 
 /// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
@@ -352,6 +382,7 @@ impl Terminal {
             pools: BTreeMap::new(),
             fill: None,
             capture: None,
+            pending_events: Vec::new(),
         }
     }
 
@@ -382,6 +413,14 @@ impl Terminal {
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
+        let redraw = self.advance_inner(bytes);
+        self.drain_listener_events();
+        redraw
+    }
+
+    /// The parse body of [`Self::advance`], split out so the wrapper drains the
+    /// listener events once no matter which of the three return points fires.
+    fn advance_inner(&mut self, bytes: &[u8]) -> bool {
         let redirecting = self.fill.is_some() || self.capture.is_some();
 
         // The APC and XTVERSION scanners only act on ESC-prefixed sequences, so
@@ -492,6 +531,7 @@ impl Terminal {
     /// no update is buffering. ESU within the stream flushes on its own.
     pub fn flush_synchronized_update(&mut self) {
         self.parser.stop_sync(&mut self.term);
+        self.drain_listener_events();
     }
 
     /// Take the bytes the terminal wants written back to the PTY, leaving none
@@ -504,6 +544,39 @@ impl Terminal {
     /// query.
     pub fn take_responses(&mut self) -> Vec<u8> {
         self.responses.take()
+    }
+
+    /// Take the host-facing notifications accumulated since the last call,
+    /// leaving none buffered.
+    ///
+    /// Surfaces window-title, bell, and clipboard-store events the running
+    /// program emitted, which the app applies outside the grid (window title,
+    /// system clipboard). Each [`Self::advance`] and
+    /// [`Self::flush_synchronized_update`] refreshes the buffer, so the caller
+    /// drains it right after feeding a chunk. Returns empty when the stream held
+    /// no such event.
+    pub fn take_events(&mut self) -> Vec<TermEvent> {
+        mem::take(&mut self.pending_events)
+    }
+
+    /// Project the listener's queued `alacritty_terminal` events into
+    /// [`TermEvent`]s, appending them to [`Self::pending_events`].
+    ///
+    /// Color and text-area-size queries are queued by the listener but consumed
+    /// by the color-reply and pixel-size features, so they are dropped here
+    /// until those land.
+    fn drain_listener_events(&mut self) {
+        for event in self.responses.take_events() {
+            match event {
+                Event::Title(title) => self.pending_events.push(TermEvent::Title(title)),
+                Event::ResetTitle => self.pending_events.push(TermEvent::ResetTitle),
+                Event::Bell => self.pending_events.push(TermEvent::Bell),
+                Event::ClipboardStore(_, text) => {
+                    self.pending_events.push(TermEvent::ClipboardStore(text))
+                },
+                _ => {},
+            }
+        }
     }
 
     /// Drain the decoration row-damage accumulated since the last drain.
@@ -1155,27 +1228,37 @@ impl Terminal {
     }
 }
 
-/// Captures the bytes the terminal wants written back to the PTY.
+/// Captures both what the terminal wants written to the PTY and the host-facing
+/// notifications the app acts on.
 ///
 /// `alacritty_terminal` reports replies to host queries (device attributes,
 /// device-status and cursor-position reports, keyboard-mode queries) as
-/// [`Event::PtyWrite`] events through its [`EventListener`]. The trait method
-/// takes `&self`, so the buffer lives behind a shared [`Mutex`]: the `Term`
-/// holds the listener while the owning [`Terminal`] keeps a clone to drain.
-/// Other event variants (title, clipboard, bell) are dropped.
+/// [`Event::PtyWrite`], appended to [`Self::bytes`] for the owning [`Terminal`]
+/// to write back. Title, bell, clipboard-store, color, and text-area-size
+/// events carry no reply bytes, but the app still needs them, so they queue in
+/// [`Self::events`] for [`Terminal::drain_listener_events`] to project into
+/// [`TermEvent`]s. The remaining variants (mouse-cursor dirty, cursor-blink
+/// change, clipboard load) are dropped.
 ///
-/// The buffer is [`Arc`]/[`Mutex`] rather than `Rc`/`RefCell` so [`Terminal`]
+/// Both buffers are [`Arc`]/[`Mutex`] rather than `Rc`/`RefCell` so [`Terminal`]
 /// stays [`Send`], letting the app parse the byte stream on a thread off the
-/// render loop.
+/// render loop. The trait method takes `&self`, so the `Term` holds the listener
+/// while the owning [`Terminal`] keeps a clone to drain.
 #[derive(Clone, Default)]
 struct ResponseSink {
     bytes: Arc<Mutex<Vec<u8>>>,
+    events: Arc<Mutex<Vec<Event>>>,
 }
 
 impl ResponseSink {
     /// Drain the buffered response bytes, leaving the buffer empty.
     fn take(&self) -> Vec<u8> {
         mem::take(&mut *self.bytes.lock())
+    }
+
+    /// Drain the queued listener events, leaving the queue empty.
+    fn take_events(&self) -> Vec<Event> {
+        mem::take(&mut *self.events.lock())
     }
 
     /// Append `bytes` to the buffer, for a reply the driver synthesizes itself
@@ -1187,8 +1270,15 @@ impl ResponseSink {
 
 impl EventListener for ResponseSink {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            self.bytes.lock().extend_from_slice(text.as_bytes());
+        match event {
+            Event::PtyWrite(text) => self.bytes.lock().extend_from_slice(text.as_bytes()),
+            Event::Title(_)
+            | Event::ResetTitle
+            | Event::Bell
+            | Event::ClipboardStore(..)
+            | Event::ColorRequest(..)
+            | Event::TextAreaSizeRequest(_) => self.events.lock().push(event),
+            _ => {},
         }
     }
 }
@@ -1873,7 +1963,7 @@ fn cube_channel(level: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApcScanner, Cursor, CursorShape, Terminal, XTVERSION_REPLY};
+    use super::{ApcScanner, Cursor, CursorShape, TermEvent, Terminal, XTVERSION_REPLY};
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Overlay,
@@ -2039,6 +2129,54 @@ mod tests {
 
         terminal.advance(b"\x1b[>0q");
         assert_eq!(terminal.take_responses(), XTVERSION_REPLY.as_bytes());
+    }
+
+    #[test]
+    fn surfaces_title_event() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]2;hi\x07");
+        assert_eq!(terminal.take_events(), vec![TermEvent::Title("hi".into())]);
+        assert!(
+            terminal.take_events().is_empty(),
+            "queue drained after taking"
+        );
+    }
+
+    #[test]
+    fn surfaces_bell_event() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x07");
+        assert_eq!(terminal.take_events(), vec![TermEvent::Bell]);
+    }
+
+    #[test]
+    fn surfaces_clipboard_store_event() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::ClipboardStore("hi".into())],
+            "OSC 52 payload is base64-decoded"
+        );
+    }
+
+    #[test]
+    fn title_stack_round_trip_restores_saved_title() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b]2;A\x07\x1b[22t\x1b]2;B\x07\x1b[23t");
+        assert_eq!(
+            terminal.take_events(),
+            vec![
+                TermEvent::Title("A".into()),
+                TermEvent::Title("B".into()),
+                TermEvent::Title("A".into()),
+            ],
+            "push saves A, B replaces it, pop restores A"
+        );
     }
 
     #[test]
