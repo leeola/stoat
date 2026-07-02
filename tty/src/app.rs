@@ -317,6 +317,12 @@ struct State {
     /// or `None` when none is, tracked from `MouseInput` so a drag-motion report
     /// can encode which button is being dragged.
     pressed_button: Option<u8>,
+    /// Whether the pointer sits in the right half of its cell, tracked from
+    /// `CursorMoved` so a native grid selection anchors on the correct edge.
+    pointer_side_right: bool,
+    /// True while a stoatty-native grid selection is being dragged, so
+    /// `CursorMoved` extends it and the left release copies and clears it.
+    native_drag: bool,
 }
 
 /// One pool's smooth-scroll animation state, held by [`State::pool_anims`].
@@ -505,6 +511,8 @@ impl ApplicationHandler<PtyEvent> for App {
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
             pressed_button: None,
+            pointer_side_right: false,
+            native_drag: false,
         });
     }
 
@@ -1071,7 +1079,26 @@ impl ApplicationHandler<PtyEvent> for App {
                 let cell_size = render::cell_size(state.font_size, state.scale_factor as f32);
                 let (rows, cols) = state.gpu.grid_size();
                 let previous = state.pointer_cell;
+                let previous_side = state.pointer_side_right;
                 state.pointer_cell = cell_at(position.x, position.y, cell_size, rows, cols);
+                state.pointer_side_right = position.x
+                    - state.pointer_cell.0 as f64 * cell_size[0] as f64
+                    > cell_size[0] as f64 / 2.0;
+
+                // A native grid selection extends as the pointer crosses a cell
+                // or cell-half boundary, and owns the pointer until release.
+                if state.native_drag {
+                    if state.pointer_cell != previous || state.pointer_side_right != previous_side {
+                        let (col, row) = state.pointer_cell;
+                        state
+                            .terminal
+                            .lock()
+                            .update_selection(row, col, state.pointer_side_right);
+                        state.window.request_redraw();
+                    }
+                    return;
+                }
+
                 if state.pointer_cell == previous {
                     return;
                 }
@@ -1106,11 +1133,39 @@ impl ApplicationHandler<PtyEvent> for App {
                 };
                 let pressed = element_state == ElementState::Pressed;
                 state.pressed_button = pressed.then_some(code);
-                let report = {
+                let sgr = {
                     let terminal = state.terminal.lock();
                     terminal.mouse_mode() && terminal.sgr_mouse()
                 };
-                if report {
+
+                // The left button drives a native grid selection when the child
+                // is not SGR-reporting, or always on shift (the escape from a
+                // mouse-capturing app). Otherwise the press is reported below.
+                if code == 0 && (!sgr || state.modifiers.shift_key()) {
+                    let (col, row) = state.pointer_cell;
+                    if pressed {
+                        state
+                            .terminal
+                            .lock()
+                            .start_selection(row, col, state.pointer_side_right);
+                        state.native_drag = true;
+                    } else if state.native_drag {
+                        state.native_drag = false;
+                        let text = {
+                            let mut terminal = state.terminal.lock();
+                            let text = terminal.selection_text();
+                            terminal.clear_selection();
+                            text
+                        };
+                        if let Some(text) = text.filter(|t| !t.is_empty()) {
+                            copy_to_clipboard(&text);
+                        }
+                    }
+                    state.window.request_redraw();
+                    return;
+                }
+
+                if sgr {
                     let (col, row) = state.pointer_cell;
                     let _ = state.pty.write(&sgr_button_bytes(code, pressed, col, row));
                 }
@@ -1309,6 +1364,16 @@ fn sgr_button_bytes(button: u8, pressed: bool, col: usize, row: usize) -> Vec<u8
 fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize) -> Vec<u8> {
     let code = button.unwrap_or(3) + 32;
     format!("\x1b[<{code};{};{}M", col + 1, row + 1).into_bytes()
+}
+
+/// Copy `text` to the OS clipboard, reporting a failure rather than crashing.
+///
+/// Opens a fresh clipboard handle per copy, the per-call pattern the editor's
+/// clipboard host uses, so no handle is held across the app's event loop.
+fn copy_to_clipboard(text: &str) {
+    if let Err(err) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.to_owned())) {
+        eprintln!("stoatty: failed to copy selection to clipboard: {err}");
+    }
 }
 
 /// The grid cell `(col, row)` under physical pixel (`x`, `y`), clamped to the
