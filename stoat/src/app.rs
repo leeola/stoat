@@ -1052,7 +1052,12 @@ impl Stoat {
                         Arc::new(b)
                     };
                     let cursor = self.primary_cursor_screen_pos();
-                    render.send_replace(Some(RenderFrame { buffer, cursor }));
+                    render.send_replace(Some(RenderFrame {
+                        buffer,
+                        cursor,
+                        #[cfg(feature = "perf")]
+                        input_time: t_event,
+                    }));
                     #[cfg(feature = "perf")]
                     if let Some(started) = t_event {
                         self.perf.record_input_to_publish(started.elapsed());
@@ -6131,6 +6136,82 @@ mod tests {
             assert!(
                 matches!(result, Ok(Ok(()))),
                 "run must quit after shutdown notify, got {result:?}"
+            );
+        });
+    }
+
+    #[cfg(feature = "perf")]
+    #[test]
+    fn input_driven_frame_carries_an_input_timestamp() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut h = Stoat::test();
+            h.stoat.persistence_disabled = true;
+
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+            let (render_tx, render_rx) = watch::channel(None);
+            // Queue one input event and drop the sender. The loop drains the
+            // event (publishing its frame), then breaks on the closed channel
+            // before any background redraw can supersede it in the watch.
+            event_tx.send(Event::Resize(80, 24)).await.expect("send");
+            drop(event_tx);
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                h.stoat.run(event_rx, render_tx),
+            )
+            .await
+            .expect("run should quit")
+            .expect("run ok");
+
+            let frame = render_rx.borrow();
+            let frame = frame.as_ref().expect("a frame was published");
+            assert!(
+                frame.input_time.is_some(),
+                "an events.recv()-driven frame carries the input timestamp"
+            );
+        });
+    }
+
+    #[cfg(feature = "perf")]
+    #[test]
+    fn notify_driven_frame_has_no_input_timestamp() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut h = Stoat::test();
+            h.stoat.persistence_disabled = true;
+            // Give the frame a real size without routing through the event
+            // channel, so no input timestamp is captured.
+            h.stoat.update(Event::Resize(80, 24));
+            let shutdown = h.stoat.shutdown_handle();
+
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+            let (render_tx, render_rx) = watch::channel(None);
+            // A redraw-notify wakes a frame with no input behind it. The biased
+            // loop takes the redraw arm, publishing a frame, then quits.
+            h.stoat.redraw_notify.notify_one();
+            shutdown.notify_one();
+            let _keep = event_tx;
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                h.stoat.run(event_rx, render_tx),
+            )
+            .await
+            .expect("run should quit")
+            .expect("run ok");
+
+            let frame = render_rx.borrow();
+            let frame = frame.as_ref().expect("a frame was published");
+            assert!(
+                frame.input_time.is_none(),
+                "a redraw-notify frame carries no input timestamp"
             );
         });
     }

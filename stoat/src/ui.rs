@@ -33,6 +33,15 @@ use tokio::sync::{
 pub struct RenderFrame {
     pub buffer: Arc<Buffer>,
     pub cursor: Option<(u16, u16)>,
+    /// When the frame's first event arrived, for measuring input-to-flush
+    /// latency on the UI thread. `Some` only for input-driven frames; `None`
+    /// for redraw-notify and PTY wakes, which carry no input to time.
+    ///
+    /// The render watch is latest-wins, so a frame superseded before the UI
+    /// thread draws it is never measured. The recorded distribution therefore
+    /// covers frames actually flushed, which is the user-visible latency.
+    #[cfg(feature = "perf")]
+    pub input_time: Option<std::time::Instant>,
 }
 
 /// Install a process-global panic hook that restores the terminal before the
@@ -117,6 +126,13 @@ async fn run(
     // cloning a fresh one out of the watch each frame.
     let mut frame = Buffer::empty(Rect::new(0, 0, size.width, size.height));
 
+    // UI-thread-local input-to-flush latency, logged periodically. The main
+    // thread keeps its own PerfStats, so this needs no cross-thread channel.
+    #[cfg(feature = "perf")]
+    let mut ui_perf = crate::perf::PerfStats::default();
+    #[cfg(feature = "perf")]
+    let mut recorded_frames: usize = 0;
+
     loop {
         // Biased: always drain input before flushing frames so keypresses
         // are never starved by a burst of render buffers
@@ -138,12 +154,18 @@ async fn run(
                 // Copy the latest frame into `frame` and drop the watch borrow
                 // before drawing, so the slow terminal flush never holds the
                 // lock the render thread needs to publish the next frame.
+                #[cfg(feature = "perf")]
+                let mut input_time = None;
                 let cursor = {
                     let latest = render_rx.borrow_and_update();
                     match latest.as_ref() {
                         Some(src) => {
                             frame.resize(src.buffer.area);
                             frame.content.clone_from(&src.buffer.content);
+                            #[cfg(feature = "perf")]
+                            {
+                                input_time = src.input_time;
+                            }
                             Some(src.cursor)
                         },
                         None => None,
@@ -166,6 +188,15 @@ async fn run(
                 // frame to the same stdout, after the grid frame so the pool
                 // composites over the content just drawn.
                 drain_apc(apc_rx)?;
+                // The frame's bytes are out, so stop the input-to-flush clock.
+                #[cfg(feature = "perf")]
+                if let Some(started) = input_time {
+                    ui_perf.record_input_to_flush(started.elapsed());
+                    recorded_frames += 1;
+                    if recorded_frames.is_multiple_of(PERF_LOG_INTERVAL) {
+                        log_input_latency(&ui_perf);
+                    }
+                }
             }
 
             batch = apc_rx.recv() => {
@@ -178,7 +209,31 @@ async fn run(
         }
     }
 
+    // Final summary so a short-lived session still reports its latency.
+    #[cfg(feature = "perf")]
+    log_input_latency(&ui_perf);
+
     Ok(())
+}
+
+/// Frames between periodic input-to-flush latency log lines.
+#[cfg(feature = "perf")]
+const PERF_LOG_INTERVAL: usize = 600;
+
+/// Log the input-to-flush latency percentiles to `stoat::perf`, in
+/// microseconds. A no-op until at least one input-driven frame has flushed.
+#[cfg(feature = "perf")]
+fn log_input_latency(perf: &crate::perf::PerfStats) {
+    if let Some(stats) = perf.input_to_flush_stats() {
+        tracing::info!(
+            target: "stoat::perf",
+            last_us = stats.last / 1_000,
+            p50_us = stats.p50 / 1_000,
+            p95_us = stats.p95 / 1_000,
+            worst_us = stats.worst / 1_000,
+            "input-to-flush latency",
+        );
+    }
 }
 
 /// Write every APC byte batch already queued on `apc_rx` to stdout without

@@ -36,6 +36,7 @@ pub struct PerfStats {
     update: Ring,
     paint: Ring,
     input_to_publish: Ring,
+    input_to_flush: Ring,
     coalesced: Ring,
     anim_tick: Ring,
 }
@@ -54,6 +55,13 @@ impl PerfStats {
     /// Latency from the first event of a frame to publishing that frame.
     pub fn record_input_to_publish(&mut self, elapsed: Duration) {
         self.input_to_publish.record(elapsed.as_nanos() as u64);
+    }
+
+    /// End-to-end latency from the first event of a frame to the moment its
+    /// bytes are flushed to the terminal. Recorded on the UI thread, one hop
+    /// past `input_to_publish`.
+    pub fn record_input_to_flush(&mut self, elapsed: Duration) {
+        self.input_to_flush.record(elapsed.as_nanos() as u64);
     }
 
     /// How many further messages a frame coalesced after its first event.
@@ -76,6 +84,10 @@ impl PerfStats {
 
     pub fn input_to_publish_stats(&self) -> Option<MetricStats> {
         self.input_to_publish.stats()
+    }
+
+    pub fn input_to_flush_stats(&self) -> Option<MetricStats> {
+        self.input_to_flush.stats()
     }
 
     pub fn coalesced_stats(&self) -> Option<MetricStats> {
@@ -174,12 +186,14 @@ mod tests {
         perf.record_update(Duration::from_micros(5));
         perf.record_paint(Duration::from_micros(10));
         perf.record_input_to_publish(Duration::from_micros(20));
+        perf.record_input_to_flush(Duration::from_micros(25));
         perf.record_coalesced(3);
         perf.record_anim_tick(Duration::from_millis(8));
 
         assert_eq!(perf.update_stats().expect("update").last, 5_000);
         assert_eq!(perf.paint_stats().expect("paint").last, 10_000);
-        assert_eq!(perf.input_to_publish_stats().expect("latency").last, 20_000);
+        assert_eq!(perf.input_to_publish_stats().expect("publish").last, 20_000);
+        assert_eq!(perf.input_to_flush_stats().expect("flush").last, 25_000);
         assert_eq!(perf.coalesced_stats().expect("coalesced").last, 3);
         assert_eq!(perf.anim_tick_stats().expect("anim").last, 8_000_000);
     }
