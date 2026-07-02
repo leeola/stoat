@@ -298,6 +298,26 @@ fn render_pane_status(
                     &text,
                     base_style.add_modifier(Modifier::ITALIC),
                 );
+                #[cfg(feature = "perf")]
+                {
+                    right_anchor = start;
+                }
+            }
+        }
+        #[cfg(feature = "perf")]
+        if let Some(seg) = frame.perf {
+            let text = crate::render::perf_label(seg);
+            let width = text.chars().count() as u16;
+            let start = right_anchor.saturating_sub(width);
+            if start >= cursor {
+                paint_segment(
+                    buf,
+                    y,
+                    start,
+                    right_anchor,
+                    &text,
+                    base_style.add_modifier(Modifier::DIM),
+                );
             }
         }
     }

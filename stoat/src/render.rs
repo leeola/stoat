@@ -92,6 +92,42 @@ pub(crate) struct FrameCtx<'a> {
     /// document editor delegates its primary cursor to the terminal cursor
     /// (which stoatty eases) instead of painting a styled grid cell.
     pub(crate) stoatty: bool,
+    /// Latency readout for the status bar, or `None` before any frame has
+    /// been painted. Present only under the `perf` feature.
+    #[cfg(feature = "perf")]
+    pub(crate) perf: Option<PerfSegment>,
+}
+
+/// A status-bar latency readout holding the most recent paint time and the
+/// p95 input-to-publish latency, both in microseconds.
+#[cfg(feature = "perf")]
+#[derive(Clone, Copy)]
+pub(crate) struct PerfSegment {
+    pub(crate) last_paint_us: u64,
+    pub(crate) p95_input_us: u64,
+}
+
+#[cfg(feature = "perf")]
+impl PerfSegment {
+    /// Read the headline metrics for the status bar, or `None` until at least
+    /// one frame has been painted (so a fresh session shows no readout).
+    pub(crate) fn capture(perf: &crate::perf::PerfStats) -> Option<PerfSegment> {
+        let paint = perf.paint_stats()?;
+        Some(PerfSegment {
+            last_paint_us: paint.last / 1_000,
+            p95_input_us: perf.input_to_publish_stats().map_or(0, |s| s.p95 / 1_000),
+        })
+    }
+}
+
+/// Format a [`PerfSegment`] for the status bar, padded like the other
+/// segments so neighbors stay separated.
+#[cfg(feature = "perf")]
+pub(crate) fn perf_label(seg: PerfSegment) -> String {
+    format!(
+        " paint {}us in-p95 {}us ",
+        seg.last_paint_us, seg.p95_input_us
+    )
 }
 
 pub(crate) const PRIMARY_MODES: &[&str] = &[
@@ -187,6 +223,8 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         diagnostics: &stoat.diagnostics,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         stoatty: stoat.stoatty,
+        #[cfg(feature = "perf")]
+        perf: PerfSegment::capture(&stoat.perf),
     };
 
     let split_focused = ws.panes.focus();
@@ -481,5 +519,36 @@ fn render_message_row(message: &str, style: Style, row: Rect, buf: &mut Buffer) 
             break;
         }
         buf[(col, row.y)].set_char(ch).set_style(style);
+    }
+}
+
+#[cfg(all(test, feature = "perf"))]
+mod perf_tests {
+    use super::{perf_label, PerfSegment};
+    use crate::perf::PerfStats;
+    use std::time::Duration;
+
+    #[test]
+    fn capture_is_none_until_a_frame_is_painted() {
+        assert!(PerfSegment::capture(&PerfStats::default()).is_none());
+    }
+
+    #[test]
+    fn capture_reads_paint_and_input_percentiles_in_micros() {
+        let mut perf = PerfStats::default();
+        perf.record_paint(Duration::from_micros(123));
+        perf.record_input_to_publish(Duration::from_micros(456));
+        let seg = PerfSegment::capture(&perf).expect("data recorded");
+        assert_eq!(seg.last_paint_us, 123);
+        assert_eq!(seg.p95_input_us, 456);
+    }
+
+    #[test]
+    fn perf_label_formats_both_values() {
+        let seg = PerfSegment {
+            last_paint_us: 12,
+            p95_input_us: 34,
+        };
+        assert_eq!(perf_label(seg), " paint 12us in-p95 34us ");
     }
 }

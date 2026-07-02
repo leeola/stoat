@@ -216,7 +216,7 @@ pub struct Stoat {
     /// Main-thread latency metrics, recorded around the run loop's per-frame
     /// steps. Only present under the `perf` feature.
     #[cfg(feature = "perf")]
-    perf: crate::perf::PerfStats,
+    pub(crate) perf: crate::perf::PerfStats,
     /// In-flight working-tree review scan. The git2 diff runs on a
     /// blocking thread; [`pump_review_scan`](action_handlers::pump_review_scan)
     /// polls the ready [`ReviewSession`](crate::review_session::ReviewSession)
@@ -1074,7 +1074,37 @@ impl Stoat {
                 UpdateEffect::None => {},
             }
         }
+
+        #[cfg(feature = "perf")]
+        self.log_perf_table();
+
         Ok(())
+    }
+
+    /// Log every main-thread perf metric's percentiles to `stoat::perf` when
+    /// the run loop exits, so a session's latency profile lands in the log.
+    #[cfg(feature = "perf")]
+    fn log_perf_table(&self) {
+        let metrics = [
+            ("update", self.perf.update_stats()),
+            ("paint", self.perf.paint_stats()),
+            ("input_to_publish", self.perf.input_to_publish_stats()),
+            ("coalesced", self.perf.coalesced_stats()),
+            ("anim_tick", self.perf.anim_tick_stats()),
+        ];
+        for (metric, stats) in metrics {
+            if let Some(s) = stats {
+                tracing::info!(
+                    target: "stoat::perf",
+                    metric,
+                    last = s.last,
+                    p50 = s.p50,
+                    p95 = s.p95,
+                    worst = s.worst,
+                    "perf percentiles",
+                );
+            }
+        }
     }
 
     /// Whether the active workspace has an in-flight animation that needs a
