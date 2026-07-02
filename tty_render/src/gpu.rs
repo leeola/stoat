@@ -28,12 +28,180 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::thread;
 use stoatty_term::grid::{Grid, Rgb};
 use wgpu::{
-    Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
+    Adapter, Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
     DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations, PowerPreference,
     PresentMode, Queue, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions,
     StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor,
 };
+#[cfg(feature = "perf")]
+use {
+    std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    },
+    wgpu::{
+        Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Features, MapMode, PollType,
+        QuerySet, QuerySetDescriptor, QueryType, RenderPassTimestampWrites,
+    },
+};
+
+/// Slots in the timestamp readback ring. Three lets a frame's timing be read
+/// back when its slot cycles around, so `present` never waits on the GPU.
+#[cfg(feature = "perf")]
+const TIMER_SLOTS: usize = 3;
+
+/// Bytes for one frame's two `u64` timestamp ticks.
+#[cfg(feature = "perf")]
+const TIMESTAMP_BYTES: u64 = 16;
+
+/// GPU-side frame timing via a two-query timestamp set and a never-blocking
+/// readback ring. Compiled only under the `perf` feature.
+///
+/// Each timed frame writes a begin/end timestamp around the frame render pass,
+/// resolves the pair into a free ring slot, and maps that slot for read. The
+/// result is picked up [`TIMER_SLOTS`] frames later when the slot cycles back,
+/// so the present path never stalls on GPU completion. A slot whose map has
+/// not landed by the time its turn returns is skipped for that frame.
+#[cfg(feature = "perf")]
+struct GpuTimer {
+    query_set: QuerySet,
+    period_ns: f32,
+    slots: Vec<TimerSlot>,
+    frame: usize,
+}
+
+#[cfg(feature = "perf")]
+struct TimerSlot {
+    resolve: Buffer,
+    map: Buffer,
+    ready: Arc<AtomicBool>,
+    in_flight: bool,
+}
+
+#[cfg(feature = "perf")]
+impl GpuTimer {
+    fn new(device: &Device, queue: &Queue) -> GpuTimer {
+        let query_set = device.create_query_set(&QuerySetDescriptor {
+            label: Some("frame-timestamps"),
+            ty: QueryType::Timestamp,
+            count: 2,
+        });
+        let slots = (0..TIMER_SLOTS)
+            .map(|_| TimerSlot {
+                resolve: device.create_buffer(&BufferDescriptor {
+                    label: Some("timestamp-resolve"),
+                    size: TIMESTAMP_BYTES,
+                    usage: BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                map: device.create_buffer(&BufferDescriptor {
+                    label: Some("timestamp-map"),
+                    size: TIMESTAMP_BYTES,
+                    usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                ready: Arc::new(AtomicBool::new(false)),
+                in_flight: false,
+            })
+            .collect();
+        GpuTimer {
+            query_set,
+            period_ns: queue.get_timestamp_period(),
+            slots,
+            frame: 0,
+        }
+    }
+
+    fn current_slot(&self) -> usize {
+        self.frame % TIMER_SLOTS
+    }
+
+    /// The timestamp writes to hang on this frame's render pass.
+    fn timestamp_writes(&self) -> RenderPassTimestampWrites<'_> {
+        RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(0),
+            end_of_pass_write_index: Some(1),
+        }
+    }
+
+    /// Read back this frame's slot if its map has landed, returning the GPU
+    /// duration and freeing the slot to be written again.
+    ///
+    /// `None` when the slot's map has not completed yet or the slot was never
+    /// written. After this returns, [`Self::slot_free`] reports whether the
+    /// slot can take this frame's timestamps.
+    fn take_ready(&mut self) -> Option<Duration> {
+        let period = self.period_ns;
+        let slot = &mut self.slots[self.frame % TIMER_SLOTS];
+        if !slot.in_flight || !slot.ready.load(Ordering::Acquire) {
+            return None;
+        }
+        let ticks: [u64; 2] = {
+            let view = slot.map.slice(..).get_mapped_range();
+            bytemuck::pod_read_unaligned(&view[..TIMESTAMP_BYTES as usize])
+        };
+        slot.map.unmap();
+        slot.in_flight = false;
+        slot.ready.store(false, Ordering::Release);
+        let elapsed = ticks[1].saturating_sub(ticks[0]);
+        Some(Duration::from_nanos(
+            (elapsed as f64 * period as f64) as u64,
+        ))
+    }
+
+    /// Whether this frame's slot is free to resolve into and re-map.
+    fn slot_free(&self) -> bool {
+        !self.slots[self.current_slot()].in_flight
+    }
+
+    /// Resolve this frame's two timestamps into its slot's buffers.
+    fn resolve(&self, encoder: &mut CommandEncoder) {
+        let slot = &self.slots[self.current_slot()];
+        encoder.resolve_query_set(&self.query_set, 0..2, &slot.resolve, 0);
+        encoder.copy_buffer_to_buffer(&slot.resolve, 0, &slot.map, 0, TIMESTAMP_BYTES);
+    }
+
+    /// Begin the async map of this frame's slot. A later device poll completes
+    /// it, and the read happens when the slot cycles back.
+    fn begin_map(&mut self) {
+        let slot = &mut self.slots[self.frame % TIMER_SLOTS];
+        let ready = slot.ready.clone();
+        ready.store(false, Ordering::Release);
+        slot.map.slice(..).map_async(MapMode::Read, move |result| {
+            if result.is_ok() {
+                ready.store(true, Ordering::Release);
+            }
+        });
+        slot.in_flight = true;
+    }
+
+    /// Advance to the next slot. Called once per frame so each slot is written
+    /// every [`TIMER_SLOTS`] frames and read back the next time around.
+    fn advance(&mut self) {
+        self.frame += 1;
+    }
+}
+
+/// The device descriptor for `adapter`. Under the `perf` feature, requests
+/// `TIMESTAMP_QUERY` when the adapter supports it so the renderer can measure
+/// GPU frame time. Otherwise it is the default descriptor, requesting no
+/// features.
+fn device_descriptor(adapter: &Adapter) -> DeviceDescriptor<'static> {
+    #[cfg(feature = "perf")]
+    if adapter.features().contains(Features::TIMESTAMP_QUERY) {
+        return DeviceDescriptor {
+            required_features: Features::TIMESTAMP_QUERY,
+            ..Default::default()
+        };
+    }
+    let _ = adapter;
+    DeviceDescriptor::default()
+}
 
 /// How the renderer renders text, passed to [`Renderer::new`] and
 /// [`GpuContext::new`].
@@ -77,6 +245,14 @@ pub struct Renderer {
     /// Cursor block color. The cursor pass applies its own blend alpha, so this
     /// is the opaque RGB only.
     cursor_color: Rgb,
+    /// GPU frame timer, created lazily on the first render when the device was
+    /// built with `TIMESTAMP_QUERY`. `None` until then or when unsupported.
+    #[cfg(feature = "perf")]
+    gpu_timer: Option<GpuTimer>,
+    /// The most recent GPU duration read back from the timer, taken by
+    /// [`GpuContext`] each frame to attach to the profiler sample.
+    #[cfg(feature = "perf")]
+    last_gpu: Option<Duration>,
 }
 
 impl Renderer {
@@ -112,6 +288,10 @@ impl Renderer {
             metrics,
             clear_color: rgb_to_color(background),
             cursor_color: cursor,
+            #[cfg(feature = "perf")]
+            gpu_timer: None,
+            #[cfg(feature = "perf")]
+            last_gpu: None,
         }
     }
 
@@ -184,6 +364,10 @@ impl Renderer {
         self.icon.prepare(device, queue, grid.icons(), resolution);
         self.bar.prepare(device, queue, grid.bars(), resolution);
 
+        // Time this frame's GPU work when the timer's current slot is free.
+        #[cfg(feature = "perf")]
+        let timing = self.prepare_gpu_timing(device, queue);
+
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
 
         {
@@ -199,6 +383,14 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
+                #[cfg(feature = "perf")]
+                timestamp_writes: timing.then(|| {
+                    self.gpu_timer
+                        .as_ref()
+                        .expect("timer present when timing")
+                        .timestamp_writes()
+                }),
+                #[cfg(not(feature = "perf"))]
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
@@ -225,7 +417,53 @@ impl Renderer {
             self.icon.draw(&mut render_pass);
         }
 
+        #[cfg(feature = "perf")]
+        if timing {
+            self.gpu_timer
+                .as_ref()
+                .expect("timer present when timing")
+                .resolve(&mut encoder);
+        }
+
         queue.submit([encoder.finish()]);
+
+        #[cfg(feature = "perf")]
+        {
+            if let Some(timer) = self.gpu_timer.as_mut() {
+                if timing {
+                    timer.begin_map();
+                }
+                timer.advance();
+            }
+            if timing {
+                let _ = device.poll(PollType::Poll);
+            }
+        }
+    }
+
+    /// Ready the GPU timer for this frame. Creates it lazily when the device
+    /// carries `TIMESTAMP_QUERY`, reads any completed measurement back into
+    /// `last_gpu`, and returns whether this frame's slot is free to time.
+    #[cfg(feature = "perf")]
+    fn prepare_gpu_timing(&mut self, device: &Device, queue: &Queue) -> bool {
+        if !device.features().contains(Features::TIMESTAMP_QUERY) {
+            return false;
+        }
+        let timer = self
+            .gpu_timer
+            .get_or_insert_with(|| GpuTimer::new(device, queue));
+        let gpu = timer.take_ready();
+        let free = timer.slot_free();
+        self.last_gpu = gpu;
+        free
+    }
+
+    /// Take the most recent GPU frame duration the timer read back, if one
+    /// landed. [`GpuContext`] consumes it each frame to attach to the profiler
+    /// sample it belongs to.
+    #[cfg(feature = "perf")]
+    pub fn take_gpu_time(&mut self) -> Option<Duration> {
+        self.last_gpu.take()
     }
 
     /// Composite `pool_grid`'s backgrounds and text over an already-rendered
@@ -475,7 +713,7 @@ impl GpuContext {
         };
 
         let (device, queue) =
-            executor::block_on(adapter.request_device(&DeviceDescriptor::default()))
+            executor::block_on(adapter.request_device(&device_descriptor(&adapter)))
                 .expect("GPU device creation failed on the selected adapter");
 
         // The text pass encodes its gamma-correct composite to sRGB in the
@@ -604,6 +842,10 @@ impl GpuContext {
         self.perf.mark_submitted();
         surface_frame.present();
         self.perf.end_frame();
+        #[cfg(feature = "perf")]
+        if let Some(gpu) = self.renderer.take_gpu_time() {
+            self.perf.attach_gpu(gpu);
+        }
     }
 
     /// Draw `live_grid` to the window surface, then composite each pool in
@@ -689,6 +931,10 @@ impl GpuContext {
         self.perf.mark_submitted();
         surface_frame.present();
         self.perf.end_frame();
+        #[cfg(feature = "perf")]
+        if let Some(gpu) = self.renderer.take_gpu_time() {
+            self.perf.attach_gpu(gpu);
+        }
     }
 
     /// The per-frame timing recorder, read by the perf HUD.
@@ -752,7 +998,7 @@ pub fn headless_device() -> Option<(Device, Queue)> {
     }))
     .ok()?;
 
-    executor::block_on(adapter.request_device(&DeviceDescriptor::default())).ok()
+    executor::block_on(adapter.request_device(&device_descriptor(&adapter))).ok()
 }
 
 #[cfg(test)]

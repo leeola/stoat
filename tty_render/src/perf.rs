@@ -149,6 +149,20 @@ mod enabled {
             })
         }
 
+        /// Attach a GPU duration to the most recently recorded frame.
+        ///
+        /// The GPU time is read back a few frames after the frame it measures,
+        /// so it lands on a slightly later sample than the one it timed. The
+        /// ring's percentiles are unaffected by that constant shift, so no
+        /// per-frame matching is done. A no-op on an empty ring.
+        pub fn attach_gpu(&mut self, gpu: Duration) {
+            if self.ring.is_empty() {
+                return;
+            }
+            let last = (self.next + RING - 1) % RING;
+            self.ring[last].gpu = Some(gpu);
+        }
+
         fn record(&mut self, sample: FrameSample) {
             if self.ring.len() < RING {
                 self.ring.push(sample);
@@ -229,6 +243,21 @@ mod enabled {
             assert_eq!(stats.last.cpu(), ms(300));
             assert_eq!(stats.cpu.worst, ms(300));
             assert_eq!(stats.cpu.p50, ms(181));
+        }
+
+        #[test]
+        fn attach_gpu_sets_the_most_recent_sample() {
+            let mut p = FrameProfiler::new();
+            p.record(sample(10));
+            p.attach_gpu(ms(4));
+            assert_eq!(p.stats().expect("stats").last.gpu, Some(ms(4)));
+
+            let mut empty = FrameProfiler::new();
+            empty.attach_gpu(ms(4));
+            assert!(
+                empty.stats().is_none(),
+                "attach on an empty ring is a no-op"
+            );
         }
 
         #[test]
