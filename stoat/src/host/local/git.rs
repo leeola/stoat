@@ -57,6 +57,17 @@ impl GitRepo for LocalGitRepo {
         repo.workdir().map(|p| p.to_path_buf())
     }
 
+    fn is_path_ignored(&self, path: &Path) -> bool {
+        let repo = self.repo.lock().expect("git repo lock");
+        let rel = repo
+            .workdir()
+            .and_then(|wd| path.strip_prefix(wd).ok())
+            .unwrap_or(path);
+        // A libgit2 error (path outside the repo, unreadable ignore file) falls
+        // back to not-ignored, so an uncertain path still refreshes the review.
+        repo.is_path_ignored(rel).unwrap_or(false)
+    }
+
     fn changed_files(&self) -> Vec<ChangedFile> {
         let repo = self.repo.lock().expect("git repo lock");
         let workdir = match repo.workdir() {

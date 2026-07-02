@@ -102,6 +102,10 @@ pub trait GitHost: Send + Sync {
 pub trait GitRepo: Send + Sync {
     fn workdir(&self) -> Option<PathBuf>;
     fn changed_files(&self) -> Vec<ChangedFile>;
+    /// Whether `path` (absolute or repo-relative) is ignored by the repo's
+    /// gitignore rules. Lets a watcher skip build churn such as `target/` when
+    /// deciding whether a change should refresh a review.
+    fn is_path_ignored(&self, path: &Path) -> bool;
     /// Read the UTF-8 content of `path` as it appears in HEAD. Returns
     /// `None` for orphan branches, paths not in HEAD, or binary blobs.
     fn head_content(&self, path: &Path) -> Option<String>;

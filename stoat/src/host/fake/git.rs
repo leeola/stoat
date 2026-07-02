@@ -8,7 +8,7 @@ use crate::host::{
     },
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -292,6 +292,16 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Mark `rel_path` as gitignored, so [`GitRepo::is_path_ignored`] reports
+    /// its absolute path ignored. Models a `target/` build artifact.
+    pub fn ignored(&mut self, rel_path: impl AsRef<Path>) -> &mut Self {
+        let abs = self.workdir.join(rel_path);
+        self.mutate_repo(move |state| {
+            state.ignored.insert(abs);
+        });
+        self
+    }
+
     /// Seed a root (no-parent) commit identified by `sha` with the given
     /// tree. `files` is a slice of `(rel_path, content)` pairs; entries
     /// are stored as the commit's full tree snapshot.
@@ -430,6 +440,9 @@ pub struct FakeGitRepo {
 struct FakeRepoState {
     head_contents: HashMap<PathBuf, String>,
     changed: Vec<ChangedFile>,
+    /// Absolute paths [`GitRepo::is_path_ignored`] reports as gitignored, seeded
+    /// via [`FakeRepoBuilder::ignored`]. Empty by default.
+    ignored: HashSet<PathBuf>,
     applied_patches: Vec<String>,
     /// When `Some`, the next [`GitRepo::apply_to_index`] call returns
     /// `Err(GitApplyError::Backend(_))` with this message. The failing
@@ -479,6 +492,11 @@ struct FakeCommit {
 impl GitRepo for FakeGitRepo {
     fn workdir(&self) -> Option<PathBuf> {
         Some(self.workdir.clone())
+    }
+
+    fn is_path_ignored(&self, path: &Path) -> bool {
+        let state = self.state.lock().unwrap();
+        state.ignored.contains(path)
     }
 
     fn changed_files(&self) -> Vec<ChangedFile> {

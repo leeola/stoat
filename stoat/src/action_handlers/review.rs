@@ -1353,6 +1353,51 @@ mod tests {
         );
     }
 
+    /// A change to a working-tree file not yet in the session pulls it
+    /// into the review on the next refresh.
+    #[test]
+    fn non_session_change_pulls_the_file_into_the_review() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
+        h.stoat.open_review();
+        h.settle();
+        assert_eq!(h.with_review(|s| s.files.len()), 1);
+
+        h.stage_review_scenario("/work", &[("b.rs", "p\n", "Q\n")]);
+        h.fake_fs_watcher()
+            .inject(PathBuf::from("/work/b.rs"), FsEventKind::Modified);
+        h.stoat.drain_fs_watch_events();
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert!(
+            h.with_review(|s| s.files.iter().any(|f| f.rel_path == "b.rs")),
+            "the newly-changed file is pulled into the session",
+        );
+    }
+
+    /// A gitignored path (build churn) arms no refresh even under the
+    /// git root.
+    #[test]
+    fn gitignored_change_arms_no_refresh() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
+        h.stoat.open_review();
+        h.settle();
+        h.fake_git.add_repo("/work").ignored("target/out.o");
+        let before = h.with_review(|s| s.version);
+
+        h.fake_fs_watcher()
+            .inject(PathBuf::from("/work/target/out.o"), FsEventKind::Modified);
+        h.stoat.drain_fs_watch_events();
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert_eq!(
+            h.with_review(|s| s.version),
+            before,
+            "a gitignored change must not refresh the review",
+        );
+    }
+
     /// (d) Working-tree review opens register one watch token per
     /// file in the session, and `CloseReview` releases them all.
     #[test]

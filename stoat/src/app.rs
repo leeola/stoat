@@ -11,8 +11,8 @@ use crate::{
     file_finder::FileFinder,
     help::Help,
     host::{
-        EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost, NoopFsWatcher,
-        NoopLsp,
+        EnvHost, FsHost, FsWatchHost, GitHost, GitRepo, LocalEnv, LocalFs, LocalGit, LspHost,
+        NoopFsWatcher, NoopLsp,
     },
     keymap::{Keymap, ResolvedAction},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
@@ -1604,6 +1604,7 @@ impl Stoat {
         let review_active = self.active_workspace().review.is_some();
         let git_root = self.active_workspace().git_root.clone();
         let git_dir = git_root.join(".git");
+        let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
         for path in paths {
             if review_active {
                 let in_session = self
@@ -1619,6 +1620,14 @@ impl Stoat {
                     // A .git write (a commit, reset, or branch switch) refreshes
                     // the whole session through one shared debounce.
                     self.arm_review_git_refresh_debounce();
+                } else if path.starts_with(&git_root) {
+                    // A change to a working-tree file not yet in the session
+                    // pulls it in on the next refresh, unless gitignored so
+                    // build churn such as target/ cannot thrash the rescan.
+                    let repo = repo.get_or_insert_with(|| self.git_host.discover(&git_root));
+                    if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
+                        self.arm_review_git_refresh_debounce();
+                    }
                 }
             }
             if path.starts_with(&git_root) && self.language_registry.for_path(&path).is_some() {
