@@ -78,6 +78,37 @@ pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     true
 }
 
+/// Point a pane at its pre-terminal view, or a fresh scratch editor, after its
+/// terminal exits.
+///
+/// The pane tree refuses to close the final split pane, so a terminal that
+/// exits there is repointed rather than removed. The view captured in
+/// [`crate::pane::Pane::prev_view`] when the terminal opened is restored when
+/// it still resolves against live workspace state. A missing, `Label`, or
+/// dangling capture falls back to a fresh scratch buffer so the pane never
+/// strands on a dead view.
+pub(crate) fn restore_pane_after_term_exit(stoat: &mut Stoat, pane_id: PaneId) {
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+
+    let prev = ws.panes.pane_mut(pane_id).prev_view.take();
+    let restored = prev.filter(|view| match view {
+        View::Editor(id) => ws.editors.contains_key(*id),
+        View::Run(id) => ws.runs.contains_key(*id),
+        View::Agent(id) | View::Terminal(id) => ws.terms.contains_key(*id),
+        View::Label(_) => false,
+    });
+
+    let view = restored.unwrap_or_else(|| {
+        let (buffer_id, buffer) = ws.buffers.new_scratch();
+        let editor_id = ws
+            .editors
+            .insert(EditorState::new(buffer_id, buffer, executor));
+        View::Editor(editor_id)
+    });
+    ws.panes.pane_mut(pane_id).view = view;
+}
+
 pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();

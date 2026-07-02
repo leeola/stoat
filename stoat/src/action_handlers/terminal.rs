@@ -16,14 +16,19 @@ const TERM_COLS: u16 = 80;
 
 /// Open a subshell in the focused pane.
 ///
-/// Spawns a fresh terminal session and points the focused pane at it. A spawn
+/// Spawns a fresh terminal session and points the focused pane at it,
+/// recording the view it replaced in [`crate::pane::Pane::prev_view`] so it
+/// can be restored if the terminal later exits in the last split pane. A spawn
 /// failure leaves the focused pane unchanged.
 pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
     match spawn_terminal_view(stoat) {
         view @ View::Terminal(_) => {
             let ws = stoat.active_workspace_mut();
             let focused = ws.panes.focus();
-            ws.panes.pane_mut(focused).view = view;
+            let prev = ws.panes.pane(focused).view.clone();
+            let pane = ws.panes.pane_mut(focused);
+            pane.prev_view = Some(prev);
+            pane.view = view;
             UpdateEffect::Redraw
         },
         _ => UpdateEffect::None,

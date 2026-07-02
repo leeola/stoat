@@ -121,6 +121,13 @@ pub enum FocusTarget {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Pane {
     pub view: View,
+    /// View this pane showed before a terminal replaced it, restored when
+    /// that terminal exits in the last split pane (which cannot close).
+    ///
+    /// `serde(skip)`: a restored terminal respawns as a fresh shell, so a
+    /// restored session has no meaningful prior view to return to.
+    #[serde(skip)]
+    pub prev_view: Option<View>,
     pub placement: Placement,
     #[serde(skip)]
     pub area: Rect,
@@ -173,6 +180,7 @@ impl PaneTree {
 
         let pane_id = panes.insert(Pane {
             view: View::Label("Pane 0".into()),
+            prev_view: None,
             placement: Placement::Split,
             area,
             index: 0,
@@ -228,6 +236,7 @@ impl PaneTree {
         let focused_view = self.panes[focused_pane].view.clone();
         let new_pane_id = self.panes.insert(Pane {
             view: focused_view,
+            prev_view: None,
             placement: Placement::Split,
             area: Rect::default(),
             index: self.next_index,

@@ -3307,8 +3307,7 @@ impl Stoat {
 
                 for pane_id in pane_ids {
                     if !action_handlers::close_pane_by_id(self, pane_id) {
-                        self.active_workspace_mut().panes.pane_mut(pane_id).view =
-                            View::Label("terminal exited".into());
+                        action_handlers::restore_pane_after_term_exit(self, pane_id);
                     }
                 }
                 UpdateEffect::Redraw
@@ -4782,7 +4781,7 @@ mod tests {
     }
 
     #[test]
-    fn last_terminal_pane_becomes_label_on_exit() {
+    fn last_terminal_pane_restores_scratch_when_no_prev_view() {
         let mut h = Stoat::test();
         let ws = h.stoat.active_workspace_mut();
         let only_pane = ws.panes.focus();
@@ -4799,10 +4798,73 @@ mod tests {
             vec![only_pane],
             "the last split pane is not closed",
         );
+        let View::Editor(editor_id) = ws.panes.pane(only_pane).view else {
+            panic!("last pane restores a scratch editor with no prev view");
+        };
+        let buffer_id = ws.editors.get(editor_id).expect("editor is live").buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("scratch buffer is live");
         assert!(
-            matches!(&ws.panes.pane(only_pane).view, View::Label(l) if l == "terminal exited"),
-            "last pane shows the exit label",
+            buffer.read().expect("buffer lock").rope().is_empty(),
+            "restored scratch buffer is empty",
         );
+    }
+
+    #[test]
+    fn last_terminal_pane_restores_previous_view_on_exit() {
+        let mut h = Stoat::test();
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+
+        let pane = h.stoat.active_workspace().panes.focus();
+        let View::Editor(original) = h.stoat.active_workspace().panes.pane(pane).view else {
+            panic!("initial pane holds an editor");
+        };
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        let View::Terminal(term_id) = h.stoat.active_workspace().panes.pane(pane).view else {
+            panic!("terminal action points the pane at a terminal");
+        };
+
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        let ws = h.stoat.active_workspace();
+        let View::Editor(restored) = ws.panes.pane(pane).view else {
+            panic!("exited terminal restores the previous editor view");
+        };
+        assert_eq!(
+            restored, original,
+            "pane restored to its pre-terminal editor"
+        );
+    }
+
+    #[test]
+    fn last_terminal_pane_falls_back_to_scratch_when_prev_view_dangles() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let only_pane = ws.panes.focus();
+        let View::Editor(stale) = ws.panes.pane(only_pane).view else {
+            panic!("initial pane holds an editor");
+        };
+        let term_id = insert_term_session(ws);
+        let pane = ws.panes.pane_mut(only_pane);
+        pane.prev_view = Some(View::Editor(stale));
+        pane.view = View::Terminal(term_id);
+        ws.editors.remove(stale);
+
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        let ws = h.stoat.active_workspace();
+        let View::Editor(restored) = ws.panes.pane(only_pane).view else {
+            panic!("dangling prev view falls back to a scratch editor");
+        };
+        assert_ne!(
+            restored, stale,
+            "fell back to a fresh editor, not the dead one"
+        );
+        assert!(ws.editors.contains_key(restored), "scratch editor is live");
     }
 
     #[test]
