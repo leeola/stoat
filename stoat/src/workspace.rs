@@ -2,7 +2,7 @@ mod name;
 mod persist;
 
 use crate::{
-    agent_session::{AgentId, AgentSession},
+    term_session::{TermId, TermSession},
     agent_status::AgentStatus,
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
     badge::BadgeTray,
@@ -110,7 +110,7 @@ pub struct Workspace {
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
-    pub(crate) agents: SlotMap<AgentId, AgentSession>,
+    pub(crate) terms: SlotMap<TermId, TermSession>,
     /// In-RAM symbol-and-call graph for this workspace, merged from the
     /// per-file shards the cold build and incremental reindex produce.
     pub(crate) code_graph: CodeGraph,
@@ -196,7 +196,7 @@ impl Workspace {
             buffers,
             editors,
             runs: SlotMap::with_key(),
-            agents: SlotMap::with_key(),
+            terms: SlotMap::with_key(),
             code_graph: CodeGraph::new(),
             index_generation: 0,
             file_paths: HashMap::new(),
@@ -227,7 +227,7 @@ impl Workspace {
             && self.rebase.is_none()
             && self.rebase_active.is_none()
             && self.runs.is_empty()
-            && self.agents.is_empty()
+            && self.terms.is_empty()
             && self.docks.is_empty()
             && self.editors.len() == 1
             && self.panes.split_panes().count() == 1
@@ -499,18 +499,18 @@ impl Workspace {
             dock.area = Rect::new(x, dock_y, width, dock_height);
         }
 
-        self.fit_agents_to_panes();
+        self.fit_terms_to_panes();
     }
 
     /// Resize every hosted agent's emulator and PTY to its pane's content area,
     /// so an agent reflows whenever the layout that frames it changes.
     ///
-    /// Runs on every [`Self::layout`], but [`AgentSession::fit`] skips agents
+    /// Runs on every [`Self::layout`], but [`TermSession::fit`] skips agents
     /// already at the right size, so a steady layout issues no PTY resizes. The
     /// content area excludes the status row via [`split_pane_status`], matching
     /// the rectangle the renderer composites the emulator into.
-    fn fit_agents_to_panes(&mut self) {
-        let targets: Vec<(AgentId, u16, u16)> = self
+    fn fit_terms_to_panes(&mut self) {
+        let targets: Vec<(TermId, u16, u16)> = self
             .panes
             .split_panes()
             .filter_map(|(_, pane)| match pane.view {
@@ -523,7 +523,7 @@ impl Workspace {
             .collect();
 
         for (id, rows, cols) in targets {
-            if let Some(agent) = self.agents.get_mut(id) {
+            if let Some(agent) = self.terms.get_mut(id) {
                 agent.fit(rows, cols);
             }
         }

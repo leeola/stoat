@@ -1,7 +1,7 @@
 use crate::{
     action_handlers,
     agent_ipc::{AgentControl, AgentEvent},
-    agent_session::AgentId,
+    term_session::TermId,
     agent_status::AgentStatus,
     badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
@@ -2076,8 +2076,8 @@ impl Stoat {
             if self.mode == "run" {
                 return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
             }
-            if let Some(agent_id) = self.agent_input_target() {
-                self.write_to_agent(agent_id, &[0x03]);
+            if let Some(agent_id) = self.term_input_target() {
+                self.write_to_term(agent_id, &[0x03]);
                 return UpdateEffect::None;
             }
             return UpdateEffect::Quit;
@@ -2138,8 +2138,8 @@ impl Stoat {
             return self.dispatch_global_search_key(key);
         }
 
-        if let Some(agent_id) = self.agent_input_target() {
-            return self.route_key_to_agent(agent_id, key);
+        if let Some(agent_id) = self.term_input_target() {
+            return self.route_key_to_term(agent_id, key);
         }
 
         if (self.mode == "insert"
@@ -2537,8 +2537,8 @@ impl Stoat {
     /// mirrors how insert mode sends typing to the focused editor, except the
     /// bytes go to the agent's PTY. Normal mode keeps its editor and
     /// pane-navigation bindings, so the user enters the agent with `i` and
-    /// leaves via the [`Self::route_key_to_agent`] escape.
-    fn agent_input_target(&self) -> Option<AgentId> {
+    /// leaves via the [`Self::route_key_to_term`] escape.
+    fn term_input_target(&self) -> Option<TermId> {
         if self.mode != "insert" {
             return None;
         }
@@ -2564,14 +2564,14 @@ impl Stoat {
     /// As a result, a literal `Esc` no longer reaches the agent during
     /// passthrough. The deferred per-agent normal-mode bindings would restore
     /// a way to send it.
-    fn route_key_to_agent(&mut self, agent_id: AgentId, key: KeyEvent) -> UpdateEffect {
+    fn route_key_to_term(&mut self, agent_id: TermId, key: KeyEvent) -> UpdateEffect {
         if key.code == KeyCode::Esc {
             self.transition_mode("normal".to_string());
             return UpdateEffect::Redraw;
         }
 
         if let Some(bytes) = encode_key_to_pty(&key) {
-            self.write_to_agent(agent_id, &bytes);
+            self.write_to_term(agent_id, &bytes);
         }
         UpdateEffect::None
     }
@@ -2582,10 +2582,10 @@ impl Stoat {
     /// writes synchronously, so keystrokes reach the agent in order without
     /// spawning a task. A write that errors or cannot complete synchronously is
     /// dropped with a warning rather than stalling input.
-    fn write_to_agent(&self, agent_id: AgentId, bytes: &[u8]) {
+    fn write_to_term(&self, agent_id: TermId, bytes: &[u8]) {
         let Some(session) = self
             .active_workspace()
-            .agents
+            .terms
             .get(agent_id)
             .map(|agent| agent.session.clone())
         else {
@@ -3068,7 +3068,7 @@ impl Stoat {
     /// Binds the session's hook socket (see [`crate::run::agent_socket_path`])
     /// and forwards decoded events to [`Self::handle_agent_event`] through the
     /// shared channel. Callers spawn this alongside the owned Claude subshell.
-    pub fn serve_agent_session(&self, uid: WorkspaceUid) -> io::Result<()> {
+    pub fn serve_term_session(&self, uid: WorkspaceUid) -> io::Result<()> {
         let socket_path = crate::run::agent_socket_path(uid)?;
         let tx = self.agent_event_tx.clone();
         let control_tx = self.agent_control_tx.clone();
@@ -3131,8 +3131,8 @@ impl Stoat {
                 }
                 UpdateEffect::Redraw
             },
-            PtyNotification::AgentOutput { agent_id, data } => {
-                let Some(agent) = ws.agents.get_mut(agent_id) else {
+            PtyNotification::TermOutput { agent_id, data } => {
+                let Some(agent) = ws.terms.get_mut(agent_id) else {
                     return UpdateEffect::None;
                 };
                 agent.term.feed(&data);
@@ -4441,19 +4441,19 @@ mod tests {
         let agent_id =
             stoat
                 .active_workspace_mut()
-                .agents
-                .insert(crate::agent_session::AgentSession {
-                    term: crate::agent_term::AgentTerm::new(24, 80),
+                .terms
+                .insert(crate::term_session::TermSession {
+                    term: crate::term_screen::TermScreen::new(24, 80),
                     session,
                 });
 
-        let effect = stoat.handle_pty_notification(PtyNotification::AgentOutput {
+        let effect = stoat.handle_pty_notification(PtyNotification::TermOutput {
             agent_id,
             data: b"hello".to_vec(),
         });
 
         assert_eq!(effect, UpdateEffect::Redraw);
-        let term = &stoat.active_workspace().agents[agent_id].term;
+        let term = &stoat.active_workspace().terms[agent_id].term;
         let row: String = term.row(0).iter().map(|cell| cell.ch).collect();
         assert!(row.starts_with("hello"), "row: {row:?}");
     }
@@ -4467,8 +4467,8 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let agent_id = ws.agents.insert(crate::agent_session::AgentSession {
-            term: crate::agent_term::AgentTerm::new(24, 80),
+        let agent_id = ws.terms.insert(crate::term_session::TermSession {
+            term: crate::term_screen::TermScreen::new(24, 80),
             session,
         });
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
@@ -4478,7 +4478,7 @@ mod tests {
 
         let ws = h.stoat.active_workspace();
         let (content, _) = crate::render::layout::split_pane_status(ws.panes.pane(focused).area);
-        let term = &ws.agents[agent_id].term;
+        let term = &ws.terms[agent_id].term;
         assert_eq!(
             (term.rows(), term.cols()),
             (content.height as usize, content.width as usize),
@@ -4492,7 +4492,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_agent_pane_kills_pty_child() {
+    fn closing_term_pane_kills_pty_child() {
         let mut h = Stoat::test();
         let ws = h.stoat.active_workspace_mut();
         ws.panes.split(crate::pane::Axis::Vertical);
@@ -4500,8 +4500,8 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let agent_id = ws.agents.insert(crate::agent_session::AgentSession {
-            term: crate::agent_term::AgentTerm::new(24, 80),
+        let agent_id = ws.terms.insert(crate::term_session::TermSession {
+            term: crate::term_screen::TermScreen::new(24, 80),
             session,
         });
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
@@ -4514,12 +4514,12 @@ mod tests {
             "closing the agent pane kills its PTY child"
         );
         assert!(
-            !h.stoat.active_workspace().agents.contains_key(agent_id),
+            !h.stoat.active_workspace().terms.contains_key(agent_id),
             "closing the agent pane drops its session",
         );
     }
 
-    fn stoat_with_focused_agent() -> (Stoat, AgentId, Arc<crate::host::FakeTerminalSession>) {
+    fn stoat_with_focused_agent() -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
         stoat.mode = "insert".to_string();
@@ -4528,8 +4528,8 @@ mod tests {
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
         let ws = stoat.active_workspace_mut();
         let focused = ws.panes.focus();
-        let agent_id = ws.agents.insert(crate::agent_session::AgentSession {
-            term: crate::agent_term::AgentTerm::new(24, 80),
+        let agent_id = ws.terms.insert(crate::term_session::TermSession {
+            term: crate::term_screen::TermScreen::new(24, 80),
             session,
         });
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
@@ -4563,7 +4563,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_agent_pane_routes_keys_to_pty() {
+    fn focused_term_pane_routes_keys_to_pty() {
         let (mut stoat, _id, fake) = stoat_with_focused_agent();
 
         assert_eq!(
@@ -4592,7 +4592,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_agent_pane_sends_interrupt_on_ctrl_c() {
+    fn focused_term_pane_sends_interrupt_on_ctrl_c() {
         let (mut stoat, _id, fake) = stoat_with_focused_agent();
 
         let effect = stoat.handle_key(ctrl('c'));
@@ -4603,7 +4603,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_escapes_agent_pane_without_forwarding() {
+    fn esc_escapes_term_pane_without_forwarding() {
         let (mut stoat, _id, fake) = stoat_with_focused_agent();
 
         let effect = stoat.handle_key(bare(KeyCode::Esc));

@@ -1,6 +1,6 @@
 use super::RunId;
 use crate::{
-    agent_session::AgentId,
+    term_session::TermId,
     host::terminal::{open_local_pty, SpawnArgs, TerminalHost, TerminalSession},
     workspace::WorkspaceUid,
 };
@@ -20,8 +20,8 @@ pub enum PtyNotification {
         run_id: RunId,
         exit_status: Option<i32>,
     },
-    AgentOutput {
-        agent_id: AgentId,
+    TermOutput {
+        agent_id: TermId,
         data: Vec<u8>,
     },
 }
@@ -125,23 +125,23 @@ pub async fn spawn_claude(
         .await
 }
 
-/// Spawn the reader that pumps an agent session's PTY output into its
+/// Spawn the reader that pumps a term session's PTY output into its
 /// emulator, tagging each chunk with `agent_id`. Detached on the executor like
 /// the run pane's reader.
-pub fn spawn_agent_reader(
+pub fn spawn_term_reader(
     executor: &Executor,
     session: Arc<dyn TerminalSession>,
-    agent_id: AgentId,
+    agent_id: TermId,
     pty_tx: mpsc::Sender<PtyNotification>,
 ) {
     executor
-        .spawn(agent_reader_task(session, agent_id, pty_tx))
+        .spawn(term_reader_task(session, agent_id, pty_tx))
         .detach();
 }
 
-async fn agent_reader_task(
+async fn term_reader_task(
     session: Arc<dyn TerminalSession>,
-    agent_id: AgentId,
+    agent_id: TermId,
     tx: mpsc::Sender<PtyNotification>,
 ) {
     loop {
@@ -150,7 +150,7 @@ async fn agent_reader_task(
             Ok(None) | Err(_) => break,
         };
         if tx
-            .send(PtyNotification::AgentOutput {
+            .send(PtyNotification::TermOutput {
                 agent_id,
                 data: chunk,
             })

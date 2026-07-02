@@ -1,16 +1,16 @@
-//! A fixed-viewport screen emulator for an owned agent (Claude) session.
+//! A fixed-viewport screen emulator for a PTY-backed pane session.
 //!
-//! An agent like Claude is a redraw-heavy full-screen TUI. It drives
-//! absolute cursor moves, screen erases, scroll regions, and the alternate
-//! screen. The Run pane's [`VtermGrid`](crate::run::vterm::VtermGrid) handles
-//! only an append-only command-output stream and cannot model that, so an
-//! agent session parses its PTY output onto an `alacritty_terminal::Term`
-//! instead -- the project's terminal-state layer, which implements the full
-//! VT screen.
+//! A full-screen TUI -- a shell's curses program or an agent like Claude --
+//! is redraw-heavy. It drives absolute cursor moves, screen erases, scroll
+//! regions, and the alternate screen. The Run pane's
+//! [`VtermGrid`](crate::run::vterm::VtermGrid) handles only an append-only
+//! command-output stream and cannot model that, so a term session parses its
+//! PTY output onto an `alacritty_terminal::Term` instead -- the project's
+//! terminal-state layer, which implements the full VT screen.
 //!
 //! No IO lives here. The event loop owns the PTY and pushes bytes in via
-//! [`AgentTerm::feed`]. The renderer reads the screen back through
-//! [`AgentTerm::rows`], [`AgentTerm::row`], and [`AgentTerm::cursor`].
+//! [`TermScreen::feed`]. The renderer reads the screen back through
+//! [`TermScreen::rows`], [`TermScreen::row`], and [`TermScreen::cursor`].
 
 use alacritty_terminal::{
     event::VoidListener,
@@ -30,7 +30,7 @@ use ratatui::style::{Color, Modifier};
 ///
 /// `fg`/`bg` are `None` when the cell uses the terminal's default color, so the
 /// renderer supplies the pane's own default rather than a baked-in one. Mirrors
-/// the Run pane's cell shape so an agent pane renders through the same path.
+/// the Run pane's cell shape so a term pane renders through the same path.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StyledCell {
     pub ch: char,
@@ -57,32 +57,32 @@ pub struct CursorPos {
     pub col: usize,
 }
 
-/// A live agent screen driven by a VT byte stream.
+/// A live terminal screen driven by a VT byte stream.
 ///
 /// Owns the parsed screen (an `alacritty_terminal::Term`) and the vte parser
 /// that feeds it. The viewport is fixed to the size passed to [`Self::new`];
-/// the agent redraws within it rather than the screen growing.
+/// the program redraws within it rather than the screen growing.
 ///
 /// The terminal's replies to host queries are discarded: a read-only emulator
 /// has nowhere to send them, so it uses a [`VoidListener`]. Wiring the replies
 /// back to the PTY for an interactive session is a separate concern.
-pub struct AgentTerm {
+pub struct TermScreen {
     term: Term<VoidListener>,
     parser: Processor,
 }
 
-impl AgentTerm {
+impl TermScreen {
     /// Create a `rows` by `cols` emulator with a blank screen.
     ///
     /// Both dimensions are clamped to at least one, since a zero-sized grid has
     /// no valid screen.
-    pub fn new(rows: u16, cols: u16) -> AgentTerm {
+    pub fn new(rows: u16, cols: u16) -> TermScreen {
         let dimensions = GridSize {
             rows: (rows as usize).max(1),
             cols: (cols as usize).max(1),
         };
 
-        AgentTerm {
+        TermScreen {
             term: Term::new(Config::default(), &dimensions, VoidListener),
             parser: Processor::new(),
         }
@@ -101,8 +101,8 @@ impl AgentTerm {
     /// new dimensions.
     ///
     /// Both dimensions are clamped to at least one, matching [`Self::new`]. The
-    /// hosting pane calls this as its area changes so the agent redraws within
-    /// the live size. Pair it with a PTY resize so the agent process learns the
+    /// hosting pane calls this as its area changes so the program redraws within
+    /// the live size. Pair it with a PTY resize so the child process learns the
     /// size too.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         let dimensions = GridSize {
@@ -140,7 +140,7 @@ impl AgentTerm {
             .collect()
     }
 
-    /// The cursor cell, or `None` when the agent has hidden it.
+    /// The cursor cell, or `None` when the program has hidden it.
     pub fn cursor(&self) -> Option<CursorPos> {
         let content = self.term.renderable_content();
         if matches!(content.cursor.shape, TermCursorShape::Hidden) {
@@ -269,7 +269,7 @@ fn map_modifiers(flags: TermFlags) -> Modifier {
 mod tests {
     use super::*;
 
-    fn text_row(term: &AgentTerm, idx: usize) -> String {
+    fn text_row(term: &TermScreen, idx: usize) -> String {
         term.row(idx)
             .iter()
             .map(|cell| cell.ch)
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn default_grid_is_blank() {
-        let term = AgentTerm::new(24, 80);
+        let term = TermScreen::new(24, 80);
         assert_eq!((term.rows(), term.cols()), (24, 80));
         assert_eq!(text_row(&term, 0), "");
         assert_eq!(term.cursor(), Some(CursorPos { row: 0, col: 0 }));
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn writes_ascii_and_advances_cursor() {
-        let mut term = AgentTerm::new(4, 10);
+        let mut term = TermScreen::new(4, 10);
         term.feed(b"hello");
         assert_eq!(text_row(&term, 0), "hello");
         assert_eq!(term.cursor(), Some(CursorPos { row: 0, col: 5 }));
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn newline_advances_row() {
-        let mut term = AgentTerm::new(4, 10);
+        let mut term = TermScreen::new(4, 10);
         term.feed(b"ab\r\ncd");
         assert_eq!(text_row(&term, 0), "ab");
         assert_eq!(text_row(&term, 1), "cd");
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn ansi_color_applies_and_resets() {
-        let mut term = AgentTerm::new(4, 10);
+        let mut term = TermScreen::new(4, 10);
         term.feed(b"\x1b[31mR\x1b[0mN");
         let row = term.row(0);
         assert_eq!((row[0].ch, row[0].fg), ('R', Some(Color::Red)));
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn escape_sequence_spans_feed_calls() {
-        let mut term = AgentTerm::new(4, 10);
+        let mut term = TermScreen::new(4, 10);
         term.feed(b"\x1b[31");
         term.feed(b"mR");
         let row = term.row(0);
@@ -322,14 +322,14 @@ mod tests {
 
     #[test]
     fn cursor_position_is_absolute() {
-        let mut term = AgentTerm::new(10, 20);
+        let mut term = TermScreen::new(10, 20);
         term.feed(b"\x1b[3;5H");
         assert_eq!(term.cursor(), Some(CursorPos { row: 2, col: 4 }));
     }
 
     #[test]
     fn erase_display_clears_screen() {
-        let mut term = AgentTerm::new(4, 10);
+        let mut term = TermScreen::new(4, 10);
         term.feed(b"hello\r\nworld");
         term.feed(b"\x1b[2J");
         assert_eq!(text_row(&term, 0), "");
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn resize_changes_viewport_and_keeps_content() {
-        let mut term = AgentTerm::new(24, 80);
+        let mut term = TermScreen::new(24, 80);
         term.feed(b"hi");
         term.resize(10, 20);
         assert_eq!((term.rows(), term.cols()), (10, 20));
@@ -347,14 +347,14 @@ mod tests {
 
     #[test]
     fn resize_clamps_zero_dimensions_to_one() {
-        let mut term = AgentTerm::new(24, 80);
+        let mut term = TermScreen::new(24, 80);
         term.resize(0, 0);
         assert_eq!((term.rows(), term.cols()), (1, 1));
     }
 
     #[test]
     fn alt_screen_saves_and_restores_primary() {
-        let mut term = AgentTerm::new(4, 10);
+        let mut term = TermScreen::new(4, 10);
         term.feed(b"main");
         term.feed(b"\x1b[?1049h\x1b[Halt");
         assert_eq!(text_row(&term, 0), "alt");

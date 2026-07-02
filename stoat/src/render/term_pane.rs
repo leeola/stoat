@@ -1,23 +1,23 @@
-use crate::agent_session::AgentSession;
+use crate::term_session::TermSession;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
 };
 
-/// Composite an agent session's emulated screen into `area`.
+/// Composite a term session's emulated screen into `area`.
 ///
 /// The emulator owns a fixed grid the size of `area` (kept in step by
 /// [`crate::workspace::Workspace::layout`]), so its origin maps directly onto
-/// `area`'s origin. Every cell is painted, including blanks, because the agent
+/// `area`'s origin. Every cell is painted, including blanks, because the term
 /// pane owns the whole rectangle rather than overlaying a shared one. Cells past
 /// `area` are clipped so a momentarily-oversized emulator cannot scribble
 /// outside its pane.
 ///
 /// When `is_focused`, the emulator's cursor cell is drawn as a reversed block,
 /// matching how the editor shows its caret only in the focused pane.
-pub(crate) fn render_agent_pane(
-    agent: &AgentSession,
+pub(crate) fn render_term_pane(
+    agent: &TermSession,
     area: Rect,
     is_focused: bool,
     buf: &mut Buffer,
@@ -61,8 +61,8 @@ pub(crate) fn render_agent_pane(
 #[cfg(test)]
 mod tests {
     use crate::{
-        agent_session::AgentSession,
-        agent_term::AgentTerm,
+        term_session::TermSession,
+        term_screen::TermScreen,
         host::{FakeTerminalSession, TerminalSession},
         pane::{Axis, View},
         Stoat,
@@ -70,25 +70,25 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn snapshot_agent_pane_composited_into_split() {
+    fn snapshot_term_pane_composited_into_split() {
         let mut h = Stoat::test();
         let ws = h.stoat.active_workspace_mut();
         ws.panes.split(Axis::Vertical);
         let focused = ws.panes.focus();
 
         let session: Arc<dyn TerminalSession> = Arc::new(FakeTerminalSession::new());
-        let agent_id = ws.agents.insert(AgentSession {
-            term: AgentTerm::new(24, 80),
+        let agent_id = ws.terms.insert(TermSession {
+            term: TermScreen::new(24, 80),
             session,
         });
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
-        h.stoat.active_workspace_mut().agents[agent_id]
+        h.stoat.active_workspace_mut().terms[agent_id]
             .term
             .feed(b"\x1b[1;32mclaude>\x1b[0m ready\r\nsecond line");
 
-        h.assert_snapshot("agent_pane_composited_into_split");
+        h.assert_snapshot("term_pane_composited_into_split");
     }
 }

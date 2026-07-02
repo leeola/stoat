@@ -1,10 +1,10 @@
 use crate::{
-    agent_session::AgentSession,
-    agent_term::AgentTerm,
+    term_session::TermSession,
+    term_screen::TermScreen,
     app::{Stoat, UpdateEffect},
     host::terminal::TerminalSession,
     pane::View,
-    run::{spawn_agent_reader, spawn_claude},
+    run::{spawn_term_reader, spawn_claude},
 };
 use futures::FutureExt;
 use std::sync::Arc;
@@ -40,13 +40,13 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let session: Arc<dyn TerminalSession> = Arc::from(session);
-    let agent_id = ws.agents.insert(AgentSession {
-        term: AgentTerm::new(AGENT_ROWS, AGENT_COLS),
+    let agent_id = ws.terms.insert(TermSession {
+        term: TermScreen::new(AGENT_ROWS, AGENT_COLS),
         session: session.clone(),
     });
     let focused = ws.panes.focus();
     ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
-    spawn_agent_reader(&executor, session, agent_id, pty_tx);
+    spawn_term_reader(&executor, session, agent_id, pty_tx);
     UpdateEffect::Redraw
 }

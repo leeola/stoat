@@ -1,8 +1,8 @@
 pub mod action_handlers;
 pub mod agent_ipc;
-pub mod agent_session;
+pub mod term_session;
 pub mod agent_status;
-pub mod agent_term;
+pub mod term_screen;
 pub mod app;
 pub mod badge;
 pub mod buffer;
