@@ -24,6 +24,9 @@ pub enum PtyNotification {
         agent_id: TermId,
         data: Vec<u8>,
     },
+    TermExited {
+        term_id: TermId,
+    },
 }
 
 pub struct ShellHandle {
@@ -184,6 +187,14 @@ async fn term_reader_task(
             break;
         }
     }
+
+    // The read loop ends when the child closes its PTY end (shell exit) or on a
+    // read error. Signal the exit unconditionally so the app can retire a
+    // terminal pane. The handler decides what to do by pane kind, and a closed
+    // channel drops this send silently.
+    let _ = tx
+        .send(PtyNotification::TermExited { term_id: agent_id })
+        .await;
 }
 
 /// Filesystem path of the per-session agent hook socket for `uid`, under

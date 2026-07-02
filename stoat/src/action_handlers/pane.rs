@@ -36,7 +36,7 @@ pub(super) fn close_other_panes(stoat: &mut Stoat) {
 /// Closes a specific pane by id and disposes its backing view state. Returns
 /// `false` when the pane tree refused to close (only one split pane
 /// remains); in that case no state is touched.
-fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
+pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let view = ws.panes.pane(id).view.clone();

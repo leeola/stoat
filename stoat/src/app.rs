@@ -3139,6 +3139,45 @@ impl Stoat {
                 agent.term.feed(&data);
                 UpdateEffect::Redraw
             },
+            PtyNotification::TermExited { term_id } => {
+                let pane_ids = ws
+                    .panes
+                    .split_pane_ids()
+                    .into_iter()
+                    .filter(
+                        |&id| matches!(ws.panes.pane(id).view, View::Terminal(t) if t == term_id),
+                    )
+                    .collect::<Vec<_>>();
+                let dock_ids = ws
+                    .docks
+                    .iter()
+                    .filter_map(|(id, dock)| {
+                        matches!(dock.view, View::Terminal(t) if t == term_id).then_some(id)
+                    })
+                    .collect::<Vec<_>>();
+
+                // Only terminal panes retire on exit. An agent pane sharing the
+                // same reader keeps its last frame, so bail before touching the
+                // session when nothing references it as a terminal.
+                if pane_ids.is_empty() && dock_ids.is_empty() {
+                    return UpdateEffect::None;
+                }
+
+                ws.terms.remove(term_id);
+                for dock_id in dock_ids {
+                    if let Some(dock) = ws.docks.get_mut(dock_id) {
+                        dock.view = View::Label("terminal exited".into());
+                    }
+                }
+
+                for pane_id in pane_ids {
+                    if !action_handlers::close_pane_by_id(self, pane_id) {
+                        self.active_workspace_mut().panes.pane_mut(pane_id).view =
+                            View::Label("terminal exited".into());
+                    }
+                }
+                UpdateEffect::Redraw
+            },
         }
     }
 
@@ -4545,6 +4584,85 @@ mod tests {
         assert!(
             !h.stoat.active_workspace().terms.contains_key(term_id),
             "closing the terminal pane drops its session",
+        );
+    }
+
+    fn insert_term_session(ws: &mut Workspace) -> TermId {
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        ws.terms.insert(crate::term_session::TermSession {
+            term: crate::term_screen::TermScreen::new(24, 80),
+            session,
+        })
+    }
+
+    #[test]
+    fn terminal_pane_closes_when_shell_exits() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let editor_pane = ws.panes.focus();
+        let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+        let term_id = insert_term_session(ws);
+        ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
+
+        let effect = h
+            .stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        let ws = h.stoat.active_workspace();
+        assert!(!ws.terms.contains_key(term_id), "session dropped on exit");
+        assert_eq!(
+            ws.panes.split_pane_ids(),
+            vec![editor_pane],
+            "terminal pane closed, editor remains",
+        );
+        assert_eq!(ws.panes.focus(), editor_pane, "focus moved to the sibling");
+    }
+
+    #[test]
+    fn last_terminal_pane_becomes_label_on_exit() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let only_pane = ws.panes.focus();
+        let term_id = insert_term_session(ws);
+        ws.panes.pane_mut(only_pane).view = View::Terminal(term_id);
+
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        let ws = h.stoat.active_workspace();
+        assert!(!ws.terms.contains_key(term_id), "session dropped on exit");
+        assert_eq!(
+            ws.panes.split_pane_ids(),
+            vec![only_pane],
+            "the last split pane is not closed",
+        );
+        assert!(
+            matches!(&ws.panes.pane(only_pane).view, View::Label(l) if l == "terminal exited"),
+            "last pane shows the exit label",
+        );
+    }
+
+    #[test]
+    fn agent_pane_survives_shell_exit() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let only_pane = ws.panes.focus();
+        let term_id = insert_term_session(ws);
+        ws.panes.pane_mut(only_pane).view = View::Agent(term_id);
+
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        let ws = h.stoat.active_workspace();
+        assert!(
+            ws.terms.contains_key(term_id),
+            "agent session retained on exit",
+        );
+        assert!(
+            matches!(ws.panes.pane(only_pane).view, View::Agent(id) if id == term_id),
+            "agent pane view unchanged",
         );
     }
 
