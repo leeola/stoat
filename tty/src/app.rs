@@ -1095,6 +1095,27 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
+                let paste_combo = if cfg!(target_os = "macos") {
+                    state.modifiers.super_key()
+                } else {
+                    state.modifiers.control_key() && state.modifiers.shift_key()
+                };
+                let is_paste_key = matches!(
+                    &event.logical_key,
+                    Key::Character(c) if c.eq_ignore_ascii_case("v")
+                );
+                if paste_combo && is_paste_key {
+                    // Consume the combo whether or not the clipboard read
+                    // succeeds, so encode_key never sends a stray "v".
+                    if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                        let bracketed = state.terminal.lock().bracketed_paste();
+                        let _ = state.pty.write(&paste_bytes(&text, bracketed));
+                        // Pasting jumps the view back to the live prompt, like typing.
+                        state.terminal.lock().scroll_to_bottom();
+                    }
+                    return;
+                }
+
                 if let Some(bytes) = encode_key(&event.logical_key, state.modifiers.control_key()) {
                     let _ = state.pty.write(&bytes);
                     // Typing jumps the view back to the live prompt, the way a
@@ -1359,6 +1380,21 @@ fn font_step(platform_mod_held: bool, key: &Key) -> Option<i32> {
         Key::Character(s) if s.as_str() == "=" => Some(1),
         Key::Character(s) if s.as_str() == "-" => Some(-1),
         _ => None,
+    }
+}
+
+/// Encode clipboard `text` for the PTY on paste.
+///
+/// In bracketed-paste mode the payload is wrapped in the DECSET 2004 guard
+/// markers, with any embedded end-guard stripped so pasted bytes cannot close
+/// the bracket early and inject input. Otherwise newlines are normalized to
+/// carriage returns, matching what the Enter key sends.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let guarded = text.replace("\x1b[201~", "");
+        format!("\x1b[200~{guarded}\x1b[201~").into_bytes()
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
 }
 
@@ -1722,7 +1758,7 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
 mod tests {
     use super::{
         alternate_scroll_bytes, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners,
-        encode_key, font_step, popover_overflow, sgr_button_bytes, sgr_motion_bytes,
+        encode_key, font_step, paste_bytes, popover_overflow, sgr_button_bytes, sgr_motion_bytes,
         sgr_wheel_bytes, step_document_scroll, step_grid_scroll, step_popover_scroll,
         step_region_scroll, step_scrollback_scroll, sweep_launch_shift, wheel_lines,
         SCROLLBACK_MIN_STEP,
@@ -2143,6 +2179,25 @@ mod tests {
             (0, 0),
             "a negative position saturates to the origin"
         );
+    }
+
+    #[test]
+    fn paste_bytes_wraps_in_bracketed_guards() {
+        assert_eq!(paste_bytes("hi", true), b"\x1b[200~hi\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn paste_bytes_strips_embedded_end_guard() {
+        assert_eq!(
+            paste_bytes("a\x1b[201~b", true),
+            b"\x1b[200~ab\x1b[201~".to_vec(),
+            "an embedded end-guard cannot break out of the bracket"
+        );
+    }
+
+    #[test]
+    fn paste_bytes_normalizes_newlines_when_unbracketed() {
+        assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc".to_vec());
     }
 
     #[test]

@@ -1117,6 +1117,12 @@ impl Terminal {
         self.term.mode().contains(TermMode::MOUSE_MOTION)
     }
 
+    /// Whether bracketed-paste mode (DECSET 2004) is on, so pasted text should be
+    /// wrapped in the paste-guard markers rather than sent to the program raw.
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     /// Copy the parsed screen onto `grid` and return the cursor, the number of
     /// rows the content scrolled since the previous call, and which rows changed.
     ///
@@ -2316,6 +2322,18 @@ mod tests {
             b"\x1b[4;384;640t".to_vec(),
             "CSI 14 t reports 24 lines * 16px by 80 cols * 8px"
         );
+    }
+
+    #[test]
+    fn tracks_bracketed_paste_mode() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        assert!(!terminal.bracketed_paste(), "off by default");
+
+        terminal.advance(b"\x1b[?2004h");
+        assert!(terminal.bracketed_paste(), "DECSET 2004 enables it");
+
+        terminal.advance(b"\x1b[?2004l");
+        assert!(!terminal.bracketed_paste(), "DECRST 2004 disables it");
     }
 
     #[test]
