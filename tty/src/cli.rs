@@ -28,6 +28,12 @@ pub struct Cli {
     /// stoatty's own working directory when unset.
     #[arg(long = "working-directory", value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub working_directory: Option<PathBuf>,
+
+    /// Files to open, forwarded as arguments to the stoat editor when it is the
+    /// launched child. Ignored under `-e`/`--command`, which consumes its own
+    /// trailing arguments.
+    #[arg(value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub files: Vec<PathBuf>,
 }
 
 impl Cli {
@@ -73,5 +79,29 @@ mod tests {
         let cli = Cli::parse_from(["stoatty", "--working-directory", "/tmp"]);
         assert_eq!(cli.working_directory, Some(PathBuf::from("/tmp")));
         assert_eq!(Cli::parse_from(["stoatty"]).working_directory, None);
+    }
+
+    #[test]
+    fn bare_positionals_collect_as_files() {
+        use std::path::PathBuf;
+
+        let cli = Cli::parse_from(["stoatty", "a.rs", "b.rs"]);
+        assert_eq!(
+            cli.files,
+            vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
+        );
+        assert_eq!(cli.command(), None);
+    }
+
+    #[test]
+    fn dash_e_consumes_trailing_args_leaving_files_empty() {
+        use std::path::PathBuf;
+
+        let cli = Cli::parse_from(["stoatty", "-e", "nvim", "a.rs"]);
+        assert_eq!(
+            cli.command(),
+            Some(("nvim".to_string(), vec!["a.rs".to_string()]))
+        );
+        assert_eq!(cli.files, Vec::<PathBuf>::new());
     }
 }
