@@ -781,12 +781,15 @@ pub(super) fn open_review(stoat: &mut Stoat) {
 ///
 /// Polls the in-flight scan with a no-op waker, so it never blocks. On
 /// completion the ready [`ReviewSession`] is installed on the main loop.
-/// `None` means the source had no changes worth reviewing. When the scan was a
-/// working-tree refresh ([`PendingReviewScan::close_on_empty`]), that closes the
-/// open session and shows a "working tree clean" badge rather than leaving its
-/// stale diffs up. A [`PendingReviewScan::sync_path`] set by an external-edit
-/// refresh triggers the post-install scroll and badge update. Returns whether
-/// the task resolved this call, mirroring the other render-time pumps.
+///
+/// `None` means the source had no changes worth reviewing, and surfaces a "no
+/// changes to review" info badge so an empty scan is never silent. When the
+/// scan was a working-tree refresh ([`PendingReviewScan::close_on_empty`]) with
+/// a session still open, it instead closes that stale session and shows a
+/// "working tree clean" badge. A [`PendingReviewScan::sync_path`] set by an
+/// external-edit refresh triggers the post-install scroll and badge update.
+/// Returns whether the task resolved this call, mirroring the other render-time
+/// pumps.
 ///
 /// Driven from [`Stoat::render`] and the test harness `settle` loop. The
 /// scan's completion notifies the redraw channel, so the loop wakes to pump
@@ -810,6 +813,8 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
             if pending.close_on_empty && stoat.active_workspace().review.is_some() {
                 let _ = close_review(stoat);
                 emit_review_info_badge(stoat, "working tree clean");
+            } else {
+                emit_review_info_badge(stoat, "no changes to review");
             }
             true
         },

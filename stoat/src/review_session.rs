@@ -1065,6 +1065,31 @@ mod tests {
     }
 
     #[test]
+    fn review_open_on_clean_tree_shows_no_changes_badge() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git().add_repo("/work").clear_changes();
+
+        h.stoat.open_review();
+        h.settle();
+
+        assert!(
+            h.stoat.active_workspace().review.is_none(),
+            "a clean tree opens no session"
+        );
+        let badges = &h.stoat.active_workspace().badges;
+        let label = badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .and_then(|id| badges.get(id))
+            .map(|b| b.label.as_str());
+        assert_eq!(
+            label,
+            Some("no changes to review"),
+            "an empty open surfaces an info badge instead of doing nothing"
+        );
+    }
+
+    #[test]
     fn review_refresh_in_memory_carries_status() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
