@@ -1364,9 +1364,11 @@ impl Stoat {
             .active_workspace_mut()
             .restore_state(&path, &*fs_host, &executor)
         {
-            Ok(()) => self
-                .active_workspace_mut()
-                .assign_languages_from_paths(&registry),
+            Ok(()) => {
+                self.active_workspace_mut()
+                    .assign_languages_from_paths(&registry);
+                action_handlers::respawn_terminal_panes(self);
+            },
             Err(err) => tracing::warn!(
                 ?path,
                 ?err,

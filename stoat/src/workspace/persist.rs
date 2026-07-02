@@ -337,8 +337,9 @@ fn stale_replacement(view: &View) -> Option<View> {
     match view {
         View::Run(_) => Some(View::Label("Terminal (closed)".into())),
         View::Agent(_) => Some(View::Label("Agent (closed)".into())),
-        View::Terminal(_) => Some(View::Label("Terminal (closed)".into())),
-        View::Label(_) | View::Editor(_) => None,
+        // Terminal panes survive the sweep with a dead id. The app respawns a
+        // fresh shell for each after restore. See action_handlers::terminal.
+        View::Terminal(_) | View::Label(_) | View::Editor(_) => None,
     }
 }
 
@@ -480,6 +481,46 @@ mod tests {
         }
         for dock in fresh.docks.values() {
             assert!(matches!(&dock.view, View::Label(_)));
+        }
+    }
+
+    #[test]
+    fn terminal_views_survive_restore_for_respawn() {
+        use crate::term_session::TermId;
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let dead_term = TermId::default();
+
+        let root = ws.panes.focus();
+        ws.panes.pane_mut(root).view = View::Terminal(dead_term);
+        ws.docks.insert(DockPanel {
+            view: View::Terminal(dead_term),
+            side: DockSide::Right,
+            visibility: DockVisibility::Open { width: 40 },
+            default_width: 40,
+            area: Default::default(),
+        });
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        for id in fresh.panes.split_pane_ids() {
+            assert!(
+                matches!(fresh.panes.pane(id).view, View::Terminal(_)),
+                "terminal pane must survive restore un-swept for respawn",
+            );
+        }
+        for dock in fresh.docks.values() {
+            assert!(
+                matches!(dock.view, View::Terminal(_)),
+                "terminal dock must survive restore un-swept for respawn",
+            );
         }
     }
 

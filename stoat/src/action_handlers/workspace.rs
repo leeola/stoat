@@ -33,6 +33,11 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;
     switch_active_workspace(stoat, id);
+
+    // The copy round-trips through to_state/apply_state, so any terminal pane
+    // arrives with a dead session id. Respawn gives the copy its own shells
+    // rather than dangling references into the source workspace.
+    super::respawn_terminal_panes(stoat);
     UpdateEffect::Redraw
 }
 

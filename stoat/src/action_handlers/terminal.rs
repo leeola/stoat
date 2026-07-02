@@ -16,12 +16,69 @@ const TERM_COLS: u16 = 80;
 
 /// Open a subshell in the focused pane.
 ///
-/// Resolves the program and arguments from the `terminal.shell` /
-/// `terminal.args` settings (falling back to `$SHELL`, then `/bin/sh`), spawns
-/// it through the terminal host, stores it alongside a fresh screen emulator,
-/// and points the focused pane at the new [`View::Terminal`]. A spawn failure
-/// leaves the pane unchanged.
+/// Spawns a fresh terminal session and points the focused pane at it. A spawn
+/// failure leaves the focused pane unchanged.
 pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
+    match spawn_terminal_view(stoat) {
+        view @ View::Terminal(_) => {
+            let ws = stoat.active_workspace_mut();
+            let focused = ws.panes.focus();
+            ws.panes.pane_mut(focused).view = view;
+            UpdateEffect::Redraw
+        },
+        _ => UpdateEffect::None,
+    }
+}
+
+/// Respawn a fresh shell for every persisted terminal pane and dock whose
+/// backing session did not survive, then repoint the view at it.
+///
+/// Terminal panes ride `PaneTree` serde as [`View::Terminal`], but the session
+/// is a live OS resource that is not persisted, so the id is dead after a
+/// restore or a workspace copy. Each dead pane and dock gets its own fresh
+/// shell. Runtime state (history, running processes) is intentionally lost, and
+/// a spawn failure leaves a `Terminal (closed)` label in place.
+pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
+    let dead_panes = {
+        let ws = stoat.active_workspace();
+        ws.panes
+            .split_pane_ids()
+            .into_iter()
+            .filter(|&id| {
+                matches!(ws.panes.pane(id).view, View::Terminal(t) if !ws.terms.contains_key(t))
+            })
+            .collect::<Vec<_>>()
+    };
+    let dead_docks = {
+        let ws = stoat.active_workspace();
+        ws.docks
+            .iter()
+            .filter_map(|(id, dock)| {
+                matches!(dock.view, View::Terminal(t) if !ws.terms.contains_key(t)).then_some(id)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for pane_id in dead_panes {
+        let view = spawn_terminal_view(stoat);
+        stoat.active_workspace_mut().panes.pane_mut(pane_id).view = view;
+    }
+    for dock_id in dead_docks {
+        let view = spawn_terminal_view(stoat);
+        if let Some(dock) = stoat.active_workspace_mut().docks.get_mut(dock_id) {
+            dock.view = view;
+        }
+    }
+}
+
+/// Spawn a fresh terminal session and return a [`View::Terminal`] naming it,
+/// or [`View::Label`] when the spawn fails.
+///
+/// Shared by the terminal action and the restore-time respawn. Resolves the
+/// program and arguments from the `terminal.shell` / `terminal.args` settings
+/// (falling back to `$SHELL`, then `/bin/sh`), stores the session alongside a
+/// fresh screen emulator, and starts its reader.
+fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let (program, args) = resolve_shell(
         stoat.settings.terminal_shell.as_deref(),
         stoat.settings.terminal_args.as_deref(),
@@ -40,9 +97,9 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
         Some(Ok(session)) => session,
         Some(Err(err)) => {
             tracing::warn!(target: "stoat::terminal", %err, "failed to spawn terminal session");
-            return UpdateEffect::None;
+            return View::Label("Terminal (closed)".into());
         },
-        None => return UpdateEffect::None,
+        None => return View::Label("Terminal (closed)".into()),
     };
 
     let session: Arc<dyn TerminalSession> = Arc::from(session);
@@ -50,11 +107,8 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
         term: TermScreen::new(TERM_ROWS, TERM_COLS),
         session: session.clone(),
     });
-    let focused = ws.panes.focus();
-    ws.panes.pane_mut(focused).view = View::Terminal(term_id);
-
     spawn_term_reader(&executor, session, term_id, pty_tx);
-    UpdateEffect::Redraw
+    View::Terminal(term_id)
 }
 
 /// Resolve the shell program and arguments for a new terminal pane.
@@ -129,5 +183,29 @@ mod tests {
             ws.terms.contains_key(term_id),
             "spawned terminal session is stored",
         );
+    }
+
+    #[test]
+    fn respawn_replaces_dead_terminal_with_live_session() {
+        use crate::term_session::TermId;
+
+        let mut h = Stoat::test();
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+
+        // A restored terminal pane names a session id that no longer exists.
+        let ws = h.stoat.active_workspace_mut();
+        let pane = ws.panes.focus();
+        let dead_id = TermId::default();
+        ws.panes.pane_mut(pane).view = View::Terminal(dead_id);
+
+        respawn_terminal_panes(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        let View::Terminal(new_id) = ws.panes.pane(pane).view else {
+            panic!("dead terminal pane should be respawned as a terminal");
+        };
+        assert_ne!(new_id, dead_id, "respawned with a fresh session id");
+        assert!(ws.terms.contains_key(new_id), "fresh session is stored");
     }
 }

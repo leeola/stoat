@@ -49,6 +49,7 @@ use stoat_action::{
     Action, ActionKind, Dump, OpenBuffer, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
     OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run,
 };
+pub(crate) use terminal::respawn_terminal_panes;
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     let effect = match action.kind() {
