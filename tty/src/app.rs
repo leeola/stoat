@@ -475,6 +475,7 @@ impl ApplicationHandler<PtyEvent> for App {
         let (rows, cols) = gpu.grid_size();
         let grid = Grid::new(rows, cols);
         let terminal = Arc::new(FairMutex::new(Terminal::new(rows, cols, self.theme)));
+        update_cell_pixels(&terminal, self.font_size, scale_factor as f32);
         let dirty = Arc::new(AtomicBool::new(false));
         let sync_pending = Arc::new(AtomicBool::new(false));
 
@@ -634,6 +635,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 state
                     .gpu
                     .set_font_size(state.font_size, scale_factor as f32);
+                update_cell_pixels(&state.terminal, state.font_size, scale_factor as f32);
 
                 // The cell metrics moved with the new density; the surface is
                 // re-fitted by the `Resized` that follows. Re-read the grid size
@@ -1054,6 +1056,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     state
                         .gpu
                         .set_font_size(font_size, state.scale_factor as f32);
+                    update_cell_pixels(&state.terminal, font_size, state.scale_factor as f32);
 
                     // The surface is unchanged, so skip `gpu.resize`; only the cell
                     // metrics moved, so re-read the grid size and resize the rest.
@@ -1300,6 +1303,18 @@ fn centroid(corners: [[f32; 2]; 4]) -> [f32; 2] {
         (corners[0][0] + corners[1][0] + corners[2][0] + corners[3][0]) / 4.0,
         (corners[0][1] + corners[1][1] + corners[2][1] + corners[3][1]) / 4.0,
     ]
+}
+
+/// Record the physical cell pixel size in the terminal so a CSI 14 t query can
+/// report the text area in pixels.
+///
+/// Re-run whenever the font size or display scale factor changes, since the
+/// cell metrics move with both.
+fn update_cell_pixels(terminal: &FairMutex<Terminal>, font_size: u32, scale_factor: f32) {
+    let [width, height] = render::cell_size(font_size, scale_factor);
+    terminal
+        .lock()
+        .set_cell_pixels(width.round() as u16, height.round() as u16);
 }
 
 /// The font-size step a key press maps to, or `None` when it is not the

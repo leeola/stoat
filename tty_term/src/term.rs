@@ -14,7 +14,7 @@ use crate::{
     theme::Theme,
 };
 use alacritty_terminal::{
-    event::{Event, EventListener},
+    event::{Event, EventListener, WindowSize},
     grid::{Dimensions, Scroll},
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionRange, SelectionType},
@@ -164,6 +164,12 @@ pub struct Terminal {
     /// its own throwaway [`ResponseSink`] that is never drained, so a title or
     /// bell emitted by page-fill content is intentionally ignored.
     pending_events: Vec<TermEvent>,
+    /// Physical pixel size of one cell (width, height), fed in by the app so a
+    /// CSI 14 t query can report the text area in pixels.
+    ///
+    /// `(0, 0)` until the app calls [`Self::set_cell_pixels`]. A query is left
+    /// unanswered while unset, since a zero-size reply is worse than none.
+    cell_pixels: (u16, u16),
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
@@ -383,6 +389,7 @@ impl Terminal {
             fill: None,
             capture: None,
             pending_events: Vec::new(),
+            cell_pixels: (0, 0),
         }
     }
 
@@ -559,12 +566,21 @@ impl Terminal {
         mem::take(&mut self.pending_events)
     }
 
+    /// Record the physical pixel size of one cell so a CSI 14 t query can report
+    /// the text area in pixels.
+    ///
+    /// The app recomputes this whenever the font size or display scale factor
+    /// changes. Until it is called, a pixel-size query goes unanswered.
+    pub fn set_cell_pixels(&mut self, width: u16, height: u16) {
+        self.cell_pixels = (width, height);
+    }
+
     /// Project the listener's queued `alacritty_terminal` events into
     /// [`TermEvent`]s, appending them to [`Self::pending_events`].
     ///
-    /// A color query is answered in place by pushing the formatter's reply into
-    /// the response bytes. A text-area-size query is still queued but dropped
-    /// here until the pixel-size feature consumes it.
+    /// Title, reset-title, bell, and clipboard-store events become
+    /// [`TermEvent`]s. Color and text-area-size queries are answered in place
+    /// by pushing the formatter's reply into the response bytes.
     fn drain_listener_events(&mut self) {
         for event in self.responses.take_events() {
             match event {
@@ -577,6 +593,18 @@ impl Terminal {
                 Event::ColorRequest(index, formatter) => {
                     if let Some(rgb) = self.query_color(index) {
                         self.responses.push(formatter(rgb).as_bytes());
+                    }
+                },
+                Event::TextAreaSizeRequest(formatter) => {
+                    let (cell_width, cell_height) = self.cell_pixels;
+                    if cell_width > 0 && cell_height > 0 {
+                        let window_size = WindowSize {
+                            num_lines: self.term.screen_lines() as u16,
+                            num_cols: self.term.columns() as u16,
+                            cell_width,
+                            cell_height,
+                        };
+                        self.responses.push(formatter(window_size).as_bytes());
                     }
                 },
                 _ => {},
@@ -2268,6 +2296,25 @@ mod tests {
             terminal.take_responses(),
             b"\x1b]10;rgb:cccc/cccc/cccc\x07".to_vec(),
             "OSC 110 reset restores the theme foreground"
+        );
+    }
+
+    #[test]
+    fn answers_text_area_pixel_query() {
+        let mut terminal = Terminal::new(24, 80, Theme::default());
+
+        terminal.advance(b"\x1b[14t");
+        assert!(
+            terminal.take_responses().is_empty(),
+            "no reply until the cell pixel size is known"
+        );
+
+        terminal.set_cell_pixels(8, 16);
+        terminal.advance(b"\x1b[14t");
+        assert_eq!(
+            terminal.take_responses(),
+            b"\x1b[4;384;640t".to_vec(),
+            "CSI 14 t reports 24 lines * 16px by 80 cols * 8px"
         );
     }
 
