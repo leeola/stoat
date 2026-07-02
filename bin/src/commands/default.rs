@@ -1,12 +1,14 @@
 use clap::{ArgAction, Parser, Subcommand};
+use crossterm::event::{Event, KeyEvent};
 use snafu::{ResultExt, Whatever};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use stoat::{
     host::{LocalFs, LocalFsWatcher},
-    Axis, Settings, Stoat,
+    input_parse, Axis, Settings, Stoat,
 };
 use stoat_cli::CommonArgs;
-use stoat_scheduler::TokioScheduler;
+use stoat_scheduler::{Executor, TokioScheduler};
+use tokio::sync::mpsc::Sender;
 
 const VERSION_INFO: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -91,20 +93,8 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
         Some(Command::AgentApi { sub }) => crate::commands::agent_api::run(sub),
         Some(Command::Editor { file }) => crate::commands::editor::run(file),
-        Some(Command::Review) => run_tui(
-            text_proto_log,
-            common.files,
-            common.continue_,
-            common.resume,
-            TuiStart::Review,
-        ),
-        None => run_tui(
-            text_proto_log,
-            common.files,
-            common.continue_,
-            common.resume,
-            TuiStart::Files,
-        ),
+        Some(Command::Review) => run_tui(text_proto_log, common, TuiStart::Review),
+        None => run_tui(text_proto_log, common, TuiStart::Files),
     }
 }
 
@@ -115,11 +105,26 @@ enum TuiStart {
 
 fn run_tui(
     text_proto_log: Option<bool>,
-    files: Vec<PathBuf>,
-    continue_: bool,
-    resume: bool,
+    common: CommonArgs,
     start: TuiStart,
 ) -> Result<(), Whatever> {
+    let CommonArgs {
+        files,
+        continue_,
+        resume,
+        inputs,
+        timeout,
+    } = common;
+
+    // Parse `--inputs` before taking over the terminal, so a malformed
+    // sequence fails the invocation with a plain error instead of after a
+    // UI takeover that must then be unwound.
+    let inputs = inputs
+        .as_deref()
+        .map(input_parse::parse_input_sequence)
+        .transpose()
+        .with_whatever_context(|e| format!("parse --inputs sequence: {e}"))?;
+
     stoat::ui::install_panic_hook();
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
@@ -135,6 +140,10 @@ fn run_tui(
     let mouse_capture_policy = stoat::default_mouse_capture_policy();
     let mouse_captured =
         stoat::resolve_mouse_captured(mouse_capture_policy, &stoat::host::LocalEnv);
+
+    // Cloned only when a sequence will be driven. A lingering extra sender
+    // would hold the event channel open past a natural shutdown.
+    let driver_tx = inputs.is_some().then(|| event_tx.clone());
 
     let ui_handle = stoat::ui::spawn(event_tx, render_rx, apc_rx, mouse_captured);
 
@@ -213,6 +222,23 @@ fn run_tui(
             }
         }
 
+        if let (Some(keys), Some(tx)) = (inputs, driver_tx) {
+            executor
+                .spawn(drive_inputs(tx, keys, executor.clone()))
+                .detach();
+        }
+
+        if let Some(seconds) = timeout {
+            let shutdown = stoat.shutdown_handle();
+            let timer_exec = executor.clone();
+            executor
+                .spawn(async move {
+                    timer_exec.timer(Duration::from_secs_f64(seconds)).await;
+                    shutdown.notify_one();
+                })
+                .detach();
+        }
+
         stoat.run(event_rx, render_tx).await
     })
     .whatever_context("stoat event loop")?;
@@ -223,4 +249,65 @@ fn run_tui(
         .whatever_context("ui thread")?;
 
     Ok(())
+}
+
+/// Delay before the first driven key, so the workspace, UI thread, and
+/// render wiring are live before input arrives.
+const READINESS_DELAY: Duration = Duration::from_millis(300);
+
+/// Gap between driven keys, so each keystroke's effect settles before the
+/// next is sent.
+const INTER_KEY_DELAY: Duration = Duration::from_millis(20);
+
+/// Feed `keys` into the event channel as `Event::Key`s, paced like real
+/// typing.
+///
+/// A readiness delay comes first so the workspace and render wiring are
+/// live, then one key lands every [`INTER_KEY_DELAY`]. This is the
+/// `--inputs` self-driver, run on the shared executor so a scripted session
+/// exercises the same input path a human keyboard drives. Stops early if the
+/// receiver has gone away.
+async fn drive_inputs(tx: Sender<Event>, keys: Vec<KeyEvent>, executor: Executor) {
+    executor.timer(READINESS_DELAY).await;
+    for key in keys {
+        executor.timer(INTER_KEY_DELAY).await;
+        if tx.send(Event::Key(key)).await.is_err() {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stoat_scheduler::TestScheduler;
+
+    #[test]
+    fn drive_inputs_paces_parsed_keys_onto_the_channel() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+        let keys = input_parse::parse_input_sequence("if<Esc>").expect("parse");
+        let expected: Vec<Event> = keys.iter().cloned().map(Event::Key).collect();
+
+        executor
+            .spawn(drive_inputs(tx, keys, executor.clone()))
+            .detach();
+
+        scheduler.run_until_parked();
+        assert!(
+            rx.try_recv().is_err(),
+            "no key arrives before the readiness delay"
+        );
+
+        scheduler.advance_clock(READINESS_DELAY + INTER_KEY_DELAY * 4);
+        scheduler.run_until_parked();
+
+        let mut got = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            got.push(event);
+        }
+        assert_eq!(got, expected);
+    }
 }

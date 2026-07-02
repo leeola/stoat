@@ -26,6 +26,7 @@ stoat_scheduler = { path = "../scheduler" }
 viewport = { path = "../viewport" }
 blake3 = { workspace = true }
 clap.workspace = true
+crossterm.workspace = true
 snafu.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

@@ -207,6 +207,12 @@ pub struct Stoat {
     /// blocking pool). Multiple notifications collapse into one
     /// pending wake-up.
     pub(crate) redraw_notify: Arc<tokio::sync::Notify>,
+    /// Notified once to make [`Self::run`] quit at the next loop turn,
+    /// regardless of editor state. The `--timeout` self-driver uses it to
+    /// auto-close a scripted session after a fixed delay. A notification
+    /// fired before the loop first polls it is retained, so the quit is not
+    /// lost in a race with the timer.
+    pub(crate) shutdown_notify: Arc<tokio::sync::Notify>,
     /// In-flight working-tree review scan. The git2 diff runs on a
     /// blocking thread; [`pump_review_scan`](action_handlers::pump_review_scan)
     /// polls the ready [`ReviewSession`](crate::review_session::ReviewSession)
@@ -718,6 +724,7 @@ impl Stoat {
             index_update_rx,
             _index_build_task: None,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             pending_review_scan: None,
             modal_run: None,
             render_tick: 0,
@@ -927,6 +934,14 @@ impl Stoat {
         action_handlers::dispatch(self, &OpenReview);
     }
 
+    /// Handle that makes [`Self::run`] quit at its next loop turn when
+    /// notified via [`tokio::sync::Notify::notify_one`], regardless of the
+    /// editor's current mode or focus. The `--timeout` self-driver holds a
+    /// clone and fires it after the delay to auto-close the session.
+    pub fn shutdown_handle(&self) -> Arc<tokio::sync::Notify> {
+        self.shutdown_notify.clone()
+    }
+
     pub async fn run(
         &mut self,
         mut events: Receiver<Event>,
@@ -966,6 +981,7 @@ impl Stoat {
                     self.handle_agent_control(ctl)
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
+                _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
                 _ = frame_timer.tick(), if animating => {
                     let now = std::time::Instant::now();
                     let dt = last_tick
@@ -6022,6 +6038,57 @@ mod tests {
         let buf = ws.buffers.get(id).expect("buffer present");
         let guard = buf.read().expect("buffer lock");
         guard.rope().to_string()
+    }
+
+    #[test]
+    fn driven_input_sequence_types_text_into_the_buffer() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+
+        // The `--inputs` driver injects plain `Event::Key`s into the same
+        // channel real keystrokes use, so feed the parsed sequence through
+        // `update` directly rather than the double-firing keystroke helper.
+        for key in crate::input_parse::parse_input_sequence("ifoo<Esc>").expect("parse") {
+            h.stoat.update(Event::Key(key));
+        }
+
+        assert_eq!(buffer_text(&h, &path), "foo");
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn shutdown_notify_quits_the_run_loop() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut h = Stoat::test();
+            h.stoat.persistence_disabled = true;
+
+            // Pre-firing the notify stores a permit, so the shutdown arm
+            // fires on the loop's first poll. This mirrors a `--timeout`
+            // timer that elapses before the loop starts.
+            let shutdown = h.stoat.shutdown_handle();
+            shutdown.notify_one();
+
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+            let (render_tx, render_rx) = watch::channel(None);
+            // Hold the event sender and render receiver so a closed channel
+            // cannot end the loop. Only the shutdown notify can.
+            let _keep = (event_tx, render_rx);
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                h.stoat.run(event_rx, render_tx),
+            )
+            .await;
+
+            assert!(
+                matches!(result, Ok(Ok(()))),
+                "run must quit after shutdown notify, got {result:?}"
+            );
+        });
     }
 
     #[test]
