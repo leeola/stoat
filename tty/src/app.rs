@@ -1199,14 +1199,21 @@ fn copy_pool_region(
         pool_grid.resize(live_grid.rows(), live_grid.cols());
     }
 
-    for r in 0..document_grid.rows() {
-        for c in 0..document_grid.cols() {
-            let row = region.top as usize + r;
-            let col = region.left as usize + c;
-            if row < pool_grid.rows() && col < pool_grid.cols() {
-                *pool_grid.get_mut(row, col) = *document_grid.get(r, c);
-            }
-        }
+    let top = region.top as usize;
+    let left = region.left as usize;
+    let cols = document_grid
+        .cols()
+        .min(pool_grid.cols().saturating_sub(left));
+    let rows = document_grid
+        .rows()
+        .min(pool_grid.rows().saturating_sub(top));
+    if cols == 0 {
+        return;
+    }
+
+    for r in 0..rows {
+        pool_grid.row_mut(top + r)[left..left + cols]
+            .copy_from_slice(&document_grid.row(r)[..cols]);
     }
 }
 
@@ -1710,6 +1717,76 @@ mod tests {
             's',
             "the surround is left untouched, not blanked"
         );
+    }
+
+    #[test]
+    fn copy_pool_region_clips_past_the_viewport() {
+        let document = {
+            let mut g = Grid::new(5, 4);
+            for r in 0..g.rows() {
+                for c in 0..g.cols() {
+                    g.get_mut(r, c).ch = 'd';
+                }
+            }
+            g
+        };
+        let live = Grid::new(5, 5);
+        let sentinel = || {
+            let mut g = Grid::new(5, 5);
+            for r in 0..g.rows() {
+                for c in 0..g.cols() {
+                    g.get_mut(r, c).ch = 's';
+                }
+            }
+            g
+        };
+
+        let mut pool = sentinel();
+        copy_pool_region(
+            &mut pool,
+            &document,
+            &live,
+            PoolRegionCommand {
+                pool: 0,
+                top: 3,
+                left: 3,
+                width: 4,
+                height: 4,
+            },
+        );
+        for r in 0..5 {
+            for c in 0..5 {
+                let want = if (3..5).contains(&r) && (3..5).contains(&c) {
+                    'd'
+                } else {
+                    's'
+                };
+                assert_eq!(pool.get(r, c).ch, want, "clipped copy cell ({r}, {c})");
+            }
+        }
+
+        let mut past = sentinel();
+        copy_pool_region(
+            &mut past,
+            &document,
+            &live,
+            PoolRegionCommand {
+                pool: 0,
+                top: 9,
+                left: 9,
+                width: 4,
+                height: 4,
+            },
+        );
+        for r in 0..5 {
+            for c in 0..5 {
+                assert_eq!(
+                    past.get(r, c).ch,
+                    's',
+                    "region past the viewport no-op ({r}, {c})"
+                );
+            }
+        }
     }
 
     #[test]
