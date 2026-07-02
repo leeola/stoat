@@ -762,7 +762,7 @@ impl TextPass {
 
             let mut pending = Vec::new();
             for row in 0..grid.rows() {
-                pending.extend(self.rasterize_row(device, queue, grid, row, &shaping));
+                self.rasterize_row(device, queue, grid, row, &shaping, &mut pending);
             }
             pending
         };
@@ -1188,7 +1188,9 @@ impl TextPass {
                 || decoration_damage.is_dirty(row)
                 || cursor_touched
             {
-                let row_glyphs = self.rasterize_row(device, queue, grid, row, &shaping);
+                let mut row_glyphs = mem::take(&mut self.glyph_row_cache[row]);
+                row_glyphs.clear();
+                self.rasterize_row(device, queue, grid, row, &shaping, &mut row_glyphs);
                 self.glyph_row_cache[row] = row_glyphs;
                 rebuilt.push(row);
             }
@@ -1299,8 +1301,8 @@ impl TextPass {
         grid: &Grid,
         row: usize,
         shaping: &RowShaping<'_>,
-    ) -> Vec<PendingGlyph> {
-        let mut pending = Vec::new();
+        pending: &mut Vec<PendingGlyph>,
+    ) {
         let mut col = 0;
         while col < grid.cols() {
             let cell = *grid.get(row, col);
@@ -1381,8 +1383,6 @@ impl TextPass {
             }
             col = end;
         }
-
-        pending
     }
 
     /// Shape and rasterize one cell's glyph on its own, returning its placement.
