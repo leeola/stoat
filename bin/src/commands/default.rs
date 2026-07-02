@@ -156,6 +156,8 @@ fn run_tui(
         theme: None,
         mouse_capture: None,
         scrolloff: None,
+        terminal_shell: None,
+        terminal_args: None,
         mode_badges: std::collections::BTreeMap::new(),
     };
 

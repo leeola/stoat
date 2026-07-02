@@ -35,6 +35,13 @@ pub struct Settings {
     /// edge when following it. `None` falls back to 3. Set via
     /// `editor.scrolloff = N;` in stcfg.
     pub scrolloff: Option<u32>,
+    /// Program a terminal pane spawns as its subshell. `None` lets the spawn
+    /// site fall back to `$SHELL`, then `/bin/sh`. Set via
+    /// `terminal.shell = "/bin/zsh";` in stcfg.
+    pub terminal_shell: Option<String>,
+    /// Arguments passed to the terminal pane's subshell. `None` spawns with no
+    /// arguments. Set via `terminal.args = ["-l"];` in stcfg.
+    pub terminal_args: Option<Vec<String>>,
     /// Per-mode status-line badge label overrides, keyed by mode name.
     /// Set via `ui.mode_badge.<name> = "ABC";` in stcfg. Renderer
     /// consults this map before falling back to its hardcoded badge
@@ -72,6 +79,8 @@ impl Settings {
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             scrolloff: other.scrolloff.or(self.scrolloff),
+            terminal_shell: other.terminal_shell.or(self.terminal_shell),
+            terminal_args: other.terminal_args.or(self.terminal_args),
             mode_badges,
         }
     }
@@ -114,6 +123,24 @@ impl Settings {
                     self.scrolloff = Some(n as u32);
                 }
             },
+            ["terminal", "shell"] => {
+                if let Value::Ident(s) | Value::String(s) = &setting.value.node {
+                    self.terminal_shell = Some(s.clone());
+                }
+            },
+            ["terminal", "args"] => {
+                if let Value::Array(items) = &setting.value.node {
+                    self.terminal_args = Some(
+                        items
+                            .iter()
+                            .filter_map(|item| match &item.node {
+                                Value::String(s) | Value::Ident(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                    );
+                }
+            },
             _ => {},
         }
     }
@@ -140,6 +167,8 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                terminal_shell: None,
+                terminal_args: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -155,6 +184,8 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                terminal_shell: None,
+                terminal_args: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -170,6 +201,8 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                terminal_shell: None,
+                terminal_args: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -194,6 +227,8 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            terminal_shell: None,
+            terminal_args: None,
             mode_badges: BTreeMap::new(),
         };
         let right = Settings {
@@ -201,6 +236,8 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            terminal_shell: None,
+            terminal_args: None,
             mode_badges: BTreeMap::new(),
         };
         assert_eq!(
@@ -210,6 +247,8 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                terminal_shell: None,
+                terminal_args: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -222,6 +261,8 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            terminal_shell: None,
+            terminal_args: None,
             mode_badges: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -232,6 +273,8 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                terminal_shell: None,
+                terminal_args: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -255,6 +298,8 @@ mod tests {
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
+                terminal_shell: None,
+                terminal_args: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -270,6 +315,8 @@ mod tests {
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
+                terminal_shell: None,
+                terminal_args: None,
                 mode_badges: BTreeMap::new(),
             }
         );
@@ -282,6 +329,8 @@ mod tests {
             theme: Some("a".into()),
             mouse_capture: None,
             scrolloff: None,
+            terminal_shell: None,
+            terminal_args: None,
             mode_badges: BTreeMap::new(),
         };
         let right = Settings {
@@ -289,6 +338,8 @@ mod tests {
             theme: Some("b".into()),
             mouse_capture: None,
             scrolloff: None,
+            terminal_shell: None,
+            terminal_args: None,
             mode_badges: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
@@ -411,5 +462,49 @@ mod tests {
                 ("shared".to_string(), "R".to_string()),
             ])
         );
+    }
+
+    #[test]
+    fn from_config_extracts_terminal_shell() {
+        let config = parse_ok(r#"on init { terminal.shell = "/bin/zsh"; }"#);
+        assert_eq!(
+            Settings::from_config(&config).terminal_shell,
+            Some("/bin/zsh".to_string())
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_terminal_args() {
+        let config = parse_ok(r#"on init { terminal.args = ["-l", "-c"]; }"#);
+        assert_eq!(
+            Settings::from_config(&config).terminal_args,
+            Some(vec!["-l".to_string(), "-c".to_string()])
+        );
+    }
+
+    #[test]
+    fn from_config_terminal_args_skips_non_string_elements() {
+        let config = parse_ok(r#"on init { terminal.args = ["-l", 3, "-c"]; }"#);
+        assert_eq!(
+            Settings::from_config(&config).terminal_args,
+            Some(vec!["-l".to_string(), "-c".to_string()])
+        );
+    }
+
+    #[test]
+    fn merge_right_overrides_terminal_shell_and_args() {
+        let left = Settings {
+            terminal_shell: Some("/bin/bash".to_string()),
+            terminal_args: Some(vec!["-i".to_string()]),
+            ..Settings::default()
+        };
+        let right = Settings {
+            terminal_shell: Some("/bin/zsh".to_string()),
+            terminal_args: Some(vec!["-l".to_string()]),
+            ..Settings::default()
+        };
+        let merged = left.merge(right);
+        assert_eq!(merged.terminal_shell, Some("/bin/zsh".to_string()));
+        assert_eq!(merged.terminal_args, Some(vec!["-l".to_string()]));
     }
 }
