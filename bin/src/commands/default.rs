@@ -161,6 +161,7 @@ fn run_tui(
         scrolloff: None,
         terminal_shell: None,
         terminal_args: None,
+        review_follow: None,
         mode_badges: std::collections::BTreeMap::new(),
     };
 
