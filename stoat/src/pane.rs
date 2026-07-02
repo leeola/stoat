@@ -6,8 +6,12 @@ use slotmap::{new_key_type, SlotMap};
 new_key_type! {
     pub struct PaneId;
     pub struct DockId;
-    struct NodeId;
+    pub(crate) struct NodeId;
 }
+
+/// Minimum cells a pane keeps on either side of a divider being dragged, so a
+/// resize can never collapse a neighbor to nothing.
+const MIN_PANE_EXTENT: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
@@ -127,6 +131,12 @@ pub struct Pane {
 struct Split {
     axis: Axis,
     children: Vec<NodeId>,
+    /// Per-child fractions of the split's usable extent, one entry per child.
+    /// Empty (the default) means divide evenly. A membership change clears it
+    /// back to even. Rides serde so a resized layout survives restart. Old
+    /// sessions without the field deserialize to empty.
+    #[serde(default)]
+    weights: Vec<f32>,
     #[serde(skip)]
     area: Rect,
 }
@@ -255,6 +265,7 @@ impl PaneTree {
 
             if let NodeContent::Split(split) = &mut self.nodes[parent_id].content {
                 split.children.insert(pos, new_leaf);
+                split.weights.clear();
             }
             self.nodes[new_leaf].parent = parent_id;
         } else {
@@ -263,6 +274,7 @@ impl PaneTree {
                 content: NodeContent::Split(Split {
                     axis,
                     children: vec![focused_node, new_leaf],
+                    weights: Vec::new(),
                     area: Rect::default(),
                 }),
             });
@@ -313,6 +325,7 @@ impl PaneTree {
 
         if let NodeContent::Split(split) = &mut self.nodes[parent_id].content {
             split.children.retain(|&c| c != node_id);
+            split.weights.clear();
 
             if split.children.len() == 1 && parent_id != self.root {
                 let remaining = split.children[0];
@@ -442,6 +455,89 @@ impl PaneTree {
         }
     }
 
+    /// The split node and gap index whose divider segment covers cell
+    /// `(col, row)`, or `None` when the point is not on a divider.
+    ///
+    /// The gap index is the position between two adjacent children, so it pairs
+    /// with [`Self::set_divider`]. Mirrors the segment geometry [`Self::dividers`]
+    /// paints.
+    pub(crate) fn divider_at(&self, col: u16, row: u16) -> Option<(NodeId, usize)> {
+        let mut stack = vec![self.root];
+        while let Some(nid) = stack.pop() {
+            let NodeContent::Split(split) = &self.nodes[nid].content else {
+                continue;
+            };
+            stack.extend(split.children.iter().copied());
+            for (gap, pair) in split.children.windows(2).enumerate() {
+                let left = self.node_area(pair[0]);
+                let hit = match split.axis {
+                    Axis::Vertical => {
+                        col == left.x + left.width
+                            && (split.area.y..split.area.y + split.area.height).contains(&row)
+                    },
+                    Axis::Horizontal => {
+                        row == left.y + left.height
+                            && (split.area.x..split.area.x + split.area.width).contains(&col)
+                    },
+                };
+                if hit {
+                    return Some((nid, gap));
+                }
+            }
+        }
+        None
+    }
+
+    /// Move the divider at `gap` in split `node` to screen position `(col, row)`,
+    /// resizing the two children it separates.
+    ///
+    /// A vertical split reads `col`, a horizontal one `row`. The two flanking
+    /// children each keep at least [`MIN_PANE_EXTENT`] cells and the rest of the
+    /// split is untouched. A no-op when `node` is not a split, `gap` names no
+    /// divider, or the pair is already too small to divide.
+    pub(crate) fn set_divider(&mut self, node: NodeId, gap: usize, col: u16, row: u16) {
+        let (axis, children) = match &self.nodes[node].content {
+            NodeContent::Split(split) => (split.axis, split.children.clone()),
+            NodeContent::Leaf(_) => return,
+        };
+        if gap + 1 >= children.len() {
+            return;
+        }
+
+        let extents: Vec<u16> = children
+            .iter()
+            .map(|&c| {
+                let r = self.node_area(c);
+                match axis {
+                    Axis::Vertical => r.width,
+                    Axis::Horizontal => r.height,
+                }
+            })
+            .collect();
+        let (origin, target) = match axis {
+            Axis::Vertical => (self.node_area(children[gap]).x, col),
+            Axis::Horizontal => (self.node_area(children[gap]).y, row),
+        };
+
+        let combined = extents[gap] + extents[gap + 1];
+        if combined < 2 * MIN_PANE_EXTENT {
+            return;
+        }
+
+        let new_lead = target
+            .saturating_sub(origin)
+            .clamp(MIN_PANE_EXTENT, combined - MIN_PANE_EXTENT);
+
+        let mut weights: Vec<f32> = extents.iter().map(|&e| f32::from(e)).collect();
+        weights[gap] = f32::from(new_lead);
+        weights[gap + 1] = f32::from(combined - new_lead);
+
+        if let NodeContent::Split(split) = &mut self.nodes[node].content {
+            split.weights = weights;
+        }
+        self.recalculate();
+    }
+
     fn split_pane_count(&self) -> usize {
         self.panes
             .values()
@@ -505,15 +601,10 @@ impl PaneTree {
                             let gap = 1u16;
                             let total_gap = gap.saturating_mul(len.saturating_sub(1) as u16);
                             let usable = area.height.saturating_sub(total_gap);
-                            let per_child = usable / len as u16;
+                            let extents = child_extents(&split.weights, len, usable);
                             let mut y = area.y;
 
-                            for (i, &child_id) in split.children.iter().enumerate() {
-                                let h = if i == len - 1 {
-                                    area.y + area.height - y
-                                } else {
-                                    per_child
-                                };
+                            for (&child_id, h) in split.children.iter().zip(extents) {
                                 self.stack
                                     .push((child_id, Rect::new(area.x, y, area.width, h)));
                                 y += h + gap;
@@ -523,15 +614,10 @@ impl PaneTree {
                             let gap = 1u16;
                             let total_gap = gap.saturating_mul(len.saturating_sub(1) as u16);
                             let usable = area.width.saturating_sub(total_gap);
-                            let per_child = usable / len as u16;
+                            let extents = child_extents(&split.weights, len, usable);
                             let mut x = area.x;
 
-                            for (i, &child_id) in split.children.iter().enumerate() {
-                                let w = if i == len - 1 {
-                                    area.x + area.width - x
-                                } else {
-                                    per_child
-                                };
+                            for (&child_id, w) in split.children.iter().zip(extents) {
                                 self.stack
                                     .push((child_id, Rect::new(x, area.y, w, area.height)));
                                 x += w + gap;
@@ -620,6 +706,42 @@ impl PaneTree {
             NodeContent::Split(s) => s.area.y,
         }
     }
+}
+
+/// Per-child extents (summing to `usable`) for a split of `len` children.
+///
+/// Uses `weights` as fractions when it has one finite, positive entry per
+/// child. Otherwise divides evenly. The last child absorbs any rounding
+/// remainder so the extents always sum to `usable` exactly.
+fn child_extents(weights: &[f32], len: usize, usable: u16) -> Vec<u16> {
+    if len == 0 {
+        return Vec::new();
+    }
+
+    let weighted = weights.len() == len && weights.iter().all(|w| w.is_finite() && *w > 0.0);
+    if !weighted {
+        let per = usable / len as u16;
+        let mut extents = vec![per; len];
+        extents[len - 1] = usable.saturating_sub(per.saturating_mul(len as u16 - 1));
+        return extents;
+    }
+
+    let sum: f32 = weights.iter().sum();
+    let mut extents = Vec::with_capacity(len);
+    let mut placed = 0u16;
+    let mut cumulative = 0.0f32;
+    for (i, &w) in weights.iter().enumerate() {
+        if i == len - 1 {
+            extents.push(usable.saturating_sub(placed));
+        } else {
+            cumulative += w;
+            let boundary = ((cumulative / sum) * f32::from(usable)).round() as u16;
+            let extent = boundary.saturating_sub(placed);
+            extents.push(extent);
+            placed += extent;
+        }
+    }
+    extents
 }
 
 pub struct Traverse<'a> {
@@ -974,5 +1096,75 @@ mod tests {
         h.type_action("SplitRight()");
         h.type_action("FocusLeft()");
         h.assert_snapshot("split_right_focus_left");
+    }
+
+    #[test]
+    fn set_divider_moves_the_boundary() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 101, 40));
+        let left = tree.focus();
+        let right = tree.split(Axis::Vertical);
+        assert_eq!(tree.pane(left).area.width, 50);
+        assert_eq!(tree.pane(right).area.width, 50);
+
+        tree.set_divider(tree.root, 0, 30, 0);
+        assert_eq!(
+            tree.pane(left).area.width,
+            30,
+            "left shrinks to the new column"
+        );
+        assert_eq!(tree.pane(right).area.width, 70, "right absorbs the rest");
+        assert_eq!(
+            tree.pane(right).area.x,
+            31,
+            "right starts after the divider gap"
+        );
+    }
+
+    #[test]
+    fn weighted_layout_scales_on_resize() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 101, 40));
+        let left = tree.focus();
+        let right = tree.split(Axis::Vertical);
+        tree.set_divider(tree.root, 0, 30, 0);
+
+        tree.resize(Rect::new(0, 0, 201, 40));
+        assert_eq!(tree.pane(left).area.width, 60, "left keeps its ~30% share");
+        assert_eq!(
+            tree.pane(right).area.width,
+            140,
+            "right keeps its ~70% share"
+        );
+    }
+
+    #[test]
+    fn set_divider_clamps_to_min_pane_extent() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 101, 40));
+        let left = tree.focus();
+        let right = tree.split(Axis::Vertical);
+        tree.set_divider(tree.root, 0, 0, 0);
+
+        assert_eq!(tree.pane(left).area.width, 2, "left clamps to the minimum");
+        assert_eq!(
+            tree.pane(right).area.width,
+            98,
+            "right keeps the remaining space"
+        );
+    }
+
+    #[test]
+    fn membership_change_resets_weights_to_even() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 101, 40));
+        let left = tree.focus();
+        let right = tree.split(Axis::Vertical);
+        tree.set_divider(tree.root, 0, 30, 0);
+        assert_eq!(tree.pane(left).area.width, 30);
+
+        tree.set_focus(right);
+        tree.split(Axis::Vertical);
+        assert_eq!(
+            tree.pane(left).area.width,
+            33,
+            "weights reset to even when a child is added"
+        );
     }
 }

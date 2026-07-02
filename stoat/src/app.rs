@@ -16,7 +16,7 @@ use crate::{
     },
     keymap::{Keymap, ResolvedAction},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
-    pane::{FocusTarget, Placement, View},
+    pane::{FocusTarget, NodeId, Placement, View},
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
     rebase::RebasePause,
     register,
@@ -332,6 +332,10 @@ pub struct Stoat {
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
     pub(crate) editor_drag: Option<(EditorId, BufferId)>,
+    /// Set on `MouseEventKind::Down(Left)` over a split divider. While `Some`,
+    /// `Drag(Left)` moves that boundary via `set_divider` and `Up(Left)` clears
+    /// it. Takes over the pointer so pane handlers never see the drag.
+    pub(crate) divider_drag: Option<(NodeId, usize)>,
     /// Buffers for which `LspHost::did_open` has been dispatched.
     /// Dedupes re-opens of the same path: [`crate::buffer_registry::BufferRegistry::open`]
     /// returns the existing entry on second open, but the LSP
@@ -739,6 +743,7 @@ impl Stoat {
             selected_register: None,
             pending_insert_register: false,
             editor_drag: None,
+            divider_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
@@ -1671,7 +1676,35 @@ impl Stoat {
         ) {
             return self.handle_mouse_scroll(mouse);
         }
+        // A divider drag owns the pointer once armed. It resizes on drag,
+        // releases on up, and swallows the rest so pane handlers never see it.
+        if self.divider_drag.is_some() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let Some((node, gap)) = self.divider_drag {
+                        self.active_workspace_mut().panes.set_divider(
+                            node,
+                            gap,
+                            mouse.column,
+                            mouse.row,
+                        );
+                    }
+                },
+                MouseEventKind::Up(MouseButton::Left) => self.divider_drag = None,
+                _ => {},
+            }
+            return UpdateEffect::Redraw;
+        }
+
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if let Some(hit) = self
+                .active_workspace()
+                .panes
+                .divider_at(mouse.column, mouse.row)
+            {
+                self.divider_drag = Some(hit);
+                return UpdateEffect::Redraw;
+            }
             self.focus_at(mouse.column, mouse.row);
         }
         let Some((col, row)) = self.translate_mouse_to_focused(mouse.column, mouse.row) else {
@@ -5692,6 +5725,58 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    #[test]
+    fn divider_drag_resizes_the_split() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let left = ws.panes.focus();
+        let right = ws.panes.split(crate::pane::Axis::Vertical);
+        ws.panes.resize(Rect::new(0, 0, 101, 24));
+
+        let la = h.stoat.active_workspace().panes.pane(left).area;
+        let divider_col = la.x + la.width;
+        let left_w0 = la.width;
+        let focus0 = h.stoat.active_workspace().panes.focus();
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            divider_col,
+            5,
+        ));
+        assert!(
+            h.stoat.divider_drag.is_some(),
+            "clicking a divider arms a drag"
+        );
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            focus0,
+            "a divider click does not move focus"
+        );
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            divider_col + 2,
+            5,
+        ));
+        assert_eq!(
+            h.stoat.active_workspace().panes.pane(left).area.width,
+            left_w0 + 2,
+            "dragging the divider right widens the left pane"
+        );
+        assert_eq!(
+            h.stoat.active_workspace().panes.pane(right).area.width,
+            98 - left_w0,
+            "the right pane shrinks by the same delta"
+        );
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            divider_col + 2,
+            5,
+        ));
+        assert!(h.stoat.divider_drag.is_none(), "releasing clears the drag");
     }
 
     #[test]
