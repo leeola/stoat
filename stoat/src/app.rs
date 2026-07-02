@@ -3138,7 +3138,10 @@ impl Stoat {
                 let Some(agent) = ws.terms.get_mut(agent_id) else {
                     return UpdateEffect::None;
                 };
-                agent.term.feed(&data);
+                let replies = agent.term.feed(&data);
+                if !replies.is_empty() {
+                    self.write_to_term(agent_id, &replies);
+                }
                 UpdateEffect::Redraw
             },
             PtyNotification::TermExited { term_id } => {
@@ -4498,6 +4501,32 @@ mod tests {
         let term = &stoat.active_workspace().terms[agent_id].term;
         let row: String = term.row(0).iter().map(|cell| cell.ch).collect();
         assert!(row.starts_with("hello"), "row: {row:?}");
+    }
+
+    #[test]
+    fn term_query_reply_writes_back_to_pty() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
+
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
+        let agent_id =
+            stoat
+                .active_workspace_mut()
+                .terms
+                .insert(crate::term_session::TermSession {
+                    term: crate::term_screen::TermScreen::new(24, 80),
+                    session,
+                });
+
+        // A DSR cursor-position query in the PTY output must be answered back
+        // to the PTY. A fresh screen reports the cursor at row 1, column 1.
+        stoat.handle_pty_notification(PtyNotification::TermOutput {
+            agent_id,
+            data: b"\x1b[6n".to_vec(),
+        });
+
+        assert_eq!(fake.sent_bytes(), vec![b"\x1b[1;1R".to_vec()]);
     }
 
     #[test]

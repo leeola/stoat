@@ -6,6 +6,7 @@
 //! [`View::Agent`](crate::pane::View::Agent) names one by its [`TermId`].
 
 use crate::{host::terminal::TerminalSession, term_screen::TermScreen};
+use futures::FutureExt;
 use slotmap::new_key_type;
 use std::sync::Arc;
 
@@ -38,9 +39,12 @@ impl TermSession {
             return;
         }
 
-        self.term.resize(rows, cols);
+        let replies = self.term.resize(rows, cols);
         if let Err(err) = self.session.resize(rows, cols) {
             tracing::warn!(target: "stoat::agent", %err, "failed to resize agent pty");
+        }
+        if !replies.is_empty() {
+            let _ = self.session.write(&replies).now_or_never();
         }
     }
 }

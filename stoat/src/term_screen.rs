@@ -13,7 +13,7 @@
 //! [`TermScreen::rows`], [`TermScreen::row`], and [`TermScreen::cursor`].
 
 use alacritty_terminal::{
-    event::VoidListener,
+    event::{Event, EventListener},
     grid::Dimensions,
     index::{Column, Line},
     term::{
@@ -24,6 +24,7 @@ use alacritty_terminal::{
     Term,
 };
 use ratatui::style::{Color, Modifier};
+use std::sync::{Arc, Mutex};
 
 /// One projected grid cell, carrying a character and the ratatui style the
 /// renderer paints it with.
@@ -57,18 +58,43 @@ pub struct CursorPos {
     pub col: usize,
 }
 
+/// Collects the terminal's replies to host queries into a shared buffer.
+///
+/// `alacritty_terminal` reports replies (device attributes, cursor-position
+/// reports) by handing the owning [`Term`] an [`EventListener`] and calling
+/// [`Event::PtyWrite`]. This proxy appends those payloads to a buffer the
+/// owning [`TermScreen`] drains and hands back to the caller. A [`Mutex`] (not
+/// `RefCell`) keeps the proxy `Send`, since a [`TermSession`](crate::term_session::TermSession)
+/// crosses threads. Non-`PtyWrite` events (title, bell, clipboard) are ignored.
+#[derive(Clone)]
+struct EventProxy {
+    replies: Arc<Mutex<Vec<u8>>>,
+}
+
+impl EventListener for EventProxy {
+    fn send_event(&self, event: Event) {
+        if let Event::PtyWrite(text) = event {
+            self.replies
+                .lock()
+                .expect("term reply buffer poisoned")
+                .extend_from_slice(text.as_bytes());
+        }
+    }
+}
+
 /// A live terminal screen driven by a VT byte stream.
 ///
 /// Owns the parsed screen (an `alacritty_terminal::Term`) and the vte parser
 /// that feeds it. The viewport is fixed to the size passed to [`Self::new`];
 /// the program redraws within it rather than the screen growing.
 ///
-/// The terminal's replies to host queries are discarded: a read-only emulator
-/// has nowhere to send them, so it uses a [`VoidListener`]. Wiring the replies
-/// back to the PTY for an interactive session is a separate concern.
+/// Replies to host queries (device attributes, DSR/CPR) are captured and
+/// returned by [`Self::feed`] and [`Self::resize`] so the caller can write them
+/// back to the PTY. TermScreen itself performs no IO.
 pub struct TermScreen {
-    term: Term<VoidListener>,
+    term: Term<EventProxy>,
     parser: Processor,
+    replies: Arc<Mutex<Vec<u8>>>,
 }
 
 impl TermScreen {
@@ -82,19 +108,31 @@ impl TermScreen {
             cols: (cols as usize).max(1),
         };
 
+        let replies = Arc::new(Mutex::new(Vec::new()));
+        let listener = EventProxy {
+            replies: replies.clone(),
+        };
+
         TermScreen {
-            term: Term::new(Config::default(), &dimensions, VoidListener),
+            term: Term::new(Config::default(), &dimensions, listener),
             parser: Processor::new(),
+            replies,
         }
     }
 
-    /// Feed `bytes` of the VT stream into the parser, mutating the screen.
+    /// Feed `bytes` of the VT stream into the parser, mutating the screen, and
+    /// return any reply the terminal produced for host queries.
     ///
     /// Bytes need not be escape-sequence aligned. The parser retains a partial
     /// sequence across calls, so a sequence split over two PTY reads finishes
     /// parsing on the second.
-    pub fn feed(&mut self, bytes: &[u8]) {
+    ///
+    /// The returned bytes (e.g. a cursor-position report answering DSR) must be
+    /// written back to the PTY for interactive programs to behave. The vec is
+    /// empty when the input produced no reply.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.term, bytes);
+        self.drain_replies()
     }
 
     /// Resize the viewport to `rows` by `cols`, reflowing the screen onto the
@@ -104,13 +142,23 @@ impl TermScreen {
     /// hosting pane calls this as its area changes so the program redraws within
     /// the live size. Pair it with a PTY resize so the child process learns the
     /// size too.
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    ///
+    /// Returns any reply the resize produced, on the same contract as
+    /// [`Self::feed`]. In practice a resize emits none.
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Vec<u8> {
         let dimensions = GridSize {
             rows: (rows as usize).max(1),
             cols: (cols as usize).max(1),
         };
 
         self.term.resize(dimensions);
+        self.drain_replies()
+    }
+
+    /// Take the reply bytes accumulated by the [`EventProxy`] since the last
+    /// drain, leaving the buffer empty.
+    fn drain_replies(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.replies.lock().expect("term reply buffer poisoned"))
     }
 
     /// The viewport height in rows.
@@ -360,5 +408,24 @@ mod tests {
         assert_eq!(text_row(&term, 0), "alt");
         term.feed(b"\x1b[?1049l");
         assert_eq!(text_row(&term, 0), "main");
+    }
+
+    #[test]
+    fn dsr_cursor_position_query_replies() {
+        let mut term = TermScreen::new(24, 80);
+        let replies = term.feed(b"\x1b[3;5H\x1b[6n");
+        assert_eq!(replies, b"\x1b[3;5R".to_vec());
+    }
+
+    #[test]
+    fn da1_query_replies_with_device_attributes() {
+        let mut term = TermScreen::new(24, 80);
+        assert_eq!(term.feed(b"\x1b[c"), b"\x1b[?6c".to_vec());
+    }
+
+    #[test]
+    fn plain_output_produces_no_reply() {
+        let mut term = TermScreen::new(24, 80);
+        assert!(term.feed(b"hello").is_empty());
     }
 }
