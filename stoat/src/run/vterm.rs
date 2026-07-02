@@ -83,6 +83,26 @@ impl VtermGrid {
         self.cells.len()
     }
 
+    /// Row count with a single trailing all-default row dropped.
+    ///
+    /// A command whose output ends in a newline leaves the cursor on a fresh
+    /// blank row. Skipping it lets the run pane render output flush like a
+    /// terminal instead of with a trailing gap. Both the renderer and
+    /// [`crate::run::RunState::active_block_grid_pos`] size the block by this
+    /// so the drawn rows and the mouse-hit rows stay in lockstep.
+    pub fn rendered_line_count(&self) -> usize {
+        match self.cells.len().checked_sub(1) {
+            Some(last) if self.row_is_blank(last) => last,
+            _ => self.cells.len(),
+        }
+    }
+
+    fn row_is_blank(&self, idx: usize) -> bool {
+        self.cells[idx]
+            .iter()
+            .all(|c| c.ch == ' ' && c.fg.is_none() && c.bg.is_none() && c.modifiers.is_empty())
+    }
+
     pub fn row(&self, idx: usize) -> &[StyledCell] {
         &self.cells[idx]
     }
@@ -534,6 +554,9 @@ impl GridSelection {
 
 pub struct OutputBlock {
     pub command: String,
+    /// The shell's working directory when this command was submitted,
+    /// rendered as the block's prompt-line cwd.
+    pub cwd: PathBuf,
     pub grid: VtermGrid,
     pub finished: bool,
     pub exit_status: Option<i32>,
@@ -545,9 +568,10 @@ pub struct OutputBlock {
 }
 
 impl OutputBlock {
-    pub fn new(command: String, width: u16) -> Self {
+    pub fn new(command: String, cwd: PathBuf, width: u16) -> Self {
         Self {
             command,
+            cwd,
             grid: VtermGrid::new(width),
             finished: false,
             exit_status: None,

@@ -5985,6 +5985,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snapshot_run_pane_prompt_blocks() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        let run_id = h.open_run();
+        // A non-home cwd keeps abbreviate_path deterministic across hosts.
+        h.stoat
+            .active_workspace_mut()
+            .runs
+            .get_mut(run_id)
+            .expect("run state")
+            .cwd = std::path::PathBuf::from("/work/proj");
+
+        h.submit_run("true");
+        h.inject_run_output(run_id, b"ok\n");
+        h.inject_run_done(run_id, 0);
+
+        h.submit_run("false");
+        h.inject_run_output(run_id, b"boom\n");
+        h.inject_run_done(run_id, 5);
+
+        // The unfinished follow-up leaves both its prompt and the input row
+        // showing the previous nonzero exit as a red [5].
+        h.submit_run("retry");
+
+        h.assert_snapshot("run_pane_prompt_blocks");
+    }
+
     fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8]) -> RunId {
         let run_id = h.open_run();
         let pane_id = h.stoat.active_workspace().panes.focus();
@@ -6081,7 +6108,9 @@ mod tests {
     #[test]
     fn mouse_drag_updates_run_pane_selection_head() {
         let mut h = Stoat::test();
-        let run_id = open_run_with_output(&mut h, b"hello\n");
+        // Two real output rows so the row-1 drag target lands inside the grid
+        // (the trailing blank row after the final newline is not rendered).
+        let run_id = open_run_with_output(&mut h, b"hello\nworld\n");
         h.stoat
             .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
         h.stoat

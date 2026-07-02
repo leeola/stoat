@@ -64,13 +64,16 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     input_ref.replace_text(ws, "");
 
     let pane_area = ws.panes.pane(focused).area;
-    let width = pane_area.width.saturating_sub(2).max(20);
+    // Output no longer sits under a "$ " indent, so the grid fills the pane.
+    let width = pane_area.width.max(20);
 
     let run_state = match ws.runs.get_mut(id) {
         Some(s) => s,
         None => return UpdateEffect::None,
     };
-    run_state.blocks.push(OutputBlock::new(text.clone(), width));
+    run_state
+        .blocks
+        .push(OutputBlock::new(text.clone(), run_state.cwd.clone(), width));
 
     if let Some(handle) = &mut run_state.shell_handle {
         handle.send_command(&text);
@@ -183,7 +186,7 @@ pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
     state.title = Some(command.to_owned());
     state
         .blocks
-        .push(OutputBlock::new(command.to_owned(), width));
+        .push(OutputBlock::new(command.to_owned(), cwd.clone(), width));
     let id = ws.runs.insert(state);
 
     match crate::run::spawn_oneshot(&stoat.executor, command, &cwd, width, pty_tx, id) {

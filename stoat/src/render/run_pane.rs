@@ -8,6 +8,7 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders, Clear, Widget},
 };
+use std::path::{Path, PathBuf};
 
 pub(crate) fn render_run_pane(
     run_state: &RunState,
@@ -23,11 +24,19 @@ pub(crate) fn render_run_pane(
 
     let input_row = area.y + area.height - 1;
     let output_height = area.height.saturating_sub(1);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
 
     let mut output_lines: Vec<OutputLine<'_>> = Vec::new();
-    for block in &run_state.blocks {
-        output_lines.push(OutputLine::CommandHeader(block.command.as_str()));
-        for row_idx in 0..block.grid.line_count() {
+    for (i, block) in run_state.blocks.iter().enumerate() {
+        let prev_exit = i
+            .checked_sub(1)
+            .and_then(|prev| run_state.blocks[prev].exit_status);
+        output_lines.push(OutputLine::Prompt {
+            cwd: &block.cwd,
+            prev_exit,
+            command: block.command.as_str(),
+        });
+        for row_idx in 0..block.grid.rendered_line_count() {
             output_lines.push(OutputLine::GridRow(
                 &block.grid,
                 row_idx,
@@ -37,11 +46,6 @@ pub(crate) fn render_run_pane(
         if let Some(err) = &block.error {
             output_lines.push(OutputLine::Error(err.as_str()));
         }
-        if block.finished {
-            let status = block.exit_status.unwrap_or(-1);
-            output_lines.push(OutputLine::Status(status));
-        }
-        output_lines.push(OutputLine::Blank);
     }
 
     let total = output_lines.len();
@@ -50,12 +54,16 @@ pub(crate) fn render_run_pane(
     for (i, line) in output_lines.iter().skip(start).take(visible).enumerate() {
         let y = area.y + i as u16;
         match line {
-            OutputLine::CommandHeader(cmd) => {
-                let cmd_style = theme.get(crate::theme::scope::UI_BADGE_COMPLETE);
-                write_str(buf, area.x, y, "$ ", cmd_style);
-                let max_w = (area.width as usize).saturating_sub(2);
-                let display: String = cmd.chars().take(max_w).collect();
-                write_str(buf, area.x + 2, y, &display, cmd_style);
+            OutputLine::Prompt {
+                cwd,
+                prev_exit,
+                command,
+            } => {
+                let abbrev = crate::run::abbreviate_path(cwd, home.as_deref());
+                let pw = write_prompt(buf, area.x, y, &abbrev, *prev_exit, theme);
+                let max_w = (area.width as usize).saturating_sub(pw as usize);
+                let display: String = command.chars().take(max_w).collect();
+                write_str(buf, area.x + pw, y, &display, Style::default());
             },
             OutputLine::GridRow(grid, row_idx, selection) => {
                 let row = grid.row(*row_idx);
@@ -99,30 +107,24 @@ pub(crate) fn render_run_pane(
                     theme.get(crate::theme::scope::UI_ERROR),
                 );
             },
-            OutputLine::Status(code) => {
-                let label = if *code == 0 {
-                    String::new()
-                } else {
-                    format!("[exit {}]", code)
-                };
-                if !label.is_empty() {
-                    write_str(
-                        buf,
-                        area.x,
-                        y,
-                        &label,
-                        theme.get(crate::theme::scope::UI_TEXT_MUTED),
-                    );
-                }
-            },
-            OutputLine::Blank => {},
         }
     }
 
-    let prompt_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
-    write_str(buf, area.x, input_row, "$ ", prompt_style);
+    let last_exit = run_state
+        .blocks
+        .iter()
+        .rev()
+        .find(|block| block.finished)
+        .and_then(|block| block.exit_status);
+    let abbrev = crate::run::abbreviate_path(&run_state.cwd, home.as_deref());
+    let prompt_w = write_prompt(buf, area.x, input_row, &abbrev, last_exit, theme);
 
-    let input_area = Rect::new(area.x + 2, input_row, area.width.saturating_sub(2), 1);
+    let input_area = Rect::new(
+        area.x + prompt_w,
+        input_row,
+        area.width.saturating_sub(prompt_w),
+        1,
+    );
     run_state.input.render(
         editors,
         input_area,
@@ -135,11 +137,51 @@ pub(crate) fn render_run_pane(
 }
 
 enum OutputLine<'a> {
-    CommandHeader(&'a str),
+    Prompt {
+        cwd: &'a Path,
+        prev_exit: Option<i32>,
+        command: &'a str,
+    },
     GridRow(&'a crate::run::VtermGrid, usize, Option<&'a GridSelection>),
     Error(&'a str),
-    Status(i32),
-    Blank,
+}
+
+/// Write the run prompt prefix (abbreviated cwd, optional exit flag, and the
+/// U+276F prompt glyph) at `(x, y)` and return its column width.
+///
+/// The cwd is styled `UI_KEY_LABEL`. The `[N]` exit flag appears only when
+/// `exit_flag` is a nonzero code, styled `UI_ERROR`. The glyph and whatever
+/// the caller writes after it are plain.
+fn write_prompt(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    cwd: &str,
+    exit_flag: Option<i32>,
+    theme: &crate::theme::Theme,
+) -> u16 {
+    let plain = Style::default();
+    let mut col = x;
+
+    write_str(
+        buf,
+        col,
+        y,
+        cwd,
+        theme.get(crate::theme::scope::UI_KEY_LABEL),
+    );
+    col += cwd.chars().count() as u16;
+    write_str(buf, col, y, " ", plain);
+    col += 1;
+    if let Some(code) = exit_flag.filter(|&c| c != 0) {
+        let flag = format!("[{code}]");
+        write_str(buf, col, y, &flag, theme.get(crate::theme::scope::UI_ERROR));
+        col += flag.chars().count() as u16;
+    }
+    // U+276F (heavy right-pointing angle quotation mark) as the prompt glyph.
+    write_str(buf, col, y, "\u{276F} ", plain);
+    col += 2;
+    col - x
 }
 
 pub(crate) fn render_modal_run(

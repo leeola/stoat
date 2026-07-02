@@ -716,10 +716,12 @@ impl TestHarness {
         };
         let run_state = ws.runs.get_mut(id).expect("run state exists");
         run_state.history.push(text.to_owned());
-        let width = ws.panes.pane(focused).area.width.saturating_sub(2).max(20);
-        run_state
-            .blocks
-            .push(OutputBlock::new(text.to_owned(), width));
+        let width = ws.panes.pane(focused).area.width.max(20);
+        run_state.blocks.push(OutputBlock::new(
+            text.to_owned(),
+            run_state.cwd.clone(),
+            width,
+        ));
         self.capture("submit_run");
     }
 

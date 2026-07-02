@@ -11,7 +11,7 @@ pub use pty::{
 };
 use ratatui::layout::Rect;
 use slotmap::new_key_type;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use stoat_scheduler::Executor;
 pub use vterm::{CommandMark, GridSelection, OutputBlock, StyledCell, VtermGrid};
 
@@ -118,26 +118,18 @@ impl RunState {
         let mut idx = 0usize;
         for block in &self.blocks[..active_idx] {
             idx += 1;
-            idx += block.grid.line_count();
+            idx += block.grid.rendered_line_count();
             if block.error.is_some() {
                 idx += 1;
             }
-            if block.finished {
-                idx += 1;
-            }
-            idx += 1;
         }
         let active_grid_start = idx + 1;
-        let active_grid_end = active_grid_start + active.grid.line_count();
+        let active_grid_end = active_grid_start + active.grid.rendered_line_count();
 
         let mut total = active_grid_end;
         if active.error.is_some() {
             total += 1;
         }
-        if active.finished {
-            total += 1;
-        }
-        total += 1;
 
         let start = total.saturating_sub(output_height + self.scroll_offset);
         let line_idx = start + row as usize;
@@ -152,10 +144,90 @@ impl RunState {
     }
 }
 
+/// Abbreviate `path` for a prompt in the style of fish's `prompt_pwd`.
+///
+/// A `home` prefix collapses to `~`. Every path component except the last is
+/// shortened to its first character, keeping a leading dot (`.config` ->
+/// `.c`); the final component is kept whole. A non-`home` absolute path keeps
+/// its leading slash (`/usr/local/bin` -> `/u/l/bin`).
+pub(crate) fn abbreviate_path(path: &Path, home: Option<&Path>) -> String {
+    let (tilde, rest) = match home.and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => (true, rest),
+        None => (false, path),
+    };
+
+    let mut leading_slash = false;
+    let mut names: Vec<String> = Vec::new();
+    for comp in rest.components() {
+        match comp {
+            Component::RootDir => leading_slash = true,
+            Component::Normal(s) => names.push(s.to_string_lossy().into_owned()),
+            _ => {},
+        }
+    }
+
+    let last = names.len().saturating_sub(1);
+    let body = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            if i == last {
+                name.clone()
+            } else {
+                abbreviate_component(name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    match (tilde, leading_slash) {
+        (true, _) if body.is_empty() => "~".to_string(),
+        (true, _) => format!("~/{body}"),
+        (false, true) => format!("/{body}"),
+        (false, false) => body,
+    }
+}
+
+/// Shorten one path component to its first character, preserving a leading
+/// dot so hidden directories stay recognizable (`.config` -> `.c`).
+fn abbreviate_component(name: &str) -> String {
+    match name.strip_prefix('.') {
+        Some(rest) => match rest.chars().next() {
+            Some(c) => format!(".{c}"),
+            None => ".".to_string(),
+        },
+        None => name.chars().next().map(String::from).unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn abbreviate_path_shortens_ancestors_under_home() {
+        let home = PathBuf::from("/Users/lee");
+        assert_eq!(
+            abbreviate_path(&PathBuf::from("/Users/lee/projects/stoat"), Some(&home)),
+            "~/p/stoat",
+        );
+        assert_eq!(
+            abbreviate_path(&PathBuf::from("/Users/lee/.config/foo"), Some(&home)),
+            "~/.c/foo",
+        );
+        assert_eq!(abbreviate_path(&home, Some(&home)), "~");
+    }
+
+    #[test]
+    fn abbreviate_path_without_home_keeps_absolute_root() {
+        assert_eq!(
+            abbreviate_path(&PathBuf::from("/usr/local/bin"), None),
+            "/u/l/bin"
+        );
+        assert_eq!(abbreviate_path(&PathBuf::from("/tmp"), None), "/tmp");
+        assert_eq!(abbreviate_path(&PathBuf::from("/"), None), "/");
+    }
 
     #[test]
     fn grid_default_empty() {
