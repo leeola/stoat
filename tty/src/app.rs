@@ -31,7 +31,7 @@ use stoatty_render::{
 };
 use stoatty_term::{
     grid::{Grid, Overlay},
-    term::{Cursor, CursorShape, Damage, Terminal},
+    term::{Cursor, CursorShape, Damage, TermEvent, Terminal},
     theme::Theme,
 };
 use winit::{
@@ -42,6 +42,10 @@ use winit::{
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
 };
+
+/// Window title shown before a program sets one, and restored when a program
+/// resets it via OSC.
+const DEFAULT_TITLE: &str = "stoatty";
 
 /// Smallest font size the live zoom allows, so cells never collapse to an
 /// unreadable size.
@@ -189,6 +193,10 @@ enum PtyEvent {
     /// [`State::dirty`], so a burst of chunks collapses into one wakeup per
     /// render cycle rather than one per read chunk.
     Redraw,
+    /// Host-facing notifications a parse produced, for the main thread to apply
+    /// off the grid (window title, clipboard). Sent only when a parse yields
+    /// events.
+    Term(Vec<TermEvent>),
     Exited,
 }
 
@@ -445,7 +453,7 @@ impl ApplicationHandler<PtyEvent> for App {
         // blocking the first paint after them.
         let font_load = FontLoad::spawn();
 
-        let mut attributes = Window::default_attributes().with_title("stoatty");
+        let mut attributes = Window::default_attributes().with_title(DEFAULT_TITLE);
         if let Some([cols, rows]) = self.size {
             let [cell_width, cell_height] = render::cell_size(self.font_size, 1.0);
             attributes = attributes.with_inner_size(LogicalSize::new(
@@ -494,17 +502,20 @@ impl ApplicationHandler<PtyEvent> for App {
                 move |output| match output {
                     PtyOutput::Data(bytes) => {
                         // Parse on the reader thread under the shared lock.
-                        let (redraw, responses) = {
+                        let (redraw, responses, events) = {
                             let mut terminal = terminal.lock();
                             let redraw = terminal.advance(bytes);
                             // A buffering synchronized update needs the main
                             // thread to arm and drive its timeout flush.
                             sync_pending
                                 .store(terminal.sync_deadline().is_some(), Ordering::Relaxed);
-                            (redraw, terminal.take_responses())
+                            (redraw, terminal.take_responses(), terminal.take_events())
                         };
                         if !responses.is_empty() {
                             let _ = proxy.send_event(PtyEvent::Responses(responses));
+                        }
+                        if !events.is_empty() {
+                            let _ = proxy.send_event(PtyEvent::Term(events));
                         }
                         // Wake the main thread to redraw, but only on the
                         // clean-to-dirty edge so a burst of chunks collapses into
@@ -571,6 +582,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.dirty.store(false, Ordering::Relaxed);
                 state.window.request_redraw();
             },
+            PtyEvent::Term(events) => handle_term_events(state, events),
             PtyEvent::Exited => event_loop.exit(),
         }
     }
@@ -584,7 +596,7 @@ impl ApplicationHandler<PtyEvent> for App {
     /// redraw (its BSU bytes reach the screen ahead of the buffer), so the reader
     /// always wakes the main thread once to arm this.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(state) = self.state.as_ref() else {
+        let Some(state) = self.state.as_mut() else {
             return;
         };
 
@@ -593,16 +605,31 @@ impl ApplicationHandler<PtyEvent> for App {
             return;
         }
 
-        let deadline = {
+        // Flushing a synchronized update dispatches its buffered bytes, which
+        // can carry host queries and notifications the parse held back, so
+        // drain both alongside the flush rather than losing them.
+        let (deadline, drained) = {
             let mut terminal = state.terminal.lock();
             match terminal.sync_deadline() {
                 Some(deadline) if deadline <= Instant::now() => {
                     terminal.flush_synchronized_update();
-                    None
+                    (
+                        None,
+                        Some((terminal.take_responses(), terminal.take_events())),
+                    )
                 },
-                other => other,
+                other => (other, None),
             }
         };
+
+        if let Some((responses, events)) = drained {
+            if !responses.is_empty() {
+                let _ = state.pty.write(&responses);
+            }
+            if !events.is_empty() {
+                handle_term_events(state, events);
+            }
+        }
 
         match deadline {
             Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
@@ -1425,6 +1452,21 @@ fn sgr_button_bytes(button: u8, pressed: bool, col: usize, row: usize) -> Vec<u8
 fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize) -> Vec<u8> {
     let code = button.unwrap_or(3) + 32;
     format!("\x1b[<{code};{};{}M", col + 1, row + 1).into_bytes()
+}
+
+/// Apply host-facing terminal notifications off the grid.
+///
+/// Title and reset-title set the window title. Clipboard-store copies to the
+/// system clipboard. Bell has no handler yet.
+fn handle_term_events(state: &mut State, events: Vec<TermEvent>) {
+    for event in events {
+        match event {
+            TermEvent::Title(title) => state.window.set_title(&title),
+            TermEvent::ResetTitle => state.window.set_title(DEFAULT_TITLE),
+            TermEvent::ClipboardStore(text) => copy_to_clipboard(&text),
+            TermEvent::Bell => {},
+        }
+    }
 }
 
 /// Copy `text` to the OS clipboard, reporting a failure rather than crashing.
