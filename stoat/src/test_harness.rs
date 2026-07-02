@@ -543,6 +543,7 @@ impl TestHarness {
             let lsp_format = crate::action_handlers::lsp::pump_lsp_format(&mut self.stoat);
             let completion = crate::completion::request::pump(&mut self.stoat);
             let external_edits = self.stoat.drain_pending_external_edits();
+            let git_refresh = self.stoat.drain_pending_git_refresh();
             if !commits
                 && !review
                 && !lsp_jumps
@@ -556,6 +557,7 @@ impl TestHarness {
                 && !lsp_format
                 && !completion
                 && !external_edits
+                && !git_refresh
             {
                 break;
             }

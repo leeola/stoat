@@ -20,6 +20,7 @@ use crate::{
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
     rebase::RebasePause,
     register,
+    review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
     term_session::TermId,
     ui::RenderFrame,
@@ -42,7 +43,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_action::{OpenFile, OpenReview, ReviewExternalEdit};
+use stoat_action::{OpenFile, OpenReview, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
@@ -416,6 +417,16 @@ pub struct Stoat {
     /// [`Self::drain_pending_external_edits`].
     pub(crate) review_external_edit_tx: Sender<PathBuf>,
     review_external_edit_rx: Receiver<PathBuf>,
+    /// Single-slot debounce for a whole-session git refresh. A commit writes
+    /// many `.git` files at once, and unlike the per-path
+    /// [`Self::review_pending_external_edits`] this collapses that burst to one
+    /// [`ReviewRefresh`]. Re-arming replaces the task, cancelling the prior
+    /// timer.
+    review_pending_git_refresh: Option<stoat_scheduler::Task<()>>,
+    /// Channel the git-refresh debounce task pushes onto once its timer fires,
+    /// drained by [`Self::drain_pending_git_refresh`].
+    review_git_refresh_tx: Sender<()>,
+    review_git_refresh_rx: Receiver<()>,
     /// Per-path debounce tasks for reindexing files changed outside the
     /// editor, mirroring [`Self::review_pending_external_edits`] but
     /// feeding the code graph instead of the review session.
@@ -685,6 +696,7 @@ impl Stoat {
         let (agent_control_tx, agent_control_rx) = tokio::sync::mpsc::channel(256);
         let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
+        let (review_git_refresh_tx, review_git_refresh_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
@@ -774,6 +786,9 @@ impl Stoat {
             review_pending_external_edits: std::collections::HashMap::new(),
             review_external_edit_tx,
             review_external_edit_rx,
+            review_pending_git_refresh: None,
+            review_git_refresh_tx,
+            review_git_refresh_rx,
             index_pending_external_edits: std::collections::HashMap::new(),
             index_external_edit_tx,
             index_external_edit_rx,
@@ -1514,6 +1529,7 @@ impl Stoat {
         self.drain_lsp_notifications();
         self.drain_fs_watch_events();
         self.drain_pending_external_edits();
+        self.drain_pending_git_refresh();
         self.drain_pending_index_edits();
         self.pending_message = None;
         let effect = match event {
@@ -1587,9 +1603,23 @@ impl Stoat {
         }
         let review_active = self.active_workspace().review.is_some();
         let git_root = self.active_workspace().git_root.clone();
+        let git_dir = git_root.join(".git");
         for path in paths {
             if review_active {
-                self.arm_review_external_edit_debounce(path.clone());
+                let in_session = self
+                    .active_workspace()
+                    .review
+                    .as_ref()
+                    .is_some_and(|s| s.files.iter().any(|f| f.path == path));
+                if in_session {
+                    // A tracked file keeps the per-path debounce, which scrolls
+                    // the review to the edited chunk when the refresh lands.
+                    self.arm_review_external_edit_debounce(path.clone());
+                } else if path.starts_with(&git_dir) {
+                    // A .git write (a commit, reset, or branch switch) refreshes
+                    // the whole session through one shared debounce.
+                    self.arm_review_git_refresh_debounce();
+                }
             }
             if path.starts_with(&git_root) && self.language_registry.for_path(&path).is_some() {
                 self.arm_index_external_edit_debounce(path);
@@ -1619,6 +1649,26 @@ impl Stoat {
         self.review_pending_external_edits.insert(path, task);
     }
 
+    /// Schedule a debounced whole-session [`ReviewRefresh`] after a git-state
+    /// change under `<git_root>/.git`.
+    ///
+    /// The debounce is single-slot rather than per-path, so re-arming drops the
+    /// prior task, which cancels its future at the [`Executor::timer`] await. A
+    /// burst of `.git` writes from one commit then fires a single refresh once
+    /// the [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses. The main loop drains
+    /// it via [`Self::drain_pending_git_refresh`], since async tasks cannot
+    /// mutate `Stoat`.
+    fn arm_review_git_refresh_debounce(&mut self) {
+        let executor = self.executor.clone();
+        let tx = self.review_git_refresh_tx.clone();
+        let redraw = self.redraw_notify.clone();
+        let task = self.executor.spawn_with_redraw(redraw, async move {
+            executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
+            let _ = tx.send(()).await;
+        });
+        self.review_pending_git_refresh = Some(task);
+    }
+
     /// Drain every path the per-path debounce tasks have pushed onto
     /// [`Self::review_external_edit_tx`] since the last call. Each
     /// path becomes one [`ReviewExternalEdit`] dispatch when a review
@@ -1635,6 +1685,33 @@ impl Stoat {
             self.review_pending_external_edits.remove(&path);
             if self.active_workspace().review.is_some() {
                 action_handlers::dispatch(self, &ReviewExternalEdit { path });
+                progressed = true;
+            }
+        }
+        progressed
+    }
+
+    /// Drain the git-refresh debounce marker and refresh the review when one
+    /// fired since the last call.
+    ///
+    /// Only a [`ReviewSource::WorkingTree`] session refreshes. Commit and
+    /// commit-range sources are fixed snapshots the rebase edit-pause review
+    /// relies on not churning, and in-memory agent-edit sources are not
+    /// git-backed. Returns `true` if a refresh dispatched so the test harness
+    /// settle loop re-iterates.
+    pub(crate) fn drain_pending_git_refresh(&mut self) -> bool {
+        let mut progressed = false;
+        for _ in 0..256 {
+            let Ok(()) = self.review_git_refresh_rx.try_recv() else {
+                break;
+            };
+            self.review_pending_git_refresh = None;
+            let working_tree = matches!(
+                self.active_workspace().review.as_ref().map(|s| &s.source),
+                Some(ReviewSource::WorkingTree { .. })
+            );
+            if working_tree {
+                action_handlers::dispatch(self, &ReviewRefresh);
                 progressed = true;
             }
         }

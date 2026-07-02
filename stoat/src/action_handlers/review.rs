@@ -1297,6 +1297,62 @@ mod tests {
         );
     }
 
+    /// A `.git` write (e.g. a commit) refreshes an open working-tree
+    /// review through the shared debounce. Here the tree is committed
+    /// clean, so the refresh finds no hunks and closes the stale session.
+    #[test]
+    fn git_state_change_refreshes_working_tree_review() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
+        h.stoat.open_review();
+        h.settle();
+        assert!(h.stoat.active_workspace().review.is_some());
+
+        h.fake_git.add_repo("/work").clear_changes();
+        h.fake_fs_watcher().inject(
+            PathBuf::from("/work/.git/refs/heads/main"),
+            FsEventKind::Modified,
+        );
+        h.stoat.drain_fs_watch_events();
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert!(
+            h.stoat.active_workspace().review.is_none(),
+            "a .git write refreshes the review, which closes on the now-clean tree",
+        );
+    }
+
+    /// A commit-source review is a fixed snapshot, so a `.git` write must
+    /// not refresh it.
+    #[test]
+    fn git_state_change_leaves_commit_review_untouched() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
+        h.open_commit_review("/work", "c2");
+        let before = h.with_review(|s| s.version);
+
+        h.fake_fs_watcher().inject(
+            PathBuf::from("/work/.git/refs/heads/main"),
+            FsEventKind::Modified,
+        );
+        h.stoat.drain_fs_watch_events();
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert!(
+            h.stoat.active_workspace().review.is_some(),
+            "the commit review stays open",
+        );
+        assert_eq!(
+            h.with_review(|s| s.version),
+            before,
+            "a commit-source review does not refresh on a git-state change",
+        );
+    }
+
     /// (d) Working-tree review opens register one watch token per
     /// file in the session, and `CloseReview` releases them all.
     #[test]
