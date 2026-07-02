@@ -122,6 +122,11 @@ theme default_dark {
 
 on init {
     theme = default_dark;
+
+    # Automatically follow an open working-tree review as the project changes
+    # on disk: external edits, commits, and newly-changed files refresh it.
+    # Default on. Set false to require a manual `r` instead.
+    # review.follow = false;
 }
 
 on key {

@@ -25,6 +25,11 @@ pub enum MouseCapturePolicy {
 pub struct Settings {
     /// Enables the LSP text-protocol transcript log.
     pub text_proto_log: Option<bool>,
+    /// Whether an open review session follows the project as it changes:
+    /// external edits, git-state changes, and newly-changed files refresh it
+    /// automatically. `None` falls back to enabled. Set `review.follow = false;`
+    /// in stcfg to require a manual `r` instead.
+    pub review_follow: Option<bool>,
     /// Name of the active theme block. Resolves against `theme NAME { ... }`
     /// blocks in the config. `None` means "use the compiled-in default".
     pub theme: Option<String>,
@@ -76,6 +81,7 @@ impl Settings {
         mode_badges.extend(other.mode_badges);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
+            review_follow: other.review_follow.or(self.review_follow),
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             scrolloff: other.scrolloff.or(self.scrolloff),
@@ -91,6 +97,11 @@ impl Settings {
             ["text_proto_log"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.text_proto_log = Some(b);
+                }
+            },
+            ["review", "follow"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.review_follow = Some(b);
                 }
             },
             ["theme"] => {
@@ -164,6 +175,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                review_follow: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -175,12 +187,19 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_review_follow() {
+        let config = parse_ok("on init { review.follow = false; }");
+        assert_eq!(Settings::from_config(&config).review_follow, Some(false));
+    }
+
+    #[test]
     fn from_config_false_value() {
         let config = parse_ok("on init { text_proto_log = false; }");
         assert_eq!(
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(false),
+                review_follow: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -198,6 +217,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                review_follow: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -224,6 +244,7 @@ mod tests {
     fn merge_right_wins_over_some() {
         let left = Settings {
             text_proto_log: Some(false),
+            review_follow: None,
             theme: None,
             mouse_capture: None,
             scrolloff: None,
@@ -233,6 +254,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: Some(true),
+            review_follow: None,
             theme: None,
             mouse_capture: None,
             scrolloff: None,
@@ -244,6 +266,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                review_follow: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -258,6 +281,7 @@ mod tests {
     fn merge_right_none_preserves_left() {
         let left = Settings {
             text_proto_log: Some(true),
+            review_follow: None,
             theme: None,
             mouse_capture: None,
             scrolloff: None,
@@ -270,6 +294,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                review_follow: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -295,6 +320,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                review_follow: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
@@ -312,6 +338,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                review_follow: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
@@ -326,6 +353,7 @@ mod tests {
     fn merge_right_overrides_theme() {
         let left = Settings {
             text_proto_log: None,
+            review_follow: None,
             theme: Some("a".into()),
             mouse_capture: None,
             scrolloff: None,
@@ -335,6 +363,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: None,
+            review_follow: None,
             theme: Some("b".into()),
             mouse_capture: None,
             scrolloff: None,

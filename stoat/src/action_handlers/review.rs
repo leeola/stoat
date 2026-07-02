@@ -1398,6 +1398,27 @@ mod tests {
         );
     }
 
+    /// With `review.follow` off, an external edit to a session file does
+    /// not auto-refresh. A manual `r` is still required.
+    #[test]
+    fn review_follow_off_suppresses_auto_refresh() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
+        h.stoat.open_review();
+        h.settle();
+        h.stoat.settings.review_follow = Some(false);
+        let before = h.with_review(|s| s.version);
+
+        h.external_edit("a.rs", "x\nZ\n");
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert_eq!(
+            h.with_review(|s| s.version),
+            before,
+            "review.follow off must suppress the automatic refresh",
+        );
+    }
+
     /// (d) Working-tree review opens register one watch token per
     /// file in the session, and `CloseReview` releases them all.
     #[test]

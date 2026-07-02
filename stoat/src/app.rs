@@ -1601,7 +1601,10 @@ impl Stoat {
         if paths.is_empty() {
             return;
         }
-        let review_active = self.active_workspace().review.is_some();
+        // `review.follow` gates every automatic refresh below. A manual `r`
+        // (ReviewRefresh) dispatches through a separate path and still works.
+        let review_active =
+            self.active_workspace().review.is_some() && self.settings.review_follow.unwrap_or(true);
         let git_root = self.active_workspace().git_root.clone();
         let git_dir = git_root.join(".git");
         let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
