@@ -3298,6 +3298,13 @@ impl Stoat {
                     return UpdateEffect::None;
                 }
 
+                // Insert keystrokes reach a terminal only when a split pane
+                // holds focus (see `term_input_target`), so a focused dock
+                // must not trigger the reset. Recorded before the loop closes
+                // or restores the pane, which reassigns focus.
+                let exited_held_focus = matches!(ws.focus, FocusTarget::SplitPane(_))
+                    && pane_ids.contains(&ws.panes.focus());
+
                 ws.terms.remove(term_id);
                 for dock_id in dock_ids {
                     if let Some(dock) = ws.docks.get_mut(dock_id) {
@@ -3309,6 +3316,10 @@ impl Stoat {
                     if !action_handlers::close_pane_by_id(self, pane_id) {
                         action_handlers::restore_pane_after_term_exit(self, pane_id);
                     }
+                }
+
+                if exited_held_focus && self.mode == "insert" {
+                    self.transition_mode("normal".to_string());
                 }
                 UpdateEffect::Redraw
             },
@@ -4764,6 +4775,7 @@ mod tests {
         let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
         let term_id = insert_term_session(ws);
         ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
+        h.stoat.transition_mode("insert".to_string());
 
         let effect = h
             .stoat
@@ -4778,6 +4790,10 @@ mod tests {
             "terminal pane closed, editor remains",
         );
         assert_eq!(ws.panes.focus(), editor_pane, "focus moved to the sibling");
+        assert_eq!(
+            h.stoat.mode, "normal",
+            "focused terminal exit leaves insert mode",
+        );
     }
 
     #[test]
@@ -4787,6 +4803,7 @@ mod tests {
         let only_pane = ws.panes.focus();
         let term_id = insert_term_session(ws);
         ws.panes.pane_mut(only_pane).view = View::Terminal(term_id);
+        h.stoat.transition_mode("insert".to_string());
 
         h.stoat
             .handle_pty_notification(PtyNotification::TermExited { term_id });
@@ -4807,6 +4824,10 @@ mod tests {
             buffer.read().expect("buffer lock").rope().is_empty(),
             "restored scratch buffer is empty",
         );
+        assert_eq!(
+            h.stoat.mode, "normal",
+            "focused terminal exit leaves insert mode",
+        );
     }
 
     #[test]
@@ -4825,6 +4846,7 @@ mod tests {
         let View::Terminal(term_id) = h.stoat.active_workspace().panes.pane(pane).view else {
             panic!("terminal action points the pane at a terminal");
         };
+        h.stoat.transition_mode("insert".to_string());
 
         h.stoat
             .handle_pty_notification(PtyNotification::TermExited { term_id });
@@ -4836,6 +4858,10 @@ mod tests {
         assert_eq!(
             restored, original,
             "pane restored to its pre-terminal editor"
+        );
+        assert_eq!(
+            h.stoat.mode, "normal",
+            "focused terminal exit leaves insert mode",
         );
     }
 
@@ -4852,6 +4878,7 @@ mod tests {
         pane.prev_view = Some(View::Editor(stale));
         pane.view = View::Terminal(term_id);
         ws.editors.remove(stale);
+        h.stoat.transition_mode("insert".to_string());
 
         h.stoat
             .handle_pty_notification(PtyNotification::TermExited { term_id });
@@ -4865,6 +4892,30 @@ mod tests {
             "fell back to a fresh editor, not the dead one"
         );
         assert!(ws.editors.contains_key(restored), "scratch editor is live");
+        assert_eq!(
+            h.stoat.mode, "normal",
+            "focused terminal exit leaves insert mode",
+        );
+    }
+
+    #[test]
+    fn terminal_exit_keeps_insert_mode_when_pane_not_focused() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let editor_pane = ws.panes.focus();
+        let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+        let term_id = insert_term_session(ws);
+        ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
+        ws.panes.set_focus(editor_pane);
+        h.stoat.transition_mode("insert".to_string());
+
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermExited { term_id });
+
+        assert_eq!(
+            h.stoat.mode, "insert",
+            "an unfocused terminal exit leaves the mode untouched",
+        );
     }
 
     #[test]
