@@ -34,6 +34,8 @@ pub mod lsp;
 pub mod multi_buffer;
 pub mod pane;
 mod paths;
+#[cfg(feature = "perf")]
+pub mod perf;
 pub(crate) mod picker;
 pub(crate) mod quit_all_confirm;
 mod rebase;

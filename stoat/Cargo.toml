@@ -7,6 +7,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compile in main-thread latency instrumentation. Off by default so release
+# builds carry no timing rings or per-frame measurement.
+perf = []
+
 [dependencies]
 codegraph = { path = "../codegraph" }
 stoat_action = { path = "../action" }

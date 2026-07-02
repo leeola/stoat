@@ -18,6 +18,10 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+# Forward the stoat crate's latency instrumentation. Off by default.
+perf = ["stoat/perf"]
+
 [dependencies]
 stoat = { path = "../stoat" }
 stoat_cli = { path = "../cli" }

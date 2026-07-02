@@ -213,6 +213,10 @@ pub struct Stoat {
     /// fired before the loop first polls it is retained, so the quit is not
     /// lost in a race with the timer.
     pub(crate) shutdown_notify: Arc<tokio::sync::Notify>,
+    /// Main-thread latency metrics, recorded around the run loop's per-frame
+    /// steps. Only present under the `perf` feature.
+    #[cfg(feature = "perf")]
+    perf: crate::perf::PerfStats,
     /// In-flight working-tree review scan. The git2 diff runs on a
     /// blocking thread; [`pump_review_scan`](action_handlers::pump_review_scan)
     /// polls the ready [`ReviewSession`](crate::review_session::ReviewSession)
@@ -725,6 +729,8 @@ impl Stoat {
             _index_build_task: None,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(feature = "perf")]
+            perf: crate::perf::PerfStats::default(),
             pending_review_scan: None,
             modal_run: None,
             render_tick: 0,
@@ -962,11 +968,26 @@ impl Stoat {
             if !animating {
                 last_tick = None;
             }
+            // Wall-clock instant the frame's first event arrived, so
+            // input-to-publish latency spans from it to `send_replace`. Set
+            // only by the input arm, so notify- and timer-woken frames record
+            // no input latency.
+            #[cfg(feature = "perf")]
+            let mut t_event: Option<std::time::Instant> = None;
             let first = tokio::select! {
                 biased;
                 event = events.recv() => {
                     let Some(event) = event else { break };
-                    self.update(event)
+                    #[cfg(feature = "perf")]
+                    {
+                        t_event = Some(std::time::Instant::now());
+                    }
+                    #[cfg(feature = "perf")]
+                    let started = std::time::Instant::now();
+                    let effect = self.update(event);
+                    #[cfg(feature = "perf")]
+                    self.perf.record_update(started.elapsed());
+                    effect
                 }
                 notif = self.pty_rx.recv() => {
                     let Some(notif) = notif else { continue };
@@ -987,6 +1008,9 @@ impl Stoat {
                     let dt = last_tick
                         .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
                         .unwrap_or_else(|| SCROLL_FRAME.as_secs_f32());
+                    #[cfg(feature = "perf")]
+                    self.perf
+                        .record_anim_tick(std::time::Duration::from_secs_f32(dt));
                     let effect = if self.tick_scroll_anim(dt) {
                         // While the glide continues, push the eased scroll
                         // target to stoatty's pool and skip the full live-grid
@@ -1008,18 +1032,31 @@ impl Stoat {
                 }
             };
 
-            let effect = first.merge(self.drain_pending(&mut events));
+            let (drained, coalesced) = self.drain_pending(&mut events);
+            let effect = first.merge(drained);
+            #[cfg(feature = "perf")]
+            self.perf.record_coalesced(coalesced);
+            #[cfg(not(feature = "perf"))]
+            let _ = coalesced;
 
             match effect {
                 UpdateEffect::Redraw => {
                     self.drive_background();
                     let buffer = {
                         let mut b = Buffer::empty(self.size);
+                        #[cfg(feature = "perf")]
+                        let painted = std::time::Instant::now();
                         self.paint_into(&mut b);
+                        #[cfg(feature = "perf")]
+                        self.perf.record_paint(painted.elapsed());
                         Arc::new(b)
                     };
                     let cursor = self.primary_cursor_screen_pos();
                     render.send_replace(Some(RenderFrame { buffer, cursor }));
+                    #[cfg(feature = "perf")]
+                    if let Some(started) = t_event {
+                        self.perf.record_input_to_publish(started.elapsed());
+                    }
                     self.emit_smooth_scroll();
                     if render.is_closed() {
                         break;
@@ -1116,7 +1153,8 @@ impl Stoat {
     }
 
     /// Apply every message already queued on the input and notification
-    /// channels without blocking, returning their combined [`UpdateEffect`].
+    /// channels without blocking, returning their combined [`UpdateEffect`]
+    /// and the count of messages drained (the frame's coalesce count).
     ///
     /// Called after [`Self::run`] wakes on its first message so a burst
     /// collapses into a single render instead of one render per message. A
@@ -1126,24 +1164,29 @@ impl Stoat {
     /// Each channel is drained only to its currently-queued extent. Messages
     /// that arrive mid-drain are handled on the next loop iteration, which
     /// keeps render forward-progress under a sustained producer.
-    fn drain_pending(&mut self, events: &mut Receiver<Event>) -> UpdateEffect {
+    fn drain_pending(&mut self, events: &mut Receiver<Event>) -> (UpdateEffect, usize) {
         let mut effect = UpdateEffect::None;
+        let mut coalesced = 0;
 
         while let Ok(event) = events.try_recv() {
             effect = effect.merge(self.update(event));
+            coalesced += 1;
         }
         while let Ok(notif) = self.pty_rx.try_recv() {
             effect = effect.merge(self.handle_pty_notification(notif));
+            coalesced += 1;
         }
         while let Ok(ev) = self.agent_event_rx.try_recv() {
             effect = effect.merge(self.handle_agent_event(ev));
+            coalesced += 1;
         }
         while let Ok(ctl) = self.agent_control_rx.try_recv() {
             effect = effect.merge(self.handle_agent_control(ctl));
+            coalesced += 1;
         }
         self.drain_index_updates();
 
-        effect
+        (effect, coalesced)
     }
 
     /// Kick off a background cold build of the active workspace's code index.
@@ -5722,8 +5765,9 @@ mod tests {
         for size in [(80u16, 24u16), (100, 30), (120, 40)] {
             tx.try_send(Event::Resize(size.0, size.1)).unwrap();
         }
-        let effect = h.stoat.drain_pending(&mut rx);
+        let (effect, coalesced) = h.stoat.drain_pending(&mut rx);
         assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(coalesced, 3, "all three queued events counted");
         assert_eq!(h.stoat.size(), Rect::new(0, 0, 120, 40));
         assert!(rx.try_recv().is_err(), "drain must empty the channel");
     }
