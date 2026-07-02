@@ -216,6 +216,12 @@ pub struct TextPass {
     /// Scratch reused each frame for the underline upload slice, shared by
     /// `prepare_underlines` and `prepare_composite`.
     underline_upload_scratch: Vec<UnderlineInstance>,
+    /// Scratch reused each frame to partition the grid's cached glyphs into the
+    /// scroll-region and plain buffers, so an active region scroll allocates no
+    /// per-frame temporary.
+    plain_pending_scratch: Vec<PendingGlyph>,
+    /// Region-side half of the [`Self::plain_pending_scratch`] split.
+    region_pending_scratch: Vec<PendingGlyph>,
     /// The grid width [`Self::glyph_row_cache`] was built at; a change invalidates
     /// every cached row since columns shift.
     glyph_cache_cols: usize,
@@ -434,6 +440,8 @@ impl TextPass {
             underline_row_instances: Vec::new(),
             plain_upload_scratch: Vec::new(),
             underline_upload_scratch: Vec::new(),
+            plain_pending_scratch: Vec::new(),
+            region_pending_scratch: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
             baseline,
@@ -548,10 +556,17 @@ impl TextPass {
                 // cache; the next region-free frame rebuilds it. Regions are rare,
                 // so this falls back rather than tracking the split per row.
                 Some(region) => {
-                    let (region_pending, plain_pending): (Vec<PendingGlyph>, Vec<PendingGlyph>) =
-                        self.collect_grid_glyphs()
-                            .into_iter()
-                            .partition(|glyph| region.contains(glyph.row, glyph.col));
+                    let mut plain_pending = mem::take(&mut self.plain_pending_scratch);
+                    let mut region_pending = mem::take(&mut self.region_pending_scratch);
+                    plain_pending.clear();
+                    region_pending.clear();
+                    for glyph in self.glyph_row_cache.iter().flatten() {
+                        if region.contains(glyph.row, glyph.col) {
+                            region_pending.push(*glyph);
+                        } else {
+                            plain_pending.push(*glyph);
+                        }
+                    }
 
                     let plain_instances = self.build_text_instances(device, queue, &plain_pending);
                     let region_instances =
@@ -576,6 +591,8 @@ impl TextPass {
                         "scroll region text instances",
                     );
                     self.plain_row_instances.clear();
+                    self.plain_pending_scratch = plain_pending;
+                    self.region_pending_scratch = region_pending;
                 },
                 None => {
                     let rebuild_all = atlas_grew;
@@ -1201,6 +1218,7 @@ impl TextPass {
 
     /// The cached glyphs of every row, concatenated in row order, ready for
     /// [`Self::build_text_instances`].
+    #[cfg(test)]
     fn collect_grid_glyphs(&self) -> Vec<PendingGlyph> {
         self.glyph_row_cache.iter().flatten().copied().collect()
     }
