@@ -125,6 +125,30 @@ pub async fn spawn_claude(
         .await
 }
 
+/// Spawn `program` as an owned subshell terminal session, returning its
+/// [`TerminalSession`].
+///
+/// The caller owns the returned session, and dropping it closes the PTY. The
+/// child runs with `TERM=xterm-256color` to match the xterm-compatible
+/// emulator the pane renders into, and inherits no other environment beyond
+/// the parent's.
+pub async fn spawn_terminal(
+    host: &dyn TerminalHost,
+    cwd: &Path,
+    program: &str,
+    args: &[String],
+) -> std::io::Result<Box<dyn TerminalSession>> {
+    host.spawn(SpawnArgs {
+        program: program.to_string(),
+        args: args.to_vec(),
+        env: vec![("TERM".into(), "xterm-256color".into())],
+        cwd: cwd.to_path_buf(),
+        width: 80,
+        rows: 24,
+    })
+    .await
+}
+
 /// Spawn the reader that pumps a term session's PTY output into its
 /// emulator, tagging each chunk with `agent_id`. Detached on the executor like
 /// the run pane's reader.

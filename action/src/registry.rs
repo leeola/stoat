@@ -83,6 +83,7 @@ use crate::{
             ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
+        terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace,
         },
@@ -518,6 +519,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
     add(SpawnClaude::DEF, |_| Ok(Box::new(SpawnClaude)));
+    add(Terminal::DEF, |_| Ok(Box::new(Terminal)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
@@ -803,6 +805,7 @@ mod tests {
         "ConflictAbort",
         "OpenRun",
         "SpawnClaude",
+        "terminal",
         "RunSubmit",
         "RunInterrupt",
         "RunHistoryPrev",
@@ -866,6 +869,13 @@ mod tests {
                 lookup_alias(token).expect(token).def.name(),
                 "ForceSaveBuffer",
             );
+        }
+    }
+
+    #[test]
+    fn terminal_alias_resolves() {
+        for token in ["term", "TERM"] {
+            assert_eq!(lookup_alias(token).expect(token).def.name(), "terminal");
         }
     }
 
@@ -1005,6 +1015,7 @@ mod tests {
         // + 1 InsertRegister.
         // + 1 CommitUndoCheckpoint.
         // + 1 SpawnClaude.
+        // + 1 terminal.
         // + 2 GotoCaller, GotoCallee.
         // + 1 GotoReferences.
         // + 1 GotoImplementors.
@@ -1013,7 +1024,7 @@ mod tests {
         // + 2 FileFinderPageUp, FileFinderPageDown.
         // + 2 PalettePageUp, PalettePageDown.
         // + 1 OpenBuffer.
-        assert_eq!(all().count(), 285);
+        assert_eq!(all().count(), 286);
     }
 
     #[test]

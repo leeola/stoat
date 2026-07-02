@@ -82,6 +82,7 @@ pub use defs::{
         ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk,
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
+    terminal::Terminal,
     workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace},
 };
 pub use kind::ActionKind;

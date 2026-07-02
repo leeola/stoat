@@ -13,4 +13,5 @@ pub mod prompt;
 pub mod rebase;
 pub mod review;
 pub mod run;
+pub mod terminal;
 pub mod workspace;

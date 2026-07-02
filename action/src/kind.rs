@@ -188,6 +188,7 @@ pub enum ActionKind {
     RunInterrupt,
     Run,
     SpawnClaude,
+    Terminal,
     ToggleDockRight,
     ToggleDockLeft,
     JumpToMoveSource,
