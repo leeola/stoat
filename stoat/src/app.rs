@@ -638,7 +638,7 @@ impl Stoat {
     }
 
     pub(crate) fn active_bindings_for_current_mode(&self) -> Vec<(String, Vec<ResolvedAction>)> {
-        let state = StoatKeymapState::new(&self.mode);
+        let state = StoatKeymapState::from_stoat(self);
         self.keymap
             .active_bindings(&state)
             .into_iter()

@@ -513,6 +513,33 @@ mod tests {
     }
 
     #[test]
+    fn review_without_active_rebase_leaves_continue_unbound() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.open_review_from_texts(&[("a.rs", "fn a() {}\n", "fn a_renamed() {}\n")]);
+
+        assert_eq!(h.stoat.mode, "review");
+        assert!(
+            h.stoat.active_workspace().rebase_active.is_none(),
+            "a plain review has no rebase in flight"
+        );
+
+        let binds_continue = h
+            .stoat
+            .active_bindings_for_current_mode()
+            .iter()
+            .any(|(_, actions)| actions.iter().any(|a| a.name == "RebaseContinue"));
+        assert!(
+            !binds_continue,
+            "C only resumes a paused rebase, so it stays unbound with none active"
+        );
+
+        h.type_keys("C");
+        assert_eq!(h.stoat.mode, "review", "C is inert without a rebase");
+        assert!(h.stoat.active_workspace().rebase_active.is_none());
+    }
+
+    #[test]
     fn conflict_take_theirs_and_apply_completes_rebase() {
         use crate::host::GitHost;
 

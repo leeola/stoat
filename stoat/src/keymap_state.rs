@@ -10,11 +10,13 @@ pub(crate) struct StoatKeymapState {
     palette_open: StateValue,
     help_open: StateValue,
     finder_open: StateValue,
+    rebase_exec: StateValue,
 }
 
 impl StoatKeymapState {
+    #[cfg(test)]
     pub(crate) fn new(mode: &str) -> Self {
-        Self::with_flags(mode, false, false, false)
+        Self::with_flags(mode, false, false, false, false)
     }
 
     pub(crate) fn with_flags(
@@ -22,12 +24,14 @@ impl StoatKeymapState {
         palette_open: bool,
         help_open: bool,
         finder_open: bool,
+        rebase_exec: bool,
     ) -> Self {
         Self {
             mode_value: StateValue::String(mode.into()),
             palette_open: StateValue::Bool(palette_open),
             help_open: StateValue::Bool(help_open),
             finder_open: StateValue::Bool(finder_open),
+            rebase_exec: StateValue::Bool(rebase_exec),
         }
     }
 
@@ -37,6 +41,7 @@ impl StoatKeymapState {
             stoat.command_palette.is_some(),
             stoat.help.is_some(),
             stoat.file_finder.is_some(),
+            stoat.active_workspace().rebase_active.is_some(),
         )
     }
 }
@@ -48,6 +53,7 @@ impl KeymapState for StoatKeymapState {
             "palette_open" => Some(&self.palette_open),
             "help_open" => Some(&self.help_open),
             "finder_open" => Some(&self.finder_open),
+            "rebase_exec" => Some(&self.rebase_exec),
             _ => None,
         }
     }

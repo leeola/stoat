@@ -434,9 +434,11 @@ on key {
         S -> ReviewSkipChunk();
         A -> ReviewApplyStaged();
         D -> ReviewRemoveSelected();
-        C -> RebaseContinue();
         r -> ReviewRefresh();
         : -> OpenCommandPalette();
+    }
+    mode == review && rebase_exec {
+        C -> RebaseContinue();
     }
     mode == insert {
         Escape -> SetMode(normal);

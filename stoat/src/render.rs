@@ -339,7 +339,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             size,
             buf,
         );
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false);
+        let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false, false);
         let raw = stoat.keymap.scoped_bindings(&state, "help_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -358,7 +358,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         );
     } else if let Some(finder) = &mut stoat.file_finder {
         file_finder::render_file_finder(finder, ws, &stoat.theme, size, buf);
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true);
+        let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true, false);
         let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -377,7 +377,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         );
     } else if let Some(palette) = &mut stoat.command_palette {
         command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);
-        let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false);
+        let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false, false);
         let raw = stoat.keymap.scoped_bindings(&state, "palette_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -462,7 +462,15 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             buf,
         );
     } else if !PRIMARY_MODES.contains(&stoat.mode.as_str()) {
-        let state = StoatKeymapState::new(&stoat.mode);
+        // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
+        // mutable borrow of the active workspace, so read the flags directly.
+        let state = StoatKeymapState::with_flags(
+            &stoat.mode,
+            stoat.command_palette.is_some(),
+            stoat.help.is_some(),
+            stoat.file_finder.is_some(),
+            ws.rebase_active.is_some(),
+        );
         let raw = stoat.keymap.active_bindings(&state);
         let bindings: Vec<_> = raw
             .iter()
