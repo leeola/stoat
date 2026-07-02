@@ -48,6 +48,7 @@ use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::Bias;
+use stoatty_widgets::ApcScene;
 use tokio::sync::{
     mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
     watch,
@@ -603,6 +604,10 @@ pub struct Stoat {
     /// `fill` page content must not be coalesced or dropped. `None` outside
     /// stoatty or before [`Self::set_stoatty_apc`] is called.
     pub(crate) apc_tx: Option<UnboundedSender<Vec<u8>>>,
+    /// Reused per-frame APC decoration buffer. Widgets append their component
+    /// frames while painting; [`Self::emit_apc_scene`] diffs it against the last
+    /// flush so unchanged decoration costs no bytes. Empty until a widget appends.
+    pub(crate) apc_scene: ApcScene,
     /// Smooth-scroll pool emit state for the focused editor. Tracks the
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
@@ -821,6 +826,7 @@ impl Stoat {
             active_snippet: None,
             stoatty: false,
             apc_tx: None,
+            apc_scene: ApcScene::new(),
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
         }
     }
@@ -1077,6 +1083,7 @@ impl Stoat {
                     if let Some(started) = t_event {
                         self.perf.record_input_to_publish(started.elapsed());
                     }
+                    self.emit_apc_scene();
                     self.emit_smooth_scroll();
                     if render.is_closed() {
                         break;
@@ -3534,7 +3541,34 @@ impl Stoat {
         self.render_tick += 1;
         buf.resize(self.size);
         buf.reset();
-        crate::render::frame(self, buf);
+
+        // Take the scene out so `frame` can hold a `&mut ApcScene` alongside its
+        // `&mut self` borrow. Widgets append into it during the paint.
+        let mut scene = std::mem::take(&mut self.apc_scene);
+        scene.clear();
+        crate::render::frame(self, buf, &mut scene);
+        self.apc_scene = scene;
+    }
+
+    /// Flush the frame's APC decoration scene to the channel, when it changed.
+    ///
+    /// A no-op unless running inside stoatty. [`ApcScene::flush_to`] writes
+    /// nothing when the scene matches the previous flush, so steady-state or
+    /// widget-free frames push no batch at all. Runs at the frame seam after the
+    /// live frame is published, beside [`Self::emit_smooth_scroll`].
+    fn emit_apc_scene(&mut self) {
+        if !self.stoatty {
+            return;
+        }
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+
+        let mut batch = Vec::new();
+        let _ = self.apc_scene.flush_to(&mut batch);
+        if !batch.is_empty() {
+            let _ = apc_tx.send(batch);
+        }
     }
 
     /// Emit the stoatty smooth-scroll APC for every visible editor pane's current
@@ -5489,6 +5523,45 @@ mod tests {
         assert!(
             !cmds.is_empty() && cmds.iter().all(|cmd| matches!(cmd, Command::PoolDrop(_))),
             "overlay mode only drops pools, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn apc_scene_emits_nothing_for_a_plain_editor_frame() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/scene");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        assert!(
+            drain_apc(&mut rx).is_empty(),
+            "a widget-free paint appends nothing, so the scene flush stays silent"
+        );
+    }
+
+    #[test]
+    fn apc_scene_flush_is_silent_outside_stoatty() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(false, tx);
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        assert!(
+            drain_apc(&mut rx).is_empty(),
+            "the scene flush never touches the channel outside stoatty"
         );
     }
 

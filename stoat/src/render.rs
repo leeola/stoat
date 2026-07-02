@@ -45,6 +45,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::path::Path;
+use stoatty_widgets::ApcScene;
 
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
@@ -158,7 +159,7 @@ pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
 ///
 /// When [`Stoat::pending_message`] is set the bottom row is reserved for it and
 /// the body layout shrinks by one row. Otherwise the panes keep full height.
-pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
+pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
     let full = stoat.size();
     let message = if full.height >= 2 {
         stoat.pending_message.clone()
@@ -244,6 +245,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             },
             frame,
             buf,
+            scene,
         );
     }
 

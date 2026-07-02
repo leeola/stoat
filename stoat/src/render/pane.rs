@@ -20,6 +20,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::path::Path;
+use stoatty_widgets::ApcScene;
 
 pub(crate) fn render_pane(
     pane: &Pane,
@@ -27,6 +28,7 @@ pub(crate) fn render_pane(
     ctx: PaneCtx<'_>,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
+    scene: &mut ApcScene,
 ) {
     let theme = frame.theme;
     let text_style = if is_focused {
@@ -70,6 +72,7 @@ pub(crate) fn render_pane(
                     labels,
                     frame.search_query,
                     diagnostic_info,
+                    Some(scene),
                 );
             }
         },

@@ -3893,6 +3893,7 @@ dependencies = [
  "stoat_scheduler",
  "stoat_text",
  "stoatty_protocol",
+ "stoatty_widgets",
  "tempfile",
  "time",
  "tokio",

@@ -22,6 +22,7 @@ stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
 stoatty_protocol = { path = "../tty_protocol" }
+stoatty_widgets = { path = "../tty_widgets" }
 ratatui.workspace = true
 crossterm.workspace = true
 serde = { workspace = true, features = ["derive"] }

@@ -11,6 +11,7 @@ use ratatui::{
 };
 use std::{collections::BTreeMap, ops::Range, path::Path};
 use stoat_text::{cursor_offset, Rope};
+use stoatty_widgets::ApcScene;
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -31,6 +32,7 @@ pub(crate) fn render_editor(
         None,
         None,
         None,
+        None,
     );
 }
 
@@ -46,6 +48,7 @@ pub(crate) fn render_editor_with_overlay(
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
+    _scene: Option<&mut ApcScene>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
