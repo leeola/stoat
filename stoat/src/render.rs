@@ -1,4 +1,3 @@
-pub(crate) mod term_pane;
 pub(crate) mod badges;
 pub(crate) mod code_action;
 pub(crate) mod command_palette;
@@ -24,12 +23,12 @@ pub(crate) mod reword;
 pub(crate) mod run_pane;
 pub(crate) mod sanitize;
 pub(crate) mod symbol_picker;
+pub(crate) mod term_pane;
 pub(crate) mod text;
 pub(crate) mod workspace_picker;
 pub(crate) mod workspace_symbol_picker;
 
 use crate::{
-    term_session::{TermId, TermSession},
     app::Stoat,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
@@ -37,6 +36,7 @@ use crate::{
     pane::{DockVisibility, FocusTarget},
     rebase::RebasePause,
     run::{RunId, RunState},
+    term_session::{TermId, TermSession},
 };
 use ratatui::{
     buffer::Buffer,

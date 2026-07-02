@@ -61,9 +61,9 @@ fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
                 state.dispose(ws);
             }
         },
-        View::Agent(id) => {
-            if let Some(agent) = ws.terms.remove(id) {
-                let session = agent.session;
+        View::Agent(id) | View::Terminal(id) => {
+            if let Some(term) = ws.terms.remove(id) {
+                let session = term.session;
                 executor
                     .spawn(async move {
                         if let Err(err) = session.kill().await {

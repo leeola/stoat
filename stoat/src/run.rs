@@ -6,7 +6,7 @@ use crate::{
     workspace::Workspace,
 };
 pub use pty::{
-    agent_socket_path, spawn_term_reader, spawn_claude, spawn_oneshot, spawn_shell,
+    agent_socket_path, spawn_claude, spawn_oneshot, spawn_shell, spawn_term_reader,
     PtyNotification, ShellHandle,
 };
 use ratatui::layout::Rect;

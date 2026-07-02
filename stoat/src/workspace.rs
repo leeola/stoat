@@ -2,7 +2,6 @@ mod name;
 mod persist;
 
 use crate::{
-    term_session::{TermId, TermSession},
     agent_status::AgentStatus,
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
     badge::BadgeTray,
@@ -24,6 +23,7 @@ use crate::{
     review::ReviewFileInput,
     review_session::ReviewSession,
     run::{RunId, RunState},
+    term_session::{TermId, TermSession},
 };
 use codegraph::{CodeGraph, FileId};
 pub use persist::find_resume_anchor;
@@ -316,7 +316,7 @@ impl Workspace {
                         visible.push(editor.buffer_id);
                     }
                 },
-                View::Label(_) | View::Run(_) | View::Agent(_) => {},
+                View::Label(_) | View::Run(_) | View::Agent(_) | View::Terminal(_) => {},
             }
         }
         for id in self.buffers.preview_buffer_ids() {
@@ -514,7 +514,7 @@ impl Workspace {
             .panes
             .split_panes()
             .filter_map(|(_, pane)| match pane.view {
-                View::Agent(id) => {
+                View::Agent(id) | View::Terminal(id) => {
                     let (content, _) = split_pane_status(pane.area);
                     Some((id, content.height, content.width))
                 },

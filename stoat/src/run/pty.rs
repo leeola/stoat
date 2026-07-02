@@ -1,7 +1,7 @@
 use super::RunId;
 use crate::{
-    term_session::TermId,
     host::terminal::{open_local_pty, SpawnArgs, TerminalHost, TerminalSession},
+    term_session::TermId,
     workspace::WorkspaceUid,
 };
 use std::{

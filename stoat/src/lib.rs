@@ -1,8 +1,6 @@
 pub mod action_handlers;
 pub mod agent_ipc;
-pub mod term_session;
 pub mod agent_status;
-pub mod term_screen;
 pub mod app;
 pub mod badge;
 pub mod buffer;
@@ -46,6 +44,8 @@ mod review_session;
 pub mod run;
 mod selection;
 mod smooth_scroll;
+pub mod term_screen;
+pub mod term_session;
 pub mod theme;
 pub mod ui;
 pub mod workspace;

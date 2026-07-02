@@ -61,10 +61,10 @@ pub(crate) fn render_term_pane(
 #[cfg(test)]
 mod tests {
     use crate::{
-        term_session::TermSession,
-        term_screen::TermScreen,
         host::{FakeTerminalSession, TerminalSession},
         pane::{Axis, View},
+        term_screen::TermScreen,
+        term_session::TermSession,
         Stoat,
     };
     use std::sync::Arc;

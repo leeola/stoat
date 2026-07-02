@@ -3,10 +3,10 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, View},
     render::{
-        term_pane::render_term_pane,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
         run_pane::render_run_pane,
+        term_pane::render_term_pane,
         FrameCtx, PaneCtx,
     },
 };
@@ -78,9 +78,9 @@ pub(crate) fn render_pane(
                 render_run_pane(run_state, editors, theme, content_area, is_focused, buf);
             }
         },
-        View::Agent(agent_id) => {
-            if let Some(agent) = terms.get(*agent_id) {
-                render_term_pane(agent, content_area, is_focused, buf);
+        View::Agent(term_id) | View::Terminal(term_id) => {
+            if let Some(term) = terms.get(*term_id) {
+                render_term_pane(term, content_area, is_focused, buf);
             }
         },
     }
@@ -457,6 +457,7 @@ fn pane_status_info(
         },
         View::Run(_) => (Some("[run]".to_string()), false, None),
         View::Agent(_) => (Some("[agent]".to_string()), false, None),
+        View::Terminal(_) => (Some("[term]".to_string()), false, None),
         View::Label(label) => (Some(label.clone()), false, None),
     }
 }

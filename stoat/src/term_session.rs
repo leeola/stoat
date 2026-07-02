@@ -5,7 +5,7 @@
 //! can host several sessions at once, and a pane view such as
 //! [`View::Agent`](crate::pane::View::Agent) names one by its [`TermId`].
 
-use crate::{term_screen::TermScreen, host::terminal::TerminalSession};
+use crate::{host::terminal::TerminalSession, term_screen::TermScreen};
 use slotmap::new_key_type;
 use std::sync::Arc;
 

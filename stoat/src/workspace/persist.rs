@@ -337,6 +337,7 @@ fn stale_replacement(view: &View) -> Option<View> {
     match view {
         View::Run(_) => Some(View::Label("Terminal (closed)".into())),
         View::Agent(_) => Some(View::Label("Agent (closed)".into())),
+        View::Terminal(_) => Some(View::Label("Terminal (closed)".into())),
         View::Label(_) | View::Editor(_) => None,
     }
 }

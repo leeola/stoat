@@ -1,7 +1,6 @@
 use crate::{
     action_handlers,
     agent_ipc::{AgentControl, AgentEvent},
-    term_session::TermId,
     agent_status::AgentStatus,
     badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
@@ -22,6 +21,7 @@ use crate::{
     rebase::RebasePause,
     register,
     run::{GridSelection, PtyNotification, RunId},
+    term_session::TermId,
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::{PickerOutcome, WorkspacePicker},
@@ -2533,9 +2533,10 @@ impl Stoat {
 
     /// The agent session that should receive raw keystrokes, if any.
     ///
-    /// `Some` only in insert mode with a focused `View::Agent` split pane. This
-    /// mirrors how insert mode sends typing to the focused editor, except the
-    /// bytes go to the agent's PTY. Normal mode keeps its editor and
+    /// `Some` only in insert mode with a focused `View::Agent` or
+    /// `View::Terminal` split pane. This mirrors how insert mode sends typing
+    /// to the focused editor, except the bytes go to the pane's PTY. Normal
+    /// mode keeps its editor and
     /// pane-navigation bindings, so the user enters the agent with `i` and
     /// leaves via the [`Self::route_key_to_term`] escape.
     fn term_input_target(&self) -> Option<TermId> {
@@ -2548,7 +2549,7 @@ impl Stoat {
             return None;
         };
         match &ws.panes.pane(ws.panes.focus()).view {
-            View::Agent(id) => Some(*id),
+            View::Agent(id) | View::Terminal(id) => Some(*id),
             _ => None,
         }
     }
@@ -4519,7 +4520,37 @@ mod tests {
         );
     }
 
-    fn stoat_with_focused_agent() -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {
+    #[test]
+    fn closing_terminal_pane_kills_pty_child() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        ws.panes.split(crate::pane::Axis::Vertical);
+        let focused = ws.panes.focus();
+
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
+        let term_id = ws.terms.insert(crate::term_session::TermSession {
+            term: crate::term_screen::TermScreen::new(24, 80),
+            session,
+        });
+        ws.panes.pane_mut(focused).view = View::Terminal(term_id);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+        h.settle();
+
+        assert!(
+            fake.was_killed(),
+            "closing the terminal pane kills its PTY child"
+        );
+        assert!(
+            !h.stoat.active_workspace().terms.contains_key(term_id),
+            "closing the terminal pane drops its session",
+        );
+    }
+
+    fn stoat_with_focused_term(
+        make_view: fn(TermId) -> View,
+    ) -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
         stoat.mode = "insert".to_string();
@@ -4528,12 +4559,16 @@ mod tests {
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
         let ws = stoat.active_workspace_mut();
         let focused = ws.panes.focus();
-        let agent_id = ws.terms.insert(crate::term_session::TermSession {
+        let term_id = ws.terms.insert(crate::term_session::TermSession {
             term: crate::term_screen::TermScreen::new(24, 80),
             session,
         });
-        ws.panes.pane_mut(focused).view = View::Agent(agent_id);
-        (stoat, agent_id, fake)
+        ws.panes.pane_mut(focused).view = make_view(term_id);
+        (stoat, term_id, fake)
+    }
+
+    fn stoat_with_focused_agent() -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {
+        stoat_with_focused_term(View::Agent)
     }
 
     fn bare(code: KeyCode) -> KeyEvent {
@@ -4589,6 +4624,21 @@ mod tests {
             stoat.mode, "insert",
             "Ctrl-W passes through, does not leave insert"
         );
+    }
+
+    #[test]
+    fn focused_terminal_pane_routes_keys_to_pty() {
+        let (mut stoat, _id, fake) = stoat_with_focused_term(View::Terminal);
+
+        stoat.handle_key(bare(KeyCode::Char('l')));
+        stoat.handle_key(bare(KeyCode::Char('s')));
+        stoat.handle_key(bare(KeyCode::Enter));
+
+        assert_eq!(
+            fake.sent_bytes(),
+            vec![b"l".to_vec(), b"s".to_vec(), vec![b'\r']],
+        );
+        assert_eq!(stoat.mode, "insert");
     }
 
     #[test]

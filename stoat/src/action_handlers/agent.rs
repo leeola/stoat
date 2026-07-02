@@ -1,10 +1,10 @@
 use crate::{
-    term_session::TermSession,
-    term_screen::TermScreen,
     app::{Stoat, UpdateEffect},
     host::terminal::TerminalSession,
     pane::View,
-    run::{spawn_term_reader, spawn_claude},
+    run::{spawn_claude, spawn_term_reader},
+    term_screen::TermScreen,
+    term_session::TermSession,
 };
 use futures::FutureExt;
 use std::sync::Arc;
