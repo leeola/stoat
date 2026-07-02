@@ -694,6 +694,10 @@ impl Terminal {
                 self.borders.push(border);
                 self.decorations_dirty.borders = true;
             },
+            // Panel compositing is not implemented in this build. The command
+            // decodes so emitters can target it, but the terminal accepts and
+            // ignores the frame rather than rendering it.
+            Command::Panel(_) => {},
             Command::Scale(scale) => {
                 self.scales.push(scale);
                 self.decorations_dirty.scales = true;

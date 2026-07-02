@@ -16,6 +16,7 @@ use crate::frame::{self, Frame};
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
     Border(BorderCommand),
+    Panel(PanelCommand),
     Scale(ScaleCommand),
     /// Open a popover whose content text streams as the bytes that follow,
     /// until [`Command::PopoverEnd`] commits it. The fixed head (region, colors,
@@ -100,6 +101,30 @@ pub enum BorderStyle {
     Heavy,
     Double,
     Rounded,
+}
+
+/// Draw off-grid modal chrome framing a cell rectangle.
+///
+/// A `width` by `height` cell region at (`top`, `left`) in absolute grid
+/// coordinates gets a hairline frame in `border` at `style` weight, with
+/// `corner_radius` device-pixel rounded corners (0 = square) and an optional
+/// drop `shadow`. Unlike a per-cell [`BorderCommand`], the frame is a floating
+/// component drawn under the grid text, so the framed cells keep rendering their
+/// own content.
+///
+/// `fill` is [`Some`] to paint the interior that color, or [`None`] to leave the
+/// cells' own SGR backgrounds showing through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PanelCommand {
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
+    pub style: BorderStyle,
+    pub border: [u8; 3],
+    pub corner_radius: u8,
+    pub fill: Option<[u8; 3]>,
+    pub shadow: bool,
 }
 
 /// Draw the glyph at a cell `scale` times the cell size.
@@ -339,6 +364,31 @@ pub fn encode_border_into(out: &mut Vec<u8>, command: &BorderCommand) {
         w.write_all(&command.height.to_be_bytes())?;
         w.write_all(&[style_code(command.style)])?;
         w.write_all(&command.color)
+    });
+    frame::end(out);
+}
+
+/// Encode a [`PanelCommand`] as a full `Gstoatty;panel` frame for an emitter.
+pub fn encode_panel(command: &PanelCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_panel_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;panel` frame for `command` to `out` without allocating.
+pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
+    frame::begin(out, "panel");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.top.to_be_bytes())?;
+        w.write_all(&command.left.to_be_bytes())?;
+        w.write_all(&command.width.to_be_bytes())?;
+        w.write_all(&command.height.to_be_bytes())?;
+        w.write_all(&[style_code(command.style)])?;
+        w.write_all(&command.border)?;
+        w.write_all(&[command.corner_radius])?;
+        w.write_all(&[command.fill.is_some() as u8])?;
+        w.write_all(&command.fill.unwrap_or([0, 0, 0]))?;
+        w.write_all(&[command.shadow as u8])
     });
     frame::end(out);
 }
@@ -738,6 +788,7 @@ pub fn encode_reset_into(out: &mut Vec<u8>) {
 pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
     match command {
         Command::Border(c) => encode_border_into(out, c),
+        Command::Panel(c) => encode_panel_into(out, c),
         Command::Scale(c) => encode_scale_into(out, c),
         Command::Popover(c) => encode_popover_into(
             out,
@@ -778,6 +829,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
 fn dispatch(frame: &Frame) -> Option<Command> {
     match frame.sub.as_str() {
         "border" => decode_border(&frame.args).map(Command::Border),
+        "panel" => decode_panel(&frame.args).map(Command::Panel),
         "scale" => decode_scale(&frame.args).map(Command::Scale),
         "popover" => decode_popover(&frame.args).map(Command::Popover),
         "popover_end" => Some(Command::PopoverEnd),
@@ -808,6 +860,22 @@ fn decode_border(args: &[Vec<u8>]) -> Option<BorderCommand> {
         height: u16::from_be_bytes([arg[6], arg[7]]),
         style: decode_style(arg[8])?,
         color: [arg[9], arg[10], arg[11]],
+    })
+}
+
+fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
+    let arg: &[u8; 18] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(PanelCommand {
+        top: u16::from_be_bytes([arg[0], arg[1]]),
+        left: u16::from_be_bytes([arg[2], arg[3]]),
+        width: u16::from_be_bytes([arg[4], arg[5]]),
+        height: u16::from_be_bytes([arg[6], arg[7]]),
+        style: decode_style(arg[8])?,
+        border: [arg[9], arg[10], arg[11]],
+        corner_radius: arg[12],
+        fill: (arg[13] != 0).then_some([arg[14], arg[15], arg[16]]),
+        shadow: arg[17] != 0,
     })
 }
 
@@ -1003,10 +1071,10 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
-        encode_line_layout, encode_pool_drop, encode_pool_region, encode_popover_end,
+        encode_line_layout, encode_panel, encode_pool_drop, encode_pool_region, encode_popover_end,
         encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
         encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
-        IconCommand, IconKind, LineLayoutCommand, PoolDropCommand, PoolRegionCommand,
+        IconCommand, IconKind, LineLayoutCommand, PanelCommand, PoolDropCommand, PoolRegionCommand,
         RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
     };
 
@@ -1048,6 +1116,52 @@ mod tests {
     fn rejects_wrong_length_border_payload() {
         // The single arg here decodes to 3 bytes, not the 12 a border needs.
         assert!(decode(b"Gstoatty;border;YWJj").is_none());
+    }
+
+    #[test]
+    fn panel_round_trips() {
+        let command = PanelCommand {
+            top: 3,
+            left: 12,
+            width: 40,
+            height: 10,
+            style: BorderStyle::Rounded,
+            border: [200, 40, 90],
+            corner_radius: 6,
+            fill: Some([20, 22, 30]),
+            shadow: true,
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    #[test]
+    fn panel_without_fill_round_trips() {
+        let command = PanelCommand {
+            top: 0,
+            left: 0,
+            width: 8,
+            height: 4,
+            style: BorderStyle::Light,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: None,
+            shadow: false,
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_panel_payload() {
+        // The single arg here decodes to 3 bytes, not the 18 a panel needs.
+        assert!(decode(b"Gstoatty;panel;YWJj").is_none());
     }
 
     #[test]
