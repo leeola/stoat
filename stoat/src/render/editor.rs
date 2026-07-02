@@ -1,5 +1,5 @@
 use crate::{
-    display_map::DisplayPoint,
+    display_map::{tab_map, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
     render::review::render_review,
 };
@@ -9,8 +9,8 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
 };
-use std::{collections::BTreeMap, path::Path};
-use stoat_text::cursor_offset;
+use std::{collections::BTreeMap, ops::Range, path::Path};
+use stoat_text::{cursor_offset, Rope};
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -146,17 +146,7 @@ pub(crate) fn render_editor_with_overlay(
     if let Some(query) = search_query.filter(|q| !q.is_empty()) {
         let version = buffer_snapshot.version();
         let rope = buffer_snapshot.rope();
-        let visible = {
-            let rope_len = rope.len();
-            let row_offset = |row: u32| {
-                snapshot
-                    .display_to_buffer(DisplayPoint::new(row, 0))
-                    .map(|point| rope.point_to_offset(point))
-                    .unwrap_or(rope_len)
-                    .min(rope_len)
-            };
-            row_offset(editor.scroll_row)..row_offset(end_row)
-        };
+        let visible = visible_byte_range(&snapshot, rope, editor.scroll_row, end_row);
         let stale = match &editor.search_match_cache {
             Some(cache) => {
                 cache.version != version || cache.query != query || cache.visible != visible
@@ -186,25 +176,19 @@ pub(crate) fn render_editor_with_overlay(
         let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
         let cache = editor.search_match_cache.as_ref().expect("set above");
         for &(match_start, match_end) in &cache.matches {
-            let mut offset = match_start;
-            let mut chars = rope.chars_at(offset);
-            while offset < match_end {
-                let Some(ch) = chars.next() else {
-                    break;
-                };
-                if ch != '\n' {
-                    let point = rope.offset_to_point(offset);
-                    let display = snapshot.buffer_to_display(point);
-                    if display.row >= editor.scroll_row && display.row < end_row {
-                        let y = inner.y + (display.row - editor.scroll_row) as u16;
-                        let x = inner.x + display.column as u16;
-                        if x < right && y < bottom {
-                            buf[(x, y)].set_style(match_style);
-                        }
-                    }
-                }
-                offset += ch.len_utf8();
-            }
+            paint_offset_range(
+                rope,
+                &snapshot,
+                match_start..match_end,
+                None,
+                match_style,
+                editor.scroll_row,
+                end_row,
+                inner,
+                right,
+                bottom,
+                buf,
+            );
         }
     }
 
@@ -217,17 +201,7 @@ pub(crate) fn render_editor_with_overlay(
     let primary_id = editor.selections.newest_anchor().id;
     let mut primary_cell: Option<(u16, u16)> = None;
     let rope = buffer_snapshot.rope();
-    let visible = {
-        let rope_len = rope.len();
-        let row_offset = |row: u32| {
-            snapshot
-                .display_to_buffer(DisplayPoint::new(row, 0))
-                .map(|point| rope.point_to_offset(point))
-                .unwrap_or(rope_len)
-                .min(rope_len)
-        };
-        row_offset(editor.scroll_row)..row_offset(end_row)
-    };
+    let visible = visible_byte_range(&snapshot, rope, editor.scroll_row, end_row);
     for selection in editor.selections.all_anchors() {
         let start_offset = buffer_snapshot.resolve_anchor(&selection.start);
         let end_offset = buffer_snapshot.resolve_anchor(&selection.end);
@@ -241,26 +215,19 @@ pub(crate) fn render_editor_with_overlay(
         let lo = start_offset.max(visible.start);
         let hi = end_offset.min(visible.end);
         if lo < hi {
-            let mut offset = lo;
-            let mut chars = rope.chars_at(lo);
-            while offset < hi {
-                let Some(ch) = chars.next() else {
-                    break;
-                };
-                if ch != '\n' && offset != cursor {
-                    let point = rope.offset_to_point(offset);
-                    let display = snapshot.buffer_to_display(point);
-                    if display.row >= editor.scroll_row && display.row < end_row {
-                        let y = inner.y + (display.row - editor.scroll_row) as u16;
-                        let x = inner.x + display.column as u16;
-                        if x < right && y < bottom {
-                            let cell = &mut buf[(x, y)];
-                            cell.set_style(selection_style);
-                        }
-                    }
-                }
-                offset += ch.len_utf8();
-            }
+            paint_offset_range(
+                rope,
+                &snapshot,
+                lo..hi,
+                Some(cursor),
+                selection_style,
+                editor.scroll_row,
+                end_row,
+                inner,
+                right,
+                bottom,
+                buf,
+            );
         }
 
         let cursor_point = rope.offset_to_point(cursor);
@@ -388,6 +355,122 @@ fn paint_diagnostic_gutter(
     }
 }
 
+/// Paint `style` over every character cell in the buffer byte range `range`,
+/// skipping newlines and `skip_offset` when it is set.
+///
+/// `skip_offset` is the cursor offset during selection painting, which the
+/// caller renders separately. Search-match painting passes `None`.
+///
+/// The display anchor is resolved once per buffer-row segment via
+/// [`DisplaySnapshot::buffer_to_display`]. On a row with no folds, inlays, or
+/// soft wrap the display column is the tab-expanded buffer column, so the
+/// segment advances one cell at a time through
+/// [`tab_map::advance_column_for_char`] instead of re-resolving each character.
+/// Re-resolving walks the whole row prefix, so the per-character path is
+/// quadratic in the row length. It is kept only for rows carrying folds,
+/// inlays, or soft wrap, where the display column is not a simple accumulation.
+#[allow(clippy::too_many_arguments)]
+fn paint_offset_range(
+    rope: &Rope,
+    snapshot: &DisplaySnapshot,
+    range: Range<usize>,
+    skip_offset: Option<usize>,
+    style: Style,
+    scroll_row: u32,
+    end_row: u32,
+    inner: Rect,
+    right: u16,
+    bottom: u16,
+    buf: &mut Buffer,
+) {
+    let map_simple =
+        snapshot.fold_snapshot().fold_count() == 0 && !snapshot.inlay_snapshot().has_inlays();
+    let tab_size = snapshot.tab_snapshot().tab_size();
+    let max_expansion_column = snapshot.tab_snapshot().max_expansion_column();
+    let line_count = snapshot.line_count();
+
+    let mut paint = |display_row: u32, display_col: u32| {
+        if display_row < scroll_row || display_row >= end_row {
+            return;
+        }
+        let y = inner.y + (display_row - scroll_row) as u16;
+        let x = inner.x + display_col as u16;
+        if x < right && y < bottom {
+            buf[(x, y)].set_style(style);
+        }
+    };
+
+    let mut offset = range.start;
+    let mut chars = rope.chars_at(offset);
+
+    'segments: while offset < range.end {
+        let display = snapshot.buffer_to_display(rope.offset_to_point(offset));
+        let single_display_row = !snapshot.is_wrap_continuation(display.row)
+            && (display.row + 1 >= line_count || !snapshot.is_wrap_continuation(display.row + 1));
+
+        if map_simple && single_display_row {
+            let row = display.row;
+            let mut col = display.column;
+            loop {
+                if offset >= range.end {
+                    break 'segments;
+                }
+                let Some(ch) = chars.next() else {
+                    break 'segments;
+                };
+                if ch == '\n' {
+                    offset += 1;
+                    continue 'segments;
+                }
+                if Some(offset) != skip_offset {
+                    paint(row, col);
+                }
+                tab_map::advance_column_for_char(&mut col, ch, tab_size, max_expansion_column);
+                offset += ch.len_utf8();
+            }
+        } else {
+            loop {
+                if offset >= range.end {
+                    break 'segments;
+                }
+                let Some(ch) = chars.next() else {
+                    break 'segments;
+                };
+                if ch == '\n' {
+                    offset += 1;
+                    continue 'segments;
+                }
+                if Some(offset) != skip_offset {
+                    let display = snapshot.buffer_to_display(rope.offset_to_point(offset));
+                    paint(display.row, display.column);
+                }
+                offset += ch.len_utf8();
+            }
+        }
+    }
+}
+
+/// Byte range of `rope` spanned by display rows `scroll_row..end_row`.
+///
+/// Rows beyond the buffer resolve to the rope length, so the returned range is
+/// always valid to slice.
+fn visible_byte_range(
+    snapshot: &DisplaySnapshot,
+    rope: &Rope,
+    scroll_row: u32,
+    end_row: u32,
+) -> Range<usize> {
+    let rope_len = rope.len();
+    let row_offset = |row: u32| {
+        snapshot
+            .display_to_buffer(DisplayPoint::new(row, 0))
+            .map(|point| rope.point_to_offset(point))
+            .unwrap_or(rope_len)
+            .min(rope_len)
+    };
+    row_offset(scroll_row)..row_offset(end_row)
+}
+
 pub(crate) fn editor_cursor_position(editor: &mut EditorState) -> Option<(u32, u32)> {
     if editor.review_view.is_some() {
         return None;
@@ -413,8 +496,8 @@ mod tests {
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
     use std::path::PathBuf;
-    use stoat_action::{MoveRight, OpenFile, OpenFileFinder};
-    use stoat_text::{Bias, SelectionGoal};
+    use stoat_action::{ExtendToLineEnd, MoveRight, OpenFile, OpenFileFinder};
+    use stoat_text::{Bias, Point, SelectionGoal};
 
     fn diag(line: u32, severity: DiagnosticSeverity) -> Diagnostic {
         Diagnostic {
@@ -538,5 +621,42 @@ mod tests {
         h.settle();
         h.snapshot();
         assert_eq!(h.stoat.primary_cursor_screen_pos(), None);
+    }
+
+    #[test]
+    fn snapshot_selection_over_tab_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 4);
+        let path = h.write_file("s.txt", "ab\tcd\n");
+        h.open_file(&path);
+        dispatch(&mut h.stoat, &ExtendToLineEnd);
+        h.assert_snapshot("selection_over_tab_line");
+    }
+
+    #[test]
+    fn snapshot_selection_over_wide_chars() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 4);
+        let path = h.write_file("s.txt", "a世z\n");
+        h.open_file(&path);
+        dispatch(&mut h.stoat, &ExtendToLineEnd);
+        // The text pass advances one terminal cell per glyph, so glyphs after a
+        // wide char diverge from the selection/cursor columns, which do account
+        // for display width. This locks that width-aware column math.
+        h.assert_snapshot("selection_over_wide_chars");
+    }
+
+    #[test]
+    fn snapshot_selection_spanning_fold() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 4);
+        let path = h.write_file("s.txt", "abcdefgh\nij\n");
+        h.open_file(&path);
+        h.settle();
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            editor
+                .display_map
+                .fold(vec![Point::new(0, 2)..Point::new(0, 6)]);
+        }
+        dispatch(&mut h.stoat, &ExtendToLineEnd);
+        h.assert_snapshot("selection_spanning_fold");
     }
 }
