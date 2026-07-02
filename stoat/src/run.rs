@@ -13,7 +13,7 @@ use ratatui::layout::Rect;
 use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
-pub use vterm::{GridSelection, OutputBlock, StyledCell, VtermGrid};
+pub use vterm::{CommandMark, GridSelection, OutputBlock, StyledCell, VtermGrid};
 
 new_key_type! {
     pub struct RunId;
@@ -155,21 +155,7 @@ impl RunState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pty::parse_sentinel_line;
     use ratatui::style::Color;
-
-    #[test]
-    fn parse_sentinel_valid() {
-        assert_eq!(parse_sentinel_line("__STOAT_5__ 0"), Some(0));
-        assert_eq!(parse_sentinel_line("__STOAT_5__ 127"), Some(127));
-    }
-
-    #[test]
-    fn parse_sentinel_invalid() {
-        assert_eq!(parse_sentinel_line("hello"), None);
-        assert_eq!(parse_sentinel_line("__STOAT_5__"), None);
-        assert_eq!(parse_sentinel_line("__STOAT_5__ abc"), None);
-    }
 
     #[test]
     fn grid_default_empty() {
@@ -292,6 +278,25 @@ mod tests {
         // OSC 0 (set window title) is a different command
         grid.feed(b"\x1b]0;some title\x1b\\");
         assert!(grid.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn osc133_records_start_and_done_with_exit() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]133;C\x07");
+        grid.feed(b"\x1b]133;D;0\x07");
+        assert_eq!(
+            grid.command_marks,
+            vec![CommandMark::Start, CommandMark::Done { exit: Some(0) }],
+        );
+    }
+
+    #[test]
+    fn osc133_done_without_exit_is_none() {
+        let mut grid = VtermGrid::new(20);
+        // ST-terminated (ESC \) with no exit field.
+        grid.feed(b"\x1b]133;D\x1b\\");
+        assert_eq!(grid.command_marks, vec![CommandMark::Done { exit: None }]);
     }
 
     #[test]

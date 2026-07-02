@@ -20,7 +20,7 @@ use crate::{
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
     rebase::RebasePause,
     register,
-    run::{GridSelection, PtyNotification, RunId},
+    run::{CommandMark, GridSelection, PtyNotification, RunId},
     term_session::TermId,
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
@@ -3228,6 +3228,17 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 block.feed(&data);
+                // An OSC 133 done mark finalizes the block with its exit code.
+                // Start marks are drained but unused. Blocks are created at
+                // submit time.
+                for mark in std::mem::take(&mut block.grid.command_marks) {
+                    if let CommandMark::Done { exit } = mark
+                        && !block.finished
+                    {
+                        block.finished = true;
+                        block.exit_status = exit;
+                    }
+                }
                 for text in block.grid.clipboard_writes.drain(..) {
                     if let Err(err) = clipboard_host.set(&text) {
                         tracing::warn!(

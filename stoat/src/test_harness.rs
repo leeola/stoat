@@ -733,9 +733,10 @@ impl TestHarness {
     }
 
     pub fn inject_run_done(&mut self, run_id: crate::run::RunId, exit_code: i32) {
-        let notif = crate::run::PtyNotification::CommandDone {
+        let mark = format!("\x1b]133;D;{exit_code}\x07");
+        let notif = crate::run::PtyNotification::Output {
             run_id,
-            exit_status: Some(exit_code),
+            data: mark.into_bytes(),
         };
         self.stoat.handle_pty_notification(notif);
         self.capture("inject_done");

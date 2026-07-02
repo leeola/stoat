@@ -21,6 +21,19 @@ impl Default for StyledCell {
     }
 }
 
+/// Shell-integration command boundary decoded from OSC 133 in the input
+/// stream.
+///
+/// `Start` (OSC 133;C) precedes a command's output. `Done` carries the
+/// command's exit code (OSC 133;D;&lt;exit&gt;), `None` when the shell omits
+/// it. Callers drain [`VtermGrid::command_marks`] after [`VtermGrid::feed`]
+/// to finalize the active output block. The grid does not own that state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandMark {
+    Start,
+    Done { exit: Option<i32> },
+}
+
 pub struct VtermGrid {
     cells: Vec<Vec<StyledCell>>,
     cursor_row: usize,
@@ -38,6 +51,10 @@ pub struct VtermGrid {
     /// Callers drain after [`Self::feed`] and forward to a clipboard
     /// host; the grid does not own clipboard side effects.
     pub clipboard_writes: Vec<String>,
+    /// OSC 133 shell-integration command marks decoded from the input
+    /// stream, in arrival order. Callers drain after [`Self::feed`] to
+    /// finalize the active output block on a `Done` mark.
+    pub command_marks: Vec<CommandMark>,
 }
 
 impl VtermGrid {
@@ -53,6 +70,7 @@ impl VtermGrid {
             alt_screen_detected: false,
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
+            command_marks: Vec::new(),
         }
     }
 
@@ -193,6 +211,25 @@ impl vte::Perform for VtermGrid {
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 133 shell-integration marks bound command output. "C" marks a
+        // command's start and "D" its completion with an optional exit code
+        // (OSC 133;D;<exit>). The app drains these to finalize the active
+        // output block. They are invisible, unlike the old __STOAT_N__ echo.
+        if !params.is_empty() && params[0] == b"133" {
+            match params.get(1) {
+                Some(p) if *p == b"C" => self.command_marks.push(CommandMark::Start),
+                Some(p) if *p == b"D" => {
+                    let exit = params
+                        .get(2)
+                        .and_then(|p| std::str::from_utf8(p).ok())
+                        .and_then(|s| s.trim().parse().ok());
+                    self.command_marks.push(CommandMark::Done { exit });
+                },
+                _ => {},
+            }
+            return;
+        }
+
         // OSC 52 -- "set clipboard". Format: ESC ] 52 ; <Pc> ; <Pd> ST,
         // where <Pc> is the selection ("c" / "p" / "s" / mixed / empty)
         // and <Pd> is base64-encoded text. We honour writes targeted at
