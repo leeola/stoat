@@ -5607,6 +5607,62 @@ mod tests {
         );
     }
 
+    fn rgb_diagnostic_theme() -> crate::theme::Theme {
+        let src = r##"theme rgbdiag {
+            ui.diagnostic.error.fg = "#ff0000";
+            ui.diagnostic.warning.fg = "#ffff00";
+            ui.diagnostic.info.fg = "#00ffff";
+            ui.diagnostic.hint.fg = "#808080";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbdiag")
+            .expect("rgb theme builds")
+    }
+
+    #[test]
+    fn diagnostic_gutter_emits_sub_cell_bars_inside_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_diagnostic_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/diag-rich");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                ..Default::default()
+            }],
+        );
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::Bar(_))),
+            "a severity mark emits a sub-cell bar, got {cmds:?}"
+        );
+    }
+
     #[test]
     fn editor_pool_pages_fill_asynchronously() {
         use stoatty_protocol::command::{Command, FillCommand};

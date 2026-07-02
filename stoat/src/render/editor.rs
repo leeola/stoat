@@ -1,17 +1,18 @@
 use crate::{
     display_map::{tab_map, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
-    render::review::render_review,
+    render::review::{render_review, style_rgb},
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
+    widgets::StatefulWidget,
 };
 use std::{collections::BTreeMap, ops::Range, path::Path};
 use stoat_text::{cursor_offset, Rope};
-use stoatty_widgets::ApcScene;
+use stoatty_widgets::{bar::Bar, ApcScene};
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -97,16 +98,47 @@ pub(crate) fn render_editor_with_overlay(
         height: inner.height,
     };
     if gutter_w > 0 {
-        paint_diagnostic_gutter(
-            row_severity,
-            inner.x - gutter_w,
-            inner.y,
-            inner.height,
-            editor.scroll_row,
-            end_row,
-            theme,
-            buf,
-        );
+        let gutter_x = inner.x - gutter_w;
+        // Rich mode emits a sub-cell severity bar per row instead of the glyph,
+        // engaging only inside stoatty with every severity color resolved to RGB.
+        let rich = scene.filter(|_| stoatty).zip(severity_colors(theme));
+        match rich {
+            Some((scene, colors)) => {
+                let area = Rect {
+                    x: gutter_x,
+                    y: inner.y,
+                    width: gutter_w,
+                    height: inner.height,
+                };
+                for display_row in editor.scroll_row..end_row {
+                    let row_offset = (display_row - editor.scroll_row) as u16;
+                    if row_offset >= inner.height {
+                        break;
+                    }
+                    let Some(sev) = row_severity.get(&display_row) else {
+                        continue;
+                    };
+                    Bar {
+                        x: 0,
+                        y: row_offset * 16,
+                        width: 6,
+                        height: 16,
+                        color: severity_color(*sev, &colors),
+                    }
+                    .render(area, buf, &mut *scene);
+                }
+            },
+            None => paint_diagnostic_gutter(
+                row_severity,
+                gutter_x,
+                inner.y,
+                inner.height,
+                editor.scroll_row,
+                end_row,
+                theme,
+                buf,
+            ),
+        }
     }
     // Record the inset so click-to-offset can subtract the same shift the text
     // rect took above. Written after the `row_severity` borrow of `editor` ends.
@@ -332,6 +364,36 @@ fn severity_rank(sev: DiagnosticSeverity) -> u8 {
         DiagnosticSeverity::INFORMATION => 2,
         DiagnosticSeverity::HINT => 3,
         _ => 0,
+    }
+}
+
+struct SeverityColors {
+    error: [u8; 3],
+    warning: [u8; 3],
+    info: [u8; 3],
+    hint: [u8; 3],
+}
+
+/// Extract every diagnostic-severity color as RGB, or `None` if any is missing
+/// or not an RGB color. A `None` here disables the sub-cell gutter for the whole
+/// frame, so it falls back to the ASCII glyphs rather than mixing the two.
+fn severity_colors(theme: &crate::theme::Theme) -> Option<SeverityColors> {
+    use crate::theme::scope as s;
+    Some(SeverityColors {
+        error: style_rgb(theme.get(s::UI_DIAGNOSTIC_ERROR).fg)?,
+        warning: style_rgb(theme.get(s::UI_DIAGNOSTIC_WARNING).fg)?,
+        info: style_rgb(theme.get(s::UI_DIAGNOSTIC_INFO).fg)?,
+        hint: style_rgb(theme.get(s::UI_DIAGNOSTIC_HINT).fg)?,
+    })
+}
+
+fn severity_color(sev: DiagnosticSeverity, colors: &SeverityColors) -> [u8; 3] {
+    match sev {
+        DiagnosticSeverity::ERROR => colors.error,
+        DiagnosticSeverity::WARNING => colors.warning,
+        DiagnosticSeverity::INFORMATION => colors.info,
+        DiagnosticSeverity::HINT => colors.hint,
+        _ => colors.error,
     }
 }
 

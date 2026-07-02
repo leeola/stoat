@@ -378,7 +378,7 @@ fn status_bar_color(status: ChunkStatus, is_current: bool, colors: &RichColors) 
     }
 }
 
-fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
+pub(crate) fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
     match color {
         Some(Color::Rgb(r, g, b)) => Some([r, g, b]),
         _ => None,
