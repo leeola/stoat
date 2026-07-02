@@ -2000,7 +2000,10 @@ impl Stoat {
         let ws = self.active_workspace_mut();
         let editor = ws.editors.get_mut(editor_id)?;
         let display_row = editor.scroll_row + row as u32;
-        let display_col = col as u32;
+        // Subtract the diagnostic gutter inset the last render shifted the text
+        // rect by, so a click lands on the glyph under the pointer. A click on
+        // the gutter column itself saturates to column 0.
+        let display_col = (col as u32).saturating_sub(editor.gutter_width as u32);
         let snapshot = editor.display_map.snapshot();
         let raw = crate::display_map::DisplayPoint::new(display_row, display_col);
         let clipped = snapshot.clip_point(raw, Bias::Left);
@@ -6510,6 +6513,50 @@ mod tests {
         ));
         assert_eq!(focused_primary_offsets(&mut h), (3, 3));
         assert!(h.stoat.editor_drag.is_some(), "drag state armed");
+    }
+
+    #[test]
+    fn editor_click_excludes_the_diagnostic_gutter() {
+        // The no-gutter case for the same click (offset 3) is covered by
+        // editor_mouse_down_collapses_cursor_at_clicked_offset above.
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/gutter-click");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"abcdef\nghi\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path: path.clone() });
+        h.settle();
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                message: String::new(),
+                ..Default::default()
+            }],
+        );
+        h.stoat.render();
+
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 3,
+            area.y,
+        ));
+        assert_eq!(
+            focused_primary_offsets(&mut h),
+            (2, 2),
+            "the gutter shifts text right one column, so the click excludes it"
+        );
     }
 
     #[test]

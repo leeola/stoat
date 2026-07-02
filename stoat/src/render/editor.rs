@@ -104,6 +104,9 @@ pub(crate) fn render_editor_with_overlay(
             buf,
         );
     }
+    // Record the inset so click-to-offset can subtract the same shift the text
+    // rect took above. Written after the `row_severity` borrow of `editor` ends.
+    editor.gutter_width = gutter_w;
 
     let right = inner.x + inner.width;
     let bottom = inner.y + inner.height;
