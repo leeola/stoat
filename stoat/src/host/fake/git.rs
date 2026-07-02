@@ -285,6 +285,13 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Clear every recorded working-tree change, so the repo reports a clean
+    /// tree. Simulates the tree having been fully committed.
+    pub fn clear_changes(&mut self) -> &mut Self {
+        self.mutate_repo(|state| state.changed.clear());
+        self
+    }
+
     /// Seed a root (no-parent) commit identified by `sha` with the given
     /// tree. `files` is a slice of `(rel_path, content)` pairs; entries
     /// are stored as the commit's full tree snapshot.

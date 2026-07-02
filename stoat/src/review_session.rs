@@ -1032,6 +1032,39 @@ mod tests {
     }
 
     #[test]
+    fn review_refresh_on_clean_tree_closes_the_session() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+        assert!(h.stoat.active_workspace().review.is_some(), "session opens");
+
+        // Simulate everything being committed, so the working tree is clean.
+        h.fake_git().add_repo("/work").clear_changes();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
+        h.settle();
+
+        assert!(
+            h.stoat.active_workspace().review.is_none(),
+            "a clean-tree refresh closes the stale session"
+        );
+        assert_eq!(h.stoat.mode, "normal");
+        let badges = &h.stoat.active_workspace().badges;
+        let label = badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .and_then(|id| badges.get(id))
+            .map(|b| b.label.as_str());
+        assert_eq!(
+            label,
+            Some("working tree clean"),
+            "the clean-tree close surfaces an info badge"
+        );
+    }
+
+    #[test]
     fn review_refresh_in_memory_carries_status() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);

@@ -35,6 +35,11 @@ use stoat_scheduler::Task;
 pub(crate) struct PendingReviewScan {
     task: Task<Option<ReviewSession>>,
     sync_path: Option<std::path::PathBuf>,
+    /// Close the open session when the scan finds nothing, rather than leaving
+    /// its now-stale diffs up. Set only by a working-tree refresh, where an
+    /// empty result means the tree was fully committed. An open or a commit
+    /// scan leaves it `false`.
+    close_on_empty: bool,
 }
 
 pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
@@ -50,6 +55,7 @@ pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
     stoat.pending_review_scan = Some(PendingReviewScan {
         task: executor.spawn_with_redraw(redraw, scan),
         sync_path: None,
+        close_on_empty: false,
     });
 }
 
@@ -268,6 +274,7 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
     stoat.pending_review_scan = Some(PendingReviewScan {
         task: executor.spawn_with_redraw(redraw, scan),
         sync_path: None,
+        close_on_empty: false,
     });
     UpdateEffect::Redraw
 }
@@ -286,6 +293,7 @@ pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: 
     stoat.pending_review_scan = Some(PendingReviewScan {
         task: executor.spawn_with_redraw(redraw, scan),
         sync_path: None,
+        close_on_empty: false,
     });
 }
 
@@ -569,6 +577,9 @@ pub(super) fn review_refresh(
     };
 
     if is_git_source(&source) {
+        // A committed-away working tree closes the session on refresh. A commit
+        // diff is a fixed snapshot, so it never closes on an empty rescan.
+        let close_on_empty = matches!(source, ReviewSource::WorkingTree { .. });
         let executor = stoat.executor.clone();
         let git_host = stoat.git_host.clone();
         let fs_host = stoat.fs_host.clone();
@@ -583,6 +594,7 @@ pub(super) fn review_refresh(
         stoat.pending_review_scan = Some(PendingReviewScan {
             task: executor.spawn_with_redraw(redraw, scan),
             sync_path,
+            close_on_empty,
         });
         return UpdateEffect::Redraw;
     }
@@ -760,6 +772,7 @@ pub(super) fn open_review(stoat: &mut Stoat) {
     stoat.pending_review_scan = Some(PendingReviewScan {
         task: executor.spawn_with_redraw(redraw, scan),
         sync_path: None,
+        close_on_empty: false,
     });
 }
 
@@ -768,10 +781,12 @@ pub(super) fn open_review(stoat: &mut Stoat) {
 ///
 /// Polls the in-flight scan with a no-op waker, so it never blocks. On
 /// completion the ready [`ReviewSession`] is installed on the main loop.
-/// `None` means the source had no changes worth reviewing. A
-/// [`PendingReviewScan::sync_path`] set by an external-edit refresh triggers
-/// the post-install scroll and badge update. Returns whether the task
-/// resolved this call, mirroring the other render-time pumps.
+/// `None` means the source had no changes worth reviewing. When the scan was a
+/// working-tree refresh ([`PendingReviewScan::close_on_empty`]), that closes the
+/// open session and shows a "working tree clean" badge rather than leaving its
+/// stale diffs up. A [`PendingReviewScan::sync_path`] set by an external-edit
+/// refresh triggers the post-install scroll and badge update. Returns whether
+/// the task resolved this call, mirroring the other render-time pumps.
 ///
 /// Driven from [`Stoat::render`] and the test harness `settle` loop. The
 /// scan's completion notifies the redraw channel, so the loop wakes to pump
@@ -791,7 +806,13 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
             }
             true
         },
-        Poll::Ready(None) => true,
+        Poll::Ready(None) => {
+            if pending.close_on_empty && stoat.active_workspace().review.is_some() {
+                let _ = close_review(stoat);
+                emit_review_info_badge(stoat, "working tree clean");
+            }
+            true
+        },
         Poll::Pending => {
             stoat.pending_review_scan = Some(pending);
             false
