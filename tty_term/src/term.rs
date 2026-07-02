@@ -110,6 +110,12 @@ pub struct Terminal {
     /// the previous [`Self::project`], so a moved or cleared decoration can damage
     /// the rows it used to cover and erase its stale footprint.
     last_decoration_footprint: Vec<bool>,
+    /// Scratch reused by [`Self::project`] to build the current decoration
+    /// footprint without allocating each frame. Swapped with
+    /// [`Self::last_decoration_footprint`] after the damage comparison, so the
+    /// two buffers alternate roles and a steady-state projection allocates
+    /// neither.
+    footprint_scratch: Vec<bool>,
     /// The inclusive viewport row span the selection covered at the previous
     /// [`Self::project`], so a growing or shrinking drag can damage the rows it
     /// entered or left and repaint their INVERSE overlay. `None` when there was
@@ -339,6 +345,7 @@ impl Terminal {
             line_layout: None,
             decorations_dirty: DecorationDirty::default(),
             last_decoration_footprint: Vec::new(),
+            footprint_scratch: Vec::new(),
             last_selection_span: None,
             decoration_damage: Vec::new(),
             last_history: 0,
@@ -1003,6 +1010,9 @@ impl Terminal {
         if span != self.last_selection_span
             && let Damage::Partial(rows_dirty) = &mut dirty
         {
+            // An idle frame carries an empty vec, so grow it before marking the
+            // entered rows. A genuinely-damaged frame already sizes it to rows.
+            rows_dirty.resize(rows, false);
             for (lo, hi) in span.into_iter().chain(self.last_selection_span) {
                 for slot in rows_dirty.iter_mut().skip(lo).take(hi - lo + 1) {
                     *slot = true;
@@ -1073,17 +1083,23 @@ impl Terminal {
         // rebuild the new footprint and erase a moved or cleared one. A VT
         // re-stamp re-applies the same decorations, leaving this signal untouched.
         if self.last_decoration_footprint.len() != rows {
-            self.last_decoration_footprint = vec![false; rows];
+            self.last_decoration_footprint.clear();
+            self.last_decoration_footprint.resize(rows, false);
         }
         if self.decoration_damage.len() != rows {
             self.decoration_damage = vec![false; rows];
         }
-        let footprint = decoration_footprint(&self.borders, &self.scales, rows);
+        decoration_footprint(
+            &self.borders,
+            &self.scales,
+            rows,
+            &mut self.footprint_scratch,
+        );
         if self.decorations_dirty.borders || self.decorations_dirty.scales || resized {
             for ((damage, &now), &before) in self
                 .decoration_damage
                 .iter_mut()
-                .zip(&footprint)
+                .zip(&self.footprint_scratch)
                 .zip(&self.last_decoration_footprint)
             {
                 if now || before {
@@ -1091,7 +1107,10 @@ impl Terminal {
                 }
             }
         }
-        self.last_decoration_footprint = footprint;
+        mem::swap(
+            &mut self.last_decoration_footprint,
+            &mut self.footprint_scratch,
+        );
 
         self.decorations_dirty = DecorationDirty::default();
 
@@ -1120,6 +1139,10 @@ impl Terminal {
         match self.term.damage() {
             TermDamage::Full => Damage::Full,
             TermDamage::Partial(lines) => {
+                let mut lines = lines.peekable();
+                if lines.peek().is_none() {
+                    return Damage::Partial(Vec::new());
+                }
                 let mut rows_dirty = vec![false; rows];
                 for bounds in lines {
                     if let Some(slot) = rows_dirty.get_mut(bounds.line) {
@@ -1562,8 +1585,10 @@ fn decoration_footprint(
     borders: &[BorderCommand],
     scales: &[ScaleCommand],
     rows: usize,
-) -> Vec<bool> {
-    let mut footprint = vec![false; rows];
+    out: &mut Vec<bool>,
+) {
+    out.clear();
+    out.resize(rows, false);
 
     for border in borders {
         if border.width == 0 || border.height == 0 {
@@ -1574,18 +1599,16 @@ fn decoration_footprint(
             continue;
         }
         let bottom = (top + border.height as usize - 1).min(rows - 1);
-        footprint[top..=bottom].fill(true);
+        out[top..=bottom].fill(true);
     }
 
     for scale in scales {
         let top = scale.top as usize;
         let end = (top + scale.scale as usize).min(rows);
         if top < end {
-            footprint[top..end].fill(true);
+            out[top..end].fill(true);
         }
     }
-
-    footprint
 }
 
 /// Stamp every stored border region's perimeter edges onto `grid`.

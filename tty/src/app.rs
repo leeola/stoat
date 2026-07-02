@@ -833,7 +833,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             let sb_damage = if rebuild {
                                 Damage::Full
                             } else {
-                                Damage::Partial(vec![false; state.scrollback_grid.rows()])
+                                Damage::Partial(Vec::new())
                             };
                             state.gpu.render(
                                 &state.scrollback_grid,
