@@ -43,7 +43,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_action::{OpenFile, OpenReview, ReviewExternalEdit, ReviewRefresh};
+use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
@@ -952,7 +952,7 @@ impl Stoat {
     }
 
     pub fn open_review(&mut self) {
-        action_handlers::dispatch(self, &OpenReview);
+        action_handlers::dispatch(self, &Diff);
     }
 
     /// Handle that makes [`Self::run`] quit at its next loop turn when

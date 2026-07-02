@@ -238,7 +238,7 @@ on key {
         ] -> SetMode(bracket_next);
         [ -> SetMode(bracket_prev);
         m -> SetMode(match);
-        R -> OpenReview();
+        R -> Diff();
         / -> OpenSearchInput();
         ? -> OpenReverseSearchInput();
         n -> SearchNext();

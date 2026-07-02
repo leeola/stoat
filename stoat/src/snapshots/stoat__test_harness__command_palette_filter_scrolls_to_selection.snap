@@ -12,6 +12,7 @@ size: 80x24
   [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
+  [0m[35m│[0m[97m Diff                [0m[90mopen a diff of working-tree changes[0m[97m                  [0m[35m│[0m
   [0m[35m│[0m[97m ForceSaveBuffer     [0m[90msave the focused buffer, overwriting external changes[0m[35m│[0m
   [0m[35m│[0m[97m FormatSelections    [0m[90mformat selection via LSP[0m[97m                             [0m[35m│[0m
   [0m[35m│[0m[97m GotoDefinition      [0m[90mjump to symbol definition[0m[97m                            [0m[35m│[0m
@@ -20,11 +21,10 @@ size: 80x24
   [0m[35m│[0m[97m Hover               [0m[90mshow hover documentation[0m[97m                             [0m[35m│[0m
   [0m[35m│[0m[97m KeepSelections      [0m[90mkeep selections matching regex[0m[97m                       [0m[35m│[0m
   [0m[35m│[0m[97m NewWorkspace        [0m[90mcreate a new workspace[0m[97m                               [0m[35m│[0m
-  [0m[35m│[0m[97m OpenBuffer          [0m[90mswitch to an open buffer[0m[97m                             [0m[35m│[0m
-  [0m[35m│[0m[30m[46m OpenCommits         browse commit history                                [0m[35m│[0m
+  [0m[35m│[0m[30m[46m OpenBuffer          switch to an open buffer                             [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mOpen the commit-list view: a left pa[0m[33m┌ palette ──────────────────────────────┐[0m
-  [0m[35m│[0m[37mwith a right-pane preview of the sel[0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
+  [0m[35m│[0m[37mShow an already-open buffer in the f[0m[33m┌ palette ──────────────────────────────┐[0m
+  [0m[35m│[0m[37medits.[0m                              [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
   [0m[35m│[0m                                    [0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m    [0m[33m│[0m
   [0m[35m│[0m                                    [0m[33m│[0m[36m    C-f[0m[97m   page palette down[0m            [0m[33m│[0m
   [0m[35m│[0m                                    [0m[33m│[0m[36m    C-b[0m[97m   page palette up[0m              [0m[33m│[0m

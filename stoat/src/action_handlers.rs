@@ -173,7 +173,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.mode = "prompt".into();
             UpdateEffect::Redraw
         },
-        ActionKind::OpenReview => {
+        ActionKind::Diff => {
             review::open_review(stoat);
             UpdateEffect::Redraw
         },

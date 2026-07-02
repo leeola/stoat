@@ -722,11 +722,11 @@ mod tests {
     fn tiers_order_prefix_then_substring_then_fuzzy() {
         // For query `re`:
         // - `ReviewRefresh` starts with "re" (prefix).
-        // - `OpenReview` contains "re" as a non-prefix substring.
+        // - `CloseReview` contains "re" as a non-prefix substring.
         // - `RunInterrupt` has r(0),e(6) as a subsequence, no "re" substring.
         let listed = names_for("re");
         let prefix = pos_in(&listed, "ReviewRefresh");
-        let substring = pos_in(&listed, "OpenReview");
+        let substring = pos_in(&listed, "CloseReview");
         let fuzzy = pos_in(&listed, "RunInterrupt");
         assert!(prefix < substring, "prefix ranks above substring");
         assert!(substring < fuzzy, "substring ranks above fuzzy");
@@ -821,7 +821,7 @@ mod tests {
         ] {
             assert!(!listed.contains(&name), "{name} unexpectedly visible");
         }
-        for name in ["Quit", "OpenFile", "OpenReview", "OpenCommits", "FocusLeft"] {
+        for name in ["Quit", "OpenFile", "Diff", "OpenCommits", "FocusLeft"] {
             assert!(
                 listed.contains(&name),
                 "{name} missing from applicable list"

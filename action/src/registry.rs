@@ -76,11 +76,11 @@ use crate::{
             SetRebaseOpReword, SetRebaseOpSquash,
         },
         review::{
-            CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
-            JumpToPrevMoveSource, OpenReview, OpenReviewCommit, OpenReviewCommitRange,
-            QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk,
-            ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk,
-            ReviewToggleStage, ReviewUnstageChunk,
+            CloseReview, Diff, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
+            JumpToPrevMoveSource, OpenReviewCommit, OpenReviewCommitRange, QueryMoveRelationships,
+            ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk, ReviewRefresh,
+            ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
+            ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         terminal::Terminal,
@@ -151,7 +151,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(FileFinderScopeToggle))
     });
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
-    add(OpenReview::DEF, |_| Ok(Box::new(OpenReview)));
+    add(Diff::DEF, |_| Ok(Box::new(Diff)));
     add(JumpToMoveSource::DEF, |_| Ok(Box::new(JumpToMoveSource)));
     add(JumpToMoveTarget::DEF, |_| Ok(Box::new(JumpToMoveTarget)));
     add(JumpToNextMoveSource::DEF, |_| {
@@ -687,7 +687,7 @@ mod tests {
         "FileFinderPageDown",
         "FileFinderScopeToggle",
         "OpenHelp",
-        "OpenReview",
+        "Diff",
         "JumpToMoveSource",
         "JumpToMoveTarget",
         "JumpToNextMoveSource",

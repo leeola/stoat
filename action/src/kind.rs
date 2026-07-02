@@ -28,7 +28,7 @@ pub enum ActionKind {
     FileFinderScopeToggle,
     OpenCommandPalette,
     OpenHelp,
-    OpenReview,
+    Diff,
     AddSelectionBelow,
     AddSelectionAbove,
     MoveLeft,

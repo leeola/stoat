@@ -232,7 +232,7 @@ impl ReviewViewState {
 /// commit-list view).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ReviewOrigin {
-    /// Opened directly from normal mode (e.g. `OpenReview` or
+    /// Opened directly from normal mode (e.g. `Diff` or
     /// `OpenReviewCommit` from the palette). `CloseReview` returns to
     /// normal mode.
     #[default]
@@ -984,7 +984,7 @@ mod tests {
         h.settle();
 
         let ws = h.stoat.active_workspace();
-        let session = ws.review.as_ref().expect("session created by OpenReview");
+        let session = ws.review.as_ref().expect("session created by open_review");
         assert_eq!(session.files.len(), 1);
         assert_eq!(session.files[0].path, PathBuf::from("/work/a.rs"));
         assert_eq!(session.files[0].base_text.as_str(), REVIEW_TWO_HUNK_BASE);

@@ -1,11 +1,11 @@
 use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
-    OpenReviewDef,
-    OpenReview,
-    "OpenReview",
-    ActionKind::OpenReview,
-    "review changed files",
+    DiffDef,
+    Diff,
+    "Diff",
+    ActionKind::Diff,
+    "open a diff of working-tree changes",
     "Open the first modified or staged file with a structural diff against HEAD.",
     ActionPriority::Common
 );
@@ -439,15 +439,15 @@ mod tests {
 
     #[test]
     fn kind_and_name() {
-        assert_eq!(OpenReview.kind(), ActionKind::OpenReview);
-        assert_eq!(OpenReview.def().name(), "OpenReview");
-        assert!(OpenReview.def().params().is_empty());
-        assert!(OpenReview.def().palette_visible());
+        assert_eq!(Diff.kind(), ActionKind::Diff);
+        assert_eq!(Diff.def().name(), "Diff");
+        assert!(Diff.def().params().is_empty());
+        assert!(Diff.def().palette_visible());
     }
 
     #[test]
     fn downcast() {
-        let action: Box<dyn Action> = Box::new(OpenReview);
-        assert!(action.as_any().downcast_ref::<OpenReview>().is_some());
+        let action: Box<dyn Action> = Box::new(Diff);
+        assert!(action.as_any().downcast_ref::<Diff>().is_some());
     }
 }
