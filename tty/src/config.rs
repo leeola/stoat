@@ -47,10 +47,16 @@ pub struct Config {
     #[serde(default = "default_cursor_animation")]
     pub cursor_animation: CursorAnimation,
 
-    /// Program to launch over the PTY instead of the default shell, with its
-    /// arguments. `None`, the default, launches the default shell.
+    /// Program to launch over the PTY instead of the default stoat editor, with
+    /// its arguments. `None`, the default, launches the resolved stoat.
     #[serde(default)]
     pub shell: Option<ShellConfig>,
+
+    /// Path to the stoat editor binary launched as the default child. `None`,
+    /// the default, resolves stoat at runtime by sibling lookup. The `STOAT_BIN`
+    /// environment variable overrides this.
+    #[serde(default)]
+    pub stoat_program: Option<PathBuf>,
 
     /// Named color themes, keyed by the name [`theme`](Self::theme) selects.
     #[serde(default)]

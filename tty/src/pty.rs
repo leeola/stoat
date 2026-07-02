@@ -9,7 +9,7 @@
 use libc::passwd;
 use portable_pty::{self, Child, CommandBuilder, MasterPty, PtySize};
 use std::{
-    ffi::{c_char, CStr},
+    ffi::{c_char, CStr, OsString},
     io::{self, Read, Write},
     mem::MaybeUninit,
     path::Path,
@@ -49,6 +49,10 @@ impl Pty {
     /// start reading. Runs the command in `cwd` when given, otherwise inheriting
     /// the caller's working directory.
     ///
+    /// When `stoat_dir` is set, that directory is prepended to the child's
+    /// `PATH`, so a nested bare-`stoat` call from inside the child resolves to
+    /// the same binary stoatty launched.
+    ///
     /// `sink` runs on the reader thread: it is called with [`PtyOutput::Data`]
     /// for each chunk the shell writes and once with [`PtyOutput::Eof`] when the
     /// shell exits. It must be `Send` since it runs off the main thread.
@@ -56,6 +60,7 @@ impl Pty {
         program: &str,
         args: &[String],
         cwd: Option<&Path>,
+        stoat_dir: Option<&Path>,
         rows: u16,
         cols: u16,
         sink: impl FnMut(PtyOutput<'_>) + Send + 'static,
@@ -71,7 +76,7 @@ impl Pty {
 
         let child = pair
             .slave
-            .spawn_command(shell_command(program, args, cwd))
+            .spawn_command(shell_command(program, args, cwd, stoat_dir))
             .map_err(io::Error::other)?;
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
@@ -117,13 +122,18 @@ impl Drop for Pty {
 
 /// Build the shell command to launch under stoatty, running in `cwd` when
 /// given. [`configure_child_env`] sets the environment the child inherits.
-fn shell_command(program: &str, args: &[String], cwd: Option<&Path>) -> CommandBuilder {
+fn shell_command(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    stoat_dir: Option<&Path>,
+) -> CommandBuilder {
     let mut command = CommandBuilder::new(program);
     command.args(args);
     if let Some(dir) = cwd {
         command.cwd(dir);
     }
-    configure_child_env(&mut command);
+    configure_child_env(&mut command, stoat_dir);
     command
 }
 
@@ -153,12 +163,27 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 /// control this window. A real multiplexer launched inside stoatty re-sets
 /// these for its own children, so in-stoatty-mux detection still stands down as
 /// intended.
-fn configure_child_env(command: &mut CommandBuilder) {
+fn configure_child_env(command: &mut CommandBuilder, stoat_dir: Option<&Path>) {
     command.env("TERM", "xterm-256color");
     command.env("STOATTY", "1");
     for var in MULTIPLEXER_ENV_VARS {
         command.env_remove(var);
     }
+    if let Some(dir) = stoat_dir {
+        command.env("PATH", prepend_path(dir, std::env::var_os("PATH")));
+    }
+}
+
+/// Prepend `dir` to a `PATH`-style variable so a binary in `dir` is found
+/// before the existing entries. Yields just `dir` when `existing` is absent or
+/// empty, so no stray separator is appended.
+fn prepend_path(dir: &Path, existing: Option<OsString>) -> OsString {
+    let mut path = dir.as_os_str().to_os_string();
+    if let Some(existing) = existing.filter(|value| !value.is_empty()) {
+        path.push(if cfg!(windows) { ";" } else { ":" });
+        path.push(existing);
+    }
+    path
 }
 
 /// Size of the reader thread's buffer. Each read fills up to this many bytes
@@ -184,6 +209,10 @@ fn read_loop(mut reader: impl Read, mut sink: impl FnMut(PtyOutput<'_>)) {
 
 /// The shell to launch, in order of preference: `$SHELL`, the passwd entry's
 /// login shell, then `/bin/sh`.
+///
+/// Unused since stoatty defaults to launching the stoat editor. Retained for
+/// the plain-terminal launch mode that runs the login shell instead.
+#[allow(dead_code)]
 pub(crate) fn default_shell() -> String {
     shell_or_default(std::env::var("SHELL").ok(), passwd_shell())
 }
@@ -247,12 +276,13 @@ fn passwd_shell() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_child_env, read_loop, shell_command, shell_or_default, CommandBuilder, PtyOutput,
-        MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
+        configure_child_env, prepend_path, read_loop, shell_command, shell_or_default,
+        CommandBuilder, PtyOutput, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
     };
     use std::{
-        ffi::OsStr,
+        ffi::{OsStr, OsString},
         io::{self, Cursor, Write},
+        path::Path,
         thread,
     };
 
@@ -282,9 +312,16 @@ mod tests {
 
     #[test]
     fn shell_command_sets_term_and_stoatty_env() {
-        let command = shell_command("/bin/sh", &[], None);
+        let command = shell_command("/bin/sh", &[], None, Some(Path::new("/opt/stoat/bin")));
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
+        let path = command.get_env("PATH").expect("PATH set from stoat dir");
+        assert!(
+            path.to_str()
+                .expect("PATH is utf8")
+                .starts_with("/opt/stoat/bin"),
+            "stoat dir prepended to PATH: {path:?}"
+        );
     }
 
     #[test]
@@ -296,7 +333,7 @@ mod tests {
         command.env("ZELLIJ_SESSION_NAME", "main");
         command.env("ZELLIJ_PANE_ID", "71");
 
-        configure_child_env(&mut command);
+        configure_child_env(&mut command, None);
 
         for var in MULTIPLEXER_ENV_VARS {
             assert_eq!(command.get_env(var), None, "{var} not stripped");
@@ -307,10 +344,33 @@ mod tests {
 
     #[test]
     fn shell_command_sets_cwd_when_given() {
-        let command = shell_command("/bin/sh", &[], Some(std::path::Path::new("/tmp")));
+        let command = shell_command("/bin/sh", &[], Some(Path::new("/tmp")), None);
         assert_eq!(
             command.get_cwd().map(|cwd| cwd.as_os_str()),
             Some(OsStr::new("/tmp"))
+        );
+    }
+
+    #[test]
+    fn prepend_path_puts_dir_first() {
+        assert_eq!(
+            prepend_path(
+                Path::new("/opt/stoat"),
+                Some(OsString::from("/usr/bin:/bin"))
+            ),
+            OsString::from("/opt/stoat:/usr/bin:/bin")
+        );
+    }
+
+    #[test]
+    fn prepend_path_without_existing_is_just_dir() {
+        assert_eq!(
+            prepend_path(Path::new("/opt/stoat"), None),
+            OsString::from("/opt/stoat")
+        );
+        assert_eq!(
+            prepend_path(Path::new("/opt/stoat"), Some(OsString::new())),
+            OsString::from("/opt/stoat")
         );
     }
 

@@ -10,12 +10,13 @@
 
 use crate::{
     config::{self, Config, CursorAnimation},
-    pty::{self, Pty, PtyOutput},
+    pty::{Pty, PtyOutput},
+    stoat_bin,
 };
 use alacritty_terminal::sync::FairMutex;
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -51,22 +52,37 @@ const FONT_SIZE_FLOOR: u32 = 6;
 /// the wheel reports forwarded to a mouse-reporting app.
 const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
 
-/// Open the stoatty window running the launch command, or the user's default
-/// shell when none is given, at the winit default window size.
+/// Open the stoatty window running the launch command, or the resolved stoat
+/// editor when none is given, at the winit default window size.
 ///
-/// Resolves the launch program and its arguments by precedence: `command` (the
-/// `-e`/`--command` CLI override) first, then the `[shell]` config, then the
-/// default shell with no arguments. The command runs in `working_directory`
-/// when it names an existing directory; a non-directory is warned about and
-/// ignored, falling back to stoatty's own working directory.
+/// The launch program and arguments follow a precedence. `command` (the
+/// `-e`/`--command` CLI override) wins first, then the `[shell]` config, then
+/// the stoat editor resolved by [`stoat_bin::resolve`] with no arguments. When
+/// the editor is the chosen default, its directory is prepended to the child's
+/// `PATH` so nested bare-`stoat` calls resolve to the same binary.
+///
+/// The command runs in `working_directory` when it names an existing directory.
+/// A non-directory is warned about and ignored, falling back to stoatty's own
+/// working directory.
 ///
 /// Blocks the calling thread for the lifetime of the window. See
 /// [`run_with_shell`] to force a specific command instead.
 pub fn run(command: Option<(String, Vec<String>)>, working_directory: Option<PathBuf>) {
     let mut config = load_config();
-    let (program, args) = command
-        .or_else(|| config.shell.take().map(|s| (s.program, s.args)))
-        .unwrap_or_else(|| (pty::default_shell(), Vec::new()));
+    let (program, args, stoat_dir) = match command {
+        Some((program, args)) => (program, args, None),
+        None => match config.shell.take() {
+            Some(shell) => (shell.program, shell.args, None),
+            None => {
+                let stoat = stoat_bin::resolve(&config);
+                let dir = stoat
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(Path::to_path_buf);
+                (stoat.to_string_lossy().into_owned(), Vec::new(), dir)
+            },
+        },
+    };
     let working_directory = working_directory.and_then(|dir| {
         if dir.is_dir() {
             Some(dir)
@@ -78,7 +94,7 @@ pub fn run(command: Option<(String, Vec<String>)>, working_directory: Option<Pat
             None
         }
     });
-    run_with_config(config, program, args, None, working_directory);
+    run_with_config(config, program, args, None, working_directory, stoat_dir);
 }
 
 /// Open the stoatty window running `program` with `args` as the PTY command,
@@ -94,7 +110,7 @@ pub fn run(command: Option<(String, Vec<String>)>, working_directory: Option<Pat
 /// (`ControlFlow::Wait`): frames are drawn on demand when PTY output arrives or
 /// the window is resized, not on a continuous timer.
 pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>) {
-    run_with_config(load_config(), program, args, size, None);
+    run_with_config(load_config(), program, args, size, None, None);
 }
 
 /// Open the window running `program` with `args`, drawing with `config`'s theme
@@ -108,6 +124,7 @@ fn run_with_config(
     args: Vec<String>,
     size: Option<[u16; 2]>,
     working_directory: Option<PathBuf>,
+    stoat_dir: Option<PathBuf>,
 ) {
     let theme = config.resolve_theme();
 
@@ -129,6 +146,7 @@ fn run_with_config(
         config.cursor_animation,
         size,
         working_directory,
+        stoat_dir,
     );
     event_loop.run_app(&mut app).expect("run event loop");
 }
@@ -175,6 +193,10 @@ struct App {
     /// Working directory for the spawned command, or `None` to inherit
     /// stoatty's own. Already validated to an existing directory.
     working_directory: Option<PathBuf>,
+    /// Directory prepended to the spawned child's `PATH` when stoatty launches
+    /// the resolved stoat editor, so a nested bare-`stoat` call resolves to the
+    /// same binary. `None` for a `-e`/shell child or a bare-name stoat.
+    stoat_dir: Option<PathBuf>,
     theme: Theme,
     font_size: u32,
     /// Ordered font-family cascade from the config, resolved against the font db
@@ -202,12 +224,14 @@ impl App {
         cursor_animation: CursorAnimation,
         size: Option<[u16; 2]>,
         working_directory: Option<PathBuf>,
+        stoat_dir: Option<PathBuf>,
     ) -> App {
         App {
             proxy,
             program,
             args,
             working_directory,
+            stoat_dir,
             theme,
             font_size: font.size,
             font_family: font.family,
@@ -449,6 +473,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 &self.program,
                 &self.args,
                 self.working_directory.as_deref(),
+                self.stoat_dir.as_deref(),
                 rows as u16,
                 cols as u16,
                 move |output| match output {
