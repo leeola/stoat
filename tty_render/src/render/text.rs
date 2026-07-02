@@ -210,6 +210,12 @@ pub struct TextPass {
     /// a VT cell attribute, so VT damage tracks it; scroll rides the globals
     /// uniform, so this survives a scroll-only frame.
     underline_row_instances: Vec<Vec<UnderlineInstance>>,
+    /// Scratch reused each frame to flatten the row instances into a contiguous
+    /// upload slice, so `patch_plain_rows` allocates no per-frame temporary.
+    plain_upload_scratch: Vec<TextInstance>,
+    /// Scratch reused each frame for the underline upload slice, shared by
+    /// `prepare_underlines` and `prepare_composite`.
+    underline_upload_scratch: Vec<UnderlineInstance>,
     /// The grid width [`Self::glyph_row_cache`] was built at; a change invalidates
     /// every cached row since columns shift.
     glyph_cache_cols: usize,
@@ -426,6 +432,8 @@ impl TextPass {
             glyph_row_cache: Vec::new(),
             plain_row_instances: Vec::new(),
             underline_row_instances: Vec::new(),
+            plain_upload_scratch: Vec::new(),
+            underline_upload_scratch: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
             baseline,
@@ -709,13 +717,15 @@ impl TextPass {
             return;
         }
 
-        let underlines: Vec<UnderlineInstance> = (0..grid.rows())
-            .flat_map(|row| build_underline_row(grid, row, self.metrics))
-            .collect();
-        self.composite_underline_count = underlines.len() as u32;
-        if !underlines.is_empty() {
-            if underlines.len() > self.composite_underline_capacity {
-                self.composite_underline_capacity = underlines.len().next_power_of_two();
+        let metrics = self.metrics;
+        self.underline_upload_scratch.clear();
+        self.underline_upload_scratch
+            .extend((0..grid.rows()).flat_map(|row| build_underline_row(grid, row, metrics)));
+        self.composite_underline_count = self.underline_upload_scratch.len() as u32;
+        if !self.underline_upload_scratch.is_empty() {
+            if self.underline_upload_scratch.len() > self.composite_underline_capacity {
+                self.composite_underline_capacity =
+                    self.underline_upload_scratch.len().next_power_of_two();
                 self.composite_underline_instances = alloc_instances(
                     device,
                     "composite underline instances",
@@ -725,7 +735,7 @@ impl TextPass {
             queue.write_buffer(
                 &self.composite_underline_instances,
                 0,
-                bytemuck::cast_slice(&underlines),
+                bytemuck::cast_slice(&self.underline_upload_scratch),
             );
         }
 
@@ -973,24 +983,27 @@ impl TextPass {
                 "underline instances",
                 instance_bytes::<UnderlineInstance>(self.underline_capacity),
             );
-            let all: Vec<UnderlineInstance> = self
-                .underline_row_instances
-                .iter()
-                .flatten()
-                .copied()
-                .collect();
-            queue.write_buffer(&self.underline_instances, 0, bytemuck::cast_slice(&all));
+            self.underline_upload_scratch.clear();
+            self.underline_upload_scratch
+                .extend(self.underline_row_instances.iter().flatten().copied());
+            queue.write_buffer(
+                &self.underline_instances,
+                0,
+                bytemuck::cast_slice(&self.underline_upload_scratch),
+            );
         } else {
-            let tail: Vec<UnderlineInstance> = self.underline_row_instances[first..]
-                .iter()
-                .flatten()
-                .copied()
-                .collect();
+            self.underline_upload_scratch.clear();
+            self.underline_upload_scratch.extend(
+                self.underline_row_instances[first..]
+                    .iter()
+                    .flatten()
+                    .copied(),
+            );
             let byte_offset = (offset * size_of::<UnderlineInstance>()) as u64;
             queue.write_buffer(
                 &self.underline_instances,
                 byte_offset,
-                bytemuck::cast_slice(&tail),
+                bytemuck::cast_slice(&self.underline_upload_scratch),
             );
         }
     }
@@ -1244,17 +1257,24 @@ impl TextPass {
                 "text instances",
                 instance_bytes::<TextInstance>(self.capacity),
             );
-            let all: Vec<TextInstance> =
-                self.plain_row_instances.iter().flatten().copied().collect();
-            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&all));
+            self.plain_upload_scratch.clear();
+            self.plain_upload_scratch
+                .extend(self.plain_row_instances.iter().flatten().copied());
+            queue.write_buffer(
+                &self.instances,
+                0,
+                bytemuck::cast_slice(&self.plain_upload_scratch),
+            );
         } else {
-            let tail: Vec<TextInstance> = self.plain_row_instances[first..]
-                .iter()
-                .flatten()
-                .copied()
-                .collect();
+            self.plain_upload_scratch.clear();
+            self.plain_upload_scratch
+                .extend(self.plain_row_instances[first..].iter().flatten().copied());
             let byte_offset = (offset * size_of::<TextInstance>()) as u64;
-            queue.write_buffer(&self.instances, byte_offset, bytemuck::cast_slice(&tail));
+            queue.write_buffer(
+                &self.instances,
+                byte_offset,
+                bytemuck::cast_slice(&self.plain_upload_scratch),
+            );
         }
     }
 

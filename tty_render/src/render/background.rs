@@ -88,6 +88,9 @@ pub struct BackgroundPass {
     cursor_pipeline: RenderPipeline,
     cursor_visible: bool,
     metrics: CellMetrics,
+    /// Scratch reused each frame to build the cell instances for upload, so a
+    /// full rebuild, a damaged row, and a composite frame each allocate none.
+    scratch: Vec<BgInstance>,
 }
 
 impl BackgroundPass {
@@ -186,6 +189,7 @@ impl BackgroundPass {
             cursor_pipeline,
             cursor_visible: false,
             metrics,
+            scratch: Vec::new(),
         }
     }
 
@@ -243,22 +247,28 @@ impl BackgroundPass {
         let full =
             matches!(damage, Damage::Full) || total != self.count as usize || total > self.capacity;
         if full {
-            let instances = build_instances(grid);
-            self.count = instances.len() as u32;
-            if instances.is_empty() {
+            self.scratch.clear();
+            build_instances(grid, &mut self.scratch);
+            self.count = self.scratch.len() as u32;
+            if self.scratch.is_empty() {
                 return;
             }
-            if instances.len() > self.capacity {
-                self.capacity = instances.len().next_power_of_two();
+            if self.scratch.len() > self.capacity {
+                self.capacity = self.scratch.len().next_power_of_two();
                 self.instances = alloc_instances(device, self.capacity);
             }
-            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scratch));
         } else {
             for row in 0..grid.rows() {
                 if damage.is_dirty(row) {
-                    let instances = build_row_instances(grid, row);
+                    self.scratch.clear();
+                    build_row_instances(grid, row, &mut self.scratch);
                     let offset = (row * cols * size_of::<BgInstance>()) as u64;
-                    queue.write_buffer(&self.instances, offset, bytemuck::cast_slice(&instances));
+                    queue.write_buffer(
+                        &self.instances,
+                        offset,
+                        bytemuck::cast_slice(&self.scratch),
+                    );
                 }
             }
         }
@@ -305,19 +315,20 @@ impl BackgroundPass {
             return;
         }
 
-        let instances = build_instances(grid);
-        self.composite_count = instances.len() as u32;
-        if instances.is_empty() {
+        self.scratch.clear();
+        build_instances(grid, &mut self.scratch);
+        self.composite_count = self.scratch.len() as u32;
+        if self.scratch.is_empty() {
             return;
         }
-        if instances.len() > self.composite_capacity {
-            self.composite_capacity = instances.len().next_power_of_two();
+        if self.scratch.len() > self.composite_capacity {
+            self.composite_capacity = self.scratch.len().next_power_of_two();
             self.composite_instances = alloc_instances(device, self.composite_capacity);
         }
         queue.write_buffer(
             &self.composite_instances,
             0,
-            bytemuck::cast_slice(&instances),
+            bytemuck::cast_slice(&self.scratch),
         );
     }
 
@@ -452,28 +463,24 @@ fn build_cursor_pipeline(
     })
 }
 
-fn build_instances(grid: &Grid) -> Vec<BgInstance> {
-    let mut instances = Vec::with_capacity(grid.rows() * grid.cols());
+fn build_instances(grid: &Grid, out: &mut Vec<BgInstance>) {
     for row in 0..grid.rows() {
-        instances.extend(build_row_instances(grid, row));
+        build_row_instances(grid, row, out);
     }
-    instances
 }
 
-fn build_row_instances(grid: &Grid, row: usize) -> Vec<BgInstance> {
-    (0..grid.cols())
-        .map(|col| {
-            let (_, bg) = grid.get(row, col).draw_colors();
-            BgInstance {
-                cell: [col as f32, row as f32],
-                color: [
-                    bg.r as f32 / 255.0,
-                    bg.g as f32 / 255.0,
-                    bg.b as f32 / 255.0,
-                ],
-            }
-        })
-        .collect()
+fn build_row_instances(grid: &Grid, row: usize, out: &mut Vec<BgInstance>) {
+    out.extend((0..grid.cols()).map(|col| {
+        let (_, bg) = grid.get(row, col).draw_colors();
+        BgInstance {
+            cell: [col as f32, row as f32],
+            color: [
+                bg.r as f32 / 255.0,
+                bg.g as f32 / 255.0,
+                bg.b as f32 / 255.0,
+            ],
+        }
+    }));
 }
 
 #[cfg(test)]
@@ -499,7 +506,8 @@ mod tests {
         grid.get_mut(0, 0).bg = Rgb::new(255, 0, 0);
         grid.get_mut(1, 1).bg = Rgb::new(0, 0, 255);
 
-        let instances = build_instances(&grid);
+        let mut instances = Vec::new();
+        build_instances(&grid, &mut instances);
 
         assert_eq!(instances.len(), 4);
         assert_eq!(instances[0].cell, [0.0, 0.0]);
@@ -515,7 +523,8 @@ mod tests {
         grid.get_mut(0, 0).bg = Rgb::new(0, 0, 255);
         grid.get_mut(0, 0).flags = Flags::INVERSE;
 
-        let instances = build_instances(&grid);
+        let mut instances = Vec::new();
+        build_instances(&grid, &mut instances);
 
         assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
     }
