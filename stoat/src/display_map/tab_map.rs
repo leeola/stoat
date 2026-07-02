@@ -440,6 +440,29 @@ fn tab_spaces_slice(width: u32) -> &'static str {
     &TAB_SPACES[..len]
 }
 
+/// Advance an expanded (tab-expanded, display-width) column past `ch`.
+///
+/// A tab jumps to the next `tab_size` stop until `max_expansion_column`, past
+/// which it counts as a single column. Any other char adds its display width.
+/// Shared with the render painter so its fast path and the display map's column
+/// math cannot drift.
+pub(crate) fn advance_column_for_char(
+    expanded: &mut u32,
+    ch: char,
+    tab_size: u32,
+    max_expansion_column: u32,
+) {
+    if ch == '\t' {
+        if *expanded >= max_expansion_column {
+            *expanded += 1;
+        } else {
+            *expanded += tab_size - (*expanded % tab_size);
+        }
+    } else {
+        *expanded += super::display_width(ch);
+    }
+}
+
 fn expand_column(
     chars: impl Iterator<Item = char>,
     fold_column: u32,
@@ -452,15 +475,7 @@ fn expand_column(
         if byte_idx >= fold_column {
             break;
         }
-        if ch == '\t' {
-            if expanded >= max_expansion_column {
-                expanded += 1;
-            } else {
-                expanded += tab_size - (expanded % tab_size);
-            }
-        } else {
-            expanded += super::display_width(ch);
-        }
+        advance_column_for_char(&mut expanded, ch, tab_size, max_expansion_column);
         byte_idx += ch.len_utf8() as u32;
     }
     expanded
