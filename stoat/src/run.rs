@@ -300,6 +300,24 @@ mod tests {
     }
 
     #[test]
+    fn osc7_records_cwd_bare_and_with_host() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]7;file:///Users/lee\x07");
+        grid.feed(b"\x1b]7;file://myhost/tmp\x07");
+        assert_eq!(
+            grid.cwd_reports,
+            vec![PathBuf::from("/Users/lee"), PathBuf::from("/tmp")],
+        );
+    }
+
+    #[test]
+    fn osc7_ignores_non_file_uri() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]7;http://example.com/x\x07");
+        assert!(grid.cwd_reports.is_empty());
+    }
+
+    #[test]
     fn osc52_accepts_clipboard_in_mixed_selection() {
         let mut grid = VtermGrid::new(20);
         // selection "cs" = clipboard + screen, both target system clipboard

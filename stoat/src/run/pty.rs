@@ -76,13 +76,13 @@ pub fn spawn_shell(
             ("PS1".into(), String::new()),
             ("PS2".into(), String::new()),
             // PS0 emits the OSC 133 command-start mark before each command
-            // runs, and PROMPT_COMMAND emits the done mark with the exit code
-            // after it. The run pane reads these to bound output blocks
-            // without a visible sentinel line.
+            // runs. PROMPT_COMMAND emits the done mark with the exit code and
+            // an OSC 7 cwd report after it. The run pane reads these to bound
+            // output blocks and track the shell's working directory.
             ("PS0".into(), "\x1b]133;C\x07".into()),
             (
                 "PROMPT_COMMAND".into(),
-                "printf '\x1b]133;D;%s\x07' \"$?\"".into(),
+                "printf '\x1b]133;D;%s\x07\x1b]7;file://%s\x07' \"$?\" \"$PWD\"".into(),
             ),
             ("TERM".into(), "dumb".into()),
         ],

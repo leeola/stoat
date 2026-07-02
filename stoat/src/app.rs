@@ -3248,6 +3248,9 @@ impl Stoat {
                         );
                     }
                 }
+                // Adopt the latest OSC 7 cwd report. Captured before the
+                // alt-screen branch reborrows run_state below.
+                let reported_cwd = std::mem::take(&mut block.grid.cwd_reports).pop();
                 if block.grid.alt_screen_detected {
                     block.error = Some("this command requires a full terminal".into());
                     block.finished = true;
@@ -3256,6 +3259,9 @@ impl Stoat {
                         handle.kill();
                     }
                     run_state.shell_handle = None;
+                }
+                if let Some(cwd) = reported_cwd {
+                    run_state.cwd = cwd;
                 }
                 UpdateEffect::Redraw
             },
@@ -5957,6 +5963,25 @@ mod tests {
         assert!(
             sent.get(1).is_some_and(|s| s.starts_with("ls\n")),
             "submit reuses the eager shell to send the command, got {sent:?}",
+        );
+    }
+
+    #[test]
+    fn osc7_updates_run_cwd() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+        h.submit_run("cd /tmp");
+        h.inject_run_output(run_id, b"\x1b]7;file:///tmp\x07");
+
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .runs
+                .get(run_id)
+                .expect("run state")
+                .cwd,
+            std::path::PathBuf::from("/tmp"),
+            "an OSC 7 report updates the run pane's cwd",
         );
     }
 

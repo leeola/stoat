@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ratatui::style::{Color, Modifier};
-use std::ops::Range;
+use std::{ops::Range, path::PathBuf};
 
 #[derive(Clone)]
 pub struct StyledCell {
@@ -55,6 +55,10 @@ pub struct VtermGrid {
     /// stream, in arrival order. Callers drain after [`Self::feed`] to
     /// finalize the active output block on a `Done` mark.
     pub command_marks: Vec<CommandMark>,
+    /// OSC 7 working-directory reports decoded from the input stream, in
+    /// arrival order. Callers drain after [`Self::feed`] and adopt the last
+    /// as the run pane's current directory.
+    pub cwd_reports: Vec<PathBuf>,
 }
 
 impl VtermGrid {
@@ -71,6 +75,7 @@ impl VtermGrid {
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
             command_marks: Vec::new(),
+            cwd_reports: Vec::new(),
         }
     }
 
@@ -226,6 +231,20 @@ impl vte::Perform for VtermGrid {
                     self.command_marks.push(CommandMark::Done { exit });
                 },
                 _ => {},
+            }
+            return;
+        }
+
+        // OSC 7 reports the shell's working directory as a file:// URI. The
+        // host is empty (file:///path) or named (file://host/path), so the
+        // path starts at the first slash after the scheme. The app adopts the
+        // last report as the run pane's cwd. A non-file URI is ignored.
+        if !params.is_empty() && params[0] == b"7" {
+            if let Some(uri) = params.get(1).and_then(|p| std::str::from_utf8(p).ok())
+                && let Some(rest) = uri.strip_prefix("file://")
+                && let Some(slash) = rest.find('/')
+            {
+                self.cwd_reports.push(PathBuf::from(&rest[slash..]));
             }
             return;
         }
