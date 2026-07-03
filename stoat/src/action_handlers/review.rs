@@ -411,10 +411,13 @@ fn emit_review_progress_badge(ws: &mut Workspace, progress: &ReviewProgress) {
     }
 }
 
-/// Refresh the editor's review view cache from the session and, if a chunk
-/// is supplied, scroll so that chunk sits near the top of the pane. Split
-/// borrow of `ws.editors` and `ws.review` is done here so callers can drop
-/// their `&mut ws.review` borrow before invoking.
+/// Refresh the editor's review view cache from the session and, when a chunk
+/// is supplied and the editor is not mid-scroll, scroll so that chunk sits near
+/// the top of the pane. A refresh that lands during an in-flight glide leaves
+/// the scroll position to the animation rather than fighting it.
+///
+/// Split borrow of `ws.editors` and `ws.review` is done here so callers can
+/// drop their `&mut ws.review` borrow before invoking.
 fn sync_review_view_and_scroll(
     ws: &mut Workspace,
     editor_id: Option<EditorId>,
@@ -430,7 +433,15 @@ fn sync_review_view_and_scroll(
     if let Some(session) = ws.review.as_ref() {
         view.refresh_from_session(session);
     }
+    // A refresh that lands mid-motion must not yank scroll_row out from under
+    // the animation. During a wheel coast the next momentum tick would
+    // overwrite it from the eased offset, and during a page glide it is the
+    // fixed target the offset eases toward, so re-targeting it here jerks the
+    // view to the chunk and back. Re-scroll only after the motion settles. The
+    // view-state refresh above still runs regardless.
+    let mid_motion = editor.scroll_velocity != 0.0 || editor.scroll_glide;
     if let Some(chunk_id) = scroll_to_chunk
+        && !mid_motion
         && let Some(buffer_row) = view.row_of_chunk(chunk_id)
     {
         // row_of_chunk is a buffer row, but scroll_row is a display row and the
@@ -1311,6 +1322,61 @@ mod tests {
             scroll_row,
             buffer_row.saturating_sub(3),
             "the old buffer-row computation would land the chunk lower",
+        );
+    }
+
+    /// A follow-refresh re-centers the review on the current chunk, but must not
+    /// do so while a scroll is in flight. Writing scroll_row mid-glide yanks the
+    /// animation's target to the chunk and back, so only a refresh at rest
+    /// scrolls.
+    #[test]
+    fn follow_refresh_leaves_scroll_row_alone_mid_glide() {
+        use super::{review_step, sync_review_view_and_scroll, ReviewStep};
+
+        let mut h = TestHarness::with_size(80, 24);
+        h.open_review_from_texts(&[
+            ("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n"),
+            ("b.rs", "fn b() { 1 }\n", "fn b() { 2 }\n"),
+            ("c.rs", "fn c() { 1 }\n", "fn c() { 2 }\n"),
+        ]);
+        let editor_id = h.with_review(|s| s.view_editor).expect("review editor id");
+
+        review_step(&mut h.stoat, ReviewStep::Next);
+        review_step(&mut h.stoat, ReviewStep::Next);
+        let chunk = h.current_review_chunk_id();
+        let target = h.editor_scroll_row(editor_id);
+        assert!(
+            target > 0,
+            "the third chunk settles below the top of the pane"
+        );
+
+        {
+            let ws = h.stoat.active_workspace_mut();
+            {
+                let editor = ws.editors.get_mut(editor_id).expect("editor");
+                editor.scroll_row = 0;
+                editor.scroll_velocity = 50.0;
+            }
+            sync_review_view_and_scroll(ws, Some(editor_id), Some(chunk));
+        }
+        assert_eq!(
+            h.editor_scroll_row(editor_id),
+            0,
+            "a mid-glide refresh does not yank scroll_row to the chunk",
+        );
+
+        {
+            let ws = h.stoat.active_workspace_mut();
+            {
+                let editor = ws.editors.get_mut(editor_id).expect("editor");
+                editor.scroll_velocity = 0.0;
+            }
+            sync_review_view_and_scroll(ws, Some(editor_id), Some(chunk));
+        }
+        assert_eq!(
+            h.editor_scroll_row(editor_id),
+            target,
+            "a refresh at rest scrolls to the current chunk",
         );
     }
 
