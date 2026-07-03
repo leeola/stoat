@@ -2,6 +2,7 @@
 pub enum ActionKind {
     Quit,
     QuitAll,
+    ShowVersion,
     SplitRight,
     SplitDown,
     SplitNewRight,

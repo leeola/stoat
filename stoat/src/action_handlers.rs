@@ -61,6 +61,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             }
         },
         ActionKind::QuitAll => quit_all(stoat),
+        ActionKind::ShowVersion => show_version(stoat),
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),
         ActionKind::SplitNewRight => pane::split_pane_new(stoat, Axis::Vertical),
@@ -929,6 +930,35 @@ fn quit_all(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Drive [`ActionKind::ShowVersion`]. Raise an app-level badge reporting
+/// stoat's version, plus stoatty's when running inside it.
+///
+/// stoatty's version is read from the `STOATTY_VERSION` env var it sets on the
+/// child. An older stoatty that sets only `STOATTY=1` yields "unknown". The
+/// badge is retired by the next key press (see [`Stoat::handle_key`]).
+fn show_version(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+
+    let mut label = format!("stoat {}", stoat.version_info);
+    if stoat.stoatty {
+        let stoatty = stoat
+            .env_host()
+            .var("STOATTY_VERSION")
+            .unwrap_or_else(|| "unknown".to_string());
+        label.push_str(&format!(" | stoatty {stoatty}"));
+    }
+
+    stoat.badges.remove_by_source(BadgeSource::Version);
+    stoat.badges.insert(Badge {
+        source: BadgeSource::Version,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Complete,
+        label,
+        detail: None,
+    });
+    UpdateEffect::Redraw
+}
+
 /// Close the help modal, disposing its scratch editor and restoring the
 /// mode that was active before the modal opened. No-op when help is not
 /// open. Shared between `CancelPromptInput`, Ctrl-C cleanup, and the help
@@ -1792,6 +1822,59 @@ mod tests {
         assert_eq!(
             colored, restored,
             "toggling syntax highlighting back on restores the coloring",
+        );
+    }
+
+    fn version_badge_label(stoat: &crate::app::Stoat) -> Option<String> {
+        let id = stoat
+            .badges
+            .find_by_source(crate::badge::BadgeSource::Version)?;
+        stoat.badges.get(id).map(|b| b.label.clone())
+    }
+
+    #[test]
+    fn show_version_badge_appends_stoatty_when_inside_it() {
+        let mut h = Stoat::test();
+        h.stoat.set_version_info("0.1.0 (aaa 2026-07-03)");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.fake_env()
+            .set("STOATTY_VERSION", "0.2.0 (bbb 2026-07-03)");
+
+        super::dispatch(&mut h.stoat, &stoat_action::ShowVersion);
+
+        assert_eq!(
+            version_badge_label(&h.stoat).as_deref(),
+            Some("stoat 0.1.0 (aaa 2026-07-03) | stoatty 0.2.0 (bbb 2026-07-03)"),
+        );
+    }
+
+    #[test]
+    fn show_version_badge_is_stoat_only_outside_stoatty() {
+        let mut h = Stoat::test();
+        h.stoat.set_version_info("0.1.0 (aaa 2026-07-03)");
+
+        super::dispatch(&mut h.stoat, &stoat_action::ShowVersion);
+
+        assert_eq!(
+            version_badge_label(&h.stoat).as_deref(),
+            Some("stoat 0.1.0 (aaa 2026-07-03)"),
+        );
+    }
+
+    #[test]
+    fn show_version_badge_is_dismissed_on_the_next_key() {
+        let mut h = Stoat::test();
+        super::dispatch(&mut h.stoat, &stoat_action::ShowVersion);
+        assert!(
+            version_badge_label(&h.stoat).is_some(),
+            "the badge is shown after ShowVersion",
+        );
+
+        h.type_keys("j");
+        assert!(
+            version_badge_label(&h.stoat).is_none(),
+            "the next key press retires the version badge",
         );
     }
 

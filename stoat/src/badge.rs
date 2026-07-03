@@ -47,6 +47,9 @@ pub enum BadgeSource {
     /// workspace's [`AgentStatus`](crate::agent_status::AgentStatus). At most
     /// one Agent-sourced badge exists per workspace.
     Agent,
+    /// One-shot version notice raised by `ShowVersion`, living in the
+    /// app-level tray until the next key press dismisses it.
+    Version,
 }
 
 #[derive(Debug, Clone)]

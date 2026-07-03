@@ -20,6 +20,16 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    ShowVersionDef,
+    ShowVersion,
+    "ShowVersion",
+    ActionKind::ShowVersion,
+    "show the version",
+    "Show stoat's version and build commit as a one-line badge, plus stoatty's version when running inside the stoatty terminal. The badge is dismissed on the next key press.",
+    ActionPriority::Normal
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

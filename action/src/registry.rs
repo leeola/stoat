@@ -1,7 +1,7 @@
 use crate::{
     defs::{
         agent::SpawnClaude,
-        app::{Quit, QuitAll},
+        app::{Quit, QuitAll, ShowVersion},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
@@ -111,6 +111,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
+    add(ShowVersion::DEF, |_| Ok(Box::new(ShowVersion)));
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
     add(SplitNewRight::DEF, |_| Ok(Box::new(SplitNewRight)));
@@ -667,6 +668,7 @@ mod tests {
     const ZERO_ARG_NAMES: &[&str] = &[
         "Quit",
         "QuitAll",
+        "ShowVersion",
         "SplitRight",
         "SplitDown",
         "SplitNewRight",
@@ -1032,7 +1034,8 @@ mod tests {
         // + 1 OpenBuffer.
         // + 1 ToggleDiff.
         // + 1 ToggleSyntaxHighlight.
-        assert_eq!(all().count(), 288);
+        // + 1 ShowVersion.
+        assert_eq!(all().count(), 289);
     }
 
     #[test]

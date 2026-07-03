@@ -6,7 +6,7 @@ pub mod registry;
 
 pub use action::{Action, ActionDef, ActionPriority};
 pub use defs::{
-    app::{Quit, QuitAll},
+    app::{Quit, QuitAll, ShowVersion},
     commits::{
         CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
         CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,

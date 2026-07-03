@@ -597,6 +597,11 @@ pub struct Stoat {
     /// mode exits so re-entering insert is not stuck mid-snippet.
     pub(crate) active_snippet: Option<crate::completion::snippet::ActiveSnippet>,
 
+    /// stoat's own `<semver> (<hash>[-dirty] <date>)` version string, shown by
+    /// the `ShowVersion` action. Injected by the binary via
+    /// [`Self::set_version_info`]. Defaults to "unknown" so tests are
+    /// deterministic without a build stamp.
+    pub(crate) version_info: &'static str,
     /// Whether stoat is running inside the stoatty terminal, detected from
     /// the `STOATTY` env var at startup. Gates the smooth-scroll APC emit:
     /// when `false`, [`Self::emit_smooth_scroll`] is a no-op and the byte
@@ -829,6 +834,7 @@ impl Stoat {
             pending_completion_request: None,
             last_completion_signature: None,
             active_snippet: None,
+            version_info: "unknown",
             stoatty: false,
             apc_tx: None,
             apc_scene: ApcScene::new(),
@@ -864,6 +870,12 @@ impl Stoat {
     pub fn set_stoatty_apc(&mut self, stoatty: bool, apc_tx: UnboundedSender<Vec<u8>>) {
         self.stoatty = stoatty;
         self.apc_tx = Some(apc_tx);
+    }
+
+    /// Inject the version string the `ShowVersion` action reports. The binary
+    /// passes its build-stamped `VERSION_INFO`. Tests leave the default.
+    pub fn set_version_info(&mut self, info: &'static str) {
+        self.version_info = info;
     }
 
     /// Swap in an alternative [`FsHost`]. The default is [`LocalFs`]; the
@@ -2310,6 +2322,10 @@ impl Stoat {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        // A version notice is a one-shot message. Any key press retires it.
+        self.badges
+            .remove_by_source(crate::badge::BadgeSource::Version);
+
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(run_id) = self.modal_run {
                 let ws = self.active_workspace_mut();
