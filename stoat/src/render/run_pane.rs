@@ -6,7 +6,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 use std::path::{Path, PathBuf};
 
@@ -189,6 +189,7 @@ pub(crate) fn render_modal_run(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if area.width < 20 || area.height < 8 {
         return;
@@ -211,14 +212,15 @@ pub(crate) fn render_modal_run(
         format!(" {display} ")
     };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_RUN);
-    let border = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(title)
-        .title_style(modal_style);
-    let inner = border.inner(modal_area);
     Clear.render(modal_area, buf);
-    border.render(modal_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        modal_area,
+        Some(title.as_str()),
+        modal_style,
+        theme,
+        scene,
+    );
 
     let Some(active) = run_state.active_block() else {
         return;

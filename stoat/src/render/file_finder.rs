@@ -84,6 +84,7 @@ pub(crate) fn render_file_finder(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let Some(layout) = file_finder_layout(area) else {
         return;
@@ -96,13 +97,7 @@ pub(crate) fn render_file_finder(
         FinderScope::Buffers => " file finder (buffers) ",
     };
     Clear.render(layout.modal, buf);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(title)
-        .title_style(modal_style);
-    block.render(layout.modal, buf);
+    crate::render::chrome::modal_frame(buf, layout.modal, Some(title), modal_style, theme, scene);
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);

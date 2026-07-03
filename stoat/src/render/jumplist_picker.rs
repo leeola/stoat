@@ -1,15 +1,12 @@
 use crate::{jumplist_picker::JumplistPicker, render::text::write_str};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    widgets::{Block, Borders, Widget},
-};
+use ratatui::{buffer::Buffer, layout::Rect};
 
 pub(crate) fn render_jumplist_picker(
     picker: &JumplistPicker,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if area.width < 50 || area.height < 6 {
         return;
@@ -36,13 +33,14 @@ pub(crate) fn render_jumplist_picker(
     let modal_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" jumplist ")
-        .title_style(modal_style);
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        modal_area,
+        Some(" jumplist "),
+        modal_style,
+        theme,
+        scene,
+    );
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);

@@ -4,7 +4,7 @@ use crate::{
 };
 use ratatui::{
     buffer::Buffer,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 
 pub(crate) fn render_dock_minimized(
@@ -35,6 +35,7 @@ pub(crate) fn render_dock_open(
     ctx: PaneCtx<'_>,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let area = dock.area;
     if area.width == 0 || area.height == 0 {
@@ -48,12 +49,7 @@ pub(crate) fn render_dock_open(
     };
 
     Clear.render(area, buf);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let inner = block.inner(area);
-    block.render(area, buf);
+    let inner = crate::render::chrome::modal_frame(buf, area, None, border_style, theme, scene);
 
     let PaneCtx { editors, .. } = ctx;
 

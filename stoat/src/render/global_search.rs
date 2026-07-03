@@ -1,9 +1,5 @@
 use crate::{global_search::GlobalSearchPicker, render::text::write_str};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    widgets::{Block, Borders, Widget},
-};
+use ratatui::{buffer::Buffer, layout::Rect};
 
 pub(crate) fn render_global_search(
     picker: &GlobalSearchPicker,
@@ -11,6 +7,7 @@ pub(crate) fn render_global_search(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if area.width < 60 || area.height < 8 {
         return;
@@ -38,13 +35,14 @@ pub(crate) fn render_global_search(
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     let title = format!(" search: {} ", picker.query());
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(title)
-        .title_style(modal_style);
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        modal_area,
+        Some(title.as_str()),
+        modal_style,
+        theme,
+        scene,
+    );
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);

@@ -6,7 +6,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, Borders, Clear, StatefulWidget, Widget},
+    widgets::{Block, Borders, StatefulWidget, Widget},
 };
 use stoatty_protocol::command::{self, BorderStyle, PanelCommand};
 use stoatty_widgets::{text_run::TextRun, ApcScene};
@@ -15,15 +15,20 @@ use stoatty_widgets::{text_run::TextRun, ApcScene};
 ///
 /// This is the single chrome primitive behind every stoat modal and cursor
 /// popup. The fallback -- taken when `scene` is absent or the theme is not an
-/// RGB theme -- clears `area` and draws a ratatui [`Block`] with
-/// [`Borders::ALL`], `style` on the border, and `title` styled the same, which
-/// is exactly what the sites drew before, so their snapshots stay identical.
+/// RGB theme -- draws a ratatui [`Block`] with [`Borders::ALL`], `style` on the
+/// border, and `title` styled the same, which is exactly what the sites drew
+/// before, so their snapshots stay identical.
 ///
 /// Under stoatty (a `scene` is threaded and the colors resolve to RGB) it
 /// instead emits a hairline `panel` APC frame with rounded corners and a drop
 /// shadow, plus, for `Some(title)`, a full-size title [`TextRun`] over the top
 /// edge whose background masks the hairline the way a Block title masks the
 /// border glyphs. No box-drawing glyphs are written in this arm.
+///
+/// The caller owns background clearing. Sites that masked what was behind the
+/// modal still call [`Clear`](ratatui::widgets::Clear) before this, and sites
+/// that painted every cell themselves still skip it. This draws only the frame,
+/// so either behavior is preserved exactly.
 ///
 /// The returned rect is the area inset by the one-cell border, matching the
 /// layout the sites lay their content out over regardless of arm.
@@ -49,7 +54,6 @@ pub(crate) fn modal_frame(
 
     match rich {
         Some((scene, border, mask)) => {
-            Clear.render(area, buf);
             command::encode_panel_into(
                 scene.buffer(),
                 &PanelCommand {
@@ -77,7 +81,6 @@ pub(crate) fn modal_frame(
             }
         },
         None => {
-            Clear.render(area, buf);
             let mut block = Block::default().borders(Borders::ALL).border_style(style);
             if let Some(title) = title {
                 block = block.title(title.to_string()).title_style(style);

@@ -2,7 +2,7 @@ use crate::{quit_all_confirm::QuitAllConfirm, render::text::write_str};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 
 pub(crate) fn render_quit_all_confirm(
@@ -10,6 +10,7 @@ pub(crate) fn render_quit_all_confirm(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if area.width < 50 || area.height < 6 {
         return;
@@ -33,14 +34,15 @@ pub(crate) fn render_quit_all_confirm(
     let modal_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" unsaved buffers ")
-        .title_style(modal_style);
-    let inner = block.inner(modal_area);
     Clear.render(modal_area, buf);
-    block.render(modal_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        modal_area,
+        Some(" unsaved buffers "),
+        modal_style,
+        theme,
+        scene,
+    );
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);

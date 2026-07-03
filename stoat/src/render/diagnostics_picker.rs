@@ -3,11 +3,7 @@ use crate::{
     render::text::write_str,
 };
 use lsp_types::DiagnosticSeverity;
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    widgets::{Block, Borders, Widget},
-};
+use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::Path;
 
 pub(crate) fn render_diagnostics_picker(
@@ -16,6 +12,7 @@ pub(crate) fn render_diagnostics_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if area.width < 50 || area.height < 6 {
         return;
@@ -46,13 +43,8 @@ pub(crate) fn render_diagnostics_picker(
         PickerScope::Local => " diagnostics ",
         PickerScope::Workspace => " diagnostics (workspace) ",
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(title)
-        .title_style(modal_style);
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
+    let inner =
+        crate::render::chrome::modal_frame(buf, modal_area, Some(title), modal_style, theme, scene);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);

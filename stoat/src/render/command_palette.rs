@@ -79,9 +79,10 @@ pub(crate) fn render_command_palette(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
-        render_palette_arg_picker(palette, ws, theme, area, buf);
+        render_palette_arg_picker(palette, ws, theme, area, buf, scene);
         return;
     }
 
@@ -102,6 +103,7 @@ pub(crate) fn render_command_palette(
         theme,
         area,
         buf,
+        scene,
     );
 }
 
@@ -118,6 +120,7 @@ fn render_palette_arg_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let Some(layout) = palette_filter_layout(area) else {
         return;
@@ -127,12 +130,14 @@ fn render_palette_arg_picker(
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     let title = format!(" {} ", entry.def.name());
     Clear.render(layout.modal, buf);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(title)
-        .title_style(modal_style);
-    block.render(layout.modal, buf);
+    crate::render::chrome::modal_frame(
+        buf,
+        layout.modal,
+        Some(title.as_str()),
+        modal_style,
+        theme,
+        scene,
+    );
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
@@ -273,6 +278,7 @@ fn render_palette_filter(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let Some(layout) = palette_filter_layout(area) else {
         return;
@@ -284,13 +290,7 @@ fn render_palette_filter(
         PaletteScope::All => " command palette (all) ",
     };
     Clear.render(layout.modal, buf);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(title)
-        .title_style(modal_style);
-    block.render(layout.modal, buf);
+    crate::render::chrome::modal_frame(buf, layout.modal, Some(title), modal_style, theme, scene);
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);

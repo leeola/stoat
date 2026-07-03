@@ -9,7 +9,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, Borders},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 /// The on-screen rectangles of the help modal, derived from a terminal `area`
@@ -95,6 +95,7 @@ pub(crate) fn render_help(
         HelpScope::All => " help: all actions ".to_string(),
     };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HELP);
+    Clear.render(layout.modal, buf);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,

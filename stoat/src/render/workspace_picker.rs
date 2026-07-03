@@ -2,11 +2,7 @@ use crate::{
     render::text::write_str,
     workspace_picker::{PathDisplay, WorkspacePicker},
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    widgets::{Block, Borders, Widget},
-};
+use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::Path;
 
 pub(crate) fn render_workspace_picker(
@@ -14,6 +10,7 @@ pub(crate) fn render_workspace_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if area.width < 60 || area.height < 8 {
         return;
@@ -40,13 +37,14 @@ pub(crate) fn render_workspace_picker(
     let picker_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" workspaces ")
-        .title_style(modal_style);
-    let inner = block.inner(picker_area);
-    block.render(picker_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        picker_area,
+        Some(" workspaces "),
+        modal_style,
+        theme,
+        scene,
+    );
 
     const NAME_W: u16 = 12;
     const BUF_W: u16 = 5;

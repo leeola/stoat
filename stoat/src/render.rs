@@ -309,6 +309,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
                 },
                 frame,
                 buf,
+                frame.stoatty.then_some(&mut *scene),
             );
         }
     }
@@ -330,7 +331,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
     );
     if let Some(run_id) = stoat.modal_run {
         if let Some(run_state) = ws.runs.get(run_id) {
-            run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
+            run_pane::render_modal_run(
+                run_state,
+                &stoat.theme,
+                size,
+                buf,
+                stoat.stoatty.then_some(&mut *scene),
+            );
         }
     } else if let Some(help) = &stoat.help {
         help::render_help(
@@ -361,7 +368,14 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
         );
     } else if let Some(finder) = &mut stoat.file_finder {
-        file_finder::render_file_finder(finder, ws, &stoat.theme, size, buf);
+        file_finder::render_file_finder(
+            finder,
+            ws,
+            &stoat.theme,
+            size,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
         let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true, false);
         let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
         let bindings: Vec<_> = raw
@@ -380,7 +394,14 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
         );
     } else if let Some(palette) = &mut stoat.command_palette {
-        command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);
+        command_palette::render_command_palette(
+            palette,
+            ws,
+            &stoat.theme,
+            size,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
         let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false, false);
         let raw = stoat.keymap.scoped_bindings(&state, "palette_open");
         let bindings: Vec<_> = raw
@@ -399,7 +420,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
         );
     } else if let Some(picker) = &stoat.workspace_picker {
-        workspace_picker::render_workspace_picker(picker, &stoat.theme, size, buf);
+        workspace_picker::render_workspace_picker(
+            picker,
+            &stoat.theme,
+            size,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "picker",
@@ -410,7 +437,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
         );
     } else if let Some(modal) = &stoat.quit_all_confirm {
-        quit_all_confirm::render_quit_all_confirm(modal, &stoat.theme, size, buf);
+        quit_all_confirm::render_quit_all_confirm(
+            modal,
+            &stoat.theme,
+            size,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
         let bindings: Vec<(&'static str, String)> = vec![
             ("y", "discard & quit".to_string()),
             ("n", "cancel".to_string()),
@@ -426,7 +459,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
         );
     } else if let Some(picker) = &stoat.jumplist_picker {
-        jumplist_picker::render_jumplist_picker(picker, &stoat.theme, size, buf);
+        jumplist_picker::render_jumplist_picker(
+            picker,
+            &stoat.theme,
+            size,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "jumplist",
@@ -443,6 +482,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             size,
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
         let bindings = picker.hint_bindings();
         hints::render_hints(
@@ -455,7 +495,14 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         );
     } else if let Some(picker) = &stoat.global_search {
         let git_root = ws.git_root.clone();
-        global_search::render_global_search(picker, &git_root, &stoat.theme, size, buf);
+        global_search::render_global_search(
+            picker,
+            &git_root,
+            &stoat.theme,
+            size,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "global-search",
