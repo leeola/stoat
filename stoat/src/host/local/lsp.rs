@@ -55,7 +55,7 @@ use std::{
 use stoat_log::TextProtoLog;
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    oneshot, Mutex as TokioMutex,
+    oneshot, Mutex as TokioMutex, Notify,
 };
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, LspResponseError>>>>>;
@@ -96,13 +96,15 @@ impl LocalLsp {
     /// Spawn `command` with `args` as a child process wired for stdio JSON-RPC.
     ///
     /// Starts the reader thread (stdout to the channels) and a stderr thread
-    /// (server logs to the `stoat::lsp` tracing target). The returned host has
-    /// not handshaked yet. Call [`LspHost::initialize`] next. Fails only if the
-    /// process cannot be spawned.
+    /// (server logs to the `stoat::lsp` tracing target). The reader signals
+    /// `wake` on server-pushed traffic so the run loop drains it promptly. The
+    /// returned host has not handshaked yet. Call [`LspHost::initialize`] next.
+    /// Fails only if the process cannot be spawned.
     pub fn spawn(
         command: &str,
         args: &[String],
         transcript: Option<LspTranscript>,
+        wake: Arc<Notify>,
     ) -> io::Result<Self> {
         let mut child = Command::new(command)
             .args(args)
@@ -126,7 +128,7 @@ impl LocalLsp {
 
         std::thread::spawn({
             let pending = pending.clone();
-            move || reader_loop(stdout, pending, notif_tx, incoming_tx, rx_transcript)
+            move || reader_loop(stdout, pending, notif_tx, incoming_tx, rx_transcript, wake)
         });
         std::thread::spawn(move || stderr_loop(stderr));
 
@@ -517,12 +519,18 @@ impl LspHost for LocalLsp {
 /// Read framed JSON-RPC off the child's stdout until EOF, routing each message
 /// to the pending map (responses) or the notification / incoming-request
 /// channels. Runs on a dedicated OS thread because the read is blocking.
+///
+/// Server-pushed notifications and incoming requests signal `wake` so the run
+/// loop, which drains those channels only when it wakes, applies them without
+/// waiting for the next keystroke. `notify_one` collapses a burst into a single
+/// permit, so heavy push traffic wakes the loop at most once per drained batch.
 fn reader_loop(
     stdout: ChildStdout,
     pending: PendingMap,
     notif_tx: UnboundedSender<LspNotification>,
     incoming_tx: UnboundedSender<IncomingRequest>,
     rx_transcript: Option<TextProtoLog>,
+    wake: Arc<Notify>,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut decoder = FrameDecoder::new();
@@ -555,11 +563,13 @@ fn reader_loop(
                     if notif_tx.send(notification).is_err() {
                         return;
                     }
+                    wake.notify_one();
                 },
                 Routed::Incoming(request) => {
                     if incoming_tx.send(request).is_err() {
                         return;
                     }
+                    wake.notify_one();
                 },
                 Routed::Ignore => {},
             }

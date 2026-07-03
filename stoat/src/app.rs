@@ -4424,6 +4424,9 @@ impl Stoat {
     /// keeping [`Self::render`] a pure paint. Tests that previously relied on
     /// `render` to drive this call it directly.
     pub(crate) fn drive_background(&mut self) {
+        self.drain_lsp_notifications();
+        self.drain_lsp_incoming_requests();
+        self.install_pending_lsp_host();
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
         self.drive_parse_jobs();

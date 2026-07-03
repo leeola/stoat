@@ -197,6 +197,7 @@ fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
 
     let root_uri = path_to_uri(&stoat.active_workspace().git_root);
     let slot = stoat.pending_lsp_host.clone();
+    let wake = stoat.redraw_notify.clone();
     let transcript = if stoat.settings.text_proto_log == Some(true) {
         match create_lsp_transcript() {
             Ok(transcript) => Some(transcript),
@@ -212,7 +213,7 @@ fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
     stoat
         .executor
         .spawn(async move {
-            let host: Arc<dyn LspHost> = match LocalLsp::spawn(&command, &args, transcript) {
+            let host: Arc<dyn LspHost> = match LocalLsp::spawn(&command, &args, transcript, wake) {
                 Ok(host) => Arc::new(host),
                 Err(err) => {
                     tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
@@ -2507,6 +2508,27 @@ mod tests {
             tags: None,
             data: None,
         }
+    }
+
+    #[test]
+    fn drive_background_applies_pushed_diagnostics() {
+        use crate::host::lsp::LspNotification;
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\n")]);
+        let path = root.join("main.rs");
+        let uri = super::path_to_uri(&path).expect("file uri");
+        h.fake_lsp()
+            .push_notification(LspNotification::Diagnostics {
+                uri,
+                diagnostics: vec![diag(0, 0, "boom")],
+                version: None,
+            });
+
+        // No input event and no settle(): the background pass alone (the
+        // redraw-wake path) must drain the pushed notification and apply it.
+        h.stoat.drive_background();
+
+        assert_eq!(h.stoat.diagnostics.get(&path), &[diag(0, 0, "boom")]);
     }
 
     fn cursor_offset(h: &mut TestHarness) -> usize {
