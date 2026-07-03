@@ -132,20 +132,22 @@ pub struct BufferRef {
     pub fingerprint: [u8; 32],
 }
 
-/// One file's contribution to a [`diff_changeset`] call. Owned strings
-/// match the per-file [`diff_with_language`] entry's argument shape so
-/// callers can hand the same buffers to either path.
+/// One file's contribution to a [`diff_changeset`] call.
 ///
-/// `language: None` falls back to [`diff_lines`] for that file --
-/// cross-file moves require a parse on both sides, so unparsed inputs
-/// produce a normal line-diff and do not participate in cross-file
-/// move detection.
+/// The text is borrowed for the call's duration. The structural pass copies
+/// what it keeps into owned arenas, and only the line-diff fallback reads the
+/// borrowed slices directly, so a caller can pass slices into buffers it
+/// already holds rather than cloning them.
+///
+/// `language: None` falls back to [`diff_lines`] for that file: cross-file
+/// moves require a parse on both sides, so unparsed inputs produce a normal
+/// line-diff and do not participate in cross-file move detection.
 #[derive(Clone)]
-pub struct FileDiffInput {
+pub struct FileDiffInput<'a> {
     pub buffer: BufferRef,
     pub language: Option<Arc<crate::Language>>,
-    pub lhs_text: String,
-    pub rhs_text: String,
+    pub lhs_text: &'a str,
+    pub rhs_text: &'a str,
 }
 
 /// Result of [`diff`] / [`diff_lines`]. `fell_back_to_line_diff` is `true`

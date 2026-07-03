@@ -107,7 +107,7 @@ pub fn extract_review_hunks_changeset(
     files: &[ReviewFileInput],
     context: u32,
 ) -> Vec<Vec<ReviewHunk>> {
-    let inputs: Vec<FileDiffInput> = files
+    let inputs: Vec<FileDiffInput<'_>> = files
         .iter()
         .map(|f| FileDiffInput {
             buffer: BufferRef {
@@ -115,8 +115,8 @@ pub fn extract_review_hunks_changeset(
                 fingerprint: fingerprint_bytes(&f.buffer_text),
             },
             language: f.language.clone(),
-            lhs_text: (*f.base_text).clone(),
-            rhs_text: (*f.buffer_text).clone(),
+            lhs_text: f.base_text.as_str(),
+            rhs_text: f.buffer_text.as_str(),
         })
         .collect();
 

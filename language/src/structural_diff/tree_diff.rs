@@ -110,16 +110,19 @@ pub fn diff_with_language_cancellable(
 /// `language` is `None` (or whose parse fails) fall back to
 /// [`super::diff_lines`] for that file and do not participate in
 /// cross-file move detection.
-pub fn diff_changeset(inputs: Vec<FileDiffInput>) -> Vec<DiffResult> {
-    enum Slot {
+pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
+    enum Slot<'a> {
         Structural(PreparedFile),
-        LineDiff { lhs_text: String, rhs_text: String },
+        LineDiff {
+            lhs_text: &'a str,
+            rhs_text: &'a str,
+        },
     }
 
-    let mut slots: Vec<Slot> = inputs
+    let mut slots: Vec<Slot<'_>> = inputs
         .into_iter()
         .map(|input| match input.language.as_ref() {
-            Some(lang) => match prepare_per_file(lang, &input.lhs_text, &input.rhs_text, None) {
+            Some(lang) => match prepare_per_file(lang, input.lhs_text, input.rhs_text, None) {
                 Some(prepared) => Slot::Structural(PreparedFile {
                     buffer: input.buffer,
                     ..prepared
@@ -935,17 +938,15 @@ mod tests {
                 buffer: buf_a.clone(),
                 language: Some(lang.clone()),
                 lhs_text: "fn relocated() { let x = 1; let y = 2; let z = 3; }\n\
-                           fn stays_a() { call_a(); }"
-                    .to_string(),
-                rhs_text: "fn stays_a() { call_a(); }".to_string(),
+                           fn stays_a() { call_a(); }",
+                rhs_text: "fn stays_a() { call_a(); }",
             },
             FileDiffInput {
                 buffer: buf_b.clone(),
                 language: Some(lang.clone()),
-                lhs_text: "fn stays_b() { call_b(); }".to_string(),
+                lhs_text: "fn stays_b() { call_b(); }",
                 rhs_text: "fn stays_b() { call_b(); }\n\
-                           fn relocated() { let x = 1; let y = 2; let z = 3; }"
-                    .to_string(),
+                           fn relocated() { let x = 1; let y = 2; let z = 3; }",
             },
         ];
 
@@ -1011,11 +1012,9 @@ mod tests {
             },
             language: Some(lang),
             lhs_text: "fn alpha() { let x = 1; let y = 2; let z = 3; }\n\
-                       fn beta() { let p = 10; let q = 20; let r = 30; }"
-                .to_string(),
+                       fn beta() { let p = 10; let q = 20; let r = 30; }",
             rhs_text: "fn beta() { let p = 10; let q = 20; let r = 30; }\n\
-                       fn alpha() { let x = 1; let y = 2; let z = 3; }"
-                .to_string(),
+                       fn alpha() { let x = 1; let y = 2; let z = 3; }",
         }];
 
         let results = diff_changeset(inputs);
