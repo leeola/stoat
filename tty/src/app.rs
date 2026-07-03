@@ -418,6 +418,13 @@ struct PoolAnim {
     /// verdict rather than re-testing, so an unbuffered pool stays degraded to
     /// the live grid without recomposing.
     last_buffered: bool,
+    /// The sub-cell fraction [`Self::document_grid`] still shows from its last
+    /// successful compose. While a frame's window is unbuffered, the region
+    /// holds this last good composite at this offset instead of snapping back
+    /// to the live grid. `None` until the first successful compose, and cleared
+    /// on a resize (which reshapes the grid) or a settled handoff (after which
+    /// the live grid owns the region).
+    held_frac: Option<f32>,
 }
 
 impl PoolAnim {
@@ -434,6 +441,7 @@ impl PoolAnim {
             last_version: None,
             last_region_dims: None,
             last_buffered: false,
+            held_frac: None,
         }
     }
 }
@@ -781,6 +789,10 @@ impl ApplicationHandler<PtyEvent> for App {
                             anim.frames_since_target_change >= HANDOFF_STABLE_FRAMES;
                         anim.scroll = scroll;
                         if !easing && scroll_settled {
+                            // The live grid owns the region once it hands off.
+                            // Drop any held composite so a later re-glide cannot
+                            // resurrect content the live grid has since replaced.
+                            anim.held_frac = None;
                             continue;
                         }
                         pool_easing = true;
@@ -801,6 +813,12 @@ impl ApplicationHandler<PtyEvent> for App {
                             || anim.last_version != version
                             || anim.last_region_dims != Some(region_dims);
 
+                        // A resize reshapes document_grid, so a held composite
+                        // from the old dimensions no longer fits the region.
+                        if anim.last_region_dims != Some(region_dims) {
+                            anim.held_frac = None;
+                        }
+
                         let buffered = if content_changed {
                             let composed = terminal
                                 .project_pool(pool.id, &mut anim.document_grid, scroll)
@@ -815,11 +833,24 @@ impl ApplicationHandler<PtyEvent> for App {
                         };
 
                         if buffered {
+                            anim.held_frac = Some(frac);
                             active.push(ActivePool {
                                 id: pool.id,
                                 region: pool.region,
                                 frac,
                                 content_changed,
+                            });
+                        } else if let Some(held) = anim.held_frac {
+                            // The window is not buffered this frame. Re-push the
+                            // last good composite at its held offset with
+                            // content_changed false, so the renderer reuses the
+                            // already-uploaded pool_grid instead of the region
+                            // snapping back to the pre-glide live grid.
+                            active.push(ActivePool {
+                                id: pool.id,
+                                region: pool.region,
+                                frac: held,
+                                content_changed: false,
                             });
                         }
                     }

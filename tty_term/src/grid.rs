@@ -341,26 +341,34 @@ impl PagePool {
     /// is sized by the caller to the viewport plus one straddle row, so an upward
     /// fractional shift has a row to reveal at the bottom.
     ///
-    /// Returns `false` the moment a needed page is not buffered, or `top` falls
-    /// above the first page; `out` is left partly written, so the caller falls
-    /// back to the live grid rather than show holes.
+    /// Returns `false` when a needed page is not buffered, or `top` falls above
+    /// the first page. `out` is left untouched on failure, so a caller holding a
+    /// previous composite keeps it rather than seeing it half-overwritten.
     pub fn compose(&self, top: i64, out: &mut Grid) -> bool {
         let page_rows = match self.pages.first() {
             Some(page) if page.grid.rows() > 0 => page.grid.rows(),
             _ => return false,
         };
 
+        // Validate the whole window before writing anything. A partial copy
+        // interrupted by an unbuffered page would corrupt the caller's held
+        // composite, which the hold-last-offset path relies on staying intact.
         for out_row in 0..out.rows() {
             let doc_row = top + out_row as i64;
             if doc_row < 0 {
                 return false;
             }
+            let page_index = doc_row as u64 / page_rows as u64;
+            if self.page(page_index).is_none() {
+                return false;
+            }
+        }
 
+        for out_row in 0..out.rows() {
+            let doc_row = top + out_row as i64;
             let page_index = doc_row as u64 / page_rows as u64;
             let row_in_page = doc_row as usize % page_rows;
-            let Some(page) = self.page(page_index) else {
-                return false;
-            };
+            let page = self.page(page_index).expect("validated above");
 
             let cols = out.cols().min(page.cols());
             out.row_mut(out_row)[..cols].copy_from_slice(&page.row(row_in_page)[..cols]);
@@ -1109,8 +1117,18 @@ mod tests {
         fill_page_rows(&mut pool, 0, &['a', 'b']);
 
         // out needs page 0's last row plus page 1, which was never filled.
+        // Seed it so a failed compose is shown to leave the caller's composite
+        // intact rather than half-overwriting it.
         let mut out = Grid::new(3, 1);
+        for row in 0..out.rows() {
+            out.get_mut(row, 0).ch = 'Z';
+        }
         assert!(!pool.compose(1, &mut out));
+        assert_eq!(
+            composed_rows(&out),
+            ['Z', 'Z', 'Z'],
+            "a failed compose leaves out untouched"
+        );
     }
 
     #[test]

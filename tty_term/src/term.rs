@@ -3767,8 +3767,20 @@ mod tests {
     fn project_pool_degrades_when_no_window_is_buffered() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
         declare_pool(&mut terminal, 0, 2, 4);
-        let mut out = Grid::new(0, 0);
+
+        // Pre-size out to the projection shape (region height + 1 straddle row,
+        // by width) and seed sentinels. A degraded projection must leave the
+        // caller's held composite intact rather than resizing or half-writing
+        // it, so the compositor can keep showing the last good frame.
+        let mut out = Grid::new(3, 4);
+        for row in 0..out.rows() {
+            for col in 0..out.cols() {
+                out.get_mut(row, col).ch = 'Z';
+            }
+        }
         assert_eq!(terminal.project_pool(0, &mut out, 0.0), None);
+        let untouched = (0..out.rows()).all(|r| (0..out.cols()).all(|c| out.get(r, c).ch == 'Z'));
+        assert!(untouched, "a degraded projection leaves out untouched");
     }
 
     #[test]
