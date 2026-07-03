@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, StatefulWidget, Widget},
 };
 use stoatty_protocol::command::{self, BorderStyle, PanelCommand};
-use stoatty_widgets::{text_run::TextRun, ApcScene};
+use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
 /// Draw a modal frame around `area` and return the inner content rect.
 ///
@@ -92,16 +92,86 @@ pub(crate) fn modal_frame(
     inner
 }
 
+/// Draw a horizontal separator across `width` cells at row `y`, starting at
+/// column `x`.
+///
+/// The fallback -- taken when `scene` is absent or `style`'s foreground is not
+/// RGB -- writes `─` glyphs styled with `style`, exactly as the separator sites
+/// did before. Under stoatty it emits one hairline [`Bar`] a sixteenth of a
+/// cell thick centered in the row, and writes no glyphs.
+pub(crate) fn hline(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    style: Style,
+    scene: Option<&mut ApcScene>,
+) {
+    match scene.zip(style_rgb(style.fg)) {
+        Some((scene, color)) => {
+            Bar {
+                x: 0,
+                y: 8,
+                width: width.saturating_mul(16),
+                height: 1,
+                color,
+            }
+            .render(Rect::new(x, y, width, 1), buf, scene);
+        },
+        None => {
+            for col in x..x + width {
+                buf[(col, y)].set_char('─').set_style(style);
+            }
+        },
+    }
+}
+
+/// Draw a vertical separator down `height` cells at column `x`, starting at row
+/// `y`.
+///
+/// The fallback -- taken when `scene` is absent or `style`'s foreground is not
+/// RGB -- writes `│` glyphs styled with `style`, exactly as the separator sites
+/// did before. Under stoatty it emits one hairline [`Bar`] a sixteenth of a
+/// cell thick centered in the column, and writes no glyphs.
+pub(crate) fn vline(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    height: u16,
+    style: Style,
+    scene: Option<&mut ApcScene>,
+) {
+    match scene.zip(style_rgb(style.fg)) {
+        Some((scene, color)) => {
+            Bar {
+                x: 8,
+                y: 0,
+                width: 1,
+                height: height.saturating_mul(16),
+                color,
+            }
+            .render(Rect::new(x, y, 1, height), buf, scene);
+        },
+        None => {
+            for row in y..y + height {
+                buf[(x, row)].set_char('│').set_style(style);
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::modal_frame;
+    use super::{hline, modal_frame, vline};
     use crate::theme::Theme;
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
         style::{Color, Style},
     };
-    use stoatty_protocol::command::{encode_panel, BorderStyle, PanelCommand};
+    use stoatty_protocol::command::{
+        encode_bar, encode_panel, BarCommand, BorderStyle, PanelCommand,
+    };
     use stoatty_widgets::ApcScene;
 
     fn rgb_style() -> Style {
@@ -165,6 +235,54 @@ mod tests {
         assert!(
             scene.buffer().len() > panel.len(),
             "the title text run follows the panel",
+        );
+    }
+
+    #[test]
+    fn hline_fallback_draws_dashes_and_stoatty_emits_a_centered_bar() {
+        let mut fallback = Buffer::empty(Rect::new(0, 0, 8, 4));
+        hline(&mut fallback, 2, 3, 4, rgb_style(), None);
+        assert_eq!(fallback.cell((2, 3)).unwrap().symbol(), "─");
+        assert_eq!(fallback.cell((5, 3)).unwrap().symbol(), "─");
+        assert_eq!(fallback.cell((6, 3)).unwrap().symbol(), " ");
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
+        let mut scene = ApcScene::new();
+        hline(&mut buf, 2, 3, 4, rgb_style(), Some(&mut scene));
+        assert_eq!(buf.cell((2, 3)).unwrap().symbol(), " ");
+        assert_eq!(
+            scene.buffer(),
+            &encode_bar(&BarCommand {
+                x: 32,
+                y: 56,
+                width: 64,
+                height: 1,
+                color: [1, 2, 3],
+            })
+        );
+    }
+
+    #[test]
+    fn vline_fallback_draws_bars_and_stoatty_emits_a_centered_bar() {
+        let mut fallback = Buffer::empty(Rect::new(0, 0, 8, 4));
+        vline(&mut fallback, 2, 1, 3, rgb_style(), None);
+        assert_eq!(fallback.cell((2, 1)).unwrap().symbol(), "│");
+        assert_eq!(fallback.cell((2, 3)).unwrap().symbol(), "│");
+        assert_eq!(fallback.cell((2, 0)).unwrap().symbol(), " ");
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
+        let mut scene = ApcScene::new();
+        vline(&mut buf, 2, 1, 3, rgb_style(), Some(&mut scene));
+        assert_eq!(buf.cell((2, 1)).unwrap().symbol(), " ");
+        assert_eq!(
+            scene.buffer(),
+            &encode_bar(&BarCommand {
+                x: 40,
+                y: 16,
+                width: 1,
+                height: 48,
+                color: [1, 2, 3],
+            })
         );
     }
 }

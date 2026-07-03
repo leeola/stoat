@@ -18,7 +18,7 @@ pub(crate) fn render_hints(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if bindings.is_empty() || area.width < 10 || area.height < 4 {
         return;
@@ -55,7 +55,7 @@ pub(crate) fn render_hints(
         Some(title.as_str()),
         modal_style,
         theme,
-        scene,
+        scene.as_deref_mut(),
     );
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
@@ -88,10 +88,7 @@ pub(crate) fn render_hints(
         let text_row = sep_row + 1;
         if sep_row < inner.y + inner.height {
             let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-            for col_offset in 0..inner.width {
-                let col = inner.x + col_offset;
-                buf[(col, sep_row)].set_char('─').set_style(sep_style);
-            }
+            crate::render::chrome::hline(buf, inner.x, sep_row, inner.width, sep_style, scene);
         }
         if text_row < inner.y + inner.height {
             for (j, ch) in footer.text.chars().enumerate() {

@@ -84,7 +84,7 @@ pub(crate) fn render_file_finder(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let Some(layout) = file_finder_layout(area) else {
         return;
@@ -97,7 +97,14 @@ pub(crate) fn render_file_finder(
         FinderScope::Buffers => " file finder (buffers) ",
     };
     Clear.render(layout.modal, buf);
-    crate::render::chrome::modal_frame(buf, layout.modal, Some(title), modal_style, theme, scene);
+    crate::render::chrome::modal_frame(
+        buf,
+        layout.modal,
+        Some(title),
+        modal_style,
+        theme,
+        scene.as_deref_mut(),
+    );
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
@@ -117,18 +124,24 @@ pub(crate) fn render_file_finder(
     );
 
     let separator_row = inner.y + 1;
-    for col in inner.x..inner.x + inner.width {
-        buf[(col, separator_row)]
-            .set_char('─')
-            .set_style(muted_style);
-    }
+    crate::render::chrome::hline(
+        buf,
+        inner.x,
+        separator_row,
+        inner.width,
+        muted_style,
+        scene.as_deref_mut(),
+    );
 
     if let Some(preview_rect) = layout.preview {
-        for row in layout.list.y..layout.list.y + layout.list.height {
-            buf[(layout.list.x + layout.list.width, row)]
-                .set_char('│')
-                .set_style(muted_style);
-        }
+        crate::render::chrome::vline(
+            buf,
+            layout.list.x + layout.list.width,
+            layout.list.y,
+            layout.list.height,
+            muted_style,
+            scene,
+        );
         render_preview(finder, preview_rect, theme, ws, buf);
     }
 

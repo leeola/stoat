@@ -120,7 +120,7 @@ fn render_palette_arg_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let Some(layout) = palette_filter_layout(area) else {
         return;
@@ -136,7 +136,7 @@ fn render_palette_arg_picker(
         Some(title.as_str()),
         modal_style,
         theme,
-        scene,
+        scene.as_deref_mut(),
     );
 
     let inner = layout.inner;
@@ -157,11 +157,14 @@ fn render_palette_arg_picker(
     );
 
     let separator_row = inner.y + 1;
-    for col in inner.x..inner.x + inner.width {
-        buf[(col, separator_row)]
-            .set_char('─')
-            .set_style(separator_style);
-    }
+    crate::render::chrome::hline(
+        buf,
+        inner.x,
+        separator_row,
+        inner.width,
+        separator_style,
+        scene.as_deref_mut(),
+    );
 
     let body_top = inner.y + 2;
     let body_height = (inner.y + inner.height).saturating_sub(body_top);
@@ -174,11 +177,14 @@ fn render_palette_arg_picker(
         return;
     };
     if let Some(preview_rect) = preview {
-        for row in list.y..list.y + list.height {
-            buf[(list.x + list.width, row)]
-                .set_char('│')
-                .set_style(separator_style);
-        }
+        crate::render::chrome::vline(
+            buf,
+            list.x + list.width,
+            list.y,
+            list.height,
+            separator_style,
+            scene,
+        );
         render_arg_preview(picker, preview_rect, theme, ws, buf);
     }
 
@@ -278,7 +284,7 @@ fn render_palette_filter(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let Some(layout) = palette_filter_layout(area) else {
         return;
@@ -290,7 +296,14 @@ fn render_palette_filter(
         PaletteScope::All => " command palette (all) ",
     };
     Clear.render(layout.modal, buf);
-    crate::render::chrome::modal_frame(buf, layout.modal, Some(title), modal_style, theme, scene);
+    crate::render::chrome::modal_frame(
+        buf,
+        layout.modal,
+        Some(title),
+        modal_style,
+        theme,
+        scene.as_deref_mut(),
+    );
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
@@ -311,11 +324,14 @@ fn render_palette_filter(
     );
 
     let separator_row = inner.y + 1;
-    for col in inner.x..inner.x + inner.width {
-        buf[(col, separator_row)]
-            .set_char('─')
-            .set_style(separator_style);
-    }
+    crate::render::chrome::hline(
+        buf,
+        inner.x,
+        separator_row,
+        inner.width,
+        separator_style,
+        scene.as_deref_mut(),
+    );
 
     let list = layout.list;
     let scroll = selected.saturating_sub(list.height.saturating_sub(1) as usize);
@@ -324,11 +340,14 @@ fn render_palette_filter(
     let doc = layout.doc;
     if doc.height > 0 {
         let doc_separator_row = doc.y - 1;
-        for col in inner.x..inner.x + inner.width {
-            buf[(col, doc_separator_row)]
-                .set_char('─')
-                .set_style(separator_style);
-        }
+        crate::render::chrome::hline(
+            buf,
+            inner.x,
+            doc_separator_row,
+            inner.width,
+            separator_style,
+            scene,
+        );
         let doc_lines = filtered
             .get(selected)
             .map(|e| wrap_text(e.def.long_desc(), inner.width as usize))

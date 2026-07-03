@@ -81,7 +81,7 @@ pub(crate) fn render_help(
     mode_badges: &std::collections::BTreeMap<String, String>,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     use crate::help::{help_input_mode, HelpInput, HelpScope};
     let input_mode = help_input_mode(stoat_mode);
@@ -102,7 +102,7 @@ pub(crate) fn render_help(
         Some(title.as_str()),
         modal_style,
         theme,
-        scene,
+        scene.as_deref_mut(),
     );
 
     let inner = layout.inner;
@@ -143,11 +143,14 @@ pub(crate) fn render_help(
     let list_rect = layout.list;
     let detail_rect = layout.detail;
 
-    for row in list_rect.y..list_rect.y + list_rect.height {
-        buf[(list_rect.x + list_rect.width, row)]
-            .set_char('│')
-            .set_style(muted);
-    }
+    crate::render::chrome::vline(
+        buf,
+        list_rect.x + list_rect.width,
+        list_rect.y,
+        list_rect.height,
+        muted,
+        scene,
+    );
 
     let list_scroll = help
         .selected()

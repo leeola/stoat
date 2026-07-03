@@ -5853,6 +5853,7 @@ mod tests {
         let src = r##"theme rgbmodal {
             ui.modal.help.fg = "#8899aa";
             ui.modal.hints.fg = "#8899aa";
+            ui.text.muted.fg = "#606060";
             ui.background.bg = "#282c34";
         }"##;
         let (config, _) = stoat_config::parse(src);
@@ -5891,6 +5892,42 @@ mod tests {
                         && p.height == modal.height
             )),
             "the help modal emits a panel at its layout rect, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn help_separator_emits_a_hairline_bar_inside_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_modal_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.settle();
+
+        let size = h.stoat.size();
+        let mut buf = Buffer::empty(size);
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let list = crate::render::help::help_layout(size)
+            .expect("help modal fits the test viewport")
+            .list;
+        let sep_x = (list.x + list.width) as i16 * 16 + 8;
+        let sep_y = list.y as i16 * 16;
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::Bar(b)
+                    if b.x == sep_x
+                        && b.y == sep_y
+                        && b.width == 1
+                        && b.height == list.height * 16
+            )),
+            "the help list/detail separator emits a hairline bar, got {cmds:?}"
         );
     }
 
