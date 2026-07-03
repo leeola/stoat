@@ -6,25 +6,33 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 
 /// Paint either the workspace-symbol input modal or the result
 /// picker, whichever is active. Anchored to the focused editor's
 /// cursor.
-pub(crate) fn render_workspace_symbol(stoat: &mut Stoat, buf: &mut Buffer) {
+pub(crate) fn render_workspace_symbol(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
     if stoat.workspace_symbol_input.is_some() {
-        render_input(stoat, buf);
+        render_input(stoat, buf, scene);
         return;
     }
     if let Some(picker) = stoat.pending_workspace_symbol_picker.as_ref()
         && !picker.entries.is_empty()
     {
-        render_picker(stoat, buf);
+        render_picker(stoat, buf, scene);
     }
 }
 
-fn render_input(stoat: &mut Stoat, buf: &mut Buffer) {
+fn render_input(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
     let anchor_offset = stoat
         .workspace_symbol_input
         .as_ref()
@@ -64,14 +72,15 @@ fn render_input(stoat: &mut Stoat, buf: &mut Buffer) {
         height: popup_height,
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" workspace symbol ")
-        .title_style(modal_style);
-    let inner = block.inner(popup_area);
     Clear.render(popup_area, buf);
-    block.render(popup_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        popup_area,
+        Some(" workspace symbol "),
+        modal_style,
+        &stoat.theme,
+        scene,
+    );
 
     let editor_id = stoat
         .workspace_symbol_input
@@ -85,7 +94,11 @@ fn render_input(stoat: &mut Stoat, buf: &mut Buffer) {
     }
 }
 
-fn render_picker(stoat: &mut Stoat, buf: &mut Buffer) {
+fn render_picker(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
     let picker = match &stoat.pending_workspace_symbol_picker {
         Some(p) if !p.entries.is_empty() => p.clone(),
         _ => return,
@@ -163,14 +176,15 @@ fn render_picker(stoat: &mut Stoat, buf: &mut Buffer) {
         height: popup_height,
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" workspace symbols ")
-        .title_style(modal_style);
-    let inner = block.inner(popup_area);
     Clear.render(popup_area, buf);
-    block.render(popup_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        popup_area,
+        Some(" workspace symbols "),
+        modal_style,
+        &stoat.theme,
+        scene,
+    );
 
     for (row_idx, line) in body.iter().enumerate() {
         let row = inner.y + row_idx as u16;

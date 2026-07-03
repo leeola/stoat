@@ -313,12 +313,16 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             );
         }
     }
-    hover::render_hover(stoat, buf);
-    completion::render_completion(stoat, buf);
-    code_action::render_code_action(stoat, buf);
-    rename_input::render_rename_input(stoat, buf);
-    symbol_picker::render_symbol_picker(stoat, buf);
-    workspace_symbol_picker::render_workspace_symbol(stoat, buf);
+    hover::render_hover(stoat, buf, stoat.stoatty.then_some(&mut *scene));
+    completion::render_completion(stoat, buf, stoat.stoatty.then_some(&mut *scene));
+    code_action::render_code_action(stoat, buf, stoat.stoatty.then_some(&mut *scene));
+    rename_input::render_rename_input(stoat, buf, stoat.stoatty.then_some(&mut *scene));
+    symbol_picker::render_symbol_picker(stoat, buf, stoat.stoatty.then_some(&mut *scene));
+    workspace_symbol_picker::render_workspace_symbol(
+        stoat,
+        buf,
+        stoat.stoatty.then_some(&mut *scene),
+    );
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
     badges::render_badges(

@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 
 /// Visible-window size for the symbol picker. The list scrolls so
@@ -18,7 +18,11 @@ pub(crate) const VISIBLE_WINDOW: usize = 9;
 /// editor's primary cursor. Renders a 9-row viewport over the
 /// picker's `entries` that follows `selected_idx`; visible rows are
 /// numbered 1..=9. Clamps width and height to the focused pane.
-pub(crate) fn render_symbol_picker(stoat: &mut Stoat, buf: &mut Buffer) {
+pub(crate) fn render_symbol_picker(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
     let picker = match &stoat.pending_symbol_picker {
         Some(p) if !p.entries.is_empty() => p.clone(),
         _ => return,
@@ -106,14 +110,15 @@ pub(crate) fn render_symbol_picker(stoat: &mut Stoat, buf: &mut Buffer) {
         height: popup_height,
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" symbols ")
-        .title_style(modal_style);
-    let inner = block.inner(popup_area);
     Clear.render(popup_area, buf);
-    block.render(popup_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        popup_area,
+        Some(" symbols "),
+        modal_style,
+        &stoat.theme,
+        scene,
+    );
 
     for (row_idx, line) in body.iter().enumerate() {
         let row = inner.y + row_idx as u16;

@@ -123,17 +123,25 @@ pub(crate) fn completion_popup_layout(
 /// No-op when [`Stoat::pending_completion`] is `None` or empty,
 /// when the focused pane is not an editor, when the cursor is
 /// off-screen, or when neither the popup width nor height fits.
-pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
+pub(crate) fn render_completion(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
     let Some((popup, prefix, layout)) = completion_popup_layout(stoat) else {
         return;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
     Clear.render(layout.popup_area, buf);
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .render(layout.popup_area, buf);
+    crate::render::chrome::modal_frame(
+        buf,
+        layout.popup_area,
+        None,
+        modal_style,
+        &stoat.theme,
+        scene,
+    );
 
     paint_completion_rows(
         &popup.items,

@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 
 /// Paint the code-action picker, if any, anchored to the focused
@@ -18,7 +18,11 @@ use ratatui::{
 ///
 /// No-op when the picker has no entries (still in flight) or when
 /// the focused pane is not an editor.
-pub(crate) fn render_code_action(stoat: &mut Stoat, buf: &mut Buffer) {
+pub(crate) fn render_code_action(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
     let picker = match &stoat.pending_code_action_picker {
         Some(p) if !p.entries.is_empty() => p.clone(),
         _ => return,
@@ -108,14 +112,15 @@ pub(crate) fn render_code_action(stoat: &mut Stoat, buf: &mut Buffer) {
         height: popup_height,
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" code action ")
-        .title_style(modal_style);
-    let inner = block.inner(popup_area);
     Clear.render(popup_area, buf);
-    block.render(popup_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        popup_area,
+        Some(" code action "),
+        modal_style,
+        &stoat.theme,
+        scene,
+    );
 
     for (row_idx, line) in body.iter().enumerate() {
         let row = inner.y + row_idx as u16;

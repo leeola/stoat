@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 
 /// Paint the rename input modal anchored to the focused editor's
@@ -15,7 +15,11 @@ use ratatui::{
 ///
 /// No-op when there is no rename input open or the focused pane is
 /// not an editor.
-pub(crate) fn render_rename_input(stoat: &mut Stoat, buf: &mut Buffer) {
+pub(crate) fn render_rename_input(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
     if stoat.rename_input.is_none() {
         return;
     }
@@ -63,14 +67,15 @@ pub(crate) fn render_rename_input(stoat: &mut Stoat, buf: &mut Buffer) {
         height: popup_height,
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" rename ")
-        .title_style(modal_style);
-    let inner = block.inner(popup_area);
     Clear.render(popup_area, buf);
-    block.render(popup_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        popup_area,
+        Some(" rename "),
+        modal_style,
+        &stoat.theme,
+        scene,
+    );
 
     let editor_id = stoat
         .rename_input

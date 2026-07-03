@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 
 /// Paint the hover popup, if any, anchored to the focused editor's
@@ -17,7 +17,11 @@ use ratatui::{
 ///
 /// No-op when [`Stoat::pending_hover`] is `None`, when the focused
 /// pane is not an editor, or when the cursor is off-screen.
-pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer) {
+pub(crate) fn render_hover(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
     let popup = match &stoat.pending_hover {
         Some(p) => p.clone(),
         None => return,
@@ -78,14 +82,15 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer) {
         height: popup_height,
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(" hover ")
-        .title_style(modal_style);
-    let inner = block.inner(popup_area);
     Clear.render(popup_area, buf);
-    block.render(popup_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        popup_area,
+        Some(" hover "),
+        modal_style,
+        &stoat.theme,
+        scene,
+    );
 
     for (row_idx, line) in body.iter().enumerate() {
         let row = inner.y + row_idx as u16;
