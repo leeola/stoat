@@ -18,6 +18,7 @@ pub struct Grid {
     rows: usize,
     cols: usize,
     overlays: Vec<Overlay>,
+    panels: Vec<Panel>,
     scroll_region: Option<ScrollRegion>,
     icons: Vec<Icon>,
     text_runs: Vec<TextRun>,
@@ -36,6 +37,7 @@ impl Grid {
             rows,
             cols,
             overlays: Vec::new(),
+            panels: Vec::new(),
             scroll_region: None,
             icons: Vec::new(),
             text_runs: Vec::new(),
@@ -136,6 +138,19 @@ impl Grid {
     /// frame it changes.
     pub fn set_overlays(&mut self, overlays: Vec<Overlay>) {
         self.overlays = overlays;
+    }
+
+    /// The modal-chrome panels drawn with the cells, in draw order.
+    pub fn panels(&self) -> &[Panel] {
+        &self.panels
+    }
+
+    /// Replace the modal-chrome panels.
+    ///
+    /// Grid-level like the overlays, so the per-cell projection leaves them
+    /// untouched. The caller sets the full list each frame it changes.
+    pub fn set_panels(&mut self, panels: Vec<Panel>) {
+        self.panels = panels;
     }
 
     /// The scrollable sub-rectangle, or `None` when no region is declared.
@@ -543,6 +558,31 @@ pub struct Overlay {
     /// clip all shift by this offset.
     pub offset: [i16; 2],
     pub content: String,
+}
+
+/// Off-grid modal chrome framing a cell rectangle.
+///
+/// Like an [`Overlay`], the panel is grid-level rather than a cell attribute: a
+/// hairline frame in [`Self::border`] at [`Self::style`] weight with
+/// [`Self::corner_radius`] device-pixel rounded corners and an optional drop
+/// [`Self::shadow`], composited around the `width` by `height` cell rectangle at
+/// (`top`, `left`). The framed cells keep rendering their own content, so unlike
+/// an opaque overlay the panel is chrome layered with the grid rather than over
+/// it.
+///
+/// [`Self::fill`] is [`Some`] to paint the interior that color, or [`None`] to
+/// leave the cells' own backgrounds showing through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Panel {
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
+    pub style: BorderStyle,
+    pub border: Rgb,
+    pub corner_radius: u8,
+    pub fill: Option<Rgb>,
+    pub shadow: bool,
 }
 
 /// A scrollable sub-rectangle of the grid.

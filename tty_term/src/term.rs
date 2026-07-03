@@ -9,7 +9,7 @@
 use crate::{
     grid::{
         Bar, Border, BorderStyle, Borders, Cell, DocumentOffset, Flags, Grid, Icon, IconKind,
-        Overlay, PagePool, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
+        Overlay, PagePool, Panel, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -29,8 +29,8 @@ use alacritty_terminal::{
 use parking_lot::Mutex;
 use std::{collections::BTreeMap, mem, sync::Arc, time::Instant};
 use stoatty_protocol::command::{
-    self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PoolRegionCommand,
-    PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
+    self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PanelCommand,
+    PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -76,6 +76,11 @@ pub struct Terminal {
     /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
     /// them, since the VT projection resets each cell's borders every frame.
     borders: Vec<BorderCommand>,
+    /// Panel regions set by `Gstoatty;panel` frames, applied to the grid's panel
+    /// list by [`Self::project`]. They float above the cells like popovers, but
+    /// their row footprint feeds decoration damage like a border's, so the chrome
+    /// over live cells rebuilds when a panel appears, moves, or clears.
+    panels: Vec<PanelCommand>,
     /// Scale commands set by `Gstoatty;scale` frames, applied to the grid by
     /// [`Self::project`]. Like borders, they persist across the per-frame VT
     /// projection that resets each cell's scale.
@@ -184,6 +189,7 @@ pub struct Terminal {
 #[derive(Default)]
 struct DecorationDirty {
     borders: bool,
+    panels: bool,
     scales: bool,
     popovers: bool,
     scroll_region: bool,
@@ -198,6 +204,7 @@ impl DecorationDirty {
     fn all() -> DecorationDirty {
         DecorationDirty {
             borders: true,
+            panels: true,
             scales: true,
             popovers: true,
             scroll_region: true,
@@ -381,6 +388,7 @@ impl Terminal {
             xtversion: XtVersionScanner::default(),
             osc_notify: OscNotifyScanner::default(),
             borders: Vec::new(),
+            panels: Vec::new(),
             scales: Vec::new(),
             popovers: Vec::new(),
             scroll_region: None,
@@ -694,10 +702,10 @@ impl Terminal {
                 self.borders.push(border);
                 self.decorations_dirty.borders = true;
             },
-            // Panel compositing is not implemented in this build. The command
-            // decodes so emitters can target it, but the terminal accepts and
-            // ignores the frame rather than rendering it.
-            Command::Panel(_) => {},
+            Command::Panel(panel) => {
+                self.panels.push(panel);
+                self.decorations_dirty.panels = true;
+            },
             Command::Scale(scale) => {
                 self.scales.push(scale);
                 self.decorations_dirty.scales = true;
@@ -1010,6 +1018,7 @@ impl Terminal {
     /// behind. Resetting lets a program redraw its decoration scene from scratch.
     fn clear_decorations(&mut self) {
         self.borders.clear();
+        self.panels.clear();
         self.scales.clear();
         self.popovers.clear();
         self.icons.clear();
@@ -1244,6 +1253,9 @@ impl Terminal {
         if self.decorations_dirty.popovers || resized {
             apply_popovers(grid, &self.popovers);
         }
+        if self.decorations_dirty.panels || resized {
+            apply_panels(grid, &self.panels);
+        }
         if self.decorations_dirty.scroll_region || resized {
             apply_scroll_region(grid, self.scroll_region);
         }
@@ -1260,11 +1272,13 @@ impl Terminal {
             apply_bars(grid, &self.bars);
         }
 
-        // Accumulate renderer-facing decoration row-damage for the cell-stamped
-        // borders and scales: when one changed, damage the rows it covers now and
-        // the rows it covered last projection, so the cell-decoration passes
-        // rebuild the new footprint and erase a moved or cleared one. A VT
-        // re-stamp re-applies the same decorations, leaving this signal untouched.
+        // Accumulate renderer-facing decoration row-damage for the borders,
+        // panels, and scales. When one changed, damage the rows it covers now and
+        // the rows it covered last projection, so the decoration passes rebuild
+        // the new footprint and erase a moved or cleared one. Panels are
+        // grid-level rather than cell-stamped, but their chrome sits over live
+        // cells, so a change still repaints the rows it spans. A VT re-stamp
+        // re-applies the same decorations, leaving this signal untouched.
         if self.last_decoration_footprint.len() != rows {
             self.last_decoration_footprint.clear();
             self.last_decoration_footprint.resize(rows, false);
@@ -1274,11 +1288,16 @@ impl Terminal {
         }
         decoration_footprint(
             &self.borders,
+            &self.panels,
             &self.scales,
             rows,
             &mut self.footprint_scratch,
         );
-        if self.decorations_dirty.borders || self.decorations_dirty.scales || resized {
+        if self.decorations_dirty.borders
+            || self.decorations_dirty.panels
+            || self.decorations_dirty.scales
+            || resized
+        {
             for ((damage, &now), &before) in self
                 .decoration_damage
                 .iter_mut()
@@ -1942,14 +1961,16 @@ fn map_underline(flags: TermFlags) -> UnderlineStyle {
     }
 }
 
-/// The grid rows the cell-stamped decorations occupy: each border region's
-/// perimeter span (`top..=top+height-1`) and each scale block's rows
-/// (`top..top+scale`), clamped to `rows`.
+/// Mark the grid rows the damage-tracked decorations occupy, clamped to `rows`.
 ///
-/// Mirrors the row ranges [`frame_region`] and [`apply_scales`] stamp, so the
-/// decoration-damage signal covers exactly the rows those appliers touch.
+/// Each border and panel region spans `top..=top+height-1` and each scale block
+/// spans `top..top+scale`. Borders and scales stamp those rows' cells, so the
+/// span mirrors what [`frame_region`] and [`apply_scales`] touch. A panel does
+/// not stamp cells, but its chrome covers the same rows, so it is tracked here
+/// too.
 fn decoration_footprint(
     borders: &[BorderCommand],
+    panels: &[PanelCommand],
     scales: &[ScaleCommand],
     rows: usize,
     out: &mut Vec<bool>,
@@ -1966,6 +1987,18 @@ fn decoration_footprint(
             continue;
         }
         let bottom = (top + border.height as usize - 1).min(rows - 1);
+        out[top..=bottom].fill(true);
+    }
+
+    for panel in panels {
+        if panel.width == 0 || panel.height == 0 {
+            continue;
+        }
+        let top = panel.top as usize;
+        if top >= rows {
+            continue;
+        }
+        let bottom = (top + panel.height as usize - 1).min(rows - 1);
         out[top..=bottom].fill(true);
     }
 
@@ -2055,6 +2088,11 @@ fn apply_scales(grid: &mut Grid, commands: &[ScaleCommand]) {
 fn apply_popovers(grid: &mut Grid, commands: &[PopoverCommand]) {
     let overlays = commands.iter().map(popover_overlay).collect();
     grid.set_overlays(overlays);
+}
+
+fn apply_panels(grid: &mut Grid, commands: &[PanelCommand]) {
+    let panels = commands.iter().map(panel_grid).collect();
+    grid.set_panels(panels);
 }
 
 /// Set the grid's scrollable region from the stored command, or clear it.
@@ -2185,6 +2223,20 @@ fn popover_overlay(command: &PopoverCommand) -> Overlay {
     }
 }
 
+fn panel_grid(command: &PanelCommand) -> Panel {
+    Panel {
+        top: command.top,
+        left: command.left,
+        width: command.width,
+        height: command.height,
+        style: grid_border_style(command.style),
+        border: Rgb::new(command.border[0], command.border[1], command.border[2]),
+        corner_radius: command.corner_radius,
+        fill: command.fill.map(|[r, g, b]| Rgb::new(r, g, b)),
+        shadow: command.shadow,
+    }
+}
+
 fn project_cursor(cursor: RenderableCursor, offset: i32) -> Cursor {
     Cursor {
         row: (cursor.point.line.0 + offset).max(0) as usize,
@@ -2247,17 +2299,18 @@ mod tests {
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Overlay,
-            Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
+            Panel, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
         },
         theme::Theme,
     };
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_line_layout,
-        encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
-        encode_scroll, encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
-        BorderStyle as ProtoBorderStyle, FillCommand, IconCommand, IconKind as ProtoIconKind,
-        LineLayoutCommand, PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand,
-        ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        encode_panel, encode_pool_region, encode_popover, encode_reposition, encode_reset,
+        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, BarCommand,
+        BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, IconCommand,
+        IconKind as ProtoIconKind, LineLayoutCommand, PanelCommand, PoolRegionCommand,
+        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+        TextRunCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -2909,6 +2962,90 @@ mod tests {
         assert_eq!(grid.get(1, 2).borders.bottom, edge);
         assert_eq!(grid.get(1, 2).borders.right, edge);
         assert_eq!(grid.get(1, 1).borders.top, None);
+    }
+
+    #[test]
+    fn panel_apc_frame_sets_a_grid_panel() {
+        let frame = encode_panel(&PanelCommand {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            style: ProtoBorderStyle::Rounded,
+            border: [40, 50, 60],
+            corner_radius: 6,
+            fill: Some([10, 20, 30]),
+            shadow: true,
+        });
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.panels(),
+            [Panel {
+                top: 1,
+                left: 2,
+                width: 4,
+                height: 3,
+                style: BorderStyle::Rounded,
+                border: Rgb::new(40, 50, 60),
+                corner_radius: 6,
+                fill: Some(Rgb::new(10, 20, 30)),
+                shadow: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn reset_clears_accumulated_panels() {
+        let panel = encode_panel(&PanelCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: None,
+            shadow: false,
+        });
+
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+        terminal.advance(&panel);
+        terminal.advance(&encode_reset());
+        terminal.project(&mut grid);
+
+        assert!(grid.panels().is_empty());
+    }
+
+    #[test]
+    fn panel_change_damages_its_rows() {
+        let panel = encode_panel(&PanelCommand {
+            top: 1,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: None,
+            shadow: false,
+        });
+
+        let mut terminal = Terminal::new(4, 3, Theme::default());
+        let mut grid = Grid::new(4, 3);
+        terminal.advance(&panel);
+        terminal.project(&mut grid);
+
+        let damage = terminal.take_decoration_damage();
+        assert!(!damage.is_dirty(0), "row above the panel stays clean");
+        assert!(damage.is_dirty(1), "panel top row damaged");
+        assert!(damage.is_dirty(2), "panel bottom row damaged");
+        assert!(!damage.is_dirty(3), "row below the panel stays clean");
     }
 
     #[test]
