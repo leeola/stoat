@@ -250,7 +250,12 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         );
     }
 
-    pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf);
+    pane::render_pane_dividers(
+        &ws.panes.dividers(),
+        &stoat.theme,
+        buf,
+        stoat.stoatty.then_some(&mut *scene),
+    );
 
     if let Some(pane_id) = overlay_pane {
         let pane = ws.panes.pane(pane_id);
@@ -310,7 +315,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         }
         let is_focused = matches!(ws.focus, FocusTarget::Dock(id) if id == dock_id);
         if matches!(dock.visibility, DockVisibility::Minimized) {
-            dock::render_dock_minimized(dock, is_focused, &stoat.theme, buf);
+            dock::render_dock_minimized(
+                dock,
+                is_focused,
+                &stoat.theme,
+                buf,
+                frame.stoatty.then_some(&mut *scene),
+            );
         } else {
             dock::render_dock_open(
                 dock,

@@ -5861,6 +5861,18 @@ mod tests {
             .expect("rgb theme builds")
     }
 
+    /// A hex theme for the pane-divider APC test, so the border colors resolve
+    /// to RGB and the stoatty arm emits bars instead of glyphs.
+    fn rgb_border_theme() -> crate::theme::Theme {
+        let src = r##"theme rgbborder {
+            ui.border.focused.fg = "#aabbcc";
+            ui.border.inactive.fg = "#556677";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbborder")
+            .expect("rgb theme builds")
+    }
+
     #[test]
     fn help_modal_emits_a_panel_inside_stoatty() {
         use stoatty_protocol::command::Command;
@@ -5928,6 +5940,47 @@ mod tests {
                         && b.height == list.height * 16
             )),
             "the help list/detail separator emits a hairline bar, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn pane_divider_emits_a_hairline_bar_inside_stoatty() {
+        use crate::pane::DividerOrientation;
+        use stoatty_protocol::command::{BarCommand, Command};
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_border_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+
+        let size = h.stoat.size();
+        let mut buf = Buffer::empty(size);
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let dividers = h.stoat.active_workspace().panes.dividers();
+        let d = dividers
+            .iter()
+            .find(|d| matches!(d.orientation, DividerOrientation::Vertical))
+            .expect("the split has a vertical divider");
+        let end_y = d.y.saturating_add(d.len).min(size.height);
+        let expected = BarCommand {
+            x: d.x as i16 * 16 + 8,
+            y: d.y as i16 * 16,
+            width: 1,
+            height: (end_y - d.y) * 16,
+            color: if d.touches_focus {
+                [0xaa, 0xbb, 0xcc]
+            } else {
+                [0x55, 0x66, 0x77]
+            },
+        };
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.contains(&Command::Bar(expected)),
+            "the split divider emits a hairline bar in the border color, got {cmds:?}"
         );
     }
 

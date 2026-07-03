@@ -12,6 +12,7 @@ pub(crate) fn render_dock_minimized(
     is_focused: bool,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let area = dock.area;
     if area.width == 0 || area.height == 0 {
@@ -22,11 +23,7 @@ pub(crate) fn render_dock_minimized(
     } else {
         theme.get(crate::theme::scope::UI_BORDER_INACTIVE)
     };
-    for y in area.y..area.y + area.height {
-        if let Some(cell) = buf.cell_mut((area.x, y)) {
-            cell.set_char('│').set_style(style);
-        }
-    }
+    crate::render::chrome::vline(buf, area.x, area.y, area.height, style, scene);
 }
 
 pub(crate) fn render_dock_open(

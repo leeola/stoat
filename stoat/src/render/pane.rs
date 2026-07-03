@@ -163,6 +163,7 @@ pub(crate) fn render_pane_dividers(
     dividers: &[Divider],
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    mut scene: Option<&mut ApcScene>,
 ) {
     let dim = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
     let lit = theme.get(crate::theme::scope::UI_BORDER_FOCUSED);
@@ -175,17 +176,15 @@ pub(crate) fn render_pane_dividers(
                 if d.x >= buf_end_x {
                     continue;
                 }
-                for yy in d.y..d.y.saturating_add(d.len).min(buf_end_y) {
-                    buf[(d.x, yy)].set_char('│').set_style(style);
-                }
+                let height = d.y.saturating_add(d.len).min(buf_end_y).saturating_sub(d.y);
+                crate::render::chrome::vline(buf, d.x, d.y, height, style, scene.as_deref_mut());
             },
             DividerOrientation::Horizontal => {
                 if d.y >= buf_end_y {
                     continue;
                 }
-                for xx in d.x..d.x.saturating_add(d.len).min(buf_end_x) {
-                    buf[(xx, d.y)].set_char('─').set_style(style);
-                }
+                let width = d.x.saturating_add(d.len).min(buf_end_x).saturating_sub(d.x);
+                crate::render::chrome::hline(buf, d.x, d.y, width, style, scene.as_deref_mut());
             },
         }
     }
