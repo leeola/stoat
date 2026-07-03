@@ -127,6 +127,10 @@ on init {
     # on disk: external edits, commits, and newly-changed files refresh it.
     # Default on. Set false to require a manual `r` instead.
     # review.follow = false;
+
+    # Override the language server for a language. The first list element is
+    # the executable and the rest are arguments. An empty list disables it.
+    # lsp.server.rust = ["rust-analyzer"];
 }
 
 on key {

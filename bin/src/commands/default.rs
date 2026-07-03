@@ -163,6 +163,7 @@ fn run_tui(
         terminal_args: None,
         review_follow: None,
         mode_badges: std::collections::BTreeMap::new(),
+        lsp_servers: std::collections::BTreeMap::new(),
     };
 
     let cwd = std::env::current_dir().unwrap_or_default();

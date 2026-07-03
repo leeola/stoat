@@ -53,6 +53,13 @@ pub struct Settings {
     /// table; user-defined modes can supply their own entry here so
     /// the status line shows something more meaningful than `---`.
     pub mode_badges: BTreeMap<String, String>,
+    /// Per-language language-server command overrides, keyed by language
+    /// name. Each value is an argv whose first element is the executable
+    /// and the rest are arguments. Set via
+    /// `lsp.server.<language> = ["cmd", "arg"];` in stcfg. An entry wins
+    /// over the builtin table. An empty argv disables the server for that
+    /// language. A language with no entry falls back to the builtin.
+    pub lsp_servers: BTreeMap<String, Vec<String>>,
 }
 
 impl Settings {
@@ -79,6 +86,8 @@ impl Settings {
     pub fn merge(self, other: Settings) -> Settings {
         let mut mode_badges = self.mode_badges;
         mode_badges.extend(other.mode_badges);
+        let mut lsp_servers = self.lsp_servers;
+        lsp_servers.extend(other.lsp_servers);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             review_follow: other.review_follow.or(self.review_follow),
@@ -88,6 +97,7 @@ impl Settings {
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
             mode_badges,
+            lsp_servers,
         }
     }
 
@@ -152,6 +162,18 @@ impl Settings {
                     );
                 }
             },
+            ["lsp", "server", language] => {
+                if let Value::Array(items) = &setting.value.node {
+                    let argv: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| match &item.node {
+                            Value::String(s) | Value::Ident(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    self.lsp_servers.insert((*language).to_string(), argv);
+                }
+            },
             _ => {},
         }
     }
@@ -182,6 +204,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
+                lsp_servers: BTreeMap::new(),
             }
         );
     }
@@ -190,6 +213,18 @@ mod tests {
     fn from_config_extracts_review_follow() {
         let config = parse_ok("on init { review.follow = false; }");
         assert_eq!(Settings::from_config(&config).review_follow, Some(false));
+    }
+
+    #[test]
+    fn from_config_extracts_lsp_server() {
+        let config = parse_ok(r#"on init { lsp.server.rust = ["ra", "--flag"]; }"#);
+        assert_eq!(
+            Settings::from_config(&config).lsp_servers,
+            BTreeMap::from([(
+                "rust".to_string(),
+                vec!["ra".to_string(), "--flag".to_string()],
+            )]),
+        );
     }
 
     #[test]
@@ -206,6 +241,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
+                lsp_servers: BTreeMap::new(),
             }
         );
     }
@@ -224,6 +260,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
+                lsp_servers: BTreeMap::new(),
             }
         );
     }
@@ -251,6 +288,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
+            lsp_servers: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: Some(true),
@@ -261,6 +299,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
+            lsp_servers: BTreeMap::new(),
         };
         assert_eq!(
             left.merge(right),
@@ -273,6 +312,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
+                lsp_servers: BTreeMap::new(),
             }
         );
     }
@@ -288,6 +328,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
+            lsp_servers: BTreeMap::new(),
         };
         let right = Settings::default();
         assert_eq!(
@@ -301,6 +342,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
+                lsp_servers: BTreeMap::new(),
             }
         );
     }
@@ -327,6 +369,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
+                lsp_servers: BTreeMap::new(),
             }
         );
     }
@@ -345,6 +388,7 @@ mod tests {
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
+                lsp_servers: BTreeMap::new(),
             }
         );
     }
@@ -360,6 +404,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
+            lsp_servers: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
@@ -370,6 +415,7 @@ mod tests {
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
+            lsp_servers: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
     }

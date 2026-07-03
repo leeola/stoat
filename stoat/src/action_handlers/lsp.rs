@@ -184,14 +184,14 @@ fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
     let Some(language) = stoat.active_workspace().buffers.language_for(buffer_id) else {
         return;
     };
-    let Some((command, args)) = crate::lsp::servers::server_command(language.name) else {
+    let Some((command, args)) =
+        crate::lsp::servers::resolve_server_command(&stoat.settings, language.name)
+    else {
         return;
     };
     stoat.lsp_spawn_attempted = true;
 
     let root_uri = path_to_uri(&stoat.active_workspace().git_root);
-    let command = command.to_string();
-    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
     let slot = stoat.pending_lsp_host.clone();
 
     stoat
