@@ -169,6 +169,7 @@ pub enum ActionKind {
     IndentSelection,
     UnindentSelection,
     ToggleComments,
+    ToggleSyntaxHighlight,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

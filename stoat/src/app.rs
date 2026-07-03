@@ -226,6 +226,10 @@ pub struct Stoat {
     /// never stalls input on the scan.
     pub(crate) pending_review_scan: Option<action_handlers::PendingReviewScan>,
     pub(crate) modal_run: Option<RunId>,
+    /// Session-wide toggle for tree-sitter syntax coloring, applied to every
+    /// editor at paint time. Not a [`crate::config::Settings`] field:
+    /// persistence can come later. Defaults to on.
+    pub(crate) syntax_highlight: bool,
     pub(crate) render_tick: u64,
     /// Transient one-line message painted in a reserved bottom row,
     /// such as a failed-save error. An action sets it during event
@@ -750,6 +754,7 @@ impl Stoat {
             perf: crate::perf::PerfStats::default(),
             pending_review_scan: None,
             modal_run: None,
+            syntax_highlight: true,
             render_tick: 0,
             pending_message: None,
             pending_count: None,
@@ -3593,6 +3598,14 @@ impl Stoat {
         buf.resize(self.size);
         buf.reset();
 
+        // Keep every editor's syntax coloring in step with the session toggle
+        // before painting, so a newly opened editor inherits the current
+        // state. set_syntax_highlighting is a no-op when already in sync.
+        let syntax = self.syntax_highlight;
+        for editor in self.active_workspace_mut().editors.values_mut() {
+            editor.display_map.set_syntax_highlighting(syntax);
+        }
+
         // Take the scene out so `frame` can hold a `&mut ApcScene` alongside its
         // `&mut self` borrow. Widgets append into it during the paint.
         let mut scene = std::mem::take(&mut self.apc_scene);
@@ -3748,6 +3761,7 @@ impl Stoat {
             },
         }
         let mut async_jobs: Vec<PoolFill> = Vec::new();
+        let syntax_highlight = self.syntax_highlight;
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -3772,11 +3786,12 @@ impl Stoat {
             };
             // Review rows regenerate on accept/reject and their gutter glyphs
             // change on stage/unstage, so the session version is the pool's
-            // content version. Plain editors stay stable while scrolling.
+            // content version. Plain editors stay stable while scrolling, save
+            // for the syntax-highlight toggle, which recolors every pooled row.
             let content_version = editor
                 .review_view
                 .as_ref()
-                .map_or(0, |view| view.session_version);
+                .map_or(u64::from(!syntax_highlight), |view| view.session_version);
             let entered = crate::smooth_scroll::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,

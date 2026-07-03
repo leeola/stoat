@@ -131,6 +131,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleSyntaxHighlightDef,
+    ToggleSyntaxHighlight,
+    "ToggleSyntaxHighlight",
+    ActionKind::ToggleSyntaxHighlight,
+    "toggle syntax highlighting",
+    "Turn tree-sitter syntax coloring off or on for the session. When off, code renders in the default foreground while search matches, diagnostics, and other text highlights stay. Applies to every open editor and to editors opened afterward; the setting is not persisted across restarts.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

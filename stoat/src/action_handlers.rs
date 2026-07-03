@@ -207,6 +207,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::IndentSelection => movement::indent_selection(stoat),
         ActionKind::UnindentSelection => movement::unindent_selection(stoat),
         ActionKind::ToggleComments => movement::toggle_comments(stoat),
+        ActionKind::ToggleSyntaxHighlight => {
+            stoat.syntax_highlight = !stoat.syntax_highlight;
+            UpdateEffect::Redraw
+        },
         ActionKind::MoveLeft => movement::move_horizontal(stoat, -1, false),
         ActionKind::MoveRight => movement::move_horizontal(stoat, 1, false),
         ActionKind::MoveUp => movement::move_vertical(stoat, -1, false),
@@ -1763,6 +1767,32 @@ mod tests {
         let frame = h.snapshot();
         assert_eq!(frame.pane_count, 1);
         h.assert_snapshot("open_file_shows_in_focused_pane");
+    }
+
+    #[test]
+    fn toggle_syntax_highlight_drops_coloring_then_restores() {
+        let mut h = Stoat::test();
+        let path = h.write_file("a.rs", "fn main() {\n    let x = 1;\n}\n");
+        h.open_file(&path);
+
+        let colored = h.stoat.render();
+
+        super::dispatch(&mut h.stoat, &stoat_action::ToggleSyntaxHighlight);
+        let plain = h.stoat.render();
+        assert_ne!(
+            colored, plain,
+            "toggling syntax highlighting off recolors the render",
+        );
+        // The code is unchanged. The snapshot shows it in the default
+        // foreground with search/diagnostic highlights still available.
+        h.assert_snapshot("toggle_syntax_off");
+
+        super::dispatch(&mut h.stoat, &stoat_action::ToggleSyntaxHighlight);
+        let restored = h.stoat.render();
+        assert_eq!(
+            colored, restored,
+            "toggling syntax highlighting back on restores the coloring",
+        );
     }
 
     #[test]

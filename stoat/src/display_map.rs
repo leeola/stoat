@@ -208,6 +208,11 @@ pub struct DisplayMap {
     companion: Option<Companion>,
     lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
     masked: bool,
+    /// When false, tree-sitter syntax coloring is suppressed for this
+    /// editor. [`Self::highlighted_chunks`] then withholds the semantic-
+    /// token highlights that carry it, leaving text and inlay highlights
+    /// (search, LSP) unaffected. Defaults to true.
+    syntax_highlighting: bool,
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
     last_buffer_version: u64,
@@ -246,6 +251,7 @@ impl DisplayMap {
             companion: None,
             lsp_folding_crease_ids: HashMap::new(),
             masked: false,
+            syntax_highlighting: true,
             clip_at_line_ends: false,
             diagnostics_max_severity: None,
             last_buffer_version: version,
@@ -283,6 +289,18 @@ impl DisplayMap {
 
     pub fn set_masked(&mut self, masked: bool) {
         self.masked = masked;
+    }
+
+    /// Enable or disable tree-sitter syntax coloring for this editor.
+    ///
+    /// Marks the highlight cache dirty only on a real change, so callers may
+    /// invoke it every frame to keep an editor in sync with a session toggle
+    /// without forcing a snapshot rebuild each time.
+    pub fn set_syntax_highlighting(&mut self, on: bool) {
+        if self.syntax_highlighting != on {
+            self.syntax_highlighting = on;
+            self.highlights_dirty = true;
+        }
     }
 
     pub fn set_clip_at_line_ends(&mut self, clip: bool) {
@@ -507,6 +525,7 @@ impl DisplayMap {
             crease_snapshot: self.crease_map.snapshot(),
             fold_placeholder: FoldPlaceholder::default(),
             masked: self.masked,
+            syntax_highlighting: self.syntax_highlighting,
             clip_at_line_ends: self.clip_at_line_ends,
             diagnostics_max_severity: self.diagnostics_max_severity,
         };
@@ -526,6 +545,7 @@ pub struct DisplaySnapshot {
     crease_snapshot: CreaseSnapshot,
     fold_placeholder: FoldPlaceholder,
     masked: bool,
+    syntax_highlighting: bool,
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
 }
@@ -607,6 +627,16 @@ impl DisplaySnapshot {
         self.block_snapshot.chunks(display_rows, endpoints)
     }
 
+    /// The semantic-token highlights (tree-sitter coloring) to feed the
+    /// endpoint builder, or `None` when syntax highlighting is off for this
+    /// editor. Withholding them is what suppresses the coloring. The endpoint
+    /// cache keys on the collection's pointer, so `None` versus `Some`
+    /// invalidates it across a toggle.
+    fn syntax_token_highlights(&self) -> Option<&SemanticTokensHighlights> {
+        self.syntax_highlighting
+            .then_some(&self.semantic_token_highlights)
+    }
+
     pub fn highlighted_chunks(
         &self,
         display_rows: std::ops::Range<u32>,
@@ -614,7 +644,7 @@ impl DisplaySnapshot {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(&self.inlay_highlights),
-            semantic_token_highlights: Some(&self.semantic_token_highlights),
+            semantic_token_highlights: self.syntax_token_highlights(),
         };
         let byte_range = self
             .block_snapshot
@@ -634,7 +664,7 @@ impl DisplaySnapshot {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(&self.inlay_highlights),
-            semantic_token_highlights: Some(&self.semantic_token_highlights),
+            semantic_token_highlights: self.syntax_token_highlights(),
         };
         let byte_range = self
             .block_snapshot

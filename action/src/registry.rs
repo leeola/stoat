@@ -40,8 +40,8 @@ use crate::{
             ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection,
             SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
             SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank,
-            YankMainToClipboard, YankToClipboard,
+            ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
+            UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::{ForceSaveBuffer, OpenBuffer, OpenFile},
         file_finder::{
@@ -467,6 +467,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(IndentSelection::DEF, |_| Ok(Box::new(IndentSelection)));
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
     add(ToggleComments::DEF, |_| Ok(Box::new(ToggleComments)));
+    add(ToggleSyntaxHighlight::DEF, |_| {
+        Ok(Box::new(ToggleSyntaxHighlight))
+    });
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -762,6 +765,7 @@ mod tests {
         "RotateSelectionsForward",
         "RotateSelectionsBackward",
         "TrimSelections",
+        "ToggleSyntaxHighlight",
         "ReviewNextChunk",
         "ReviewPrevChunk",
         "ReviewStageChunk",
@@ -1027,7 +1031,8 @@ mod tests {
         // + 2 PalettePageUp, PalettePageDown.
         // + 1 OpenBuffer.
         // + 1 ToggleDiff.
-        assert_eq!(all().count(), 287);
+        // + 1 ToggleSyntaxHighlight.
+        assert_eq!(all().count(), 288);
     }
 
     #[test]
