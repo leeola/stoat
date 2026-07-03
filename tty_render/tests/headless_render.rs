@@ -11,7 +11,9 @@ use stoatty_render::gpu::{
     build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll,
 };
 use stoatty_term::{
-    grid::{Bar, Border, BorderStyle, Grid, Icon, IconKind, Overlay, Rgb, ScrollRegion, TextRun},
+    grid::{
+        Bar, Border, BorderStyle, Grid, Icon, IconKind, Overlay, Panel, Rgb, ScrollRegion, TextRun,
+    },
     term::Damage,
 };
 use wgpu::{
@@ -98,6 +100,20 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             content: "aa\nbb\ncc\ndd".to_owned(),
         },
     ]);
+
+    // A modal-chrome panel with a fill and shadow, so the panel pass draws its
+    // rounded frame under the grid text against the real device.
+    grid.set_panels(vec![Panel {
+        top: 4,
+        left: 2,
+        width: 10,
+        height: 4,
+        style: BorderStyle::Rounded,
+        border: Rgb::new(180, 180, 220),
+        corner_radius: 6,
+        fill: Some(Rgb::new(30, 30, 50)),
+        shadow: true,
+    }]);
 
     // A scroll region with a glyph inside it, scrolled by a non-zero offset, so
     // the scissored region-text draw runs against the real device too.

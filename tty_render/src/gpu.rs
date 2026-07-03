@@ -18,6 +18,7 @@ use crate::{
         decoration::DecorationPass,
         icon::IconPass,
         overlay::OverlayPass,
+        panel::PanelPass,
         text::TextPass,
         CellMetrics,
     },
@@ -229,6 +230,7 @@ pub struct FontConfig<'a> {
 /// which lets a test keep them to poll for completion.
 pub struct Renderer {
     background: BackgroundPass,
+    panel: PanelPass,
     decoration: DecorationPass,
     text: TextPass,
     overlay: OverlayPass,
@@ -271,6 +273,7 @@ impl Renderer {
         let metrics = CellMetrics::from_font_size(font.size, font.scale_factor);
         Renderer {
             background: BackgroundPass::new(device, format, metrics),
+            panel: PanelPass::new(device, format, metrics),
             decoration: DecorationPass::new(device, format, metrics),
             text: TextPass::new(
                 device,
@@ -314,6 +317,7 @@ impl Renderer {
         let metrics = CellMetrics::from_font_size(font_size, scale_factor);
         self.metrics = metrics;
         self.background.set_metrics(metrics);
+        self.panel.set_metrics(metrics);
         self.decoration.set_metrics(metrics);
         self.text.set_metrics(metrics);
         self.overlay.set_metrics(metrics);
@@ -360,6 +364,7 @@ impl Renderer {
             frame.decoration_damage,
         );
         self.text.prepare(device, queue, grid, resolution, &frame);
+        self.panel.prepare(device, queue, grid, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
         self.icon.prepare(device, queue, grid.icons(), resolution);
         self.bar.prepare(device, queue, grid.bars(), resolution);
@@ -397,6 +402,7 @@ impl Renderer {
             });
 
             self.background.draw(&mut render_pass);
+            self.panel.draw(&mut render_pass);
             self.decoration.draw(&mut render_pass);
             self.text.draw(&mut render_pass);
             self.text.draw_region_text(&mut render_pass);

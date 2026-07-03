@@ -7,6 +7,7 @@ pub mod bar;
 pub mod decoration;
 pub mod icon;
 pub mod overlay;
+pub mod panel;
 pub mod text;
 
 /// The eased vertical scroll offsets a frame applies, in rows.
