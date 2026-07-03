@@ -25,6 +25,7 @@ pub(crate) fn render_commits(
     state: &mut CommitListState,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
@@ -39,9 +40,14 @@ pub(crate) fn render_commits(
     let right_w = inner.width.saturating_sub(left_area.width + 1);
 
     let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    for y in inner.y..inner.y + inner.height {
-        buf[(sep_x, y)].set_char('│').set_style(sep_style);
-    }
+    crate::render::chrome::vline(
+        buf,
+        sep_x,
+        inner.y,
+        inner.height,
+        sep_style,
+        scene.as_deref_mut(),
+    );
 
     state.viewport_rows = left_area.height as usize;
     state.ensure_selected_visible(state.viewport_rows);
@@ -49,7 +55,7 @@ pub(crate) fn render_commits(
 
     if right_w > 0 {
         let right_area = Rect::new(right_x, inner.y, right_w, inner.height);
-        render_commit_detail_pane(state, workspace_root, theme, right_area, buf);
+        render_commit_detail_pane(state, workspace_root, theme, right_area, buf, scene);
     }
 }
 
@@ -162,6 +168,7 @@ fn render_commit_detail_pane(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let dim = theme.get(crate::theme::scope::VCS_COMMIT_METADATA);
     let Some(sha) = state.selected_sha() else {
@@ -188,7 +195,7 @@ fn render_commit_detail_pane(
         area.y + area.height - preview_y,
     );
     match state.preview_sessions.get(sha) {
-        Some(session) => render_commit_preview(session, theme, preview_area, buf),
+        Some(session) => render_commit_preview(session, theme, preview_area, buf, scene),
         None => {
             if preview_area.height > 0 {
                 write_str(
@@ -261,6 +268,7 @@ fn render_commit_preview(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -317,7 +325,7 @@ fn render_commit_preview(
                     return;
                 }
                 if sep_x < area.x + area.width {
-                    buf[(sep_x, y)].set_char('│').set_style(dim);
+                    crate::render::chrome::vline(buf, sep_x, y, 1, dim, scene.as_deref_mut());
                 }
                 let left_num_x = area.x + status_w as u16;
                 let right_num_x = right_start + status_w as u16;

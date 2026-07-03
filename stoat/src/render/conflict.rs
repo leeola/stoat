@@ -16,6 +16,7 @@ pub(crate) fn render_conflict(
     active: &ActiveRebase,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     use crate::rebase::ConflictResolution;
 
@@ -53,9 +54,7 @@ pub(crate) fn render_conflict(
     let add_hl = theme.get(s::DIFF_ADDED);
     let del_hl = theme.get(s::DIFF_DELETED);
 
-    for y in inner.y..inner.y + inner.height {
-        buf[(sep_x, y)].set_char('│').set_style(dim);
-    }
+    crate::render::chrome::vline(buf, sep_x, inner.y, inner.height, dim, scene);
 
     let short = source_sha.chars().take(7).collect::<String>();
     write_str(

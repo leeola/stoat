@@ -257,7 +257,14 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane(id) if id == pane_id);
         if commits_mode {
             if let Some(state) = ws.commits.as_mut() {
-                commits::render_commits(pane, is_focused, state, frame, buf);
+                commits::render_commits(
+                    pane,
+                    is_focused,
+                    state,
+                    frame,
+                    buf,
+                    frame.stoatty.then_some(&mut *scene),
+                );
             }
         } else if rebase_mode {
             if let Some(state) = ws.rebase.as_ref() {
@@ -286,7 +293,14 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
                 reword::render_reword(pane, is_focused, editor, &sha, &orig, frame, buf);
             }
         } else if conflict_mode && let Some(active) = ws.rebase_active.as_ref() {
-            conflict::render_conflict(pane, is_focused, active, frame, buf);
+            conflict::render_conflict(
+                pane,
+                is_focused,
+                active,
+                frame,
+                buf,
+                frame.stoatty.then_some(&mut *scene),
+            );
         }
     }
 
