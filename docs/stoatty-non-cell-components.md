@@ -15,12 +15,17 @@ into roughly two columns, things the cell grid cannot say:
   narrower than a cell;
 - a hairline separator a fraction of a cell wide.
 
-The renderer cannot draw these today. Glyph scale is an integer at least 1
-(`shape_char` takes `scale: u8` and sizes the buffer by `scale as f32`;
-`cell_glyph_scale` returns `u8`), and glyph origins snap to whole cells
-(`glyph_origin` computes `col * width` / `row * height`). Background fills are
-whole cells (`BgInstance` is a cell coordinate plus a color). Nothing renders at
-a sub-cell position or a fractional size.
+Grid text stays integer-scaled and cell-snapped. A scaled VT glyph owns a whole
+cell block (`cell_glyph_scale` returns `u8`), glyph origins snap to whole cells
+(`glyph_origin` computes `col * width` / `row * height`), and background fills
+are whole cells (`BgInstance` is a cell coordinate plus a color). Off the grid,
+though, the renderer already draws at a fractional size and a sub-cell position.
+A text run carries a `u16` scale in 256ths of a cell and a signed `i16` col/row
+in sixteenths (`TextRunCommand`). `shape_char` rasterizes each glyph at that
+fractional `f32` scale into its own atlas entry, and `text_run_origin` anchors
+the run at a fractional cell, advancing one scaled cell width per glyph and
+centering it in its row. Those off-grid text runs, and thin color bars, are the
+primitives the gutter is built from.
 
 The floating-overlay layer already points the way out. Overlays anchor at a
 signed sub-cell pixel offset, there is a grid-level list beside the cells
