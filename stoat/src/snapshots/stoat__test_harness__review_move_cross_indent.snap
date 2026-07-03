@@ -10,20 +10,20 @@ size: 100x20
 [0m[33mnest.rs --- 1/1 --- rust[0m                         [0m[90m│[0m
 [0m[1m[36m│[0m[90m.....[0m                                           [0m[90m│[0m[1m[36m│[0m[90m   1 [0m[7m[97mf[0m[97mn outer() [0m[32m{}[0m
 [0m[1m[36m│[0m[90m   1 [0m[97mfn outer() {[0m                               [0m[90m│[0m[1m[36m│[0m[90m   2 [0m
-[0m[1m[36m│[0m[90m   2 [0m[97m    let [0m[3m[36mrelocated[0m[97m = [0m[3m[36mcompute[0m[97m([0m[3m[36marg1[0m[97m, [0m[3m[36marg2[0m[97m,[0m[33m┌ review ─────────────────────────────────────────────┐[0m
-[0m[1m[36m│[0m[90m   3 [0m[97m}[0m                                      [0m[33m│[0m[36m     ?[0m[97m   open the help modal[0m                         [0m[33m│[0m
-[0m[1m[36m│[0m[90m   4 [0m                                       [0m[33m│[0m[36mEsc, q[0m[97m   close the active review[0m                     [0m[33m│[0m
-[0m[1m[36m│[0m[90m.....[0m                                       [0m[33m│[0m[36m  n, j[0m[97m   advance to the next review chunk[0m            [0m[33m│[0m
-[0m[1m[36m│[0m[90m   5 [0m[97mfn wrapper() {[0m                         [0m[33m│[0m[36m  p, k[0m[97m   step back to the previous review chunk[0m      [0m[33m│[0m
-[0m[1m[36m│[0m[90m   6 [0m[97m    println!("hello");[0m                 [0m[33m│[0m[36m     s[0m[97m   mark the current chunk as staged[0m            [0m[33m│[0m
-[0m[1m[36m│[0m[90m   7 [0m[97m}[0m                                      [0m[33m│[0m[36m     u[0m[97m   mark the current chunk as unstaged[0m          [0m[33m│[0m
-                                             [0m[33m│[0m[36m   Spc[0m[97m   toggle staged/unstaged for the current chunk[0m[33m│[0m
-                                             [0m[33m│[0m[36m     S[0m[97m   skip the current chunk[0m                      [0m[33m│[0m
-                                             [0m[33m│[0m[36m     A[0m[97m   apply staged chunks[0m                         [0m[33m│[0m
-                                             [0m[33m│[0m[36m     D[0m[97m   remove staged hunks from the reviewed commit[0m[33m│[0m
-                                             [0m[33m│[0m[36m     r[0m[97m   rescan the review source[0m                    [0m[33m│[0m
-                                             [0m[33m│[0m[36m     :[0m[97m   open the command palette[0m                    [0m[33m│[0m
-                                             [0m[33m│[0m[90m─────────────────────────────────────────────────────[0m[33m│[0m
-                                             [0m[33m│[0m[97m1/1 · 0 staged · 0 unstaged · 1 pending[0m              [0m[33m│[0m
-                                             [0m[33m└─────────────────────────────────────────────────────┘[0m
+[0m[1m[36m│[0m[90m   2 [0m[97m    let [0m[3m[36mrelocated[0m[97m = [0m[3m[36mcompute[0m[97m([0m[3m[36marg1[0m[97m, [0m[3m[36marg2[0m[97m, [0m[3m[36marg[0m[90m│[0m[1m[36m│[0m[90m.....[0m
+[0m[1m[36m│[0m[90m   3 [0m[97m}[0m                                          [0m[90m│[0m[1m[36m│[0m[90m   3 [0m[97mfn wrapper() {[0m
+[0m[1m[36m│[0m[90m   4 [0m                                           [0m[90m│[0m[1m[36m│[0m[90m   4 [0m[97m    println!("hello");[0m
+[0m[1m[36m│[0m[90m.....[0m                                           [0m[90m│[0m[1m[36m│[0m[90m   5 [0m[97m    let [0m[3m[36mrelocated[0m[97m = [0m[3m[36mcompute[0m[97m([0m[3m[36marg1[0m[97m, [0m[3m[36marg2[0m[97m, [0m[3m[36marg3[0m
+[0m[1m[36m│[0m[90m   5 [0m[97mfn wrapper() {[0m                             [0m[90m│[0m[1m[36m│[0m[90m   6 [0m[97m}[0m
+[0m[1m[36m│[0m[90m   6 [0m[97m    println!("hello");[0m                     [0m[90m│[0m[1m[36m│[0m[90m.....[0m
+[0m[1m[36m│[0m[90m   7 [0m[97m}[0m                                          [0m[90m│[0m[1m[36m│[0m[90m.....[0m
+
+
+
+
+
+
+
+
+
 [0m[1m[30m[46m REV [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                                           [0m

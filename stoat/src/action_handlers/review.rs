@@ -24,7 +24,7 @@ use std::{
 };
 use stoat_language::{Language, LanguageRegistry};
 use stoat_scheduler::Task;
-use stoat_text::Point;
+use stoat_text::{Bias, Point, SelectionGoal};
 
 /// A message streamed from a running review scan.
 ///
@@ -517,6 +517,7 @@ pub(super) fn review_step(stoat: &mut Stoat, step: ReviewStep) -> UpdateEffect {
     }
     let chunk_id = session.cursor.current;
     let editor_id = session.view_editor;
+    move_review_cursor_to_chunk(ws, editor_id, chunk_id);
     sync_review_view_and_scroll(ws, editor_id, chunk_id);
     UpdateEffect::Redraw
 }
@@ -585,6 +586,42 @@ fn emit_review_progress_badge(ws: &mut Workspace, progress: &ReviewProgress) {
             });
         },
     }
+}
+
+/// Move the review editor's text cursor to the first buffer row of `chunk_id`
+/// so `n`/`p` chunk navigation carries the single cursor to the chunk.
+///
+/// Sets only the selection. [`sync_review_view_and_scroll`] owns the scroll, so
+/// a chunk-nav key pressed mid-glide does not yank `scroll_row`.
+fn move_review_cursor_to_chunk(
+    ws: &mut Workspace,
+    editor_id: Option<EditorId>,
+    chunk_id: Option<crate::review_session::ReviewChunkId>,
+) {
+    let (Some(editor_id), Some(chunk_id)) = (editor_id, chunk_id) else {
+        return;
+    };
+    let Some(editor) = ws.editors.get_mut(editor_id) else {
+        return;
+    };
+    let Some(buffer_row) = editor
+        .review_view
+        .as_ref()
+        .and_then(|view| view.row_of_chunk(chunk_id))
+    else {
+        return;
+    };
+
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let offset = buffer_snapshot
+        .rope()
+        .point_to_offset(Point::new(buffer_row, 0));
+    let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
+    editor.selections = crate::selection::SelectionsCollection::new();
+    editor
+        .selections
+        .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
 }
 
 /// Refresh the editor's review view cache from the session and, when a chunk

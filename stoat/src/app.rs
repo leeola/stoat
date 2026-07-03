@@ -1569,6 +1569,10 @@ impl Stoat {
                     None => false,
                 };
 
+                if cursor_moved {
+                    self.sync_review_chunk_to_cursor();
+                }
+
                 if scrolled {
                     effect.merge(UpdateEffect::Redraw)
                 } else {
@@ -2902,6 +2906,51 @@ impl Stoat {
         let head = editor.selections.newest_anchor().head();
         let offset = buffer_snapshot.resolve_anchor(&head);
         Some((editor.buffer_id, offset))
+    }
+
+    /// Point the review chunk cursor at the chunk under the focused review
+    /// editor's text cursor, so status actions act on the chunk the user is
+    /// looking at rather than the last `n`/`p` target.
+    ///
+    /// No-op unless the focused editor is a review editor. Called after a key
+    /// moved the text cursor. Both the chunk cursor and its highlight track the
+    /// text cursor, and `n`/`p` move the text cursor too, so they never diverge.
+    fn sync_review_chunk_to_cursor(&mut self) {
+        let buffer_row = {
+            let Some(editor) = action_handlers::focused_editor_mut(self) else {
+                return;
+            };
+            if editor.review_view.is_none() {
+                return;
+            }
+            let snapshot = editor.display_map.snapshot();
+            let buffer_snapshot = snapshot.buffer_snapshot();
+            let head = editor.selections.newest_anchor().head();
+            let offset = buffer_snapshot.resolve_anchor(&head);
+            buffer_snapshot.rope().offset_to_point(offset).row
+        };
+
+        let ws = self.active_workspace_mut();
+        let Some(editor_id) = ws.review.as_ref().and_then(|s| s.view_editor) else {
+            return;
+        };
+        let Some(editor) = ws.editors.get_mut(editor_id) else {
+            return;
+        };
+        let Some(view) = editor.review_view.as_mut() else {
+            return;
+        };
+        let Some((chunk_id, _)) = view.chunk_and_status_at_row(buffer_row) else {
+            return;
+        };
+        let Some(session) = ws.review.as_mut() else {
+            return;
+        };
+        if session.cursor.current != Some(chunk_id) {
+            session.cursor.current = Some(chunk_id);
+            session.version += 1;
+            view.refresh_from_session(session);
+        }
     }
 
     pub(crate) fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {

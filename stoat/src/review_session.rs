@@ -912,6 +912,55 @@ mod tests {
     }
 
     #[test]
+    fn review_j_moves_cursor_down_one_display_row() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        let before = h.cursor_display_positions();
+        h.type_keys("j");
+        let after = h.cursor_display_positions();
+        assert_eq!(
+            after[0].0,
+            before[0].0 + 1,
+            "j moves the review text cursor down one display row"
+        );
+    }
+
+    #[test]
+    fn snapshot_review_cursor_crosses_into_second_chunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        let second = h.with_review(|s| s.order[1]);
+        // The first chunk spans four buffer rows. The fourth `j` clears the
+        // chunk-2 header block and lands the cursor on the second chunk.
+        h.type_keys("j j j j");
+        assert_eq!(
+            h.current_review_chunk_id(),
+            second,
+            "crossing the boundary moves the chunk cursor to the second chunk"
+        );
+        h.assert_snapshot("review_cursor_crosses_into_second_chunk");
+    }
+
+    #[test]
+    fn review_stage_follows_text_cursor_not_chunk_nav() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        let (first, second) = h.with_review(|s| (s.order[0], s.order[1]));
+
+        // `n` jumps the cursor to the second chunk, `k` carries it back across
+        // the boundary into the first, so staging must act on the first chunk
+        // rather than the last chunk-nav target.
+        h.type_keys("n");
+        assert_eq!(h.current_review_chunk_id(), second);
+        h.type_keys("k");
+        assert_eq!(h.current_review_chunk_id(), first);
+
+        h.type_keys("s");
+        assert_eq!(h.chunk_status(first), ChunkStatus::Staged);
+        assert_eq!(h.chunk_status(second), ChunkStatus::Pending);
+    }
+
+    #[test]
     fn snapshot_review_stage_current_chunk() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);

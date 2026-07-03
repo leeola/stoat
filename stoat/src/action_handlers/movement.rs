@@ -306,6 +306,10 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
 pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
     let delta = (delta as i64).saturating_mul(count as i64);
+    // Clip toward the direction of travel so a block row (e.g. a review
+    // chunk header) snaps to the buffer row past it rather than back to the
+    // one just left, which would strand the cursor at the block boundary.
+    let clip_bias = if delta > 0 { Bias::Right } else { Bias::Left };
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -331,7 +335,7 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
         }
         let clamped_col = goal_col.min(display_snapshot.line_len(new_row));
         let raw = DisplayPoint::new(new_row, clamped_col);
-        let clipped = display_snapshot.clip_point(raw, Bias::Left);
+        let clipped = display_snapshot.clip_point(raw, clip_bias);
         let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
             return sel.clone();
         };
