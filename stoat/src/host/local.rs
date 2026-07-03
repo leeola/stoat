@@ -8,5 +8,5 @@ pub mod terminal;
 
 pub use clipboard::LocalClipboard;
 pub use git::LocalGit;
-pub use lsp::LocalLsp;
+pub use lsp::{LocalLsp, LspTranscript};
 pub use terminal::LocalTerminalHost;

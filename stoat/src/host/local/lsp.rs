@@ -52,12 +52,25 @@ use std::{
     },
     time::Duration,
 };
+use stoat_log::TextProtoLog;
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     oneshot, Mutex as TokioMutex,
 };
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, LspResponseError>>>>>;
+
+/// Byte-faithful JSONL transcripts of the two protocol directions, enabled
+/// by the `text_proto_log` setting.
+///
+/// `tx` records every frame stoat writes to the server's stdin. `rx` records
+/// every frame read from the server's stdout, including frames that fail to
+/// parse, so the transcript is a faithful record of the raw stream rather
+/// than only the messages that decoded.
+pub struct LspTranscript {
+    pub tx: TextProtoLog,
+    pub rx: TextProtoLog,
+}
 
 /// A language server running as a child process, addressed over stdio JSON-RPC.
 ///
@@ -74,6 +87,9 @@ pub struct LocalLsp {
     notif_rx: TokioMutex<UnboundedReceiver<LspNotification>>,
     incoming_rx: TokioMutex<UnboundedReceiver<IncomingRequest>>,
     capabilities: Mutex<Arc<ServerCapabilities>>,
+    /// Outgoing-frame transcript, `Some` when `text_proto_log` is on. The
+    /// paired incoming transcript lives in the reader thread.
+    tx_transcript: Option<TextProtoLog>,
 }
 
 impl LocalLsp {
@@ -83,7 +99,11 @@ impl LocalLsp {
     /// (server logs to the `stoat::lsp` tracing target). The returned host has
     /// not handshaked yet. Call [`LspHost::initialize`] next. Fails only if the
     /// process cannot be spawned.
-    pub fn spawn(command: &str, args: &[String]) -> io::Result<Self> {
+    pub fn spawn(
+        command: &str,
+        args: &[String],
+        transcript: Option<LspTranscript>,
+    ) -> io::Result<Self> {
         let mut child = Command::new(command)
             .args(args)
             .stdin(Stdio::piped())
@@ -99,9 +119,14 @@ impl LocalLsp {
         let (incoming_tx, incoming_rx) = unbounded_channel();
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
+        let (tx_transcript, rx_transcript) = match transcript {
+            Some(transcript) => (Some(transcript.tx), Some(transcript.rx)),
+            None => (None, None),
+        };
+
         std::thread::spawn({
             let pending = pending.clone();
-            move || reader_loop(stdout, pending, notif_tx, incoming_tx)
+            move || reader_loop(stdout, pending, notif_tx, incoming_tx, rx_transcript)
         });
         std::thread::spawn(move || stderr_loop(stderr));
 
@@ -113,6 +138,7 @@ impl LocalLsp {
             notif_rx: TokioMutex::new(notif_rx),
             incoming_rx: TokioMutex::new(incoming_rx),
             capabilities: Mutex::new(Arc::new(ServerCapabilities::default())),
+            tx_transcript,
         })
     }
 
@@ -173,6 +199,9 @@ impl LocalLsp {
     /// child's stdin.
     fn write_message(&self, message: &Value) -> io::Result<()> {
         let body = serde_json::to_vec(message)?;
+        if let Some(transcript) = &self.tx_transcript {
+            transcript.record(&String::from_utf8_lossy(&body));
+        }
         let framed = encode_message(&body);
         let mut stdin = self.stdin.lock().expect("lsp stdin poisoned");
         stdin.write_all(&framed)?;
@@ -493,6 +522,7 @@ fn reader_loop(
     pending: PendingMap,
     notif_tx: UnboundedSender<LspNotification>,
     incoming_tx: UnboundedSender<IncomingRequest>,
+    rx_transcript: Option<TextProtoLog>,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut decoder = FrameDecoder::new();
@@ -504,6 +534,9 @@ fn reader_loop(
         };
         decoder.push(&buf[..n]);
         while let Some(body) = decoder.next_body() {
+            if let Some(transcript) = &rx_transcript {
+                transcript.record(&String::from_utf8_lossy(&body));
+            }
             let Ok(message) = serde_json::from_slice::<Value>(&body) else {
                 tracing::warn!(target: "stoat::lsp", "dropping unparseable lsp frame");
                 continue;

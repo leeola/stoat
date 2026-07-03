@@ -12,7 +12,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    host::{LanguageServerFeature, LocalLsp, LspHost, OffsetEncoding},
+    host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
 };
 use codegraph::SymbolKey;
@@ -30,6 +30,7 @@ use lsp_types::{
 };
 use std::{
     future::Future,
+    io,
     path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
@@ -37,6 +38,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+use stoat_log::TextProtoLog;
 use stoat_text::{patch::Patch, Point, Rope};
 
 /// Quiet window after the last edit before a buffer's `did_change`
@@ -195,11 +197,22 @@ fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
 
     let root_uri = path_to_uri(&stoat.active_workspace().git_root);
     let slot = stoat.pending_lsp_host.clone();
+    let transcript = if stoat.settings.text_proto_log == Some(true) {
+        match create_lsp_transcript() {
+            Ok(transcript) => Some(transcript),
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "text_proto_log transcript disabled");
+                None
+            },
+        }
+    } else {
+        None
+    };
 
     stoat
         .executor
         .spawn(async move {
-            let host: Arc<dyn LspHost> = match LocalLsp::spawn(&command, &args) {
+            let host: Arc<dyn LspHost> = match LocalLsp::spawn(&command, &args, transcript) {
                 Ok(host) => Arc::new(host),
                 Err(err) => {
                     tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
@@ -237,6 +250,21 @@ fn server_label(info: Option<&ServerInfo>) -> String {
         Some(version) => format!("{}@{}", info.name, version),
         None => info.name.clone(),
     }
+}
+
+/// Create the paired protocol transcripts for `text_proto_log`, keyed by
+/// stoat's pid so they correlate with `stoat-<pid>.log`.
+///
+/// Writes `lsp-<pid>.tx.jsonl` (frames sent to the server) and
+/// `lsp-<pid>.rx.jsonl` (frames received) under the shared log directory,
+/// creating that directory if it does not exist.
+fn create_lsp_transcript() -> io::Result<LspTranscript> {
+    let dir = stoat_log::log_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let pid = std::process::id();
+    let tx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}.tx.jsonl")))?;
+    let rx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}.rx.jsonl")))?;
+    Ok(LspTranscript { tx, rx })
 }
 
 /// Scan every buffer in [`Stoat::lsp_opened`] for an updated
