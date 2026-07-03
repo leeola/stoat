@@ -5853,7 +5853,9 @@ mod tests {
         let src = r##"theme rgbmodal {
             ui.modal.help.fg = "#8899aa";
             ui.modal.hints.fg = "#8899aa";
+            ui.text.fg = "#c8ccd4";
             ui.text.muted.fg = "#606060";
+            ui.key_label.fg = "#d19a66";
             ui.background.bg = "#282c34";
         }"##;
         let (config, _) = stoat_config::parse(src);
@@ -5940,6 +5942,30 @@ mod tests {
                         && b.height == list.height * 16
             )),
             "the help list/detail separator emits a hairline bar, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn hints_overlay_emits_scaled_text_runs_inside_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_modal_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.settle();
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::TextRun(t) if t.scale == 218)),
+            "the hints overlay emits 0.85x hint-row text runs, got {cmds:?}"
         );
     }
 

@@ -160,9 +160,55 @@ pub(crate) fn vline(
     }
 }
 
+/// Draw `content` at cell `(x, y)`, clipped before column `end_x`.
+///
+/// The fallback -- taken when `scene` is absent, `style`'s foreground is not
+/// RGB, or `bg` is `None` -- writes glyphs cell-by-cell styled with `style`,
+/// stopping before `end_x`, exactly as the text sites did before. Under stoatty
+/// it emits one [`TextRun`] at `scale` (256ths of a cell) anchored at the cell
+/// and composited over `bg`, painting no glyphs.
+///
+/// `bg` is the color beneath the run. The renderer paints each glyph box
+/// opaquely, so it must match the surface the text sits on for a clean blend.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    end_x: u16,
+    content: &str,
+    style: Style,
+    bg: Option<[u8; 3]>,
+    scale: u16,
+    scene: Option<&mut ApcScene>,
+) {
+    match (scene, style_rgb(style.fg), bg) {
+        (Some(scene), Some(color), Some(bg)) => {
+            TextRun {
+                col: 0,
+                row: 0,
+                scale,
+                color,
+                bg,
+                text: content,
+            }
+            .render(Rect::new(x, y, 1, 1), buf, scene);
+        },
+        _ => {
+            for (j, ch) in content.chars().enumerate() {
+                let col = x + j as u16;
+                if col >= end_x {
+                    break;
+                }
+                buf[(col, y)].set_char(ch).set_style(style);
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{hline, modal_frame, vline};
+    use super::{hline, modal_frame, text, vline};
     use crate::theme::Theme;
     use ratatui::{
         buffer::Buffer,
@@ -170,7 +216,8 @@ mod tests {
         style::{Color, Style},
     };
     use stoatty_protocol::command::{
-        encode_bar, encode_panel, BarCommand, BorderStyle, PanelCommand,
+        encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, PanelCommand,
+        TextRunCommand,
     };
     use stoatty_widgets::ApcScene;
 
@@ -282,6 +329,52 @@ mod tests {
                 width: 1,
                 height: 48,
                 color: [1, 2, 3],
+            })
+        );
+    }
+
+    #[test]
+    fn text_fallback_writes_clipped_glyphs_and_stoatty_emits_a_scaled_run() {
+        let mut fallback = Buffer::empty(Rect::new(0, 0, 8, 2));
+        text(
+            &mut fallback,
+            1,
+            0,
+            5,
+            "hello",
+            rgb_style(),
+            Some([9, 9, 9]),
+            218,
+            None,
+        );
+        assert_eq!(fallback.cell((1, 0)).unwrap().symbol(), "h");
+        assert_eq!(fallback.cell((4, 0)).unwrap().symbol(), "l");
+        // The 'o' would land on column 5, which is clipped at end_x.
+        assert_eq!(fallback.cell((5, 0)).unwrap().symbol(), " ");
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 2));
+        let mut scene = ApcScene::new();
+        text(
+            &mut buf,
+            1,
+            0,
+            5,
+            "hi",
+            rgb_style(),
+            Some([9, 9, 9]),
+            218,
+            Some(&mut scene),
+        );
+        assert_eq!(buf.cell((1, 0)).unwrap().symbol(), " ");
+        assert_eq!(
+            scene.buffer(),
+            &encode_text_run(&TextRunCommand {
+                col: 16,
+                row: 0,
+                scale: 218,
+                color: [1, 2, 3],
+                bg: [9, 9, 9],
+                text: "hi".to_owned(),
             })
         );
     }

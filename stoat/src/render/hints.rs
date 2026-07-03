@@ -6,6 +6,9 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
+/// Hint-row and footer text size under stoatty, in 256ths of a cell (0.85x).
+const HINT_TEXT_SCALE: u16 = 218;
+
 pub(crate) struct HintsFooter {
     pub(crate) text: String,
     pub(crate) style: Style,
@@ -60,6 +63,12 @@ pub(crate) fn render_hints(
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
+    let end_x = inner.x + inner.width;
+    let run_bg = crate::render::review::style_rgb(
+        theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|s| s.bg),
+    );
 
     for (i, (key, action)) in rows.iter().enumerate() {
         let row = inner.y + i as u16;
@@ -67,20 +76,30 @@ pub(crate) fn render_hints(
             break;
         }
         let padded_key = format!("{key:>width$}", width = key_width);
-        let line = format!("{padded_key}   {action}");
+        crate::render::chrome::text(
+            buf,
+            inner.x,
+            row,
+            end_x,
+            &padded_key,
+            key_style,
+            run_bg,
+            HINT_TEXT_SCALE,
+            scene.as_deref_mut(),
+        );
 
-        for (j, ch) in line.chars().enumerate() {
-            let col = inner.x + j as u16;
-            if col >= inner.x + inner.width {
-                break;
-            }
-            let style = if j < key_width {
-                key_style
-            } else {
-                action_style
-            };
-            buf[(col, row)].set_char(ch).set_style(style);
-        }
+        let action_text = format!("   {action}");
+        crate::render::chrome::text(
+            buf,
+            inner.x + key_width as u16,
+            row,
+            end_x,
+            &action_text,
+            action_style,
+            run_bg,
+            HINT_TEXT_SCALE,
+            scene.as_deref_mut(),
+        );
     }
 
     if let Some(footer) = footer {
@@ -88,16 +107,27 @@ pub(crate) fn render_hints(
         let text_row = sep_row + 1;
         if sep_row < inner.y + inner.height {
             let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-            crate::render::chrome::hline(buf, inner.x, sep_row, inner.width, sep_style, scene);
+            crate::render::chrome::hline(
+                buf,
+                inner.x,
+                sep_row,
+                inner.width,
+                sep_style,
+                scene.as_deref_mut(),
+            );
         }
         if text_row < inner.y + inner.height {
-            for (j, ch) in footer.text.chars().enumerate() {
-                let col = inner.x + j as u16;
-                if col >= inner.x + inner.width {
-                    break;
-                }
-                buf[(col, text_row)].set_char(ch).set_style(footer.style);
-            }
+            crate::render::chrome::text(
+                buf,
+                inner.x,
+                text_row,
+                end_x,
+                &footer.text,
+                footer.style,
+                run_bg,
+                HINT_TEXT_SCALE,
+                scene,
+            );
         }
     }
 }
