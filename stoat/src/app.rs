@@ -5846,6 +5846,109 @@ mod tests {
         );
     }
 
+    /// modal_frame's rich arm engages only when the border fg and the mask bg
+    /// both resolve to RGB, so the modal APC tests need a hex theme. The default
+    /// theme uses named colors and would fall back to glyphs.
+    fn rgb_modal_theme() -> crate::theme::Theme {
+        let src = r##"theme rgbmodal {
+            ui.modal.help.fg = "#8899aa";
+            ui.modal.hints.fg = "#8899aa";
+            ui.background.bg = "#282c34";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbmodal")
+            .expect("rgb theme builds")
+    }
+
+    #[test]
+    fn help_modal_emits_a_panel_inside_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_modal_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.settle();
+
+        let size = h.stoat.size();
+        let mut buf = Buffer::empty(size);
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let modal = crate::render::help::help_layout(size)
+            .expect("help modal fits the test viewport")
+            .modal;
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::Panel(p)
+                    if p.top == modal.y
+                        && p.left == modal.x
+                        && p.width == modal.width
+                        && p.height == modal.height
+            )),
+            "the help modal emits a panel at its layout rect, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn completion_popup_emits_a_panel_inside_stoatty() {
+        use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_modal_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/complete");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.type_keys("i");
+
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![CompletionItem {
+                label: "println".into(),
+                source: CompletionSource::Lsp,
+                kind: None,
+                detail: None,
+                replace_range: 0..0,
+                insert_text: "println".into(),
+                is_snippet: false,
+            }],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..0,
+        });
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let popup_area = crate::render::completion::completion_popup_layout(&mut h.stoat)
+            .expect("completion popup lays out")
+            .2
+            .popup_area;
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::Panel(p)
+                    if p.top == popup_area.y
+                        && p.left == popup_area.x
+                        && p.width == popup_area.width
+                        && p.height == popup_area.height
+            )),
+            "the completion popup emits a panel at its layout rect, got {cmds:?}"
+        );
+    }
+
     #[test]
     fn editor_pool_pages_fill_asynchronously() {
         use stoatty_protocol::command::{Command, FillCommand};
