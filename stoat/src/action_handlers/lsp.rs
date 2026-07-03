@@ -12,7 +12,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    host::{LanguageServerFeature, OffsetEncoding},
+    host::{LanguageServerFeature, LocalLsp, LspHost, OffsetEncoding},
 };
 use codegraph::SymbolKey;
 pub(crate) use lsp_types::Uri;
@@ -111,6 +111,7 @@ pub(crate) fn notify_buffer_opened(
     path: &Path,
     text: &str,
 ) {
+    maybe_spawn_language_server(stoat, buffer_id);
     if !stoat.lsp_opened.insert(buffer_id) {
         return;
     }
@@ -156,6 +157,58 @@ pub(crate) fn notify_buffer_opened(
             if let Err(err) = lsp.did_open(params).await {
                 tracing::warn!(target: "stoat::lsp", ?err, "did_open notification failed");
             }
+        })
+        .detach();
+}
+
+/// Launch a language server for `buffer_id`'s language the first time a
+/// buffer that has one opens, replacing the [`crate::host::NoopLsp`]
+/// placeholder for the rest of the session.
+///
+/// No-op unless auto-spawn is enabled, the current host is still the
+/// [`crate::host::NoopLsp`] placeholder, the buffer's language has a
+/// known [`crate::lsp::servers::server_command`], and no spawn has been
+/// attempted yet this session. The binary opts into auto-spawn via
+/// [`Stoat::set_lsp_auto_spawn`]. Tests leave it off, so the placeholder
+/// never performs IO.
+///
+/// The spawn plus `initialize` handshake runs detached on the workspace
+/// [`Stoat::executor`]. The ready host is parked in
+/// [`Stoat::pending_lsp_host`] for [`Stoat::update`] to install. A spawn
+/// or handshake failure is logged and leaves the placeholder in place
+/// with no retry.
+fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
+    if !stoat.lsp_auto_spawn || stoat.lsp_spawn_attempted || !stoat.lsp_host.is_noop() {
+        return;
+    }
+    let Some(language) = stoat.active_workspace().buffers.language_for(buffer_id) else {
+        return;
+    };
+    let Some((command, args)) = crate::lsp::servers::server_command(language.name) else {
+        return;
+    };
+    stoat.lsp_spawn_attempted = true;
+
+    let root_uri = path_to_uri(&stoat.active_workspace().git_root);
+    let command = command.to_string();
+    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    let slot = stoat.pending_lsp_host.clone();
+
+    stoat
+        .executor
+        .spawn(async move {
+            let host: Arc<dyn LspHost> = match LocalLsp::spawn(&command, &args) {
+                Ok(host) => Arc::new(host),
+                Err(err) => {
+                    tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
+                    return;
+                },
+            };
+            if let Err(err) = host.initialize(root_uri).await {
+                tracing::warn!(target: "stoat::lsp", ?err, %command, "language server initialize failed");
+                return;
+            }
+            *slot.lock().expect("pending lsp host mutex") = Some(host);
         })
         .detach();
 }
@@ -2007,6 +2060,18 @@ mod tests {
             opens.len(),
             1,
             "did_open should fire exactly once per buffer lifetime"
+        );
+    }
+
+    #[test]
+    fn auto_spawn_skipped_when_a_real_host_is_installed() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.set_lsp_auto_spawn(true);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        assert!(
+            !h.stoat.lsp_spawn_attempted,
+            "FakeLsp is a non-noop host, so opening a rust buffer attempts no spawn",
         );
     }
 

@@ -184,6 +184,7 @@ fn run_tui(
         let mut stoat = Stoat::new(executor.clone(), cli_settings, initial_git_root);
         stoat.set_stoatty_apc(stoatty, apc_tx);
         stoat.set_version_info(VERSION_INFO);
+        stoat.set_lsp_auto_spawn(true);
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }

@@ -451,6 +451,24 @@ pub struct Stoat {
     /// until a real `LocalLsp` is wired in; tests install
     /// [`crate::host::FakeLsp`] to drive end-to-end LSP scenarios.
     pub(crate) lsp_host: Arc<dyn LspHost>,
+    /// Whether opening a buffer whose language has a known server
+    /// command may spawn a real language server, replacing the
+    /// [`NoopLsp`] placeholder. Off by default so [`NoopLsp`] stays
+    /// side-effect-free for tests. The binary turns it on for a live
+    /// session via [`Self::set_lsp_auto_spawn`].
+    pub(crate) lsp_auto_spawn: bool,
+    /// Set once the first buffer with a known server command has
+    /// triggered a spawn, so at most one server launches per session
+    /// even as more buffers open. A failed spawn leaves it set, with no
+    /// retry.
+    pub(crate) lsp_spawn_attempted: bool,
+    /// Landing slot for a language server that finished spawning and
+    /// initializing on the detached spawn task. Drained by
+    /// [`Self::install_pending_lsp_host`] in [`Self::update`], which
+    /// swaps it in for the [`NoopLsp`] placeholder. Shared rather than
+    /// returned because the spawn runs detached on [`Self::executor`]
+    /// and cannot borrow `self`.
+    pub(crate) pending_lsp_host: Arc<std::sync::Mutex<Option<Arc<dyn LspHost>>>>,
     /// System-clipboard writes route through this trait. Defaults to
     /// [`NoopClipboard`] so headless or display-less environments do
     /// not error on the first clipboard event; tests install
@@ -810,6 +828,9 @@ impl Stoat {
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
             lsp_host: Arc::new(NoopLsp),
+            lsp_auto_spawn: false,
+            lsp_spawn_attempted: false,
+            pending_lsp_host: Arc::new(std::sync::Mutex::new(None)),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
@@ -943,6 +964,14 @@ impl Stoat {
     /// run against programmed responses.
     pub fn set_lsp_host(&mut self, host: Arc<dyn LspHost>) {
         self.lsp_host = host;
+    }
+
+    /// Enable or disable lazily spawning a real language server on the
+    /// first open of a buffer whose language has a known server command.
+    /// The binary enables it for a live session. Tests leave it off so
+    /// the [`NoopLsp`] placeholder performs no IO.
+    pub fn set_lsp_auto_spawn(&mut self, enabled: bool) {
+        self.lsp_auto_spawn = enabled;
     }
 
     /// Returns the active [`LspHost`].
@@ -1553,6 +1582,7 @@ impl Stoat {
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
         self.drain_lsp_notifications();
+        self.install_pending_lsp_host();
         self.drain_fs_watch_events();
         self.drain_pending_external_edits();
         self.drain_pending_git_refresh();
@@ -1879,6 +1909,51 @@ impl Stoat {
                     );
                 },
             }
+        }
+    }
+
+    /// Swap in a language server that finished spawning since the last
+    /// tick. The lazy-spawn task armed by
+    /// [`action_handlers::lsp::notify_buffer_opened`] parks a ready
+    /// [`crate::host::LocalLsp`] in [`Self::pending_lsp_host`]. This
+    /// takes it, replaces the [`NoopLsp`] placeholder, and re-fires
+    /// `did_open` for every open file-backed buffer so the real server
+    /// receives the documents that opened while it was starting.
+    fn install_pending_lsp_host(&mut self) {
+        let host = self
+            .pending_lsp_host
+            .lock()
+            .expect("pending lsp host mutex")
+            .take();
+        let Some(host) = host else {
+            return;
+        };
+
+        self.set_lsp_host(host);
+        self.lsp_opened.clear();
+        self.lsp_doc_versions.clear();
+        self.lsp_buffer_versions.clear();
+
+        let reopen: Vec<(BufferId, PathBuf, String)> = {
+            let buffers = &self.active_workspace().buffers;
+            buffers
+                .open_paths()
+                .into_iter()
+                .filter_map(|path| {
+                    let id = buffers.id_for_path(&path)?;
+                    let text = buffers
+                        .get(id)?
+                        .read()
+                        .expect("buffer poisoned")
+                        .rope()
+                        .to_string();
+                    Some((id, path, text))
+                })
+                .collect()
+        };
+
+        for (id, path, text) in reopen {
+            action_handlers::lsp::notify_buffer_opened(self, id, &path, &text);
         }
     }
 

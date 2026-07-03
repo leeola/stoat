@@ -211,6 +211,14 @@ pub trait LspHost: Send + Sync {
     /// completed initialization return the empty defaults.
     fn capabilities(&self) -> Arc<ServerCapabilities>;
 
+    /// Whether this is the [`NoopLsp`] placeholder installed when no
+    /// real server is wired in. The lazy-spawn path checks this so a
+    /// buffer already served by a real or fake host never triggers a
+    /// second spawn. Default `false`. Only [`NoopLsp`] overrides it.
+    fn is_noop(&self) -> bool {
+        false
+    }
+
     /// Negotiated [`OffsetEncoding`] for `Position.character` width.
     /// Default impl reads from
     /// `capabilities().position_encoding`; absent or unrecognized
@@ -532,6 +540,10 @@ static NOOP_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> =
 impl LspHost for NoopLsp {
     fn capabilities(&self) -> Arc<ServerCapabilities> {
         NOOP_CAPABILITIES.clone()
+    }
+
+    fn is_noop(&self) -> bool {
+        true
     }
 
     async fn initialize(&self, _root_uri: Option<Uri>) -> io::Result<InitializeResult> {
