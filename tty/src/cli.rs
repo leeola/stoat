@@ -2,6 +2,18 @@ use clap::{Parser, ValueHint};
 use std::path::PathBuf;
 use stoat_cli::CommonArgs;
 
+/// The version string `stoatty --version` prints, and the value exported to
+/// child programs via `STOATTY_VERSION` so an inner stoat can report it.
+///
+/// Shape is `<semver> (<hash>[-dirty] <date>)`. `STOATTY_BUILD_INFO` is the
+/// git hash and date emitted by build.rs.
+pub(crate) const VERSION_INFO: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("STOATTY_BUILD_INFO"),
+    ")",
+);
+
 /// Per-invocation launch overrides for the stoatty terminal, parsed from argv.
 ///
 /// Flags here apply to a single run and take precedence over the persistent
@@ -11,7 +23,7 @@ use stoat_cli::CommonArgs;
 #[command(
     name = "stoatty",
     about = "A GPU-accelerated terminal emulator",
-    version
+    version = VERSION_INFO
 )]
 pub struct Cli {
     /// Run PROGRAM (with any following arguments) instead of the shell, e.g.

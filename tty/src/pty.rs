@@ -167,6 +167,7 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 fn configure_child_env(command: &mut CommandBuilder, stoat_dir: Option<&Path>) {
     command.env("TERM", "xterm-256color");
     command.env("STOATTY", "1");
+    command.env("STOATTY_VERSION", crate::cli::VERSION_INFO);
     for var in MULTIPLEXER_ENV_VARS {
         command.env_remove(var);
     }
@@ -315,6 +316,10 @@ mod tests {
         let command = shell_command("/bin/sh", &[], None, Some(Path::new("/opt/stoat/bin")));
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
+        assert_eq!(
+            command.get_env("STOATTY_VERSION"),
+            Some(OsStr::new(crate::cli::VERSION_INFO)),
+        );
         let path = command.get_env("PATH").expect("PATH set from stoat dir");
         assert!(
             path.to_str()
@@ -340,6 +345,10 @@ mod tests {
         }
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
+        assert_eq!(
+            command.get_env("STOATTY_VERSION"),
+            Some(OsStr::new(crate::cli::VERSION_INFO)),
+        );
     }
 
     #[test]
