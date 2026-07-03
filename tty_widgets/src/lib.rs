@@ -12,6 +12,7 @@ pub mod border;
 pub(crate) mod cells;
 pub mod gutter;
 pub mod icon;
+pub mod panel;
 pub mod popover;
 pub mod scale;
 pub mod scroll_region;
