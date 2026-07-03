@@ -29,7 +29,6 @@ use crate::{
     commit_list::CommitListState,
     completion::CompletionItem,
     display_map::DisplaySnapshot,
-    editor_state::EditorState,
     file_finder::FileFinder,
     help::Help,
     render::{
@@ -38,8 +37,9 @@ use crate::{
         completion::paint_completion_rows,
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
-        review::render_review,
+        review::render_review_rows,
     },
+    review_session::ReviewViewState,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, ops::Range};
@@ -376,32 +376,47 @@ pub(crate) fn render_page_from_snapshot(
     serialize_buffer(&buf)
 }
 
-/// Render `region_height` rows of a review pane starting at row
-/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
-/// page's self-contained VT byte stream.
+/// Render review page `index` from owned parts and wrap it in the pool fill
+/// frames, so the returned bytes are a self-contained fill the terminal applies
+/// to slot `index`.
 ///
-/// Mirrors [`render_editor_page`] but drives the review painter, so a pooled
-/// review page matches the live diff at that scroll position. `editor.scroll_row`
-/// is saved and restored, leaving the live scroll position unchanged.
-pub(crate) fn render_review_page(
-    editor: &mut EditorState,
-    page: u64,
-    fallback_style: Style,
+/// The review analogue of [`render_page_fill`]: it runs on a blocking worker
+/// from a cloned [`ReviewViewState`] plus an owned [`DisplaySnapshot`] and
+/// [`Theme`](crate::theme::Theme), all `Send`, so a pooled review page renders
+/// off the run loop and matches the live diff at that scroll position.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_review_page_from_parts(
+    snapshot: &DisplaySnapshot,
+    view: &ReviewViewState,
     theme: &crate::theme::Theme,
+    pool: u32,
+    index: u64,
+    fallback_style: Style,
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let mut buf = Buffer::empty(area);
-
-    let saved_scroll = editor.scroll_row;
-    editor.scroll_row = page
+    let scroll_row = index
         .saturating_mul(region_height as u64)
         .min(u32::MAX as u64) as u32;
-    render_review(editor, area, fallback_style, theme, &mut buf, None);
-    editor.scroll_row = saved_scroll;
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+    render_review_rows(
+        snapshot,
+        view,
+        scroll_row,
+        area,
+        fallback_style,
+        theme,
+        &mut buf,
+        None,
+    );
+    let bytes = serialize_buffer(&buf);
 
-    serialize_buffer(&buf)
+    let mut frame = Vec::with_capacity(bytes.len() + 16);
+    encode_fill_into(&mut frame, pool, index);
+    frame.extend_from_slice(&bytes);
+    encode_fill_end_into(&mut frame);
+    frame
 }
 
 /// Render `region_height` rows of the file finder list starting at row
@@ -823,6 +838,72 @@ mod tests {
         assert!(
             find(&frame, &page).is_some(),
             "the page bytes ride between the fill markers"
+        );
+    }
+
+    #[test]
+    fn review_page_fill_wraps_and_matches_the_live_render() {
+        use super::{render_review_page_from_parts, serialize_buffer};
+        use crate::{
+            render::review::render_review,
+            theme::{scope, Theme},
+            Stoat,
+        };
+        use ratatui::{buffer::Buffer, layout::Rect};
+        use stoatty_protocol::command::FillCommand;
+
+        let mut h = Stoat::test();
+        h.open_review_from_texts(&[("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n")]);
+
+        let theme = Theme::empty();
+        let fallback = theme.get(scope::UI_TEXT);
+        let editor_id = h.with_review(|s| s.view_editor).expect("review editor");
+        let (width, height) = (40u16, 6u16);
+
+        let (snapshot, view) = {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            (
+                editor.display_map.snapshot(),
+                editor.review_view.clone().expect("review view"),
+            )
+        };
+
+        let frame =
+            render_review_page_from_parts(&snapshot, &view, &theme, 3, 0, fallback, width, height);
+
+        let cmds = commands(&frame);
+        assert!(
+            cmds.contains(&Command::Fill(FillCommand { pool: 3, index: 0 })),
+            "frame opens with the slot's fill, got {cmds:?}"
+        );
+        assert!(
+            cmds.contains(&Command::FillEnd),
+            "frame closes the fill, got {cmds:?}"
+        );
+
+        // The async page bytes match what the live editor path paints for the
+        // same page, so moving the render off-thread changed nothing on screen.
+        let area = Rect::new(0, 0, width, height);
+        let mut live = Buffer::empty(area);
+        {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            editor.scroll_row = 0;
+            render_review(editor, area, fallback, &theme, &mut live, None);
+        }
+        let page = serialize_buffer(&live);
+        assert!(
+            find(&frame, &page).is_some(),
+            "the live render's page bytes ride between the fill markers"
         );
     }
 

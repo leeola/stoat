@@ -3668,12 +3668,35 @@ impl Stoat {
         }
         self.smooth_scroll.drop_absent(&mut out, &active);
 
-        // Plain editor pages render off the run loop. The loop collects a snapshot
-        // and the newly-entered page indices per pane, then spawns the renders after
-        // the APC batch ships, so region and scroll always reach the terminal before
+        // Editor and review pages render off the run loop. The loop collects a
+        // snapshot -- plus the cloned view state and theme for review -- and the
+        // newly-entered page indices per pane, then spawns the renders after the
+        // APC batch ships, so region and scroll always reach the terminal before
         // any fill.
-        let mut async_jobs: Vec<(crate::display_map::DisplaySnapshot, Vec<u64>, u32, u16, u16)> =
-            Vec::new();
+        // The review view and theme a pooled review page needs, boxed so the
+        // Review variant does not dwarf Editor.
+        struct ReviewFillParts {
+            view: crate::review_session::ReviewViewState,
+            theme: crate::theme::Theme,
+        }
+        enum PoolFill {
+            Editor {
+                snapshot: crate::display_map::DisplaySnapshot,
+                pages: Vec<u64>,
+                pool: u32,
+                width: u16,
+                height: u16,
+            },
+            Review {
+                snapshot: crate::display_map::DisplaySnapshot,
+                parts: Box<ReviewFillParts>,
+                pages: Vec<u64>,
+                pool: u32,
+                width: u16,
+                height: u16,
+            },
+        }
+        let mut async_jobs: Vec<PoolFill> = Vec::new();
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -3696,45 +3719,47 @@ impl Stoat {
             } else {
                 editor.scroll_row as f32
             };
-            // Review rows regenerate on accept/reject, so their count is the
-            // pool's content version. Plain editors stay stable while scrolling.
-            let is_review = editor.review_view.is_some();
+            // Review rows regenerate on accept/reject and their gutter glyphs
+            // change on stage/unstage, so the session version is the pool's
+            // content version. Plain editors stay stable while scrolling.
             let content_version = editor
                 .review_view
                 .as_ref()
-                .map_or(0, |view| view.rows.len() as u64);
+                .map_or(0, |view| view.session_version);
             let entered = crate::smooth_scroll::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
                 region,
                 scroll_offset,
                 content_version,
-                |page| {
-                    if is_review {
-                        crate::smooth_scroll::render_review_page(
-                            editor,
-                            page,
-                            fallback_style,
-                            theme,
-                            region.width,
-                            region.height,
-                        )
-                    } else {
-                        // Plain editor pages fill asynchronously below. The empty
-                        // render skips a synchronous fill frame here.
-                        Vec::new()
-                    }
-                },
+                // Editor and review pages both fill asynchronously below, so the
+                // synchronous render emits nothing here.
+                |_| Vec::new(),
             );
 
-            if !is_review && !entered.is_empty() {
-                async_jobs.push((
-                    editor.display_map.snapshot(),
-                    entered,
-                    region.pool,
-                    region.width,
-                    region.height,
-                ));
+            if !entered.is_empty() {
+                let snapshot = editor.display_map.snapshot();
+                if let Some(view) = editor.review_view.as_ref() {
+                    async_jobs.push(PoolFill::Review {
+                        snapshot,
+                        parts: Box::new(ReviewFillParts {
+                            view: view.clone(),
+                            theme: theme.clone(),
+                        }),
+                        pages: entered,
+                        pool: region.pool,
+                        width: region.width,
+                        height: region.height,
+                    });
+                } else {
+                    async_jobs.push(PoolFill::Editor {
+                        snapshot,
+                        pages: entered,
+                        pool: region.pool,
+                        width: region.width,
+                        height: region.height,
+                    });
+                }
             }
         }
 
@@ -3971,23 +3996,64 @@ impl Stoat {
         // geometry before a fill lands. Render each newly-entered plain editor page on
         // a blocking worker and deliver its fill frame through the same channel, off
         // the run loop.
-        for (snapshot, pages, pool, width, height) in async_jobs {
-            for index in pages {
-                let snapshot = snapshot.clone();
-                let apc_tx = apc_tx.clone();
-                self.executor
-                    .spawn_blocking(move || {
-                        let fill = crate::smooth_scroll::render_page_fill(
-                            &snapshot,
-                            pool,
-                            index,
-                            fallback_style,
-                            width,
-                            height,
-                        );
-                        let _ = apc_tx.send(fill);
-                    })
-                    .detach();
+        for job in async_jobs {
+            match job {
+                PoolFill::Editor {
+                    snapshot,
+                    pages,
+                    pool,
+                    width,
+                    height,
+                } => {
+                    for index in pages {
+                        let snapshot = snapshot.clone();
+                        let apc_tx = apc_tx.clone();
+                        self.executor
+                            .spawn_blocking(move || {
+                                let fill = crate::smooth_scroll::render_page_fill(
+                                    &snapshot,
+                                    pool,
+                                    index,
+                                    fallback_style,
+                                    width,
+                                    height,
+                                );
+                                let _ = apc_tx.send(fill);
+                            })
+                            .detach();
+                    }
+                },
+                PoolFill::Review {
+                    snapshot,
+                    parts,
+                    pages,
+                    pool,
+                    width,
+                    height,
+                } => {
+                    let ReviewFillParts { view, theme } = *parts;
+                    for index in pages {
+                        let snapshot = snapshot.clone();
+                        let view = view.clone();
+                        let theme = theme.clone();
+                        let apc_tx = apc_tx.clone();
+                        self.executor
+                            .spawn_blocking(move || {
+                                let fill = crate::smooth_scroll::render_review_page_from_parts(
+                                    &snapshot,
+                                    &view,
+                                    &theme,
+                                    pool,
+                                    index,
+                                    fallback_style,
+                                    width,
+                                    height,
+                                );
+                                let _ = apc_tx.send(fill);
+                            })
+                            .detach();
+                    }
+                },
             }
         }
     }

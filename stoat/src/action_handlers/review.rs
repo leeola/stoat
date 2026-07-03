@@ -1226,6 +1226,37 @@ mod tests {
         assert!(!hunks.is_empty(), "cached hunks should not be empty");
     }
 
+    #[test]
+    fn staging_a_chunk_bumps_the_review_content_version() {
+        use crate::review_session::ReviewViewState;
+
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n")]);
+
+        // The pool content version is the session version the review view carries.
+        // A status-only edit must bump it even though the row count is unchanged,
+        // which the old rows.len() version missed, so pooled pages never refreshed
+        // their gutter glyphs on stage.
+        let read = |h: &TestHarness| {
+            h.with_review(|s| {
+                let v = ReviewViewState::from_session(s);
+                (v.rows.len(), v.session_version)
+            })
+        };
+        let (rows_before, version_before) = read(&h);
+        h.set_review_status(0, ChunkStatus::Staged);
+        let (rows_after, version_after) = read(&h);
+
+        assert_eq!(
+            rows_after, rows_before,
+            "staging leaves the row count unchanged"
+        );
+        assert!(
+            version_after > version_before,
+            "staging bumps the content version {version_before} -> {version_after}"
+        );
+    }
+
     /// Navigating to a chunk positions the view by the chunk's display row, so
     /// preceding chunk-header blocks do not push it down the pane. Three chunks
     /// (one per file) mean three header blocks; the third chunk's display row

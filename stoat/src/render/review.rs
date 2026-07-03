@@ -1,8 +1,8 @@
 use crate::{
-    display_map::BlockRowKind,
+    display_map::{BlockRowKind, DisplaySnapshot},
     editor_state::EditorState,
     review::{MoveProvenance, ReviewRow},
-    review_session::ChunkStatus,
+    review_session::{ChunkStatus, ReviewViewState},
 };
 use ratatui::{
     buffer::Buffer,
@@ -25,15 +25,41 @@ pub(crate) fn render_review(
     scene: Option<&mut ApcScene>,
 ) {
     let snapshot = editor.display_map.snapshot();
-    let view = match editor.review_view.as_ref() {
-        Some(v) => v,
-        None => return,
+    let Some(view) = editor.review_view.as_ref() else {
+        return;
     };
+    render_review_rows(
+        &snapshot,
+        view,
+        editor.scroll_row,
+        inner,
+        fallback_style,
+        theme,
+        buf,
+        scene,
+    );
+}
+
+/// Paint the review pane rows from owned, `Send` parts rather than an
+/// [`EditorState`], so a pooled review page can render off the run loop the way
+/// [`render_page_from_snapshot`](crate::smooth_scroll::render_page_from_snapshot)
+/// does for editors. `scroll_row` is the display row at the top of `inner`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_review_rows(
+    snapshot: &DisplaySnapshot,
+    view: &ReviewViewState,
+    scroll_row: u32,
+    inner: Rect,
+    fallback_style: Style,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
+) {
     let rows = &view.rows;
     let total_rows = snapshot.line_count();
     let visible = inner.height as u32;
-    let end_row = (editor.scroll_row + visible).min(total_rows);
-    if end_row <= editor.scroll_row {
+    let end_row = (scroll_row + visible).min(total_rows);
+    if end_row <= scroll_row {
         return;
     }
 
@@ -62,8 +88,8 @@ pub(crate) fn render_review(
         resolve_rich_colors(theme, fallback_style).map(|colors| RichGutter { scene, colors })
     });
 
-    for display_row in editor.scroll_row..end_row {
-        let y = inner.y + (display_row - editor.scroll_row) as u16;
+    for display_row in scroll_row..end_row {
+        let y = inner.y + (display_row - scroll_row) as u16;
         if y >= inner.y + inner.height {
             break;
         }
@@ -244,7 +270,7 @@ pub(crate) fn render_review(
             x: (sep_x - inner.x) * 16 + 8,
             y: 0,
             width: 1,
-            height: (end_row - editor.scroll_row) as u16 * 16,
+            height: (end_row - scroll_row) as u16 * 16,
             color: rg.colors.dim,
         }
         .render(inner, buf, &mut *rg.scene);
