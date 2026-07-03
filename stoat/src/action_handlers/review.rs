@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    diff_cache::{DiffCache, DiffCacheKey},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost, WatchToken},
@@ -16,9 +17,9 @@ use ratatui::{
 };
 use std::{
     path::Path,
-    sync::{mpsc, Arc},
+    sync::{mpsc, Arc, Mutex},
 };
-use stoat_language::LanguageRegistry;
+use stoat_language::{Language, LanguageRegistry};
 use stoat_scheduler::Task;
 use stoat_text::Point;
 
@@ -98,12 +99,19 @@ fn spawn_review_scan(
 }
 
 /// Stream a working-tree scan's gathered inputs: one [`ReviewScanMsg::First`]
-/// then a [`ReviewScanMsg::File`] per remaining file, each diffed on its own,
-/// then a [`ReviewScanMsg::Complete`] carrying the whole-changeset session so
-/// cross-file moves are restored. Sends nothing for an empty input set.
+/// then a [`ReviewScanMsg::File`] per remaining file, then -- unless every file
+/// hit the diff cache -- a [`ReviewScanMsg::Complete`] carrying the whole-
+/// changeset session so cross-file moves are restored. Sends nothing for an
+/// empty input set.
+///
+/// Each file's hunks come from `cache` on a hit, so reopening an unchanged tree
+/// re-diffs nothing. The cache holds move-aware hunks (a whole-changeset install
+/// wrote them), so a full cache hit needs no Complete pass; a changed file
+/// misses and forces one.
 fn stream_review_inputs(
     tx: &mpsc::Sender<ReviewScanMsg>,
     redraw: &Arc<tokio::sync::Notify>,
+    cache: &Arc<Mutex<DiffCache>>,
     source: ReviewSource,
     inputs: Vec<ReviewFileInput>,
 ) {
@@ -112,8 +120,22 @@ fn stream_review_inputs(
         return;
     }
 
+    let mut all_cached = true;
     for (index, input) in inputs.iter().enumerate() {
-        let hunks = review::extract_review_hunks_single(input, 3);
+        let key = diff_cache_key(
+            &input.base_text,
+            &input.buffer_text,
+            input.language.as_ref(),
+        );
+        let cached = cache.lock().expect("diff_cache poisoned").lookup(&key);
+        let hunks = match cached {
+            Some(hunks) => (*hunks).clone(),
+            None => {
+                all_cached = false;
+                review::extract_review_hunks_single(input, 3)
+            },
+        };
+
         let msg = if index == 0 {
             ReviewScanMsg::First {
                 source: source.clone(),
@@ -133,10 +155,25 @@ fn stream_review_inputs(
         redraw.notify_one();
     }
 
-    let mut session = ReviewSession::new(source);
-    session.add_files(inputs);
-    let _ = tx.send(ReviewScanMsg::Complete(session));
-    redraw.notify_one();
+    // A changed file misses the cache, so re-run the whole-changeset move pass.
+    // On a full cache hit the streamed hunks are already move-aware and the
+    // session is final, so no Complete is sent.
+    if !all_cached {
+        let mut session = ReviewSession::new(source);
+        session.add_files(inputs);
+        let _ = tx.send(ReviewScanMsg::Complete(session));
+        redraw.notify_one();
+    }
+}
+
+/// Cache key matching what [`populate_diff_cache`] writes, so a scan reads back
+/// the hunks a prior install stored for an unchanged file.
+fn diff_cache_key(base: &str, buffer: &str, language: Option<&Arc<Language>>) -> DiffCacheKey {
+    DiffCacheKey {
+        left_hash: blake3::hash(base.as_bytes()).into(),
+        right_hash: blake3::hash(buffer.as_bytes()).into(),
+        language: language.map(|l| l.name.to_string()),
+    }
 }
 
 pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
@@ -880,6 +917,7 @@ pub(super) fn open_review(stoat: &mut Stoat) {
     let git_host = stoat.git_host.clone();
     let fs_host = stoat.fs_host.clone();
     let langs = stoat.language_registry.clone();
+    let cache = stoat.diff_cache.clone();
 
     spawn_review_scan(stoat, None, false, true, move |tx, redraw| {
         let Some((workdir, inputs)) =
@@ -887,7 +925,13 @@ pub(super) fn open_review(stoat: &mut Stoat) {
         else {
             return;
         };
-        stream_review_inputs(tx, redraw, ReviewSource::WorkingTree { workdir }, inputs);
+        stream_review_inputs(
+            tx,
+            redraw,
+            &cache,
+            ReviewSource::WorkingTree { workdir },
+            inputs,
+        );
     });
 }
 
@@ -986,6 +1030,14 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
                 } else {
                     emit_review_info_badge(stoat, "no changes to review");
                 }
+            } else if pending.scanning_badge {
+                // A full-cache-hit open streamed every file and sent no Complete,
+                // so clear the scanning badge here rather than leaving it stuck.
+                use crate::badge::BadgeSource;
+                stoat
+                    .active_workspace_mut()
+                    .badges
+                    .remove_by_source(BadgeSource::Review);
             }
             true
         },
@@ -1339,8 +1391,6 @@ fn render_review_editor(stoat: &mut Stoat) {
 /// a `stoat diff` CLI invocation that hashes the same `(base, buffer,
 /// language)` tuple gets a cache hit instead of recomputing.
 fn populate_diff_cache(stoat: &Stoat, session: &ReviewSession) {
-    use crate::{diff_cache::DiffCacheKey, review::ReviewHunk};
-
     let mut cache = stoat.diff_cache.lock().expect("diff_cache poisoned");
     for file in &session.files {
         let hunks: Vec<ReviewHunk> = file
@@ -1348,11 +1398,7 @@ fn populate_diff_cache(stoat: &Stoat, session: &ReviewSession) {
             .iter()
             .filter_map(|id| session.chunks.get(id).map(|c| c.hunk.clone()))
             .collect();
-        let key = DiffCacheKey {
-            left_hash: blake3::hash(file.base_text.as_bytes()).into(),
-            right_hash: blake3::hash(file.buffer_text.as_bytes()).into(),
-            language: file.language.as_ref().map(|l| l.name.to_string()),
-        };
+        let key = diff_cache_key(&file.base_text, &file.buffer_text, file.language.as_ref());
         cache.insert(key, Arc::new(hunks));
     }
 }
@@ -1751,6 +1797,58 @@ mod tests {
         assert_eq!(
             ws.badges.get(id).expect("badge").label,
             "no changes to review"
+        );
+    }
+
+    #[test]
+    fn reopening_an_unchanged_diff_reads_the_cache() {
+        use crate::badge::BadgeSource;
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[
+                ("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n"),
+                ("b.rs", "fn b() { 1 }\n", "fn b() { 2 }\n"),
+                ("c.rs", "fn c() { 1 }\n", "fn c() { 2 }\n"),
+            ],
+        );
+
+        let cache_stats = |h: &TestHarness| {
+            let cache = h.stoat.diff_cache();
+            let guard = cache.lock().expect("diff_cache");
+            (guard.hits(), guard.misses())
+        };
+
+        // The first open diffs every file and populates the cache.
+        h.stoat.open_review();
+        h.settle();
+        let (hits_1, misses_1) = cache_stats(&h);
+
+        // Reopening the unchanged tree reads every file from the cache and
+        // re-diffs nothing. Three hits, no new misses, no whole-changeset pass.
+        h.stoat.open_review();
+        h.settle();
+        let (hits_2, misses_2) = cache_stats(&h);
+
+        assert_eq!(
+            hits_2 - hits_1,
+            3,
+            "the reopen reads all three files from cache",
+        );
+        assert_eq!(misses_2, misses_1, "the reopen re-diffs nothing");
+        assert_eq!(
+            h.with_review(|s| s.files.len()),
+            3,
+            "the reopened session still has every file",
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .badges
+                .find_by_source(BadgeSource::Review)
+                .is_none(),
+            "the scanning badge clears on a full-cache-hit reopen",
         );
     }
 

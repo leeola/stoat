@@ -33,6 +33,10 @@ pub struct DiffCache {
     map: BTreeMap<DiffCacheKey, Entry>,
     counter: u64,
     cap: usize,
+    #[cfg(test)]
+    hits: u64,
+    #[cfg(test)]
+    misses: u64,
 }
 
 impl DiffCache {
@@ -42,14 +46,42 @@ impl DiffCache {
             map: BTreeMap::new(),
             counter: 0,
             cap,
+            #[cfg(test)]
+            hits: 0,
+            #[cfg(test)]
+            misses: 0,
         }
     }
 
     pub fn lookup(&mut self, key: &DiffCacheKey) -> Option<Arc<Vec<ReviewHunk>>> {
         let counter = self.tick();
-        let entry = self.map.get_mut(key)?;
-        entry.last_used = counter;
-        Some(entry.hunks.clone())
+        let hit = self.map.get_mut(key).map(|entry| {
+            entry.last_used = counter;
+            entry.hunks.clone()
+        });
+
+        #[cfg(test)]
+        {
+            if hit.is_some() {
+                self.hits += 1;
+            } else {
+                self.misses += 1;
+            }
+        }
+
+        hit
+    }
+
+    /// Total cache hits observed by [`Self::lookup`] since construction.
+    #[cfg(test)]
+    pub(crate) fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    /// Total cache misses observed by [`Self::lookup`] since construction.
+    #[cfg(test)]
+    pub(crate) fn misses(&self) -> u64 {
+        self.misses
     }
 
     pub fn insert(&mut self, key: DiffCacheKey, hunks: Arc<Vec<ReviewHunk>>) {
