@@ -106,9 +106,17 @@ pub trait GitRepo: Send + Sync {
     /// gitignore rules. Lets a watcher skip build churn such as `target/` when
     /// deciding whether a change should refresh a review.
     fn is_path_ignored(&self, path: &Path) -> bool;
+    /// Read the UTF-8 content of each `paths` entry as it appears in HEAD, in
+    /// input order. An entry is `None` for an orphan branch, a path not in HEAD,
+    /// or a binary blob. Resolves HEAD's tree once for the whole batch so a
+    /// many-file review does not re-peel it per file.
+    fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>>;
+
     /// Read the UTF-8 content of `path` as it appears in HEAD. Returns
     /// `None` for orphan branches, paths not in HEAD, or binary blobs.
-    fn head_content(&self, path: &Path) -> Option<String>;
+    fn head_content(&self, path: &Path) -> Option<String> {
+        self.head_contents(&[path]).into_iter().next().flatten()
+    }
     /// Apply a unified-diff patch to the index. Most callers will want
     /// to drive this through the review-apply flow rather than directly.
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError>;

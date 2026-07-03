@@ -515,10 +515,15 @@ impl GitRepo for FakeGitRepo {
         staged
     }
 
-    fn head_content(&self, path: &Path) -> Option<String> {
-        let rel = path.strip_prefix(&self.workdir).ok()?;
+    fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>> {
         let state = self.state.lock().unwrap();
-        state.head_contents.get(rel).cloned()
+        paths
+            .iter()
+            .map(|path| {
+                let rel = path.strip_prefix(&self.workdir).ok()?;
+                state.head_contents.get(rel).cloned()
+            })
+            .collect()
     }
 
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
@@ -901,6 +906,29 @@ mod tests {
         host.add_repo(workdir()).head_file("a.rs", "v1");
         let repo = host.discover(&workdir()).unwrap();
         assert!(repo.head_content(Path::new("/elsewhere/a.rs")).is_none());
+    }
+
+    #[test]
+    fn head_contents_reads_each_path_in_order() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "content a")
+            .head_file("b.rs", "content b");
+        let repo = host.discover(&workdir()).unwrap();
+
+        let a = workdir().join("a.rs");
+        let missing = workdir().join("missing.rs");
+        let b = workdir().join("b.rs");
+        let paths: Vec<&Path> = vec![a.as_path(), missing.as_path(), b.as_path()];
+
+        assert_eq!(
+            repo.head_contents(&paths),
+            vec![
+                Some("content a".to_string()),
+                None,
+                Some("content b".to_string()),
+            ],
+        );
     }
 
     #[test]

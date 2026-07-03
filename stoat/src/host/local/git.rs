@@ -116,14 +116,23 @@ impl GitRepo for LocalGitRepo {
         staged
     }
 
-    fn head_content(&self, path: &Path) -> Option<String> {
+    fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>> {
         let repo = self.repo.lock().expect("git repo lock");
-        let workdir = repo.workdir()?;
-        let rel = path.strip_prefix(workdir).ok()?;
-        let tree = repo.head().ok()?.peel_to_tree().ok()?;
-        let entry = tree.get_path(rel).ok()?;
-        let blob = entry.to_object(&repo).ok()?.peel_to_blob().ok()?;
-        std::str::from_utf8(blob.content()).ok().map(String::from)
+        let Some(workdir) = repo.workdir() else {
+            return vec![None; paths.len()];
+        };
+        let Some(tree) = repo.head().ok().and_then(|h| h.peel_to_tree().ok()) else {
+            return vec![None; paths.len()];
+        };
+        paths
+            .iter()
+            .map(|path| {
+                let rel = path.strip_prefix(workdir).ok()?;
+                let entry = tree.get_path(rel).ok()?;
+                let blob = entry.to_object(&repo).ok()?.peel_to_blob().ok()?;
+                std::str::from_utf8(blob.content()).ok().map(String::from)
+            })
+            .collect()
     }
 
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {

@@ -41,8 +41,11 @@ pub fn scan_working_tree(
         return None;
     }
 
+    let head_paths: Vec<&Path> = changed.iter().map(|f| f.path.as_path()).collect();
+    let head_texts = repo.head_contents(&head_paths);
+
     let mut inputs: Vec<ReviewFileInput> = Vec::with_capacity(changed.len());
-    for file in &changed {
+    for (file, base_text) in changed.iter().zip(head_texts) {
         let buffer_text = match read_utf8(fs, &file.path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -55,7 +58,7 @@ pub fn scan_working_tree(
                 continue;
             },
         };
-        let base_text = repo.head_content(&file.path).unwrap_or_default();
+        let base_text = base_text.unwrap_or_default();
         let lang = langs.for_path(&file.path);
         let rel_path = file
             .path
