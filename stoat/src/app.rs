@@ -1582,6 +1582,7 @@ impl Stoat {
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
         self.drain_lsp_notifications();
+        self.drain_lsp_incoming_requests();
         self.install_pending_lsp_host();
         self.drain_fs_watch_events();
         self.drain_pending_external_edits();
@@ -1909,6 +1910,96 @@ impl Stoat {
                     );
                 },
             }
+        }
+    }
+
+    /// Drain and answer server-to-client requests the LSP host has
+    /// queued, so a server that pulls configuration or requests an edit
+    /// does not block waiting on the editor.
+    ///
+    /// Mirrors [`Self::drain_lsp_notifications`] with a bounded
+    /// `now_or_never` loop over
+    /// [`crate::host::LspHost::try_recv_incoming_request`]. Each request
+    /// carries an id the server blocks on, so every one is answered on a
+    /// detached [`crate::host::LspHost::reply`] task. A `workspace/applyEdit`
+    /// mutates buffers synchronously here because it needs `&mut self`. Only
+    /// the reply is deferred.
+    pub(crate) fn drain_lsp_incoming_requests(&mut self) {
+        use crate::host::lsp::{IncomingRequest, LspResponseError};
+        use futures::FutureExt;
+        use lsp_types::ApplyWorkspaceEditResponse;
+        use serde_json::Value;
+
+        let host = self.lsp_host.clone();
+        for _ in 0..256 {
+            let Some(slot) = host.try_recv_incoming_request().now_or_never() else {
+                break;
+            };
+            let Some(request) = slot else {
+                break;
+            };
+
+            let id = request.id().clone();
+            let result: Result<Value, LspResponseError> = match request {
+                IncomingRequest::WorkDoneProgressCreate { params, .. } => {
+                    tracing::debug!(target: "stoat::lsp", ?params, "workDoneProgress/create");
+                    Ok(Value::Null)
+                },
+                IncomingRequest::RegisterCapability { params, .. } => {
+                    tracing::debug!(target: "stoat::lsp", ?params, "client/registerCapability");
+                    Ok(Value::Null)
+                },
+                IncomingRequest::UnregisterCapability { params, .. } => {
+                    tracing::debug!(target: "stoat::lsp", ?params, "client/unregisterCapability");
+                    Ok(Value::Null)
+                },
+                IncomingRequest::WorkspaceConfiguration { params, .. } => {
+                    Ok(Value::Array(vec![Value::Null; params.items.len()]))
+                },
+                IncomingRequest::ShowMessageRequest { .. } => Ok(Value::Null),
+                IncomingRequest::WorkspaceApplyEdit { params, .. } => {
+                    let response = match crate::lsp::edit_apply::apply_workspace_edit(
+                        self,
+                        params.edit,
+                    ) {
+                        Ok(_) => ApplyWorkspaceEditResponse {
+                            applied: true,
+                            failure_reason: None,
+                            failed_change: None,
+                        },
+                        Err(err) => {
+                            tracing::warn!(target: "stoat::lsp", %err, "workspace/applyEdit failed");
+                            ApplyWorkspaceEditResponse {
+                                applied: false,
+                                failure_reason: Some(err.to_string()),
+                                failed_change: None,
+                            }
+                        },
+                    };
+                    serde_json::to_value(response).map_err(|err| LspResponseError {
+                        code: -32603,
+                        message: err.to_string(),
+                        data: None,
+                    })
+                },
+                IncomingRequest::Unknown { method, .. } => {
+                    tracing::debug!(target: "stoat::lsp", %method, "unhandled server->client request");
+                    Err(LspResponseError {
+                        code: -32601,
+                        message: "method not found".to_string(),
+                        data: None,
+                    })
+                },
+            };
+
+            let reply_host = host.clone();
+            self.executor
+                .spawn(async move {
+                    if let Err(err) = reply_host.reply(id, result).await {
+                        tracing::warn!(target: "stoat::lsp", ?err, "lsp reply failed");
+                    }
+                })
+                .detach();
         }
     }
 
@@ -6698,6 +6789,126 @@ mod tests {
             .diagnostics
             .summarize(std::path::Path::new("/ws/a.rs"));
         assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn incoming_apply_edit_mutates_buffer_and_replies_applied() {
+        use crate::host::lsp::IncomingRequest;
+        use lsp_types::{
+            ApplyWorkspaceEditParams, ApplyWorkspaceEditResponse, DocumentChanges, NumberOrString,
+            OneOf, OptionalVersionedTextDocumentIdentifier, Position, Range, TextDocumentEdit,
+            TextEdit, WorkspaceEdit,
+        };
+        use std::path::PathBuf;
+
+        let mut h = Stoat::test();
+        let path = PathBuf::from("/ws/a.rs");
+        h.fake_fs().insert_file(&path, b"abcde\n");
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .open(&path, "abcde\n");
+
+        let uri = action_handlers::lsp::path_to_uri(&path).expect("uri");
+        let edit = WorkspaceEdit {
+            changes: None,
+            document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+                edits: vec![OneOf::Left(TextEdit {
+                    range: Range::new(Position::new(0, 1), Position::new(0, 4)),
+                    new_text: "X".to_string(),
+                })],
+            }])),
+            change_annotations: None,
+        };
+        let id = NumberOrString::Number(7);
+        h.fake_lsp()
+            .push_incoming_request(IncomingRequest::WorkspaceApplyEdit {
+                id: id.clone(),
+                params: ApplyWorkspaceEditParams { label: None, edit },
+            });
+        h.stoat.drain_lsp_incoming_requests();
+        h.settle();
+
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .expect("buffer");
+        let text = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .unwrap()
+            .read()
+            .unwrap()
+            .rope()
+            .to_string();
+        assert_eq!(text, "aXe\n");
+
+        let applied = serde_json::to_value(ApplyWorkspaceEditResponse {
+            applied: true,
+            failure_reason: None,
+            failed_change: None,
+        })
+        .unwrap();
+        assert_eq!(h.fake_lsp().observed_replies(), vec![(id, Ok(applied))]);
+    }
+
+    #[test]
+    fn incoming_configuration_replies_null_per_item() {
+        use crate::host::lsp::IncomingRequest;
+        use lsp_types::{ConfigurationItem, ConfigurationParams, NumberOrString};
+
+        let mut h = Stoat::test();
+        let id = NumberOrString::Number(8);
+        let item = |section: &str| ConfigurationItem {
+            scope_uri: None,
+            section: Some(section.to_string()),
+        };
+        h.fake_lsp()
+            .push_incoming_request(IncomingRequest::WorkspaceConfiguration {
+                id: id.clone(),
+                params: ConfigurationParams {
+                    items: vec![item("a"), item("b")],
+                },
+            });
+        h.stoat.drain_lsp_incoming_requests();
+        h.settle();
+
+        let nulls = serde_json::Value::Array(vec![serde_json::Value::Null; 2]);
+        assert_eq!(h.fake_lsp().observed_replies(), vec![(id, Ok(nulls))]);
+    }
+
+    #[test]
+    fn incoming_unknown_request_replies_method_not_found() {
+        use crate::host::lsp::{IncomingRequest, LspResponseError};
+        use lsp_types::NumberOrString;
+
+        let mut h = Stoat::test();
+        let id = NumberOrString::Number(9);
+        h.fake_lsp()
+            .push_incoming_request(IncomingRequest::Unknown {
+                id: id.clone(),
+                method: "experimental/foo".to_string(),
+                params: serde_json::Value::Null,
+            });
+        h.stoat.drain_lsp_incoming_requests();
+        h.settle();
+
+        assert_eq!(
+            h.fake_lsp().observed_replies(),
+            vec![(
+                id,
+                Err(LspResponseError {
+                    code: -32601,
+                    message: "method not found".to_string(),
+                    data: None,
+                }),
+            )],
+        );
     }
 
     #[test]
