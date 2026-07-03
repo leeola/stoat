@@ -23,6 +23,7 @@ use std::{
 };
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::Task;
+use stoat_text::Point;
 
 /// An in-flight review scan and the work to run once it lands.
 ///
@@ -430,9 +431,18 @@ fn sync_review_view_and_scroll(
         view.refresh_from_session(session);
     }
     if let Some(chunk_id) = scroll_to_chunk
-        && let Some(row) = view.row_of_chunk(chunk_id)
+        && let Some(buffer_row) = view.row_of_chunk(chunk_id)
     {
-        editor.scroll_row = row.saturating_sub(3);
+        // row_of_chunk is a buffer row, but scroll_row is a display row and the
+        // review display inserts a header block above each chunk. Convert
+        // through the display map so the chunk lands at the same offset
+        // regardless of how many headers precede it.
+        let display_row = editor
+            .display_map
+            .snapshot()
+            .buffer_to_display(Point::new(buffer_row, 0))
+            .row;
+        editor.scroll_row = display_row.saturating_sub(3);
     }
 }
 
@@ -1214,6 +1224,63 @@ mod tests {
         let mut guard = cache.lock().expect("diff_cache poisoned");
         let hunks = guard.lookup(&key).expect("cache hit after install");
         assert!(!hunks.is_empty(), "cached hunks should not be empty");
+    }
+
+    /// Navigating to a chunk positions the view by the chunk's display row, so
+    /// preceding chunk-header blocks do not push it down the pane. Three chunks
+    /// (one per file) mean three header blocks; the third chunk's display row
+    /// exceeds its buffer row, and scroll_row must track the display row.
+    #[test]
+    fn chunk_navigation_accounts_for_header_blocks() {
+        use super::{review_step, ReviewStep};
+        use stoat_text::Point;
+
+        let mut h = TestHarness::with_size(80, 24);
+        h.open_review_from_texts(&[
+            ("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n"),
+            ("b.rs", "fn b() { 1 }\n", "fn b() { 2 }\n"),
+            ("c.rs", "fn c() { 1 }\n", "fn c() { 2 }\n"),
+        ]);
+
+        let editor_id = h.with_review(|s| s.view_editor).expect("review editor id");
+
+        review_step(&mut h.stoat, ReviewStep::Next);
+        review_step(&mut h.stoat, ReviewStep::Next);
+
+        let current = h.current_review_chunk_id();
+        let scroll_row = h.editor_scroll_row(editor_id);
+
+        let (buffer_row, display_row) = {
+            let ws = h.stoat.active_workspace_mut();
+            let editor = ws.editors.get_mut(editor_id).expect("editor");
+            let buffer_row = editor
+                .review_view
+                .as_ref()
+                .expect("review view")
+                .row_of_chunk(current)
+                .expect("row of current chunk");
+            let display_row = editor
+                .display_map
+                .snapshot()
+                .buffer_to_display(Point::new(buffer_row, 0))
+                .row;
+            (buffer_row, display_row)
+        };
+
+        assert!(
+            display_row > buffer_row,
+            "the third chunk sits below preceding header blocks",
+        );
+        assert_eq!(
+            scroll_row,
+            display_row.saturating_sub(3),
+            "scroll_row is the chunk's display row minus the 3-row margin",
+        );
+        assert_ne!(
+            scroll_row,
+            buffer_row.saturating_sub(3),
+            "the old buffer-row computation would land the chunk lower",
+        );
     }
 
     /// (a) An external edit that introduces a second hunk grows
