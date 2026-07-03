@@ -22,7 +22,7 @@ use lsp_types::{
     DidOpenTextDocumentParams, DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
     DocumentSymbolResponse, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse,
     HoverContents, HoverParams, MarkedString, OneOf, Position, PrepareRenameResponse, Range,
-    ReferenceContext, ReferenceParams, RenameParams, SymbolInformation,
+    ReferenceContext, ReferenceParams, RenameParams, ServerInfo, SymbolInformation,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
@@ -206,13 +206,37 @@ fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
                     return;
                 },
             };
-            if let Err(err) = host.initialize(root_uri).await {
-                tracing::warn!(target: "stoat::lsp", ?err, %command, "language server initialize failed");
-                return;
+            match host.initialize(root_uri).await {
+                Ok(result) => {
+                    tracing::info!(
+                        target: "stoat::lsp",
+                        %command,
+                        server = %server_label(result.server_info.as_ref()),
+                        "language server initialized",
+                    );
+                },
+                Err(err) => {
+                    tracing::warn!(target: "stoat::lsp", ?err, %command, "language server initialize failed");
+                    return;
+                },
             }
             *slot.lock().expect("pending lsp host mutex") = Some(host);
         })
         .detach();
+}
+
+/// A language server's `name@version` identity from its
+/// `InitializeResult`, for logging. The version is omitted when the
+/// server reported a name but no version, and the whole label is
+/// "unknown" when the server reported no `serverInfo` at all.
+fn server_label(info: Option<&ServerInfo>) -> String {
+    let Some(info) = info else {
+        return "unknown".to_string();
+    };
+    match &info.version {
+        Some(version) => format!("{}@{}", info.name, version),
+        None => info.name.clone(),
+    }
 }
 
 /// Scan every buffer in [`Stoat::lsp_opened`] for an updated

@@ -1938,7 +1938,15 @@ impl Stoat {
                     uri, diagnostics, ..
                 } => {
                     if let Some(path) = lsp_uri_to_path(uri) {
-                        self.diagnostics.replace_for_path(path, diagnostics.clone());
+                        let count = diagnostics.len();
+                        self.diagnostics
+                            .replace_for_path(path.clone(), diagnostics.clone());
+                        tracing::info!(
+                            target: "stoat::lsp",
+                            path = %path.display(),
+                            count,
+                            "diagnostics applied",
+                        );
                     } else {
                         tracing::debug!(
                             target: "stoat::app",
