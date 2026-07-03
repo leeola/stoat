@@ -2887,7 +2887,9 @@ pub(crate) fn step_scroll_momentum(
     max_offset: f32,
 ) -> (f32, f32, bool) {
     const FRICTION: f32 = 0.85;
-    const MIN_VEL: f32 = 0.1;
+    // Below ~2 rows/s the coast is visually stationary. Ending it here hands the
+    // last sub-row fraction to the ease glide rather than dribbling to a stop.
+    const MIN_VEL: f32 = 2.0;
     const NOMINAL_DT: f32 = 0.008;
 
     let next = (offset + velocity * dt).clamp(0.0, max_offset);

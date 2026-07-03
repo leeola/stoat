@@ -1150,7 +1150,9 @@ impl Stoat {
     /// [`step_scroll_momentum`](action_handlers::movement::step_scroll_momentum),
     /// writing back the decayed velocity and new offset and keeping `scroll_row`
     /// at `floor(scroll_offset)` so the integer-row render and pool paths track
-    /// the glide.
+    /// the coast. On settle it arms a page glide onto the rounded resting row
+    /// rather than snapping `scroll_offset` there, so the final sub-row fraction
+    /// eases in instead of jumping after the coast has slowed to a standstill.
     ///
     /// A keyboard page glide (`scroll_glide`, zero velocity) eases `scroll_offset`
     /// toward the `scroll_row` target the jump already set, clearing the flag on
@@ -1169,20 +1171,20 @@ impl Stoat {
                     dt,
                     max_offset,
                 );
-                // Come to rest exactly on a row. The pool eases to the fractional
-                // offset, but the live grid can only repaint at the integer row,
-                // so a fractional resting offset snaps by its remainder when the
-                // pool hands back to the live grid. Rounding on the final step
-                // lands both on the same row.
-                let offset = if settled {
-                    offset.round().clamp(0.0, max_offset)
-                } else {
-                    offset
-                };
                 editor.scroll_offset = offset;
                 editor.scroll_velocity = velocity;
-                editor.scroll_row = offset.floor() as u32;
-                animating |= velocity != 0.0;
+                if settled {
+                    // A low settle speed can leave the offset up to half a row
+                    // from its resting row. Snapping scroll_offset onto the
+                    // rounded row jumps that remainder visibly, right as the
+                    // coast slows to a near standstill. Arm a page glide onto
+                    // the rounded row instead so the final fraction eases in.
+                    editor.scroll_row = offset.round().clamp(0.0, max_offset) as u32;
+                    editor.scroll_glide = true;
+                } else {
+                    editor.scroll_row = offset.floor() as u32;
+                }
+                animating = true;
             } else if editor.scroll_glide {
                 let target = editor.scroll_row as f32;
                 let viewport = editor
@@ -4651,6 +4653,41 @@ mod tests {
             "a gap wider than three viewports snaps straight to the target"
         );
         assert!(!editor.scroll_glide, "and clears the glide");
+    }
+
+    #[test]
+    fn momentum_settle_arms_a_glide_instead_of_snapping() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let path = h.write_file("glide.rs", &body);
+        h.open_file(&path);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            editor.scroll_row = 42;
+            editor.scroll_offset = 42.4;
+            editor.scroll_velocity = 1.0;
+        }
+
+        h.stoat.tick_scroll_anim(0.016);
+
+        assert!(
+            h.stoat.is_animating(),
+            "the coast eases onto the row instead of stopping dead"
+        );
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        assert_eq!(editor.scroll_velocity, 0.0, "the coast has settled");
+        assert!(editor.scroll_glide, "settle arms an ease glide");
+        assert_eq!(
+            editor.scroll_row, 42,
+            "the glide targets the rounded resting row"
+        );
+        assert!(
+            editor.scroll_offset > 42.0 && editor.scroll_offset < 43.0,
+            "the offset keeps its fraction for the glide to ease in, not a snapped integer"
+        );
     }
 
     #[test]
