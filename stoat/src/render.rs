@@ -370,6 +370,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     } else if let Some(finder) = &mut stoat.file_finder {
         file_finder::render_file_finder(
@@ -396,6 +397,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     } else if let Some(palette) = &mut stoat.command_palette {
         command_palette::render_command_palette(
@@ -422,6 +424,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     } else if let Some(picker) = &stoat.workspace_picker {
         workspace_picker::render_workspace_picker(
@@ -439,6 +442,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     } else if let Some(modal) = &stoat.quit_all_confirm {
         quit_all_confirm::render_quit_all_confirm(
@@ -461,6 +465,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     } else if let Some(picker) = &stoat.jumplist_picker {
         jumplist_picker::render_jumplist_picker(
@@ -478,6 +483,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     } else if let Some(picker) = &stoat.diagnostics_picker {
         diagnostics_picker::render_diagnostics_picker(
@@ -496,6 +502,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     } else if let Some(picker) = &stoat.global_search {
         let git_root = ws.git_root.clone();
@@ -515,6 +522,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     } else if !PRIMARY_MODES.contains(&stoat.mode.as_str()) {
         // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
@@ -564,6 +572,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.theme,
             hints_overlay_area(size),
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
     }
 

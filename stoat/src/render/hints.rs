@@ -2,7 +2,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Clear, Widget},
 };
 use std::collections::HashMap;
 
@@ -18,6 +18,7 @@ pub(crate) fn render_hints(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if bindings.is_empty() || area.width < 10 || area.height < 4 {
         return;
@@ -46,14 +47,16 @@ pub(crate) fn render_hints(
     let help_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(format!(" {mode} "))
-        .title_style(modal_style);
-    let inner = block.inner(help_area);
+    let title = format!(" {mode} ");
     Clear.render(help_area, buf);
-    block.render(help_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        help_area,
+        Some(title.as_str()),
+        modal_style,
+        theme,
+        scene,
+    );
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
