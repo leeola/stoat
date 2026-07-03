@@ -12,7 +12,7 @@ use crate::{
 };
 use lsp_types::{
     CompletionItem as LspCompletionItem, CompletionItemKind as LspCompletionItemKind,
-    CompletionParams, CompletionResponse, CompletionTextEdit,
+    CompletionParams, CompletionResponse, CompletionTextEdit, Documentation,
 };
 use stoat_text::Rope;
 
@@ -77,13 +77,24 @@ fn translate(
     );
 
     CompletionItem {
-        label: lsp_item.label,
+        label: lsp_item.label.clone(),
         source: CompletionSource::Lsp,
         kind: lsp_item.kind.and_then(map_kind),
-        detail: lsp_item.detail,
+        detail: lsp_item.detail.clone(),
+        documentation: documentation_string(lsp_item.documentation.as_ref()),
         replace_range,
         insert_text,
         is_snippet,
+        lsp_item: Some(Box::new(lsp_item)),
+    }
+}
+
+/// Flatten an LSP [`Documentation`] value into plain text. Markdown
+/// content is kept verbatim. The popup footer renders the first line.
+pub(crate) fn documentation_string(doc: Option<&Documentation>) -> Option<String> {
+    match doc? {
+        Documentation::String(text) => Some(text.clone()),
+        Documentation::MarkupContent(markup) => Some(markup.value.clone()),
     }
 }
 

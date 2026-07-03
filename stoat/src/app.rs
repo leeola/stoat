@@ -604,6 +604,15 @@ pub struct Stoat {
     pub(crate) pending_completion_request:
         Option<stoat_scheduler::Task<crate::completion::CompletionPopup>>,
 
+    /// In-flight debounced `completionItem/resolve` for the popup's
+    /// selected row. Replacing the entry drops the prior task, so
+    /// navigating past a row cancels its resolve. Polled by
+    /// [`action_handlers::completion::pump_completion_resolve`], which
+    /// patches the resolved detail/documentation back into
+    /// [`Self::pending_completion`].
+    pub(crate) pending_completion_resolve:
+        Option<stoat_scheduler::Task<Option<action_handlers::completion::ResolvedCompletion>>>,
+
     /// Buffer signature `(BufferId, version)` recorded at the most
     /// recent completion-trigger call. The trigger pipeline returns
     /// early when this matches the focused buffer's current
@@ -860,6 +869,7 @@ impl Stoat {
             pending_format_request: None,
             pending_completion: None,
             pending_completion_request: None,
+            pending_completion_resolve: None,
             last_completion_signature: None,
             active_snippet: None,
             version_info: "unknown",
@@ -3342,6 +3352,7 @@ impl Stoat {
                 if let Some(popup) = self.pending_completion.as_mut() {
                     popup.selected_idx = popup.selected_idx.saturating_sub(1);
                 }
+                action_handlers::completion::arm_completion_resolve(self);
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Down if self.pending_completion.is_some() => {
@@ -3349,6 +3360,7 @@ impl Stoat {
                     let last = popup.items.len().saturating_sub(1);
                     popup.selected_idx = (popup.selected_idx + 1).min(last);
                 }
+                action_handlers::completion::arm_completion_resolve(self);
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Up if self.focused_run_pane().is_some() => Some(action_handlers::dispatch(
@@ -4396,6 +4408,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_workspace_symbol(self);
         action_handlers::lsp::pump_lsp_format(self);
         crate::completion::request::pump(self);
+        action_handlers::completion::pump_completion_resolve(self);
     }
 
     fn dispatch_workspace_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
@@ -6227,6 +6240,8 @@ mod tests {
                 replace_range: 0..0,
                 insert_text: "println".into(),
                 is_snippet: false,
+                documentation: None,
+                lsp_item: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -6442,6 +6457,8 @@ mod tests {
             replace_range: 0..0,
             insert_text: label.into(),
             is_snippet: false,
+            documentation: None,
+            lsp_item: None,
         };
         h.stoat.pending_completion = Some(CompletionPopup {
             items: vec![item("alpha"), item("beta"), item("gamma")],
@@ -7911,6 +7928,8 @@ mod tests {
                 replace_range: 0..0,
                 insert_text: "foo".into(),
                 is_snippet: false,
+                documentation: None,
+                lsp_item: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -7958,6 +7977,8 @@ mod tests {
                 replace_range: 0..3,
                 insert_text: "foobar".into(),
                 is_snippet: false,
+                documentation: None,
+                lsp_item: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -7990,6 +8011,8 @@ mod tests {
                     replace_range: 0..1,
                     insert_text: "foo".into(),
                     is_snippet: false,
+                    documentation: None,
+                    lsp_item: None,
                 },
                 CompletionItem {
                     label: "foobar".into(),
@@ -7999,6 +8022,8 @@ mod tests {
                     replace_range: 0..1,
                     insert_text: "foobar".into(),
                     is_snippet: false,
+                    documentation: None,
+                    lsp_item: None,
                 },
                 CompletionItem {
                     label: "foobaz".into(),
@@ -8008,6 +8033,8 @@ mod tests {
                     replace_range: 0..1,
                     insert_text: "foobaz".into(),
                     is_snippet: false,
+                    documentation: None,
+                    lsp_item: None,
                 },
             ],
             selected_idx: 0,
@@ -8064,6 +8091,8 @@ mod tests {
                 replace_range: 0..3,
                 insert_text: "${1:name}(${2:arg})$0".into(),
                 is_snippet: true,
+                documentation: None,
+                lsp_item: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -8105,6 +8134,8 @@ mod tests {
                 replace_range: 0..1,
                 insert_text: "${1:a} ${2:b}".into(),
                 is_snippet: true,
+                documentation: None,
+                lsp_item: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,

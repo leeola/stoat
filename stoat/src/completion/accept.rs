@@ -172,6 +172,8 @@ mod tests {
                 replace_range: 0..3,
                 insert_text: "foobar".into(),
                 is_snippet: false,
+                documentation: None,
+                lsp_item: None,
             }],
             0..3,
         );
@@ -200,6 +202,8 @@ mod tests {
                 replace_range: 0..5,
                 insert_text: "println!(\"\")".into(),
                 is_snippet: false,
+                documentation: None,
+                lsp_item: None,
             }],
             0..5,
         );
@@ -226,6 +230,8 @@ mod tests {
                     replace_range: 0..2,
                     insert_text: "foo".into(),
                     is_snippet: false,
+                    documentation: None,
+                    lsp_item: None,
                 },
                 CompletionItem {
                     label: "foobar".into(),
@@ -235,6 +241,8 @@ mod tests {
                     replace_range: 0..2,
                     insert_text: "foobar".into(),
                     is_snippet: false,
+                    documentation: None,
+                    lsp_item: None,
                 },
             ],
             selected_idx: 1,
@@ -276,6 +284,8 @@ mod tests {
                 replace_range: 0..3,
                 insert_text: "println!(${1:msg})$0".into(),
                 is_snippet: true,
+                documentation: None,
+                lsp_item: None,
             }],
             0..3,
         );
@@ -319,6 +329,8 @@ mod tests {
                 replace_range: 0..3,
                 insert_text: "println!()$0".into(),
                 is_snippet: true,
+                documentation: None,
+                lsp_item: None,
             }],
             0..3,
         );
@@ -345,6 +357,8 @@ mod tests {
                 replace_range: 0..3,
                 insert_text: "${1:x} = ${1}".into(),
                 is_snippet: true,
+                documentation: None,
+                lsp_item: None,
             }],
             0..3,
         );
@@ -383,6 +397,8 @@ mod tests {
                 replace_range: 0..3,
                 insert_text: "foobar".into(),
                 is_snippet: false,
+                documentation: None,
+                lsp_item: None,
             }],
             0..3,
         );

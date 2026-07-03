@@ -63,7 +63,7 @@ pub enum CompletionItemKind {
 /// layer treat every source identically; per-source extras (LSP
 /// text edits, snippet placeholders) extend this struct as the
 /// items 85/89 land them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompletionItem {
     /// The text the popup renders for this row.
     pub label: String,
@@ -75,6 +75,11 @@ pub struct CompletionItem {
     /// Single-line summary painted dimmed beside the label when
     /// the terminal width permits.
     pub detail: Option<String>,
+    /// Longer documentation for the item, shown in the popup detail
+    /// footer. LSP items often leave this `None` until resolved via
+    /// [`crate::host::LspHost::completion_resolve`]. Non-LSP sources
+    /// never set it.
+    pub documentation: Option<String>,
     /// Byte-range in the source buffer that acceptance replaces.
     /// Sources scope this to the current prefix at minimum; LSP
     /// items widen it to the server's `text_edit.range`.
@@ -88,6 +93,10 @@ pub struct CompletionItem {
     /// placeholders into multi-cursor selections; non-snippet items
     /// insert the text verbatim.
     pub is_snippet: bool,
+    /// The raw server item for an LSP source, retained so the popup
+    /// can issue `completionItem/resolve` for the selected row.
+    /// `None` for non-LSP sources.
+    pub lsp_item: Option<Box<lsp_types::CompletionItem>>,
 }
 
 /// In-flight completion popup. Held on
@@ -96,7 +105,7 @@ pub struct CompletionItem {
 /// changes and clears the field when the cursor leaves
 /// [`Self::prefix_range`]; the acceptance handler (item 89)
 /// consumes the entry on `Tab`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompletionPopup {
     /// Rows the popup paints, in display order (already filtered
     /// and ranked by the trigger pipeline).
@@ -331,6 +340,8 @@ mod tests {
             replace_range: 4..12,
             insert_text: "open_file(${1:path})".into(),
             is_snippet: true,
+            documentation: None,
+            lsp_item: None,
         };
         assert_eq!(item.clone(), item);
     }
@@ -354,6 +365,8 @@ mod tests {
             replace_range: 4..7,
             insert_text: "open_file()".into(),
             is_snippet: false,
+            documentation: None,
+            lsp_item: None,
         };
         let popup = CompletionPopup {
             items: vec![item.clone()],
@@ -395,6 +408,8 @@ mod tests {
                 replace_range: 0..0,
                 insert_text: String::new(),
                 is_snippet: false,
+                documentation: None,
+                lsp_item: None,
             };
             assert_eq!(item.kind, Some(kind));
         }

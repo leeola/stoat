@@ -9,6 +9,7 @@ use nucleo::Utf32Str;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Modifier,
     widgets::{Block, Borders, Clear, Widget},
 };
 
@@ -26,9 +27,14 @@ pub(crate) struct CompletionLayout {
     /// The bordered popup rect.
     pub(crate) popup_area: Rect,
     /// Inside the border: the scrolling row region, also the pool region.
+    /// Excludes the detail footer row when one is present.
     pub(crate) inner: Rect,
     /// Index of the first visible item, the list's scroll offset.
     pub(crate) viewport_top: usize,
+    /// Detail-and-documentation line for the selected row, painted dimmed
+    /// in a footer row just below [`Self::inner`]. `None` when the
+    /// selected row has neither.
+    pub(crate) detail: Option<String>,
 }
 
 /// Compute the anchored completion popup geometry, returning the cloned popup,
@@ -82,8 +88,20 @@ pub(crate) fn completion_popup_layout(
         })
         .max()
         .unwrap_or(0) as u16;
-    let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
-    let popup_height = (visible_count as u16 + 2).clamp(3, content_area.height.max(3));
+    let detail = popup.items.get(popup.selected_idx).and_then(detail_footer);
+    let detail_width = detail
+        .as_deref()
+        .map(|d| {
+            truncate_to_width(d, interior_width as usize)
+                .chars()
+                .count()
+        })
+        .unwrap_or(0) as u16;
+    let footer_rows: u16 = if detail.is_some() { 1 } else { 0 };
+
+    let popup_width = (max_line_width.max(detail_width) + 2).clamp(3, content_area.width.max(3));
+    let popup_height =
+        (visible_count as u16 + footer_rows + 2).clamp(3, content_area.height.max(3));
 
     let popup_x = cursor_screen
         .0
@@ -102,7 +120,11 @@ pub(crate) fn completion_popup_layout(
         width: popup_width,
         height: popup_height,
     };
-    let inner = Block::default().borders(Borders::ALL).inner(popup_area);
+    let full_inner = Block::default().borders(Borders::ALL).inner(popup_area);
+    let inner = Rect {
+        height: full_inner.height.saturating_sub(footer_rows),
+        ..full_inner
+    };
 
     Some((
         popup,
@@ -111,8 +133,28 @@ pub(crate) fn completion_popup_layout(
             popup_area,
             inner,
             viewport_top,
+            detail,
         },
     ))
+}
+
+/// The dimmed footer line for a completion row, joining its detail with
+/// the first line of its documentation. `None` when it has neither.
+/// Painted just below the list by [`render_completion`].
+fn detail_footer(item: &CompletionItem) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(detail) = item.detail.as_deref().filter(|d| !d.is_empty()) {
+        parts.push(detail);
+    }
+    if let Some(first) = item
+        .documentation
+        .as_deref()
+        .and_then(|doc| doc.lines().next())
+        .filter(|line| !line.is_empty())
+    {
+        parts.push(first);
+    }
+    (!parts.is_empty()).then(|| parts.join("  "))
 }
 
 /// Paint the completion popup, if any, anchored to the focused
@@ -152,6 +194,19 @@ pub(crate) fn render_completion(
         &stoat.theme,
         buf,
     );
+
+    if let Some(detail) = &layout.detail {
+        let footer_y = layout.inner.y + layout.inner.height;
+        let footer_style = modal_style.add_modifier(Modifier::DIM);
+        let text = truncate_to_width(detail, layout.inner.width as usize);
+        for (col_idx, ch) in text.chars().enumerate() {
+            let col = layout.inner.x + col_idx as u16;
+            if col >= layout.inner.x + layout.inner.width {
+                break;
+            }
+            buf[(col, footer_y)].set_char(ch).set_style(footer_style);
+        }
+    }
 }
 
 /// Paint completion rows into `area` starting at item `start_row`, one row per
@@ -323,6 +378,8 @@ mod tests {
             replace_range: 0..0,
             insert_text: label.into(),
             is_snippet: false,
+            documentation: None,
+            lsp_item: None,
         }
     }
 
@@ -338,6 +395,23 @@ mod tests {
             prefix_range: 0..0,
         });
         h.assert_snapshot("snapshot_completion_popup_basic");
+    }
+
+    #[test]
+    fn snapshot_popup_shows_detail_footer_for_selected_row() {
+        let mut h = TestHarness::with_size(40, 12);
+        let _path = open_scratch(&mut h, "");
+        h.type_keys("i");
+        let mut foo = make_item("foo");
+        foo.detail = Some("fn foo() -> u32".into());
+        foo.documentation = Some("Returns the foo.\nMore details.".into());
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![foo, make_item("bar")],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..0,
+        });
+        h.assert_snapshot("snapshot_completion_popup_detail_footer");
     }
 
     #[test]

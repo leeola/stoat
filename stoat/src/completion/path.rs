@@ -69,6 +69,8 @@ pub fn fetch(
             replace_range: replace_start..cursor,
             insert_text: label,
             is_snippet: false,
+            documentation: None,
+            lsp_item: None,
         });
     }
     items

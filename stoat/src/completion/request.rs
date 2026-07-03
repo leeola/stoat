@@ -250,6 +250,7 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
             } else {
                 stoat.pending_completion = Some(popup);
             }
+            crate::action_handlers::completion::arm_completion_resolve(stoat);
             true
         },
         Poll::Pending => {

@@ -542,6 +542,8 @@ impl TestHarness {
                 crate::action_handlers::lsp::pump_lsp_workspace_symbol(&mut self.stoat);
             let lsp_format = crate::action_handlers::lsp::pump_lsp_format(&mut self.stoat);
             let completion = crate::completion::request::pump(&mut self.stoat);
+            let completion_resolve =
+                crate::action_handlers::completion::pump_completion_resolve(&mut self.stoat);
             let external_edits = self.stoat.drain_pending_external_edits();
             let git_refresh = self.stoat.drain_pending_git_refresh();
             if !commits
@@ -556,6 +558,7 @@ impl TestHarness {
                 && !lsp_workspace_symbol
                 && !lsp_format
                 && !completion
+                && !completion_resolve
                 && !external_edits
                 && !git_refresh
             {

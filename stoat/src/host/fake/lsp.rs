@@ -548,6 +548,7 @@ struct FakeLspState {
     diagnostics: BTreeMap<Uri, Vec<Diagnostic>>,
     hovers: BTreeMap<LspKey, Hover>,
     completions: BTreeMap<LspKey, Vec<CompletionItem>>,
+    completion_resolve: BTreeMap<String, CompletionItem>,
     definitions: BTreeMap<LspKey, GotoDefinitionResponse>,
     declarations: BTreeMap<LspKey, GotoDefinitionResponse>,
     type_definitions: BTreeMap<LspKey, GotoDefinitionResponse>,
@@ -625,6 +626,7 @@ impl FakeLsp {
                 diagnostics: BTreeMap::new(),
                 hovers: BTreeMap::new(),
                 completions: BTreeMap::new(),
+                completion_resolve: BTreeMap::new(),
                 definitions: BTreeMap::new(),
                 declarations: BTreeMap::new(),
                 type_definitions: BTreeMap::new(),
@@ -1473,6 +1475,18 @@ impl FakeLsp {
             .insert(LspKey::new(path, line, col), items);
     }
 
+    /// Program the enriched item [`LspHost::completion_resolve`] returns
+    /// for a request whose `label` matches. Resolve carries no position,
+    /// so entries are keyed by label alone. Unmatched labels resolve to
+    /// the request unchanged.
+    pub fn set_completion_resolve(&self, label: &str, item: CompletionItem) {
+        self.state
+            .lock()
+            .unwrap()
+            .completion_resolve
+            .insert(label.to_string(), item);
+    }
+
     // --- Navigation (definition, declaration, type definition, implementation) ---
 
     fn set_goto(
@@ -2008,7 +2022,14 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::ResolveCompletionItem, item);
-        Ok(item)
+        let resolved = self
+            .state
+            .lock()
+            .unwrap()
+            .completion_resolve
+            .get(&item.label)
+            .cloned();
+        Ok(resolved.unwrap_or(item))
     }
 
     async fn code_action(
