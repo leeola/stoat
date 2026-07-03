@@ -321,50 +321,11 @@ impl ReviewSession {
     /// stay stable.
     pub(crate) fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
         let hunks_per_file = extract_review_hunks_changeset(&files, 3);
-        let mut all_chunk_ids: Vec<Vec<ReviewChunkId>> = Vec::with_capacity(files.len());
-
-        for (file, hunks) in files.into_iter().zip(hunks_per_file) {
-            let file_index = self.files.len();
-
-            let base_offsets = line_byte_offsets(&split_lines(&file.base_text));
-            let buffer_offsets = line_byte_offsets(&split_lines(&file.buffer_text));
-
-            let mut chunk_ids: Vec<ReviewChunkId> = Vec::with_capacity(hunks.len());
-            for (chunk_index_in_file, hunk) in hunks.into_iter().enumerate() {
-                let id = self.alloc_id();
-                let (base_line_range, buffer_line_range) = hunk_line_ranges(&hunk);
-                let base_byte_range = lines_to_bytes(&base_offsets, &base_line_range);
-                let buffer_byte_range = lines_to_bytes(&buffer_offsets, &buffer_line_range);
-
-                self.chunks.insert(
-                    id,
-                    ReviewChunk {
-                        id,
-                        file_index,
-                        chunk_index_in_file,
-                        hunk,
-                        buffer_line_range,
-                        base_line_range,
-                        buffer_byte_range,
-                        base_byte_range,
-                        status: ChunkStatus::Pending,
-                    },
-                );
-                self.order.push(id);
-                chunk_ids.push(id);
-            }
-
-            self.files.push(ReviewFile {
-                path: file.path,
-                rel_path: file.rel_path,
-                language: file.language,
-                base_text: file.base_text,
-                buffer_text: file.buffer_text,
-                chunks: chunk_ids.clone(),
-            });
-
-            all_chunk_ids.push(chunk_ids);
-        }
+        let all_chunk_ids: Vec<Vec<ReviewChunkId>> = files
+            .into_iter()
+            .zip(hunks_per_file)
+            .map(|(file, hunks)| self.push_file_with_hunks(file, hunks))
+            .collect();
 
         if self.cursor.current.is_none() {
             self.cursor.current = self.order.first().copied();
@@ -372,6 +333,59 @@ impl ReviewSession {
 
         self.version += 1;
         all_chunk_ids
+    }
+
+    /// Append one already-diffed file's chunks with a stable file index,
+    /// returning the ids allocated for its hunks.
+    ///
+    /// Leaves the cursor and version untouched so a caller adding a batch of
+    /// files sets the cursor and bumps the version once at the end rather than
+    /// per file.
+    fn push_file_with_hunks(
+        &mut self,
+        file: ReviewFileInput,
+        hunks: Vec<ReviewHunk>,
+    ) -> Vec<ReviewChunkId> {
+        let file_index = self.files.len();
+
+        let base_offsets = line_byte_offsets(&split_lines(&file.base_text));
+        let buffer_offsets = line_byte_offsets(&split_lines(&file.buffer_text));
+
+        let mut chunk_ids: Vec<ReviewChunkId> = Vec::with_capacity(hunks.len());
+        for (chunk_index_in_file, hunk) in hunks.into_iter().enumerate() {
+            let id = self.alloc_id();
+            let (base_line_range, buffer_line_range) = hunk_line_ranges(&hunk);
+            let base_byte_range = lines_to_bytes(&base_offsets, &base_line_range);
+            let buffer_byte_range = lines_to_bytes(&buffer_offsets, &buffer_line_range);
+
+            self.chunks.insert(
+                id,
+                ReviewChunk {
+                    id,
+                    file_index,
+                    chunk_index_in_file,
+                    hunk,
+                    buffer_line_range,
+                    base_line_range,
+                    buffer_byte_range,
+                    base_byte_range,
+                    status: ChunkStatus::Pending,
+                },
+            );
+            self.order.push(id);
+            chunk_ids.push(id);
+        }
+
+        self.files.push(ReviewFile {
+            path: file.path,
+            rel_path: file.rel_path,
+            language: file.language,
+            base_text: file.base_text,
+            buffer_text: file.buffer_text,
+            chunks: chunk_ids.clone(),
+        });
+
+        chunk_ids
     }
 
     #[allow(dead_code)]
