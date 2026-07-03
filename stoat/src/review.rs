@@ -143,6 +143,34 @@ pub fn extract_review_hunks_changeset(
         .collect()
 }
 
+/// Extract review hunks for a single file via the single-file diff pipeline.
+///
+/// Unlike [`extract_review_hunks_changeset`], this runs no cross-file move
+/// pass, so a streaming scan can show one file's hunks before the whole
+/// changeset is diffed. Cross-file move provenance never resolves here: a
+/// single-file diff produces no cross-file origins, so the callback only
+/// answers for this file's own path.
+pub fn extract_review_hunks_single(file: &ReviewFileInput, context: u32) -> Vec<ReviewHunk> {
+    let diff = match &file.language {
+        Some(language) => structural_diff::diff_with_language_or_lines(
+            language,
+            &file.base_text,
+            &file.buffer_text,
+        ),
+        None => structural_diff::diff(&file.base_text, &file.buffer_text),
+    };
+
+    let rel_path_for = |path: &Path| (path == file.path.as_path()).then(|| file.rel_path.clone());
+
+    extract_review_hunks_from_diff(
+        &diff,
+        &file.base_text,
+        &file.buffer_text,
+        context,
+        &rel_path_for,
+    )
+}
+
 fn extract_review_hunks_from_diff(
     diff_result: &DiffResult,
     base_text: &str,

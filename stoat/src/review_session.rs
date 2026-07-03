@@ -335,6 +335,22 @@ impl ReviewSession {
         all_chunk_ids
     }
 
+    /// Append one streamed, already-diffed file to a session that is already
+    /// installed, setting the cursor to the first chunk on the first file and
+    /// bumping the version so pooled views refresh.
+    ///
+    /// The streaming scan diffs each file on its own and appends it as it
+    /// lands, rather than diffing the whole changeset before showing anything.
+    pub(crate) fn add_file_streamed(&mut self, file: ReviewFileInput, hunks: Vec<ReviewHunk>) {
+        self.push_file_with_hunks(file, hunks);
+
+        if self.cursor.current.is_none() {
+            self.cursor.current = self.order.first().copied();
+        }
+
+        self.version += 1;
+    }
+
     /// Append one already-diffed file's chunks with a stable file index,
     /// returning the ids allocated for its hunks.
     ///

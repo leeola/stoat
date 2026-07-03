@@ -4,7 +4,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost, WatchToken},
     pane::View,
-    review::ReviewFileInput,
+    review::{self, ReviewFileInput, ReviewHunk},
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
@@ -15,26 +15,43 @@ use ratatui::{
     text::Line,
 };
 use std::{
-    future::Future,
     path::Path,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
+    sync::{mpsc, Arc},
 };
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::Task;
 use stoat_text::Point;
 
-/// An in-flight review scan and the work to run once it lands.
+/// A message streamed from a running review scan.
 ///
-/// The git2 diff runs on a blocking thread. [`pump_review_scan`] polls
-/// `task` and installs the resulting session on the main loop. `sync_path`
-/// is set only for an external-edit refresh. After the install lands the
-/// pump scrolls the review to the chunk containing that path's first change
-/// and refreshes the progress badge, the work [`review_external_edit`] used
-/// to do inline.
+/// A working-tree open streams one [`First`](Self::First) then a
+/// [`File`](Self::File) per remaining file so the session installs before the
+/// whole changeset is diffed, and finally a [`Complete`](Self::Complete)
+/// carrying the authoritative whole-changeset session with cross-file moves.
+/// A commit scan or a refresh sends only [`Complete`](Self::Complete).
+enum ReviewScanMsg {
+    First {
+        source: ReviewSource,
+        total: usize,
+        file: ReviewFileInput,
+        hunks: Vec<ReviewHunk>,
+    },
+    File {
+        file: ReviewFileInput,
+        hunks: Vec<ReviewHunk>,
+    },
+    Complete(ReviewSession),
+}
+
+/// An in-flight review scan and the work to run once each message lands.
+///
+/// The diff runs on a blocking thread and streams [`ReviewScanMsg`] values
+/// over `rx`. [`pump_review_scan`] drains one per call, and `_task` keeps the
+/// closure scheduled. `sync_path` is set only for an external-edit refresh:
+/// after the final install lands the pump scrolls to that path's first change.
 pub(crate) struct PendingReviewScan {
-    task: Task<Option<ReviewSession>>,
+    rx: mpsc::Receiver<ReviewScanMsg>,
+    _task: Task<()>,
     sync_path: Option<std::path::PathBuf>,
     /// Close the open session when the scan finds nothing, rather than leaving
     /// its now-stale diffs up. Set only by a working-tree refresh, where an
@@ -46,24 +63,94 @@ pub(crate) struct PendingReviewScan {
     /// so a progress or apply-result badge already in the tray survives the
     /// scan.
     scanning_badge: bool,
+    /// Files the scan will stream, learned from the first message. Drives the
+    /// "N left" badge count.
+    total: usize,
+    /// Files streamed and installed so far.
+    streamed: usize,
+}
+
+/// Spawn a review scan whose blocking closure streams [`ReviewScanMsg`] values,
+/// and park the pending scan on `stoat`.
+///
+/// `produce` runs on a blocking thread. It sends messages through the given
+/// sender and calls `notify_one` on the given redraw handle after each send so
+/// the run loop wakes to pump them.
+fn spawn_review_scan(
+    stoat: &mut Stoat,
+    sync_path: Option<std::path::PathBuf>,
+    close_on_empty: bool,
+    scanning_badge: bool,
+    produce: impl FnOnce(&mpsc::Sender<ReviewScanMsg>, &Arc<tokio::sync::Notify>) + Send + 'static,
+) {
+    let (tx, rx) = mpsc::channel();
+    let redraw = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_blocking(move || produce(&tx, &redraw));
+    stoat.pending_review_scan = Some(PendingReviewScan {
+        rx,
+        _task: task,
+        sync_path,
+        close_on_empty,
+        scanning_badge,
+        total: 0,
+        streamed: 0,
+    });
+}
+
+/// Stream a working-tree scan's gathered inputs: one [`ReviewScanMsg::First`]
+/// then a [`ReviewScanMsg::File`] per remaining file, each diffed on its own,
+/// then a [`ReviewScanMsg::Complete`] carrying the whole-changeset session so
+/// cross-file moves are restored. Sends nothing for an empty input set.
+fn stream_review_inputs(
+    tx: &mpsc::Sender<ReviewScanMsg>,
+    redraw: &Arc<tokio::sync::Notify>,
+    source: ReviewSource,
+    inputs: Vec<ReviewFileInput>,
+) {
+    let total = inputs.len();
+    if total == 0 {
+        return;
+    }
+
+    for (index, input) in inputs.iter().enumerate() {
+        let hunks = review::extract_review_hunks_single(input, 3);
+        let msg = if index == 0 {
+            ReviewScanMsg::First {
+                source: source.clone(),
+                total,
+                file: input.clone(),
+                hunks,
+            }
+        } else {
+            ReviewScanMsg::File {
+                file: input.clone(),
+                hunks,
+            }
+        };
+        if tx.send(msg).is_err() {
+            return;
+        }
+        redraw.notify_one();
+    }
+
+    let mut session = ReviewSession::new(source);
+    session.add_files(inputs);
+    let _ = tx.send(ReviewScanMsg::Complete(session));
+    redraw.notify_one();
 }
 
 pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
     emit_review_info_badge(stoat, "scanning diff");
-    let executor = stoat.executor.clone();
     let git_host = stoat.git_host.clone();
     let langs = stoat.language_registry.clone();
-    let redraw = stoat.redraw_notify.clone();
     let workdir = workdir.to_path_buf();
     let sha = sha.to_string();
 
-    let scan =
-        executor.spawn_blocking(move || scan_commit_pure(&*git_host, &langs, &workdir, &sha));
-    stoat.pending_review_scan = Some(PendingReviewScan {
-        task: executor.spawn_with_redraw(redraw, scan),
-        sync_path: None,
-        close_on_empty: false,
-        scanning_badge: true,
+    spawn_review_scan(stoat, None, false, true, move |tx, redraw| {
+        if let Some(session) = scan_commit_pure(&*git_host, &langs, &workdir, &sha) {
+            let _ = tx.send(ReviewScanMsg::Complete(session));
+            redraw.notify_one();
+        }
     });
 }
 
@@ -269,42 +356,32 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
     }) else {
         return UpdateEffect::None;
     };
-    let executor = stoat.executor.clone();
     let git_host = stoat.git_host.clone();
     let langs = stoat.language_registry.clone();
-    let redraw = stoat.redraw_notify.clone();
 
-    let scan = executor.spawn_blocking(move || {
-        let mut session = scan_commit_pure(&*git_host, &langs, &workdir, &sha)?;
-        session.origin = ReviewOrigin::FromCommits;
-        Some(session)
-    });
-    stoat.pending_review_scan = Some(PendingReviewScan {
-        task: executor.spawn_with_redraw(redraw, scan),
-        sync_path: None,
-        close_on_empty: false,
-        scanning_badge: false,
+    spawn_review_scan(stoat, None, false, false, move |tx, redraw| {
+        if let Some(mut session) = scan_commit_pure(&*git_host, &langs, &workdir, &sha) {
+            session.origin = ReviewOrigin::FromCommits;
+            let _ = tx.send(ReviewScanMsg::Complete(session));
+            redraw.notify_one();
+        }
     });
     UpdateEffect::Redraw
 }
 
 pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: &str, to: &str) {
     emit_review_info_badge(stoat, "scanning diff");
-    let executor = stoat.executor.clone();
     let git_host = stoat.git_host.clone();
     let langs = stoat.language_registry.clone();
-    let redraw = stoat.redraw_notify.clone();
     let workdir = workdir.to_path_buf();
     let from = from.to_string();
     let to = to.to_string();
 
-    let scan = executor
-        .spawn_blocking(move || scan_commit_range_pure(&*git_host, &langs, &workdir, &from, &to));
-    stoat.pending_review_scan = Some(PendingReviewScan {
-        task: executor.spawn_with_redraw(redraw, scan),
-        sync_path: None,
-        close_on_empty: false,
-        scanning_badge: true,
+    spawn_review_scan(stoat, None, false, true, move |tx, redraw| {
+        if let Some(session) = scan_commit_range_pure(&*git_host, &langs, &workdir, &from, &to) {
+            let _ = tx.send(ReviewScanMsg::Complete(session));
+            redraw.notify_one();
+        }
     });
 }
 
@@ -598,6 +675,37 @@ pub(super) fn review_refresh(
         old.source.clone()
     };
 
+    if is_git_source(&source) {
+        // A committed-away working tree closes the session on refresh. A commit
+        // diff is a fixed snapshot, so it never closes on an empty rescan.
+        let close_on_empty = matches!(source, ReviewSource::WorkingTree { .. });
+        let git_host = stoat.git_host.clone();
+        let fs_host = stoat.fs_host.clone();
+        let langs = stoat.language_registry.clone();
+
+        // A refresh sends only Complete, never streaming First/File increments:
+        // streaming would replace the live session with fresh Pending chunks and
+        // flicker the user's decisions away. Leaving the old session up until
+        // Complete lets the pump reapply carried statuses from it.
+        spawn_review_scan(
+            stoat,
+            sync_path,
+            close_on_empty,
+            false,
+            move |tx, redraw| {
+                if let Some(session) =
+                    rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source)
+                {
+                    let _ = tx.send(ReviewScanMsg::Complete(session));
+                    redraw.notify_one();
+                }
+            },
+        );
+        return UpdateEffect::Redraw;
+    }
+
+    // Non-git sources (agent edits, in-memory) rescan synchronously off no git
+    // IO, so they install directly rather than through the scan channel.
     let carried = {
         let ws = stoat.active_workspace();
         let old = ws
@@ -606,31 +714,6 @@ pub(super) fn review_refresh(
             .expect("review session still present (early-returned above when absent)");
         carried_statuses(old)
     };
-
-    if is_git_source(&source) {
-        // A committed-away working tree closes the session on refresh. A commit
-        // diff is a fixed snapshot, so it never closes on an empty rescan.
-        let close_on_empty = matches!(source, ReviewSource::WorkingTree { .. });
-        let executor = stoat.executor.clone();
-        let git_host = stoat.git_host.clone();
-        let fs_host = stoat.fs_host.clone();
-        let langs = stoat.language_registry.clone();
-        let redraw = stoat.redraw_notify.clone();
-
-        let scan = executor.spawn_blocking(move || {
-            let mut session = rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source)?;
-            apply_carried_status(&mut session, &carried);
-            Some(session)
-        });
-        stoat.pending_review_scan = Some(PendingReviewScan {
-            task: executor.spawn_with_redraw(redraw, scan),
-            sync_path,
-            close_on_empty,
-            scanning_badge: false,
-        });
-        return UpdateEffect::Redraw;
-    }
-
     let Some(mut new_session) = rescan_source(stoat, &source) else {
         return UpdateEffect::None;
     };
@@ -793,53 +876,92 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
 
 pub(super) fn open_review(stoat: &mut Stoat) {
     emit_review_info_badge(stoat, "scanning diff");
-    let executor = stoat.executor.clone();
     let git_root = stoat.active_workspace().git_root.clone();
     let git_host = stoat.git_host.clone();
     let fs_host = stoat.fs_host.clone();
     let langs = stoat.language_registry.clone();
-    let redraw = stoat.redraw_notify.clone();
 
-    let scan = executor
-        .spawn_blocking(move || scan_working_tree_pure(&*git_host, &*fs_host, &langs, &git_root));
-    stoat.pending_review_scan = Some(PendingReviewScan {
-        task: executor.spawn_with_redraw(redraw, scan),
-        sync_path: None,
-        close_on_empty: false,
-        scanning_badge: true,
+    spawn_review_scan(stoat, None, false, true, move |tx, redraw| {
+        let Some((workdir, inputs)) =
+            crate::diff::scan_working_tree(&*git_host, &*fs_host, &langs, &git_root)
+        else {
+            return;
+        };
+        stream_review_inputs(tx, redraw, ReviewSource::WorkingTree { workdir }, inputs);
     });
 }
 
-/// Install a finished review scan spawned by one of the open or refresh
-/// handlers.
+/// Drain one message from the in-flight review scan, advancing the streamed
+/// install.
 ///
-/// Polls the in-flight scan with a no-op waker, so it never blocks. On
-/// completion the ready [`ReviewSession`] is installed on the main loop.
+/// A working-tree open streams [`ReviewScanMsg::First`] (create and install the
+/// session with the first file), then a [`ReviewScanMsg::File`] per remaining
+/// file (append and re-render), then [`ReviewScanMsg::Complete`] carrying the
+/// whole-changeset session that restores cross-file moves. A commit scan or a
+/// refresh sends only [`ReviewScanMsg::Complete`].
 ///
-/// `None` means the source had no changes worth reviewing, and surfaces a "no
-/// changes to review" info badge so an empty scan is never silent. When the
-/// scan was a working-tree refresh ([`PendingReviewScan::close_on_empty`]) with
-/// a session still open, it instead closes that stale session and shows a
-/// "working tree clean" badge. A [`PendingReviewScan::sync_path`] set by an
-/// external-edit refresh triggers the post-install scroll and badge update.
-/// Returns whether the task resolved this call, mirroring the other render-time
-/// pumps.
+/// One message is drained per call, re-notifying the redraw channel so the run
+/// loop pumps the next. The blocking closure queues every message up front on
+/// the test scheduler, so draining one at a time is what makes the install
+/// appear file by file.
 ///
-/// Driven from [`Stoat::render`] and the test harness `settle` loop. The
-/// scan's completion notifies the redraw channel, so the loop wakes to pump
-/// it without the user pressing a key.
+/// A channel that closes before any file streamed means the source had no
+/// changes. A working-tree refresh ([`PendingReviewScan::close_on_empty`]) with
+/// a session still open closes it with a "working tree clean" badge, otherwise a
+/// "no changes to review" badge keeps an empty scan from being silent.
+///
+/// Returns whether a message was drained this call, mirroring the other
+/// render-time pumps. Driven from [`Stoat::render`] and the test harness
+/// `settle` loop.
 pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
     let Some(mut pending) = stoat.pending_review_scan.take() else {
         return false;
     };
 
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut pending.task).poll(&mut cx) {
-        Poll::Ready(Some(session)) => {
-            // An open armed a "scanning diff" badge. Clear it now the session is
-            // ready. A refresh or commits-mode open armed none, so an apply-result
-            // or progress badge it left in the tray survives.
+    match pending.rx.try_recv() {
+        Ok(ReviewScanMsg::First {
+            source,
+            total,
+            file,
+            hunks,
+        }) => {
+            let mut session = ReviewSession::new(source);
+            session.add_file_streamed(file, hunks);
+            install_review_session(stoat, session);
+
+            pending.total = total;
+            pending.streamed = 1;
+            emit_scanning_progress_badge(stoat, &pending);
+
+            stoat.redraw_notify.notify_one();
+            stoat.pending_review_scan = Some(pending);
+            true
+        },
+        Ok(ReviewScanMsg::File { file, hunks }) => {
+            append_streamed_file(stoat, file, hunks);
+
+            pending.streamed += 1;
+            emit_scanning_progress_badge(stoat, &pending);
+
+            stoat.redraw_notify.notify_one();
+            stoat.pending_review_scan = Some(pending);
+            true
+        },
+        Ok(ReviewScanMsg::Complete(mut session)) => {
+            // Reapply the current session's decisions to the authoritative
+            // whole-changeset session. This is empty for a fresh open, whose
+            // streamed chunks are all pending, and carries the user's
+            // staged/rejected chunks for a refresh, where the old session is
+            // still installed here.
+            let carried = stoat
+                .active_workspace()
+                .review
+                .as_ref()
+                .map(carried_statuses)
+                .unwrap_or_default();
+            apply_carried_status(&mut session, &carried);
+            install_review_session(stoat, session);
+
             if pending.scanning_badge {
                 use crate::badge::BadgeSource;
                 stoat
@@ -847,26 +969,53 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
                     .badges
                     .remove_by_source(BadgeSource::Review);
             }
-            install_review_session(stoat, session);
             if let Some(path) = pending.sync_path {
                 post_refresh_sync(stoat, &path);
             }
             true
         },
-        Poll::Ready(None) => {
-            if pending.close_on_empty && stoat.active_workspace().review.is_some() {
-                let _ = close_review(stoat);
-                emit_review_info_badge(stoat, "working tree clean");
-            } else {
-                emit_review_info_badge(stoat, "no changes to review");
-            }
-            true
-        },
-        Poll::Pending => {
+        Err(mpsc::TryRecvError::Empty) => {
             stoat.pending_review_scan = Some(pending);
             false
         },
+        Err(mpsc::TryRecvError::Disconnected) => {
+            if pending.streamed == 0 {
+                if pending.close_on_empty && stoat.active_workspace().review.is_some() {
+                    let _ = close_review(stoat);
+                    emit_review_info_badge(stoat, "working tree clean");
+                } else {
+                    emit_review_info_badge(stoat, "no changes to review");
+                }
+            }
+            true
+        },
     }
+}
+
+/// Update the "scanning diff (N left)" badge for a streaming open, or leave the
+/// tray untouched for a scan that armed no scanning badge.
+fn emit_scanning_progress_badge(stoat: &mut Stoat, pending: &PendingReviewScan) {
+    if !pending.scanning_badge {
+        return;
+    }
+    let remaining = pending.total.saturating_sub(pending.streamed);
+    let label = if remaining == 0 {
+        "scanning diff".to_string()
+    } else {
+        format!("scanning diff ({remaining} left)")
+    };
+    emit_review_info_badge(stoat, &label);
+}
+
+/// Append one streamed file to the installed session and rebuild the review
+/// editor from it. Watchers are set once for the first file and refreshed
+/// wholesale by the [`ReviewScanMsg::Complete`] install, so appends only
+/// re-render.
+fn append_streamed_file(stoat: &mut Stoat, file: ReviewFileInput, hunks: Vec<ReviewHunk>) {
+    if let Some(session) = stoat.active_workspace_mut().review.as_mut() {
+        session.add_file_streamed(file, hunks);
+    }
+    render_review_editor(stoat);
 }
 
 /// Scan the git working tree rooted at `git_root` into a review session.
@@ -1128,13 +1277,29 @@ pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSessi
         }
     }
 
-    let view = ReviewViewState::from_session(&session);
-    let blocks = build_review_blocks(&session, &view);
-    let row_count = view.rows.len();
+    stoat.active_workspace_mut().review = Some(session);
+    render_review_editor(stoat);
+}
 
-    let placeholder = " \n".repeat(row_count.saturating_sub(1)) + " ";
+/// Rebuild the review editor from the currently installed session.
+///
+/// Builds a flattened [`ReviewViewState`] and chunk-header blocks, spawns a
+/// placeholder buffer + editor to host them, and swaps it into the focused
+/// pane, dropping the pane's previous editor. A streamed append and a whole-
+/// session install both land here, so the on-screen review always matches
+/// `ws.review`.
+fn render_review_editor(stoat: &mut Stoat) {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_ref() else {
+        return;
+    };
+
+    let view = ReviewViewState::from_session(session);
+    let blocks = build_review_blocks(session, &view);
+    let row_count = view.rows.len();
+    let placeholder = " \n".repeat(row_count.saturating_sub(1)) + " ";
+
     let (buffer_id, buffer) = ws.buffers.new_scratch();
     {
         let mut guard = buffer.write().expect("buffer poisoned");
@@ -1147,8 +1312,9 @@ pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSessi
     editor.review_view = Some(view);
 
     let new_editor_id = ws.editors.insert(editor);
-    session.view_editor = Some(new_editor_id);
-    ws.review = Some(session);
+    if let Some(session) = ws.review.as_mut() {
+        session.view_editor = Some(new_editor_id);
+    }
 
     let focused = ws.panes.focus();
     let old = match ws.panes.pane(focused).view {
@@ -1468,6 +1634,124 @@ mod tests {
             .find_by_source(BadgeSource::Review)
             .expect("a badge the scan did not arm survives the refresh");
         assert_eq!(ws.badges.get(id).expect("badge").label, "applied 1 chunk");
+    }
+
+    #[test]
+    fn open_streams_the_session_one_file_at_a_time() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[
+                ("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n"),
+                ("b.rs", "fn b() { 1 }\n", "fn b() { 2 }\n"),
+                ("c.rs", "fn c() { 1 }\n", "fn c() { 2 }\n"),
+            ],
+        );
+        h.stoat.open_review();
+        assert!(
+            h.stoat.active_workspace().review.is_none(),
+            "nothing installs until the first file is pumped",
+        );
+
+        super::pump_review_scan(&mut h.stoat);
+        assert_eq!(
+            h.with_review(|s| s.files.len()),
+            1,
+            "the first file installs before the rest are diffed",
+        );
+        let cursor = h.current_review_chunk_id();
+
+        super::pump_review_scan(&mut h.stoat);
+        assert_eq!(
+            h.with_review(|s| s.files.len()),
+            2,
+            "the second file appends"
+        );
+        assert_eq!(
+            h.current_review_chunk_id(),
+            cursor,
+            "appending a file does not reset the cursor",
+        );
+
+        super::pump_review_scan(&mut h.stoat);
+        assert_eq!(
+            h.with_review(|s| s.files.len()),
+            3,
+            "the third file appends"
+        );
+        assert_eq!(
+            h.current_review_chunk_id(),
+            cursor,
+            "the cursor still holds"
+        );
+    }
+
+    #[test]
+    fn the_complete_pass_restores_a_cross_file_move() {
+        use crate::review::{ReviewRow, ReviewSide};
+
+        fn has_cross_file_move(session: &crate::review_session::ReviewSession) -> bool {
+            session.chunks.values().any(|chunk| {
+                chunk.hunk.rows.iter().any(|row| {
+                    let sides: [Option<&ReviewSide>; 2] = match row {
+                        ReviewRow::Context { left, right } => [Some(left), Some(right)],
+                        ReviewRow::Changed { left, right } => [left.as_ref(), right.as_ref()],
+                    };
+                    sides.iter().flatten().any(|s| s.move_provenance.is_some())
+                })
+            })
+        }
+
+        // `migrated` leaves a.rs and reappears in b.rs -- a relocation only the
+        // whole-changeset pass detects, not the per-file diffs.
+        let a_base =
+            "fn migrated() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n\nfn stays_a() {\n    call_a();\n}\n";
+        let a_rhs = "fn stays_a() {\n    call_a();\n}\n";
+        let b_base = "fn stays_b() {\n    call_b();\n}\n";
+        let b_rhs =
+            "fn stays_b() {\n    call_b();\n}\n\nfn migrated() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
+
+        let mut h = TestHarness::with_size(140, 32);
+        h.stage_review_scenario("/work", &[("a.rs", a_base, a_rhs), ("b.rs", b_base, b_rhs)]);
+        h.stoat.open_review();
+
+        super::pump_review_scan(&mut h.stoat);
+        super::pump_review_scan(&mut h.stoat);
+        assert!(
+            !h.with_review(has_cross_file_move),
+            "per-file streaming surfaces no cross-file move",
+        );
+
+        h.settle();
+        assert!(
+            h.with_review(has_cross_file_move),
+            "the whole-changeset Complete pass restores the cross-file move",
+        );
+    }
+
+    #[test]
+    fn open_on_a_clean_tree_shows_no_changes_to_review() {
+        use crate::badge::BadgeSource;
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.fake_git.add_repo("/work");
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.stoat.open_review();
+        h.settle();
+
+        assert!(
+            h.stoat.active_workspace().review.is_none(),
+            "a clean tree installs no session",
+        );
+        let ws = h.stoat.active_workspace();
+        let id = ws
+            .badges
+            .find_by_source(BadgeSource::Review)
+            .expect("an empty scan is not silent");
+        assert_eq!(
+            ws.badges.get(id).expect("badge").label,
+            "no changes to review"
+        );
     }
 
     /// (a) An external edit that introduces a second hunk grows
