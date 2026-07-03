@@ -2738,7 +2738,7 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     }
 
     let prev = editor.scroll_row;
-    let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
+    let max_scroll = max_scroll_row(display_snapshot.line_count(), viewport);
     editor.scroll_row = match dir {
         PageDir::Up => editor.scroll_row.saturating_sub(delta),
         PageDir::Down => editor.scroll_row.saturating_add(delta).min(max_scroll),
@@ -2846,15 +2846,26 @@ pub(crate) fn wheel_impulse(editor: &mut EditorState, down: bool) {
     editor.scroll_decoupled = true;
 }
 
-/// Largest top-row position that keeps the last document row in view, as a
+/// Largest `scroll_row` (a display row) that keeps the last display row in
+/// view for a document of `display_line_count` display rows.
+///
+/// `display_line_count` counts display rows -- buffer lines plus block rows
+/// such as review chunk headers and deleted-line blocks -- so the bound tracks
+/// what is on screen rather than the buffer's row count. A clamp on the buffer
+/// row count stops one row short per block, stranding the last rows.
+fn max_scroll_row(display_line_count: u32, viewport: u32) -> u32 {
+    display_line_count
+        .saturating_sub(1)
+        .saturating_sub(viewport.saturating_sub(1))
+}
+
+/// Largest top-row position that keeps the last display row in view, as a
 /// float so the integer scroll path and the momentum path clamp to one shared
 /// bound.
 pub(crate) fn max_scroll_offset(editor: &mut EditorState) -> f32 {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
     let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let max_row = buffer_snapshot.rope().max_point().row;
-    max_row.saturating_sub(viewport.saturating_sub(1)) as f32
+    max_scroll_row(display_snapshot.line_count(), viewport) as f32
 }
 
 /// Advance an inertial scroll by `dt` seconds, integrating `offset` by
@@ -2967,8 +2978,6 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
 
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    let max_row = rope.max_point().row;
 
     let head = editor.selections.newest_anchor().head();
     let cursor_row = buffer_snapshot.point_for_anchor(&head).row;
@@ -2978,7 +2987,7 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
         ViewAlign::Center => cursor_row.saturating_sub(viewport / 2),
         ViewAlign::Bottom => cursor_row.saturating_sub(viewport.saturating_sub(1)),
     };
-    let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
+    let max_scroll = max_scroll_row(display_snapshot.line_count(), viewport);
     editor.scroll_row = desired_scroll.min(max_scroll);
     UpdateEffect::Redraw
 }
@@ -3016,10 +3025,7 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
 
     let top = scrolloff.min(viewport.saturating_sub(1) / 2);
     let bottom = scrolloff.min(viewport / 2);
-    let max_scroll = rope
-        .max_point()
-        .row
-        .saturating_sub(viewport.saturating_sub(1));
+    let max_scroll = max_scroll_row(snapshot.line_count(), viewport);
 
     let before = editor.scroll_row;
     if cursor_row < editor.scroll_row + top {
@@ -3225,6 +3231,111 @@ mod tests {
         assert_eq!(
             editor.scroll_row, 5,
             "upward jump keeps a 3-row margin above the cursor",
+        );
+    }
+
+    #[test]
+    fn max_scroll_row_bounds_on_display_rows() {
+        assert_eq!(
+            max_scroll_row(100, 10),
+            90,
+            "last display row pins to bottom"
+        );
+        assert_eq!(max_scroll_row(5, 10), 0, "fewer rows than the viewport");
+        assert_eq!(max_scroll_row(0, 10), 0, "empty document");
+        assert_eq!(
+            max_scroll_row(104, 10),
+            94,
+            "four block rows raise the bound one-for-one",
+        );
+    }
+
+    /// A plain editor has no block rows, so the display-row bound equals the
+    /// old buffer-row bound exactly and non-review scrolling is unchanged.
+    #[test]
+    fn max_scroll_offset_matches_buffer_rows_without_blocks() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..30).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("plain.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        let expected = {
+            let snapshot = editor.display_map.snapshot();
+            let buffer_snapshot = snapshot.buffer_snapshot();
+            buffer_snapshot.rope().max_point().row.saturating_sub(9)
+        };
+        assert_eq!(
+            max_scroll_offset(editor) as u32,
+            expected,
+            "no blocks means the display bound equals the buffer-row bound",
+        );
+    }
+
+    /// Block rows -- review chunk headers or deleted-line blocks -- add display
+    /// rows the buffer does not have. The scroll bound must count them, and the
+    /// cursor-follow must reach the last display row, or the last content sits
+    /// below a false bottom. A deletion diff is the cache-coherent way to add
+    /// block rows in a test (a `diff_version` bump forces the snapshot rebuild).
+    #[test]
+    fn scroll_bound_reaches_last_row_past_block_rows() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..20).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("diff.rs", &body);
+        h.open_file(&path);
+
+        let dm = {
+            let mut dm = DiffMap::default();
+            dm.set_base_text(Arc::new("a\nb\nc\n".to_string()));
+            dm.push_hunk(DiffHunk {
+                status: DiffHunkStatus::Deleted,
+                buffer_start_line: 1,
+                buffer_line_range: 1..1,
+                base_byte_range: 0..5,
+                anchor_range: None,
+                token_detail: None,
+            });
+            dm
+        };
+        {
+            let ws = h.stoat.active_workspace();
+            let focused = ws.panes.focus();
+            let editor_id = match ws.panes.pane(focused).view {
+                View::Editor(id) => id,
+                _ => panic!("focused pane is not an editor"),
+            };
+            let buffer_id = ws.editors[editor_id].buffer_id;
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            buffer.write().expect("poisoned").diff_map = Some(dm);
+        }
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        let (buffer_rows, line_count) = {
+            let s = editor.display_map.snapshot();
+            (s.buffer_line_count(), s.line_count())
+        };
+        assert!(
+            line_count > buffer_rows,
+            "the deletion adds block rows: {line_count} display vs {buffer_rows} buffer",
+        );
+
+        assert_eq!(
+            max_scroll_offset(editor) as u32,
+            line_count - 10,
+            "the bound clamps on display rows, not buffer rows",
+        );
+
+        set_cursor_row(editor, buffer_rows - 1);
+        editor.scroll_row = 0;
+        ensure_cursor_in_view(editor, 0);
+        assert_eq!(
+            editor.scroll_row,
+            line_count - 10,
+            "following the cursor to the last line reaches the display bound",
         );
     }
 
