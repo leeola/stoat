@@ -486,6 +486,12 @@ pub struct Stoat {
     /// [`crate::host::LspHost::try_recv_notification`] inside
     /// [`Stoat::update`].
     pub(crate) lsp_progress: crate::lsp::progress::LspProgressMap,
+    /// Freshest `window/showMessage` text from the language server,
+    /// shown in the status line until the next key press. Set by
+    /// [`Self::drain_lsp_notifications`] and cleared at the top of
+    /// [`Self::handle_key`]. `MessageType::ERROR` renders in the error
+    /// style. Other levels use the default status style.
+    pub(crate) lsp_message: Option<(lsp_types::MessageType, String)>,
     /// In-flight goto-style LSP request (definition / type definition
     /// / implementation / declaration). Replacing the entry drops the
     /// prior task, cancelling its spawned future before the response
@@ -836,6 +842,7 @@ impl Stoat {
                 256,
             ))),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
+            lsp_message: None,
             pending_lsp_jump: None,
             pending_hover_request: None,
             pending_hover: None,
@@ -1902,6 +1909,9 @@ impl Stoat {
                         );
                     }
                 },
+                LspNotification::ShowMessage { typ, message } => {
+                    self.lsp_message = Some((*typ, message.clone()));
+                },
                 _ => {
                     tracing::debug!(
                         target: "stoat::app",
@@ -2491,6 +2501,7 @@ impl Stoat {
         // A version notice is a one-shot message. Any key press retires it.
         self.badges
             .remove_by_source(crate::badge::BadgeSource::Version);
+        self.lsp_message = None;
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(run_id) = self.modal_run {
@@ -6726,6 +6737,39 @@ mod tests {
         });
         h.drain_lsp();
         h.assert_snapshot("lsp_progress_indexing");
+    }
+
+    #[test]
+    fn snapshot_lsp_show_message_error() {
+        use crate::host::LspNotification;
+        use lsp_types::MessageType;
+        let mut h = Stoat::test();
+        h.fake_lsp()
+            .push_notification(LspNotification::ShowMessage {
+                typ: MessageType::ERROR,
+                message: "rust-analyzer failed to load".to_string(),
+            });
+        h.drain_lsp();
+        h.assert_snapshot("lsp_show_message_error");
+    }
+
+    #[test]
+    fn lsp_message_clears_on_key() {
+        use crate::host::LspNotification;
+        use lsp_types::MessageType;
+        let mut h = Stoat::test();
+        h.fake_lsp()
+            .push_notification(LspNotification::ShowMessage {
+                typ: MessageType::INFO,
+                message: "checking".to_string(),
+            });
+        h.drain_lsp();
+        assert_eq!(
+            h.stoat.lsp_message,
+            Some((MessageType::INFO, "checking".to_string())),
+        );
+        h.type_keys("<Esc>");
+        assert!(h.stoat.lsp_message.is_none(), "any key retires the message");
     }
 
     #[test]

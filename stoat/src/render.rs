@@ -73,6 +73,9 @@ pub(crate) struct FrameCtx<'a> {
     /// Painted in the right side of the status bar so users see
     /// "rust-analyzer indexing" / "checking" progress.
     pub(crate) lsp_progress: Option<&'a crate::lsp::progress::LspProgressEntry>,
+    /// Freshest `window/showMessage` text, painted in the right side of
+    /// the status bar. `MessageType::ERROR` is styled as an error.
+    pub(crate) lsp_message: Option<(lsp_types::MessageType, &'a str)>,
     /// Active labels for an in-progress `GotoWord` jump, keyed by label
     /// string with byte-offset values. Painted by the focused editor's
     /// render path; non-focused panes ignore this field.
@@ -220,6 +223,10 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         theme: &stoat.theme,
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
+        lsp_message: stoat
+            .lsp_message
+            .as_ref()
+            .map(|(typ, message)| (*typ, message.as_str())),
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_badges: &stoat.settings.mode_badges,
         diagnostics: &stoat.diagnostics,

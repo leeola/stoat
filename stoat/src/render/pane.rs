@@ -287,6 +287,21 @@ fn render_pane_status(
                 right_anchor = start;
             }
         }
+        if let Some((typ, message)) = frame.lsp_message {
+            let available = right_anchor.saturating_sub(cursor) as usize;
+            if available > 0 {
+                let text: String = message.chars().take(available).collect();
+                let width = text.chars().count() as u16;
+                let start = right_anchor.saturating_sub(width);
+                let style = if typ == lsp_types::MessageType::ERROR {
+                    base_style.patch(theme.get(crate::theme::scope::UI_ERROR))
+                } else {
+                    base_style
+                };
+                paint_segment(buf, y, start, right_anchor, &text, style);
+                right_anchor = start;
+            }
+        }
         if let Some(entry) = frame.lsp_progress {
             let text = lsp_progress_label(entry);
             let width = text.chars().count() as u16;
