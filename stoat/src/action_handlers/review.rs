@@ -17,7 +17,10 @@ use ratatui::{
 };
 use std::{
     path::Path,
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
 };
 use stoat_language::{Language, LanguageRegistry};
 use stoat_scheduler::Task;
@@ -69,6 +72,9 @@ pub(crate) struct PendingReviewScan {
     total: usize,
     /// Files streamed and installed so far.
     streamed: usize,
+    /// Set true when a newer scan supersedes this one or the review closes. The
+    /// scan closure polls it to abandon its diffs and send nothing more.
+    cancel: Arc<AtomicBool>,
 }
 
 /// Spawn a review scan whose blocking closure streams [`ReviewScanMsg`] values,
@@ -76,17 +82,33 @@ pub(crate) struct PendingReviewScan {
 ///
 /// `produce` runs on a blocking thread. It sends messages through the given
 /// sender and calls `notify_one` on the given redraw handle after each send so
-/// the run loop wakes to pump them.
+/// the run loop wakes to pump them. It polls the given cancel flag to stop early
+/// when a newer scan supersedes it.
+///
+/// Arming a scan cancels the one it replaces so that superseded scan stops
+/// diffing rather than burning the blocking pool to completion.
 fn spawn_review_scan(
     stoat: &mut Stoat,
     sync_path: Option<std::path::PathBuf>,
     close_on_empty: bool,
     scanning_badge: bool,
-    produce: impl FnOnce(&mpsc::Sender<ReviewScanMsg>, &Arc<tokio::sync::Notify>) + Send + 'static,
+    produce: impl FnOnce(&mpsc::Sender<ReviewScanMsg>, &Arc<tokio::sync::Notify>, &AtomicBool)
+        + Send
+        + 'static,
 ) {
+    if let Some(old) = stoat.pending_review_scan.as_ref() {
+        old.cancel.store(true, Ordering::Relaxed);
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
     let redraw = stoat.redraw_notify.clone();
-    let task = stoat.executor.spawn_blocking(move || produce(&tx, &redraw));
+    let task = {
+        let cancel = cancel.clone();
+        stoat
+            .executor
+            .spawn_blocking(move || produce(&tx, &redraw, &cancel))
+    };
     stoat.pending_review_scan = Some(PendingReviewScan {
         rx,
         _task: task,
@@ -95,6 +117,7 @@ fn spawn_review_scan(
         scanning_badge,
         total: 0,
         streamed: 0,
+        cancel,
     });
 }
 
@@ -112,6 +135,7 @@ fn stream_review_inputs(
     tx: &mpsc::Sender<ReviewScanMsg>,
     redraw: &Arc<tokio::sync::Notify>,
     cache: &Arc<Mutex<DiffCache>>,
+    cancel: &AtomicBool,
     source: ReviewSource,
     inputs: Vec<ReviewFileInput>,
 ) {
@@ -122,6 +146,10 @@ fn stream_review_inputs(
 
     let mut all_cached = true;
     for (index, input) in inputs.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+
         let key = diff_cache_key(
             &input.base_text,
             &input.buffer_text,
@@ -132,7 +160,7 @@ fn stream_review_inputs(
             Some(hunks) => (*hunks).clone(),
             None => {
                 all_cached = false;
-                review::extract_review_hunks_single(input, 3)
+                review::extract_review_hunks_single(input, 3, Some(cancel))
             },
         };
 
@@ -158,9 +186,15 @@ fn stream_review_inputs(
     // A changed file misses the cache, so re-run the whole-changeset move pass.
     // On a full cache hit the streamed hunks are already move-aware and the
     // session is final, so no Complete is sent.
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
     if !all_cached {
         let mut session = ReviewSession::new(source);
         session.add_files(inputs);
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         let _ = tx.send(ReviewScanMsg::Complete(session));
         redraw.notify_one();
     }
@@ -183,8 +217,14 @@ pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
     let workdir = workdir.to_path_buf();
     let sha = sha.to_string();
 
-    spawn_review_scan(stoat, None, false, true, move |tx, redraw| {
+    spawn_review_scan(stoat, None, false, true, move |tx, redraw, cancel| {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         if let Some(session) = scan_commit_pure(&*git_host, &langs, &workdir, &sha) {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
             let _ = tx.send(ReviewScanMsg::Complete(session));
             redraw.notify_one();
         }
@@ -396,9 +436,15 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
     let git_host = stoat.git_host.clone();
     let langs = stoat.language_registry.clone();
 
-    spawn_review_scan(stoat, None, false, false, move |tx, redraw| {
+    spawn_review_scan(stoat, None, false, false, move |tx, redraw, cancel| {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         if let Some(mut session) = scan_commit_pure(&*git_host, &langs, &workdir, &sha) {
             session.origin = ReviewOrigin::FromCommits;
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
             let _ = tx.send(ReviewScanMsg::Complete(session));
             redraw.notify_one();
         }
@@ -414,8 +460,14 @@ pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: 
     let from = from.to_string();
     let to = to.to_string();
 
-    spawn_review_scan(stoat, None, false, true, move |tx, redraw| {
+    spawn_review_scan(stoat, None, false, true, move |tx, redraw, cancel| {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         if let Some(session) = scan_commit_range_pure(&*git_host, &langs, &workdir, &from, &to) {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
             let _ = tx.send(ReviewScanMsg::Complete(session));
             redraw.notify_one();
         }
@@ -729,10 +781,16 @@ pub(super) fn review_refresh(
             sync_path,
             close_on_empty,
             false,
-            move |tx, redraw| {
+            move |tx, redraw, cancel| {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 if let Some(session) =
                     rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source)
                 {
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
                     let _ = tx.send(ReviewScanMsg::Complete(session));
                     redraw.notify_one();
                 }
@@ -864,6 +922,17 @@ fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> 
 pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
     use crate::{badge::BadgeSource, review_session::ReviewOrigin};
 
+    // Cancel and drop any in-flight scan so it stops diffing and never installs
+    // a session into the review the user just closed. Clear its scanning badge
+    // too, since the cancelled scan will not reach the pump that normally does.
+    if let Some(pending) = stoat.pending_review_scan.take() {
+        pending.cancel.store(true, Ordering::Relaxed);
+        stoat
+            .active_workspace_mut()
+            .badges
+            .remove_by_source(BadgeSource::Review);
+    }
+
     let executor = stoat.executor.clone();
     let fs_watch_host = stoat.fs_watch_host.clone();
     let ws = stoat.active_workspace_mut();
@@ -919,7 +988,7 @@ pub(super) fn open_review(stoat: &mut Stoat) {
     let langs = stoat.language_registry.clone();
     let cache = stoat.diff_cache.clone();
 
-    spawn_review_scan(stoat, None, false, true, move |tx, redraw| {
+    spawn_review_scan(stoat, None, false, true, move |tx, redraw, cancel| {
         let Some((workdir, inputs)) =
             crate::diff::scan_working_tree(&*git_host, &*fs_host, &langs, &git_root)
         else {
@@ -929,6 +998,7 @@ pub(super) fn open_review(stoat: &mut Stoat) {
             tx,
             redraw,
             &cache,
+            cancel,
             ReviewSource::WorkingTree { workdir },
             inputs,
         );
@@ -1849,6 +1919,44 @@ mod tests {
                 .find_by_source(BadgeSource::Review)
                 .is_none(),
             "the scanning badge clears on a full-cache-hit reopen",
+        );
+    }
+
+    #[test]
+    fn a_superseded_scan_is_cancelled_and_only_the_newer_installs() {
+        use std::sync::atomic::Ordering;
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[
+                ("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n"),
+                ("b.rs", "fn b() { 1 }\n", "fn b() { 2 }\n"),
+            ],
+        );
+
+        // Arm a scan and capture its cancel flag before a second scan supersedes
+        // it.
+        h.stoat.open_review();
+        let first_cancel = h
+            .stoat
+            .pending_review_scan
+            .as_ref()
+            .expect("a scan is pending")
+            .cancel
+            .clone();
+
+        h.stoat.open_review();
+        assert!(
+            first_cancel.load(Ordering::Relaxed),
+            "arming a newer scan cancels the one it supersedes",
+        );
+
+        h.settle();
+        assert_eq!(
+            h.with_review(|s| s.files.len()),
+            2,
+            "only the newer scan's session installs",
         );
     }
 

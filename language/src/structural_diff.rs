@@ -45,7 +45,7 @@ pub use line_diff::diff_lines;
 pub use lower::lower_tree;
 pub use moves::{find_moves, ChangesetMoveRecord, FileMoveInput, MoveRecord};
 use std::{ops::Range, path::PathBuf, sync::Arc};
-pub use tree_diff::{diff_changeset, diff_with_language};
+pub use tree_diff::{diff_changeset, diff_with_language, diff_with_language_cancellable};
 pub use unchanged::{
     mark_unchanged, ChangeKind as PreprocessChangeKind, ChangeMap, PreprocessResult,
 };

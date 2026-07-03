@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     ops::Range,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{atomic::AtomicBool, Arc},
 };
 use stoat_language::{
     structural_diff::{
@@ -150,13 +150,22 @@ pub fn extract_review_hunks_changeset(
 /// changeset is diffed. Cross-file move provenance never resolves here: a
 /// single-file diff produces no cross-file origins, so the callback only
 /// answers for this file's own path.
-pub fn extract_review_hunks_single(file: &ReviewFileInput, context: u32) -> Vec<ReviewHunk> {
+///
+/// `cancel` is polled by the structural diff's search. A superseded scan sets
+/// it to abandon the in-flight diff, which drops through to a coarse line diff.
+pub fn extract_review_hunks_single(
+    file: &ReviewFileInput,
+    context: u32,
+    cancel: Option<&AtomicBool>,
+) -> Vec<ReviewHunk> {
     let diff = match &file.language {
-        Some(language) => structural_diff::diff_with_language_or_lines(
+        Some(language) => structural_diff::diff_with_language_cancellable(
             language,
             &file.base_text,
             &file.buffer_text,
-        ),
+            cancel,
+        )
+        .unwrap_or_else(|| structural_diff::diff(&file.base_text, &file.buffer_text)),
         None => structural_diff::diff(&file.base_text, &file.buffer_text),
     };
 
