@@ -31,15 +31,11 @@ pub enum PtyNotification {
 
 pub struct ShellHandle {
     session: Arc<dyn TerminalSession>,
-    pub active_sentinel: Option<String>,
 }
 
 impl ShellHandle {
     pub(crate) fn new(session: Arc<dyn TerminalSession>) -> Self {
-        Self {
-            session,
-            active_sentinel: None,
-        }
+        Self { session }
     }
 
     pub fn send_command(&self, command: &str) {
