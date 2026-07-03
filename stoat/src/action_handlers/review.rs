@@ -1419,8 +1419,15 @@ fn render_review_editor(stoat: &mut Stoat) {
 
     let view = ReviewViewState::from_session(session);
     let blocks = build_review_blocks(session, &view);
-    let row_count = view.rows.len();
-    let placeholder = " \n".repeat(row_count.saturating_sub(1)) + " ";
+    // The buffer mirrors the new (right) side of each row so the cursor and
+    // motions have real text to move over. Row indices, blocks, and
+    // classify_row stay aligned because there is still one line per row.
+    let placeholder = view
+        .rows
+        .iter()
+        .map(|row| row.right_text())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let (buffer_id, buffer) = ws.buffers.new_scratch();
     {

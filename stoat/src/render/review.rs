@@ -10,6 +10,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
+use stoat_text::cursor_offset;
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
 /// Line-number glyph size in 256ths of a cell, so the number reads smaller than
@@ -25,6 +26,7 @@ pub(crate) fn render_review(
     scene: Option<&mut ApcScene>,
 ) {
     let snapshot = editor.display_map.snapshot();
+    let stoatty = scene.is_some();
     let Some(view) = editor.review_view.as_ref() else {
         return;
     };
@@ -38,6 +40,61 @@ pub(crate) fn render_review(
         buf,
         scene,
     );
+    render_review_cursor(editor, &snapshot, inner, theme, buf, stoatty);
+}
+
+/// X column where the right pane's text begins. Mirrors the right-pane layout
+/// in [`render_review_rows`]: a status glyph then a line-number column precede
+/// the text on each side.
+fn right_text_x(inner: Rect) -> u16 {
+    let full_w = inner.width as usize;
+    let sep: usize = 1;
+    let half_w = (full_w.saturating_sub(sep)) / 2;
+    let right_start = inner.x + half_w as u16 + sep as u16;
+    right_start + 1 + 5
+}
+
+/// Paint the primary selection's cursor over the right pane's text, or set the
+/// stoatty hardware cursor there. Skips a row scrolled out of view.
+fn render_review_cursor(
+    editor: &mut EditorState,
+    snapshot: &DisplaySnapshot,
+    inner: Rect,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    stoatty: bool,
+) {
+    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
+    let text_x = right_text_x(inner);
+
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let sel = editor.selections.newest_anchor();
+    let cursor = cursor_offset(
+        rope,
+        buffer_snapshot.resolve_anchor(&sel.tail()),
+        buffer_snapshot.resolve_anchor(&sel.head()),
+    );
+    let display = snapshot.buffer_to_display(rope.offset_to_point(cursor));
+
+    let visible = inner.height as u32;
+    if display.row < editor.scroll_row || display.row >= editor.scroll_row + visible {
+        return;
+    }
+    let y = inner.y + (display.row - editor.scroll_row) as u16;
+    let x = text_x + display.column as u16;
+    if x >= inner.x + inner.width || y >= inner.y + inner.height {
+        return;
+    }
+
+    if stoatty {
+        editor.cursor_screen_cell = Some((x, y));
+    } else {
+        let cell = &mut buf[(x, y)];
+        let existing = cell.symbol().chars().next().unwrap_or(' ');
+        cell.set_char(if existing == '\0' { ' ' } else { existing });
+        cell.set_style(cursor_style);
+    }
 }
 
 /// Paint the review pane rows from owned, `Send` parts rather than an

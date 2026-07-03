@@ -72,6 +72,17 @@ impl ReviewRow {
     fn is_changed(&self) -> bool {
         matches!(self, ReviewRow::Changed { .. })
     }
+
+    /// The text on the new (right) side of this row, used as the review
+    /// editor's buffer line so a cursor and motions have real content. Empty
+    /// for a deletion-only row, which has no right side.
+    pub(crate) fn right_text(&self) -> &str {
+        match self {
+            ReviewRow::Context { right, .. } => &right.text,
+            ReviewRow::Changed { right: Some(r), .. } => &r.text,
+            ReviewRow::Changed { right: None, .. } => "",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -966,6 +977,43 @@ mod tests {
             "fn main() {\n    let x = 2;\n}\n",
         )]);
         h.assert_snapshot("review_modification");
+    }
+
+    #[test]
+    fn snapshot_review_cursor_after_motions() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::{MoveDown, MoveRight};
+
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[(
+            "test.rs",
+            "fn main() {\n    let x = 1;\n}\n",
+            "fn main() {\n    let x = 2;\n}\n",
+        )]);
+        // The cursor starts at the top-left of the right pane. Walk it down a
+        // row and along that line's real text.
+        dispatch(&mut h.stoat, &MoveDown);
+        for _ in 0..6 {
+            dispatch(&mut h.stoat, &MoveRight);
+        }
+        h.assert_snapshot("review_cursor_after_motions");
+    }
+
+    #[test]
+    fn snapshot_review_cursor_on_deletion_row() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::MoveDown;
+
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[(
+            "test.rs",
+            "fn a() {}\nfn old() {}\nfn b() {}\n",
+            "fn a() {}\nfn b() {}\n",
+        )]);
+        // Moving onto the deleted line's row, whose right side is empty, keeps
+        // the cursor at column 0 of a blank right-pane cell.
+        dispatch(&mut h.stoat, &MoveDown);
+        h.assert_snapshot("review_cursor_on_deletion_row");
     }
 
     #[test]
