@@ -516,12 +516,15 @@ pub(crate) fn render_empty_num(buf: &mut Buffer, x: u16, y: u16, style: Style) {
     }
 }
 
-/// Paint a `<- {rel_path}:{line+1}` chip after the rendered side text
-/// to surface that the moved hunk's source lives in a different file
-/// of the same review session. `text_cols` is the column count
-/// already consumed by [`render_side_text`]; the chip starts two
-/// columns later (so the gap is visually obvious) and truncates if
-/// fewer columns remain. No-op when `text_cols + 2 >= max_cols`.
+/// Paint a move-origin chip after the rendered side text to surface where
+/// the moved hunk's counterpart lives.
+///
+/// A cross-file move paints `<- {rel_path}:{line+1}`. An intra-file move
+/// paints a path-less `<- {line+1}`, since repeating the row's own file name
+/// is noise. `text_cols` is the column count already consumed by
+/// [`render_side_text`]; the chip starts two columns later (so the gap is
+/// visually obvious) and truncates if fewer columns remain. No-op when
+/// `text_cols + 2 >= max_cols`.
 pub(crate) fn render_move_chip(
     buf: &mut Buffer,
     start_x: u16,
@@ -535,7 +538,11 @@ pub(crate) fn render_move_chip(
     if chip_start_col >= max_cols {
         return;
     }
-    let chip = format!("<- {}:{}", prov.rel_path, prov.line + 1);
+    let chip = if prov.intra_file {
+        format!("<- {}", prov.line + 1)
+    } else {
+        format!("<- {}:{}", prov.rel_path, prov.line + 1)
+    };
     let available = max_cols - chip_start_col;
     for (i, ch) in chip.chars().take(available).enumerate() {
         let x = start_x + (chip_start_col + i) as u16;
@@ -610,6 +617,7 @@ mod tests {
         let prov = MoveProvenance {
             rel_path: "a.rs".to_string(),
             line: 0,
+            intra_file: false,
         };
         render_move_chip(&mut buf, 0, 0, 5, 50, &prov, Style::default());
         let text = buffer_text(&buf, 0);
@@ -624,6 +632,7 @@ mod tests {
         let prov = MoveProvenance {
             rel_path: "long_name.rs".to_string(),
             line: 100,
+            intra_file: false,
         };
         render_move_chip(&mut buf, 0, 0, 19, 20, &prov, Style::default());
         let text = buffer_text(&buf, 0);
@@ -640,6 +649,7 @@ mod tests {
         let prov = MoveProvenance {
             rel_path: "long_name.rs".to_string(),
             line: 99,
+            intra_file: false,
         };
         render_move_chip(&mut buf, 0, 0, 5, 20, &prov, Style::default());
         let text = buffer_text(&buf, 0);
@@ -655,12 +665,30 @@ mod tests {
         let prov = MoveProvenance {
             rel_path: "x.rs".to_string(),
             line: 41,
+            intra_file: false,
         };
         render_move_chip(&mut buf, 0, 0, 0, 30, &prov, Style::default());
         let text = buffer_text(&buf, 0);
         assert!(
             text.contains("<- x.rs:42"),
             "chip prints 1-based line number; got {text:?}"
+        );
+    }
+
+    #[test]
+    fn move_chip_intra_file_omits_the_path() {
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        let prov = MoveProvenance {
+            rel_path: String::new(),
+            line: 41,
+            intra_file: true,
+        };
+        render_move_chip(&mut buf, 0, 0, 0, 30, &prov, Style::default());
+        let text = buffer_text(&buf, 0);
+        assert!(
+            text.contains("<- 42") && !text.contains(':'),
+            "intra-file chip shows the 1-based line without a path; got {text:?}"
         );
     }
 }

@@ -24,16 +24,25 @@ pub struct ReviewFileInput {
     pub buffer_text: Arc<String>,
 }
 
-/// Cross-file move provenance for a single review row. Set when the
-/// row participates in a [`stoat_language::structural_diff::ChangeKind::Moved`]
-/// hunk whose [`stoat_language::structural_diff::MoveSource`] points
-/// at a *different* file in the same review session. Intra-file moves
-/// keep this as `None`. The renderer paints a chip
-/// `<- {rel_path}:{line+1}` next to the row when set.
+/// Move provenance for a single review row, recording where the moved
+/// content's counterpart lives.
+///
+/// Set when the row participates in a
+/// [`stoat_language::structural_diff::ChangeKind::Moved`] hunk. A cross-file
+/// move points at a *different* file in the same session
+/// ([`Self::intra_file`] false, [`Self::rel_path`] naming that file); an
+/// intra-file move points within the same file ([`Self::intra_file`] true,
+/// [`Self::rel_path`] empty). The renderer paints `<- {rel_path}:{line+1}`
+/// for the former and a path-less `<- {line+1}` for the latter, since
+/// repeating the row's own file name is noise.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveProvenance {
     pub rel_path: String,
     pub line: u32,
+    /// The counterpart lives in this same file rather than another file of
+    /// the session.
+    #[serde(default)]
+    pub intra_file: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,15 +341,25 @@ fn collect_moved_provenance(
             Some(m) => m,
             None => continue,
         };
-        let foreign = metadata.sources.iter().find_map(|s| {
+        let cross_file = metadata.sources.iter().find_map(|s| {
             let path = s.buffer.as_ref()?.path.as_path();
             let rel_path = rel_path_for(path)?;
             Some(MoveProvenance {
                 rel_path,
                 line: s.line_range.start,
+                intra_file: false,
             })
         });
-        let Some(prov) = foreign else {
+        let prov = cross_file.or_else(|| {
+            metadata.sources.iter().find_map(|s| {
+                s.buffer.is_none().then(|| MoveProvenance {
+                    rel_path: String::new(),
+                    line: s.line_range.start,
+                    intra_file: true,
+                })
+            })
+        });
+        let Some(prov) = prov else {
             continue;
         };
         let cr = &change.byte_range;
@@ -1061,7 +1080,7 @@ fn alpha() {
 
     #[test]
     fn snapshot_review_move_cross_indent() {
-        let mut h = TestHarness::with_size(100, 20);
+        let mut h = TestHarness::with_size(140, 20);
         let base = "\
 fn outer() {
     let relocated = compute(arg1, arg2, arg3);

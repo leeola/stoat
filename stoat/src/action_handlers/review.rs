@@ -1248,9 +1248,12 @@ fn cursor_move_provenance(stoat: &mut Stoat, dir: MoveJumpDir) -> Option<MovePro
     row_move_provenance(row, dir).cloned()
 }
 
-/// The [`MoveProvenance`] on the row side selected by `dir`: the added
-/// (right) side for [`MoveJumpDir::Source`], the deleted (left) side for
-/// [`MoveJumpDir::Target`].
+/// The cross-file [`MoveProvenance`] on the row side selected by `dir`: the
+/// added (right) side for [`MoveJumpDir::Source`], the deleted (left) side
+/// for [`MoveJumpDir::Target`].
+///
+/// Intra-file provenance is skipped. Its counterpart is in the same file and
+/// carries no target path to resolve, so jumping is not wired for it yet.
 fn row_move_provenance(row: &ReviewRow, dir: MoveJumpDir) -> Option<&MoveProvenance> {
     let side = match dir {
         MoveJumpDir::Source => match row {
@@ -1264,7 +1267,7 @@ fn row_move_provenance(row: &ReviewRow, dir: MoveJumpDir) -> Option<&MoveProvena
             ReviewRow::Changed { left: None, .. } => None,
         },
     };
-    side?.move_provenance.as_ref()
+    side?.move_provenance.as_ref().filter(|p| !p.intra_file)
 }
 
 /// The chunk in `file_index` whose base or buffer line range contains `line`.
@@ -2424,6 +2427,7 @@ mod tests {
                     s.move_provenance = Some(MoveProvenance {
                         rel_path: "ghost.rs".to_string(),
                         line: 0,
+                        intra_file: false,
                     });
                     found = Some(i as u32);
                     break;

@@ -257,6 +257,7 @@ mod tests {
                         move_provenance: Some(crate::review::MoveProvenance {
                             rel_path: "other.rs".into(),
                             line: 7,
+                            intra_file: false,
                         }),
                     }),
                 },
@@ -278,7 +279,8 @@ mod tests {
             r.move_provenance,
             Some(crate::review::MoveProvenance {
                 rel_path: "other.rs".into(),
-                line: 7
+                line: 7,
+                intra_file: false,
             })
         );
     }
