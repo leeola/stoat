@@ -1,4 +1,5 @@
 use clap::Args;
+use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::{whatever, FromString, ResultExt, Whatever};
 use std::{
     io::{self, IsTerminal, Write},
@@ -282,12 +283,18 @@ fn cached_hunks_via_socket(
         .build()
         .ok()?;
     runtime.block_on(async {
-        for sock in candidates {
-            let attempt = tokio::time::timeout(
-                Duration::from_millis(250),
-                fetch_all_from_socket(&sock, inputs),
-            )
-            .await;
+        // Probe every candidate at once so one dead session's timeout does not
+        // serialize in front of a live editor. The first useful reply wins.
+        let mut probes: FuturesUnordered<_> = candidates
+            .iter()
+            .map(|sock| {
+                tokio::time::timeout(
+                    Duration::from_millis(250),
+                    fetch_all_from_socket(sock, inputs),
+                )
+            })
+            .collect();
+        while let Some(attempt) = probes.next().await {
             if let Ok(Some(hunks)) = attempt {
                 return Some(hunks);
             }
@@ -300,7 +307,21 @@ async fn fetch_all_from_socket(
     sock: &Path,
     inputs: &[ReviewFileInput],
 ) -> Option<Vec<Vec<ReviewHunk>>> {
-    let mut client = ViewportClient::connect(sock).await.ok()?;
+    let mut client = match ViewportClient::connect(sock).await {
+        Ok(client) => client,
+        Err(e) => {
+            // A leftover socket from a dead session refuses the connection, or
+            // the file vanished between discovery and connect. Unlink it so
+            // later runs do not probe it again.
+            if matches!(
+                e.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) {
+                let _ = std::fs::remove_file(sock);
+            }
+            return None;
+        },
+    };
     let mut results = Vec::with_capacity(inputs.len());
     for input in inputs {
         let req = ToMain::DiffRequest {
@@ -357,4 +378,96 @@ fn select_pager(no_pager_flag: bool) -> Option<Vec<String>> {
         return None;
     }
     Some(argv)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(name: &str) -> ReviewFileInput {
+        ReviewFileInput {
+            rel_path: name.to_string(),
+            path: PathBuf::from(name),
+            language: None,
+            base_text: Arc::new(format!("{name} base\n")),
+            buffer_text: Arc::new(format!("{name} buffer\n")),
+        }
+    }
+
+    #[test]
+    fn a_stale_socket_is_unlinked() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("stoat-stale.sock");
+        // Bind then drop, leaving the socket file behind with no listener.
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        assert!(stale.exists());
+
+        let inputs = [input("a.rs")];
+        let result = cached_hunks_via_socket(Some(dir.path()), &inputs);
+
+        assert!(result.is_none(), "a stale socket yields no cache hit");
+        assert!(!stale.exists(), "the stale socket is unlinked");
+    }
+
+    #[test]
+    fn a_live_editor_answers_past_a_stale_socket() {
+        use bytes::Bytes;
+        use futures::SinkExt;
+        use stoat::diff_cache::serialize_hunks;
+        use tokio_util::codec::{FramedRead, FramedWrite};
+        use viewport::protocol::{ToMainCodec, ToViewportCodec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("stoat-stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        let live = dir.path().join("stoat-live.sock");
+
+        // A live editor that answers each DiffRequest with two empty hunks,
+        // running on its own runtime so it accepts while the probe blocks.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let responder = std::thread::spawn({
+            let live = live.clone();
+            move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    let listener = tokio::net::UnixListener::bind(&live).unwrap();
+                    ready_tx.send(()).unwrap();
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let (r, w) = stream.into_split();
+                    let mut reader = FramedRead::new(r, ToMainCodec::new());
+                    let mut writer = FramedWrite::new(w, ToViewportCodec::new());
+                    if let Some(Ok(ToMain::DiffRequest { .. })) = reader.next().await {
+                        let bytes = serialize_hunks(&[
+                            ReviewHunk { rows: Vec::new() },
+                            ReviewHunk { rows: Vec::new() },
+                        ]);
+                        writer
+                            .send(ToViewport::DiffResponse {
+                                result: Some(Bytes::from(bytes)),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        ready_rx.recv().unwrap();
+
+        let inputs = [input("a.rs")];
+        let per_file = cached_hunks_via_socket(Some(dir.path()), &inputs)
+            .expect("the live editor answers past the stale socket");
+
+        assert_eq!(per_file.len(), 1, "one file's hunks came back");
+        assert_eq!(
+            per_file[0].len(),
+            2,
+            "the live editor's two hunks came back"
+        );
+        assert!(!stale.exists(), "the stale socket was unlinked");
+
+        responder.join().unwrap();
+    }
 }

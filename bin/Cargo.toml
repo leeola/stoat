@@ -31,6 +31,7 @@ viewport = { path = "../viewport" }
 blake3 = { workspace = true }
 clap.workspace = true
 crossterm.workspace = true
+futures.workspace = true
 snafu.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -44,4 +45,3 @@ insta = "1"
 stoat_host = { path = "../host" }
 tokio-util.workspace = true
 bytes.workspace = true
-futures.workspace = true
