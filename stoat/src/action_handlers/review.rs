@@ -41,9 +41,15 @@ pub(crate) struct PendingReviewScan {
     /// empty result means the tree was fully committed. An open or a commit
     /// scan leaves it `false`.
     close_on_empty: bool,
+    /// This scan armed a "scanning diff" badge on open, so its completion clears
+    /// the review badge tray. A refresh or commits-mode open leaves it `false`,
+    /// so a progress or apply-result badge already in the tray survives the
+    /// scan.
+    scanning_badge: bool,
 }
 
 pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
+    emit_review_info_badge(stoat, "scanning diff");
     let executor = stoat.executor.clone();
     let git_host = stoat.git_host.clone();
     let langs = stoat.language_registry.clone();
@@ -57,6 +63,7 @@ pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
         task: executor.spawn_with_redraw(redraw, scan),
         sync_path: None,
         close_on_empty: false,
+        scanning_badge: true,
     });
 }
 
@@ -276,11 +283,13 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
         task: executor.spawn_with_redraw(redraw, scan),
         sync_path: None,
         close_on_empty: false,
+        scanning_badge: false,
     });
     UpdateEffect::Redraw
 }
 
 pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: &str, to: &str) {
+    emit_review_info_badge(stoat, "scanning diff");
     let executor = stoat.executor.clone();
     let git_host = stoat.git_host.clone();
     let langs = stoat.language_registry.clone();
@@ -295,6 +304,7 @@ pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: 
         task: executor.spawn_with_redraw(redraw, scan),
         sync_path: None,
         close_on_empty: false,
+        scanning_badge: true,
     });
 }
 
@@ -616,6 +626,7 @@ pub(super) fn review_refresh(
             task: executor.spawn_with_redraw(redraw, scan),
             sync_path,
             close_on_empty,
+            scanning_badge: false,
         });
         return UpdateEffect::Redraw;
     }
@@ -781,6 +792,7 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn open_review(stoat: &mut Stoat) {
+    emit_review_info_badge(stoat, "scanning diff");
     let executor = stoat.executor.clone();
     let git_root = stoat.active_workspace().git_root.clone();
     let git_host = stoat.git_host.clone();
@@ -794,6 +806,7 @@ pub(super) fn open_review(stoat: &mut Stoat) {
         task: executor.spawn_with_redraw(redraw, scan),
         sync_path: None,
         close_on_empty: false,
+        scanning_badge: true,
     });
 }
 
@@ -824,6 +837,16 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut pending.task).poll(&mut cx) {
         Poll::Ready(Some(session)) => {
+            // An open armed a "scanning diff" badge. Clear it now the session is
+            // ready. A refresh or commits-mode open armed none, so an apply-result
+            // or progress badge it left in the tray survives.
+            if pending.scanning_badge {
+                use crate::badge::BadgeSource;
+                stoat
+                    .active_workspace_mut()
+                    .badges
+                    .remove_by_source(BadgeSource::Review);
+            }
             install_review_session(stoat, session);
             if let Some(path) = pending.sync_path {
                 post_refresh_sync(stoat, &path);
@@ -1378,6 +1401,73 @@ mod tests {
             target,
             "a refresh at rest scrolls to the current chunk",
         );
+    }
+
+    #[test]
+    fn opening_a_diff_shows_a_scanning_badge_until_the_scan_settles() {
+        use crate::badge::{BadgeSource, BadgeState};
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
+        h.stoat.open_review();
+
+        {
+            let ws = h.stoat.active_workspace();
+            let id = ws
+                .badges
+                .find_by_source(BadgeSource::Review)
+                .expect("a scanning badge is shown before the scan settles");
+            let badge = ws.badges.get(id).expect("badge");
+            assert_eq!(badge.label, "scanning diff");
+            assert_eq!(badge.state, BadgeState::Active);
+        }
+        assert!(
+            h.stoat.active_workspace().review.is_none(),
+            "the session is not installed until the scan settles",
+        );
+
+        h.settle();
+
+        assert!(
+            h.stoat
+                .active_workspace()
+                .badges
+                .find_by_source(BadgeSource::Review)
+                .is_none(),
+            "the scanning badge clears once the session installs",
+        );
+        assert!(
+            h.stoat.active_workspace().review.is_some(),
+            "the session installs after the scan settles",
+        );
+    }
+
+    #[test]
+    fn a_refresh_scan_keeps_a_review_badge_it_did_not_arm() {
+        use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
+        h.stoat.open_review();
+        h.settle();
+
+        // A badge left by a stage or apply action, not armed by the scan.
+        h.stoat.active_workspace_mut().badges.insert(Badge {
+            source: BadgeSource::Review,
+            anchor: Anchor::BottomRight,
+            state: BadgeState::Complete,
+            label: "applied 1 chunk".to_string(),
+            detail: None,
+        });
+
+        h.dispatch_review_refresh();
+
+        let ws = h.stoat.active_workspace();
+        let id = ws
+            .badges
+            .find_by_source(BadgeSource::Review)
+            .expect("a badge the scan did not arm survives the refresh");
+        assert_eq!(ws.badges.get(id).expect("badge").label, "applied 1 chunk");
     }
 
     /// (a) An external edit that introduces a second hunk grows
