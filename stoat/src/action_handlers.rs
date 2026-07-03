@@ -492,7 +492,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoImplementation => lsp::goto_implementation(stoat),
         ActionKind::GotoCaller => crate::code_index::nav::goto_caller(stoat),
         ActionKind::GotoCallee => crate::code_index::nav::goto_callee(stoat),
-        ActionKind::GotoReferences => crate::code_index::nav::goto_references(stoat),
+        ActionKind::GotoReferences => lsp::goto_references(stoat),
         ActionKind::GotoImplementors => crate::code_index::nav::goto_implementors(stoat),
         ActionKind::GotoDiffCallerUp => crate::code_index::nav::goto_diff_caller_up(stoat),
         ActionKind::GotoDiffCalleeDown => crate::code_index::nav::goto_diff_callee_down(stoat),

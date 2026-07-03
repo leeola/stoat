@@ -22,10 +22,11 @@ use lsp_types::{
     DidOpenTextDocumentParams, DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
     DocumentSymbolResponse, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse,
     HoverContents, HoverParams, MarkedString, OneOf, Position, PrepareRenameResponse, Range,
-    RenameParams, SymbolInformation, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextEdit, VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit,
-    WorkspaceSymbol, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    ReferenceContext, ReferenceParams, RenameParams, SymbolInformation,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     future::Future,
@@ -496,6 +497,75 @@ pub(crate) fn goto_implementation(stoat: &mut Stoat) -> UpdateEffect {
     lsp_jump(stoat, LspJumpKind::Implementation)
 }
 
+/// Issue a `textDocument/references` request for the symbol under the
+/// focused editor's primary cursor and feed the results to the
+/// multi-location picker via [`Stoat::pending_lsp_jump`]. A single
+/// reference jumps directly. Several open the picker. The declaration is
+/// included, matching the common editor default.
+///
+/// Falls back to code-graph reference navigation
+/// ([`crate::code_index::nav::goto_references`]) when the server does not
+/// advertise `references`, so references keep working with no language
+/// server. No-op when the focused pane is not an editor, its buffer has
+/// no path, or a review cursor does not map to a file line.
+pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::GotoReference)
+    {
+        return crate::code_index::nav::goto_references(stoat);
+    }
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let Some(site) = lsp_request_site(stoat) else {
+        return UpdateEffect::None;
+    };
+    let Some(source_uri) = path_to_uri(&site.path) else {
+        return UpdateEffect::None;
+    };
+
+    let position = crate::lsp::util::byte_offset_to_lsp_pos(&site.rope, site.offset, encoding);
+    let params = ReferenceParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: source_uri },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: ReferenceContext {
+            include_declaration: true,
+        },
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let fs = stoat.fs_host.clone();
+    let source_path = site.path;
+    let source_rope = site.rope;
+    let task = stoat.executor.spawn(async move {
+        let locations = match lsp.references(params).await {
+            Ok(Some(locations)) => locations,
+            Ok(None) => return Vec::new(),
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::lsp",
+                    ?err,
+                    "references request failed",
+                );
+                return Vec::new();
+            },
+        };
+        resolve_goto_targets(
+            GotoDefinitionResponse::Array(locations),
+            &source_path,
+            &source_rope,
+            encoding,
+            &*fs,
+        )
+    });
+    stoat.pending_lsp_jump = Some(task);
+    UpdateEffect::None
+}
+
 /// Resolve a focused review editor's cursor to the real working-tree file it
 /// mirrors, readying that file for an LSP request.
 ///
@@ -527,6 +597,53 @@ fn review_lsp_source(stoat: &mut Stoat) -> Option<(PathBuf, Rope, usize)> {
     Some((path, rope, offset))
 }
 
+/// The focused editor's cursor resolved to an LSP request site: the
+/// source file, its rope, and the cursor's byte offset into it.
+struct LspRequestSite {
+    path: PathBuf,
+    rope: Rope,
+    offset: usize,
+}
+
+/// Resolve the focused editor's cursor to an [`LspRequestSite`] for a
+/// position-based request.
+///
+/// A working-tree review cursor resolves to the real file it mirrors via
+/// [`review_lsp_source`], so requests target disk content rather than the
+/// diff placeholder. Returns `None` when the focused pane is not an editor,
+/// its buffer has no path, or a review cursor does not map to a file line.
+fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
+    let (focused_offset, buffer_id, focused_rope, is_review) = {
+        let editor = crate::action_handlers::focused_editor_mut(stoat)?;
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buf_snap.resolve_anchor(&head);
+        (
+            offset,
+            editor.buffer_id,
+            buf_snap.rope().clone(),
+            editor.review_view.is_some(),
+        )
+    };
+
+    if is_review {
+        let (path, rope, offset) = review_lsp_source(stoat)?;
+        Some(LspRequestSite { path, rope, offset })
+    } else {
+        let path = stoat
+            .active_workspace()
+            .buffers
+            .path_for(buffer_id)
+            .map(Path::to_path_buf)?;
+        Some(LspRequestSite {
+            path,
+            rope: focused_rope,
+            offset: focused_offset,
+        })
+    }
+}
+
 /// Issue an LSP jump-style request (definition / type definition /
 /// implementation / declaration) for the symbol under the focused
 /// editor's primary cursor. The async response is stored on
@@ -548,43 +665,14 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     }
 
     let encoding = stoat.lsp_host.offset_encoding();
-    let (focused_offset, buffer_id, focused_rope, is_review) = {
-        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
-            return UpdateEffect::None;
-        };
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buf_snap.resolve_anchor(&head);
-        (
-            offset,
-            editor.buffer_id,
-            buf_snap.rope().clone(),
-            editor.review_view.is_some(),
-        )
+    let Some(site) = lsp_request_site(stoat) else {
+        return UpdateEffect::None;
     };
-
-    let (source_path, source_rope, cursor_offset) = if is_review {
-        match review_lsp_source(stoat) {
-            Some(resolved) => resolved,
-            None => return UpdateEffect::None,
-        }
-    } else {
-        let Some(path) = stoat
-            .active_workspace()
-            .buffers
-            .path_for(buffer_id)
-            .map(Path::to_path_buf)
-        else {
-            return UpdateEffect::None;
-        };
-        (path, focused_rope, focused_offset)
-    };
-    let Some(source_uri) = path_to_uri(&source_path) else {
+    let Some(source_uri) = path_to_uri(&site.path) else {
         return UpdateEffect::None;
     };
 
-    let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, cursor_offset, encoding);
+    let position = crate::lsp::util::byte_offset_to_lsp_pos(&site.rope, site.offset, encoding);
     let params = GotoDefinitionParams {
         text_document_position_params: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: source_uri },
@@ -596,6 +684,8 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
 
     let lsp = stoat.lsp_host.clone();
     let fs = stoat.fs_host.clone();
+    let source_path = site.path;
+    let source_rope = site.rope;
     let task = stoat.executor.spawn(async move {
         let result = match kind {
             LspJumpKind::Definition => lsp.goto_definition(params).await,
@@ -2494,6 +2584,14 @@ mod tests {
         });
     }
 
+    fn enable_goto_references(h: &TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            references_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
     fn focused_buffer_path(h: &TestHarness) -> PathBuf {
         let ws = h.stoat.active_workspace();
         let pane = ws.panes.pane(ws.panes.focus());
@@ -2622,6 +2720,53 @@ mod tests {
         h.settle();
         assert_eq!(cursor_offset(&mut h), 0);
         assert!(h.stoat.pending_lsp_jump.is_none());
+    }
+
+    #[test]
+    fn goto_references_multiple_opens_picker() {
+        use crate::test_harness::keys;
+        use crossterm::event::{Event, KeyCode};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_references(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let p = path.to_str().unwrap();
+        h.fake_lsp()
+            .set_references(p, 0, 0, &[(p, 0, 0), (p, 1, 0), (p, 2, 0)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::defs::editor::GotoReferences);
+        h.settle();
+
+        let picker = h.stoat.location_picker.as_ref().expect("picker open");
+        assert_eq!(picker.entries().len(), 3);
+
+        h.stoat.update(Event::Key(keys::key(KeyCode::Down)));
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        h.settle();
+
+        assert!(h.stoat.location_picker.is_none());
+        assert_eq!(cursor_offset(&mut h), 4);
+    }
+
+    #[test]
+    fn goto_references_unsupported_uses_code_graph() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let p = path.to_str().unwrap();
+        h.fake_lsp()
+            .set_references(p, 0, 0, &[(p, 0, 0), (p, 1, 0), (p, 2, 0)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::defs::editor::GotoReferences);
+        h.settle();
+
+        assert!(h.stoat.location_picker.is_none(), "LSP path is gated off");
+        assert!(h.stoat.pending_lsp_jump.is_none());
+        assert_eq!(
+            cursor_offset(&mut h),
+            0,
+            "code-graph fallback no-ops on empty graph"
+        );
     }
 
     #[test]
