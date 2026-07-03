@@ -1,4 +1,5 @@
 pub(crate) mod badges;
+pub(crate) mod chrome;
 pub(crate) mod code_action;
 pub(crate) mod command_palette;
 pub(crate) mod commits;
@@ -340,6 +341,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             &stoat.settings.mode_badges,
             size,
             buf,
+            stoat.stoatty.then_some(&mut *scene),
         );
         let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false, false);
         let raw = stoat.keymap.scoped_bindings(&state, "help_open");

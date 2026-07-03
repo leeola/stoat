@@ -9,7 +9,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, Borders, Clear, Widget},
+    widgets::{Block, Borders},
 };
 
 /// The on-screen rectangles of the help modal, derived from a terminal `area`
@@ -81,6 +81,7 @@ pub(crate) fn render_help(
     mode_badges: &std::collections::BTreeMap<String, String>,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     use crate::help::{help_input_mode, HelpInput, HelpScope};
     let input_mode = help_input_mode(stoat_mode);
@@ -94,13 +95,14 @@ pub(crate) fn render_help(
         HelpScope::All => " help: all actions ".to_string(),
     };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HELP);
-    Clear.render(layout.modal, buf);
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(modal_style)
-        .title(title)
-        .title_style(modal_style)
-        .render(layout.modal, buf);
+    crate::render::chrome::modal_frame(
+        buf,
+        layout.modal,
+        Some(title.as_str()),
+        modal_style,
+        theme,
+        scene,
+    );
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
