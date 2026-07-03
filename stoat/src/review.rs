@@ -434,6 +434,80 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
             new_line += 1;
         }
 
+        // A one-sided in-line change marks only the modified side, so one run
+        // holds the plain change while the other is empty. Pull the unmarked,
+        // still-mismatched lines from the empty side into its run so the modified
+        // line pairs with its old text rather than leaving the cursor to cascade
+        // misaligned pairs to EOF.
+        //
+        // The pull is committed only when it realigns the cursor. The line after
+        // the pulled block must match the opposite run's resume line, or both
+        // must reach EOF. A pull that runs the whole length without realigning has grabbed
+        // unrelated content (a moved or consolidated block that should stay
+        // gap-aligned), so it is rolled back. Restricting to a non-moved run
+        // skips relocated blocks up front.
+        let is_plain_change = |run: &[ReviewSide]| {
+            run.iter()
+                .all(|s| s.move_provenance.is_none() && s.moved_spans.is_empty())
+        };
+        if left_run.is_empty() && !right_run.is_empty() && is_plain_change(&right_run) {
+            let (start_li, start_old) = (li, old_line);
+            let mut pulled = Vec::new();
+            while pulled.len() < right_run.len()
+                && li < lhs.lines.len()
+                && !lhs.changed[li]
+                && (ri >= rhs.lines.len() || lhs.lines[li] != rhs.lines[ri])
+            {
+                pulled.push(ReviewSide {
+                    text: lhs.lines[li].to_string(),
+                    line_num: old_line,
+                    change_spans: lhs.spans[li].clone(),
+                    moved_spans: lhs.moved[li].clone(),
+                    move_provenance: lhs.provenance[li].clone(),
+                });
+                li += 1;
+                old_line += 1;
+            }
+            let resynced = !pulled.is_empty()
+                && (li >= lhs.lines.len()
+                    || ri >= rhs.lines.len()
+                    || lhs.lines[li] == rhs.lines[ri]);
+            if resynced {
+                left_run = pulled;
+            } else {
+                li = start_li;
+                old_line = start_old;
+            }
+        } else if right_run.is_empty() && !left_run.is_empty() && is_plain_change(&left_run) {
+            let (start_ri, start_new) = (ri, new_line);
+            let mut pulled = Vec::new();
+            while pulled.len() < left_run.len()
+                && ri < rhs.lines.len()
+                && !rhs.changed[ri]
+                && (li >= lhs.lines.len() || rhs.lines[ri] != lhs.lines[li])
+            {
+                pulled.push(ReviewSide {
+                    text: rhs.lines[ri].to_string(),
+                    line_num: new_line,
+                    change_spans: rhs.spans[ri].clone(),
+                    moved_spans: rhs.moved[ri].clone(),
+                    move_provenance: rhs.provenance[ri].clone(),
+                });
+                ri += 1;
+                new_line += 1;
+            }
+            let resynced = !pulled.is_empty()
+                && (ri >= rhs.lines.len()
+                    || li >= lhs.lines.len()
+                    || rhs.lines[ri] == lhs.lines[li]);
+            if resynced {
+                right_run = pulled;
+            } else {
+                ri = start_ri;
+                new_line = start_new;
+            }
+        }
+
         if left_run.is_empty() && right_run.is_empty() {
             // Both unchanged but text differs (structural diff paired
             // tokens across non-corresponding lines). Treat as change.
@@ -550,6 +624,49 @@ mod tests {
             .into_iter()
             .next()
             .unwrap_or_default()
+    }
+
+    /// Like [`hunks`] but drives the structural (tree-sitter) diff by tagging the
+    /// input as Rust, so a one-sided in-line change is marked on one side only.
+    fn hunks_rust(base: &str, buffer: &str, ctx: u32) -> Vec<ReviewHunk> {
+        use stoat_language::LanguageRegistry;
+        let inputs = vec![ReviewFileInput {
+            path: PathBuf::from("x.rs"),
+            rel_path: "x.rs".to_string(),
+            language: LanguageRegistry::standard().for_path(Path::new("x.rs")),
+            base_text: Arc::new(base.to_string()),
+            buffer_text: Arc::new(buffer.to_string()),
+        }];
+        extract_review_hunks_changeset(&inputs, ctx)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn one_sided_inline_change_pairs_instead_of_cascading() {
+        let base = "fn main() {\n    let x = 1;\n    draw(a, b);\n}\n\
+             fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\n\
+             fn f() {}\nfn g() {}\nfn h() {}\nfn i() {}\n";
+        let buffer = "fn main() {\n    let x = 1;\n    draw(a, b, None);\n}\n\
+             fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\n\
+             fn f() {}\nfn g() {}\nfn h() {}\nfn i() {}\n";
+
+        let hs = hunks_rust(base, buffer, 3);
+
+        assert_eq!(hs.len(), 1, "one edit is one hunk, not a cascade to EOF");
+        let rows = &hs[0].rows;
+        assert_eq!(
+            rows.iter().filter(|r| r.is_changed()).count(),
+            1,
+            "exactly one changed row, not a misaligned pair per line"
+        );
+        let changed = rows.iter().find(|r| r.is_changed()).expect("a changed row");
+        assert!(
+            matches!(changed, ReviewRow::Changed { left: Some(l), right: Some(r) }
+                if l.text == "    draw(a, b);" && r.text == "    draw(a, b, None);"),
+            "the change pairs the old call with the new one, got {changed:?}"
+        );
     }
 
     #[test]
