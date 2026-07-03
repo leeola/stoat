@@ -11,6 +11,20 @@ define_action!(
 );
 
 define_action!(
+    ToggleDiffDef,
+    ToggleDiff,
+    "ToggleDiff",
+    ActionKind::ToggleDiff,
+    "toggle between the diff and the plain file",
+    "Swap the focused pane between the side-by-side review and a plain \
+     editor on the same file, keeping the review session alive so the \
+     toggle is instant and staging decisions survive. From the diff, \
+     lands the cursor on the file line under the review cursor; from the \
+     file, restores the diff at the chunk the cursor sits in.",
+    ActionPriority::Common
+);
+
+define_action!(
     JumpToMoveSourceDef,
     JumpToMoveSource,
     "JumpToMoveSource",

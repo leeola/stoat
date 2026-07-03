@@ -266,13 +266,7 @@ pub(crate) fn open_file_in_pane(
     ws.panes.pane_mut(target).view = View::Editor(new_editor_id);
 
     if let Some(old_id) = old {
-        let still_referenced = ws
-            .panes
-            .split_panes()
-            .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == old_id));
-        if !still_referenced {
-            ws.editors.remove(old_id);
-        }
+        super::gc_editor_if_unreferenced(ws, old_id);
     }
 
     Some(buffer_id)

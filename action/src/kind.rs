@@ -29,6 +29,7 @@ pub enum ActionKind {
     OpenCommandPalette,
     OpenHelp,
     Diff,
+    ToggleDiff,
     AddSelectionBelow,
     AddSelectionAbove,
     MoveLeft,

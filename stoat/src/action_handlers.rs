@@ -30,7 +30,7 @@ pub(crate) mod yank;
 use crate::{
     app::{Stoat, UpdateEffect},
     command_palette::CommandPalette,
-    editor_state::EditorState,
+    editor_state::{EditorId, EditorState},
     help::Help,
     host::FsHost,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
@@ -177,6 +177,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             review::open_review(stoat);
             UpdateEffect::Redraw
         },
+        ActionKind::ToggleDiff => review::toggle_diff(stoat),
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
         ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
         ActionKind::SplitSelectionOnNewline => movement::split_selection_on_newline(stoat),
@@ -696,6 +697,32 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
         View::Editor(id) => ws.editors.get_mut(id),
         _ => None,
     }
+}
+
+/// Remove `editor_id` from the workspace's editor store unless it is still
+/// live. An editor stays alive while a split pane shows it, or while it is
+/// the review editor parked off-screen by a toggled-off diff session (see
+/// [`crate::review_session::ReviewSession::toggled_off`]).
+///
+/// Editor-swapping sites (opening a file, rebuilding the review, closing a
+/// review) call this on the editor they displaced so a pane never leaves a
+/// dangling editor behind, while the parked review editor survives a toggle.
+pub(crate) fn gc_editor_if_unreferenced(ws: &mut crate::workspace::Workspace, editor_id: EditorId) {
+    let referenced = ws
+        .panes
+        .split_panes()
+        .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == editor_id));
+    if referenced {
+        return;
+    }
+    let parked = ws
+        .review
+        .as_ref()
+        .is_some_and(|r| r.toggled_off && r.view_editor == Some(editor_id));
+    if parked {
+        return;
+    }
+    ws.editors.remove(editor_id);
 }
 
 /// Drive [`ActionKind::OpenGlobalSearch`]. Opens the input modal so the

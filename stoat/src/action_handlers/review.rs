@@ -5,7 +5,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost, WatchToken},
     pane::View,
-    review::{self, ReviewFileInput, ReviewHunk},
+    review::{self, ReviewFileInput, ReviewHunk, ReviewRow},
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
@@ -1017,7 +1017,180 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Toggle the focused pane between the side-by-side diff and a plain editor
+/// on the same file, driven by [`stoat_action::ToggleDiff`].
+///
+/// From the diff (`toggled_off` clear) this hides it; from the parked state
+/// it swaps the diff back in. A no-op when no review session is open.
+pub(super) fn toggle_diff(stoat: &mut Stoat) -> UpdateEffect {
+    match stoat
+        .active_workspace()
+        .review
+        .as_ref()
+        .map(|s| s.toggled_off)
+    {
+        Some(false) => toggle_diff_off(stoat),
+        Some(true) => toggle_diff_on(stoat),
+        None => UpdateEffect::None,
+    }
+}
+
+/// Hide the diff by opening the real file at the line under the review
+/// cursor, parking the review editor so [`toggle_diff_on`] can restore it.
+///
+/// The session stays installed with `toggled_off` set and the review scroll
+/// row stashed, so the editor GC keeps the parked editor alive.
+fn toggle_diff_off(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((path, line, scroll_row)) = review_cursor_file_target(stoat) else {
+        return UpdateEffect::None;
+    };
+
+    if let Some(session) = stoat.active_workspace_mut().review.as_mut() {
+        session.toggled_off = true;
+        session.stashed_display_row = Some(scroll_row);
+    }
+
+    let focused = stoat.active_workspace().panes.focus();
+    super::file::open_file_in_pane(stoat, focused, &path);
+    if let Some(editor) = super::focused_editor_mut(stoat) {
+        super::movement::set_cursor_row(editor, line.saturating_sub(1));
+    }
+
+    stoat.mode = "normal".to_string();
+    UpdateEffect::Redraw
+}
+
+/// Resolve the review cursor to `(file path, 1-based new-side line, review
+/// scroll row)`.
+///
+/// `None` when the focused review editor has no cursor row, the row maps to
+/// no chunk, or the chunk's file is missing.
+fn review_cursor_file_target(stoat: &mut Stoat) -> Option<(std::path::PathBuf, u32, u32)> {
+    let ws = stoat.active_workspace_mut();
+    let editor_id = ws.review.as_ref()?.view_editor?;
+
+    let (buffer_row, scroll_row) = {
+        let editor = ws.editors.get_mut(editor_id)?;
+        editor.review_view.as_ref()?;
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buffer_snapshot.resolve_anchor(&head);
+        let buffer_row = buffer_snapshot.rope().offset_to_point(offset).row;
+        (buffer_row, editor.scroll_row)
+    };
+
+    let view = ws.editors.get(editor_id)?.review_view.as_ref()?;
+    let line = row_line_num(view.rows.get(buffer_row as usize)?);
+    let (chunk_id, _) = view.chunk_and_status_at_row(buffer_row)?;
+
+    let session = ws.review.as_ref()?;
+    let file_index = session.chunks.get(&chunk_id)?.file_index;
+    let path = session.files.get(file_index)?.path.clone();
+    Some((path, line, scroll_row))
+}
+
+/// The new-side line number for `row`, falling back to the old side on a
+/// deletion-only row.
+fn row_line_num(row: &ReviewRow) -> u32 {
+    match row {
+        ReviewRow::Context { right, .. } => right.line_num,
+        ReviewRow::Changed { right: Some(r), .. } => r.line_num,
+        ReviewRow::Changed { left: Some(l), .. } => l.line_num,
+        ReviewRow::Changed {
+            left: None,
+            right: None,
+        } => 1,
+    }
+}
+
+/// Swap the parked review editor back into the focused pane, positioning it
+/// on the chunk the plain-file cursor sits in.
+///
+/// Falls back to the scroll row stashed at toggle-off when the file cursor
+/// maps to no chunk (e.g. the pane now shows a file not in the session). A
+/// no-op unless a toggled-off session exists.
+fn toggle_diff_on(stoat: &mut Stoat) -> UpdateEffect {
+    let review_editor_id = match stoat.active_workspace().review.as_ref() {
+        Some(s) if s.toggled_off => s.view_editor,
+        _ => return UpdateEffect::None,
+    };
+    let Some(review_editor_id) = review_editor_id else {
+        return UpdateEffect::None;
+    };
+
+    let (file_buffer_id, file_byte) = {
+        let Some(editor) = super::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        (editor.buffer_id, buffer_snapshot.resolve_anchor(&head))
+    };
+
+    let target_chunk = {
+        let ws = stoat.active_workspace();
+        let path = ws.buffers.path_for(file_buffer_id).map(Path::to_path_buf);
+        ws.review.as_ref().and_then(|session| {
+            let path = path.as_ref()?;
+            let file_index = session.files.iter().position(|f| &f.path == path)?;
+            session.chunk_containing_buffer_byte(file_index, file_byte)
+        })
+    };
+
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let file_editor_id = match ws.panes.pane(focused).view {
+        View::Editor(eid) => Some(eid),
+        _ => None,
+    };
+    ws.panes.pane_mut(focused).view = View::Editor(review_editor_id);
+
+    if let Some(chunk_id) = target_chunk {
+        if let Some(session) = ws.review.as_mut()
+            && session.cursor.current != Some(chunk_id)
+        {
+            session.cursor.current = Some(chunk_id);
+            session.version += 1;
+        }
+        move_review_cursor_to_chunk(ws, Some(review_editor_id), Some(chunk_id));
+        sync_review_view_and_scroll(ws, Some(review_editor_id), Some(chunk_id));
+    } else if let Some(stashed) = ws.review.as_ref().and_then(|s| s.stashed_display_row)
+        && let Some(editor) = ws.editors.get_mut(review_editor_id)
+    {
+        editor.scroll_row = stashed;
+    }
+
+    if let Some(session) = ws.review.as_mut() {
+        session.toggled_off = false;
+        session.stashed_display_row = None;
+    }
+
+    if let Some(file_id) = file_editor_id
+        && file_id != review_editor_id
+    {
+        super::gc_editor_if_unreferenced(ws, file_id);
+    }
+
+    stoat.mode = "review".to_string();
+    UpdateEffect::Redraw
+}
+
 pub(super) fn open_review(stoat: &mut Stoat) {
+    // A diff toggled off with Tab parks its session and review editor. Re-
+    // entering (R / Diff) swaps that editor back in rather than rescanning, so
+    // reopening is instant and staged decisions are preserved.
+    if stoat
+        .active_workspace()
+        .review
+        .as_ref()
+        .is_some_and(|s| s.toggled_off)
+    {
+        toggle_diff_on(stoat);
+        return;
+    }
+
     emit_review_info_badge(stoat, "scanning diff");
     let git_root = stoat.active_workspace().git_root.clone();
     let git_host = stoat.git_host.clone();
@@ -1478,8 +1651,11 @@ fn render_review_editor(stoat: &mut Stoat) {
     editor.review_view = Some(view);
 
     let new_editor_id = ws.editors.insert(editor);
+    let prev_view_editor = ws.review.as_ref().and_then(|s| s.view_editor);
     if let Some(session) = ws.review.as_mut() {
         session.view_editor = Some(new_editor_id);
+        session.toggled_off = false;
+        session.stashed_display_row = None;
     }
 
     let focused = ws.panes.focus();
@@ -1488,13 +1664,13 @@ fn render_review_editor(stoat: &mut Stoat) {
         _ => None,
     };
     ws.panes.pane_mut(focused).view = View::Editor(new_editor_id);
-    if let Some(old_id) = old {
-        let still_referenced = ws
-            .panes
-            .split_panes()
-            .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == old_id));
-        if !still_referenced {
-            ws.editors.remove(old_id);
+
+    // Drop the pane's previous editor and, when a refresh rebuilt the view
+    // while the diff was toggled off, the editor that had been parked off-
+    // screen. Both are unreferenced now. The gc keeps split-shared editors.
+    for stale in [old, prev_view_editor].into_iter().flatten() {
+        if stale != new_editor_id {
+            crate::action_handlers::gc_editor_if_unreferenced(ws, stale);
         }
     }
 
@@ -1844,6 +2020,119 @@ mod tests {
             cursor,
             "the cursor still holds"
         );
+    }
+
+    /// The 1-based new-side line and 0-based buffer row of the review
+    /// editor's text cursor.
+    fn review_cursor_row(h: &mut TestHarness) -> u32 {
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let bs = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        bs.rope().offset_to_point(bs.resolve_anchor(&head)).row
+    }
+
+    #[test]
+    fn toggle_diff_off_opens_the_real_file_at_the_cursor_line() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+        h.stoat.open_review();
+        h.settle();
+
+        // Put the review cursor on the changed row (new-side line 3).
+        let review_editor_id = h.with_review(|s| s.view_editor).expect("review editor");
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let editor = ws.editors.get_mut(review_editor_id).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 2);
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
+
+        assert_eq!(h.stoat.mode, "normal", "toggling off leaves review mode");
+        let (is_review, text) = {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            (
+                editor.review_view.is_some(),
+                snapshot.buffer_snapshot().rope().to_string(),
+            )
+        };
+        assert!(!is_review, "the pane shows a plain editor, not the diff");
+        assert_eq!(text, "a\nb\nX\nd\n", "the real working-tree file is shown");
+        assert_eq!(
+            review_cursor_row(&mut h),
+            2,
+            "cursor lands on new-side line 3 (row 2)",
+        );
+        assert!(h.with_review(|s| s.toggled_off), "the session is parked");
+        assert_eq!(
+            h.with_review(|s| s.view_editor),
+            Some(review_editor_id),
+            "the parked review editor is kept alive",
+        );
+    }
+
+    #[test]
+    fn toggle_diff_back_restores_the_diff_with_staging_intact() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+        h.stoat.open_review();
+        h.settle();
+
+        let chunk = h.current_review_chunk_id();
+        h.set_review_status(0, ChunkStatus::Staged);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
+        assert_eq!(h.stoat.mode, "normal");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
+
+        assert_eq!(
+            h.stoat.mode, "review",
+            "toggling back re-enters review mode"
+        );
+        assert!(!h.with_review(|s| s.toggled_off), "the session is unparked");
+        let is_review = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .review_view
+            .is_some();
+        assert!(is_review, "the diff is back in the focused pane");
+        assert_eq!(
+            h.chunk_status(chunk),
+            ChunkStatus::Staged,
+            "the staged decision survived the round trip",
+        );
+        assert_eq!(
+            h.with_review(|s| s.cursor.current),
+            Some(chunk),
+            "the review cursor lands on the chunk the file cursor sat in",
+        );
+    }
+
+    #[test]
+    fn reentering_a_parked_diff_arms_no_scan() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+        h.stoat.open_review();
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
+        assert_eq!(h.stoat.mode, "normal");
+        assert!(
+            h.stoat.pending_review_scan.is_none(),
+            "toggling off arms no scan",
+        );
+
+        // R / Diff re-enters by swapping the parked editor back in, not by
+        // rescanning the working tree.
+        h.stoat.open_review();
+
+        assert_eq!(h.stoat.mode, "review");
+        assert!(
+            h.stoat.pending_review_scan.is_none(),
+            "re-entry swaps the parked editor back rather than arming a scan",
+        );
+        assert!(!h.with_review(|s| s.toggled_off));
     }
 
     #[test]

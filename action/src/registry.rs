@@ -80,7 +80,7 @@ use crate::{
             JumpToPrevMoveSource, OpenReviewCommit, OpenReviewCommitRange, QueryMoveRelationships,
             ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk, ReviewRefresh,
             ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
-            ReviewUnstageChunk,
+            ReviewUnstageChunk, ToggleDiff,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         terminal::Terminal,
@@ -152,6 +152,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
     add(Diff::DEF, |_| Ok(Box::new(Diff)));
+    add(ToggleDiff::DEF, |_| Ok(Box::new(ToggleDiff)));
     add(JumpToMoveSource::DEF, |_| Ok(Box::new(JumpToMoveSource)));
     add(JumpToMoveTarget::DEF, |_| Ok(Box::new(JumpToMoveTarget)));
     add(JumpToNextMoveSource::DEF, |_| {
@@ -688,6 +689,7 @@ mod tests {
         "FileFinderScopeToggle",
         "OpenHelp",
         "Diff",
+        "ToggleDiff",
         "JumpToMoveSource",
         "JumpToMoveTarget",
         "JumpToNextMoveSource",
@@ -1024,7 +1026,8 @@ mod tests {
         // + 2 FileFinderPageUp, FileFinderPageDown.
         // + 2 PalettePageUp, PalettePageDown.
         // + 1 OpenBuffer.
-        assert_eq!(all().count(), 286);
+        // + 1 ToggleDiff.
+        assert_eq!(all().count(), 287);
     }
 
     #[test]

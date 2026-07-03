@@ -263,6 +263,15 @@ pub(crate) struct ReviewSession {
     pub order: Vec<ReviewChunkId>,
     pub cursor: ReviewCursor,
     pub view_editor: Option<EditorId>,
+    /// True while the diff is toggled off. The pane then shows a plain
+    /// file editor and [`Self::view_editor`] is parked off-screen but
+    /// kept alive so a toggle back is instant. The editor GC skips the
+    /// parked editor for exactly this reason.
+    pub toggled_off: bool,
+    /// Review scroll row captured at toggle-off, used to reposition the
+    /// diff on toggle-back when the file cursor cannot be mapped to a
+    /// chunk (e.g. the pane now shows a file not in this session).
+    pub stashed_display_row: Option<u32>,
     /// Bumped on any mutation so editor-level caches can detect staleness.
     pub version: u64,
     /// Where the user launched this review from; consulted on close.
@@ -284,6 +293,8 @@ impl ReviewSession {
             order: Vec::new(),
             cursor: ReviewCursor::default(),
             view_editor: None,
+            toggled_off: false,
+            stashed_display_row: None,
             version: 0,
             origin: ReviewOrigin::Standalone,
             watch_tokens: Vec::new(),

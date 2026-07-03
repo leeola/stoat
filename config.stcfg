@@ -424,6 +424,7 @@ on key {
     mode == review {
         Escape -> CloseReview();
         q -> CloseReview();
+        Tab -> ToggleDiff();
         n -> ReviewNextChunk();
         p -> ReviewPrevChunk();
         h -> MoveLeft();
