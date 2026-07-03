@@ -1066,6 +1066,12 @@ impl FakeLsp {
         self.state.lock().unwrap().observed_replies.clone()
     }
 
+    /// Whether [`LspHost::shutdown`] has been called, so a quit-path test
+    /// can assert the language server was reaped on exit.
+    pub fn was_shut_down(&self) -> bool {
+        self.state.lock().unwrap().shut_down
+    }
+
     /// Programs the response value returned for a
     /// `workspace/executeCommand` request whose `params.command`
     /// matches `command`. Replaces any previously seeded

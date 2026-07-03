@@ -986,6 +986,19 @@ impl Stoat {
         &self.lsp_host
     }
 
+    /// Reap the language server on quit. Awaits [`LspHost::shutdown`]
+    /// bounded by a 500ms timeout so a server that ignores the request
+    /// cannot block the editor's exit. [`NoopLsp`] and the test fake
+    /// return immediately, so the call is unconditional. Errors and
+    /// timeouts are ignored -- the process is exiting regardless.
+    pub async fn shutdown_lsp(&self) {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            self.lsp_host.shutdown(),
+        )
+        .await;
+    }
+
     pub fn active_workspace(&self) -> &Workspace {
         &self.workspaces[self.active_workspace]
     }
@@ -7553,6 +7566,23 @@ mod tests {
             assert!(
                 matches!(result, Ok(Ok(()))),
                 "run must quit after shutdown notify, got {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn shutdown_lsp_reaps_the_server_on_quit() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let h = Stoat::test();
+            assert!(!h.fake_lsp().was_shut_down());
+            h.stoat.shutdown_lsp().await;
+            assert!(
+                h.fake_lsp().was_shut_down(),
+                "the quit teardown shuts the language server down",
             );
         });
     }

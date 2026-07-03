@@ -242,7 +242,9 @@ fn run_tui(
                 .detach();
         }
 
-        stoat.run(event_rx, render_tx).await
+        let outcome = stoat.run(event_rx, render_tx).await;
+        stoat.shutdown_lsp().await;
+        outcome
     })
     .whatever_context("stoat event loop")?;
 
