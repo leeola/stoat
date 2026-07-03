@@ -107,9 +107,6 @@ fn cursor_screen_position(
     content_area: Rect,
     anchor_offset: usize,
 ) -> Option<(u16, u16)> {
-    if editor.review_view.is_some() {
-        return None;
-    }
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();

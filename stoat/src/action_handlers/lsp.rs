@@ -35,7 +35,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use stoat_text::{patch::Patch, Rope};
+use stoat_text::{patch::Patch, Point, Rope};
 
 /// Quiet window after the last edit before a buffer's `did_change`
 /// fires. Matches Helix's default and prevents per-keystroke storms
@@ -453,11 +453,46 @@ pub(crate) fn goto_implementation(stoat: &mut Stoat) -> UpdateEffect {
     lsp_jump(stoat, LspJumpKind::Implementation)
 }
 
+/// Resolve a focused review editor's cursor to the real working-tree file it
+/// mirrors, readying that file for an LSP request.
+///
+/// Ensures the file's buffer is open and did-opened (no pane swap), then
+/// returns its path, rope, and the cursor's byte offset in it. This is what
+/// lets hover and goto work from the side-by-side diff, whose own buffer is a
+/// pathless placeholder the language server knows nothing about. `None` when
+/// the cursor is not on a new-side line or the source is not a working tree
+/// (see [`review::review_cursor_file_position`]).
+fn review_lsp_source(stoat: &mut Stoat) -> Option<(PathBuf, Rope, usize)> {
+    let (path, line, col) = super::review::review_cursor_file_position(stoat)?;
+    let content = super::read_string_via_host(&*stoat.fs_host, &path).ok()?;
+    let lang = stoat.language_registry.for_path(&path);
+
+    let (buffer_id, buffer) = {
+        let ws = stoat.active_workspace_mut();
+        let (buffer_id, buffer) = ws.buffers.open(&path, &content);
+        if let Some(lang) = lang
+            && ws.buffers.language_for(buffer_id).is_none()
+        {
+            ws.buffers.set_language(buffer_id, lang);
+        }
+        (buffer_id, buffer)
+    };
+    notify_buffer_opened(stoat, buffer_id, &path, &content);
+
+    let rope = buffer.read().expect("buffer lock").rope().clone();
+    let offset = rope.point_to_offset(Point::new(line, col));
+    Some((path, rope, offset))
+}
+
 /// Issue an LSP jump-style request (definition / type definition /
 /// implementation / declaration) for the symbol under the focused
 /// editor's primary cursor. The async response is stored on
 /// [`Stoat::pending_lsp_jump`] and applied by [`pump_lsp_jumps`] on
 /// the next render tick.
+///
+/// From a working-tree review the cursor resolves to the real file via
+/// [`review_lsp_source`], so the request targets disk content, not the diff
+/// placeholder.
 ///
 /// No-op when: the focused pane is not an editor; the buffer has no
 /// path; or the server does not advertise the matching
@@ -470,7 +505,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     }
 
     let encoding = stoat.lsp_host.offset_encoding();
-    let (cursor_offset, buffer_id, source_rope) = {
+    let (focused_offset, buffer_id, focused_rope, is_review) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
@@ -478,16 +513,29 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
         let buf_snap = snapshot.buffer_snapshot();
         let head = editor.selections.newest_anchor().head();
         let offset = buf_snap.resolve_anchor(&head);
-        (offset, editor.buffer_id, buf_snap.rope().clone())
+        (
+            offset,
+            editor.buffer_id,
+            buf_snap.rope().clone(),
+            editor.review_view.is_some(),
+        )
     };
 
-    let Some(source_path) = stoat
-        .active_workspace()
-        .buffers
-        .path_for(buffer_id)
-        .map(Path::to_path_buf)
-    else {
-        return UpdateEffect::None;
+    let (source_path, source_rope, cursor_offset) = if is_review {
+        match review_lsp_source(stoat) {
+            Some(resolved) => resolved,
+            None => return UpdateEffect::None,
+        }
+    } else {
+        let Some(path) = stoat
+            .active_workspace()
+            .buffers
+            .path_for(buffer_id)
+            .map(Path::to_path_buf)
+        else {
+            return UpdateEffect::None;
+        };
+        (path, focused_rope, focused_offset)
     };
     let Some(source_uri) = path_to_uri(&source_path) else {
         return UpdateEffect::None;
@@ -623,7 +671,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let encoding = stoat.lsp_host.offset_encoding();
-    let (cursor_offset, buffer_id, source_rope) = {
+    let (anchor_offset, buffer_id, focused_rope, is_review) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
@@ -631,16 +679,32 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         let buf_snap = snapshot.buffer_snapshot();
         let head = editor.selections.newest_anchor().head();
         let offset = buf_snap.resolve_anchor(&head);
-        (offset, editor.buffer_id, buf_snap.rope().clone())
+        (
+            offset,
+            editor.buffer_id,
+            buf_snap.rope().clone(),
+            editor.review_view.is_some(),
+        )
     };
 
-    let Some(source_path) = stoat
-        .active_workspace()
-        .buffers
-        .path_for(buffer_id)
-        .map(Path::to_path_buf)
-    else {
-        return UpdateEffect::None;
+    // A review cursor requests against the real working-tree file, but the
+    // popup still anchors at the placeholder cursor cell, so `anchor_offset`
+    // stays the review-editor offset while the request uses the real file.
+    let (source_path, source_rope, cursor_offset) = if is_review {
+        match review_lsp_source(stoat) {
+            Some(resolved) => resolved,
+            None => return UpdateEffect::None,
+        }
+    } else {
+        let Some(path) = stoat
+            .active_workspace()
+            .buffers
+            .path_for(buffer_id)
+            .map(Path::to_path_buf)
+        else {
+            return UpdateEffect::None;
+        };
+        (path, focused_rope, anchor_offset)
     };
     let Some(source_uri) = path_to_uri(&source_path) else {
         return UpdateEffect::None;
@@ -660,7 +724,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         match lsp.hover(params).await {
             Ok(Some(hover)) => Some(HoverResponse {
                 lines: flatten_hover_contents(hover.contents),
-                anchor_offset: cursor_offset,
+                anchor_offset,
             }),
             Ok(None) => None,
             Err(err) => {
@@ -1855,6 +1919,15 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(Some(target)) => {
+            // A jump issued from the diff parks the review before opening its
+            // target, so the review editor survives the pane swap (the gc
+            // guard keeps parked editors) and R re-enters the diff.
+            let from_review = crate::action_handlers::focused_editor_mut(stoat)
+                .is_some_and(|e| e.review_view.is_some());
+            if from_review {
+                super::review::park_review_session(stoat);
+                stoat.mode = "normal".to_string();
+            }
             let focused = stoat.active_workspace().panes.focus();
             super::file::open_file_in_pane(stoat, focused, &target.path);
             super::movement::jump_to_offset(stoat, target.offset);
@@ -2756,6 +2829,119 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
         h.assert_snapshot("snapshot_hover_popup");
+    }
+
+    /// Move the review editor's text cursor to `buffer_row`. Panics without an
+    /// open review session.
+    fn place_review_cursor(h: &mut TestHarness, buffer_row: u32) {
+        let review_editor_id = h.with_review(|s| s.view_editor).expect("review editor");
+        let ws = h.stoat.active_workspace_mut();
+        let editor = ws.editors.get_mut(review_editor_id).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, buffer_row);
+    }
+
+    #[test]
+    fn hover_from_the_diff_cursor_targets_the_real_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+        h.stoat.open_review();
+        h.settle();
+
+        // Cursor on the changed row (new-side line 3, i.e. LSP line 2).
+        place_review_cursor(&mut h, 2);
+        // Seeded at the real file path and the translated new-side position,
+        // so a matching response proves the request left the placeholder
+        // buffer for the working-tree file.
+        h.fake_lsp()
+            .set_hover("/work/a.rs", 2, 0, "the changed line");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        let popup = h
+            .stoat
+            .pending_hover
+            .as_ref()
+            .expect("hover popup over the diff");
+        assert_eq!(popup.lines, vec!["the changed line".to_string()]);
+    }
+
+    #[test]
+    fn snapshot_hover_over_the_diff() {
+        let mut h = TestHarness::with_size(80, 14);
+        enable_hover(&h);
+        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+        h.stoat.open_review();
+        h.settle();
+
+        place_review_cursor(&mut h, 2);
+        h.fake_lsp().set_hover("/work/a.rs", 2, 0, "changed here");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        h.assert_snapshot("snapshot_hover_over_diff");
+    }
+
+    #[test]
+    fn hover_from_a_non_working_tree_review_issues_nothing() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        // An in-memory (non-working-tree) review: the new side is not disk
+        // state, so LSP stays off and no request is issued.
+        h.open_review_from_texts(&[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+
+        place_review_cursor(&mut h, 2);
+        h.fake_lsp().set_hover("a.rs", 2, 0, "unreachable");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        assert!(
+            h.stoat.pending_hover.is_none(),
+            "no popup for a non-working-tree review",
+        );
+        assert!(
+            h.stoat.pending_hover_request.is_none(),
+            "no request was issued",
+        );
+    }
+
+    #[test]
+    fn goto_definition_from_the_diff_parks_the_review() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_definition(&h);
+        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+        h.fake_fs().insert_file(
+            &PathBuf::from("/work/lib.rs"),
+            b"fn one() {}\nfn two() {}\n",
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        place_review_cursor(&mut h, 2);
+        h.fake_lsp()
+            .set_definition("/work/a.rs", 2, 0, "/work/lib.rs", 1, 3);
+
+        let review_editor_id = h.with_review(|s| s.view_editor).expect("review editor");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            PathBuf::from("/work/lib.rs"),
+            "the jump lands in the target file",
+        );
+        assert_eq!(h.stoat.mode, "normal", "the pane left review mode");
+        assert!(
+            h.with_review(|s| s.toggled_off),
+            "the review is parked so R re-enters the diff",
+        );
+        assert_eq!(
+            h.with_review(|s| s.view_editor),
+            Some(review_editor_id),
+            "the parked review editor survived the pane swap",
+        );
     }
 
     fn enable_code_action(h: &TestHarness) {

@@ -1041,14 +1041,11 @@ pub(super) fn toggle_diff(stoat: &mut Stoat) -> UpdateEffect {
 /// The session stays installed with `toggled_off` set and the review scroll
 /// row stashed, so the editor GC keeps the parked editor alive.
 fn toggle_diff_off(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((path, line, scroll_row)) = review_cursor_file_target(stoat) else {
+    let Some((path, line)) = review_cursor_file_target(stoat) else {
         return UpdateEffect::None;
     };
 
-    if let Some(session) = stoat.active_workspace_mut().review.as_mut() {
-        session.toggled_off = true;
-        session.stashed_display_row = Some(scroll_row);
-    }
+    park_review_session(stoat);
 
     let focused = stoat.active_workspace().panes.focus();
     super::file::open_file_in_pane(stoat, focused, &path);
@@ -1060,24 +1057,43 @@ fn toggle_diff_off(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Resolve the review cursor to `(file path, 1-based new-side line, review
-/// scroll row)`.
+/// Park the installed review session so its editor survives an editor swap.
+///
+/// Marks the session toggled off and stashes the review editor's current
+/// scroll row for a later toggle-back, which is what keeps the editor GC from
+/// reclaiming the parked editor. Leaves the pane view and mode to the caller.
+/// No-op when no session is open. Shared by [`toggle_diff_off`] and a
+/// goto-from-diff jump, which parks the review before opening its target.
+pub(super) fn park_review_session(stoat: &mut Stoat) {
+    let ws = stoat.active_workspace_mut();
+    let scroll_row = ws
+        .review
+        .as_ref()
+        .and_then(|s| s.view_editor)
+        .and_then(|id| ws.editors.get(id))
+        .map(|e| e.scroll_row);
+    if let Some(session) = ws.review.as_mut() {
+        session.toggled_off = true;
+        session.stashed_display_row = scroll_row;
+    }
+}
+
+/// Resolve the review cursor to `(file path, 1-based new-side line)`.
 ///
 /// `None` when the focused review editor has no cursor row, the row maps to
 /// no chunk, or the chunk's file is missing.
-fn review_cursor_file_target(stoat: &mut Stoat) -> Option<(std::path::PathBuf, u32, u32)> {
+fn review_cursor_file_target(stoat: &mut Stoat) -> Option<(std::path::PathBuf, u32)> {
     let ws = stoat.active_workspace_mut();
     let editor_id = ws.review.as_ref()?.view_editor?;
 
-    let (buffer_row, scroll_row) = {
+    let buffer_row = {
         let editor = ws.editors.get_mut(editor_id)?;
         editor.review_view.as_ref()?;
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
         let head = editor.selections.newest_anchor().head();
         let offset = buffer_snapshot.resolve_anchor(&head);
-        let buffer_row = buffer_snapshot.rope().offset_to_point(offset).row;
-        (buffer_row, editor.scroll_row)
+        buffer_snapshot.rope().offset_to_point(offset).row
     };
 
     let view = ws.editors.get(editor_id)?.review_view.as_ref()?;
@@ -1087,7 +1103,7 @@ fn review_cursor_file_target(stoat: &mut Stoat) -> Option<(std::path::PathBuf, u
     let session = ws.review.as_ref()?;
     let file_index = session.chunks.get(&chunk_id)?.file_index;
     let path = session.files.get(file_index)?.path.clone();
-    Some((path, line, scroll_row))
+    Some((path, line))
 }
 
 /// The new-side line number for `row`, falling back to the old side on a
@@ -1101,6 +1117,56 @@ fn row_line_num(row: &ReviewRow) -> u32 {
             left: None,
             right: None,
         } => 1,
+    }
+}
+
+/// Resolve the review cursor to a working-tree file position for LSP:
+/// `(real file path, 0-based new-side line, byte column)`.
+///
+/// `None` unless the focused review editor is over a
+/// [`ReviewSource::WorkingTree`] diff and the cursor sits on a row with a new
+/// side (context or an addition). A deletion-only row has no position in the
+/// new file. The byte column carries over unchanged because the placeholder
+/// row mirrors the new-side line verbatim, so only the line is remapped.
+pub(super) fn review_cursor_file_position(
+    stoat: &mut Stoat,
+) -> Option<(std::path::PathBuf, u32, u32)> {
+    let ws = stoat.active_workspace_mut();
+    let session = ws.review.as_ref()?;
+    if !matches!(session.source, ReviewSource::WorkingTree { .. }) {
+        return None;
+    }
+    let editor_id = session.view_editor?;
+
+    let (buffer_row, col) = {
+        let editor = ws.editors.get_mut(editor_id)?;
+        editor.review_view.as_ref()?;
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let point = buffer_snapshot
+            .rope()
+            .offset_to_point(buffer_snapshot.resolve_anchor(&head));
+        (point.row, point.column)
+    };
+
+    let view = ws.editors.get(editor_id)?.review_view.as_ref()?;
+    let line = review_row_new_line(view.rows.get(buffer_row as usize)?)?;
+    let (chunk_id, _) = view.chunk_and_status_at_row(buffer_row)?;
+
+    let session = ws.review.as_ref()?;
+    let file_index = session.chunks.get(&chunk_id)?.file_index;
+    let path = session.files.get(file_index)?.path.clone();
+    Some((path, line.saturating_sub(1), col))
+}
+
+/// The new-side line number for `row`, or `None` for a deletion-only row,
+/// which has no position in the new file.
+fn review_row_new_line(row: &ReviewRow) -> Option<u32> {
+    match row {
+        ReviewRow::Context { right, .. } => Some(right.line_num),
+        ReviewRow::Changed { right: Some(r), .. } => Some(r.line_num),
+        ReviewRow::Changed { right: None, .. } => None,
     }
 }
 
