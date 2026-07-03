@@ -36,7 +36,8 @@ use crate::{
     pane::{FocusTarget, View},
 };
 use lsp_types::{
-    CompletionParams, PartialResultParams, TextDocumentIdentifier, TextDocumentPositionParams,
+    CompletionContext as LspCompletionContext, CompletionParams, CompletionTriggerKind,
+    PartialResultParams, TextDocumentIdentifier, TextDocumentPositionParams,
     WorkDoneProgressParams,
 };
 use std::{
@@ -160,7 +161,21 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     stoat.last_completion_signature = Some(signature);
 
     let owned = compute_context(&snapshot.rope, snapshot.cursor_offset);
-    let sources = applicable_sources(&owned.as_borrowed());
+
+    let trigger_char = owned.text_before_cursor.chars().last();
+    let is_trigger_char = match (trigger_char, server_trigger_characters(&stoat.lsp_host)) {
+        (Some(ch), Some(triggers)) => triggers.contains(&ch.to_string()),
+        _ => false,
+    };
+
+    let mut sources = applicable_sources(&owned.as_borrowed());
+    if is_trigger_char && !sources.contains(&CompletionSource::Lsp) {
+        let at = sources
+            .iter()
+            .position(|s| matches!(s, CompletionSource::Word))
+            .unwrap_or(sources.len());
+        sources.insert(at, CompletionSource::Lsp);
+    }
     if sources.is_empty() {
         stoat.pending_completion_request = None;
         stoat.pending_completion = None;
@@ -175,6 +190,18 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
 
     let base_dir = base_dir_for(snapshot.source_path.as_deref(), &snapshot.git_root);
 
+    let completion_context = if is_trigger_char {
+        LspCompletionContext {
+            trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+            trigger_character: trigger_char.map(|ch| ch.to_string()),
+        }
+    } else {
+        LspCompletionContext {
+            trigger_kind: CompletionTriggerKind::INVOKED,
+            trigger_character: None,
+        }
+    };
+
     let lsp_params = if sources.contains(&CompletionSource::Lsp)
         && lsp_host.supports_feature(LanguageServerFeature::Completion)
     {
@@ -183,6 +210,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
             &snapshot.rope,
             snapshot.cursor_offset,
             encoding,
+            Some(completion_context),
         )
     } else {
         None
@@ -199,6 +227,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         base_dir,
         home_dir,
         lsp_params,
+        is_trigger_char,
     ));
     stoat.pending_completion_request = Some(task);
 }
@@ -290,11 +319,26 @@ fn base_dir_for(source_path: Option<&Path>, git_root: &Path) -> PathBuf {
         .unwrap_or_else(|| git_root.to_path_buf())
 }
 
+/// The server's completion trigger characters, if it advertises any.
+/// Each is a single character (e.g. `.`, `:`). Typing one fires
+/// completion immediately with
+/// [`CompletionTriggerKind::TRIGGER_CHARACTER`] instead of waiting out
+/// the prefix debounce.
+fn server_trigger_characters(lsp_host: &Arc<dyn LspHost>) -> Option<Vec<String>> {
+    lsp_host
+        .capabilities()
+        .completion_provider
+        .as_ref()?
+        .trigger_characters
+        .clone()
+}
+
 fn build_lsp_params(
     source_path: Option<&Path>,
     rope: &Rope,
     cursor_offset: usize,
     encoding: OffsetEncoding,
+    context: Option<LspCompletionContext>,
 ) -> Option<CompletionParams> {
     let path = source_path?;
     let uri = crate::action_handlers::lsp::path_to_uri(path)?;
@@ -306,7 +350,7 @@ fn build_lsp_params(
         },
         work_done_progress_params: WorkDoneProgressParams::default(),
         partial_result_params: PartialResultParams::default(),
-        context: None,
+        context,
     })
 }
 
@@ -322,8 +366,11 @@ async fn run_request(
     base_dir: PathBuf,
     home_dir: Option<PathBuf>,
     lsp_params: Option<CompletionParams>,
+    immediate: bool,
 ) -> CompletionPopup {
-    executor.timer(COMPLETION_DEBOUNCE).await;
+    if !immediate {
+        executor.timer(COMPLETION_DEBOUNCE).await;
+    }
 
     let ctx = owned.as_borrowed();
     let mut items: Vec<CompletionItem> = Vec::new();
@@ -484,6 +531,16 @@ mod harness_tests {
         });
     }
 
+    fn enable_completion_with_triggers(h: &TestHarness, triggers: &[&str]) {
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            completion_provider: Some(CompletionOptions {
+                trigger_characters: Some(triggers.iter().map(|t| t.to_string()).collect()),
+                ..CompletionOptions::default()
+            }),
+            ..ServerCapabilities::default()
+        });
+    }
+
     fn open_scratch(h: &mut TestHarness, contents: &str) -> PathBuf {
         let path = PathBuf::from("/ws/buf.rs");
         h.fake_fs()
@@ -496,6 +553,62 @@ mod harness_tests {
 
     fn labels(items: &[CompletionItem]) -> Vec<String> {
         items.iter().map(|i| i.label.clone()).collect()
+    }
+
+    #[test]
+    fn trigger_character_fires_immediately_with_context() {
+        let mut h = TestHarness::default();
+        enable_completion_with_triggers(&h, &["."]);
+        open_scratch(&mut h, "");
+
+        h.type_keys("i");
+        h.type_text(".");
+        // A trigger character skips the prefix debounce, so no clock advance.
+        h.settle();
+
+        let observed = h.fake_lsp().observed_completions();
+        assert_eq!(
+            observed.len(),
+            1,
+            "trigger char issues an immediate request"
+        );
+        assert_eq!(
+            observed[0].context,
+            Some(LspCompletionContext {
+                trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+                trigger_character: Some(".".to_string()),
+            }),
+        );
+    }
+
+    #[test]
+    fn plain_letter_keeps_the_debounce_and_sends_invoked() {
+        let mut h = TestHarness::default();
+        enable_completion_with_triggers(&h, &["."]);
+        open_scratch(&mut h, "");
+
+        h.type_keys("i");
+        h.type_text("f");
+        h.settle();
+        assert!(
+            h.fake_lsp().observed_completions().is_empty(),
+            "a plain letter waits out the debounce",
+        );
+
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        let observed = h.fake_lsp().observed_completions();
+        assert_eq!(
+            observed.len(),
+            1,
+            "the request fires after the quiet window"
+        );
+        assert_eq!(
+            observed[0].context,
+            Some(LspCompletionContext {
+                trigger_kind: CompletionTriggerKind::INVOKED,
+                trigger_character: None,
+            }),
+        );
     }
 
     #[test]

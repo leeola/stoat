@@ -586,6 +586,7 @@ struct FakeLspState {
     observed_replies: Vec<(NumberOrString, Result<Value, LspResponseError>)>,
     observed_opens: Vec<DidOpenTextDocumentParams>,
     observed_changes: Vec<DidChangeTextDocumentParams>,
+    observed_completions: Vec<CompletionParams>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     renames: BTreeMap<LspKey, WorkspaceEdit>,
     open_documents: BTreeMap<Uri, String>,
@@ -662,6 +663,7 @@ impl FakeLsp {
                 observed_replies: Vec::new(),
                 observed_opens: Vec::new(),
                 observed_changes: Vec::new(),
+                observed_completions: Vec::new(),
                 prepare_renames: BTreeMap::new(),
                 renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
@@ -1017,6 +1019,13 @@ impl FakeLsp {
     /// quiet window with the latest text and a monotonic version.
     pub fn observed_changes(&self) -> Vec<DidChangeTextDocumentParams> {
         self.state.lock().unwrap().observed_changes.clone()
+    }
+
+    /// Snapshot of every [`CompletionParams`] received via
+    /// [`LspHost::completion`] in call order. Tests assert the trigger
+    /// context and that a request fired at the expected time.
+    pub fn observed_completions(&self) -> Vec<CompletionParams> {
+        self.state.lock().unwrap().observed_completions.clone()
     }
 
     /// Snapshot of every [`DidChangeWatchedFilesParams`] received
@@ -1979,11 +1988,12 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::Completion, params);
-        let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position.text_document.uri,
             &params.text_document_position.position,
         );
+        let mut state = self.state.lock().unwrap();
+        state.observed_completions.push(params);
         Ok(state.completions.get(&key).map(|items| {
             CompletionResponse::List(CompletionList {
                 is_incomplete: false,
