@@ -234,6 +234,16 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     let mut paired_rhs: HashSet<FileNode> = HashSet::new();
     let mut records: Vec<ChangesetMoveRecord> = Vec::new();
 
+    // A duplication copies a source that itself stays in place, so its
+    // Unchanged original and Unchanged in-place twin must not be rewritten
+    // to Moved even though they are paired (the pairing exists so records
+    // carry provenance for the new copies). Marking them would render a
+    // phantom change at an untouched location. Only the 1:N duplication
+    // shape fills these. A consolidation or plain move still marks its
+    // Unchanged nodes as before.
+    let mut stay_lhs: HashSet<FileNode> = HashSet::new();
+    let mut stay_rhs: HashSet<FileNode> = HashSet::new();
+
     for (cid, _, _) in &shared {
         let lhs_cand = lhs_by_cid.get(cid).expect("cid in shared set");
         let rhs_cand = rhs_by_cid.get(cid).expect("cid in shared set");
@@ -260,6 +270,16 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
             continue;
         }
 
+        if lhs_avail.len() == 1 && rhs_avail.len() > 1 {
+            record_duplication_stays(
+                files,
+                lhs_avail[0],
+                &rhs_avail,
+                &mut stay_lhs,
+                &mut stay_rhs,
+            );
+        }
+
         emit_records_multi(
             files,
             &lhs_avail,
@@ -271,10 +291,16 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     }
 
     for (fi, id) in &paired_lhs {
+        if stay_lhs.contains(&(*fi, *id)) {
+            continue;
+        }
         let f = &mut files[*fi];
         mark_subtree_moved(f.lhs_arena, *id, f.lhs_changes);
     }
     for (fi, id) in &paired_rhs {
+        if stay_rhs.contains(&(*fi, *id)) {
+            continue;
+        }
         let f = &mut files[*fi];
         mark_subtree_moved(f.rhs_arena, *id, f.rhs_changes);
     }
@@ -341,6 +367,30 @@ fn filter_unpaired_multi(
             !paired.contains(&(*fi, *id)) && !ancestor_in_set_multi(parents_per, *fi, *id, paired)
         })
         .collect()
+}
+
+/// Record the participants of a 1:N duplication that stayed in place. When
+/// the single LHS source is `Unchanged`, it was copied rather than moved,
+/// so neither it nor any `Unchanged` in-place twin among the targets may be
+/// rewritten to `Moved`. Doing so would render a phantom change at an
+/// untouched location. The `Pending` targets are the genuine new copies and
+/// are left for the marking pass to handle.
+fn record_duplication_stays(
+    files: &[FileMoveInput<'_>],
+    src: FileNode,
+    targets: &[FileNode],
+    stay_lhs: &mut HashSet<FileNode>,
+    stay_rhs: &mut HashSet<FileNode>,
+) {
+    if files[src.0].lhs_changes.get(src.1) != ChangeKind::Unchanged {
+        return;
+    }
+    stay_lhs.insert(src);
+    for &target in targets {
+        if files[target.0].rhs_changes.get(target.1) == ChangeKind::Unchanged {
+            stay_rhs.insert(target);
+        }
+    }
 }
 
 fn emit_records_multi(
@@ -714,6 +764,51 @@ mod tests {
             "both duplication targets share the LHS source"
         );
         assert!(contains_text(&lhs_arena, src_a, lhs, "render_widget"));
+    }
+
+    #[test]
+    fn duplicate_of_unchanged_statement_leaves_original() {
+        // fn a is byte-identical on both sides; fn b gains a copy of a's
+        // body. The duplication legitimately produces a record for every
+        // RHS copy, but only the new copy in fn b may be marked Moved.
+        // Rewriting the untouched original or its twin would render a
+        // phantom change where nothing moved.
+        let lhs = "fn a() { let x = make_thing(1, 2); }\nfn b() {}";
+        let rhs = "fn a() { let x = make_thing(1, 2); }\n\
+                   fn b() { let x = make_thing(1, 2); }";
+        let (_, rhs_arena, _, _, pre, records) = find_moves_in(lhs, rhs);
+
+        let mut targets: Vec<SyntaxId> = records
+            .iter()
+            .map(|r| r.rhs_target)
+            .filter(|t| contains_text(&rhs_arena, *t, rhs, "make_thing"))
+            .collect();
+        targets.sort_by_key(|t| full_byte_range(&rhs_arena, *t).start);
+        assert_eq!(
+            targets.len(),
+            2,
+            "one record per RHS copy of the duplicated body; got {records:?}"
+        );
+        let (twin, new_copy) = (targets[0], targets[1]);
+
+        let original = records
+            .iter()
+            .find(|r| r.rhs_target == new_copy)
+            .and_then(|r| r.lhs_sources.first().copied())
+            .expect("the new copy's record names the LHS original");
+
+        assert!(
+            is_moved(&pre.rhs_changes, new_copy),
+            "the new copy in fn b is the move destination"
+        );
+        assert!(
+            !is_moved(&pre.lhs_changes, original),
+            "the untouched LHS original must stay unchanged, not Moved"
+        );
+        assert!(
+            !is_moved(&pre.rhs_changes, twin),
+            "the unchanged RHS twin in fn a must stay unchanged, not Moved"
+        );
     }
 
     #[test]

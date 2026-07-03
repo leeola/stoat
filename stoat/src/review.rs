@@ -670,6 +670,43 @@ mod tests {
     }
 
     #[test]
+    fn duplicated_statement_leaves_untouched_file_clean() {
+        use stoat_language::LanguageRegistry;
+        let unchanged = "fn a() {\n    let x = make_thing(1, 2);\n}\n";
+        let b_base = "fn b() {\n}\n";
+        let b_buffer = "fn b() {\n    let x = make_thing(1, 2);\n}\n";
+        let inputs = vec![
+            ReviewFileInput {
+                path: PathBuf::from("a.rs"),
+                rel_path: "a.rs".to_string(),
+                language: LanguageRegistry::standard().for_path(Path::new("a.rs")),
+                base_text: Arc::new(unchanged.to_string()),
+                buffer_text: Arc::new(unchanged.to_string()),
+            },
+            ReviewFileInput {
+                path: PathBuf::from("b.rs"),
+                rel_path: "b.rs".to_string(),
+                language: LanguageRegistry::standard().for_path(Path::new("b.rs")),
+                base_text: Arc::new(b_base.to_string()),
+                buffer_text: Arc::new(b_buffer.to_string()),
+            },
+        ];
+
+        let per_file = extract_review_hunks_changeset(&inputs, 3);
+
+        assert!(
+            per_file[0].is_empty(),
+            "the untouched file gets no hunks even when its body is copied \
+             elsewhere; got {:?}",
+            per_file[0]
+        );
+        assert!(
+            !per_file[1].is_empty(),
+            "the file that gained the copy shows a real change"
+        );
+    }
+
+    #[test]
     fn no_changes() {
         assert!(hunks("a\nb\nc\n", "a\nb\nc\n", 3).is_empty());
     }
