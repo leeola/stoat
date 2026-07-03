@@ -14,9 +14,26 @@
 
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer::BufferId,
+    completion::CompletionItem,
     pane::{FocusTarget, View},
 };
+use std::{
+    future::Future,
+    path::Path,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 use stoat_text::Bias;
+
+/// The `additionalTextEdits` a `completionItem/resolve` returned for an
+/// accepted completion, plus the buffer they apply to. Carried from the
+/// accept resolve task to [`pump_completion_accept`].
+pub(crate) struct AcceptedImports {
+    buffer_id: BufferId,
+    edits: Vec<lsp_types::TextEdit>,
+}
 
 /// Accept the highlighted item in [`Stoat::pending_completion`]. No-op
 /// when the popup is not showing, the focused pane is not an editor,
@@ -96,7 +113,99 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     crate::completion::request::record_dismiss(stoat);
     stoat.active_snippet = active_snippet;
 
+    apply_or_resolve_additional_edits(stoat, buffer_id, &item);
+
     UpdateEffect::Redraw
+}
+
+/// Apply the accepted item's `additionalTextEdits` -- typically the
+/// imports rust-analyzer adds when a completion needs one.
+///
+/// Applies them synchronously when the item already carries them.
+/// Otherwise, for an LSP item whose server advertises `resolveProvider`,
+/// resolves the item with a 300ms timeout and applies the edits from
+/// [`pump_completion_accept`] once it lands. The main edit has already
+/// been applied by [`execute`], so a resolve failure or timeout simply
+/// leaves it as the only edit. Non-LSP items do nothing.
+fn apply_or_resolve_additional_edits(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    item: &CompletionItem,
+) {
+    let Some(lsp_item) = &item.lsp_item else {
+        return;
+    };
+    if let Some(edits) = lsp_item.additional_text_edits.clone()
+        && !edits.is_empty()
+    {
+        apply_additional_edits(stoat, buffer_id, edits);
+        return;
+    }
+    if !resolve_advertised(stoat) {
+        return;
+    }
+
+    let raw = (**lsp_item).clone();
+    let lsp = stoat.lsp_host.clone();
+    let executor = stoat.executor.clone();
+    let task = stoat.executor.spawn(async move {
+        let resolve = std::pin::pin!(lsp.completion_resolve(raw));
+        let timer = std::pin::pin!(executor.timer(Duration::from_millis(300)));
+        let resolved = match futures::future::select(resolve, timer).await {
+            futures::future::Either::Left((Ok(item), _)) => item,
+            _ => return None,
+        };
+        let edits = resolved.additional_text_edits?;
+        (!edits.is_empty()).then_some(AcceptedImports { buffer_id, edits })
+    });
+    stoat.pending_completion_accept = Some(task);
+}
+
+fn resolve_advertised(stoat: &Stoat) -> bool {
+    stoat
+        .lsp_host
+        .capabilities()
+        .completion_provider
+        .as_ref()
+        .and_then(|opts| opts.resolve_provider)
+        .unwrap_or(false)
+}
+
+fn apply_additional_edits(stoat: &mut Stoat, buffer_id: BufferId, edits: Vec<lsp_types::TextEdit>) {
+    let Some(path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return;
+    };
+    if let Err(err) = crate::lsp::edit_apply::apply_text_edits_to_buffer(stoat, &path, edits) {
+        tracing::warn!(target: "stoat::lsp", ?err, "additionalTextEdits apply failed");
+    }
+}
+
+/// Poll the in-flight accept-resolve task. On completion, apply the
+/// resolved `additionalTextEdits` to the captured buffer. The placed
+/// cursor rides edit-tracking anchors, so imports inserted above it keep
+/// it correct. Returns `true` when the buffer changed.
+pub(crate) fn pump_completion_accept(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_completion_accept.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(imports)) => {
+            apply_additional_edits(stoat, imports.buffer_id, imports.edits);
+            true
+        },
+        Poll::Ready(None) => false,
+        Poll::Pending => {
+            stoat.pending_completion_accept = Some(task);
+            false
+        },
+    }
 }
 
 #[cfg(test)]
@@ -120,7 +229,7 @@ mod tests {
         path
     }
 
-    fn buffer_text(h: &TestHarness, path: &std::path::Path) -> String {
+    fn buffer_text(h: &TestHarness, path: &Path) -> String {
         let ws = h.stoat.active_workspace();
         let id = ws.buffers.id_for_path(path).expect("buffer registered");
         let buf = ws.buffers.get(id).expect("buffer present");
@@ -407,5 +516,125 @@ mod tests {
 
         assert_eq!(buffer_text(&h, &path), "foobar");
         assert!(h.stoat.active_snippet.is_none());
+    }
+
+    fn enable_resolve(h: &TestHarness) {
+        use lsp_types::{CompletionOptions, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            completion_provider: Some(CompletionOptions {
+                resolve_provider: Some(true),
+                ..CompletionOptions::default()
+            }),
+            ..ServerCapabilities::default()
+        });
+    }
+
+    fn lsp_row(label: &str, range: std::ops::Range<usize>) -> CompletionItem {
+        CompletionItem {
+            label: label.into(),
+            source: CompletionSource::Lsp,
+            kind: None,
+            detail: None,
+            replace_range: range,
+            insert_text: label.into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: Some(Box::new(lsp_types::CompletionItem {
+                label: label.into(),
+                ..Default::default()
+            })),
+        }
+    }
+
+    fn resolved_with_import(label: &str, text: &str) -> lsp_types::CompletionItem {
+        lsp_types::CompletionItem {
+            label: label.into(),
+            additional_text_edits: Some(vec![lsp_types::TextEdit {
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(0, 0),
+                    lsp_types::Position::new(0, 0),
+                ),
+                new_text: text.into(),
+            }]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn accept_resolves_and_applies_additional_text_edits() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "");
+        enable_resolve(&h);
+        h.fake_lsp()
+            .set_completion_resolve("barbaz", resolved_with_import("barbaz", "use foo;\n"));
+        h.type_keys("i");
+        h.type_text("bar");
+        install_popup(&mut h, vec![lsp_row("barbaz", 0..3)], 0..3);
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+        assert_eq!(
+            buffer_text(&h, &path),
+            "barbaz",
+            "the main edit lands at once"
+        );
+        h.settle();
+
+        assert_eq!(
+            buffer_text(&h, &path),
+            "use foo;\nbarbaz",
+            "the resolved import is applied above the completion",
+        );
+    }
+
+    #[test]
+    fn accept_resolve_timeout_leaves_the_main_edit_alone() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "");
+        enable_resolve(&h);
+        h.fake_lsp()
+            .set_request_delay("completionItem/resolve", Duration::from_millis(400));
+        h.fake_lsp()
+            .set_completion_resolve("barbaz", resolved_with_import("barbaz", "use foo;\n"));
+        h.type_keys("i");
+        h.type_text("bar");
+        install_popup(&mut h, vec![lsp_row("barbaz", 0..3)], 0..3);
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+        // The resolve is delayed past the 300ms timeout, which fires first.
+        h.advance_clock(Duration::from_millis(300));
+
+        assert_eq!(buffer_text(&h, &path), "barbaz");
+    }
+
+    #[test]
+    fn word_accept_arms_no_resolve() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "");
+        enable_resolve(&h);
+        h.type_keys("i");
+        h.type_text("foo");
+        install_popup(
+            &mut h,
+            vec![CompletionItem {
+                label: "foobar".into(),
+                source: CompletionSource::Word,
+                kind: None,
+                detail: None,
+                replace_range: 0..3,
+                insert_text: "foobar".into(),
+                is_snippet: false,
+                documentation: None,
+                lsp_item: None,
+            }],
+            0..3,
+        );
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        assert_eq!(buffer_text(&h, &path), "foobar");
+        assert!(
+            h.stoat.pending_completion_accept.is_none(),
+            "a word accept issues no resolve",
+        );
     }
 }

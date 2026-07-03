@@ -613,6 +613,14 @@ pub struct Stoat {
     pub(crate) pending_completion_resolve:
         Option<stoat_scheduler::Task<Option<action_handlers::completion::ResolvedCompletion>>>,
 
+    /// In-flight `completionItem/resolve` fired when an LSP completion is
+    /// accepted, resolving its `additionalTextEdits` (imports) under a
+    /// 300ms timeout. Polled by
+    /// [`crate::completion::accept::pump_completion_accept`], which
+    /// applies the resolved edits to the captured buffer.
+    pub(crate) pending_completion_accept:
+        Option<stoat_scheduler::Task<Option<crate::completion::accept::AcceptedImports>>>,
+
     /// Buffer signature `(BufferId, version)` recorded at the most
     /// recent completion-trigger call. The trigger pipeline returns
     /// early when this matches the focused buffer's current
@@ -870,6 +878,7 @@ impl Stoat {
             pending_completion: None,
             pending_completion_request: None,
             pending_completion_resolve: None,
+            pending_completion_accept: None,
             last_completion_signature: None,
             active_snippet: None,
             version_info: "unknown",
@@ -4409,6 +4418,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_format(self);
         crate::completion::request::pump(self);
         action_handlers::completion::pump_completion_resolve(self);
+        crate::completion::accept::pump_completion_accept(self);
     }
 
     fn dispatch_workspace_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {

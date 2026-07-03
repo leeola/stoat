@@ -544,6 +544,8 @@ impl TestHarness {
             let completion = crate::completion::request::pump(&mut self.stoat);
             let completion_resolve =
                 crate::action_handlers::completion::pump_completion_resolve(&mut self.stoat);
+            let completion_accept =
+                crate::completion::accept::pump_completion_accept(&mut self.stoat);
             let external_edits = self.stoat.drain_pending_external_edits();
             let git_refresh = self.stoat.drain_pending_git_refresh();
             if !commits
@@ -559,6 +561,7 @@ impl TestHarness {
                 && !lsp_format
                 && !completion
                 && !completion_resolve
+                && !completion_accept
                 && !external_edits
                 && !git_refresh
             {

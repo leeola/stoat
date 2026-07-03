@@ -179,7 +179,11 @@ fn uri_to_path(uri: &Uri) -> Result<PathBuf, WorkspaceEditError> {
     Ok(PathBuf::from(uri.path().as_str()))
 }
 
-fn apply_text_edits_to_buffer(
+/// Apply a set of LSP [`TextEdit`]s to the buffer for `path`, opening it
+/// if needed. Edits are sorted descending and applied right-to-left so
+/// earlier ranges keep their offsets, converting each range against the
+/// live rope. The spec guarantees the edits do not overlap.
+pub(crate) fn apply_text_edits_to_buffer(
     stoat: &mut Stoat,
     path: &Path,
     edits: Vec<TextEdit>,
