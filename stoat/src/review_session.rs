@@ -94,7 +94,6 @@ pub(crate) struct ReviewChunk {
     /// 0-based half-open row range in the buffer (RHS) text. Empty for
     /// pure-deletion chunks; callers scrolling to a chunk should fall
     /// back to `base_line_range` in that case.
-    #[allow(dead_code)]
     pub buffer_line_range: Range<u32>,
     /// 0-based half-open row range in the base (LHS) text.
     pub base_line_range: Range<u32>,
@@ -1013,7 +1012,7 @@ mod tests {
 
     #[test]
     fn snapshot_review_progress_footer() {
-        let mut h = TestHarness::with_size(120, 30);
+        let mut h = TestHarness::with_size(120, 32);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("s n");
         h.assert_snapshot("review_progress_footer");
@@ -1021,7 +1020,7 @@ mod tests {
 
     #[test]
     fn snapshot_review_complete_state() {
-        let mut h = TestHarness::with_size(120, 30);
+        let mut h = TestHarness::with_size(120, 32);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("s n s");
         h.assert_snapshot("review_complete_state");

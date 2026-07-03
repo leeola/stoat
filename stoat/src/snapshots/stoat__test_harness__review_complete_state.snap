@@ -5,7 +5,7 @@ expression: text
 actions: s
 focused: #1 of 1
 mode: review
-size: 120x30
+size: 120x32
 ---
 [0m[32m+[0m[90m   3 [0m[97mc[0m                                                    [0m[90m│[0m[32m+[0m[90m   3 [0m[97mc[0m
 [0m[32m+[0m[90m   4 [0m[97md[0m                                                    [0m[90m│[0m[32m+[0m[90m  [0m[33m┌ review ───────────────────────────────────────────────┐[0m
@@ -14,6 +14,8 @@ size: 120x30
 [0m[1m[36m│[0m[90m  18 [0m[97mr[0m                                                    [0m[90m│[0m[1m[36m│[0m[90m  [0m[33m│[0m[36m     Tab[0m[97m   toggle between the diff and the plain file[0m  [0m[33m│[0m
 [0m[1m[36m│[0m[90m  19 [0m[97ms[0m                                                    [0m[90m│[0m[1m[36m│[0m[90m  [0m[33m│[0m[36m       n[0m[97m   advance to the next review chunk[0m            [0m[33m│[0m
 [0m[1m[36m│[0m[90m  20 [0m[31mt[0m                                                    [0m[90m│[0m[1m[36m│[0m[90m  [0m[33m│[0m[36m       p[0m[97m   step back to the previous review chunk[0m      [0m[33m│[0m
+                                                               [0m[33m│[0m[36m       m[0m[97m   jump to the source of a moved hunk[0m          [0m[33m│[0m
+                                                               [0m[33m│[0m[36m       M[0m[97m   jump to the target of a moved hunk[0m          [0m[33m│[0m
                                                                [0m[33m│[0m[36m       h[0m[97m   move cursor left[0m                            [0m[33m│[0m
                                                                [0m[33m│[0m[36m       j[0m[97m   move cursor down[0m                            [0m[33m│[0m
                                                                [0m[33m│[0m[36m       k[0m[97m   move cursor up[0m                              [0m[33m│[0m

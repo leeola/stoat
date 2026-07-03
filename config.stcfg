@@ -427,6 +427,8 @@ on key {
         Tab -> ToggleDiff();
         n -> ReviewNextChunk();
         p -> ReviewPrevChunk();
+        m -> JumpToMoveSource();
+        M -> JumpToMoveTarget();
         h -> MoveLeft();
         j -> MoveDown();
         k -> MoveUp();

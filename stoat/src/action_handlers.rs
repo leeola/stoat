@@ -440,9 +440,19 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ToggleDockRight => pane::toggle_dock(stoat, DockSide::Right),
         ActionKind::ToggleDockLeft => pane::toggle_dock(stoat, DockSide::Left),
         ActionKind::JumpToMoveSource => {
-            movement::move_nav(stoat, movement::MoveNavigation::FirstSource)
+            if focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some()) {
+                review::jump_to_move(stoat, review::MoveJumpDir::Source)
+            } else {
+                movement::move_nav(stoat, movement::MoveNavigation::FirstSource)
+            }
         },
-        ActionKind::JumpToMoveTarget => movement::move_nav(stoat, movement::MoveNavigation::Target),
+        ActionKind::JumpToMoveTarget => {
+            if focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some()) {
+                review::jump_to_move(stoat, review::MoveJumpDir::Target)
+            } else {
+                movement::move_nav(stoat, movement::MoveNavigation::Target)
+            }
+        },
         ActionKind::JumpToNextMoveSource => {
             movement::move_nav(stoat, movement::MoveNavigation::NextSource)
         },

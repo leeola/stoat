@@ -5,7 +5,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost, WatchToken},
     pane::View,
-    review::{self, ReviewFileInput, ReviewHunk, ReviewRow},
+    review::{self, MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
@@ -1170,6 +1170,124 @@ fn review_row_new_line(row: &ReviewRow) -> Option<u32> {
     }
 }
 
+/// Which counterpart of a moved hunk a jump follows.
+#[derive(Copy, Clone, Debug)]
+pub(super) enum MoveJumpDir {
+    /// Jump to the moved content's source, recorded on the added (right)
+    /// side of the row under the cursor. Bound to `m`.
+    Source,
+    /// Jump to the moved content's destination, recorded on the deleted
+    /// (left) side of the row under the cursor. Bound to `M`.
+    Target,
+}
+
+/// Jump the review cursor from a moved hunk to its cross-file counterpart.
+///
+/// Reads the [`MoveProvenance`] on the side of the cursor's row selected by
+/// `dir`, resolves the referenced file and chunk within this session, and
+/// moves the cursor and scroll there. The review flattens every file into
+/// one editor, so this is an in-editor move rather than a file open.
+///
+/// When the referenced file has no changes in this diff -- its content only
+/// exists at HEAD, so it is not one of the session's files -- emits a "move
+/// origin not in this diff" badge instead of jumping. A no-op when the cursor
+/// is not on a row with provenance on the selected side (including every
+/// intra-file move, whose provenance is not recorded yet).
+pub(super) fn jump_to_move(stoat: &mut Stoat, dir: MoveJumpDir) -> UpdateEffect {
+    let Some(prov) = cursor_move_provenance(stoat, dir) else {
+        return UpdateEffect::None;
+    };
+
+    let target = {
+        let ws = stoat.active_workspace();
+        let Some(session) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        session
+            .files
+            .iter()
+            .position(|f| f.rel_path == prov.rel_path)
+            .and_then(|file_index| chunk_for_line(session, file_index, prov.line))
+    };
+
+    let Some(chunk_id) = target else {
+        emit_review_info_badge(stoat, "move origin not in this diff");
+        return UpdateEffect::Redraw;
+    };
+
+    let ws = stoat.active_workspace_mut();
+    let editor_id = ws.review.as_ref().and_then(|s| s.view_editor);
+    if let Some(session) = ws.review.as_mut() {
+        session.cursor.current = Some(chunk_id);
+        session.version += 1;
+    }
+    move_review_cursor_to_chunk(ws, editor_id, Some(chunk_id));
+    sync_review_view_and_scroll(ws, editor_id, Some(chunk_id));
+    UpdateEffect::Redraw
+}
+
+/// The [`MoveProvenance`] on the cursor row's side selected by `dir`, or
+/// `None` when the focused editor is not a review editor or the row carries
+/// no provenance on that side.
+fn cursor_move_provenance(stoat: &mut Stoat, dir: MoveJumpDir) -> Option<MoveProvenance> {
+    let ws = stoat.active_workspace_mut();
+    let editor_id = ws.review.as_ref()?.view_editor?;
+
+    let buffer_row = {
+        let editor = ws.editors.get_mut(editor_id)?;
+        editor.review_view.as_ref()?;
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buffer_snapshot.resolve_anchor(&head);
+        buffer_snapshot.rope().offset_to_point(offset).row
+    };
+
+    let view = ws.editors.get(editor_id)?.review_view.as_ref()?;
+    let row = view.rows.get(buffer_row as usize)?;
+    row_move_provenance(row, dir).cloned()
+}
+
+/// The [`MoveProvenance`] on the row side selected by `dir`: the added
+/// (right) side for [`MoveJumpDir::Source`], the deleted (left) side for
+/// [`MoveJumpDir::Target`].
+fn row_move_provenance(row: &ReviewRow, dir: MoveJumpDir) -> Option<&MoveProvenance> {
+    let side = match dir {
+        MoveJumpDir::Source => match row {
+            ReviewRow::Context { right, .. } => Some(right),
+            ReviewRow::Changed { right: Some(r), .. } => Some(r),
+            ReviewRow::Changed { right: None, .. } => None,
+        },
+        MoveJumpDir::Target => match row {
+            ReviewRow::Context { left, .. } => Some(left),
+            ReviewRow::Changed { left: Some(l), .. } => Some(l),
+            ReviewRow::Changed { left: None, .. } => None,
+        },
+    };
+    side?.move_provenance.as_ref()
+}
+
+/// The chunk in `file_index` whose base or buffer line range contains `line`.
+///
+/// A move provenance line is a source line (base coordinates) for a deletion
+/// and a target line (buffer coordinates) for an addition, and the side is
+/// not preserved on [`MoveProvenance`], so both ranges are checked.
+fn chunk_for_line(
+    session: &ReviewSession,
+    file_index: usize,
+    line: u32,
+) -> Option<crate::review_session::ReviewChunkId> {
+    let file = session.files.get(file_index)?;
+    file.chunks
+        .iter()
+        .find(|id| {
+            session.chunks.get(id).is_some_and(|c| {
+                c.base_line_range.contains(&line) || c.buffer_line_range.contains(&line)
+            })
+        })
+        .copied()
+}
+
 /// Swap the parked review editor back into the focused pane, positioning it
 /// on the chunk the plain-file cursor sits in.
 ///
@@ -2199,6 +2317,132 @@ mod tests {
             "re-entry swaps the parked editor back rather than arming a scan",
         );
         assert!(!h.with_review(|s| s.toggled_off));
+    }
+
+    /// Open a two-file review where `migrated` moves from a.rs's base to
+    /// b.rs's rhs, producing a cross-file move on both files.
+    fn open_cross_file_move_review(h: &mut TestHarness) {
+        let a_base = "fn migrated() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n\nfn stays_a() {\n    call_a();\n}\n";
+        let a_rhs = "fn stays_a() {\n    call_a();\n}\n";
+        let b_base = "fn stays_b() {\n    call_b();\n}\n";
+        let b_rhs = "fn stays_b() {\n    call_b();\n}\n\nfn migrated() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
+        h.open_review_from_texts(&[("a.rs", a_base, a_rhs), ("b.rs", b_base, b_rhs)]);
+    }
+
+    /// Move the review cursor to `buffer_row`.
+    fn set_review_cursor(h: &mut TestHarness, buffer_row: u32) {
+        let editor_id = h.with_review(|s| s.view_editor).expect("review editor");
+        let ws = h.stoat.active_workspace_mut();
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, buffer_row);
+    }
+
+    /// The buffer row of the first row whose right (`want_right`) or left side
+    /// carries move provenance.
+    fn moved_row(h: &TestHarness, want_right: bool) -> u32 {
+        use crate::review::ReviewRow;
+        let editor_id = h.with_review(|s| s.view_editor).expect("review editor");
+        let ws = h.stoat.active_workspace();
+        let view = ws
+            .editors
+            .get(editor_id)
+            .expect("editor")
+            .review_view
+            .as_ref()
+            .expect("review view");
+        view.rows
+            .iter()
+            .position(|r| {
+                let side = match (want_right, r) {
+                    (true, ReviewRow::Changed { right: Some(s), .. }) => Some(s),
+                    (false, ReviewRow::Changed { left: Some(s), .. }) => Some(s),
+                    _ => None,
+                };
+                side.is_some_and(|s| s.move_provenance.is_some())
+            })
+            .expect("a moved row") as u32
+    }
+
+    /// The file index of the chunk currently under the review cursor.
+    fn current_chunk_file(h: &TestHarness) -> usize {
+        h.with_review(|s| {
+            let id = s.cursor.current.expect("current chunk");
+            s.chunks.get(&id).expect("chunk").file_index
+        })
+    }
+
+    #[test]
+    fn move_jump_source_and_target_round_trip() {
+        let mut h = TestHarness::with_size(120, 32);
+        open_cross_file_move_review(&mut h);
+
+        // Cursor on b.rs's added `migrated` (right-side provenance -> a.rs).
+        let dest_row = moved_row(&h, true);
+        set_review_cursor(&mut h, dest_row);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpToMoveSource);
+        assert_eq!(
+            current_chunk_file(&h),
+            0,
+            "m lands on the source file (a.rs) chunk",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpToMoveTarget);
+        assert_eq!(
+            current_chunk_file(&h),
+            1,
+            "M jumps back to the destination file (b.rs) chunk",
+        );
+    }
+
+    #[test]
+    fn move_jump_to_missing_origin_emits_a_badge() {
+        use crate::{
+            badge::{BadgeSource, BadgeState},
+            review::{MoveProvenance, ReviewRow},
+        };
+
+        let mut h = TestHarness::with_size(120, 32);
+        open_cross_file_move_review(&mut h);
+
+        // Repoint a moved row's provenance at a file not in this review.
+        let ghost_row = {
+            let editor_id = h.with_review(|s| s.view_editor).expect("review editor");
+            let ws = h.stoat.active_workspace_mut();
+            let view = ws
+                .editors
+                .get_mut(editor_id)
+                .expect("editor")
+                .review_view
+                .as_mut()
+                .expect("review view");
+            let mut found = None;
+            for (i, row) in view.rows.iter_mut().enumerate() {
+                if let ReviewRow::Changed { right: Some(s), .. } = row
+                    && s.move_provenance.is_some()
+                {
+                    s.move_provenance = Some(MoveProvenance {
+                        rel_path: "ghost.rs".to_string(),
+                        line: 0,
+                    });
+                    found = Some(i as u32);
+                    break;
+                }
+            }
+            found.expect("a moved row")
+        };
+        set_review_cursor(&mut h, ghost_row);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpToMoveSource);
+
+        let ws = h.stoat.active_workspace();
+        let badge_id = ws
+            .badges
+            .find_by_source(BadgeSource::Review)
+            .expect("a badge is shown when the origin is not in the diff");
+        let badge = ws.badges.get(badge_id).expect("badge");
+        assert_eq!(badge.label, "move origin not in this diff");
+        assert_eq!(badge.state, BadgeState::Active);
     }
 
     #[test]
