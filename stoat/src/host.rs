@@ -30,7 +30,7 @@ pub use git::{
     ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
     RebaseTodoOp, RewriteResult,
 };
-pub use local::{LocalClipboard, LocalGit, LocalTerminalHost};
+pub use local::{LocalClipboard, LocalGit, LocalLsp, LocalTerminalHost};
 pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
 #[cfg(test)]
 pub use stoat_host::FakeShell;
