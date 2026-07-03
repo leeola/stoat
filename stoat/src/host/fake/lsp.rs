@@ -1531,6 +1531,28 @@ impl FakeLsp {
         );
     }
 
+    /// Seed a definition response with multiple targets, so a goto at
+    /// `(path, line, col)` returns a `GotoDefinitionResponse::Array`.
+    /// Each `targets` tuple is `(target_path, target_line, target_col)`.
+    pub fn set_definitions(&self, path: &str, line: u32, col: u32, targets: &[(&str, u32, u32)]) {
+        let locations = targets
+            .iter()
+            .map(|(target_path, target_line, target_col)| {
+                Location::new(
+                    file_uri(target_path),
+                    Range::new(
+                        Position::new(*target_line, *target_col),
+                        Position::new(*target_line, *target_col),
+                    ),
+                )
+            })
+            .collect();
+        self.state.lock().unwrap().definitions.insert(
+            LspKey::new(path, line, col),
+            GotoDefinitionResponse::Array(locations),
+        );
+    }
+
     pub fn set_declaration(
         &self,
         path: &str,

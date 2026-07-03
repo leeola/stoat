@@ -13,6 +13,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     host::{LanguageServerFeature, LocalLsp, LspHost, OffsetEncoding},
+    location_picker::{LocationEntry, LocationPicker},
 };
 use codegraph::SymbolKey;
 pub(crate) use lsp_types::Uri;
@@ -449,17 +450,6 @@ fn resolve_sync_kind(cap: &Option<TextDocumentSyncCapability>) -> TextDocumentSy
     }
 }
 
-/// Resolved target of an in-flight `textDocument/definition` request.
-/// `path` is an absolute filesystem path (file-scheme URIs only;
-/// non-`file:` responses are dropped because stoat has no remote-buffer
-/// concept). `offset` is a byte offset into that file's rope after
-/// applying the host's negotiated [`OffsetEncoding`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct JumpTarget {
-    pub(crate) path: PathBuf,
-    pub(crate) offset: usize,
-}
-
 /// Discriminator for the goto-style LSP requests that all return
 /// `Option<GotoDefinitionResponse>` (a single Location or list of
 /// candidates) and feed the same `Stoat::pending_lsp_jump` slot.
@@ -614,7 +604,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
         };
         let response = match result {
             Ok(Some(resp)) => resp,
-            Ok(None) => return None,
+            Ok(None) => return Vec::new(),
             Err(err) => {
                 tracing::warn!(
                     target: "stoat::lsp",
@@ -622,66 +612,106 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
                     ?err,
                     "lsp jump request failed",
                 );
-                return None;
+                return Vec::new();
             },
         };
-        resolve_goto_target(response, &source_path, &source_rope, encoding, &*fs)
+        resolve_goto_targets(response, &source_path, &source_rope, encoding, &*fs)
     });
     stoat.pending_lsp_jump = Some(task);
     UpdateEffect::None
 }
 
-/// Translate a `GotoDefinitionResponse` into a [`JumpTarget`]. The
-/// first candidate is taken across all variants; multi-candidate
-/// disambiguation (Helix's picker) is a separate concern. Same-file
-/// targets reuse the supplied source rope; cross-file targets read the
-/// destination through the supplied [`crate::host::FsHost`] so a
-/// closed buffer can still be resolved without round-tripping through
-/// `Stoat`.
-fn resolve_goto_target(
+/// Resolve every candidate in a `GotoDefinitionResponse` into a
+/// [`LocationEntry`]. A single-target response yields one entry (the
+/// caller jumps directly); a multi-target response yields several (the
+/// caller opens a picker). Candidates whose URI is not a `file:` path,
+/// or whose target file cannot be read, are dropped rather than
+/// aborting the whole batch, so one bad location does not sink the rest.
+///
+/// Same-file targets reuse the supplied source rope. Cross-file targets
+/// read the destination through the supplied [`crate::host::FsHost`] so
+/// a closed buffer still resolves without round-tripping through
+/// `Stoat`. Each entry carries the byte offset after applying the
+/// host's negotiated [`OffsetEncoding`], the 1-based line and column,
+/// and the trimmed text of the target line for display.
+fn resolve_goto_targets(
     response: GotoDefinitionResponse,
     source_path: &Path,
     source_rope: &Rope,
     encoding: OffsetEncoding,
     fs: &dyn crate::host::FsHost,
-) -> Option<JumpTarget> {
-    let (uri, position) = match response {
-        GotoDefinitionResponse::Scalar(loc) => (loc.uri, loc.range.start),
-        GotoDefinitionResponse::Array(locs) => {
-            let loc = locs.into_iter().next()?;
-            (loc.uri, loc.range.start)
-        },
-        GotoDefinitionResponse::Link(links) => {
-            let link = links.into_iter().next()?;
-            (link.target_uri, link.target_range.start)
-        },
+) -> Vec<LocationEntry> {
+    let candidates: Vec<(Uri, Position)> = match response {
+        GotoDefinitionResponse::Scalar(loc) => vec![(loc.uri, loc.range.start)],
+        GotoDefinitionResponse::Array(locs) => locs
+            .into_iter()
+            .map(|loc| (loc.uri, loc.range.start))
+            .collect(),
+        GotoDefinitionResponse::Link(links) => links
+            .into_iter()
+            .map(|link| (link.target_uri, link.target_range.start))
+            .collect(),
     };
 
+    candidates
+        .into_iter()
+        .filter_map(|(uri, position)| {
+            resolve_one_target(uri, position, source_path, source_rope, encoding, fs)
+        })
+        .collect()
+}
+
+fn resolve_one_target(
+    uri: Uri,
+    position: Position,
+    source_path: &Path,
+    source_rope: &Rope,
+    encoding: OffsetEncoding,
+    fs: &dyn crate::host::FsHost,
+) -> Option<LocationEntry> {
     let target_path = crate::app::lsp_uri_to_path(&uri)?;
 
-    let offset = if target_path == source_path {
-        crate::lsp::util::lsp_pos_to_byte_offset(source_rope, position, encoding)
+    let (offset, text) = if target_path == source_path {
+        (
+            crate::lsp::util::lsp_pos_to_byte_offset(source_rope, position, encoding),
+            line_text(source_rope, position.line),
+        )
     } else {
-        let text = match super::read_string_via_host(fs, &target_path) {
+        let file_text = match super::read_string_via_host(fs, &target_path) {
             Ok(s) => s,
             Err(err) => {
                 tracing::warn!(
                     target: "stoat::lsp",
                     path = %target_path.display(),
                     ?err,
-                    "goto_definition target file unreadable",
+                    "goto target file unreadable",
                 );
                 return None;
             },
         };
-        let target_rope = Rope::from(text.as_str());
-        crate::lsp::util::lsp_pos_to_byte_offset(&target_rope, position, encoding)
+        let target_rope = Rope::from(file_text.as_str());
+        let offset = crate::lsp::util::lsp_pos_to_byte_offset(&target_rope, position, encoding);
+        (offset, line_text(&target_rope, position.line))
     };
 
-    Some(JumpTarget {
+    Some(LocationEntry {
         path: target_path,
         offset,
+        line: position.line + 1,
+        column: position.character + 1,
+        text,
     })
+}
+
+/// The trimmed text of `line` (0-based) in `rope`, for display in the
+/// location picker. Returns an empty string when the line is out of
+/// range so a stale position never panics.
+fn line_text(rope: &Rope, line: u32) -> String {
+    let start = rope.point_to_offset(Point::new(line, 0));
+    let end = rope
+        .point_to_offset(Point::new(line + 1, 0))
+        .min(rope.len());
+    rope.slice(start..end).to_string().trim().to_string()
 }
 
 /// Hover response carried from the spawned task to
@@ -1959,10 +1989,10 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
 }
 
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
-/// and apply the result. On `Ready(Some)` opens the target file in
-/// the focused pane (no-op when already open) and collapses every
-/// selection onto the resolved offset; on `Ready(None)` silently
-/// drops; on `Pending` puts the task back. Returns true when state
+/// and dispatch on how many locations resolved. Zero locations changes
+/// nothing. One jumps to it directly via [`apply_jump`]. Two or more
+/// open a [`LocationPicker`] in [`Stoat::location_picker`] so the user
+/// chooses. On `Pending` puts the task back. Returns true when state
 /// changed so the caller can request a redraw.
 pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_lsp_jump.take() else {
@@ -1971,27 +2001,45 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(target)) => {
-            // A jump issued from the diff parks the review before opening its
-            // target, so the review editor survives the pane swap (the gc
-            // guard keeps parked editors) and R re-enters the diff.
-            let from_review = crate::action_handlers::focused_editor_mut(stoat)
-                .is_some_and(|e| e.review_view.is_some());
-            if from_review {
-                super::review::park_review_session(stoat);
-                stoat.mode = "normal".to_string();
+        Poll::Ready(mut entries) => {
+            match entries.len() {
+                0 => {},
+                1 => {
+                    let entry = entries.remove(0);
+                    apply_jump(stoat, &entry.path, entry.offset);
+                },
+                _ => {
+                    let previous_mode = stoat.mode.clone();
+                    stoat.location_picker = Some(LocationPicker::new(entries, previous_mode));
+                },
             }
-            let focused = stoat.active_workspace().panes.focus();
-            super::file::open_file_in_pane(stoat, focused, &target.path);
-            super::movement::jump_to_offset(stoat, target.offset);
             true
         },
-        Poll::Ready(None) => true,
         Poll::Pending => {
             stoat.pending_lsp_jump = Some(task);
             false
         },
     }
+}
+
+/// Open `path` in the focused pane and collapse every selection onto
+/// `offset`. Opening is a no-op when the file is already the pane's
+/// buffer.
+///
+/// A jump issued from a diff review parks the review session first so
+/// the review editor survives the pane swap (the gc guard keeps parked
+/// editors) and R re-enters the diff.
+pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
+    let from_review =
+        crate::action_handlers::focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some());
+    if from_review {
+        super::review::park_review_session(stoat);
+        stoat.mode = "normal".to_string();
+    }
+
+    let focused = stoat.active_workspace().panes.focus();
+    super::file::open_file_in_pane(stoat, focused, path);
+    super::movement::jump_to_offset(stoat, offset);
 }
 
 /// Convert an absolute filesystem path to an `lsp_types::Uri`. Returns
@@ -2470,8 +2518,55 @@ mod tests {
             .set_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
         h.settle();
+        assert!(
+            h.stoat.location_picker.is_none(),
+            "single target skips picker"
+        );
         assert_eq!(cursor_offset(&mut h), 8);
         assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    #[test]
+    fn goto_definition_multiple_targets_opens_picker() {
+        use crate::test_harness::keys;
+        use crossterm::event::{Event, KeyCode};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_definition(&h);
+        let root = seed(
+            &mut h,
+            &[
+                ("main.rs", "abc\n"),
+                ("lib.rs", "fn one() {}\nfn two() {}\nfn three() {}\n"),
+            ],
+        );
+        let main_path = root.join("main.rs");
+        let lib_path = root.join("lib.rs");
+        open_buffer(&mut h, main_path.clone());
+        let lib = lib_path.to_str().unwrap();
+        h.fake_lsp().set_definitions(
+            main_path.to_str().unwrap(),
+            0,
+            0,
+            &[(lib, 0, 3), (lib, 1, 3), (lib, 2, 3)],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+
+        let picker = h.stoat.location_picker.as_ref().expect("picker open");
+        assert_eq!(picker.entries().len(), 3);
+        assert_eq!(
+            focused_buffer_path(&h),
+            main_path,
+            "picker does not jump yet"
+        );
+
+        h.stoat.update(Event::Key(keys::key(KeyCode::Down)));
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        h.settle();
+
+        assert!(h.stoat.location_picker.is_none());
+        assert_eq!(focused_buffer_path(&h), lib_path);
+        assert_eq!(cursor_offset(&mut h), 15);
     }
 
     #[test]

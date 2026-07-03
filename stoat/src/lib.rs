@@ -30,6 +30,7 @@ mod jumplist;
 pub(crate) mod jumplist_picker;
 pub mod keymap;
 mod keymap_state;
+pub(crate) mod location_picker;
 pub mod lsp;
 pub mod multi_buffer;
 pub mod pane;

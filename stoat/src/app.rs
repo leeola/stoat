@@ -120,6 +120,11 @@ pub struct Stoat {
     /// the modal is open; cleared on Esc, on selection (after
     /// jumping the focused editor's cursor), and on Ctrl-C.
     pub(crate) diagnostics_picker: Option<crate::diagnostics_picker::DiagnosticsPicker>,
+    /// Active multi-location goto picker modal. `Some` while a goto
+    /// request that resolved to two or more locations is awaiting the
+    /// user's choice. Cleared on Esc (restoring the prior mode), on
+    /// selection (after jumping), and on Ctrl-C.
+    pub(crate) location_picker: Option<crate::location_picker::LocationPicker>,
     /// Name of the action that most recently opened a picker
     /// successfully. Used by `OpenLastPicker` (`space '`) to
     /// re-fire the same action and rebuild the picker fresh.
@@ -500,7 +505,7 @@ pub struct Stoat {
     /// in the focused pane (when cross-file) and jumps the primary
     /// cursor; `Ready(None)` silently drops.
     pub(crate) pending_lsp_jump:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::JumpTarget>>>,
+        Option<stoat_scheduler::Task<Vec<crate::location_picker::LocationEntry>>>,
 
     /// In-flight `textDocument/hover` request. Replacing the entry
     /// drops the prior task, cancelling its spawned future before the
@@ -768,6 +773,7 @@ impl Stoat {
             quit_all_confirm: None,
             jumplist_picker: None,
             diagnostics_picker: None,
+            location_picker: None,
             last_picker_action: None,
             global_search_input: None,
             global_search: None,
@@ -2578,6 +2584,10 @@ impl Stoat {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
             }
+            if let Some(picker) = self.location_picker.take() {
+                self.mode = picker.previous_mode;
+                return UpdateEffect::Redraw;
+            }
             if let Some(picker) = self.global_search.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -2641,6 +2651,10 @@ impl Stoat {
 
         if self.diagnostics_picker.is_some() {
             return self.dispatch_diagnostics_picker_key(key);
+        }
+
+        if self.location_picker.is_some() {
+            return self.dispatch_location_picker_key(key);
         }
 
         if self.global_search.is_some() {
@@ -4526,6 +4540,35 @@ impl Stoat {
                     None => local_offset,
                 };
                 self.collapse_focused_cursor_to(offset);
+                UpdateEffect::Redraw
+            },
+        }
+    }
+
+    fn dispatch_location_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        use crate::location_picker::PickerOutcome;
+        let outcome = match self.location_picker.as_mut() {
+            Some(picker) => picker.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            PickerOutcome::None => UpdateEffect::Redraw,
+            PickerOutcome::Close => {
+                if let Some(picker) = self.location_picker.take() {
+                    self.mode = picker.previous_mode;
+                }
+                UpdateEffect::Redraw
+            },
+            PickerOutcome::Select(idx) => {
+                let Some(picker) = self.location_picker.take() else {
+                    return UpdateEffect::None;
+                };
+                let entry = match picker.entries().get(idx) {
+                    Some(entry) => entry.clone(),
+                    None => return UpdateEffect::Redraw,
+                };
+                self.mode = picker.previous_mode;
+                action_handlers::lsp::apply_jump(self, &entry.path, entry.offset);
                 UpdateEffect::Redraw
             },
         }

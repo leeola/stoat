@@ -15,6 +15,7 @@ pub(crate) mod hints;
 pub(crate) mod hover;
 pub(crate) mod jumplist_picker;
 pub(crate) mod layout;
+pub(crate) mod location_picker;
 pub(crate) mod pane;
 pub(crate) mod quit_all_confirm;
 pub(crate) mod rebase;
@@ -529,6 +530,25 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "diagnostics",
+            &bindings,
+            None,
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
+    } else if let Some(picker) = &stoat.location_picker {
+        location_picker::render_location_picker(
+            picker,
+            &ws.git_root,
+            &stoat.theme,
+            size,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
+        let bindings = picker.hint_bindings();
+        hints::render_hints(
+            "locations",
             &bindings,
             None,
             &stoat.theme,
