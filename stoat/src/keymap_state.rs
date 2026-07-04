@@ -5,7 +5,21 @@ use crate::{
     workspace::Workspace,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
 use stoat_action::Action;
+
+/// The predicate field names [`StoatKeymapState`] derives itself, which a
+/// `SetVar` user variable may not shadow.
+pub(crate) const BUILTIN_FIELDS: &[&str] = &[
+    "mode",
+    "pane",
+    "view",
+    "modal",
+    "palette_open",
+    "help_open",
+    "finder_open",
+    "rebase_exec",
+];
 
 /// The still-hand-set modal booleans a keymap state carries besides `mode`.
 ///
@@ -35,6 +49,9 @@ pub(crate) struct StoatKeymapState {
     /// The topmost open modal, absent when none is open. Absence lets bare
     /// `modal` read false and `modal != x` read true.
     modal: Option<StateValue>,
+    /// Config-defined session variables, read only after the built-in fields so
+    /// a variable can never shadow one.
+    user_vars: HashMap<String, StateValue>,
 }
 
 impl StoatKeymapState {
@@ -53,6 +70,7 @@ impl StoatKeymapState {
             pane: None,
             view: None,
             modal: None,
+            user_vars: HashMap::new(),
         }
     }
 
@@ -68,6 +86,7 @@ impl StoatKeymapState {
             pane: pane_predicate(ws).map(|s| StateValue::String(s.into())),
             view: view_predicate(ws).map(|s| StateValue::String(s.into())),
             modal: modal_predicate(stoat).map(|s| StateValue::String(s.into())),
+            user_vars: stoat.user_vars.clone(),
             ..Self::with_flags(stoat.mode.as_str(), flags)
         }
     }
@@ -84,7 +103,7 @@ impl KeymapState for StoatKeymapState {
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
-            _ => None,
+            other => self.user_vars.get(other),
         }
     }
 }
@@ -189,6 +208,20 @@ pub(crate) fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
     }
 }
 
+/// The [`StateValue`] a `SetVar` value argument sets, mapping a string/ident to
+/// a string, a number to a number, and a bool to a bool. `None` for a value
+/// shape a predicate cannot compare against.
+pub(crate) fn arg_to_state_value(arg: &ResolvedArg) -> Option<StateValue> {
+    match &arg.value {
+        stoat_config::Value::String(s) | stoat_config::Value::Ident(s) => {
+            Some(StateValue::String(s.as_str().into()))
+        },
+        stoat_config::Value::Number(n) => Some(StateValue::Number(*n)),
+        stoat_config::Value::Bool(b) => Some(StateValue::Bool(*b)),
+        _ => None,
+    }
+}
+
 fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
     match &arg.value {
         stoat_config::Value::String(s) => Some(stoat_action::ParamValue::String(s.clone())),
@@ -203,6 +236,10 @@ pub(crate) fn action_display_desc(action: &ResolvedAction) -> String {
     if action.name == "SetMode" {
         let target = action.args.first().and_then(arg_as_str).unwrap_or_default();
         return format!("{target} mode");
+    }
+    if action.name == "SetVar" {
+        let name = action.args.first().and_then(arg_as_str).unwrap_or_default();
+        return format!("set {name}");
     }
     stoat_action::registry::lookup(&action.name)
         .map(|e| e.def.short_desc().to_string())
@@ -282,5 +319,16 @@ mod tests {
         h.stoat.modal_run = Some(RunId::default());
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "modal"), Some("run".to_string()));
+    }
+
+    #[test]
+    fn user_var_reads_through_get_without_shadowing_builtins() {
+        let mut h = Stoat::test();
+        h.stoat
+            .user_vars
+            .insert("sidebar".into(), StateValue::String("on".into()));
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(field(&state, "sidebar"), Some("on".to_string()));
+        assert_eq!(field(&state, "mode"), Some("normal".to_string()));
     }
 }

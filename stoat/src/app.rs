@@ -14,7 +14,7 @@ use crate::{
         EnvHost, FsHost, FsWatchHost, GitHost, GitRepo, LocalEnv, LocalFs, LocalGit, LspHost,
         NoopFsWatcher, NoopLsp,
     },
-    keymap::{Keymap, ResolvedAction},
+    keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
     pane::{FocusTarget, NodeId, Placement, View},
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
@@ -99,6 +99,9 @@ impl UpdateEffect {
 pub struct Stoat {
     size: Rect,
     pub mode: String,
+    /// Config-defined session variables set by `SetVar`. Session-local and never
+    /// persisted. The keymap reads them after its built-in predicate fields.
+    pub(crate) user_vars: std::collections::HashMap<String, StateValue>,
     pub executor: Executor,
     pub(crate) keymap: Keymap,
     pub settings: Settings,
@@ -838,6 +841,7 @@ impl Stoat {
         Self {
             size: Rect::default(),
             mode: "normal".into(),
+            user_vars: std::collections::HashMap::new(),
             executor,
             keymap,
             settings,
@@ -3107,6 +3111,11 @@ impl Stoat {
                 }
                 continue;
             }
+            if ra.name == "SetVar" {
+                self.set_user_var(ra);
+                effect = UpdateEffect::Redraw;
+                continue;
+            }
             if ra.name == "Hover" {
                 dispatched_hover = true;
             }
@@ -3564,6 +3573,40 @@ impl Stoat {
             self.current_insert_run = Some(String::new());
         }
         self.mode = next;
+    }
+
+    /// Apply a `SetVar(name, value)` action to [`Self::user_vars`].
+    ///
+    /// A name colliding with a built-in predicate field, or a value shape no
+    /// predicate can compare against, warns and is dropped, so a config typo
+    /// cannot shadow a built-in or store an uncomparable value.
+    fn set_user_var(&mut self, action: &ResolvedAction) {
+        let Some(name) = action
+            .args
+            .first()
+            .and_then(crate::keymap_state::arg_as_str)
+        else {
+            return;
+        };
+        if crate::keymap_state::BUILTIN_FIELDS.contains(&name.as_str()) {
+            tracing::warn!(
+                target: "stoat::keymap",
+                "SetVar name `{name}` shadows a built-in field and was ignored"
+            );
+            return;
+        }
+        let Some(value) = action
+            .args
+            .get(1)
+            .and_then(crate::keymap_state::arg_to_state_value)
+        else {
+            tracing::warn!(
+                target: "stoat::keymap",
+                "SetVar `{name}` has no usable value and was ignored"
+            );
+            return;
+        };
+        self.user_vars.insert(name, value);
     }
 
     pub(crate) fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
@@ -5787,6 +5830,44 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn compile_keymap(src: &str) -> Keymap {
+        let (config, errors) = stoat_config::parse(src);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        Keymap::compile(&config.expect("config"))
+    }
+
+    #[test]
+    fn set_var_gates_a_binding() {
+        let mut h = Stoat::test();
+        h.stoat.keymap = compile_keymap(
+            r#"on key {
+                x -> SetVar(sidebar, on);
+                sidebar == "on" { j -> SetVar(pressed, yes); }
+            }"#,
+        );
+
+        // `j` is inert until `x` sets the variable.
+        h.stoat.handle_key(bare(KeyCode::Char('j')));
+        assert!(h.stoat.user_vars.get("pressed").is_none());
+
+        h.stoat.handle_key(bare(KeyCode::Char('x')));
+        h.stoat.handle_key(bare(KeyCode::Char('j')));
+        assert_eq!(
+            h.stoat.user_vars.get("pressed"),
+            Some(&StateValue::String("yes".into()))
+        );
+    }
+
+    #[test]
+    fn set_var_collision_with_builtin_is_ignored() {
+        let mut h = Stoat::test();
+        h.stoat.keymap = compile_keymap("on key { x -> SetVar(mode, hacked); }");
+
+        h.stoat.handle_key(bare(KeyCode::Char('x')));
+        assert!(h.stoat.user_vars.get("mode").is_none());
+        assert_eq!(h.stoat.mode, "normal");
     }
 
     #[test]

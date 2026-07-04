@@ -860,6 +860,7 @@ mod tests {
     fn lookup_unknown_returns_none() {
         assert!(lookup("Foo").is_none());
         assert!(lookup("SetMode").is_none());
+        assert!(lookup("SetVar").is_none());
     }
 
     #[test]
