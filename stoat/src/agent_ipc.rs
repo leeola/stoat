@@ -9,6 +9,7 @@
 
 use crate::{agent_status::AgentHookEvent, workspace::WorkspaceUid};
 use serde::Deserialize;
+use serde_json::Value;
 use std::path::PathBuf;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -43,6 +44,29 @@ pub enum AgentControl {
         path: PathBuf,
         done: oneshot::Sender<()>,
     },
+    /// Answer a live-session [`AgentQuery`] and fire `reply` with the JSON
+    /// result. The connection stays open afterward, so several queries ride one
+    /// connection, unlike the park-and-return [`Self::OpenEditor`].
+    Query {
+        uid: WorkspaceUid,
+        request: AgentQuery,
+        reply: oneshot::Sender<Value>,
+    },
+}
+
+/// A read-only interrogation of live session state, answered by the event loop.
+///
+/// Separate from the [`AgentRequest`] wire form so the control channel carries
+/// only genuine queries. The `open-editor` request is a blocking interaction
+/// routed through [`AgentControl::OpenEditor`] and never appears here.
+#[derive(Debug, PartialEq)]
+pub enum AgentQuery {
+    /// LSP host liveness plus the server's serialized capabilities.
+    LspStatus,
+    /// Diagnostics for `path`, or for every tracked path when `None`.
+    Diagnostics { path: Option<PathBuf> },
+    /// Hover at an LSP UTF-16 `line`/`col` within `path`.
+    Hover { path: PathBuf, line: u32, col: u32 },
 }
 
 /// A request decoded from one socket line.
@@ -56,6 +80,13 @@ pub enum AgentControl {
 enum AgentRequest {
     /// `{"req":"open-editor","path":"..."}`.
     OpenEditor { path: PathBuf },
+    /// `{"req":"lsp-status"}`.
+    LspStatus,
+    /// `{"req":"diagnostics"}` or `{"req":"diagnostics","path":"..."}`.
+    Diagnostics { path: Option<PathBuf> },
+    /// `{"req":"hover","path":"...","line":N,"col":N}`. `line`/`col` are LSP
+    /// UTF-16 positions, forwarded to the server unconverted.
+    Hover { path: PathBuf, line: u32, col: u32 },
 }
 
 /// Bind the per-session socket at `socket_path` and forward decoded hook events
@@ -133,7 +164,7 @@ async fn serve_connection<R>(
         }
 
         if let Ok(request) = serde_json::from_str::<AgentRequest>(trimmed) {
-            match request {
+            let query = match request {
                 AgentRequest::OpenEditor { path } => {
                     let (done_tx, done_rx) = oneshot::channel();
                     if control_tx
@@ -151,9 +182,41 @@ async fn serve_connection<R>(
                     let _ = write_half
                         .write_all(b"{\"reply\":\"editor-closed\"}\n")
                         .await;
+                    return;
                 },
+                AgentRequest::LspStatus => AgentQuery::LspStatus,
+                AgentRequest::Diagnostics { path } => AgentQuery::Diagnostics { path },
+                AgentRequest::Hover { path, line, col } => AgentQuery::Hover { path, line, col },
+            };
+
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if control_tx
+                .send(AgentControl::Query {
+                    uid,
+                    request: query,
+                    reply: reply_tx,
+                })
+                .await
+                .is_err()
+            {
+                return;
             }
-            return;
+            let value = match reply_rx.await {
+                Ok(value) => value,
+                Err(_) => return,
+            };
+            let mut encoded = match serde_json::to_vec(&value) {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    tracing::warn!(%err, "failed to encode query reply");
+                    continue;
+                },
+            };
+            encoded.push(b'\n');
+            if write_half.write_all(&encoded).await.is_err() {
+                return;
+            }
+            continue;
         }
 
         match parse_hook_line(trimmed) {
@@ -270,7 +333,10 @@ mod tests {
             uid: got_uid,
             path,
             done,
-        } = control_rx.recv().await.expect("control message");
+        } = control_rx.recv().await.expect("control message")
+        else {
+            panic!("expected an open-editor control message");
+        };
         assert_eq!(got_uid, uid);
         assert_eq!(path, PathBuf::from("/tmp/msg"));
 
@@ -280,6 +346,62 @@ mod tests {
         let mut reply = String::new();
         client.read_to_string(&mut reply).await.unwrap();
         assert_eq!(reply, "{\"reply\":\"editor-closed\"}\n");
+        conn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_requests_route_to_control_and_reply_over_one_connection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(8);
+        let uid = WorkspaceUid(9);
+
+        let (client, server) = tokio::io::duplex(256);
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut replies = BufReader::new(client_read).lines();
+
+        let conn = tokio::spawn(async move {
+            serve_connection(server, uid, &tx, &control_tx).await;
+        });
+
+        client_write
+            .write_all(b"{\"req\":\"lsp-status\"}\n")
+            .await
+            .unwrap();
+        let AgentControl::Query {
+            uid: got_uid,
+            request,
+            reply,
+        } = control_rx.recv().await.expect("first query")
+        else {
+            panic!("expected a query control message");
+        };
+        assert_eq!(got_uid, uid);
+        assert_eq!(request, AgentQuery::LspStatus);
+        reply.send(serde_json::json!({ "active": true })).unwrap();
+        assert_eq!(
+            replies.next_line().await.unwrap().unwrap(),
+            r#"{"active":true}"#
+        );
+
+        client_write
+            .write_all(b"{\"req\":\"diagnostics\"}\n")
+            .await
+            .unwrap();
+        let AgentControl::Query { request, reply, .. } =
+            control_rx.recv().await.expect("second query")
+        else {
+            panic!("expected a second query control message");
+        };
+        assert_eq!(request, AgentQuery::Diagnostics { path: None });
+        reply.send(serde_json::json!([])).unwrap();
+        assert_eq!(replies.next_line().await.unwrap().unwrap(), "[]");
+
+        // Both split halves must drop for the duplex to close and the server's
+        // read loop to see EOF and return.
+        drop(client_write);
+        drop(replies);
         conn.await.unwrap();
     }
 }

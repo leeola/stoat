@@ -3771,32 +3771,44 @@ impl Stoat {
     /// the session or the file cannot be opened. The dropped oneshot then
     /// unblocks the agent so its `$EDITOR` invocation does not hang.
     pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
-        let AgentControl::OpenEditor { uid, path, done } = ctl;
-        let Some(ws_id) = self
-            .workspaces
-            .iter()
-            .find(|(_, ws)| ws.uid == uid)
-            .map(|(id, _)| id)
-        else {
-            return UpdateEffect::None;
-        };
-        self.active_workspace = ws_id;
+        match ctl {
+            AgentControl::OpenEditor { uid, path, done } => {
+                let Some(ws_id) = self
+                    .workspaces
+                    .iter()
+                    .find(|(_, ws)| ws.uid == uid)
+                    .map(|(id, _)| id)
+                else {
+                    return UpdateEffect::None;
+                };
+                self.active_workspace = ws_id;
 
-        let new_pane = {
-            let ws = self.active_workspace_mut();
-            let new_pane = ws.panes.split(crate::pane::Axis::Vertical);
-            ws.focus = FocusTarget::SplitPane(new_pane);
-            new_pane
-        };
+                let new_pane = {
+                    let ws = self.active_workspace_mut();
+                    let new_pane = ws.panes.split(crate::pane::Axis::Vertical);
+                    ws.focus = FocusTarget::SplitPane(new_pane);
+                    new_pane
+                };
 
-        let Some(buffer_id) = action_handlers::file::open_file_in_pane(self, new_pane, &path)
-        else {
-            return UpdateEffect::None;
-        };
-        self.active_workspace_mut()
-            .editor_bridge_waiters
-            .insert(buffer_id, done);
-        UpdateEffect::Redraw
+                let Some(buffer_id) =
+                    action_handlers::file::open_file_in_pane(self, new_pane, &path)
+                else {
+                    return UpdateEffect::None;
+                };
+                self.active_workspace_mut()
+                    .editor_bridge_waiters
+                    .insert(buffer_id, done);
+                UpdateEffect::Redraw
+            },
+            AgentControl::Query {
+                uid,
+                request,
+                reply,
+            } => {
+                action_handlers::lsp::answer_agent_query(self, uid, request, reply);
+                UpdateEffect::None
+            },
+        }
     }
 
     /// Start the per-session agent hook server for `uid` on the executor.
