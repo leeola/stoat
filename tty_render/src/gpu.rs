@@ -37,6 +37,7 @@ use wgpu::{
 };
 #[cfg(feature = "perf")]
 use {
+    crate::{perf::FrameSample, render::hud::HudPass},
     std::{
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -236,6 +237,9 @@ pub struct Renderer {
     overlay: OverlayPass,
     icon: IconPass,
     bar: BarPass,
+    /// Perf HUD overlay pass, composited topmost. Present only under `perf`.
+    #[cfg(feature = "perf")]
+    hud: HudPass,
     width: u32,
     height: u32,
     metrics: CellMetrics,
@@ -286,6 +290,8 @@ impl Renderer {
             overlay: OverlayPass::new(device, format, metrics),
             icon: IconPass::new(device, format, metrics),
             bar: BarPass::new(device, format, metrics),
+            #[cfg(feature = "perf")]
+            hud: HudPass::new(device, format),
             width: size[0],
             height: size[1],
             metrics,
@@ -600,6 +606,46 @@ impl Renderer {
         queue.submit([encoder.finish()]);
     }
 
+    /// Composite the perf HUD topmost via a load-not-clear pass.
+    ///
+    /// Draws the previous frame's sample series over everything, including pool
+    /// composites and the cursor, in its own encoder so the HUD's cost lands
+    /// outside the timed grid pass rather than inflating the numbers it shows.
+    #[cfg(feature = "perf")]
+    pub fn draw_hud_over(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        view: &TextureView,
+        samples: &[FrameSample],
+        resolution: [f32; 2],
+    ) {
+        self.hud.prepare(device, queue, samples, resolution);
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("perf hud"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.hud.draw(&mut render_pass);
+        }
+
+        queue.submit([encoder.finish()]);
+    }
+
     fn set_size(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
@@ -645,6 +691,9 @@ pub struct GpuContext {
     view_format: TextureFormat,
     renderer: Renderer,
     perf: FrameProfiler,
+    /// Whether to composite the perf HUD topmost. Toggled from the app.
+    #[cfg(feature = "perf")]
+    show_perf_hud: bool,
 }
 
 /// A [`FontSystem`] being built on a background thread, handed to
@@ -779,6 +828,8 @@ impl GpuContext {
             view_format,
             renderer,
             perf: FrameProfiler::new(),
+            #[cfg(feature = "perf")]
+            show_perf_hud: false,
         }
     }
 
@@ -845,6 +896,15 @@ impl GpuContext {
         });
         self.renderer
             .render_into(&self.device, &self.queue, &view, grid, frame);
+
+        #[cfg(feature = "perf")]
+        if self.show_perf_hud {
+            let samples = self.perf.samples();
+            let resolution = [self.config.width as f32, self.config.height as f32];
+            self.renderer
+                .draw_hud_over(&self.device, &self.queue, &view, &samples, resolution);
+        }
+
         self.perf.mark_submitted();
         surface_frame.present();
         self.perf.end_frame();
@@ -934,6 +994,14 @@ impl GpuContext {
                 cursor_scissor,
             );
         }
+
+        #[cfg(feature = "perf")]
+        if self.show_perf_hud {
+            let samples = self.perf.samples();
+            self.renderer
+                .draw_hud_over(&self.device, &self.queue, &view, &samples, resolution);
+        }
+
         self.perf.mark_submitted();
         surface_frame.present();
         self.perf.end_frame();
@@ -947,6 +1015,12 @@ impl GpuContext {
     #[cfg(feature = "perf")]
     pub fn perf(&self) -> &FrameProfiler {
         &self.perf
+    }
+
+    /// Toggle whether the perf HUD is composited over subsequent frames.
+    #[cfg(feature = "perf")]
+    pub fn set_perf_hud(&mut self, on: bool) {
+        self.show_perf_hud = on;
     }
 }
 

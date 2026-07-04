@@ -5,6 +5,8 @@ use stoatty_term::term::Damage;
 pub mod background;
 pub mod bar;
 pub mod decoration;
+#[cfg(feature = "perf")]
+pub mod hud;
 pub mod icon;
 pub mod overlay;
 pub mod panel;

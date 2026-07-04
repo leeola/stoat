@@ -149,6 +149,17 @@ mod enabled {
             })
         }
 
+        /// The retained frame samples in oldest-to-newest order.
+        ///
+        /// [`stats`](Self::stats) collapses the ring to percentiles. The perf
+        /// HUD graphs the raw per-frame series instead, so it needs the samples
+        /// laid out chronologically across the ring's circular split point.
+        pub fn samples(&self) -> Vec<FrameSample> {
+            let split = self.next.min(self.ring.len());
+            let (older, newer) = self.ring.split_at(split);
+            newer.iter().chain(older).copied().collect()
+        }
+
         /// Attach a GPU duration to the most recently recorded frame.
         ///
         /// The GPU time is read back a few frames after the frame it measures,
@@ -243,6 +254,24 @@ mod enabled {
             assert_eq!(stats.last.cpu(), ms(300));
             assert_eq!(stats.cpu.worst, ms(300));
             assert_eq!(stats.cpu.p50, ms(181));
+        }
+
+        #[test]
+        fn samples_are_oldest_to_newest_across_the_ring_split() {
+            let mut p = FrameProfiler::new();
+            for i in 1..=3 {
+                p.record(sample(i));
+            }
+            let filling: Vec<Duration> = p.samples().iter().map(FrameSample::cpu).collect();
+            assert_eq!(filling, vec![ms(1), ms(2), ms(3)]);
+
+            for i in 4..=300 {
+                p.record(sample(i));
+            }
+            let wrapped = p.samples();
+            assert_eq!(wrapped.len(), 240);
+            assert_eq!(wrapped.first().unwrap().cpu(), ms(61));
+            assert_eq!(wrapped.last().unwrap().cpu(), ms(300));
         }
 
         #[test]
