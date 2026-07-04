@@ -1,6 +1,6 @@
 use compact_str::CompactString;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use stoat_config::{
     ActionExpr, Binding, Config, EventType, Key, KeyPart, Predicate, Statement, Value,
 };
@@ -312,6 +312,43 @@ impl Keymap {
         Self { bindings }
     }
 
+    /// Compile `config` and collect warnings for `SetMode` targets no binding
+    /// block selects on.
+    ///
+    /// A mode name is a free ident, so a typo in a `SetMode(mode)` action leaves
+    /// the keymap with no way back out of that mode. Each target that no
+    /// `mode ==`/`mode !=` predicate mentions is warned, except `normal` and
+    /// `insert`, which have hard-coded behavior and stay reachable without a
+    /// binding block.
+    pub fn compile_with_warnings(config: &Config) -> (Self, Vec<String>) {
+        let keymap = Self::compile(config);
+
+        let mut set_mode_targets: HashSet<String> = HashSet::new();
+        let mut selected_modes: HashSet<String> = HashSet::new();
+        for binding in &keymap.bindings {
+            for action in &binding.actions {
+                if action.name == "SetMode"
+                    && let Some(target) = action.args.first().and_then(|a| value_str(&a.value))
+                {
+                    set_mode_targets.insert(target.to_string());
+                }
+            }
+            for predicate in &binding.predicates {
+                collect_mode_targets(predicate, &mut selected_modes);
+            }
+        }
+
+        let mut warnings: Vec<String> = set_mode_targets
+            .into_iter()
+            .filter(|target| target != "normal" && target != "insert")
+            .filter(|target| !selected_modes.contains(target))
+            .map(|target| format!("SetMode target `{target}` matches no `mode ==` binding block"))
+            .collect();
+        warnings.sort();
+
+        (keymap, warnings)
+    }
+
     pub fn lookup(&self, state: &dyn KeymapState, event: &KeyEvent) -> Option<&[ResolvedAction]> {
         let mut best: Option<(usize, &[ResolvedAction])> = None;
         for binding in &self.bindings {
@@ -396,6 +433,33 @@ fn predicate_mentions_field(pred: &Predicate, field: &str) -> bool {
         Predicate::And(l, r) | Predicate::Or(l, r) => {
             predicate_mentions_field(&l.node, field) || predicate_mentions_field(&r.node, field)
         },
+    }
+}
+
+/// The string a `String` or bare `Ident` config value carries, if any.
+fn value_str(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(s) | Value::Ident(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// Collect the mode names any `mode ==`/`mode !=` predicate selects on, walking
+/// through `And`/`Or`.
+fn collect_mode_targets(predicate: &Predicate, out: &mut HashSet<String>) {
+    match predicate {
+        Predicate::Eq(field, val) | Predicate::NotEq(field, val) => {
+            if field.node == "mode"
+                && let Some(target) = value_str(&val.node)
+            {
+                out.insert(target.to_string());
+            }
+        },
+        Predicate::And(l, r) | Predicate::Or(l, r) => {
+            collect_mode_targets(&l.node, out);
+            collect_mode_targets(&r.node, out);
+        },
+        _ => {},
     }
 }
 
@@ -828,6 +892,38 @@ mod tests {
         let event = key_event(KeyCode::Char('x'), KeyModifiers::NONE);
 
         assert!(keymap.lookup(&state, &event).is_none());
+    }
+
+    #[test]
+    fn compile_warns_on_unreachable_set_mode_target() {
+        let config = parse_config("on key { i -> SetMode(nomral); }");
+        let (_, warnings) = Keymap::compile_with_warnings(&config);
+        assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
+        assert!(
+            warnings[0].contains("nomral"),
+            "warning names the ident: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn compile_no_warning_for_reachable_targets() {
+        let config = parse_config(
+            r#"on key {
+                mode == "diff" { j -> Quit(); }
+                i -> SetMode(diff);
+                n -> SetMode(normal);
+            }"#,
+        );
+        let (_, warnings) = Keymap::compile_with_warnings(&config);
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn default_config_compiles_without_warnings() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let (_, warnings) = Keymap::compile_with_warnings(&config);
+        assert!(warnings.is_empty(), "shipped config warnings: {warnings:?}");
     }
 
     #[test]

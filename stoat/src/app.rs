@@ -800,12 +800,19 @@ impl Stoat {
             }
         };
 
-        let keymap = config.map(|c| Keymap::compile(&c)).unwrap_or_else(|| {
-            Keymap::compile(&stoat_config::Config {
-                blocks: vec![],
-                themes: vec![],
-            })
-        });
+        let keymap = {
+            let (keymap, warnings) = match config {
+                Some(c) => Keymap::compile_with_warnings(&c),
+                None => Keymap::compile_with_warnings(&stoat_config::Config {
+                    blocks: vec![],
+                    themes: vec![],
+                }),
+            };
+            for warning in warnings {
+                tracing::warn!(target: "stoat::keymap", "{warning}");
+            }
+            keymap
+        };
 
         let syntax_styles = SyntaxStyles::from_theme(&theme);
         let language_registry = Arc::new(LanguageRegistry::standard());
