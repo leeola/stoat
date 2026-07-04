@@ -539,6 +539,8 @@ impl TestHarness {
                 crate::action_handlers::lsp::pump_lsp_pull_diagnostics(&mut self.stoat);
             let lsp_semantic_tokens =
                 crate::action_handlers::lsp::pump_lsp_semantic_tokens(&mut self.stoat);
+            let lsp_folding_ranges =
+                crate::action_handlers::lsp::pump_lsp_folding_ranges(&mut self.stoat);
             let lsp_code_actions =
                 crate::action_handlers::lsp::pump_lsp_code_actions(&mut self.stoat);
             let lsp_code_action_resolve =
@@ -568,6 +570,7 @@ impl TestHarness {
                 && !lsp_doc_highlight
                 && !lsp_pull_diagnostics
                 && !lsp_semantic_tokens
+                && !lsp_folding_ranges
                 && !lsp_code_actions
                 && !lsp_code_action_resolve
                 && !lsp_prepare_rename

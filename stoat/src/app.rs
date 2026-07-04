@@ -275,6 +275,14 @@ pub struct Stoat {
     /// `(buffer, version)` the semantic-token trigger last requested for, so an
     /// unchanged tick does not re-request.
     pub(crate) last_semantic_tokens_key: Option<(BufferId, u64)>,
+    /// In-flight folding-range request for the focused editor, armed by
+    /// [`action_handlers::lsp::folding_ranges_trigger`] behind a debounce and
+    /// applied by [`action_handlers::lsp::pump_lsp_folding_ranges`].
+    pub(crate) pending_folding_ranges:
+        Option<stoat_scheduler::Task<Option<action_handlers::lsp::FoldingRangesOutcome>>>,
+    /// `(buffer, version)` the folding-range trigger last requested for, so an
+    /// unchanged tick does not re-request.
+    pub(crate) last_folding_range_key: Option<(BufferId, u64)>,
     pub(crate) render_tick: u64,
     /// Transient one-line message painted in a reserved bottom row,
     /// such as a failed-save error. An action sets it during event
@@ -878,6 +886,8 @@ impl Stoat {
             last_pull_diagnostic_key: std::collections::HashMap::new(),
             pending_semantic_tokens: None,
             last_semantic_tokens_key: None,
+            pending_folding_ranges: None,
+            last_folding_range_key: None,
             render_tick: 0,
             pending_message: None,
             pending_count: None,
@@ -1757,6 +1767,7 @@ impl Stoat {
         action_handlers::lsp::document_highlight_trigger(self);
         action_handlers::lsp::pull_diagnostics_trigger(self);
         action_handlers::lsp::semantic_tokens_trigger(self);
+        action_handlers::lsp::folding_ranges_trigger(self);
         effect
     }
 
@@ -4519,6 +4530,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_document_highlight(self);
         action_handlers::lsp::pump_lsp_pull_diagnostics(self);
         action_handlers::lsp::pump_lsp_semantic_tokens(self);
+        action_handlers::lsp::pump_lsp_folding_ranges(self);
         action_handlers::lsp::pump_lsp_code_actions(self);
         action_handlers::lsp::pump_lsp_code_action_resolve(self);
         action_handlers::lsp::pump_lsp_prepare_rename(self);

@@ -452,13 +452,21 @@ impl DisplayMap {
         &mut self,
         creases: impl IntoIterator<Item = Crease<Anchor>>,
     ) -> Vec<CreaseId> {
-        let buffer_snapshot = self.multi_buffer.snapshot();
-        let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
-        self.crease_map.insert(creases, &resolve)
+        let ids = {
+            let buffer_snapshot = self.multi_buffer.snapshot();
+            let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
+            self.crease_map.insert(creases, &resolve)
+        };
+        // A crease change alters the crease snapshot without touching buffer,
+        // fold, or inlay versions, so the cached snapshot must be dropped
+        // explicitly or the new creases stay invisible.
+        self.cached_snapshot = None;
+        ids
     }
 
     pub fn remove_creases(&mut self, ids: impl IntoIterator<Item = CreaseId>) {
         self.crease_map.remove(ids);
+        self.cached_snapshot = None;
     }
 
     pub fn set_lsp_folding_ranges(
