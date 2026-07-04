@@ -986,7 +986,7 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
         _ => "normal",
     };
     let Some(review_editor_id) = session.view_editor else {
-        stoat.mode = next_mode.to_string();
+        stoat.set_focused_mode(next_mode.to_string());
         return UpdateEffect::Redraw;
     };
 
@@ -1013,7 +1013,7 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
         ws.editors.remove(review_editor_id);
     }
 
-    stoat.mode = next_mode.to_string();
+    stoat.set_focused_mode(next_mode.to_string());
     UpdateEffect::Redraw
 }
 
@@ -1053,7 +1053,7 @@ fn toggle_diff_off(stoat: &mut Stoat) -> UpdateEffect {
         super::movement::set_cursor_row(editor, line.saturating_sub(1));
     }
 
-    stoat.mode = "normal".to_string();
+    stoat.set_focused_mode("normal".to_string());
     UpdateEffect::Redraw
 }
 
@@ -1360,7 +1360,7 @@ fn toggle_diff_on(stoat: &mut Stoat) -> UpdateEffect {
         super::gc_editor_if_unreferenced(ws, file_id);
     }
 
-    stoat.mode = "review".to_string();
+    stoat.set_focused_mode("review".to_string());
     UpdateEffect::Redraw
 }
 
@@ -1861,7 +1861,7 @@ fn render_review_editor(stoat: &mut Stoat) {
         }
     }
 
-    stoat.mode = "review".to_string();
+    stoat.set_focused_mode("review".to_string());
 }
 
 /// Mirror this session's freshly-extracted hunks into the diff cache so

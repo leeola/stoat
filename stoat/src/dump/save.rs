@@ -29,7 +29,7 @@ pub fn save_at(
     let archive_path = dumps.join(id.filename());
     write_archive(
         stoat.active_workspace(),
-        &stoat.mode,
+        stoat.focused_mode(),
         &id,
         at,
         &archive_path,

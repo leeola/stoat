@@ -2201,7 +2201,7 @@ pub(super) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
     let Some((kind, ch)) = stoat.last_find else {
         return UpdateEffect::None;
     };
-    let extend = stoat.mode == "select";
+    let extend = stoat.focused_mode() == "select";
     let count = stoat.take_pending_count().unwrap_or(1);
     execute_find(stoat, kind, ch, extend, count)
 }

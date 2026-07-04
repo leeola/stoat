@@ -87,7 +87,7 @@ impl StoatKeymapState {
             view: view_predicate(ws).map(|s| StateValue::String(s.into())),
             modal: modal_predicate(stoat).map(|s| StateValue::String(s.into())),
             user_vars: stoat.user_vars.clone(),
-            ..Self::with_flags(stoat.mode.as_str(), flags)
+            ..Self::with_flags(stoat.focused_mode(), flags)
         }
     }
 }

@@ -78,11 +78,11 @@ pub(super) fn conflict_skip_entry(stoat: &mut Stoat) -> UpdateEffect {
 pub(super) fn conflict_abort(stoat: &mut Stoat) -> UpdateEffect {
     stoat.active_workspace_mut().rebase_active = None;
     emit_rebase_error(stoat, "rebase aborted during conflict", None);
-    stoat.mode = if stoat.active_workspace().commits.is_some() {
+    stoat.set_focused_mode(if stoat.active_workspace().commits.is_some() {
         "commits".into()
     } else {
         "normal".into()
-    };
+    });
     UpdateEffect::Redraw
 }
 

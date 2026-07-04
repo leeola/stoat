@@ -25,11 +25,11 @@ pub(super) fn reword_abort(stoat: &mut Stoat) -> UpdateEffect {
         "rebase aborted during reword",
         Some("HEAD left at partial rebase state".into()),
     );
-    stoat.mode = if stoat.active_workspace().commits.is_some() {
+    stoat.set_focused_mode(if stoat.active_workspace().commits.is_some() {
         "commits".into()
     } else {
         "normal".into()
-    };
+    });
     UpdateEffect::Redraw
 }
 
@@ -68,11 +68,11 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
             "rebase aborted: empty commit message",
             Some("HEAD left at partial rebase state".into()),
         );
-        stoat.mode = if stoat.active_workspace().commits.is_some() {
+        stoat.set_focused_mode(if stoat.active_workspace().commits.is_some() {
             "commits".into()
         } else {
             "normal".into()
-        };
+        });
         return UpdateEffect::Redraw;
     }
 

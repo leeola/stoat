@@ -191,14 +191,16 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         (full, None)
     };
 
+    let mode = stoat.focused_mode().to_string();
+
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
     ws.layout(size);
 
-    let commits_mode = stoat.mode == "commits";
-    let rebase_mode = stoat.mode == "rebase";
-    let reword_mode = stoat.mode == "reword" || stoat.mode == "reword_insert";
-    let conflict_mode = stoat.mode == "conflict";
+    let commits_mode = mode == "commits";
+    let rebase_mode = mode == "rebase";
+    let reword_mode = mode == "reword" || mode == "reword_insert";
+    let conflict_mode = mode == "conflict";
     let overlay_pane = if (commits_mode && ws.commits.is_some())
         || (rebase_mode && ws.rebase.is_some())
         || ((reword_mode || conflict_mode) && ws.rebase_active.is_some())
@@ -221,7 +223,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
     let frame = FrameCtx {
         workspace_name: &workspace_name,
         workspace_root: &ws.git_root,
-        mode: &stoat.mode,
+        mode: &mode,
         theme: &stoat.theme,
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
@@ -381,7 +383,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
     } else if let Some(help) = &stoat.help {
         help::render_help(
             help,
-            &stoat.mode,
+            &mode,
             ws,
             &stoat.theme,
             &stoat.settings.mode_badges,
@@ -390,7 +392,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             stoat.stoatty.then_some(&mut *scene),
         );
         let state = StoatKeymapState::with_flags(
-            &stoat.mode,
+            &mode,
             Flags {
                 help_open: true,
                 ..Default::default()
@@ -423,7 +425,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             stoat.stoatty.then_some(&mut *scene),
         );
         let state = StoatKeymapState::with_flags(
-            &stoat.mode,
+            &mode,
             Flags {
                 finder_open: true,
                 ..Default::default()
@@ -456,7 +458,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             stoat.stoatty.then_some(&mut *scene),
         );
         let state = StoatKeymapState::with_flags(
-            &stoat.mode,
+            &mode,
             Flags {
                 palette_open: true,
                 ..Default::default()
@@ -596,11 +598,11 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-    } else if !PRIMARY_MODES.contains(&stoat.mode.as_str()) {
+    } else if !PRIMARY_MODES.contains(&mode.as_str()) {
         // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
         // mutable borrow of the active workspace, so read the flags directly.
         let state = StoatKeymapState::with_flags(
-            &stoat.mode,
+            &mode,
             Flags {
                 palette_open: stoat.command_palette.is_some(),
                 help_open: stoat.help.is_some(),
@@ -616,7 +618,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
                 (key.as_str(), desc)
             })
             .collect();
-        let footer = if stoat.mode == "review" {
+        let footer = if mode == "review" {
             ws.review.as_ref().map(|session| {
                 let p = session.progress();
                 let complete = session.is_complete();
@@ -640,7 +642,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             None
         };
         hints::render_hints(
-            &stoat.mode,
+            &mode,
             &bindings,
             footer.as_ref(),
             &stoat.theme,

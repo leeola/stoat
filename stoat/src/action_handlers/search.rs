@@ -51,7 +51,7 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
     if stoat.search_input.is_some() {
         return UpdateEffect::None;
     }
-    let previous_mode = stoat.mode.clone();
+    let previous_mode = stoat.focused_mode().to_string();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::Search, "", "prompt", 1);
@@ -60,7 +60,7 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
         direction,
         previous_mode,
     });
-    stoat.mode = "prompt".into();
+    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
@@ -77,7 +77,7 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let direction = state.direction;
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.mode = previous_mode;
+    stoat.set_focused_mode(previous_mode);
 
     if query.is_empty() {
         return true;
@@ -97,7 +97,7 @@ pub(crate) fn search_cancel(stoat: &mut Stoat) -> bool {
     let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.mode = previous_mode;
+    stoat.set_focused_mode(previous_mode);
     true
 }
 

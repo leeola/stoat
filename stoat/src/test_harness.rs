@@ -633,7 +633,7 @@ impl TestHarness {
         let frame = Frame {
             number: self.step + self.sub_frame,
             actions: vec!["one_frame".to_string()],
-            mode: self.stoat.mode.clone(),
+            mode: self.stoat.focused_mode().to_string(),
             size: (buf.area.width, buf.area.height),
             pane_count,
             focused_pane,
@@ -788,7 +788,7 @@ impl TestHarness {
         let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
         let mut visited: HashSet<String> = HashSet::new();
 
-        let start = self.stoat.mode.clone();
+        let start = self.stoat.focused_mode().to_string();
         queue.push_back((start.clone(), Vec::new()));
         visited.insert(start);
 
@@ -817,7 +817,7 @@ impl TestHarness {
 
         panic!(
             "action {action_expr:?} is unreachable from mode {:?}",
-            self.stoat.mode
+            self.stoat.focused_mode()
         );
     }
 
@@ -851,7 +851,7 @@ impl TestHarness {
         self.frames.push(Frame {
             number: self.step + self.sub_frame,
             actions: vec![action.to_string()],
-            mode: self.stoat.mode.clone(),
+            mode: self.stoat.focused_mode().to_string(),
             size: (buf.area.width, buf.area.height),
             pane_count,
             focused_pane,
@@ -979,7 +979,7 @@ impl TestHarness {
             self.frames.push(Frame {
                 number: self.step + self.sub_frame,
                 actions: vec![action.to_string()],
-                mode: self.stoat.mode.clone(),
+                mode: self.stoat.focused_mode().to_string(),
                 size: (buf.area.width, buf.area.height),
                 pane_count,
                 focused_pane,

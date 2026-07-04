@@ -88,8 +88,8 @@ pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     // drop into modal editing. A second Escape - routed via a separate
     // keymap binding like `mode == normal && help_open { Escape -> ... }` -
     // closes the modal.
-    if stoat.mode == "prompt" {
-        stoat.mode = "normal".into();
+    if stoat.focused_mode() == "prompt" {
+        stoat.set_focused_mode("normal".into());
         return UpdateEffect::Redraw;
     }
     UpdateEffect::None

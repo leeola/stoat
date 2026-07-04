@@ -40,7 +40,7 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     ));
 
     stoat.active_workspace_mut().commits = Some(state);
-    stoat.mode = "commits".to_string();
+    stoat.set_focused_mode("commits".to_string());
     drain_commits_tasks(stoat);
     ensure_selected_preview(stoat);
     drain_commits_tasks(stoat);
@@ -52,7 +52,7 @@ pub(super) fn close_commits(stoat: &mut Stoat) -> UpdateEffect {
     if ws.commits.take().is_none() {
         return UpdateEffect::None;
     }
-    stoat.mode = "normal".to_string();
+    stoat.set_focused_mode("normal".to_string());
     UpdateEffect::Redraw
 }
 

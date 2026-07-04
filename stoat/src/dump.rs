@@ -502,7 +502,7 @@ fn apply_snapshot(stoat: &mut crate::app::Stoat, snap: snapshot::WorkspaceSnapsh
     });
 
     if !mode.is_empty() {
-        stoat.mode = mode;
+        stoat.set_focused_mode(mode);
     }
     let workspace = stoat.active_workspace_mut();
     workspace.rebase = rebase;

@@ -2675,7 +2675,7 @@ impl Stoat {
             if let Some(palette) = self.command_palette.take() {
                 let active_idx = self.active_workspace;
                 palette.dispose(&mut self.workspaces[active_idx]);
-                self.mode = palette.previous_mode;
+                self.set_focused_mode(palette.previous_mode);
                 return UpdateEffect::Redraw;
             }
             if self.workspace_picker.is_some() {
@@ -2687,19 +2687,19 @@ impl Stoat {
                 return UpdateEffect::Redraw;
             }
             if let Some(picker) = self.jumplist_picker.take() {
-                self.mode = picker.previous_mode;
+                self.set_focused_mode(picker.previous_mode);
                 return UpdateEffect::Redraw;
             }
             if let Some(picker) = self.diagnostics_picker.take() {
-                self.mode = picker.previous_mode;
+                self.set_focused_mode(picker.previous_mode);
                 return UpdateEffect::Redraw;
             }
             if let Some(picker) = self.location_picker.take() {
-                self.mode = picker.previous_mode;
+                self.set_focused_mode(picker.previous_mode);
                 return UpdateEffect::Redraw;
             }
             if let Some(picker) = self.global_search.take() {
-                self.mode = picker.previous_mode;
+                self.set_focused_mode(picker.previous_mode);
                 return UpdateEffect::Redraw;
             }
             if self.focused_run_pane().is_some() {
@@ -2775,7 +2775,9 @@ impl Stoat {
             return self.route_key_to_term(agent_id, key);
         }
 
-        if (self.mode == "insert" || self.mode == "reword_insert" || self.mode == "prompt")
+        if (self.focused_mode() == "insert"
+            || self.focused_mode() == "reword_insert"
+            || self.focused_mode() == "prompt")
             && let Some(effect) = self.handle_insert_key(key)
         {
             // If help is open, keep its filtered list in sync after every
@@ -2790,7 +2792,7 @@ impl Stoat {
             return effect;
         }
 
-        if (self.mode == "normal" || self.mode == "select")
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
             && self.pending_code_action_picker.is_some()
         {
             if let KeyCode::Char(ch) = key.code {
@@ -2847,7 +2849,8 @@ impl Stoat {
             self.pending_code_action_request = None;
         }
 
-        if (self.mode == "normal" || self.mode == "select") && self.pending_symbol_picker.is_some()
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+            && self.pending_symbol_picker.is_some()
         {
             if let KeyCode::Char(ch) = key.code {
                 match ch {
@@ -2900,7 +2903,7 @@ impl Stoat {
             self.pending_symbol_picker_request = None;
         }
 
-        if (self.mode == "normal" || self.mode == "select")
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
             && self.pending_workspace_symbol_picker.is_some()
         {
             if let KeyCode::Char(ch) = key.code {
@@ -2957,7 +2960,9 @@ impl Stoat {
             self.pending_workspace_symbol_request = None;
         }
 
-        if (self.mode == "normal" || self.mode == "select") && self.pending_find.is_some() {
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+            && self.pending_find.is_some()
+        {
             if let KeyCode::Char(ch) = key.code {
                 let (kind, extend, count) = self.pending_find.take().expect("checked above");
                 return action_handlers::movement::execute_find(self, kind, ch, extend, count);
@@ -2965,7 +2970,7 @@ impl Stoat {
             self.pending_find = None;
         }
 
-        if self.mode == "normal" && self.pending_mark.is_some() {
+        if self.focused_mode() == "normal" && self.pending_mark.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 let request = self.pending_mark.take().expect("checked above");
                 return action_handlers::marks::execute_mark(self, request, ch);
@@ -2973,7 +2978,9 @@ impl Stoat {
             self.pending_mark = None;
         }
 
-        if (self.mode == "normal" || self.mode == "select") && self.pending_replace {
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+            && self.pending_replace
+        {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_replace = false;
                 return action_handlers::movement::execute_replace(self, ch);
@@ -2981,7 +2988,9 @@ impl Stoat {
             self.pending_replace = false;
         }
 
-        if (self.mode == "normal" || self.mode == "select") && self.pending_surround_add {
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+            && self.pending_surround_add
+        {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_surround_add = false;
                 return action_handlers::surround::execute_surround_add(self, ch);
@@ -2989,7 +2998,9 @@ impl Stoat {
             self.pending_surround_add = false;
         }
 
-        if (self.mode == "normal" || self.mode == "select") && self.pending_register_select {
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+            && self.pending_register_select
+        {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_register_select = false;
                 action_handlers::yank::execute_select_register(self, ch);
@@ -2998,7 +3009,7 @@ impl Stoat {
             self.pending_register_select = false;
         }
 
-        if (self.mode == "normal" || self.mode == "select")
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
             && self.pending_surround_replace
                 != action_handlers::surround::SurroundReplaceStage::Idle
         {
@@ -3021,7 +3032,9 @@ impl Stoat {
             self.pending_surround_replace = action_handlers::surround::SurroundReplaceStage::Idle;
         }
 
-        if (self.mode == "normal" || self.mode == "select") && self.pending_surround_delete {
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+            && self.pending_surround_delete
+        {
             if let KeyCode::Char(ch) = key.code {
                 self.pending_surround_delete = false;
                 return action_handlers::surround::execute_surround_delete(self, ch);
@@ -3029,7 +3042,7 @@ impl Stoat {
             self.pending_surround_delete = false;
         }
 
-        if (self.mode == "normal" || self.mode == "select")
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
             && self.pending_textobject_select.is_some()
         {
             if let KeyCode::Char(ch) = key.code {
@@ -3040,7 +3053,9 @@ impl Stoat {
             self.pending_textobject_select = None;
         }
 
-        if (self.mode == "normal" || self.mode == "select") && self.pending_goto_word.is_some() {
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+            && self.pending_goto_word.is_some()
+        {
             if let KeyCode::Char(ch) = key.code {
                 let labels = self.pending_goto_word.as_ref().expect("checked above");
                 match crate::goto_word::step_jump(labels, &self.pending_goto_word_input, ch) {
@@ -3064,7 +3079,7 @@ impl Stoat {
             self.pending_goto_word_input.clear();
         }
 
-        let count_active_mode = self.mode == "normal" || self.mode == "select";
+        let count_active_mode = self.focused_mode() == "normal" || self.focused_mode() == "select";
         if count_active_mode
             && self.pending_count.is_some()
             && key.modifiers.is_empty()
@@ -3175,7 +3190,7 @@ impl Stoat {
     /// pane-navigation bindings, so the user enters the agent with `i` and
     /// leaves via the [`Self::route_key_to_term`] escape.
     fn term_input_target(&self) -> Option<TermId> {
-        if self.mode != "insert" {
+        if self.focused_mode() != "insert" {
             return None;
         }
 
@@ -3471,7 +3486,7 @@ impl Stoat {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if self.focused_run_pane().is_some() {
                     Some(action_handlers::dispatch(self, &stoat_action::RunSubmit))
-                } else if self.mode == "prompt" {
+                } else if self.focused_mode() == "prompt" {
                     None
                 } else {
                     let indent = match self.newest_cursor_offset(editor_id) {
@@ -3513,11 +3528,11 @@ impl Stoat {
                 self,
                 &stoat_action::RunHistoryNext,
             )),
-            KeyCode::Up if self.mode != "prompt" => {
+            KeyCode::Up if self.focused_mode() != "prompt" => {
                 action_handlers::dispatch(self, &stoat_action::MoveUp);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Down if self.mode != "prompt" => {
+            KeyCode::Down if self.focused_mode() != "prompt" => {
                 action_handlers::dispatch(self, &stoat_action::MoveDown);
                 Some(UpdateEffect::Redraw)
             },
@@ -3553,14 +3568,32 @@ impl Stoat {
         true
     }
 
-    /// Switch [`Self::mode`] to `next`, opening or closing the
+    /// The mode of the focused input target.
+    ///
+    /// Every mode read routes through here rather than touching the mode
+    /// storage directly, so the storage can move to per-target state without
+    /// disturbing callers.
+    pub(crate) fn focused_mode(&self) -> &str {
+        &self.mode
+    }
+
+    /// Set the mode of the focused input target.
+    ///
+    /// The raw setter, without the insert-run bookkeeping
+    /// [`Self::transition_mode`] layers on top. Prompt-setters and screen
+    /// handlers that bypass that bookkeeping today route their writes here.
+    pub(crate) fn set_focused_mode(&mut self, mode: String) {
+        self.mode = mode;
+    }
+
+    /// Switch the focused target's mode to `next`, opening or closing the
     /// insert-run buffer that backs the `.` register. Entering
     /// any insert-like mode (`insert`, `reword_insert`) starts a
-    /// fresh run; leaving commits the run's text into
+    /// fresh run. Leaving commits the run's text into
     /// [`Self::last_insert_text`] (when non-empty) and clears the
     /// scratch buffer.
     pub(crate) fn transition_mode(&mut self, next: String) {
-        let was_insert = is_insert_run_mode(&self.mode);
+        let was_insert = is_insert_run_mode(self.focused_mode());
         let now_insert = is_insert_run_mode(&next);
         if was_insert
             && !now_insert
@@ -3572,7 +3605,7 @@ impl Stoat {
         if !was_insert && now_insert {
             self.current_insert_run = Some(String::new());
         }
-        self.mode = next;
+        self.set_focused_mode(next);
     }
 
     /// Apply a `SetVar(name, value)` action to [`Self::user_vars`].
@@ -4000,7 +4033,7 @@ impl Stoat {
                     }
                 }
 
-                if exited_held_focus && self.mode == "insert" {
+                if exited_held_focus && self.focused_mode() == "insert" {
                     self.transition_mode("normal".to_string());
                 }
                 UpdateEffect::Redraw
@@ -4121,7 +4154,7 @@ impl Stoat {
         // A full-screen overlay mode hides every editor, so nothing is pooled this
         // frame and any live pools are retired.
         let overlay = matches!(
-            self.mode.as_str(),
+            self.focused_mode(),
             "commits" | "rebase" | "reword" | "reword_insert" | "conflict"
         );
         let panes = if overlay {
@@ -4151,7 +4184,7 @@ impl Stoat {
 
         // The commits overlay renders into the focused pane; its left list pools
         // as a non-pane surface while editor panes stay suppressed in this mode.
-        let commits_region = (self.mode == "commits")
+        let commits_region = (self.focused_mode() == "commits")
             .then(|| {
                 let ws = self.active_workspace();
                 ws.commits.as_ref()?;
@@ -4715,7 +4748,7 @@ impl Stoat {
             PickerOutcome::None => UpdateEffect::Redraw,
             PickerOutcome::Close => {
                 if let Some(picker) = self.jumplist_picker.take() {
-                    self.mode = picker.previous_mode;
+                    self.set_focused_mode(picker.previous_mode);
                 }
                 UpdateEffect::Redraw
             },
@@ -4727,7 +4760,7 @@ impl Stoat {
                     Some(entry) => entry.offset,
                     None => return UpdateEffect::Redraw,
                 };
-                self.mode = picker.previous_mode;
+                self.set_focused_mode(picker.previous_mode);
                 self.jump_focused_to_offset(target_offset, idx);
                 UpdateEffect::Redraw
             },
@@ -4744,7 +4777,7 @@ impl Stoat {
             PickerOutcome::None => UpdateEffect::Redraw,
             PickerOutcome::Close => {
                 if let Some(picker) = self.diagnostics_picker.take() {
-                    self.mode = picker.previous_mode;
+                    self.set_focused_mode(picker.previous_mode);
                 }
                 UpdateEffect::Redraw
             },
@@ -4760,7 +4793,7 @@ impl Stoat {
                 let zero_based_line = entry.line.saturating_sub(1);
                 let zero_based_column = entry.column.saturating_sub(1);
                 let local_offset = entry.offset;
-                self.mode = picker.previous_mode;
+                self.set_focused_mode(picker.previous_mode);
                 let offset = match path {
                     Some(path) => {
                         action_handlers::file::open_file(self, &path);
@@ -4785,7 +4818,7 @@ impl Stoat {
             PickerOutcome::None => UpdateEffect::Redraw,
             PickerOutcome::Close => {
                 if let Some(picker) = self.location_picker.take() {
-                    self.mode = picker.previous_mode;
+                    self.set_focused_mode(picker.previous_mode);
                 }
                 UpdateEffect::Redraw
             },
@@ -4797,7 +4830,7 @@ impl Stoat {
                     Some(entry) => entry.clone(),
                     None => return UpdateEffect::Redraw,
                 };
-                self.mode = picker.previous_mode;
+                self.set_focused_mode(picker.previous_mode);
                 action_handlers::lsp::apply_jump(self, &entry.path, entry.offset);
                 UpdateEffect::Redraw
             },
@@ -4861,7 +4894,7 @@ impl Stoat {
             PickerOutcome::None => UpdateEffect::Redraw,
             PickerOutcome::Close => {
                 if let Some(picker) = self.global_search.take() {
-                    self.mode = picker.previous_mode;
+                    self.set_focused_mode(picker.previous_mode);
                 }
                 UpdateEffect::Redraw
             },
@@ -4873,7 +4906,7 @@ impl Stoat {
                     Some(m) => (m.path.clone(), m.offset),
                     None => return UpdateEffect::Redraw,
                 };
-                self.mode = picker.previous_mode;
+                self.set_focused_mode(picker.previous_mode);
                 action_handlers::dispatch(self, &OpenFile { path: target.0 });
                 self.jump_focused_to_match_offset(target.1);
                 UpdateEffect::Redraw

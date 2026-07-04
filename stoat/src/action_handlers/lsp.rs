@@ -1141,7 +1141,7 @@ pub(crate) struct SignatureHelpPopup {
 ///
 /// Version-gated on the focused buffer so a cursor-only tick does not re-request.
 pub(crate) fn signature_help_trigger(stoat: &mut Stoat) {
-    let in_insert_editor = stoat.mode == "insert" && {
+    let in_insert_editor = stoat.focused_mode() == "insert" && {
         let ws = stoat.active_workspace();
         matches!(
             ws.panes.pane(ws.panes.focus()).view,
@@ -1610,7 +1610,7 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
         return;
     }
 
-    if stoat.mode != "normal" {
+    if stoat.focused_mode() != "normal" {
         if stoat.last_document_highlight_key.is_some() {
             clear_document_highlights(stoat);
             stoat.last_document_highlight_key = None;
@@ -2820,7 +2820,7 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 let head = editor.selections.newest_anchor().head();
                 buf_snap.resolve_anchor(&head)
             };
-            let previous_mode = stoat.mode.clone();
+            let previous_mode = stoat.focused_mode().to_string();
             let executor = stoat.executor.clone();
             let ws = stoat.active_workspace_mut();
             let input = crate::input_view::InputView::create(
@@ -2838,7 +2838,7 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 anchor_offset,
                 previous_mode,
             });
-            stoat.mode = "prompt".into();
+            stoat.set_focused_mode("prompt".into());
             true
         },
         Poll::Ready(None) => true,
@@ -2861,7 +2861,7 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
     let previous_mode = rename_state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     rename_state.input.dispose(ws);
-    stoat.mode = previous_mode;
+    stoat.set_focused_mode(previous_mode);
 
     if new_name.is_empty() {
         return true;
@@ -2900,7 +2900,7 @@ pub(crate) fn rename_input_cancel(stoat: &mut Stoat) -> bool {
     let previous_mode = rename_state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     rename_state.input.dispose(ws);
-    stoat.mode = previous_mode;
+    stoat.set_focused_mode(previous_mode);
     true
 }
 
@@ -3207,7 +3207,7 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         buf_snap.resolve_anchor(&head)
     };
 
-    let previous_mode = stoat.mode.clone();
+    let previous_mode = stoat.focused_mode().to_string();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = crate::input_view::InputView::create(
@@ -3223,7 +3223,7 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         anchor_offset,
         previous_mode,
     });
-    stoat.mode = "prompt".into();
+    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
@@ -3239,7 +3239,7 @@ pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
     let anchor_offset = state.anchor_offset;
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.mode = previous_mode;
+    stoat.set_focused_mode(previous_mode);
 
     let params = WorkspaceSymbolParams {
         query,
@@ -3275,7 +3275,7 @@ pub(crate) fn workspace_symbol_cancel(stoat: &mut Stoat) -> bool {
     let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.mode = previous_mode;
+    stoat.set_focused_mode(previous_mode);
     true
 }
 
@@ -3589,7 +3589,7 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
                     apply_jump(stoat, &entry.path, entry.offset);
                 },
                 _ => {
-                    let previous_mode = stoat.mode.clone();
+                    let previous_mode = stoat.focused_mode().to_string();
                     stoat.location_picker = Some(LocationPicker::new(entries, previous_mode));
                 },
             }
@@ -3614,7 +3614,7 @@ pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
         crate::action_handlers::focused_editor_mut(stoat).is_some_and(|e| e.review_view.is_some());
     if from_review {
         super::review::park_review_session(stoat);
-        stoat.mode = "normal".to_string();
+        stoat.set_focused_mode("normal".to_string());
     }
 
     let focused = stoat.active_workspace().panes.focus();

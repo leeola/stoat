@@ -270,7 +270,7 @@ struct EditorSnapshot {
 }
 
 fn insert_mode_in_editor_pane(stoat: &Stoat) -> bool {
-    if stoat.mode != "insert" {
+    if stoat.focused_mode() != "insert" {
         return false;
     }
     let ws = stoat.active_workspace();

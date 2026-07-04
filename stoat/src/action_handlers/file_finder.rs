@@ -62,7 +62,7 @@ pub(super) fn open_file_finder(
         modified_paths,
         buffer_paths,
     ));
-    stoat.mode = "prompt".into();
+    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
@@ -161,5 +161,5 @@ pub(crate) fn close_file_finder(stoat: &mut Stoat) {
         let active_idx = stoat.active_workspace;
         finder.dispose(&mut stoat.workspaces[active_idx]);
     }
-    stoat.mode = finder.previous_mode.clone();
+    stoat.set_focused_mode(finder.previous_mode.clone());
 }
