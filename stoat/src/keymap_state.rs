@@ -74,6 +74,16 @@ impl StoatKeymapState {
         }
     }
 
+    /// Set the `modal` predicate value on an otherwise flag-built state.
+    ///
+    /// Lets the hint-overlay renderer construct a state that targets a specific
+    /// open modal (`modal == help`) without a full [`Self::from_stoat`], which
+    /// it cannot call while holding a workspace borrow.
+    pub(crate) fn with_modal(mut self, modal: &str) -> Self {
+        self.modal = Some(StateValue::String(modal.into()));
+        self
+    }
+
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         let ws = stoat.active_workspace();
         let flags = Flags {

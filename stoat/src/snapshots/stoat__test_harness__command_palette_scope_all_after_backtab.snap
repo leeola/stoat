@@ -4,7 +4,7 @@ expression: text
 ---
 actions: shift-backtab
 focused: #1 of 1
-mode: prompt
+mode: insert
 size: 80x24
 ---
 [0m[7m [0m
@@ -30,4 +30,4 @@ size: 80x24
   [0m[35m│[0m                                    [0m[33m│[0m[36m    C-b[0m[97m   page palette up[0m              [0m[33m│[0m
   [0m[35m└────────────────────────────────────[0m[33m│[0m[36m  S-Tab[0m[97m   toggle command palette scope[0m [0m[33m│[0m
                                        [0m[33m└───────────────────────────────────────┘[0m
-[0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m
+[0m[1m[30m[42m INS [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

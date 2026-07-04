@@ -16,9 +16,8 @@ pub(super) fn open(stoat: &mut Stoat) -> UpdateEffect {
     }
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let input = InputView::create(ws, executor, SubmitTarget::SplitSelection, "", "prompt", 1);
+    let input = InputView::create(ws, executor, SubmitTarget::SplitSelection, "", "insert", 1);
     stoat.split_selection_input = Some(SplitSelectionInputState { input });
-    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
@@ -144,7 +143,7 @@ mod tests {
             UpdateEffect::Redraw
         );
         assert!(h.stoat.split_selection_input.is_some());
-        assert_eq!(h.stoat.focused_mode(), "prompt");
+        assert_eq!(h.stoat.focused_mode(), "insert");
     }
 
     #[test]

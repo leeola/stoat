@@ -52,9 +52,8 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
     }
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let input = InputView::create(ws, executor, SubmitTarget::Search, "", "prompt", 1);
+    let input = InputView::create(ws, executor, SubmitTarget::Search, "", "insert", 1);
     stoat.search_input = Some(SearchInputState { input, direction });
-    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
@@ -237,7 +236,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::OpenSearchInput);
-        assert_eq!(h.stoat.focused_mode(), "prompt");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("abc");
         h.type_keys("enter");
         assert_eq!(cursor_offset(&mut h), 8);

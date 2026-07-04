@@ -2798,9 +2798,9 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Poll any in-flight prepare-rename task and, on `Ready(Some)`, open
-/// the input modal seeded with the placeholder text. Transitions
-/// [`Stoat::mode`] to "prompt" so typing routes through
-/// `handle_insert_key` into the modal's [`crate::input_view::InputView`].
+/// the input modal seeded with the placeholder text. The input is born
+/// in insert mode so typing routes through `handle_insert_key` into the
+/// modal's [`crate::input_view::InputView`].
 pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_prepare_rename.take() else {
         return false;
@@ -2825,7 +2825,7 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 executor,
                 crate::input_view::SubmitTarget::RenameSymbol,
                 &prep.placeholder,
-                "prompt",
+                "insert",
                 1,
             );
             stoat.rename_input = Some(RenameInputState {
@@ -2834,7 +2834,6 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 symbol_position: prep.symbol_position,
                 anchor_offset,
             });
-            stoat.set_focused_mode("prompt".into());
             true
         },
         Poll::Ready(None) => true,
@@ -3174,11 +3173,10 @@ pub(crate) struct WorkspaceSymbolPicker {
 }
 
 /// Open the workspace-symbol query input modal. Capability-gates on
-/// [`LanguageServerFeature::WorkspaceSymbols`]; transitions to
-/// "prompt" so typing routes through `handle_insert_key` into the
-/// modal's [`crate::input_view::InputView`]. The modal seed is
-/// empty; submit fires the request, cancel restores the previous
-/// mode.
+/// [`LanguageServerFeature::WorkspaceSymbols`]. The input is born in
+/// insert mode so typing routes through `handle_insert_key` into the
+/// modal's [`crate::input_view::InputView`]. The modal seed is empty;
+/// submit fires the request, cancel disposes the input.
 pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
         .lsp_host
@@ -3204,14 +3202,13 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         executor,
         crate::input_view::SubmitTarget::WorkspaceSymbolPicker,
         "",
-        "prompt",
+        "insert",
         1,
     );
     stoat.workspace_symbol_input = Some(WorkspaceSymbolInputState {
         input,
         anchor_offset,
     });
-    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
@@ -5407,7 +5404,7 @@ mod tests {
         h.settle();
         let modal = h.stoat.rename_input.as_ref().expect("modal open");
         assert_eq!(modal.input.text(h.stoat.active_workspace()), "foo");
-        assert_eq!(h.stoat.focused_mode(), "prompt");
+        assert_eq!(h.stoat.focused_mode(), "insert");
     }
 
     #[test]
@@ -5513,7 +5510,7 @@ mod tests {
         h.settle();
         let modal = h.stoat.rename_input.as_ref().expect("modal open");
         assert_eq!(modal.input.text(h.stoat.active_workspace()), "foo");
-        assert_eq!(h.stoat.focused_mode(), "prompt");
+        assert_eq!(h.stoat.focused_mode(), "insert");
     }
 
     #[test]
@@ -5814,7 +5811,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
         h.settle();
         assert!(h.stoat.workspace_symbol_input.is_some());
-        assert_eq!(h.stoat.focused_mode(), "prompt");
+        assert_eq!(h.stoat.focused_mode(), "insert");
     }
 
     #[test]
@@ -6042,7 +6039,7 @@ mod tests {
         h.type_keys("space l shift-s");
         h.settle();
         assert!(h.stoat.workspace_symbol_input.is_some());
-        assert_eq!(h.stoat.focused_mode(), "prompt");
+        assert_eq!(h.stoat.focused_mode(), "insert");
     }
 
     #[test]

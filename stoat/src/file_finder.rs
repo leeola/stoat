@@ -95,7 +95,7 @@ impl FileFinder {
             executor.clone(),
             SubmitTarget::FileFinder,
             "",
-            "prompt",
+            "insert",
             1,
         );
         let preview = Preview::new(ws, executor);
@@ -447,12 +447,12 @@ mod tests {
     }
 
     #[test]
-    fn space_p_opens_finder_and_switches_to_prompt_mode() {
+    fn space_p_opens_finder_and_switches_to_insert_mode() {
         let mut h = crate::Stoat::test();
         seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}")]);
         h.type_keys("space p");
         assert!(h.stoat.file_finder.is_some(), "finder not opened");
-        assert_eq!(h.snapshot().mode, "prompt");
+        assert_eq!(h.snapshot().mode, "insert");
     }
 
     #[test]
@@ -510,7 +510,7 @@ mod tests {
         h.type_keys("space a f");
         let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
         assert_eq!(finder.open_intent, OpenIntent::HSplit);
-        assert_eq!(h.snapshot().mode, "prompt");
+        assert_eq!(h.snapshot().mode, "insert");
     }
 
     #[test]
@@ -561,7 +561,7 @@ mod tests {
         let base: Vec<PathBuf> = finder.base_paths().to_vec();
         assert_eq!(base.len(), 1, "Modified scope should list only b.rs");
         assert!(base[0].ends_with("b.rs"));
-        assert_eq!(h.snapshot().mode, "prompt");
+        assert_eq!(h.snapshot().mode, "insert");
     }
 
     #[test]
@@ -596,7 +596,7 @@ mod tests {
         assert!(base.iter().any(|p| p.ends_with("a.rs")));
         assert!(base.iter().any(|p| p.ends_with("c.rs")));
         assert!(!base.iter().any(|p| p.ends_with("b.rs")));
-        assert_eq!(h.snapshot().mode, "prompt");
+        assert_eq!(h.snapshot().mode, "insert");
     }
 
     #[test]

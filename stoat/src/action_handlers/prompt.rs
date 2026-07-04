@@ -83,12 +83,11 @@ pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(effect) = super::palette::palette_cancel(stoat) {
         return effect;
     }
-    // For pane-tied or modal inputs (help, run), Escape in prompt
-    // leaves the user in normal sub-mode so they can navigate with hjkl /
-    // drop into modal editing. A second Escape - routed via a separate
-    // keymap binding like `mode == normal && help_open { Escape -> ... }` -
-    // closes the modal.
-    if stoat.focused_mode() == "prompt" {
+    // Help handles Escape in two stages. The first leaves the search input in
+    // normal sub-mode so the list can be navigated with hjkl, and a second
+    // Escape - routed via `modal == help && mode == normal { Escape -> ... }` -
+    // closes it. Every other input was disposed by a cancel above.
+    if stoat.focused_mode() == "insert" {
         stoat.set_focused_mode("normal".into());
         return UpdateEffect::Redraw;
     }

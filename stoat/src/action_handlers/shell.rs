@@ -47,9 +47,8 @@ fn open_with(stoat: &mut Stoat, action: ShellAction) -> UpdateEffect {
     }
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let input = InputView::create(ws, executor, SubmitTarget::Shell, "", "prompt", 1);
+    let input = InputView::create(ws, executor, SubmitTarget::Shell, "", "insert", 1);
     stoat.shell_input = Some(ShellInputState { input, action });
-    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 

@@ -140,8 +140,6 @@ pub(crate) fn perf_label(seg: PerfSegment) -> String {
 pub(crate) const PRIMARY_MODES: &[&str] = &[
     "normal",
     "insert",
-    "prompt",
-    "run",
     "commits",
     "rebase",
     "reword",
@@ -391,14 +389,8 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(
-            &mode,
-            Flags {
-                help_open: true,
-                ..Default::default()
-            },
-        );
-        let raw = stoat.keymap.scoped_bindings(&state, "help_open");
+        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("help");
+        let raw = stoat.keymap.scoped_bindings(&state, "modal", "help");
         let bindings: Vec<_> = raw
             .iter()
             .map(|(key, actions)| {
@@ -424,14 +416,8 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(
-            &mode,
-            Flags {
-                finder_open: true,
-                ..Default::default()
-            },
-        );
-        let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
+        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("finder");
+        let raw = stoat.keymap.scoped_bindings(&state, "modal", "finder");
         let bindings: Vec<_> = raw
             .iter()
             .map(|(key, actions)| {
@@ -457,14 +443,8 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(
-            &mode,
-            Flags {
-                palette_open: true,
-                ..Default::default()
-            },
-        );
-        let raw = stoat.keymap.scoped_bindings(&state, "palette_open");
+        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("palette");
+        let raw = stoat.keymap.scoped_bindings(&state, "modal", "palette");
         let bindings: Vec<_> = raw
             .iter()
             .map(|(key, actions)| {

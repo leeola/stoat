@@ -313,7 +313,7 @@ pub(crate) enum PaletteOutcome {
 
 impl CommandPalette {
     pub fn new(ws: &mut Workspace, executor: Executor, availability: Availability) -> Self {
-        let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "prompt", 1);
+        let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "insert", 1);
         let scope = PaletteScope::Active;
         let mut filtered = Vec::new();
         let mut match_indices = Vec::new();

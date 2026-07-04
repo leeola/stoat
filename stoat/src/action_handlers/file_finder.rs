@@ -65,7 +65,6 @@ pub(super) fn open_file_finder(
         modified_paths,
         buffer_paths,
     ));
-    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 

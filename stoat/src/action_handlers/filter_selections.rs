@@ -31,11 +31,10 @@ fn open_with(stoat: &mut Stoat, remove: bool) -> UpdateEffect {
         executor,
         SubmitTarget::KeepRemoveSelections,
         "",
-        "prompt",
+        "insert",
         1,
     );
     stoat.filter_selections_input = Some(FilterSelectionsInputState { input, remove });
-    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
@@ -222,6 +221,6 @@ mod tests {
             UpdateEffect::Redraw
         );
         assert!(h.stoat.filter_selections_input.is_some());
-        assert_eq!(h.stoat.focused_mode(), "prompt");
+        assert_eq!(h.stoat.focused_mode(), "insert");
     }
 }

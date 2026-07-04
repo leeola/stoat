@@ -155,7 +155,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             let availability = crate::command_palette::Availability::from_stoat(stoat);
             let ws = stoat.active_workspace_mut();
             stoat.command_palette = Some(CommandPalette::new(ws, executor, availability));
-            stoat.set_focused_mode("prompt".into());
             UpdateEffect::Redraw
         },
         ActionKind::OpenHelp => {
@@ -164,7 +163,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             let executor = stoat.executor.clone();
             let ws = stoat.active_workspace_mut();
             stoat.help = Some(Help::new(&mode, active, ws, executor));
-            stoat.set_focused_mode("prompt".into());
             UpdateEffect::Redraw
         },
         ActionKind::Diff => {
@@ -758,11 +756,10 @@ fn open_global_search(stoat: &mut Stoat) -> UpdateEffect {
         executor,
         crate::input_view::SubmitTarget::GlobalSearch,
         "",
-        "prompt",
+        "insert",
         1,
     );
     stoat.global_search_input = Some(crate::global_search::GlobalSearchInputState { input });
-    stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
@@ -1150,7 +1147,7 @@ mod tests {
             UpdateEffect::Redraw
         );
         assert!(stoat.global_search_input.is_some());
-        assert_eq!(stoat.focused_mode(), "prompt");
+        assert_eq!(stoat.focused_mode(), "insert");
     }
 
     #[test]

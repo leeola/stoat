@@ -69,13 +69,14 @@ pub enum HelpInput {
     Normal,
 }
 
-/// Derive the help "sub-mode" from the global [`crate::app::Stoat::mode`].
-/// `"prompt"` maps to [`HelpInput::Insert`] (user is typing into the search
+/// Derive the help "sub-mode" from the focused mode of the help search input.
+///
+/// `"insert"` maps to [`HelpInput::Insert`] (user is typing into the search
 /// field); anything else maps to [`HelpInput::Normal`] (user is navigating
 /// the list with hjkl).
 pub fn help_input_mode(stoat_mode: &str) -> HelpInput {
     match stoat_mode {
-        "prompt" => HelpInput::Insert,
+        "insert" => HelpInput::Insert,
         _ => HelpInput::Normal,
     }
 }
@@ -105,7 +106,7 @@ impl Help {
         ws: &mut Workspace,
         executor: Executor,
     ) -> Self {
-        let input = InputView::create(ws, executor, SubmitTarget::HelpSearch, "", "prompt", 1);
+        let input = InputView::create(ws, executor, SubmitTarget::HelpSearch, "", "insert", 1);
         let mut help = Self {
             input,
             scope: HelpScope::Active,
@@ -437,14 +438,14 @@ mod tests {
     }
 
     /// Open a help modal in the given test harness with the supplied synthetic
-    /// `active` bindings. Also sets the focused mode to `"prompt"` so help
-    /// starts in its Insert sub-mode, matching the real `OpenHelp` handler.
+    /// `active` bindings. The search input is born in insert mode, so help
+    /// starts in its Insert sub-mode just as the real `OpenHelp` handler leaves
+    /// it.
     fn open_help_with(h: &mut TestHarness, active: Vec<(String, Vec<ResolvedAction>)>) {
         let executor = h.stoat.executor.clone();
         let active_idx = h.stoat.active_workspace;
         let ws = &mut h.stoat.workspaces[active_idx];
         h.stoat.help = Some(Help::new("normal", active, ws, executor));
-        h.stoat.set_focused_mode("prompt".into());
     }
 
     /// Dispatch a key through the test harness's top-level key handler so

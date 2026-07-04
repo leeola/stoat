@@ -2774,9 +2774,7 @@ impl Stoat {
             return self.route_key_to_term(agent_id, key);
         }
 
-        if (self.focused_mode() == "insert"
-            || self.focused_mode() == "reword_insert"
-            || self.focused_mode() == "prompt")
+        if (self.focused_mode() == "insert" || self.focused_mode() == "reword_insert")
             && let Some(effect) = self.handle_insert_key(key)
         {
             // If help is open, keep its filtered list in sync after every
@@ -3477,7 +3475,7 @@ impl Stoat {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if self.focused_run_pane().is_some() {
                     Some(action_handlers::dispatch(self, &stoat_action::RunSubmit))
-                } else if self.focused_mode() == "prompt" {
+                } else if self.has_open_modal() {
                     None
                 } else {
                     let indent = match self.newest_cursor_offset(editor_id) {
@@ -3519,11 +3517,11 @@ impl Stoat {
                 self,
                 &stoat_action::RunHistoryNext,
             )),
-            KeyCode::Up if self.focused_mode() != "prompt" => {
+            KeyCode::Up if !self.has_open_modal() => {
                 action_handlers::dispatch(self, &stoat_action::MoveUp);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Down if self.focused_mode() != "prompt" => {
+            KeyCode::Down if !self.has_open_modal() => {
                 action_handlers::dispatch(self, &stoat_action::MoveDown);
                 Some(UpdateEffect::Redraw)
             },
@@ -3601,6 +3599,18 @@ impl Stoat {
             return;
         }
         self.fallback_mode = mode;
+    }
+
+    /// Whether a modal overlay currently owns focus, per the `modal` keymap
+    /// predicate.
+    ///
+    /// In [`Self::handle_insert_key`] this separates a modal text input - whose
+    /// Enter/Up/Down are bound in the keymap - from an ordinary insert-mode
+    /// buffer, whose Enter/Up/Down are handled inline. The pickers `modal` also
+    /// reports are intercepted earlier in [`Self::handle_key`], so only text
+    /// inputs reach that comparison.
+    pub(crate) fn has_open_modal(&self) -> bool {
+        crate::keymap_state::modal_predicate(self).is_some()
     }
 
     /// The focused terminal or agent pane's [`TermId`], if the focused pane is
@@ -5930,20 +5940,20 @@ mod tests {
     #[test]
     fn modal_over_a_target_keeps_the_target_mode() {
         let mut h = Stoat::test();
-        h.stoat.set_focused_mode("insert".into());
-        assert_eq!(h.stoat.focused_mode(), "insert");
+        h.stoat.set_focused_mode("select".into());
+        assert_eq!(h.stoat.focused_mode(), "select");
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
         assert_eq!(
             h.stoat.focused_mode(),
-            "prompt",
+            "insert",
             "the palette input carries its own mode, not the target's"
         );
 
         h.stoat.handle_key(ctrl('c'));
         assert_eq!(
             h.stoat.focused_mode(),
-            "insert",
+            "select",
             "closing the modal leaves the underlying target's mode untouched"
         );
     }

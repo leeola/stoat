@@ -46,7 +46,6 @@ theme default_dark {
 
     ui.statusline.normal.fg   = primary;
     ui.statusline.insert.fg   = success;
-    ui.statusline.prompt.fg   = success;
     ui.statusline.commits.fg  = warning;
     ui.statusline.rebase.fg   = danger;
     ui.statusline.reword.fg   = danger;
@@ -139,10 +138,10 @@ on key {
     mode != normal {
         ? -> OpenHelp();
     }
-    mode == normal && help_open {
+    modal == help && mode == normal {
         Escape -> CloseHelp();
-        i -> SetMode(prompt);
-        a -> SetMode(prompt);
+        i -> SetMode(insert);
+        a -> SetMode(insert);
         Enter -> SubmitPromptInput();
         j -> HelpSelectNext();
         k -> HelpSelectPrev();
@@ -468,7 +467,7 @@ on key {
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();
     }
-    mode == prompt && finder_open {
+    modal == finder && mode == insert {
         Up -> FileFinderSelectPrev();
         Down -> FileFinderSelectNext();
         Ctrl-p -> FileFinderSelectPrev();
@@ -477,7 +476,7 @@ on key {
         Ctrl-b -> FileFinderPageUp();
         BackTab -> FileFinderScopeToggle();
     }
-    mode == prompt && palette_open {
+    modal == palette && mode == insert {
         Up -> PaletteSelectPrev();
         Down -> PaletteSelectNext();
         Ctrl-p -> PaletteSelectPrev();
@@ -486,7 +485,7 @@ on key {
         Ctrl-b -> PalettePageUp();
         BackTab -> PaletteScopeToggle();
     }
-    mode == prompt && help_open {
+    modal == help && mode == insert {
         Up -> HelpSelectPrev();
         Down -> HelpSelectNext();
         Ctrl-p -> HelpSelectPrev();
@@ -497,7 +496,7 @@ on key {
         PageDown -> HelpScrollDetailDown();
         BackTab -> HelpScopeToggle();
     }
-    mode == prompt {
+    modal && mode == insert {
         Escape -> CancelPromptInput();
         Enter -> SubmitPromptInput();
         Shift-Enter -> PromptInsertNewline();

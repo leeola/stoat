@@ -4,7 +4,7 @@ expression: text
 ---
 actions: p
 focused: #1 of 1
-mode: prompt
+mode: insert
 size: 30x8
 ---
 [0m[7m [0m
@@ -14,4 +14,4 @@ size: 30x8
 
 
 
-[0m[1m[30m[42m PMT [0m[1m[97m[100m stoat-finder-test-empty [0m
+[0m[1m[30m[42m INS [0m[1m[97m[100m stoat-finder-test-empty [0m
