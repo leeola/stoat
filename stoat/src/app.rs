@@ -594,6 +594,13 @@ pub struct Stoat {
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
     pub(crate) pending_format_request:
         Option<stoat_scheduler::Task<Option<action_handlers::lsp::FormatResponse>>>,
+    /// In-flight format-on-save task. Set when a save with `format_on_save`
+    /// enabled arms a formatting request bounded by a save-time budget;
+    /// [`action_handlers::file::pump_format_on_save`] applies any edits and
+    /// writes the buffer. While `Some`, further saves of that buffer are
+    /// ignored so a burst does not queue duplicate writes.
+    pub(crate) pending_format_on_save:
+        Option<stoat_scheduler::Task<action_handlers::file::FormatOnSaveOutcome>>,
 
     /// Editor autocomplete popup waiting to be painted. Set by the
     /// trigger pipeline (item 83) when a completion request resolves;
@@ -881,6 +888,7 @@ impl Stoat {
             pending_workspace_symbol_request: None,
             pending_workspace_symbol_picker: None,
             pending_format_request: None,
+            pending_format_on_save: None,
             pending_completion: None,
             pending_completion_request: None,
             pending_completion_resolve: None,
@@ -4441,6 +4449,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_symbol_picker(self);
         action_handlers::lsp::pump_lsp_workspace_symbol(self);
         action_handlers::lsp::pump_lsp_format(self);
+        action_handlers::file::pump_format_on_save(self);
         crate::completion::request::pump(self);
         action_handlers::completion::pump_completion_resolve(self);
         crate::completion::accept::pump_completion_accept(self);

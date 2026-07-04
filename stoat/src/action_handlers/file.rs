@@ -3,10 +3,23 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     editor_state::EditorState,
+    host::LanguageServerFeature,
     pane::{PaneId, View},
 };
-use lsp_types::{DidCloseTextDocumentParams, DidSaveTextDocumentParams, TextDocumentIdentifier};
-use std::{path::Path, str::FromStr};
+use lsp_types::{
+    DidCloseTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
+    FormattingOptions, TextDocumentIdentifier, TextEdit, Uri, WorkDoneProgressParams,
+    WorkspaceEdit,
+};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    str::FromStr,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 /// Write the focused buffer to its backing file via
 /// [`crate::host::FsHost::write_atomic`], clear the dirty flag, and notify the
@@ -37,21 +50,140 @@ fn save_buffer_inner(stoat: &mut Stoat, force: bool) -> UpdateEffect {
         Some(p) => p.to_path_buf(),
         None => return UpdateEffect::None,
     };
-    let buffer = match stoat.active_workspace().buffers.get(buffer_id) {
-        Some(b) => b,
-        None => return UpdateEffect::None,
-    };
-    let text = {
-        let guard = buffer.read().expect("buffer poisoned");
-        guard.rope().to_string()
-    };
 
     if !force && disk_changed_since_open(stoat, buffer_id, &path) {
         stoat.pending_message = Some("file changed on disk; use :w! to overwrite".to_string());
         return UpdateEffect::Redraw;
     }
 
-    if let Err(err) = stoat.fs_host.write_atomic(&path, text.as_bytes()) {
+    if format_on_save_enabled(stoat) {
+        // A save already formatting drops later ones so a burst does not queue
+        // duplicate writes. The in-flight one still lands the latest text.
+        if stoat.pending_format_on_save.is_some() {
+            return UpdateEffect::None;
+        }
+        arm_format_on_save(stoat, buffer_id, path);
+        return UpdateEffect::Redraw;
+    }
+
+    write_buffer_to_disk(stoat, buffer_id, &path)
+}
+
+/// What a completed format-on-save request hands back to the pump.
+///
+/// Carries the buffer and path to write, plus the edits to apply first. The
+/// edits are `None` when the server errored or the save-time budget elapsed, in
+/// which case the buffer is written unchanged.
+pub(crate) struct FormatOnSaveOutcome {
+    buffer_id: BufferId,
+    path: PathBuf,
+    uri: Uri,
+    edits: Option<Vec<TextEdit>>,
+}
+
+/// Save-time budget for `format_on_save`. A formatting response slower than this
+/// is abandoned and the buffer is written unchanged, so a sluggish server never
+/// blocks a save.
+const FORMAT_ON_SAVE_BUDGET: Duration = Duration::from_millis(500);
+
+fn format_on_save_enabled(stoat: &Stoat) -> bool {
+    stoat.settings.format_on_save == Some(true)
+        && stoat
+            .lsp_host
+            .supports_feature(LanguageServerFeature::Format)
+}
+
+/// Race a `textDocument/formatting` request against [`FORMAT_ON_SAVE_BUDGET`]
+/// and park the outcome in [`Stoat::pending_format_on_save`] for
+/// [`pump_format_on_save`]. Writes immediately without formatting when the path
+/// has no `file:` URI.
+fn arm_format_on_save(stoat: &mut Stoat, buffer_id: BufferId, path: PathBuf) {
+    let Some(uri) = super::lsp::path_to_uri(&path) else {
+        write_buffer_to_disk(stoat, buffer_id, &path);
+        return;
+    };
+
+    let params = DocumentFormattingParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        options: FormattingOptions {
+            tab_size: 4,
+            insert_spaces: true,
+            ..FormattingOptions::default()
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let executor = stoat.executor.clone();
+    let task = stoat.executor.spawn(async move {
+        let format = std::pin::pin!(lsp.formatting(params));
+        let timer = std::pin::pin!(executor.timer(FORMAT_ON_SAVE_BUDGET));
+        let edits = match futures::future::select(format, timer).await {
+            futures::future::Either::Left((Ok(Some(edits)), _)) if !edits.is_empty() => Some(edits),
+            _ => None,
+        };
+        FormatOnSaveOutcome {
+            buffer_id,
+            path,
+            uri,
+            edits,
+        }
+    });
+    stoat.pending_format_on_save = Some(task);
+}
+
+/// Poll the in-flight format-on-save request. On completion, apply any formatting
+/// edits as a single-document [`WorkspaceEdit`] and then write the buffer.
+/// Returns true when state changed so the caller can request a redraw.
+pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_format_on_save.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(outcome) => {
+            if let Some(edits) = outcome.edits {
+                #[allow(clippy::mutable_key_type)]
+                let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+                changes.insert(outcome.uri, edits);
+                let edit = WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                };
+                if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
+                    tracing::warn!(
+                        target: "stoat::lsp",
+                        ?err,
+                        "format-on-save edit failed to apply",
+                    );
+                }
+            }
+            write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path);
+            true
+        },
+        Poll::Pending => {
+            stoat.pending_format_on_save = Some(task);
+            false
+        },
+    }
+}
+
+/// Write `buffer_id`'s current text to `path`, clear the dirty flag, refresh the
+/// recorded disk mtime, persist the saved shard, and fire the LSP `did_save`
+/// notification. Reads the buffer fresh so a format-on-save edit applied just
+/// before is included.
+fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> UpdateEffect {
+    let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
+        return UpdateEffect::None;
+    };
+    let text = {
+        let guard = buffer.read().expect("buffer poisoned");
+        guard.rope().to_string()
+    };
+
+    if let Err(err) = stoat.fs_host.write_atomic(path, text.as_bytes()) {
         tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
         stoat.pending_message = Some(format!("save failed: {err}"));
         return UpdateEffect::Redraw;
@@ -62,7 +194,7 @@ fn save_buffer_inner(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     }
     if let Some(mtime) = stoat
         .fs_host
-        .metadata(&path)
+        .metadata(path)
         .ok()
         .flatten()
         .map(|m| m.modified)
@@ -72,12 +204,11 @@ fn save_buffer_inner(stoat: &mut Stoat, force: bool) -> UpdateEffect {
             .buffers
             .set_disk_mtime(buffer_id, mtime);
     }
-    stoat.persist_saved_shard(buffer_id, &path, &text);
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return UpdateEffect::Redraw,
+    stoat.persist_saved_shard(buffer_id, path, &text);
+    let Some(path_str) = path.to_str() else {
+        return UpdateEffect::Redraw;
     };
-    let Ok(uri) = lsp_types::Uri::from_str(&format!("file://{path_str}")) else {
+    let Ok(uri) = Uri::from_str(&format!("file://{path_str}")) else {
         return UpdateEffect::Redraw;
     };
     let params = DidSaveTextDocumentParams {
@@ -178,7 +309,7 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
 
     if let Some(path) = path
         && let Some(path_str) = path.to_str()
-        && let Ok(uri) = lsp_types::Uri::from_str(&format!("file://{path_str}"))
+        && let Ok(uri) = Uri::from_str(&format!("file://{path_str}"))
     {
         let params = DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
@@ -372,6 +503,99 @@ mod tests {
             .read(&path, &mut written)
             .expect("file readable");
         assert_eq!(written, b"edited original\n");
+    }
+
+    fn enable_format_on_save(h: &mut TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.stoat.settings.format_on_save = Some(true);
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            document_formatting_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
+    fn open_rs(h: &mut TestHarness, root: &Path, name: &str, content: &[u8]) -> PathBuf {
+        let path = root.join(name);
+        h.fake_fs().insert_file(&path, content);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        path
+    }
+
+    fn whole_file_edit(new_text: &str) -> lsp_types::TextEdit {
+        use lsp_types::{Position, Range, TextEdit};
+        TextEdit {
+            range: Range::new(Position::new(0, 0), Position::new(1, 0)),
+            new_text: new_text.to_string(),
+        }
+    }
+
+    fn on_disk(h: &TestHarness, path: &Path) -> Vec<u8> {
+        let mut buf = Vec::new();
+        h.fake_fs().read(path, &mut buf).expect("file readable");
+        buf
+    }
+
+    #[test]
+    fn format_on_save_formats_then_writes() {
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/fos-format");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"fn main() {}\n");
+    }
+
+    #[test]
+    fn format_on_save_timeout_writes_original() {
+        use std::time::Duration;
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/fos-timeout");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+        h.fake_lsp()
+            .set_request_delay("textDocument/formatting", Duration::from_millis(600));
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        // The 500ms budget elapses before the delayed format returns.
+        h.advance_clock(Duration::from_millis(500));
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"fn  main (){}\n");
+    }
+
+    #[test]
+    fn format_on_save_disabled_writes_unformatted() {
+        use lsp_types::{OneOf, ServerCapabilities};
+        let mut h = Stoat::test();
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            document_formatting_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+        let root = PathBuf::from("/fos-disabled");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        h.settle();
+
+        assert_eq!(on_disk(&h, &path), b"fn  main (){}\n");
+        assert!(h.stoat.pending_format_on_save.is_none());
     }
 
     #[test]

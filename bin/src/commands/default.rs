@@ -156,6 +156,7 @@ fn run_tui(
 
     let cli_settings = Settings {
         text_proto_log,
+        format_on_save: None,
         theme: None,
         mouse_capture: None,
         scrolloff: None,

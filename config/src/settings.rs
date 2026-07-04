@@ -25,6 +25,11 @@ pub enum MouseCapturePolicy {
 pub struct Settings {
     /// Enables the LSP text-protocol transcript log.
     pub text_proto_log: Option<bool>,
+    /// Runs LSP formatting on the focused buffer before each save when the
+    /// server advertises the capability. `None` falls back to disabled. Set
+    /// `format_on_save = true;` in stcfg. A format that errors or exceeds the
+    /// save-time budget saves the buffer unchanged.
+    pub format_on_save: Option<bool>,
     /// Whether an open review session follows the project as it changes:
     /// external edits, git-state changes, and newly-changed files refresh it
     /// automatically. `None` falls back to enabled. Set `review.follow = false;`
@@ -90,6 +95,7 @@ impl Settings {
         lsp_servers.extend(other.lsp_servers);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
+            format_on_save: other.format_on_save.or(self.format_on_save),
             review_follow: other.review_follow.or(self.review_follow),
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
@@ -107,6 +113,11 @@ impl Settings {
             ["text_proto_log"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.text_proto_log = Some(b);
+                }
+            },
+            ["format_on_save"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.format_on_save = Some(b);
                 }
             },
             ["review", "follow"] => {
@@ -197,6 +208,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                format_on_save: None,
                 review_follow: None,
                 theme: None,
                 mouse_capture: None,
@@ -234,6 +246,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(false),
+                format_on_save: None,
                 review_follow: None,
                 theme: None,
                 mouse_capture: None,
@@ -253,6 +266,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                format_on_save: None,
                 review_follow: None,
                 theme: None,
                 mouse_capture: None,
@@ -281,6 +295,7 @@ mod tests {
     fn merge_right_wins_over_some() {
         let left = Settings {
             text_proto_log: Some(false),
+            format_on_save: None,
             review_follow: None,
             theme: None,
             mouse_capture: None,
@@ -292,6 +307,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: Some(true),
+            format_on_save: None,
             review_follow: None,
             theme: None,
             mouse_capture: None,
@@ -305,6 +321,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                format_on_save: None,
                 review_follow: None,
                 theme: None,
                 mouse_capture: None,
@@ -321,6 +338,7 @@ mod tests {
     fn merge_right_none_preserves_left() {
         let left = Settings {
             text_proto_log: Some(true),
+            format_on_save: None,
             review_follow: None,
             theme: None,
             mouse_capture: None,
@@ -335,6 +353,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                format_on_save: None,
                 review_follow: None,
                 theme: None,
                 mouse_capture: None,
@@ -362,6 +381,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                format_on_save: None,
                 review_follow: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
@@ -381,6 +401,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                format_on_save: None,
                 review_follow: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
@@ -397,6 +418,7 @@ mod tests {
     fn merge_right_overrides_theme() {
         let left = Settings {
             text_proto_log: None,
+            format_on_save: None,
             review_follow: None,
             theme: Some("a".into()),
             mouse_capture: None,
@@ -408,6 +430,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: None,
+            format_on_save: None,
             review_follow: None,
             theme: Some("b".into()),
             mouse_capture: None,

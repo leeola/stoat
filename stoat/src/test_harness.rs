@@ -541,6 +541,7 @@ impl TestHarness {
             let lsp_workspace_symbol =
                 crate::action_handlers::lsp::pump_lsp_workspace_symbol(&mut self.stoat);
             let lsp_format = crate::action_handlers::lsp::pump_lsp_format(&mut self.stoat);
+            let format_on_save = crate::action_handlers::file::pump_format_on_save(&mut self.stoat);
             let completion = crate::completion::request::pump(&mut self.stoat);
             let completion_resolve =
                 crate::action_handlers::completion::pump_completion_resolve(&mut self.stoat);
@@ -559,6 +560,7 @@ impl TestHarness {
                 && !lsp_symbol_picker
                 && !lsp_workspace_symbol
                 && !lsp_format
+                && !format_on_save
                 && !completion
                 && !completion_resolve
                 && !completion_accept
