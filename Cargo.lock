@@ -3920,6 +3920,7 @@ dependencies = [
  "futures",
  "git2",
  "insta",
+ "serde",
  "serde_json",
  "snafu",
  "stoat",

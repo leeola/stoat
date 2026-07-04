@@ -78,6 +78,12 @@ enum Command {
         /// File to open in the parent instance.
         file: PathBuf,
     },
+    /// Interrogate a live session over its socket for LSP status, diagnostics,
+    /// or hover at a position. Prints the JSON reply.
+    Query {
+        #[command(subcommand)]
+        sub: crate::commands::query::QueryCommand,
+    },
 }
 
 pub fn run(args: Args) -> Result<(), Whatever> {
@@ -93,6 +99,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
         Some(Command::AgentApi { sub }) => crate::commands::agent_api::run(sub),
         Some(Command::Editor { file }) => crate::commands::editor::run(file),
+        Some(Command::Query { sub }) => crate::commands::query::run(sub),
         Some(Command::Review) => run_tui(text_proto_log, common, TuiStart::Review),
         None => run_tui(text_proto_log, common, TuiStart::Files),
     }
