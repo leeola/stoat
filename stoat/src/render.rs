@@ -35,7 +35,7 @@ use crate::{
     app::Stoat,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
-    keymap_state::{action_display_desc, StoatKeymapState},
+    keymap_state::{action_display_desc, Flags, StoatKeymapState},
     pane::{DockVisibility, FocusTarget},
     rebase::RebasePause,
     run::{RunId, RunState},
@@ -389,7 +389,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false, false);
+        let state = StoatKeymapState::with_flags(
+            &stoat.mode,
+            Flags {
+                help_open: true,
+                ..Default::default()
+            },
+        );
         let raw = stoat.keymap.scoped_bindings(&state, "help_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -416,7 +422,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true, false);
+        let state = StoatKeymapState::with_flags(
+            &stoat.mode,
+            Flags {
+                finder_open: true,
+                ..Default::default()
+            },
+        );
         let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -443,7 +455,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false, false);
+        let state = StoatKeymapState::with_flags(
+            &stoat.mode,
+            Flags {
+                palette_open: true,
+                ..Default::default()
+            },
+        );
         let raw = stoat.keymap.scoped_bindings(&state, "palette_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -583,10 +601,12 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         // mutable borrow of the active workspace, so read the flags directly.
         let state = StoatKeymapState::with_flags(
             &stoat.mode,
-            stoat.command_palette.is_some(),
-            stoat.help.is_some(),
-            stoat.file_finder.is_some(),
-            ws.rebase_active.is_some(),
+            Flags {
+                palette_open: stoat.command_palette.is_some(),
+                help_open: stoat.help.is_some(),
+                finder_open: stoat.file_finder.is_some(),
+                rebase_exec: ws.rebase_active.is_some(),
+            },
         );
         let raw = stoat.keymap.active_bindings(&state);
         let bindings: Vec<_> = raw
