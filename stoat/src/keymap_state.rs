@@ -2,6 +2,7 @@ use crate::{
     app::Stoat,
     keymap::{KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{FocusTarget, View},
+    rebase::RebasePause,
     workspace::Workspace,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -137,19 +138,35 @@ fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
     })
 }
 
-/// The focused editor's `view` predicate value, `diff` under a review and `file`
-/// otherwise. Absent unless an editor is focused.
-fn view_predicate(ws: &Workspace) -> Option<&'static str> {
-    match focused_view(ws)? {
-        View::Editor(id) => Some(
-            if ws.editors.get(*id).is_some_and(|e| e.review_view.is_some()) {
-                "diff"
-            } else {
-                "file"
-            },
-        ),
-        _ => None,
+/// The active `view` predicate value, naming the app screen in the foreground.
+///
+/// App screens are not editor modes. They are derived from the session state
+/// that already tracks them, resolved in the precedence order diff > reword >
+/// conflict > rebase > commits > file so that a screen stacked over another (a
+/// diff opened from the commit list, a reword paused mid-rebase) reports the
+/// topmost one. `file` is any focused editor with no screen over it. The value
+/// is absent when nothing is focused.
+pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
+    if let Some(View::Editor(id)) = focused_view(ws)
+        && ws.editors.get(*id).is_some_and(|e| e.review_view.is_some())
+    {
+        return Some("diff");
     }
+    match ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref()) {
+        Some(RebasePause::Reword { .. }) => return Some("reword"),
+        Some(RebasePause::Conflict { .. }) => return Some("conflict"),
+        _ => {},
+    }
+    if ws.rebase.is_some() {
+        return Some("rebase");
+    }
+    if ws.commits.is_some() {
+        return Some("commits");
+    }
+    if matches!(focused_view(ws), Some(View::Editor(_))) {
+        return Some("file");
+    }
+    None
 }
 
 /// The topmost open modal as a `modal` predicate value, in render precedence.
@@ -340,6 +357,26 @@ mod tests {
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "pane"), Some("editor".to_string()));
         assert_eq!(field(&state, "view"), Some("diff".to_string()));
+    }
+
+    #[test]
+    fn from_stoat_commits_is_commits_view() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("c1", "init", &[("a.rs", "fn a() {}\n")]),
+                ("c2", "more", &[("a.rs", "fn a() {}\nfn b() {}\n")]),
+            ],
+        );
+        h.open_commits("/repo");
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(field(&state, "view"), Some("commits".to_string()));
+        assert_eq!(
+            field(&state, "mode"),
+            Some("commits".to_string()),
+            "commits is still a mode until the screen-view switch lands"
+        );
     }
 
     #[test]
