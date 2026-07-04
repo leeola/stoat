@@ -144,7 +144,14 @@ fn view_predicate(ws: &Workspace) -> Option<&'static str> {
 
 /// The topmost open modal as a `modal` predicate value, in render precedence.
 /// Absent when no modal is open.
-fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
+///
+/// Covers both the pickers/overlays and the transient text inputs (search,
+/// shell, rename, ...). The latter are plain insert-mode editors, so the
+/// `modal` value is the only thing distinguishing them from an ordinary buffer
+/// when resolving keybindings. `search` is the global-search *results* picker;
+/// the incremental `/` input is `isearch`, its query counterpart
+/// `global_search`.
+pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
     if stoat.modal_run.is_some() {
         Some("run")
     } else if stoat.quit_all_confirm.is_some() {
@@ -165,6 +172,20 @@ fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
         Some("palette")
     } else if stoat.help.is_some() {
         Some("help")
+    } else if stoat.rename_input.is_some() {
+        Some("rename")
+    } else if stoat.workspace_symbol_input.is_some() {
+        Some("workspace_symbol")
+    } else if stoat.search_input.is_some() {
+        Some("isearch")
+    } else if stoat.global_search_input.is_some() {
+        Some("global_search")
+    } else if stoat.split_selection_input.is_some() {
+        Some("split_selection")
+    } else if stoat.filter_selections_input.is_some() {
+        Some("filter_selections")
+    } else if stoat.shell_input.is_some() {
+        Some("shell")
     } else {
         None
     }
@@ -319,6 +340,14 @@ mod tests {
         h.stoat.modal_run = Some(RunId::default());
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "modal"), Some("run".to_string()));
+    }
+
+    #[test]
+    fn from_stoat_modal_covers_text_inputs() {
+        let mut h = Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSearchInput);
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(field(&state, "modal"), Some("isearch".to_string()));
     }
 
     #[test]
