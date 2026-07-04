@@ -7,10 +7,10 @@ focused: #1 of 1
 mode: normal
 size: 80x24
 ---
-[0m[31mE[0m[7m[97ma[0m[97mlpha[0m
-[0m[33mW[0m[97mbravo[0m
-[0m[36mI[0m[97mcharlie[0m
-[0m[90mH[0m[97mdelta[0m
+[0m[31mE[0m[4m[7m[31ma[0m[97mlpha[0m
+[0m[33mW[0m[4m[33mb[0m[97mravo[0m
+[0m[36mI[0m[4m[36mc[0m[97mharlie[0m
+[0m[90mH[0m[4m[90md[0m[97melta[0m
 
 
 

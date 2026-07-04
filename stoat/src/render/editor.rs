@@ -11,7 +11,7 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 use std::{collections::BTreeMap, ops::Range, path::Path};
-use stoat_text::{cursor_offset, Rope};
+use stoat_text::{cursor_offset, Point, Rope};
 use stoatty_widgets::{bar::Bar, ApcScene};
 
 pub(crate) fn render_editor(
@@ -179,6 +179,22 @@ pub(crate) fn render_editor_with_overlay(
 
     let buffer_snapshot = snapshot.buffer_snapshot();
 
+    if let Some((path, set)) = diagnostic_info {
+        paint_diagnostic_spans(
+            set,
+            path,
+            buffer_snapshot.rope(),
+            &snapshot,
+            theme,
+            editor.scroll_row,
+            end_row,
+            inner,
+            right,
+            bottom,
+            buf,
+        );
+    }
+
     if let Some(query) = search_query.filter(|q| !q.is_empty()) {
         let version = buffer_snapshot.version();
         let rope = buffer_snapshot.rope();
@@ -298,6 +314,23 @@ pub(crate) fn render_editor_with_overlay(
 
     editor.cursor_screen_cell = primary_cell;
 
+    if let Some((path, set)) = diagnostic_info {
+        let cursor = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
+        paint_cursor_line_diagnostic(
+            set,
+            path,
+            rope,
+            &snapshot,
+            cursor,
+            theme,
+            editor.scroll_row,
+            end_row,
+            inner,
+            right,
+            buf,
+        );
+    }
+
     if let Some(labels) = goto_word_labels {
         let label_style = fallback_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
         for (label, &offset) in labels {
@@ -367,6 +400,17 @@ fn severity_rank(sev: DiagnosticSeverity) -> u8 {
     }
 }
 
+fn severity_scope(sev: DiagnosticSeverity) -> &'static str {
+    use crate::theme::scope as s;
+    match sev {
+        DiagnosticSeverity::ERROR => s::UI_DIAGNOSTIC_ERROR,
+        DiagnosticSeverity::WARNING => s::UI_DIAGNOSTIC_WARNING,
+        DiagnosticSeverity::INFORMATION => s::UI_DIAGNOSTIC_INFO,
+        DiagnosticSeverity::HINT => s::UI_DIAGNOSTIC_HINT,
+        _ => s::UI_DIAGNOSTIC_ERROR,
+    }
+}
+
 struct SeverityColors {
     error: [u8; 3],
     warning: [u8; 3],
@@ -416,15 +460,123 @@ fn paint_diagnostic_gutter(
         let Some(sev) = row_severity.get(&display_row) else {
             continue;
         };
-        let (glyph, scope) = match *sev {
-            DiagnosticSeverity::ERROR => ('E', crate::theme::scope::UI_DIAGNOSTIC_ERROR),
-            DiagnosticSeverity::WARNING => ('W', crate::theme::scope::UI_DIAGNOSTIC_WARNING),
-            DiagnosticSeverity::INFORMATION => ('I', crate::theme::scope::UI_DIAGNOSTIC_INFO),
-            DiagnosticSeverity::HINT => ('H', crate::theme::scope::UI_DIAGNOSTIC_HINT),
-            _ => ('E', crate::theme::scope::UI_DIAGNOSTIC_ERROR),
+        let glyph = match *sev {
+            DiagnosticSeverity::ERROR => 'E',
+            DiagnosticSeverity::WARNING => 'W',
+            DiagnosticSeverity::INFORMATION => 'I',
+            DiagnosticSeverity::HINT => 'H',
+            _ => 'E',
         };
-        let style = theme.get(scope);
+        let style = theme.get(severity_scope(*sev));
         buf[(x, y + row_offset)].set_char(glyph).set_style(style);
+    }
+}
+
+/// Underline every visible diagnostic's text span in its severity color.
+///
+/// Each diagnostic range is resolved from LSP line/character positions to buffer
+/// byte offsets and painted through [`paint_offset_range`], which merges the
+/// style so the underlined span keeps its syntax background. Empty ranges paint
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+fn paint_diagnostic_spans(
+    set: &crate::diagnostics::DiagnosticSet,
+    path: &Path,
+    rope: &Rope,
+    snapshot: &DisplaySnapshot,
+    theme: &crate::theme::Theme,
+    scroll_row: u32,
+    end_row: u32,
+    inner: Rect,
+    right: u16,
+    bottom: u16,
+    buf: &mut Buffer,
+) {
+    let rope_len = rope.len();
+    for diag in set.get(path) {
+        let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+        let start = rope
+            .point_to_offset(Point::new(
+                diag.range.start.line,
+                diag.range.start.character,
+            ))
+            .min(rope_len);
+        let end = rope
+            .point_to_offset(Point::new(diag.range.end.line, diag.range.end.character))
+            .min(rope_len);
+        if start >= end {
+            continue;
+        }
+        let style = theme
+            .get(severity_scope(sev))
+            .add_modifier(Modifier::UNDERLINED);
+        paint_offset_range(
+            rope,
+            snapshot,
+            start..end,
+            None,
+            style,
+            scroll_row,
+            end_row,
+            inner,
+            right,
+            bottom,
+            buf,
+        );
+    }
+}
+
+/// Paint the highest-severity diagnostic covering the primary cursor's line as
+/// an end-of-line message, dimmed in the severity color.
+///
+/// The message is the first line of the winning diagnostic, started two columns
+/// past the row's content and clipped to the pane's right edge. A no-op when the
+/// cursor row is scrolled off, no diagnostic covers it, or the message is empty.
+#[allow(clippy::too_many_arguments)]
+fn paint_cursor_line_diagnostic(
+    set: &crate::diagnostics::DiagnosticSet,
+    path: &Path,
+    rope: &Rope,
+    snapshot: &DisplaySnapshot,
+    cursor: usize,
+    theme: &crate::theme::Theme,
+    scroll_row: u32,
+    end_row: u32,
+    inner: Rect,
+    right: u16,
+    buf: &mut Buffer,
+) {
+    let cursor_point = rope.offset_to_point(cursor);
+    let display = snapshot.buffer_to_display(cursor_point);
+    if display.row < scroll_row || display.row >= end_row {
+        return;
+    }
+
+    let cursor_line = cursor_point.row;
+    let Some(diag) = set
+        .get(path)
+        .iter()
+        .filter(|d| d.range.start.line <= cursor_line && cursor_line <= d.range.end.line)
+        .min_by_key(|d| severity_rank(d.severity.unwrap_or(DiagnosticSeverity::ERROR)))
+    else {
+        return;
+    };
+
+    let message = diag.message.lines().next().unwrap_or("");
+    if message.is_empty() {
+        return;
+    }
+
+    let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+    let style = theme.get(severity_scope(sev)).add_modifier(Modifier::DIM);
+    let y = inner.y + (display.row - scroll_row) as u16;
+    let base_x = inner.x as u32 + snapshot.line_len(display.row) + 2;
+    for (i, ch) in message.chars().enumerate() {
+        let x = base_x + i as u32;
+        if x >= right as u32 {
+            break;
+        }
+        buf[(x as u16, y)].set_char(ch).set_style(style);
     }
 }
 
@@ -623,6 +775,71 @@ mod tests {
             ],
         );
         h.assert_snapshot("diagnostic_gutter_worst_severity_wins");
+    }
+
+    #[test]
+    fn snapshot_diagnostic_inline_underline_span() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-inline");
+        let path = root.join("a.rs");
+        h.fake_fs()
+            .insert_file(&path, b"let x = 1;\nlet y = 2;\nlet z = 3;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        // The diagnostic sits on line 1 while the cursor stays on line 0, so
+        // only the span is underlined and no end-of-line message appears.
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: 1,
+                        character: 4,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 5,
+                    },
+                },
+                severity: Some(DiagnosticSeverity::WARNING),
+                message: "unused variable".into(),
+                ..Default::default()
+            }],
+        );
+        h.assert_snapshot("diagnostic_inline_underline_span");
+    }
+
+    #[test]
+    fn snapshot_diagnostic_cursor_line_eol_message() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-eol");
+        let path = root.join("a.rs");
+        h.fake_fs().insert_file(&path, b"let x = 1;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        // The cursor opens on line 0. The diagnostic underlines its span, and
+        // its message trails the line content, dimmed in the severity color.
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 4,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 5,
+                    },
+                },
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: "mismatched types".into(),
+                ..Default::default()
+            }],
+        );
+        h.assert_snapshot("diagnostic_cursor_line_eol_message");
     }
 
     fn add_cursor_at(stoat: &mut Stoat, offset: usize) {

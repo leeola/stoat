@@ -1,0 +1,33 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: snapshot
+focused: #1 of 1
+mode: normal
+size: 80x24
+---
+ [0m[1m[7m[34ml[0m[1m[34met[0m[97m x [0m[96m=[0m[97m [0m[35m1[0m[37m;[0m
+[0m[33mW[0m[1m[34mlet[0m[97m [0m[4m[33my[0m[97m [0m[96m=[0m[97m [0m[35m2[0m[37m;[0m
+ [0m[1m[34mlet[0m[97m z [0m[96m=[0m[97m [0m[35m3[0m[37m;[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m[1m[30m[44m NOR [0m[1m[97m[100m diag-inline [0m[97m[100ma.rs                                                 [0m[1m[33m[100m W1 [0m[97m[100m 1:1 [0m
