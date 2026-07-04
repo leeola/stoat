@@ -14,7 +14,7 @@ use crate::{
     buffer::BufferId,
     display_map::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
-        InlayKind,
+        HighlightStyleInterner, InlayKind, SemanticTokenHighlight,
     },
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
@@ -31,11 +31,13 @@ use lsp_types::{
     Documentation, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, HoverContents,
     HoverParams, InlayHint, InlayHintLabel, InlayHintParams, MarkedString, OneOf, ParameterLabel,
     Position, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams,
-    ServerInfo, SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    SemanticToken, SemanticTokenType, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerInfo, SignatureHelp, SignatureHelpParams,
+    SignatureInformation, SymbolInformation, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, VersionedTextDocumentIdentifier,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     future::Future,
@@ -1894,6 +1896,261 @@ fn apply_pull_diagnostics(
         },
         None => {},
     }
+}
+
+/// Debounce before requesting semantic tokens, so a burst of edits collapses into
+/// a single request once typing settles.
+const SEMANTIC_TOKENS_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// A decoded LSP semantic token. It pairs an absolute buffer span with the
+/// tree-sitter highlight scope stem its type maps to.
+#[derive(Debug, PartialEq)]
+struct DecodedToken {
+    line: u32,
+    start: u32,
+    length: u32,
+    scope: &'static str,
+}
+
+/// A completed semantic-tokens request's payload. It carries the buffer and the
+/// resolved `(byte range, scope stem)` spans in request-time coordinates.
+pub(crate) type SemanticTokensOutcome = (BufferId, Vec<(std::ops::Range<usize>, &'static str)>);
+
+/// Request semantic tokens for the focused editor when the server advertises a
+/// full-document legend and the `(buffer, version)` key changed.
+///
+/// A newly-focused buffer and each edit re-request behind a 500ms debounce. A key
+/// change also clears the stale LSP highlights first. Tokens layer over the
+/// tree-sitter baseline, so they never replace it -- only recolor on top.
+/// [`pump_lsp_semantic_tokens`] applies the response.
+pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
+    let capabilities = stoat.lsp_host.capabilities();
+    let Some(legend) = semantic_tokens_legend(&capabilities) else {
+        return;
+    };
+    let legend = legend.to_vec();
+    let encoding = stoat.lsp_host.offset_encoding();
+
+    let Some((buffer_id, version, rope, params)) = build_semantic_tokens_request(stoat) else {
+        return;
+    };
+
+    let key = (buffer_id, version);
+    if stoat.last_semantic_tokens_key == Some(key) {
+        return;
+    }
+    stoat.last_semantic_tokens_key = Some(key);
+    if let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) {
+        editor.display_map.invalidate_lsp_highlights(buffer_id);
+    }
+
+    let lsp = stoat.lsp_host.clone();
+    let executor = stoat.executor.clone();
+    let task = stoat.executor.spawn(async move {
+        executor.timer(SEMANTIC_TOKENS_DEBOUNCE).await;
+        match lsp.semantic_tokens_full(params).await {
+            Ok(Some(result)) => Some((
+                buffer_id,
+                convert_semantic_tokens(result, &legend, &rope, encoding),
+            )),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "semantic_tokens_full request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_semantic_tokens = Some(task);
+}
+
+fn build_semantic_tokens_request(
+    stoat: &mut Stoat,
+) -> Option<(BufferId, u64, Rope, SemanticTokensParams)> {
+    let (buffer_id, version, rope) = {
+        let editor = crate::action_handlers::focused_editor_mut(stoat)?;
+        if editor.review_view.is_some() {
+            return None;
+        }
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        (
+            editor.buffer_id,
+            buf_snap.version(),
+            buf_snap.rope().clone(),
+        )
+    };
+
+    let path = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)?;
+    let uri = path_to_uri(&path)?;
+    let params = SemanticTokensParams {
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        text_document: TextDocumentIdentifier { uri },
+    };
+    Some((buffer_id, version, rope, params))
+}
+
+/// The token-type legend from the server's semantic-tokens capability, or `None`
+/// when it advertises no full-document semantic tokens.
+fn semantic_tokens_legend(caps: &lsp_types::ServerCapabilities) -> Option<&[SemanticTokenType]> {
+    let opts = match caps.semantic_tokens_provider.as_ref()? {
+        SemanticTokensServerCapabilities::SemanticTokensOptions(o) => o,
+        SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(o) => {
+            &o.semantic_tokens_options
+        },
+    };
+    opts.full.as_ref()?;
+    Some(&opts.legend.token_types)
+}
+
+/// Decode a semantic-tokens response into `(byte range, scope stem)` spans using
+/// the request-time rope. Partial (streaming) results carry no full token set and
+/// yield nothing.
+fn convert_semantic_tokens(
+    result: SemanticTokensResult,
+    legend: &[SemanticTokenType],
+    rope: &Rope,
+    encoding: OffsetEncoding,
+) -> Vec<(std::ops::Range<usize>, &'static str)> {
+    let SemanticTokensResult::Tokens(tokens) = result else {
+        return Vec::new();
+    };
+    decode_semantic_tokens(&tokens.data, legend)
+        .into_iter()
+        .map(|t| {
+            let start = crate::lsp::util::lsp_pos_to_byte_offset(
+                rope,
+                Position::new(t.line, t.start),
+                encoding,
+            );
+            let end = crate::lsp::util::lsp_pos_to_byte_offset(
+                rope,
+                Position::new(t.line, t.start + t.length),
+                encoding,
+            );
+            (start..end, t.scope)
+        })
+        .collect()
+}
+
+/// Map an LSP `SemanticTokenType` name onto a stoat tree-sitter scope stem. Types
+/// with no stoat equivalent return `None` and are skipped.
+fn lsp_token_scope(token_type: &str) -> Option<&'static str> {
+    Some(match token_type {
+        "function" | "method" => "function",
+        "macro" => "function.special",
+        "type" | "class" | "enum" | "interface" | "struct" | "typeParameter" => "type",
+        "variable" => "variable",
+        "parameter" => "variable.parameter",
+        "property" | "enumMember" => "property",
+        "keyword" | "modifier" => "keyword",
+        "comment" => "comment",
+        "string" => "string",
+        "number" => "number",
+        "operator" => "operator",
+        _ => return None,
+    })
+}
+
+/// Decode the LSP relative token stream into absolute-positioned spans.
+///
+/// Each token's line and start accumulate from the previous per the LSP encoding.
+/// `delta_start` is relative within a line and absolute after a line break. Tokens
+/// whose type index falls outside the legend, or whose type has no stoat scope,
+/// are skipped.
+fn decode_semantic_tokens(
+    data: &[SemanticToken],
+    legend: &[SemanticTokenType],
+) -> Vec<DecodedToken> {
+    let mut out = Vec::new();
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for token in data {
+        line += token.delta_line;
+        if token.delta_line == 0 {
+            col += token.delta_start;
+        } else {
+            col = token.delta_start;
+        }
+        let Some(ty) = legend.get(token.token_type as usize) else {
+            continue;
+        };
+        let Some(scope) = lsp_token_scope(ty.as_str()) else {
+            continue;
+        };
+        out.push(DecodedToken {
+            line,
+            start: col,
+            length: token.length,
+            scope,
+        });
+    }
+    out
+}
+
+/// Poll any in-flight semantic-tokens request and paint the results onto the
+/// focused editor's LSP highlight channel. Returns true when state changed.
+pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_semantic_tokens.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some((buffer_id, items))) => {
+            apply_semantic_tokens(stoat, buffer_id, items);
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_semantic_tokens = Some(task);
+            false
+        },
+    }
+}
+
+fn apply_semantic_tokens(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    items: Vec<(std::ops::Range<usize>, &'static str)>,
+) {
+    let mut interner = HighlightStyleInterner::default();
+    let styled: Vec<(std::ops::Range<usize>, _)> = items
+        .into_iter()
+        .map(|(range, scope)| {
+            let scope_path = syntax_theme::theme_scope_for_key(scope);
+            let style = syntax_theme::style_to_highlight_style(&stoat.theme.get(&scope_path));
+            (range, interner.intern(style))
+        })
+        .collect();
+    let interner = Arc::new(interner);
+
+    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+        return;
+    };
+    if editor.buffer_id != buffer_id {
+        return;
+    }
+
+    let tokens: Arc<[SemanticTokenHighlight]> = {
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        styled
+            .into_iter()
+            .map(|(range, style)| SemanticTokenHighlight {
+                range: buf_snap.anchor_at(range.start, Bias::Right)
+                    ..buf_snap.anchor_at(range.end, Bias::Left),
+                style,
+            })
+            .collect()
+    };
+    editor
+        .display_map
+        .set_lsp_token_highlights(buffer_id, tokens, interner);
 }
 
 /// One actionable entry in [`CodeActionPicker`]. Variants reflect
@@ -5921,5 +6178,115 @@ mod tests {
         h.type_keys("escape");
         h.advance_clock(Duration::from_millis(350));
         assert!(h.stoat.diagnostics.get(&path).is_empty());
+    }
+
+    #[test]
+    fn decode_semantic_tokens_accumulates_deltas() {
+        use lsp_types::{SemanticToken, SemanticTokenType};
+        let legend = vec![
+            SemanticTokenType::new("keyword"),
+            SemanticTokenType::new("function"),
+            SemanticTokenType::new("boolean"),
+        ];
+        let tok = |delta_line, delta_start, length, token_type| SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            token_modifiers_bitset: 0,
+        };
+        let data = vec![
+            tok(0, 0, 3, 0),
+            tok(0, 4, 2, 1),
+            tok(1, 2, 5, 0),
+            tok(0, 6, 1, 2),
+            tok(0, 8, 4, 9),
+        ];
+        let decoded = super::decode_semantic_tokens(&data, &legend);
+        let want = |line, start, length, scope| super::DecodedToken {
+            line,
+            start,
+            length,
+            scope,
+        };
+        assert_eq!(
+            decoded,
+            vec![
+                want(0, 0, 3, "keyword"),
+                want(0, 4, 2, "function"),
+                want(1, 2, 5, "keyword"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lsp_token_scope_maps_standard_types() {
+        assert_eq!(super::lsp_token_scope("function"), Some("function"));
+        assert_eq!(super::lsp_token_scope("method"), Some("function"));
+        assert_eq!(
+            super::lsp_token_scope("parameter"),
+            Some("variable.parameter")
+        );
+        assert_eq!(super::lsp_token_scope("struct"), Some("type"));
+        assert_eq!(super::lsp_token_scope("regexp"), None);
+    }
+
+    fn enable_semantic_tokens(h: &TestHarness) {
+        use lsp_types::{
+            SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
+            SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
+        };
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            semantic_tokens_provider: Some(
+                SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                    legend: SemanticTokensLegend {
+                        token_types: vec![SemanticTokenType::new("function")],
+                        token_modifiers: vec![],
+                    },
+                    full: Some(SemanticTokensFullOptions::Bool(true)),
+                    range: None,
+                    work_done_progress_options: Default::default(),
+                }),
+            ),
+            ..Default::default()
+        });
+    }
+
+    fn lsp_token_count(h: &mut TestHarness) -> usize {
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        snapshot
+            .lsp_token_highlights()
+            .values()
+            .map(|(tokens, _)| tokens.len())
+            .sum()
+    }
+
+    #[test]
+    fn snapshot_semantic_tokens_recolor_over_tree_sitter() {
+        use lsp_types::{SemanticToken, SemanticTokens, SemanticTokensResult};
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_tokens(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = y\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_semantic_tokens_full(
+            path.to_str().unwrap(),
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: vec![SemanticToken {
+                    delta_line: 0,
+                    delta_start: 8,
+                    length: 1,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                }],
+            }),
+        );
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        assert_eq!(lsp_token_count(&mut h), 1);
+        h.assert_snapshot("semantic_tokens_recolor");
     }
 }

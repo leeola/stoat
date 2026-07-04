@@ -55,7 +55,7 @@ const THEME_KEYS: &[&str] = &[
 /// in tree-sitter queries to preserve longest-prefix matching on
 /// `.markup`; the theme reorders them so the hierarchy rooted at
 /// `syntax.markup` can fall back naturally.
-fn theme_scope_for_key(key: &str) -> String {
+pub(crate) fn theme_scope_for_key(key: &str) -> String {
     if let Some(rest) = key.strip_suffix(".markup") {
         // e.g. "emphasis.strong.markup" → "syntax.markup.emphasis.strong"
         return format!("syntax.markup.{rest}");

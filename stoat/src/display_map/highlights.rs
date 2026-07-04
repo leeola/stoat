@@ -81,6 +81,7 @@ pub enum HighlightLayer {
     ColorizeBracket,
     SyntaxToken,
     SemanticToken,
+    LspSemanticToken,
     SearchHighlight,
     DiffHighlight,
     DocumentHighlightRead,
@@ -217,6 +218,7 @@ pub struct Highlights<'a> {
     pub text_highlights: Option<&'a TextHighlights>,
     pub inlay_highlights: Option<&'a InlayHighlights>,
     pub semantic_token_highlights: Option<&'a SemanticTokensHighlights>,
+    pub lsp_token_highlights: Option<&'a SemanticTokensHighlights>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +254,7 @@ pub struct CachedHighlightEndpoints {
     version: u64,
     text_ptr: usize,
     semantic_ptr: Option<usize>,
+    lsp_ptr: Option<usize>,
     range: Range<usize>,
     endpoints: Arc<[HighlightEndpoint]>,
 }
@@ -262,11 +265,13 @@ impl CachedHighlightEndpoints {
         version: u64,
         highlights: &TextHighlights,
         semantic: Option<&SemanticTokensHighlights>,
+        lsp: Option<&SemanticTokensHighlights>,
         range: &Range<usize>,
     ) -> bool {
         self.version == version
             && self.text_ptr == Arc::as_ptr(highlights) as usize
             && self.semantic_ptr == semantic.map(|s| Arc::as_ptr(s) as usize)
+            && self.lsp_ptr == lsp.map(|s| Arc::as_ptr(s) as usize)
             && self.range == *range
     }
 
@@ -280,20 +285,34 @@ pub fn create_highlight_endpoints_cached(
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
+    lsp_highlights: Option<&SemanticTokensHighlights>,
     resolve: &impl Fn(&Anchor) -> usize,
     cache: &mut Option<CachedHighlightEndpoints>,
 ) -> Arc<[HighlightEndpoint]> {
     if let &mut Some(ref cached) = cache
-        && cached.is_valid(version, highlights, semantic_highlights, range)
+        && cached.is_valid(
+            version,
+            highlights,
+            semantic_highlights,
+            lsp_highlights,
+            range,
+        )
     {
         return cached.endpoints.clone();
     }
-    let endpoints = create_highlight_endpoints(range, highlights, semantic_highlights, resolve);
+    let endpoints = create_highlight_endpoints(
+        range,
+        highlights,
+        semantic_highlights,
+        lsp_highlights,
+        resolve,
+    );
     let arc: Arc<[HighlightEndpoint]> = Arc::from(endpoints);
     *cache = Some(CachedHighlightEndpoints {
         version,
         text_ptr: Arc::as_ptr(highlights) as usize,
         semantic_ptr: semantic_highlights.map(|s| Arc::as_ptr(s) as usize),
+        lsp_ptr: lsp_highlights.map(|s| Arc::as_ptr(s) as usize),
         range: range.clone(),
         endpoints: arc.clone(),
     });
@@ -304,6 +323,7 @@ pub fn create_highlight_endpoints(
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
+    lsp_highlights: Option<&SemanticTokensHighlights>,
     resolve: &impl Fn(&Anchor) -> usize,
 ) -> Vec<HighlightEndpoint> {
     let mut endpoints = Vec::new();
@@ -345,45 +365,74 @@ pub fn create_highlight_endpoints(
     }
 
     if let Some(semantic) = semantic_highlights {
-        for (_buffer_id, (tokens, interner)) in semantic.iter() {
-            // Tokens are sorted by `range.start`, not `range.end`, so an
-            // end-keyed binary search would drop enclosing tokens whose nested
-            // children end before the viewport. Walk the whole slice and skip
-            // tokens that end at or before the viewport. The `s >= range.end`
-            // break still holds because `start` is the sort key.
-            for (i, token) in tokens.iter().enumerate() {
-                let s = resolve(&token.range.start);
-                let e = resolve(&token.range.end);
-                if s >= range.end {
-                    break;
-                }
-                if s == e {
-                    continue;
-                }
-                if e <= range.start {
-                    continue;
-                }
-                // Unique slot per token keeps nested captures (e.g. escape
-                // inside string) in distinct entries of the merger's active map.
-                let key = HighlightKey::new(HighlightLayer::SemanticToken, i as u32);
-                endpoints.push(HighlightEndpoint {
-                    offset: s,
-                    is_start: true,
-                    key,
-                    style: Some(interner[token.style].clone()),
-                });
-                endpoints.push(HighlightEndpoint {
-                    offset: e,
-                    is_start: false,
-                    key,
-                    style: None,
-                });
-            }
-        }
+        push_semantic_endpoints(
+            &mut endpoints,
+            semantic,
+            HighlightLayer::SemanticToken,
+            range,
+            resolve,
+        );
+    }
+
+    // LSP semantic tokens ride a higher layer than the tree-sitter tokens above,
+    // so their styles merge on top of the syntactic baseline per slot.
+    if let Some(lsp) = lsp_highlights {
+        push_semantic_endpoints(
+            &mut endpoints,
+            lsp,
+            HighlightLayer::LspSemanticToken,
+            range,
+            resolve,
+        );
     }
 
     endpoints.sort();
     endpoints
+}
+
+/// Emit start/end endpoints for one semantic-token channel at `layer`.
+///
+/// Tokens are sorted by `range.start`, not `range.end`, so an end-keyed binary
+/// search would drop enclosing tokens whose nested children end before the
+/// viewport. Walk the whole slice and skip tokens that end at or before it. The
+/// `s >= range.end` break still holds because `start` is the sort key. Each token
+/// gets a unique slot so nested captures (e.g. an escape inside a string) occupy
+/// distinct entries of the merger's active map.
+fn push_semantic_endpoints(
+    endpoints: &mut Vec<HighlightEndpoint>,
+    semantic: &SemanticTokensHighlights,
+    layer: HighlightLayer,
+    range: &Range<usize>,
+    resolve: &impl Fn(&Anchor) -> usize,
+) {
+    for (_buffer_id, (tokens, interner)) in semantic.iter() {
+        for (i, token) in tokens.iter().enumerate() {
+            let s = resolve(&token.range.start);
+            let e = resolve(&token.range.end);
+            if s >= range.end {
+                break;
+            }
+            if s == e {
+                continue;
+            }
+            if e <= range.start {
+                continue;
+            }
+            let key = HighlightKey::new(layer, i as u32);
+            endpoints.push(HighlightEndpoint {
+                offset: s,
+                is_start: true,
+                key,
+                style: Some(interner[token.style].clone()),
+            });
+            endpoints.push(HighlightEndpoint {
+                offset: e,
+                is_start: false,
+                key,
+                style: None,
+            });
+        }
+    }
 }
 
 /// Iterate text chunks with merged highlight styles applied.
@@ -591,7 +640,7 @@ mod tests {
         let text = "hello world";
         let highlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello world");
@@ -612,7 +661,7 @@ mod tests {
             vec![6..11],
         )]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].text, "hello ");
@@ -650,7 +699,7 @@ mod tests {
             ),
         ]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
 
         // "ab" (no style), "cd" (blue+bold), "ef" (red+bold, red overrides blue fg),
@@ -690,7 +739,7 @@ mod tests {
             vec![2..2],
         )]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello");
@@ -750,7 +799,8 @@ mod tests {
         let text_hl: TextHighlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
 
-        let eps = create_highlight_endpoints(&(0..text.len()), &text_hl, Some(&semantic), &resolve);
+        let eps =
+            create_highlight_endpoints(&(0..text.len()), &text_hl, Some(&semantic), None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
 
         // "ab" unstyled; "cd" outer only (blue+bold); "ef" outer+inner (inner slot
@@ -830,7 +880,7 @@ mod tests {
         let text_hl: TextHighlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
 
-        let eps = create_highlight_endpoints(&(20..40), &text_hl, Some(&semantic), &resolve);
+        let eps = create_highlight_endpoints(&(20..40), &text_hl, Some(&semantic), None, &resolve);
         let endpoints: Arc<[HighlightEndpoint]> = Arc::from(eps);
         let chunks: Vec<Chunk<'_>> = BufferChunks::new(&rope, 20..40, endpoints).collect();
 

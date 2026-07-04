@@ -204,6 +204,7 @@ pub struct DisplayMap {
     crease_map: CreaseMap,
     text_highlights: TextHighlights,
     semantic_token_highlights: SemanticTokensHighlights,
+    lsp_token_highlights: SemanticTokensHighlights,
     inlay_highlights: InlayHighlights,
     companion: Option<Companion>,
     lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
@@ -247,6 +248,7 @@ impl DisplayMap {
             crease_map: CreaseMap::new(),
             text_highlights: Arc::new(HashMap::new()),
             semantic_token_highlights: Arc::new(HashMap::new()),
+            lsp_token_highlights: Arc::new(HashMap::new()),
             inlay_highlights: BTreeMap::new(),
             companion: None,
             lsp_folding_crease_ids: HashMap::new(),
@@ -403,6 +405,24 @@ impl DisplayMap {
         self.highlights_dirty = true;
     }
 
+    /// Install LSP semantic tokens for `buffer_id`. They render on a higher layer
+    /// than the tree-sitter tokens set by [`Self::set_semantic_token_highlights`],
+    /// so their styles merge over the syntactic baseline.
+    pub fn set_lsp_token_highlights(
+        &mut self,
+        buffer_id: BufferId,
+        tokens: Arc<[SemanticTokenHighlight]>,
+        interner: Arc<HighlightStyleInterner>,
+    ) {
+        Arc::make_mut(&mut self.lsp_token_highlights).insert(buffer_id, (tokens, interner));
+        self.highlights_dirty = true;
+    }
+
+    pub fn invalidate_lsp_highlights(&mut self, buffer_id: BufferId) {
+        Arc::make_mut(&mut self.lsp_token_highlights).remove(&buffer_id);
+        self.highlights_dirty = true;
+    }
+
     pub fn highlight_inlays(
         &mut self,
         key: HighlightKey,
@@ -534,6 +554,7 @@ impl DisplayMap {
             diff_map,
             text_highlights: self.text_highlights.clone(),
             semantic_token_highlights: self.semantic_token_highlights.clone(),
+            lsp_token_highlights: self.lsp_token_highlights.clone(),
             inlay_highlights: self.inlay_highlights.clone(),
             crease_snapshot: self.crease_map.snapshot(),
             fold_placeholder: FoldPlaceholder::default(),
@@ -554,6 +575,7 @@ pub struct DisplaySnapshot {
     diff_map: Option<DiffMap>,
     text_highlights: TextHighlights,
     semantic_token_highlights: SemanticTokensHighlights,
+    lsp_token_highlights: SemanticTokensHighlights,
     inlay_highlights: InlayHighlights,
     crease_snapshot: CreaseSnapshot,
     fold_placeholder: FoldPlaceholder,
@@ -608,6 +630,10 @@ impl DisplaySnapshot {
         &self.semantic_token_highlights
     }
 
+    pub fn lsp_token_highlights(&self) -> &SemanticTokensHighlights {
+        &self.lsp_token_highlights
+    }
+
     pub fn inlay_highlights(&self) -> &InlayHighlights {
         &self.inlay_highlights
     }
@@ -650,6 +676,13 @@ impl DisplaySnapshot {
             .then_some(&self.semantic_token_highlights)
     }
 
+    /// LSP semantic tokens gated on the same syntax-highlighting toggle as
+    /// [`Self::syntax_token_highlights`], since both are semantic coloring.
+    fn lsp_syntax_token_highlights(&self) -> Option<&SemanticTokensHighlights> {
+        self.syntax_highlighting
+            .then_some(&self.lsp_token_highlights)
+    }
+
     pub fn highlighted_chunks(
         &self,
         display_rows: std::ops::Range<u32>,
@@ -658,6 +691,7 @@ impl DisplaySnapshot {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(&self.inlay_highlights),
             semantic_token_highlights: self.syntax_token_highlights(),
+            lsp_token_highlights: self.lsp_syntax_token_highlights(),
         };
         let byte_range = self
             .block_snapshot
@@ -678,6 +712,7 @@ impl DisplaySnapshot {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(&self.inlay_highlights),
             semantic_token_highlights: self.syntax_token_highlights(),
+            lsp_token_highlights: self.lsp_syntax_token_highlights(),
         };
         let byte_range = self
             .block_snapshot
@@ -695,11 +730,13 @@ impl DisplaySnapshot {
         let empty: TextHighlights = Arc::new(HashMap::new());
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
         let semantic_ref = highlights.semantic_token_highlights;
+        let lsp_ref = highlights.lsp_token_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
         let eps = highlights::create_highlight_endpoints(
             &range,
             text_highlights_ref,
             semantic_ref,
+            lsp_ref,
             &resolve,
         );
         Arc::from(eps)
@@ -717,12 +754,14 @@ impl DisplaySnapshot {
         let empty: TextHighlights = Arc::new(HashMap::new());
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
         let semantic_ref = highlights.semantic_token_highlights;
+        let lsp_ref = highlights.lsp_token_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
         highlights::create_highlight_endpoints_cached(
             buffer.version(),
             &range,
             text_highlights_ref,
             semantic_ref,
+            lsp_ref,
             &resolve,
             cache,
         )
