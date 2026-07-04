@@ -254,6 +254,19 @@ pub struct Stoat {
     /// `(buffer, version, cursor offset)` the document-highlight trigger last
     /// requested for, so an unchanged tick does not re-request.
     pub(crate) last_document_highlight_key: Option<(BufferId, u64, usize)>,
+    /// Last diagnostic `result_id` the server returned per buffer, sent as
+    /// `previous_result_id` on the next pull so the server may answer Unchanged.
+    pub(crate) pull_diagnostic_result_ids: std::collections::HashMap<BufferId, String>,
+    /// In-flight pull-diagnostic requests per buffer, armed by
+    /// [`action_handlers::lsp::pull_diagnostics_trigger`] behind a debounce and
+    /// applied by [`action_handlers::lsp::pump_lsp_pull_diagnostics`].
+    pub(crate) pending_pull_diagnostics: std::collections::HashMap<
+        BufferId,
+        stoat_scheduler::Task<Option<action_handlers::lsp::PullDiagnosticsOutcome>>,
+    >,
+    /// Buffer version the pull-diagnostic trigger last requested for, per buffer,
+    /// so an unchanged tick does not re-request.
+    pub(crate) last_pull_diagnostic_key: std::collections::HashMap<BufferId, u64>,
     pub(crate) render_tick: u64,
     /// Transient one-line message painted in a reserved bottom row,
     /// such as a failed-save error. An action sets it during event
@@ -852,6 +865,9 @@ impl Stoat {
             last_inlay_hint_key: None,
             pending_document_highlight_request: None,
             last_document_highlight_key: None,
+            pull_diagnostic_result_ids: std::collections::HashMap::new(),
+            pending_pull_diagnostics: std::collections::HashMap::new(),
+            last_pull_diagnostic_key: std::collections::HashMap::new(),
             render_tick: 0,
             pending_message: None,
             pending_count: None,
@@ -1729,6 +1745,7 @@ impl Stoat {
         action_handlers::lsp::signature_help_trigger(self);
         action_handlers::lsp::inlay_hints_trigger(self);
         action_handlers::lsp::document_highlight_trigger(self);
+        action_handlers::lsp::pull_diagnostics_trigger(self);
         effect
     }
 
@@ -4489,6 +4506,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_signature_help(self);
         action_handlers::lsp::pump_lsp_inlay_hints(self);
         action_handlers::lsp::pump_lsp_document_highlight(self);
+        action_handlers::lsp::pump_lsp_pull_diagnostics(self);
         action_handlers::lsp::pump_lsp_code_actions(self);
         action_handlers::lsp::pump_lsp_code_action_resolve(self);
         action_handlers::lsp::pump_lsp_prepare_rename(self);
