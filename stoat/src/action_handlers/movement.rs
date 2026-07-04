@@ -2549,6 +2549,31 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         .syntax_map(buffer_id)
         .and_then(|sm| sm.snapshot().iter_layers().next().map(|l| l.tree.clone()));
 
+    let language = ws.buffers.language_for(buffer_id);
+    let bracket_query = language
+        .as_ref()
+        .and_then(|lang| lang.bracket_query.as_ref());
+
+    // A brackets query captures only structural delimiters, so a bracket inside
+    // a string, char, or comment literal resolves to no pair instead of
+    // false-matching. When the language ships one it is authoritative. The text
+    // scanner below only runs for languages without a query (e.g. toml).
+    if let (Some(query), Some(tree)) = (bracket_query, tree_opt.as_ref()) {
+        let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+
+        let Some(target) =
+            stoat_language::matching_bracket(query, tree.root_node(), rope, head_offset)
+        else {
+            return UpdateEffect::None;
+        };
+
+        apply_primary_range(editor, target..target);
+        return UpdateEffect::Redraw;
+    }
+
     if let Some(ref tree) = tree_opt
         && is_in_string_or_comment(tree, head_offset)
     {

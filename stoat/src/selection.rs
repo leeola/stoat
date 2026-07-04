@@ -3825,6 +3825,39 @@ mod tests {
     }
 
     #[test]
+    fn match_brackets_skips_paren_in_char_literal() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 5);
+        let path = h.write_file("s.rs", "fn f() { let c = '('; }\n");
+        h.open_file(&path);
+        h.type_keys("1 8 l");
+        assert_eq!(
+            h.primary_head_offset(),
+            18,
+            "cursor on the `(` inside the char literal"
+        );
+        h.type_keys("m m");
+        assert_eq!(
+            h.primary_head_offset(),
+            18,
+            "`(` in a char literal is not a bracket token and must not match"
+        );
+    }
+
+    #[test]
+    fn match_brackets_scanner_fallback_without_query() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 5);
+        let path = h.write_file("t.toml", "[table]\n");
+        h.open_file(&path);
+        assert_eq!(h.primary_head_offset(), 0, "cursor starts on the `[`");
+        h.type_keys("m m");
+        assert_eq!(
+            h.primary_head_offset(),
+            6,
+            "toml has no brackets query, so the scanner matches `[` to `]`"
+        );
+    }
+
+    #[test]
     fn count_prefix_word_clamps_at_buffer_edge() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");
