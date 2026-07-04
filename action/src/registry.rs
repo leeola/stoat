@@ -54,9 +54,10 @@ use crate::{
             HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
         },
         lsp::{
-            CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,
-            GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenDiagnosticsPicker, OpenSymbolPicker,
-            OpenWorkspaceDiagnosticsPicker, OpenWorkspaceSymbolPicker, RenameSymbol,
+            CodeAction, Format, FormatSelections, GotoDefinition, GotoImplementation,
+            GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
+            OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
+            OpenWorkspaceSymbolPicker, RenameSymbol,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -186,6 +187,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenWorkspaceSymbolPicker))
     });
     add(FormatSelections::DEF, |_| Ok(Box::new(FormatSelections)));
+    add(Format::DEF, |_| Ok(Box::new(Format)));
     add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
     add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
     add(ReviewStageChunk::DEF, |_| Ok(Box::new(ReviewStageChunk)));
@@ -721,6 +723,7 @@ mod tests {
         "OpenSymbolPicker",
         "OpenWorkspaceSymbolPicker",
         "FormatSelections",
+        "Format",
         "SetMark",
         "GotoMark",
         "GotoMarkExact",
@@ -1011,6 +1014,7 @@ mod tests {
         // + 1 OpenSymbolPicker.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
+        // + 1 Format.
         // + 3 marks (SetMark, GotoMark, GotoMarkExact).
         // + 1 SurroundAdd.
         // + 2 SurroundReplace, SurroundDelete.
@@ -1035,7 +1039,7 @@ mod tests {
         // + 1 ToggleDiff.
         // + 1 ToggleSyntaxHighlight.
         // + 1 ShowVersion.
-        assert_eq!(all().count(), 289);
+        assert_eq!(all().count(), 290);
     }
 
     #[test]

@@ -19,14 +19,14 @@ use codegraph::SymbolKey;
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse,
-    HoverContents, HoverParams, MarkedString, OneOf, Position, PrepareRenameResponse, Range,
-    ReferenceContext, ReferenceParams, RenameParams, ServerInfo, SymbolInformation,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, FormattingOptions,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, MarkedString, OneOf,
+    Position, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams,
+    ServerInfo, SymbolInformation, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextEdit, VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit,
+    WorkspaceSymbol, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     future::Future,
@@ -2085,6 +2085,70 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
             Ok(_) => None,
             Err(err) => {
                 tracing::warn!(target: "stoat::lsp", ?err, "range_formatting request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_format_request = Some(task);
+    UpdateEffect::None
+}
+
+/// Issue a `textDocument/formatting` request for the whole focused
+/// document. The async response is stored on
+/// [`Stoat::pending_format_request`] and applied by [`pump_lsp_format`]
+/// on the next render tick, sharing the single-document apply path with
+/// [`format_selections`].
+///
+/// No-op when the focused pane is not an editor, the buffer has no
+/// path, or the server does not advertise
+/// [`LanguageServerFeature::Format`].
+pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::Format)
+    {
+        return UpdateEffect::None;
+    }
+
+    let Some(buffer_id) = crate::action_handlers::focused_editor_mut(stoat).map(|e| e.buffer_id)
+    else {
+        return UpdateEffect::None;
+    };
+
+    let Some(source_path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(source_uri) = path_to_uri(&source_path) else {
+        return UpdateEffect::None;
+    };
+
+    let params = DocumentFormattingParams {
+        text_document: TextDocumentIdentifier {
+            uri: source_uri.clone(),
+        },
+        options: FormattingOptions {
+            tab_size: 4,
+            insert_spaces: true,
+            ..FormattingOptions::default()
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let task = stoat.executor.spawn(async move {
+        match lsp.formatting(params).await {
+            Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
+                uri: source_uri,
+                edits,
+            }),
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "formatting request failed");
                 None
             },
         }
@@ -4453,6 +4517,53 @@ mod tests {
             vec![format_text_edit(0, 0, 1, 0, "fn foo() {}\n")],
         );
         h.type_keys("=");
+        h.settle();
+        assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    }
+
+    #[test]
+    fn format_document_applies_returned_edits() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_format(&h);
+        let root = seed(&mut h, &[("main.rs", "fn  foo (){}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![format_text_edit(0, 0, 1, 0, "fn foo() {}\n")],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Format);
+        h.settle();
+        assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    }
+
+    #[test]
+    fn format_document_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "fn  foo (){}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![format_text_edit(0, 0, 1, 0, "fn foo() {}\n")],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Format);
+        h.settle();
+        assert_eq!(buffer_text(&h, &path), "fn  foo (){}\n");
+    }
+
+    #[test]
+    fn space_l_f_formats_document() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_format(&h);
+        let root = seed(&mut h, &[("main.rs", "fn  foo (){}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![format_text_edit(0, 0, 1, 0, "fn foo() {}\n")],
+        );
+        h.type_keys("space l f");
         h.settle();
         assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
     }

@@ -554,6 +554,7 @@ on key {
         p -> [TrailPrev(), SetMode(normal)];
         i -> [Hover(), SetMode(normal)];
         a -> [CodeAction(), SetMode(normal)];
+        f -> [Format(), SetMode(normal)];
         r -> [RenameSymbol(), SetMode(normal)];
         s -> [OpenSymbolPicker(), SetMode(normal)];
         S -> OpenWorkspaceSymbolPicker();

@@ -176,3 +176,16 @@ define_action!(
      the formatting capability or returns no edits.",
     ActionPriority::Common
 );
+
+define_action!(
+    FormatDef,
+    Format,
+    "Format",
+    ActionKind::Format,
+    "format document via LSP",
+    "Issue an LSP `textDocument/formatting` request for the whole \
+     focused document and apply the returned text edits to the \
+     buffer. No-op when the server does not advertise the formatting \
+     capability or returns no edits.",
+    ActionPriority::Common
+);

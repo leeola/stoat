@@ -220,6 +220,7 @@ pub enum ActionKind {
     OpenSymbolPicker,
     OpenWorkspaceSymbolPicker,
     FormatSelections,
+    Format,
     ReviewNextChunk,
     ReviewPrevChunk,
     ReviewStageChunk,

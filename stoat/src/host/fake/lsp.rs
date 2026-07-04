@@ -562,6 +562,7 @@ struct FakeLspState {
     folding_ranges: BTreeMap<Uri, Vec<FoldingRange>>,
     selection_ranges: BTreeMap<LspKey, SelectionRange>,
     range_formatting: BTreeMap<Uri, Vec<TextEdit>>,
+    formatting: BTreeMap<Uri, Vec<TextEdit>>,
     document_diagnostics: BTreeMap<Uri, DocumentDiagnosticReportResult>,
     document_links: BTreeMap<Uri, Vec<DocumentLink>>,
     document_colors: BTreeMap<Uri, Vec<ColorInformation>>,
@@ -640,6 +641,7 @@ impl FakeLsp {
                 folding_ranges: BTreeMap::new(),
                 selection_ranges: BTreeMap::new(),
                 range_formatting: BTreeMap::new(),
+                formatting: BTreeMap::new(),
                 document_diagnostics: BTreeMap::new(),
                 document_links: BTreeMap::new(),
                 document_colors: BTreeMap::new(),
@@ -762,6 +764,17 @@ impl FakeLsp {
             .lock()
             .unwrap()
             .range_formatting
+            .insert(file_uri(path), edits);
+    }
+
+    /// Programs the [`TextEdit`]s returned for a `textDocument/formatting`
+    /// (whole-document) call against `path`. Replaces any previously
+    /// seeded edits for the same document.
+    pub fn set_formatting(&self, path: &str, edits: Vec<TextEdit>) {
+        self.state
+            .lock()
+            .unwrap()
+            .formatting
             .insert(file_uri(path), edits);
     }
 
@@ -2430,7 +2443,8 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::Formatting, params);
-        Ok(None)
+        let state = self.state.lock().unwrap();
+        Ok(state.formatting.get(&params.text_document.uri).cloned())
     }
 
     async fn range_formatting(
