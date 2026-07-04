@@ -164,6 +164,14 @@ pub struct TextPass {
     text_run_instances: Buffer,
     text_run_capacity: usize,
     text_run_count: u32,
+    /// Screen-anchored glyphs for the perf HUD readout, laid out in pixel space
+    /// and drawn topmost with the text-run pipeline.
+    #[cfg(feature = "perf")]
+    hud_instances: Buffer,
+    #[cfg(feature = "perf")]
+    hud_capacity: usize,
+    #[cfg(feature = "perf")]
+    hud_count: u32,
     underline_pipeline: RenderPipeline,
     underline_instances: Buffer,
     underline_capacity: usize,
@@ -381,6 +389,12 @@ impl TextPass {
             "text run instances",
             instance_bytes::<TextInstance>(INITIAL_CAPACITY),
         );
+        #[cfg(feature = "perf")]
+        let hud_instances = alloc_instances(
+            device,
+            "hud text instances",
+            instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+        );
         let underline_instances = alloc_instances(
             device,
             "underline instances",
@@ -421,6 +435,12 @@ impl TextPass {
             text_run_instances,
             text_run_capacity: INITIAL_CAPACITY,
             text_run_count: 0,
+            #[cfg(feature = "perf")]
+            hud_instances,
+            #[cfg(feature = "perf")]
+            hud_capacity: INITIAL_CAPACITY,
+            #[cfg(feature = "perf")]
+            hud_count: 0,
             underline_pipeline,
             underline_instances,
             underline_capacity: INITIAL_CAPACITY,
@@ -1085,6 +1105,85 @@ impl TextPass {
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.text_run_instances.slice(..));
         render_pass.draw(0..6, 0..self.text_run_count);
+    }
+
+    /// Rasterize the perf HUD readout `lines` at pixel `anchor`, one line per
+    /// entry stacked downward, into the screen-anchored HUD glyph buffer.
+    ///
+    /// Glyphs go through the shared atlas at `scale` relative to the body font
+    /// and composite over the panel background, so the readout blends onto the
+    /// HUD rather than the grid behind it.
+    #[cfg(feature = "perf")]
+    pub fn set_hud_text(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        anchor: [f32; 2],
+        scale: f32,
+        lines: &[String],
+    ) {
+        const PANEL_BG: [f32; 3] = [0.05, 0.05, 0.08];
+        const READOUT_FG: [f32; 3] = [0.85, 0.85, 0.9];
+
+        let mut instances = Vec::new();
+        for (line, text) in lines.iter().enumerate() {
+            let line_top = anchor[1] + line as f32 * self.metrics.height * scale;
+            let baseline_y = line_top + self.baseline * scale;
+            for (index, ch) in text.chars().enumerate() {
+                if ch == ' ' {
+                    continue;
+                }
+                let Some(key) = self.glyph_key(ch, scale) else {
+                    continue;
+                };
+                let Some(info) = self.atlas.get_or_insert(
+                    device,
+                    queue,
+                    &mut self.font_system,
+                    &mut self.swash_cache,
+                    key,
+                ) else {
+                    continue;
+                };
+                let pen_x = anchor[0] + index as f32 * scale * self.metrics.width;
+                instances.push(TextInstance {
+                    pos: [
+                        pen_x + info.placement[0] as f32,
+                        baseline_y - info.placement[1] as f32,
+                    ],
+                    dim: [info.size[0] as f32, info.size[1] as f32],
+                    uv: info.uv,
+                    fg: READOUT_FG,
+                    bg: PANEL_BG,
+                    kind: kind_flag(info.kind),
+                });
+            }
+        }
+
+        self.hud_count = instances.len() as u32;
+        upload_instances(
+            device,
+            queue,
+            &instances,
+            &mut self.hud_instances,
+            &mut self.hud_capacity,
+            "hud text instances",
+        );
+    }
+
+    /// Record the HUD readout draw into `render_pass`, screen-anchored like the
+    /// text runs. A no-op when there is no readout text.
+    #[cfg(feature = "perf")]
+    pub fn draw_hud_text(&self, render_pass: &mut RenderPass<'_>) {
+        if self.hud_count == 0 {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.static_globals_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.hud_instances.slice(..));
+        render_pass.draw(0..6, 0..self.hud_count);
     }
 
     /// Record the scroll-region glyph draw into `render_pass`, scissored to the

@@ -11,7 +11,7 @@
 use std::time::Duration;
 use stoatty_render::{
     gpu::{build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll},
-    perf::FrameSample,
+    perf::{FrameSample, FrameStats, Percentiles},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -97,15 +97,25 @@ fn hud_composites_over_a_frame_off_screen() {
 
     // Bars spanning all three budget bands plus an empty series (panel and
     // hairlines only), so both the full and degenerate instance sets record.
+    // The readout also rasterizes glyph text through the atlas.
+    let pct = |ms: u64| Percentiles {
+        p50: Duration::from_millis(ms),
+        p95: Duration::from_millis(ms),
+        worst: Duration::from_millis(ms),
+    };
+    let mut last = sample(12.0);
+    last.gpu = Some(Duration::from_millis(3));
+    let stats = FrameStats {
+        frames: 3,
+        last,
+        cpu: pct(20),
+        interval: pct(16),
+        gpu: Some(pct(3)),
+    };
+    let resolution = [width as f32, height as f32];
     let samples = [sample(4.0), sample(12.0), sample(24.0)];
-    renderer.draw_hud_over(
-        &device,
-        &queue,
-        &view,
-        &samples,
-        [width as f32, height as f32],
-    );
-    renderer.draw_hud_over(&device, &queue, &view, &[], [width as f32, height as f32]);
+    renderer.draw_hud_over(&device, &queue, &view, &stats, &samples, resolution);
+    renderer.draw_hud_over(&device, &queue, &view, &stats, &[], resolution);
 
     // Reaching here without a wgpu uncaptured-error panic is the assertion.
     let _ = device.poll(PollType::wait_indefinitely());

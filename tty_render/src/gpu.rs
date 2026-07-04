@@ -37,7 +37,10 @@ use wgpu::{
 };
 #[cfg(feature = "perf")]
 use {
-    crate::{perf::FrameSample, render::hud::HudPass},
+    crate::{
+        perf::{FrameSample, FrameStats},
+        render::hud::{self, HudPass},
+    },
     std::{
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -617,10 +620,18 @@ impl Renderer {
         device: &Device,
         queue: &Queue,
         view: &TextureView,
+        stats: &FrameStats,
         samples: &[FrameSample],
         resolution: [f32; 2],
     ) {
         self.hud.prepare(device, queue, samples, resolution);
+        self.text.set_hud_text(
+            device,
+            queue,
+            hud::readout_anchor(resolution),
+            hud::READOUT_SCALE,
+            &hud::readout_lines(stats),
+        );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
         {
@@ -641,6 +652,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             self.hud.draw(&mut render_pass);
+            self.text.draw_hud_text(&mut render_pass);
         }
 
         queue.submit([encoder.finish()]);
@@ -898,11 +910,19 @@ impl GpuContext {
             .render_into(&self.device, &self.queue, &view, grid, frame);
 
         #[cfg(feature = "perf")]
-        if self.show_perf_hud {
+        if self.show_perf_hud
+            && let Some(stats) = self.perf.stats()
+        {
             let samples = self.perf.samples();
             let resolution = [self.config.width as f32, self.config.height as f32];
-            self.renderer
-                .draw_hud_over(&self.device, &self.queue, &view, &samples, resolution);
+            self.renderer.draw_hud_over(
+                &self.device,
+                &self.queue,
+                &view,
+                &stats,
+                &samples,
+                resolution,
+            );
         }
 
         self.perf.mark_submitted();
@@ -996,10 +1016,18 @@ impl GpuContext {
         }
 
         #[cfg(feature = "perf")]
-        if self.show_perf_hud {
+        if self.show_perf_hud
+            && let Some(stats) = self.perf.stats()
+        {
             let samples = self.perf.samples();
-            self.renderer
-                .draw_hud_over(&self.device, &self.queue, &view, &samples, resolution);
+            self.renderer.draw_hud_over(
+                &self.device,
+                &self.queue,
+                &view,
+                &stats,
+                &samples,
+                resolution,
+            );
         }
 
         self.perf.mark_submitted();

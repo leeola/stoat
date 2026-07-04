@@ -6,8 +6,9 @@
 //! The rectangles are in physical pixels, not cell fractions, so the HUD is a
 //! fixed overlay that ignores font zoom. Compiled only under the `perf` feature.
 
-use crate::perf::FrameSample;
+use crate::perf::{FrameSample, FrameStats};
 use bytemuck::{Pod, Zeroable};
+use std::time::Duration;
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor,
@@ -22,13 +23,18 @@ const INITIAL_CAPACITY: usize = 256;
 
 /// Outer margin from the surface's top-right corner, in pixels.
 const MARGIN: f32 = 12.0;
-/// Panel width and height in pixels.
+/// Panel width and height in pixels. The height holds the graph plus the two
+/// readout lines below it.
 const PANEL_W: f32 = 260.0;
-const PANEL_H: f32 = 96.0;
+const PANEL_H: f32 = 128.0;
 /// Inner padding between the panel edge and the graph, in pixels.
 const PAD: f32 = 8.0;
 /// Graph height in pixels. The readout occupies the panel below it.
 const GRAPH_H: f32 = 56.0;
+/// Gap in pixels between the graph bottom and the first readout line.
+const READOUT_GAP: f32 = 6.0;
+/// Text scale for the readout, relative to the body font.
+pub(crate) const READOUT_SCALE: f32 = 0.7;
 /// 60 Hz frame budget in milliseconds, drawn at the full graph height.
 const BUDGET_60: f32 = 1000.0 / 60.0;
 /// 120 Hz frame budget in milliseconds, drawn at half the graph height.
@@ -263,10 +269,31 @@ fn bar_color(ms: f32) -> [f32; 4] {
     }
 }
 
+/// The two readout lines below the graph. The first is the last and p95 CPU
+/// frame time, the second the GPU frame time when the timestamp path has one.
+pub(crate) fn readout_lines(stats: &FrameStats) -> Vec<String> {
+    let ms = |d: Duration| d.as_secs_f32() * 1000.0;
+    let gpu = match stats.last.gpu {
+        Some(gpu) => format!("gpu {:.1}", ms(gpu)),
+        None => "gpu --".to_string(),
+    };
+    vec![
+        format!("cpu {:.1} / {:.1}", ms(stats.last.cpu()), ms(stats.cpu.p95)),
+        gpu,
+    ]
+}
+
+/// Top-left pixel of the readout text block, below the graph inside the panel.
+pub(crate) fn readout_anchor(resolution: [f32; 2]) -> [f32; 2] {
+    let panel_x = resolution[0] - PANEL_W - MARGIN;
+    let panel_y = MARGIN;
+    [panel_x + PAD, panel_y + PAD + GRAPH_H + READOUT_GAP]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bar_color, build_hud_instances, BUDGET_120, BUDGET_60};
-    use crate::perf::FrameSample;
+    use super::{bar_color, build_hud_instances, readout_lines, BUDGET_120, BUDGET_60};
+    use crate::perf::{FrameSample, FrameStats, Percentiles};
     use std::time::Duration;
     use wgpu::naga::{
         front::wgsl,
@@ -309,5 +336,27 @@ mod tests {
         assert_eq!(bar_color(BUDGET_120 - 1.0), [0.3, 0.85, 0.4, 0.9]);
         assert_eq!(bar_color(BUDGET_60 - 1.0), [0.9, 0.8, 0.3, 0.9]);
         assert_eq!(bar_color(BUDGET_60 + 1.0), [0.9, 0.3, 0.3, 0.95]);
+    }
+
+    #[test]
+    fn readout_lines_format_cpu_and_optional_gpu() {
+        let flat = |ms: u64| Percentiles {
+            p50: Duration::from_millis(ms),
+            p95: Duration::from_millis(ms),
+            worst: Duration::from_millis(ms),
+        };
+        let mut stats = FrameStats {
+            frames: 10,
+            last: sample(8.0),
+            cpu: flat(14),
+            interval: flat(16),
+            gpu: None,
+        };
+        let lines = readout_lines(&stats);
+        assert_eq!(lines[0], "cpu 8.0 / 14.0");
+        assert_eq!(lines[1], "gpu --");
+
+        stats.last.gpu = Some(Duration::from_millis(2));
+        assert_eq!(readout_lines(&stats)[1], "gpu 2.0");
     }
 }
