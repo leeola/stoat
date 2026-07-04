@@ -36,6 +36,10 @@ pub(crate) struct SearchMatchCache {
 
 pub(crate) struct EditorState {
     pub(crate) buffer_id: BufferId,
+    /// This editor's input mode (`normal`, `insert`, `select`, ...). Held
+    /// per-editor so the mode survives focus moving to another pane and back,
+    /// rather than living in one global slot shared by every pane.
+    pub(crate) mode: String,
     pub(crate) display_map: DisplayMap,
     pub(crate) scroll_row: u32,
     /// Fractional top row for inertial scroll. [`Self::scroll_row`] stays
@@ -137,6 +141,7 @@ impl EditorState {
         let multi_buffer = MultiBuffer::singleton(buffer_id, buffer);
         Self {
             buffer_id,
+            mode: "normal".into(),
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
             scroll_offset: 0.0,
@@ -167,6 +172,7 @@ impl EditorState {
     ) -> Self {
         Self {
             buffer_id,
+            mode: "normal".into(),
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
             scroll_offset: 0.0,

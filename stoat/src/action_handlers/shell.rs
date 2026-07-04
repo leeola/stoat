@@ -483,6 +483,6 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
         assert!(h.stoat.shell_input.is_none());
         assert_eq!(buffer_text(&mut h), "hello");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 }

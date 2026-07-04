@@ -247,11 +247,11 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::OpenSearchInput);
-        assert_eq!(h.stoat.mode, "prompt");
+        assert_eq!(h.stoat.focused_mode(), "prompt");
         h.type_text("abc");
         h.type_keys("enter");
         assert_eq!(cursor_offset(&mut h), 8);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
         h.type_keys("enter");
         assert_eq!(cursor_offset(&mut h), before);
         assert!(h.stoat.last_search.is_none());
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -347,7 +347,7 @@ mod tests {
         h.type_keys("escape");
         assert_eq!(cursor_offset(&mut h), before);
         assert!(h.stoat.last_search.is_none());
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]

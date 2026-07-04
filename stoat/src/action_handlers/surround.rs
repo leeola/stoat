@@ -566,7 +566,7 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("m s [");
         assert_eq!(buffer_text(&h, &path), "[abc]\n");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     fn rope(s: &str) -> Rope {
@@ -637,7 +637,7 @@ mod tests {
         h.type_keys("l l");
         h.type_keys("m r ( [");
         assert_eq!(buffer_text(&h, &path), "[abc]\n");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
         assert_eq!(h.stoat.pending_surround_replace, SurroundReplaceStage::Idle,);
     }
 

@@ -113,7 +113,7 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Create an [`InputView`] seeded with `original_message`, place the cursor
 /// at end, and install a [`crate::rebase::RebasePause::Reword`] pointing at
-/// the new input. Caller is responsible for transitioning `stoat.mode` to
+/// the new input. Caller is responsible for transitioning the focused mode to
 /// `"reword"` after this returns so the Helix-scratch-buffer workflow
 /// (normal mode default, `Ctrl-s` to submit) applies.
 pub(super) fn install_reword_pause(

@@ -25,9 +25,23 @@ new_key_type! {
 pub struct TermSession {
     pub term: TermScreen,
     pub session: Arc<dyn TerminalSession>,
+    /// The pane's input mode. `"insert"` enables PTY passthrough so keys reach
+    /// the child. Other modes keep stoat's pane-level bindings live. Held
+    /// per-term so switching between terminal panes preserves each one's mode.
+    pub mode: String,
 }
 
 impl TermSession {
+    /// Pair `term` with the `session` driving it, opening in `"normal"` mode so
+    /// the pane starts under stoat's bindings rather than PTY passthrough.
+    pub fn new(term: TermScreen, session: Arc<dyn TerminalSession>) -> Self {
+        Self {
+            term,
+            session,
+            mode: "normal".into(),
+        }
+    }
+
     /// Resize the emulator and its PTY to `rows` by `cols` so the child reflows
     /// to the hosting pane.
     ///

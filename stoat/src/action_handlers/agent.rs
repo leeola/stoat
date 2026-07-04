@@ -40,10 +40,10 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let session: Arc<dyn TerminalSession> = Arc::from(session);
-    let agent_id = ws.terms.insert(TermSession {
-        term: TermScreen::new(AGENT_ROWS, AGENT_COLS),
-        session: session.clone(),
-    });
+    let agent_id = ws.terms.insert(TermSession::new(
+        TermScreen::new(AGENT_ROWS, AGENT_COLS),
+        session.clone(),
+    ));
     let focused = ws.panes.focus();
     ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 

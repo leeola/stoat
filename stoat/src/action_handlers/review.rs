@@ -2236,7 +2236,11 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
 
-        assert_eq!(h.stoat.mode, "normal", "toggling off leaves review mode");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "toggling off leaves review mode"
+        );
         let (is_review, text) = {
             let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
             let snapshot = editor.display_map.snapshot();
@@ -2271,11 +2275,12 @@ mod tests {
         h.set_review_status(0, ChunkStatus::Staged);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
 
         assert_eq!(
-            h.stoat.mode, "review",
+            h.stoat.focused_mode(),
+            "review",
             "toggling back re-enters review mode"
         );
         assert!(!h.with_review(|s| s.toggled_off), "the session is unparked");
@@ -2304,7 +2309,7 @@ mod tests {
         h.settle();
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(
             h.stoat.pending_review_scan.is_none(),
             "toggling off arms no scan",
@@ -2314,7 +2319,7 @@ mod tests {
         // rescanning the working tree.
         h.stoat.open_review();
 
-        assert_eq!(h.stoat.mode, "review");
+        assert_eq!(h.stoat.focused_mode(), "review");
         assert!(
             h.stoat.pending_review_scan.is_none(),
             "re-entry swaps the parked editor back rather than arming a scan",

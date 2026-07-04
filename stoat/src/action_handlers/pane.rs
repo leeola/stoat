@@ -1,7 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    editor_state::EditorState,
+    editor_state::{EditorId, EditorState},
     pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, PaneId, View},
+    workspace::Workspace,
 };
 
 /// Closes the focused pane and disposes its backing view state. Returns
@@ -113,16 +114,16 @@ pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let new_pane_id = ws.panes.split(axis);
-    if let View::Editor(old_editor_id) = ws.panes.pane(new_pane_id).view
-        && let Some(old_editor) = ws.editors.get(old_editor_id)
-    {
-        let buffer_id = old_editor.buffer_id;
-        if let Some(buffer) = ws.buffers.get(buffer_id) {
+    if let View::Editor(source_editor_id) = ws.panes.pane(new_pane_id).view {
+        if let Some(buffer_id) = ws.editors.get(source_editor_id).map(|e| e.buffer_id)
+            && let Some(buffer) = ws.buffers.get(buffer_id)
+        {
             let new_editor_id = ws
                 .editors
                 .insert(EditorState::new(buffer_id, buffer, executor));
             ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
         }
+        clear_split_source_mode(ws, source_editor_id);
     }
     UpdateEffect::Redraw
 }
@@ -131,12 +132,31 @@ pub(super) fn split_pane_new(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let new_pane_id = ws.panes.split(axis);
+    let source_editor_id = match ws.panes.pane(new_pane_id).view {
+        View::Editor(id) => Some(id),
+        _ => None,
+    };
     let (buffer_id, buffer) = ws.buffers.new_scratch();
     let new_editor_id = ws
         .editors
         .insert(EditorState::new(buffer_id, buffer, executor));
     ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
+    if let Some(source_editor_id) = source_editor_id {
+        clear_split_source_mode(ws, source_editor_id);
+    }
     UpdateEffect::Redraw
+}
+
+/// Reset `editor_id` to normal mode after a split moved focus off it.
+///
+/// A split is issued from a leader sequence whose trailing `SetMode` lands on
+/// the newly focused pane, so the source pane never leaves the transient leader
+/// mode on its own. Left as-is it would show the leader overlay the next time
+/// focus returns to it.
+fn clear_split_source_mode(ws: &mut Workspace, editor_id: EditorId) {
+    if let Some(editor) = ws.editors.get_mut(editor_id) {
+        editor.mode = "normal".into();
+    }
 }
 
 pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {

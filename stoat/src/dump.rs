@@ -644,7 +644,7 @@ mod tests {
 
         hydrate(&mut stoat, &meta_path, &fake).unwrap();
 
-        assert_eq!(stoat.mode, "rebase");
+        assert_eq!(stoat.focused_mode(), "rebase");
         let rebase = stoat
             .active_workspace()
             .rebase

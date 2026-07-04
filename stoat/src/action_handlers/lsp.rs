@@ -4073,7 +4073,7 @@ mod tests {
             .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
         h.type_keys("space l w");
         assert_eq!(cursor_offset(&mut h), 4);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -4088,7 +4088,7 @@ mod tests {
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
         h.type_keys("space l shift-w");
         assert_eq!(cursor_offset(&mut h), 8);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     fn enable_goto_definition(h: &TestHarness) {
@@ -4188,7 +4188,7 @@ mod tests {
         h.type_keys("space l J");
         h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -4348,7 +4348,7 @@ mod tests {
         h.type_keys("space l j");
         h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     fn enable_goto_type_definition(h: &TestHarness) {
@@ -4464,7 +4464,7 @@ mod tests {
         h.type_keys("space l k");
         h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     fn enable_goto_implementation(h: &TestHarness) {
@@ -4562,7 +4562,7 @@ mod tests {
         h.type_keys("space l t");
         h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -4577,7 +4577,7 @@ mod tests {
         h.type_keys("g s");
         h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     fn enable_hover(h: &TestHarness) {
@@ -4737,7 +4737,7 @@ mod tests {
         h.settle();
         let popup = h.stoat.pending_hover.as_ref().expect("popup");
         assert_eq!(popup.lines, vec!["documentation".to_string()]);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     fn enable_signature_help(h: &TestHarness) {
@@ -5008,7 +5008,11 @@ mod tests {
             PathBuf::from("/work/lib.rs"),
             "the jump lands in the target file",
         );
-        assert_eq!(h.stoat.mode, "normal", "the pane left review mode");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "the pane left review mode"
+        );
         assert!(
             h.with_review(|s| s.toggled_off),
             "the review is parked so R re-enters the diff",
@@ -5320,7 +5324,7 @@ mod tests {
         h.type_keys("space l a");
         h.settle();
         assert!(h.stoat.pending_code_action_picker.is_some());
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -5420,7 +5424,7 @@ mod tests {
         h.settle();
         let modal = h.stoat.rename_input.as_ref().expect("modal open");
         assert_eq!(modal.input.text(h.stoat.active_workspace()), "foo");
-        assert_eq!(h.stoat.mode, "prompt");
+        assert_eq!(h.stoat.focused_mode(), "prompt");
     }
 
     #[test]
@@ -5502,7 +5506,7 @@ mod tests {
         assert!(cancelled);
         assert!(h.stoat.rename_input.is_none());
         assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -5526,7 +5530,7 @@ mod tests {
         h.settle();
         let modal = h.stoat.rename_input.as_ref().expect("modal open");
         assert_eq!(modal.input.text(h.stoat.active_workspace()), "foo");
-        assert_eq!(h.stoat.mode, "prompt");
+        assert_eq!(h.stoat.focused_mode(), "prompt");
     }
 
     #[test]
@@ -5777,7 +5781,7 @@ mod tests {
         h.type_keys("space l s");
         h.settle();
         assert!(h.stoat.pending_symbol_picker.is_some());
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -5815,7 +5819,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
         h.settle();
         assert!(h.stoat.workspace_symbol_input.is_none());
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -5827,7 +5831,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
         h.settle();
         assert!(h.stoat.workspace_symbol_input.is_some());
-        assert_eq!(h.stoat.mode, "prompt");
+        assert_eq!(h.stoat.focused_mode(), "prompt");
     }
 
     #[test]
@@ -6043,7 +6047,7 @@ mod tests {
         let cancelled = crate::action_handlers::lsp::workspace_symbol_cancel(&mut h.stoat);
         assert!(cancelled);
         assert!(h.stoat.workspace_symbol_input.is_none());
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -6055,7 +6059,7 @@ mod tests {
         h.type_keys("space l shift-s");
         h.settle();
         assert!(h.stoat.workspace_symbol_input.is_some());
-        assert_eq!(h.stoat.mode, "prompt");
+        assert_eq!(h.stoat.focused_mode(), "prompt");
     }
 
     #[test]

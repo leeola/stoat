@@ -98,7 +98,11 @@ impl UpdateEffect {
 
 pub struct Stoat {
     size: Rect,
-    pub mode: String,
+    /// Fallback mode store, read and written only when the focused target has
+    /// no mode of its own -- no focused editor, run, or terminal pane, and no
+    /// open input modal. The live mode for those targets lives on the target
+    /// itself; [`Self::focused_mode`] resolves which store applies.
+    fallback_mode: String,
     /// Config-defined session variables set by `SetVar`. Session-local and never
     /// persisted. The keymap reads them after its built-in predicate fields.
     pub(crate) user_vars: std::collections::HashMap<String, StateValue>,
@@ -840,7 +844,7 @@ impl Stoat {
 
         Self {
             size: Rect::default(),
-            mode: "normal".into(),
+            fallback_mode: "normal".into(),
             user_vars: std::collections::HashMap::new(),
             executor,
             keymap,
@@ -3193,15 +3197,7 @@ impl Stoat {
         if self.focused_mode() != "insert" {
             return None;
         }
-
-        let ws = self.active_workspace();
-        let FocusTarget::SplitPane(_) = ws.focus else {
-            return None;
-        };
-        match &ws.panes.pane(ws.panes.focus()).view {
-            View::Agent(id) | View::Terminal(id) => Some(*id),
-            _ => None,
-        }
+        self.focused_term_id()
     }
 
     /// Encode `key` and send it to the agent's PTY, or handle the focus escape.
@@ -3570,20 +3566,60 @@ impl Stoat {
 
     /// The mode of the focused input target.
     ///
-    /// Every mode read routes through here rather than touching the mode
-    /// storage directly, so the storage can move to per-target state without
-    /// disturbing callers.
+    /// The target is resolved the way [`Self::focused_editor_ids`] resolves it.
+    /// A topmost open input modal, or else a focused editor or run pane,
+    /// supplies its editor's [`EditorState::mode`]. A focused terminal or agent
+    /// pane supplies its [`TermSession::mode`]. With no such target the mode
+    /// falls back to [`Self::fallback_mode`].
     pub(crate) fn focused_mode(&self) -> &str {
-        &self.mode
+        let ws = self.active_workspace();
+        if let Some((editor_id, _)) = self.focused_editor_ids()
+            && let Some(editor) = ws.editors.get(editor_id)
+        {
+            return &editor.mode;
+        }
+        if let Some(term_id) = self.focused_term_id()
+            && let Some(term) = ws.terms.get(term_id)
+        {
+            return &term.mode;
+        }
+        &self.fallback_mode
     }
 
     /// Set the mode of the focused input target.
     ///
-    /// The raw setter, without the insert-run bookkeeping
-    /// [`Self::transition_mode`] layers on top. Prompt-setters and screen
-    /// handlers that bypass that bookkeeping today route their writes here.
+    /// Writes to the same target [`Self::focused_mode`] reads, so a value
+    /// written is read back while focus and open modals are unchanged. This is
+    /// the raw setter, without the insert-run bookkeeping
+    /// [`Self::transition_mode`] layers on top.
     pub(crate) fn set_focused_mode(&mut self, mode: String) {
-        self.mode = mode;
+        if let Some((editor_id, _)) = self.focused_editor_ids()
+            && let Some(editor) = self.active_workspace_mut().editors.get_mut(editor_id)
+        {
+            editor.mode = mode;
+            return;
+        }
+        if let Some(term_id) = self.focused_term_id()
+            && let Some(term) = self.active_workspace_mut().terms.get_mut(term_id)
+        {
+            term.mode = mode;
+            return;
+        }
+        self.fallback_mode = mode;
+    }
+
+    /// The focused terminal or agent pane's [`TermId`], if the focused pane is
+    /// one. Unlike [`Self::term_input_target`] this does not gate on the mode,
+    /// so [`Self::focused_mode`] can consult it without recursing.
+    fn focused_term_id(&self) -> Option<TermId> {
+        let ws = self.active_workspace();
+        let FocusTarget::SplitPane(_) = ws.focus else {
+            return None;
+        };
+        match &ws.panes.pane(ws.panes.focus()).view {
+            View::Agent(id) | View::Terminal(id) => Some(*id),
+            _ => None,
+        }
     }
 
     /// Switch the focused target's mode to `next`, opening or closing the
@@ -5521,10 +5557,10 @@ mod tests {
             stoat
                 .active_workspace_mut()
                 .terms
-                .insert(crate::term_session::TermSession {
-                    term: crate::term_screen::TermScreen::new(24, 80),
+                .insert(crate::term_session::TermSession::new(
+                    crate::term_screen::TermScreen::new(24, 80),
                     session,
-                });
+                ));
 
         let effect = stoat.handle_pty_notification(PtyNotification::TermOutput {
             agent_id,
@@ -5548,10 +5584,10 @@ mod tests {
             stoat
                 .active_workspace_mut()
                 .terms
-                .insert(crate::term_session::TermSession {
-                    term: crate::term_screen::TermScreen::new(24, 80),
+                .insert(crate::term_session::TermSession::new(
+                    crate::term_screen::TermScreen::new(24, 80),
                     session,
-                });
+                ));
 
         // A DSR cursor-position query in the PTY output must be answered back
         // to the PTY. A fresh screen reports the cursor at row 1, column 1.
@@ -5572,10 +5608,10 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let agent_id = ws.terms.insert(crate::term_session::TermSession {
-            term: crate::term_screen::TermScreen::new(24, 80),
+        let agent_id = ws.terms.insert(crate::term_session::TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
             session,
-        });
+        ));
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
         let size = h.stoat.size();
@@ -5605,10 +5641,10 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let agent_id = ws.terms.insert(crate::term_session::TermSession {
-            term: crate::term_screen::TermScreen::new(24, 80),
+        let agent_id = ws.terms.insert(crate::term_session::TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
             session,
-        });
+        ));
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
@@ -5633,10 +5669,10 @@ mod tests {
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-        let term_id = ws.terms.insert(crate::term_session::TermSession {
-            term: crate::term_screen::TermScreen::new(24, 80),
+        let term_id = ws.terms.insert(crate::term_session::TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
             session,
-        });
+        ));
         ws.panes.pane_mut(focused).view = View::Terminal(term_id);
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
@@ -5655,10 +5691,10 @@ mod tests {
     fn insert_term_session(ws: &mut Workspace) -> TermId {
         let session: Arc<dyn crate::host::TerminalSession> =
             Arc::new(crate::host::FakeTerminalSession::new());
-        ws.terms.insert(crate::term_session::TermSession {
-            term: crate::term_screen::TermScreen::new(24, 80),
+        ws.terms.insert(crate::term_session::TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
             session,
-        })
+        ))
     }
 
     #[test]
@@ -5685,7 +5721,8 @@ mod tests {
         );
         assert_eq!(ws.panes.focus(), editor_pane, "focus moved to the sibling");
         assert_eq!(
-            h.stoat.mode, "normal",
+            h.stoat.focused_mode(),
+            "normal",
             "focused terminal exit leaves insert mode",
         );
     }
@@ -5719,7 +5756,8 @@ mod tests {
             "restored scratch buffer is empty",
         );
         assert_eq!(
-            h.stoat.mode, "normal",
+            h.stoat.focused_mode(),
+            "normal",
             "focused terminal exit leaves insert mode",
         );
     }
@@ -5754,7 +5792,8 @@ mod tests {
             "pane restored to its pre-terminal editor"
         );
         assert_eq!(
-            h.stoat.mode, "normal",
+            h.stoat.focused_mode(),
+            "normal",
             "focused terminal exit leaves insert mode",
         );
     }
@@ -5787,7 +5826,8 @@ mod tests {
         );
         assert!(ws.editors.contains_key(restored), "scratch editor is live");
         assert_eq!(
-            h.stoat.mode, "normal",
+            h.stoat.focused_mode(),
+            "normal",
             "focused terminal exit leaves insert mode",
         );
     }
@@ -5807,7 +5847,8 @@ mod tests {
             .handle_pty_notification(PtyNotification::TermExited { term_id });
 
         assert_eq!(
-            h.stoat.mode, "insert",
+            h.stoat.focused_mode(),
+            "insert",
             "an unfocused terminal exit leaves the mode untouched",
         );
     }
@@ -5839,17 +5880,17 @@ mod tests {
     ) -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
-        stoat.mode = "insert".to_string();
 
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
         let ws = stoat.active_workspace_mut();
         let focused = ws.panes.focus();
-        let term_id = ws.terms.insert(crate::term_session::TermSession {
-            term: crate::term_screen::TermScreen::new(24, 80),
+        let term_id = ws.terms.insert(crate::term_session::TermSession::new(
+            crate::term_screen::TermScreen::new(24, 80),
             session,
-        });
+        ));
         ws.panes.pane_mut(focused).view = make_view(term_id);
+        stoat.set_focused_mode("insert".to_string());
         (stoat, term_id, fake)
     }
 
@@ -5900,7 +5941,50 @@ mod tests {
 
         h.stoat.handle_key(bare(KeyCode::Char('x')));
         assert!(h.stoat.user_vars.get("mode").is_none());
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    #[test]
+    fn modal_over_a_target_keeps_the_target_mode() {
+        let mut h = Stoat::test();
+        h.stoat.set_focused_mode("insert".into());
+        assert_eq!(h.stoat.focused_mode(), "insert");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "prompt",
+            "the palette input carries its own mode, not the target's"
+        );
+
+        h.stoat.handle_key(ctrl('c'));
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "closing the modal leaves the underlying target's mode untouched"
+        );
+    }
+
+    #[test]
+    fn editor_pane_modes_are_independent_across_focus() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        h.stoat.set_focused_mode("insert".into());
+        assert_eq!(h.stoat.focused_mode(), "insert");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "the other pane keeps its own mode across the focus switch"
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "returning focus restores the pane's own mode"
+        );
     }
 
     #[test]
@@ -5945,7 +6029,8 @@ mod tests {
             ],
         );
         assert_eq!(
-            stoat.mode, "insert",
+            stoat.focused_mode(),
+            "insert",
             "Ctrl-W passes through, does not leave insert"
         );
     }
@@ -5962,7 +6047,7 @@ mod tests {
             fake.sent_bytes(),
             vec![b"l".to_vec(), b"s".to_vec(), vec![b'\r']],
         );
-        assert_eq!(stoat.mode, "insert");
+        assert_eq!(stoat.focused_mode(), "insert");
     }
 
     #[test]
@@ -5972,7 +6057,7 @@ mod tests {
         let effect = stoat.handle_key(ctrl('c'));
 
         assert_eq!(effect, UpdateEffect::None);
-        assert_eq!(stoat.mode, "insert");
+        assert_eq!(stoat.focused_mode(), "insert");
         assert_eq!(fake.sent_bytes(), vec![vec![0x03]]);
     }
 
@@ -5983,7 +6068,7 @@ mod tests {
         let effect = stoat.handle_key(bare(KeyCode::Esc));
 
         assert_eq!(effect, UpdateEffect::Redraw);
-        assert_eq!(stoat.mode, "normal");
+        assert_eq!(stoat.focused_mode(), "normal");
         assert!(
             fake.sent_bytes().is_empty(),
             "escape must not reach the agent"
@@ -5993,7 +6078,7 @@ mod tests {
     #[test]
     fn agent_input_ignored_outside_insert_mode() {
         let (mut stoat, _id, fake) = stoat_with_focused_agent();
-        stoat.mode = "normal".to_string();
+        stoat.set_focused_mode("normal".to_string());
 
         stoat.handle_key(bare(KeyCode::Char('x')));
 
@@ -6306,7 +6391,7 @@ mod tests {
         );
 
         // Entering a full-screen overlay mode retires the editor pool.
-        h.stoat.mode = "rebase".into();
+        h.stoat.set_focused_mode("rebase".into());
         h.stoat.emit_smooth_scroll();
         let cmds = drain_apc(&mut rx);
         assert!(
@@ -6965,7 +7050,7 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
         h.stoat.active_workspace_mut().commits =
             Some(CommitListState::new(std::path::PathBuf::from("/work")));
-        h.stoat.mode = "commits".to_string();
+        h.stoat.set_focused_mode("commits".to_string());
 
         h.stoat.emit_smooth_scroll();
         let focused = {
@@ -6989,7 +7074,7 @@ mod tests {
             "the commits list declares a pool at its list rect"
         );
 
-        h.stoat.mode = "normal".to_string();
+        h.stoat.set_focused_mode("normal".to_string());
         h.stoat.active_workspace_mut().commits = None;
         h.stoat.emit_smooth_scroll();
         let bytes = rx.try_recv().expect("leaving commits emits a drop");
@@ -7494,7 +7579,8 @@ mod tests {
         let mut h = Stoat::test();
         h.open_run();
         assert_eq!(
-            h.stoat.mode, "insert",
+            h.stoat.focused_mode(),
+            "insert",
             "opening a run pane enters insert mode"
         );
     }
@@ -7515,7 +7601,11 @@ mod tests {
 
         h.type_text("pwd");
         h.type_keys("esc");
-        assert_eq!(h.stoat.mode, "normal", "Escape leaves insert mode");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "Escape leaves insert mode"
+        );
         h.type_keys("enter");
         assert!(
             fake.sent_strings().iter().any(|s| s.starts_with("pwd\n")),
@@ -7952,7 +8042,7 @@ mod tests {
         }
 
         assert_eq!(buffer_text(&h, &path), "foo");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -8088,7 +8178,7 @@ mod tests {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "");
         h.type_keys("i");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("foo bar baz");
         h.type_keys("ctrl-w");
         assert_eq!(buffer_text(&h, &path), "foo bar ");
@@ -8152,7 +8242,7 @@ mod tests {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "abc");
         h.type_keys("A");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_keys("delete");
         assert_eq!(buffer_text(&h, &path), "abc");
     }
@@ -8173,7 +8263,7 @@ mod tests {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "abc\n");
         h.type_keys("a");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("X");
         assert_eq!(buffer_text(&h, &path), "aXbc\n");
     }
@@ -8184,7 +8274,7 @@ mod tests {
         let path = open_scratch_file(&mut h, "    code\n");
         h.type_keys("l");
         h.type_keys("I");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("X");
         assert_eq!(buffer_text(&h, &path), "    Xcode\n");
     }
@@ -8194,7 +8284,7 @@ mod tests {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "abc\nxyz\n");
         h.type_keys("A");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("Z");
         assert_eq!(buffer_text(&h, &path), "abcZ\nxyz\n");
     }
@@ -8204,7 +8294,7 @@ mod tests {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "abc\ndef\n");
         h.type_keys("o");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("X");
         assert_eq!(buffer_text(&h, &path), "abc\nX\ndef\n");
     }
@@ -8214,7 +8304,7 @@ mod tests {
         let mut h = Stoat::test();
         open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
         h.type_keys("o");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("x");
         assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
     }
@@ -8226,7 +8316,7 @@ mod tests {
         h.type_keys("o");
         h.type_keys("escape");
         h.type_keys("O");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("Y");
         assert_eq!(buffer_text(&h, &path), "abc\nY\n\ndef\n");
     }
@@ -8255,7 +8345,7 @@ mod tests {
         let path = open_scratch_file(&mut h, "abcdef");
         h.type_keys("v l l l");
         h.type_keys("c");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("XYZ");
         assert_eq!(buffer_text(&h, &path), "XYZef");
     }
@@ -8268,7 +8358,7 @@ mod tests {
         h.type_keys("r");
         h.type_keys("X");
         assert_eq!(buffer_text(&h, &path), "XXXXef");
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
     }
 
     #[test]
@@ -8278,7 +8368,7 @@ mod tests {
         h.type_keys("r");
         h.type_keys("X");
         assert_eq!(buffer_text(&h, &path), "abc");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(!h.stoat.pending_replace);
     }
 
@@ -8331,7 +8421,7 @@ mod tests {
         let mut h = Stoat::test();
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.stoat.pending_completion = Some(CompletionPopup {
             items: vec![CompletionItem {
                 label: "foo".into(),
@@ -8350,7 +8440,7 @@ mod tests {
         });
         h.type_keys("escape");
         assert_eq!(h.stoat.pending_completion, None);
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
     }
 
     #[test]
@@ -8358,10 +8448,10 @@ mod tests {
         let mut h = Stoat::test();
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
-        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         assert_eq!(h.stoat.pending_completion, None);
         h.type_keys("escape");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -8559,7 +8649,7 @@ mod tests {
 
         h.type_keys("escape");
         h.type_keys("escape");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(h.stoat.active_snippet.is_none());
     }
 

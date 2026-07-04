@@ -275,7 +275,7 @@ mod tests {
         h.type_keys("] f");
         let first = cursor_offset(&mut h);
         assert_eq!(&src[first..first + 8], "fn beta(");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -288,6 +288,6 @@ mod tests {
         h.type_keys("[ t");
         let off = cursor_offset(&mut h);
         assert!(src[off..].starts_with("struct Bar"), "{}", &src[off..]);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 }

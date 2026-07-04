@@ -108,10 +108,10 @@ fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     };
 
     let session: Arc<dyn TerminalSession> = Arc::from(session);
-    let term_id = ws.terms.insert(TermSession {
-        term: TermScreen::new(TERM_ROWS, TERM_COLS),
-        session: session.clone(),
-    });
+    let term_id = ws.terms.insert(TermSession::new(
+        TermScreen::new(TERM_ROWS, TERM_COLS),
+        session.clone(),
+    ));
     spawn_term_reader(&executor, session, term_id, pty_tx);
     View::Terminal(term_id)
 }

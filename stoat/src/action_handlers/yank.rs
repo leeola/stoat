@@ -520,11 +520,11 @@ mod tests {
 
     fn make_two_selections(h: &mut TestHarness) {
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
-        h.stoat.mode = "select".into();
+        h.stoat.set_focused_mode("select".into());
         crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
-        h.stoat.mode = "normal".into();
+        h.stoat.set_focused_mode("normal".into());
     }
 
     #[test]
@@ -626,7 +626,7 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("space \" y");
         assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]

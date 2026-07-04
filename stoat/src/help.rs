@@ -444,15 +444,15 @@ mod tests {
     }
 
     /// Open a help modal in the given test harness with the supplied synthetic
-    /// `active` bindings. Also transitions `stoat.mode` to `"prompt"` so help
+    /// `active` bindings. Also sets the focused mode to `"prompt"` so help
     /// starts in its Insert sub-mode, matching the real `OpenHelp` handler.
     fn open_help_with(h: &mut TestHarness, active: Vec<(String, Vec<ResolvedAction>)>) {
-        let previous_mode = h.stoat.mode.clone();
+        let previous_mode = h.stoat.focused_mode().to_string();
         let executor = h.stoat.executor.clone();
         let active_idx = h.stoat.active_workspace;
         let ws = &mut h.stoat.workspaces[active_idx];
         h.stoat.help = Some(Help::new("normal", active, ws, executor, previous_mode));
-        h.stoat.mode = "prompt".into();
+        h.stoat.set_focused_mode("prompt".into());
     }
 
     /// Dispatch a key through the test harness's top-level key handler so
@@ -499,7 +499,7 @@ mod tests {
             assert_eq!(help.snapshot_mode(), "normal");
             assert_eq!(help.scope(), HelpScope::Active);
         }
-        assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
+        assert_eq!(help_input_mode(h.stoat.focused_mode()), HelpInput::Insert);
         let names = filtered_names(&h);
         assert!(names.contains(&"Quit"));
         assert!(names.contains(&"MoveDown"));
@@ -592,9 +592,9 @@ mod tests {
     fn esc_in_insert_switches_to_normal() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
+        assert_eq!(help_input_mode(h.stoat.focused_mode()), HelpInput::Insert);
         send_key(&mut h, keys::key(KeyCode::Esc));
-        assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Normal);
+        assert_eq!(help_input_mode(h.stoat.focused_mode()), HelpInput::Normal);
     }
 
     #[test]
@@ -612,7 +612,7 @@ mod tests {
         open_help_with(&mut h, sample_active());
         send_key(&mut h, keys::key(KeyCode::Esc));
         send_key(&mut h, keys::key(KeyCode::Char('i')));
-        assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
+        assert_eq!(help_input_mode(h.stoat.focused_mode()), HelpInput::Insert);
     }
 
     #[test]

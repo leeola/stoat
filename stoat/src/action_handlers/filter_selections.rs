@@ -220,7 +220,7 @@ mod tests {
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 3, false), (4, 7, false)]);
         assert!(h.stoat.filter_selections_input.is_none());
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -232,6 +232,6 @@ mod tests {
             UpdateEffect::Redraw
         );
         assert!(h.stoat.filter_selections_input.is_some());
-        assert_eq!(h.stoat.mode, "prompt");
+        assert_eq!(h.stoat.focused_mode(), "prompt");
     }
 }

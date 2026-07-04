@@ -709,7 +709,7 @@ mod harness_tests {
         // event, sees mode != insert on the second pass, and clears
         // every completion-related field.
         h.type_keys("escape escape");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(h.stoat.pending_completion.is_none());
         assert!(h.stoat.pending_completion_request.is_none());
         assert!(h.stoat.last_completion_signature.is_none());

@@ -351,7 +351,7 @@ mod tests {
         jump(&mut h, 2);
         h.type_keys("m i p");
         assert_eq!(primary_range(&mut h), (0, 11));
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
         let _ = path;
     }
 

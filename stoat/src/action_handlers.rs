@@ -1174,7 +1174,7 @@ mod tests {
             UpdateEffect::Redraw
         );
         assert!(stoat.global_search_input.is_some());
-        assert_eq!(stoat.mode, "prompt");
+        assert_eq!(stoat.focused_mode(), "prompt");
     }
 
     #[test]

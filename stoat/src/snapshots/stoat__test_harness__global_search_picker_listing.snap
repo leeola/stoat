@@ -4,7 +4,7 @@ expression: text
 ---
 actions: snapshot
 focused: #1 of 1
-mode: prompt
+mode: normal
 size: 80x24
 ---
 [0m[7m [0m
@@ -30,4 +30,4 @@ size: 80x24
                                                              [0m[33m│[0m[36mCtrl-N[0m[97m   next[0m    [0m[33m│[0m
                                                              [0m[33m│[0m[36mCtrl-P[0m[97m   prev[0m    [0m[33m│[0m
                                                              [0m[33m└─────────────────┘[0m
-[0m[1m[30m[42m PMT [0m[1m[97m[100m repo [0m[97m[100m[scratch]                                                        1:1 [0m
+[0m[1m[30m[44m NOR [0m[1m[97m[100m repo [0m[97m[100m[scratch]                                                        1:1 [0m

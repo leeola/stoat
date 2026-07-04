@@ -28,14 +28,6 @@ pub(crate) struct InputView {
     /// field.
     #[allow(dead_code)]
     pub(crate) max_height: u16,
-    /// Mode to transition to when the view is focused. Callers typically use
-    /// `"prompt"` for simple submit-on-Enter behavior and `"normal"` (or
-    /// `"reword"`, etc.) for Helix-style modal editing with explicit submit.
-    /// Currently stored at construction time but not yet read because
-    /// focus-change-driven mode transitions are not wired; see
-    /// `jiggly-toasting-cherny.md` Phase D.
-    #[allow(dead_code)]
-    pub(crate) start_mode: &'static str,
 }
 
 /// Identifies which consumer owns an [`InputView`], used by
@@ -74,7 +66,8 @@ impl InputView {
             let mut guard = shared_buffer.write().expect("buffer poisoned");
             guard.edit(0..0, seed);
         }
-        let editor_state = EditorState::new(buffer_id, shared_buffer, executor);
+        let mut editor_state = EditorState::new(buffer_id, shared_buffer, executor);
+        editor_state.mode = start_mode.to_string();
         let editor_id = ws.editors.insert(editor_state);
 
         if !seed.is_empty()
@@ -95,7 +88,6 @@ impl InputView {
             buffer_id,
             target,
             max_height,
-            start_mode,
         }
     }
 

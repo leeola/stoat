@@ -1626,7 +1626,7 @@ mod tests {
         h.type_keys("3 l");
         let before = h.selection_spans();
         h.type_keys("v");
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
         h.type_keys("h h");
         let after = h.selection_spans();
         assert_ne!(after, before, "selection should have extended");
@@ -1640,7 +1640,7 @@ mod tests {
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\n");
         h.open_file(&path);
         h.type_keys("v");
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
         h.type_keys("3 j");
         let spans = h.selection_spans();
         assert_eq!(spans.len(), 1);
@@ -1660,9 +1660,9 @@ mod tests {
         let path = h.write_file("s.txt", "abc\n");
         h.open_file(&path);
         h.type_keys("v");
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
         h.type_keys("v");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -1671,9 +1671,9 @@ mod tests {
         let path = h.write_file("s.txt", "abc\n");
         h.open_file(&path);
         h.type_keys("v");
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
         h.type_keys("Escape");
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -1843,7 +1843,11 @@ mod tests {
         let before = h.selection_spans()[0];
         h.type_keys("Alt-o");
         let after = h.selection_spans()[0];
-        assert_eq!(h.stoat.mode, "select", "Alt-o stays in select mode");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "select",
+            "Alt-o stays in select mode"
+        );
         assert!(
             after.0 <= before.0 && after.1 > before.1,
             "expansion should cover and exceed the prior selection ({before:?} -> {after:?})"
@@ -1860,7 +1864,11 @@ mod tests {
         h.type_keys("Alt-o");
         assert_ne!(h.selection_spans(), before, "Alt-o should grow selection");
         h.type_keys("Alt-i");
-        assert_eq!(h.stoat.mode, "select", "Alt-i stays in select mode");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "select",
+            "Alt-i stays in select mode"
+        );
         assert_eq!(
             h.selection_spans(),
             before,
@@ -2052,7 +2060,11 @@ mod tests {
             (0, 5, false),
             "head one past column 5 while tail stays at 0, cursor on offset 4"
         );
-        assert_eq!(h.stoat.mode, "select", "back to select after the chord");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "select",
+            "back to select after the chord"
+        );
     }
 
     #[test]
@@ -2062,7 +2074,7 @@ mod tests {
         h.open_file(&path);
         h.type_keys("5 g |");
         assert_eq!(h.cursor_display_positions(), vec![(0, 4)]);
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -2074,7 +2086,7 @@ mod tests {
         h.type_keys("g i");
         let (start, end, reversed) = h.selection_spans()[0];
         assert_eq!((start, end, reversed), (4, 8, true));
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
     }
 
     #[test]
@@ -2089,7 +2101,7 @@ mod tests {
             head, 7,
             "cursor on start of last content line, head one past"
         );
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
     }
 
     #[test]
@@ -2101,7 +2113,7 @@ mod tests {
         h.type_keys("g k");
         let (start, end, reversed) = h.selection_spans()[0];
         assert_eq!((start, end, reversed), (0, 6, true));
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
     }
 
     #[test]
@@ -2117,7 +2129,7 @@ mod tests {
             (0, 4, true),
             "head extended to row 0; tail at the original cursor row 2"
         );
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
     }
 
     #[test]
@@ -2129,7 +2141,7 @@ mod tests {
         h.type_keys("g i");
         let (start, end, _) = h.selection_spans()[0];
         assert_eq!((start, end), (4, 4));
-        assert_eq!(h.stoat.mode, "normal");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
     #[test]
@@ -2138,9 +2150,9 @@ mod tests {
         let path = h.write_file("s.txt", "abc\n");
         h.open_file(&path);
         h.type_keys("v g");
-        assert_eq!(h.stoat.mode, "select_goto");
+        assert_eq!(h.stoat.focused_mode(), "select_goto");
         h.type_keys("Escape");
-        assert_eq!(h.stoat.mode, "select");
+        assert_eq!(h.stoat.focused_mode(), "select");
     }
 
     #[test]
