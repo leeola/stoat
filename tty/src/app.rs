@@ -378,6 +378,10 @@ struct State {
     /// True while a stoatty-native grid selection is being dragged, so
     /// `CursorMoved` extends it and the left release copies and clears it.
     native_drag: bool,
+    /// Whether the perf HUD overlay is shown, toggled by the platform modifier
+    /// plus Shift+P. Drives both the HUD composite and the redraw keep-alive.
+    #[cfg(feature = "perf")]
+    show_perf_hud: bool,
 }
 
 /// One pool's smooth-scroll animation state, held by [`State::pool_anims`].
@@ -583,6 +587,8 @@ impl ApplicationHandler<PtyEvent> for App {
             pressed_button: None,
             pointer_side_right: false,
             native_drag: false,
+            #[cfg(feature = "perf")]
+            show_perf_hud: false,
         });
     }
 
@@ -1106,12 +1112,19 @@ impl ApplicationHandler<PtyEvent> for App {
                 // popover scrolls, or the grid, scrollback, a region, or a pool
                 // scrolls. When all settle the loop idles until the next PTY
                 // output or resize.
+                // The perf HUD updates every frame while shown, so it keeps the
+                // loop alive like an easing animation does.
+                #[cfg(feature = "perf")]
+                let hud_streaming = state.show_perf_hud;
+                #[cfg(not(feature = "perf"))]
+                let hud_streaming = false;
                 if cursor_easing
                     || popover_scrolling
                     || grid_scrolling
                     || scrollback_scrolling
                     || region_scrolling
                     || pool_easing
+                    || hud_streaming
                 {
                     state.window.request_redraw();
                 }
@@ -1145,6 +1158,17 @@ impl ApplicationHandler<PtyEvent> for App {
                     state.terminal.lock().resize(rows, cols);
                     let _ = state.pty.resize(rows as u16, cols as u16);
 
+                    state.window.request_redraw();
+                    return;
+                }
+
+                #[cfg(feature = "perf")]
+                if platform_mod_held
+                    && state.modifiers.shift_key()
+                    && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("p"))
+                {
+                    state.show_perf_hud = !state.show_perf_hud;
+                    state.gpu.set_perf_hud(state.show_perf_hud);
                     state.window.request_redraw();
                     return;
                 }
