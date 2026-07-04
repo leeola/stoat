@@ -214,6 +214,14 @@ impl Workspace {
         }
     }
 
+    /// Stable identifier for this session across restarts.
+    ///
+    /// Keys the workspace's on-disk state file and its per-session agent hook
+    /// socket, so external tooling addresses a live session by this value.
+    pub fn uid(&self) -> WorkspaceUid {
+        self.uid
+    }
+
     /// True when this workspace is structurally indistinguishable from the
     /// state produced by [`Self::new`]: one empty scratch buffer, one editor,
     /// one un-split pane, and no auxiliary state (docks, review,

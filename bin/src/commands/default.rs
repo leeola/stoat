@@ -190,6 +190,19 @@ fn run_tui(
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }
+
+        // Bind the active session's agent hook socket so an owned agent's hooks
+        // and runtime queries can reach this process. Deferred until after state
+        // restore, which adopts the persisted session uid. Production-only like
+        // set_lsp_auto_spawn, so tests never open real sockets.
+        if let Err(err) = stoat.serve_term_session(stoat.active_workspace().uid()) {
+            tracing::warn!(
+                target: "stoat::bin",
+                %err,
+                "session hook socket bind failed; agent hooks and runtime queries disabled this session",
+            );
+        }
+
         match LocalFsWatcher::new() {
             Ok(watcher) => stoat.set_fs_watch_host(Arc::new(watcher)),
             Err(err) => tracing::warn!(
