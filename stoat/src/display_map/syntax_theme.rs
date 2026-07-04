@@ -120,7 +120,7 @@ impl SyntaxStyles {
     }
 }
 
-fn style_to_highlight_style(s: &Style) -> HighlightStyle {
+pub(crate) fn style_to_highlight_style(s: &Style) -> HighlightStyle {
     let mods = s.add_modifier;
     HighlightStyle {
         foreground: s.fg,

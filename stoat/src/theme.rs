@@ -400,6 +400,9 @@ pub mod scope {
 
     pub const UI_SEARCH_MATCH: &str = "ui.search.match";
 
+    pub const UI_HIGHLIGHT_READ: &str = "ui.highlight.read";
+    pub const UI_HIGHLIGHT_WRITE: &str = "ui.highlight.write";
+
     pub const UI_BORDER_FOCUSED: &str = "ui.border.focused";
     pub const UI_BORDER_INACTIVE: &str = "ui.border.inactive";
 

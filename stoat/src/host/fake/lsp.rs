@@ -1647,12 +1647,18 @@ impl FakeLsp {
 
     // --- Document highlight ---
 
-    pub fn set_highlights(&self, path: &str, line: u32, col: u32, ranges: &[(u32, u32, u32)]) {
+    pub fn set_highlights(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        ranges: &[(u32, u32, u32, DocumentHighlightKind)],
+    ) {
         let highlights = ranges
             .iter()
-            .map(|(l, start, end)| DocumentHighlight {
+            .map(|(l, start, end, kind)| DocumentHighlight {
                 range: Range::new(Position::new(*l, *start), Position::new(*l, *end)),
-                kind: Some(DocumentHighlightKind::READ),
+                kind: Some(*kind),
             })
             .collect();
         self.state
@@ -2734,7 +2740,16 @@ mod tests {
     fn document_highlight_programmed() {
         rt().block_on(async {
             let lsp = FakeLsp::new();
-            lsp.set_highlights("/src/main.rs", 5, 4, &[(5, 4, 7), (10, 4, 7), (15, 8, 11)]);
+            lsp.set_highlights(
+                "/src/main.rs",
+                5,
+                4,
+                &[
+                    (5, 4, 7, DocumentHighlightKind::READ),
+                    (10, 4, 7, DocumentHighlightKind::READ),
+                    (15, 8, 11, DocumentHighlightKind::READ),
+                ],
+            );
 
             let result = lsp
                 .document_highlight(document_highlight_params("/src/main.rs", 5, 4))

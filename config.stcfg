@@ -16,6 +16,8 @@ theme default_dark {
     ui.selection.editor = { bg: muted };
     ui.selection.reversed = { fg: black, bg: text, modifiers: [reversed] };
     ui.search.match = { fg: black, bg: warning };
+    ui.highlight.read = { bg: muted };
+    ui.highlight.write = { bg: muted, modifiers: [underlined] };
 
     ui.border.focused.fg = accent;
     ui.border.inactive.fg = muted;

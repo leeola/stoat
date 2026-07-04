@@ -12,24 +12,29 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    display_map::{DisplayPoint, DisplaySnapshot, InlayKind},
+    display_map::{
+        syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
+        InlayKind,
+    },
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
+    theme::scope,
 };
 use codegraph::SymbolKey;
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation, FormattingOptions,
-    GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, InlayHint,
-    InlayHintLabel, InlayHintParams, MarkedString, OneOf, ParameterLabel, Position,
-    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams, ServerInfo,
-    SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
+    DocumentHighlightParams, DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, Documentation, FormattingOptions, GotoDefinitionParams,
+    GotoDefinitionResponse, HoverContents, HoverParams, InlayHint, InlayHintLabel, InlayHintParams,
+    MarkedString, OneOf, ParameterLabel, Position, PrepareRenameResponse, Range, ReferenceContext,
+    ReferenceParams, RenameParams, ServerInfo, SignatureHelp, SignatureHelpParams,
+    SignatureInformation, SymbolInformation, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, VersionedTextDocumentIdentifier,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     future::Future,
@@ -42,7 +47,7 @@ use std::{
     time::Duration,
 };
 use stoat_log::TextProtoLog;
-use stoat_text::{patch::Patch, Bias, Point, Rope};
+use stoat_text::{patch::Patch, Anchor, Bias, Point, Rope};
 
 /// Quiet window after the last edit before a buffer's `did_change`
 /// fires. Matches Helix's default and prevents per-keystroke storms
@@ -1462,7 +1467,7 @@ fn apply_inlay_hints(stoat: &mut Stoat, buffer_id: BufferId, items: Vec<InlayHin
         return;
     }
 
-    let inserts: Vec<(stoat_text::Anchor, String, InlayKind)> = {
+    let inserts: Vec<(Anchor, String, InlayKind)> = {
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         items
@@ -1484,6 +1489,220 @@ pub(crate) fn clear_inlay_hints(stoat: &mut Stoat) {
     if !prev.is_empty() {
         editor.display_map.splice_inlays(prev, Vec::new());
     }
+}
+
+/// Debounce before requesting document highlights, so the symbol under the
+/// cursor lights up only once cursor motion settles.
+const DOCUMENT_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// A completed document-highlight request's payload. It carries the buffer the
+/// request targeted and each occurrence as a byte-offset range paired with
+/// whether the server marked it a write.
+pub(crate) type DocumentHighlightResponse = (BufferId, Vec<(std::ops::Range<usize>, bool)>);
+
+/// Highlight the occurrences of the symbol under the focused editor's cursor when
+/// the server supports it and the cursor rests in normal mode.
+///
+/// Leaving normal mode, or a change to the `(buffer, version, cursor offset)`
+/// key, clears the current highlights immediately and re-arms a debounced
+/// request. Occurrences therefore vanish while navigating and reappear once the
+/// cursor settles. [`pump_lsp_document_highlight`] applies the response.
+pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::DocumentHighlight)
+    {
+        return;
+    }
+
+    if stoat.mode != "normal" {
+        if stoat.last_document_highlight_key.is_some() {
+            clear_document_highlights(stoat);
+            stoat.last_document_highlight_key = None;
+            stoat.pending_document_highlight_request = None;
+        }
+        return;
+    }
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let Some((buffer_id, version, offset, rope, params)) =
+        build_document_highlight_request(stoat, encoding)
+    else {
+        return;
+    };
+
+    let key = (buffer_id, version, offset);
+    if stoat.last_document_highlight_key == Some(key) {
+        return;
+    }
+    stoat.last_document_highlight_key = Some(key);
+    clear_document_highlights(stoat);
+
+    let lsp = stoat.lsp_host.clone();
+    let executor = stoat.executor.clone();
+    let task = stoat.executor.spawn(async move {
+        executor.timer(DOCUMENT_HIGHLIGHT_DEBOUNCE).await;
+        match lsp.document_highlight(params).await {
+            Ok(Some(highlights)) => Some((
+                buffer_id,
+                convert_document_highlights(highlights, &rope, encoding),
+            )),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "document_highlight request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_document_highlight_request = Some(task);
+}
+
+fn build_document_highlight_request(
+    stoat: &mut Stoat,
+    encoding: OffsetEncoding,
+) -> Option<(BufferId, u64, usize, Rope, DocumentHighlightParams)> {
+    let (buffer_id, version, offset, rope) = {
+        let editor = crate::action_handlers::focused_editor_mut(stoat)?;
+        if editor.review_view.is_some() {
+            return None;
+        }
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buf_snap.resolve_anchor(&head);
+        (
+            editor.buffer_id,
+            buf_snap.version(),
+            offset,
+            buf_snap.rope().clone(),
+        )
+    };
+
+    let path = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)?;
+    let uri = path_to_uri(&path)?;
+    let position = crate::lsp::util::byte_offset_to_lsp_pos(&rope, offset, encoding);
+    let params = DocumentHighlightParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    Some((buffer_id, version, offset, rope, params))
+}
+
+/// Convert LSP document highlights into `(byte range, is_write)` pairs using the
+/// request-time rope. WRITE occurrences carry the write flag; READ, TEXT, and
+/// unspecified occurrences carry the read flag.
+fn convert_document_highlights(
+    highlights: Vec<DocumentHighlight>,
+    rope: &Rope,
+    encoding: OffsetEncoding,
+) -> Vec<(std::ops::Range<usize>, bool)> {
+    highlights
+        .into_iter()
+        .map(|hl| {
+            let start = crate::lsp::util::lsp_pos_to_byte_offset(rope, hl.range.start, encoding);
+            let end = crate::lsp::util::lsp_pos_to_byte_offset(rope, hl.range.end, encoding);
+            let is_write = hl.kind == Some(DocumentHighlightKind::WRITE);
+            (start..end, is_write)
+        })
+        .collect()
+}
+
+/// Poll any in-flight document-highlight request and paint the results as read
+/// and write text highlights on the focused editor. Returns true when state
+/// changed.
+pub(crate) fn pump_lsp_document_highlight(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_document_highlight_request.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some((buffer_id, items))) => {
+            apply_document_highlights(stoat, buffer_id, items);
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_document_highlight_request = Some(task);
+            false
+        },
+    }
+}
+
+fn apply_document_highlights(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    items: Vec<(std::ops::Range<usize>, bool)>,
+) {
+    let read_style = document_highlight_style(stoat, scope::UI_HIGHLIGHT_READ);
+    let write_style = document_highlight_style(stoat, scope::UI_HIGHLIGHT_WRITE);
+
+    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+        return;
+    };
+    if editor.buffer_id != buffer_id {
+        return;
+    }
+
+    let (read, write) = {
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let mut read: Vec<std::ops::Range<Anchor>> = Vec::new();
+        let mut write: Vec<std::ops::Range<Anchor>> = Vec::new();
+        for (range, is_write) in items {
+            let anchors = buf_snap.anchor_at(range.start, Bias::Right)
+                ..buf_snap.anchor_at(range.end, Bias::Left);
+            if is_write {
+                write.push(anchors);
+            } else {
+                read.push(anchors);
+            }
+        }
+        (read, write)
+    };
+
+    let read_key = HighlightKey::layer(HighlightLayer::DocumentHighlightRead);
+    if read.is_empty() {
+        editor.display_map.clear_highlights(read_key);
+    } else {
+        editor
+            .display_map
+            .highlight_text(read_key, read, read_style);
+    }
+
+    let write_key = HighlightKey::layer(HighlightLayer::DocumentHighlightWrite);
+    if write.is_empty() {
+        editor.display_map.clear_highlights(write_key);
+    } else {
+        editor
+            .display_map
+            .highlight_text(write_key, write, write_style);
+    }
+}
+
+/// Remove the read and write document-highlight ranges from the focused editor.
+pub(crate) fn clear_document_highlights(stoat: &mut Stoat) {
+    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+        return;
+    };
+    editor
+        .display_map
+        .clear_highlights(HighlightKey::layer(HighlightLayer::DocumentHighlightRead));
+    editor
+        .display_map
+        .clear_highlights(HighlightKey::layer(HighlightLayer::DocumentHighlightWrite));
+}
+
+fn document_highlight_style(stoat: &Stoat, scope_key: &str) -> HighlightStyle {
+    syntax_theme::style_to_highlight_style(&stoat.theme.get(scope_key))
 }
 
 /// One actionable entry in [`CodeActionPicker`]. Variants reflect
@@ -5247,5 +5466,118 @@ mod tests {
         h.type_keys("escape");
         h.advance_clock(Duration::from_millis(150));
         assert_eq!(hint_ids_len(&mut h), 2);
+    }
+
+    fn enable_document_highlight(h: &TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            document_highlight_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
+    fn doc_highlight_count(
+        h: &mut TestHarness,
+        layer: crate::display_map::HighlightLayer,
+    ) -> usize {
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        snapshot
+            .text_highlights()
+            .get(&crate::display_map::HighlightKey::layer(layer))
+            .map(|hl| hl.1.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn snapshot_document_highlight_read_write() {
+        use lsp_types::DocumentHighlightKind;
+        let mut h = TestHarness::with_size(24, 4);
+        enable_document_highlight(&h);
+        let root = seed(&mut h, &[("main.rs", "foo bar foo\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_highlights(
+            path.to_str().unwrap(),
+            0,
+            0,
+            &[
+                (0, 0, 3, DocumentHighlightKind::WRITE),
+                (0, 8, 11, DocumentHighlightKind::READ),
+            ],
+        );
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(250));
+        h.assert_snapshot("document_highlight_read_write");
+    }
+
+    #[test]
+    fn document_highlight_re_requests_on_cursor_move() {
+        use crate::display_map::HighlightLayer;
+        use lsp_types::DocumentHighlightKind;
+        let mut h = TestHarness::with_size(24, 4);
+        enable_document_highlight(&h);
+        let root = seed(&mut h, &[("main.rs", "foo bar foo\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let p = path.to_str().unwrap();
+        h.fake_lsp().set_highlights(
+            p,
+            0,
+            0,
+            &[
+                (0, 0, 3, DocumentHighlightKind::READ),
+                (0, 8, 11, DocumentHighlightKind::READ),
+            ],
+        );
+        h.fake_lsp()
+            .set_highlights(p, 0, 1, &[(0, 0, 3, DocumentHighlightKind::READ)]);
+
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(250));
+        assert_eq!(
+            doc_highlight_count(&mut h, HighlightLayer::DocumentHighlightRead),
+            2
+        );
+
+        h.type_keys("l");
+        h.advance_clock(Duration::from_millis(250));
+        assert_eq!(
+            doc_highlight_count(&mut h, HighlightLayer::DocumentHighlightRead),
+            1
+        );
+    }
+
+    #[test]
+    fn document_highlight_cleared_in_insert_mode() {
+        use crate::display_map::HighlightLayer;
+        use lsp_types::DocumentHighlightKind;
+        let mut h = TestHarness::with_size(24, 4);
+        enable_document_highlight(&h);
+        let root = seed(&mut h, &[("main.rs", "foo bar foo\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_highlights(
+            path.to_str().unwrap(),
+            0,
+            0,
+            &[
+                (0, 0, 3, DocumentHighlightKind::READ),
+                (0, 8, 11, DocumentHighlightKind::READ),
+            ],
+        );
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(250));
+        assert_eq!(
+            doc_highlight_count(&mut h, HighlightLayer::DocumentHighlightRead),
+            2
+        );
+
+        h.type_keys("i");
+        assert_eq!(
+            doc_highlight_count(&mut h, HighlightLayer::DocumentHighlightRead),
+            0
+        );
     }
 }

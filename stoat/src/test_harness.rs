@@ -533,6 +533,8 @@ impl TestHarness {
                 crate::action_handlers::lsp::pump_lsp_signature_help(&mut self.stoat);
             let lsp_inlay_hints =
                 crate::action_handlers::lsp::pump_lsp_inlay_hints(&mut self.stoat);
+            let lsp_doc_highlight =
+                crate::action_handlers::lsp::pump_lsp_document_highlight(&mut self.stoat);
             let lsp_code_actions =
                 crate::action_handlers::lsp::pump_lsp_code_actions(&mut self.stoat);
             let lsp_code_action_resolve =
@@ -559,6 +561,7 @@ impl TestHarness {
                 && !lsp_hover
                 && !lsp_sig_help
                 && !lsp_inlay_hints
+                && !lsp_doc_highlight
                 && !lsp_code_actions
                 && !lsp_code_action_resolve
                 && !lsp_prepare_rename

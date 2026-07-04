@@ -1,0 +1,13 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: snapshot
+focused: #1 of 1
+mode: normal
+size: 24x4
+---
+[0m[4m[7m[97m[100mf[0m[4m[97m[100moo[0m[97m bar [0m[97m[100mfoo[0m
+
+
+[0m[1m[30m[44m NOR [0m[1m[97m[100m lsp-did-open-test [0m
