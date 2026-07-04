@@ -107,7 +107,7 @@ pub(crate) fn render_hover(
     }
 }
 
-fn cursor_screen_position(
+pub(crate) fn cursor_screen_position(
     editor: &mut crate::editor_state::EditorState,
     content_area: Rect,
     anchor_offset: usize,
@@ -135,7 +135,7 @@ fn cursor_screen_position(
     Some((x, y))
 }
 
-fn truncate_to_width(line: &str, width: usize) -> String {
+pub(crate) fn truncate_to_width(line: &str, width: usize) -> String {
     if line.chars().count() <= width {
         return line.to_string();
     }

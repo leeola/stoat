@@ -24,6 +24,7 @@ pub(crate) mod review;
 pub(crate) mod reword;
 pub(crate) mod run_pane;
 pub(crate) mod sanitize;
+pub(crate) mod signature_help;
 pub(crate) mod symbol_picker;
 pub(crate) mod term_pane;
 pub(crate) mod text;
@@ -347,6 +348,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         }
     }
     hover::render_hover(stoat, buf, stoat.stoatty.then_some(&mut *scene));
+    signature_help::render_signature_help(stoat, buf, stoat.stoatty.then_some(&mut *scene));
     completion::render_completion(stoat, buf, stoat.stoatty.then_some(&mut *scene));
     code_action::render_code_action(stoat, buf, stoat.stoatty.then_some(&mut *scene));
     rename_input::render_rename_input(stoat, buf, stoat.stoatty.then_some(&mut *scene));

@@ -529,6 +529,8 @@ impl TestHarness {
             let review = crate::action_handlers::pump_review_scan(&mut self.stoat);
             let lsp_jumps = crate::action_handlers::pump_lsp_jumps(&mut self.stoat);
             let lsp_hover = crate::action_handlers::lsp::pump_lsp_hover(&mut self.stoat);
+            let lsp_sig_help =
+                crate::action_handlers::lsp::pump_lsp_signature_help(&mut self.stoat);
             let lsp_code_actions =
                 crate::action_handlers::lsp::pump_lsp_code_actions(&mut self.stoat);
             let lsp_code_action_resolve =
@@ -553,6 +555,7 @@ impl TestHarness {
                 && !review
                 && !lsp_jumps
                 && !lsp_hover
+                && !lsp_sig_help
                 && !lsp_code_actions
                 && !lsp_code_action_resolve
                 && !lsp_prepare_rename

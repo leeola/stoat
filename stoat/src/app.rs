@@ -521,6 +521,20 @@ pub struct Stoat {
     /// popup vanishes on cursor motion.
     pub(crate) pending_hover: Option<action_handlers::lsp::HoverPopup>,
 
+    /// In-flight `textDocument/signatureHelp` request, armed by
+    /// [`action_handlers::lsp::signature_help_trigger`] on a trigger character
+    /// and polled by [`action_handlers::lsp::pump_lsp_signature_help`].
+    pub(crate) pending_signature_help_request:
+        Option<stoat_scheduler::Task<Option<action_handlers::lsp::SignatureHelpPopup>>>,
+
+    /// Signature-help popup content waiting to be painted. Cleared when the
+    /// editor leaves insert mode or the completion popup opens.
+    pub(crate) pending_signature_help: Option<action_handlers::lsp::SignatureHelpPopup>,
+
+    /// `(buffer, version)` the signature-help trigger last acted on, so a
+    /// cursor-only tick does not re-request. Mirrors [`Self::last_completion_signature`].
+    pub(crate) last_signature_help_key: Option<(BufferId, u64)>,
+
     /// In-flight `textDocument/codeAction` request. Replacing the
     /// entry drops the prior task, cancelling its spawned future.
     /// Polled by [`action_handlers::lsp::pump_lsp_code_actions`] each
@@ -876,6 +890,9 @@ impl Stoat {
             pending_lsp_jump: None,
             pending_hover_request: None,
             pending_hover: None,
+            pending_signature_help_request: None,
+            pending_signature_help: None,
+            last_signature_help_key: None,
             pending_code_action_request: None,
             pending_code_action_picker: None,
             pending_code_action_resolve: None,
@@ -1685,6 +1702,7 @@ impl Stoat {
         };
         action_handlers::lsp::notify_buffer_changes_pending(self);
         crate::completion::request::trigger(self);
+        action_handlers::lsp::signature_help_trigger(self);
         effect
     }
 
@@ -4442,6 +4460,7 @@ impl Stoat {
         action_handlers::pump_review_scan(self);
         action_handlers::pump_lsp_jumps(self);
         action_handlers::lsp::pump_lsp_hover(self);
+        action_handlers::lsp::pump_lsp_signature_help(self);
         action_handlers::lsp::pump_lsp_code_actions(self);
         action_handlers::lsp::pump_lsp_code_action_resolve(self);
         action_handlers::lsp::pump_lsp_prepare_rename(self);
