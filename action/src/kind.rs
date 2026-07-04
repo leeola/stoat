@@ -203,6 +203,7 @@ pub enum ActionKind {
     GotoNextDiagnostic,
     GotoPrevDiagnostic,
     GotoDefinition,
+    GotoDeclaration,
     GotoTypeDefinition,
     GotoImplementation,
     GotoCaller,

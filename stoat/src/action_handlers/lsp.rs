@@ -518,6 +518,7 @@ fn resolve_sync_kind(cap: &Option<TextDocumentSyncCapability>) -> TextDocumentSy
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LspJumpKind {
     Definition,
+    Declaration,
     TypeDefinition,
     Implementation,
 }
@@ -526,6 +527,7 @@ impl LspJumpKind {
     fn feature(self) -> LanguageServerFeature {
         match self {
             Self::Definition => LanguageServerFeature::GotoDefinition,
+            Self::Declaration => LanguageServerFeature::GotoDeclaration,
             Self::TypeDefinition => LanguageServerFeature::GotoTypeDefinition,
             Self::Implementation => LanguageServerFeature::GotoImplementation,
         }
@@ -534,6 +536,7 @@ impl LspJumpKind {
     fn warn_label(self) -> &'static str {
         match self {
             Self::Definition => "goto_definition",
+            Self::Declaration => "goto_declaration",
             Self::TypeDefinition => "goto_type_definition",
             Self::Implementation => "goto_implementation",
         }
@@ -544,6 +547,12 @@ impl LspJumpKind {
 /// focused editor's primary cursor. Thin wrapper over [`lsp_jump`].
 pub(crate) fn goto_definition(stoat: &mut Stoat) -> UpdateEffect {
     lsp_jump(stoat, LspJumpKind::Definition)
+}
+
+/// Issue a `textDocument/declaration` request for the symbol under the
+/// focused editor's primary cursor. Thin wrapper over [`lsp_jump`].
+pub(crate) fn goto_declaration(stoat: &mut Stoat) -> UpdateEffect {
+    lsp_jump(stoat, LspJumpKind::Declaration)
 }
 
 /// Issue a `textDocument/typeDefinition` request for the symbol under
@@ -750,6 +759,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     let task = stoat.executor.spawn(async move {
         let result = match kind {
             LspJumpKind::Definition => lsp.goto_definition(params).await,
+            LspJumpKind::Declaration => lsp.goto_declaration(params).await,
             LspJumpKind::TypeDefinition => lsp.goto_type_definition(params).await,
             LspJumpKind::Implementation => lsp.goto_implementation(params).await,
         };
@@ -3448,6 +3458,58 @@ mod tests {
         );
         assert_eq!(cursor_offset(&mut h), 8);
         assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    fn enable_goto_declaration(h: &TestHarness) {
+        use lsp_types::{DeclarationCapability, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            declaration_provider: Some(DeclarationCapability::Simple(true)),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn goto_declaration_jumps_within_same_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_declaration(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_declaration(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDeclaration);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    #[test]
+    fn goto_declaration_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_declaration(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 0, 2);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDeclaration);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 0);
+        assert!(h.stoat.pending_lsp_jump.is_none());
+    }
+
+    #[test]
+    fn space_l_shift_j_jumps_to_declaration() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_declaration(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_declaration(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
+        h.type_keys("space l J");
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.stoat.mode, "normal");
     }
 
     #[test]

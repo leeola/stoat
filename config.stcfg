@@ -542,6 +542,7 @@ on key {
         w -> [GotoNextDiagnostic(), SetMode(normal)];
         W -> [GotoPrevDiagnostic(), SetMode(normal)];
         j -> [GotoDefinition(), SetMode(normal)];
+        J -> [GotoDeclaration(), SetMode(normal)];
         k -> [GotoTypeDefinition(), SetMode(normal)];
         t -> [GotoImplementation(), SetMode(normal)];
         c -> [GotoCaller(), SetMode(normal)];

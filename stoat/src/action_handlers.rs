@@ -497,6 +497,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::Prev)
         },
         ActionKind::GotoDefinition => lsp::goto_definition(stoat),
+        ActionKind::GotoDeclaration => lsp::goto_declaration(stoat),
         ActionKind::GotoTypeDefinition => lsp::goto_type_definition(stoat),
         ActionKind::GotoImplementation => lsp::goto_implementation(stoat),
         ActionKind::GotoCaller => crate::code_index::nav::goto_caller(stoat),

@@ -65,6 +65,20 @@ define_action!(
 );
 
 define_action!(
+    GotoDeclarationDef,
+    GotoDeclaration,
+    "GotoDeclaration",
+    ActionKind::GotoDeclaration,
+    "jump to symbol declaration",
+    "Move the primary cursor to the declaration of the symbol under the cursor \
+     by issuing an LSP `textDocument/declaration` request. Multi-file targets \
+     open the destination file in the focused pane before jumping. Multiple \
+     candidates jump to the first; no-op when the server returns nothing or \
+     does not advertise the capability.",
+    ActionPriority::Common
+);
+
+define_action!(
     GotoTypeDefinitionDef,
     GotoTypeDefinition,
     "GotoTypeDefinition",

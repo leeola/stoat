@@ -54,8 +54,8 @@ use crate::{
             HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
         },
         lsp::{
-            CodeAction, Format, FormatSelections, GotoDefinition, GotoImplementation,
-            GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
+            CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
+            GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
             OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
             OpenWorkspaceSymbolPicker, RenameSymbol,
         },
@@ -173,6 +173,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(GotoPrevDiagnostic))
     });
     add(GotoDefinition::DEF, |_| Ok(Box::new(GotoDefinition)));
+    add(GotoDeclaration::DEF, |_| Ok(Box::new(GotoDeclaration)));
     add(GotoTypeDefinition::DEF, |_| {
         Ok(Box::new(GotoTypeDefinition))
     });
@@ -706,6 +707,7 @@ mod tests {
         "GotoNextDiagnostic",
         "GotoPrevDiagnostic",
         "GotoDefinition",
+        "GotoDeclaration",
         "GotoTypeDefinition",
         "GotoImplementation",
         "GotoCaller",
@@ -1042,7 +1044,8 @@ mod tests {
         // + 1 ToggleSyntaxHighlight.
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
-        assert_eq!(all().count(), 291);
+        // + 1 GotoDeclaration.
+        assert_eq!(all().count(), 292);
     }
 
     #[test]

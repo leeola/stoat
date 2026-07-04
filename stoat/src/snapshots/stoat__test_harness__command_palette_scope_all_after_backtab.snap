@@ -19,9 +19,9 @@ size: 80x24
   [0m[35m│[0m[97m ForceSaveBuffer     [0m[90msave the focused buffer, overwriting external changes[0m[35m│[0m
   [0m[35m│[0m[97m Format              [0m[90mformat document via LSP[0m[97m                              [0m[35m│[0m
   [0m[35m│[0m[97m FormatSelections    [0m[90mformat selection via LSP[0m[97m                             [0m[35m│[0m
+  [0m[35m│[0m[97m GotoDeclaration     [0m[90mjump to symbol declaration[0m[97m                           [0m[35m│[0m
   [0m[35m│[0m[97m GotoDefinition      [0m[90mjump to symbol definition[0m[97m                            [0m[35m│[0m
   [0m[35m│[0m[97m GotoImplementation  [0m[90mjump to symbol implementation[0m[97m                        [0m[35m│[0m
-  [0m[35m│[0m[97m GotoTypeDefinition  [0m[90mjump to type definition[0m[97m                              [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[37mReplace the highlighted item's repla[0m[33m┌ palette ──────────────────────────────┐[0m
   [0m[35m│[0m[37mits insert_text and place the primar[0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m

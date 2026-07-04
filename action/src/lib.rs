@@ -55,7 +55,7 @@ pub use defs::{
         HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
     },
     lsp::{
-        CodeAction, Format, FormatSelections, GotoDefinition, GotoImplementation,
+        CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition, GotoImplementation,
         GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenDiagnosticsPicker,
         OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker, OpenWorkspaceSymbolPicker, RenameSymbol,
     },
