@@ -198,6 +198,19 @@ pub fn evaluate(predicate: &Predicate, state: &dyn KeymapState) -> bool {
     }
 }
 
+/// The count of leaf predicate atoms in `predicate`, the specificity a binding
+/// contributes per predicate when resolving competing bindings.
+///
+/// An `And` sums its branches, since satisfying it requires all of them. Every
+/// other form counts as one. Leaves are a single atom, and an `Or` scores one
+/// because it is satisfiable by its weakest branch.
+fn predicate_atoms(predicate: &Predicate) -> usize {
+    match predicate {
+        Predicate::And(l, r) => predicate_atoms(&l.node) + predicate_atoms(&r.node),
+        _ => 1,
+    }
+}
+
 fn state_value_eq(sv: &StateValue, val: &Value) -> bool {
     match (sv, val) {
         (StateValue::String(s), Value::String(v)) => s == v,
@@ -300,16 +313,22 @@ impl Keymap {
     }
 
     pub fn lookup(&self, state: &dyn KeymapState, event: &KeyEvent) -> Option<&[ResolvedAction]> {
+        let mut best: Option<(usize, &[ResolvedAction])> = None;
         for binding in &self.bindings {
             if !binding.key.matches(event) {
                 continue;
             }
-            let preds_match = binding.predicates.iter().all(|p| evaluate(p, state));
-            if preds_match {
-                return Some(&binding.actions);
+            if !binding.predicates.iter().all(|p| evaluate(p, state)) {
+                continue;
+            }
+            let score: usize = binding.predicates.iter().map(predicate_atoms).sum();
+            // Strict `>` keeps the earliest binding on a tie, so equally specific
+            // matches still resolve in source order.
+            if best.is_none_or(|(best_score, _)| score > best_score) {
+                best = Some((score, binding.actions.as_slice()));
             }
         }
-        None
+        best.map(|(_, actions)| actions)
     }
 
     pub fn active_keys(&self, state: &dyn KeymapState) -> Vec<(&CompiledKey, &[ResolvedAction])> {
@@ -750,19 +769,22 @@ mod tests {
     }
 
     #[test]
-    fn lookup_returns_first_match() {
+    fn lookup_prefers_more_specific() {
         let config = parse_config(
             r#"on key {
-                mode == "normal" { q -> Quit(); }
-                q -> Default();
+                mode == "normal" { q -> MoveLeft(); }
+                mode == "normal" && palette_open { q -> MoveRight(); }
             }"#,
         );
         let keymap = Keymap::compile(&config);
-        let state = TestState::new().set("mode", StateValue::String("normal".into()));
+        let state = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("palette_open", StateValue::Bool(true));
         let event = key_event(KeyCode::Char('q'), KeyModifiers::NONE);
 
+        // The later 2-atom binding outscores the earlier 1-atom one.
         let actions = keymap.lookup(&state, &event).expect("should match");
-        assert_eq!(actions[0].name, "Quit");
+        assert_eq!(actions[0].name, "MoveRight");
     }
 
     #[test]
@@ -779,6 +801,23 @@ mod tests {
 
         let actions = keymap.lookup(&state, &event).expect("should fall through");
         assert_eq!(actions[0].name, "Quit");
+    }
+
+    #[test]
+    fn lookup_ties_keep_source_order() {
+        let config = parse_config(
+            r#"on key {
+                mode == "normal" { q -> MoveLeft(); }
+                mode != "insert" { q -> MoveRight(); }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let state = TestState::new().set("mode", StateValue::String("normal".into()));
+        let event = key_event(KeyCode::Char('q'), KeyModifiers::NONE);
+
+        // Both bindings match with one atom each, so the earlier one wins.
+        let actions = keymap.lookup(&state, &event).expect("should match");
+        assert_eq!(actions[0].name, "MoveLeft");
     }
 
     #[test]
