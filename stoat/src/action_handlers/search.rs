@@ -27,7 +27,6 @@ impl SearchDirection {
 pub(crate) struct SearchInputState {
     pub(crate) input: InputView,
     pub(crate) direction: SearchDirection,
-    pub(crate) previous_mode: String,
 }
 
 /// Persisted query + direction from the most recent submitted
@@ -51,15 +50,10 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
     if stoat.search_input.is_some() {
         return UpdateEffect::None;
     }
-    let previous_mode = stoat.focused_mode().to_string();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::Search, "", "prompt", 1);
-    stoat.search_input = Some(SearchInputState {
-        input,
-        direction,
-        previous_mode,
-    });
+    stoat.search_input = Some(SearchInputState { input, direction });
     stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
@@ -73,11 +67,9 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         return false;
     };
     let query = state.input.text(stoat.active_workspace());
-    let previous_mode = state.previous_mode.clone();
     let direction = state.direction;
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
 
     if query.is_empty() {
         return true;
@@ -89,15 +81,13 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
 }
 
 /// Cancel the input modal without changing the cursor. Disposes
-/// the embedded [`InputView`] and restores the previous mode.
+/// the embedded [`InputView`].
 pub(crate) fn search_cancel(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.search_input.take() else {
         return false;
     };
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     true
 }
 

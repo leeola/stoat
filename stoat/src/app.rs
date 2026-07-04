@@ -2679,7 +2679,6 @@ impl Stoat {
             if let Some(palette) = self.command_palette.take() {
                 let active_idx = self.active_workspace;
                 palette.dispose(&mut self.workspaces[active_idx]);
-                self.set_focused_mode(palette.previous_mode);
                 return UpdateEffect::Redraw;
             }
             if self.workspace_picker.is_some() {
@@ -2690,20 +2689,16 @@ impl Stoat {
                 self.quit_all_confirm = None;
                 return UpdateEffect::Redraw;
             }
-            if let Some(picker) = self.jumplist_picker.take() {
-                self.set_focused_mode(picker.previous_mode);
+            if self.jumplist_picker.take().is_some() {
                 return UpdateEffect::Redraw;
             }
-            if let Some(picker) = self.diagnostics_picker.take() {
-                self.set_focused_mode(picker.previous_mode);
+            if self.diagnostics_picker.take().is_some() {
                 return UpdateEffect::Redraw;
             }
-            if let Some(picker) = self.location_picker.take() {
-                self.set_focused_mode(picker.previous_mode);
+            if self.location_picker.take().is_some() {
                 return UpdateEffect::Redraw;
             }
-            if let Some(picker) = self.global_search.take() {
-                self.set_focused_mode(picker.previous_mode);
+            if self.global_search.take().is_some() {
                 return UpdateEffect::Redraw;
             }
             if self.focused_run_pane().is_some() {
@@ -4783,9 +4778,7 @@ impl Stoat {
         match outcome {
             PickerOutcome::None => UpdateEffect::Redraw,
             PickerOutcome::Close => {
-                if let Some(picker) = self.jumplist_picker.take() {
-                    self.set_focused_mode(picker.previous_mode);
-                }
+                self.jumplist_picker = None;
                 UpdateEffect::Redraw
             },
             PickerOutcome::Select(idx) => {
@@ -4796,7 +4789,6 @@ impl Stoat {
                     Some(entry) => entry.offset,
                     None => return UpdateEffect::Redraw,
                 };
-                self.set_focused_mode(picker.previous_mode);
                 self.jump_focused_to_offset(target_offset, idx);
                 UpdateEffect::Redraw
             },
@@ -4812,9 +4804,7 @@ impl Stoat {
         match outcome {
             PickerOutcome::None => UpdateEffect::Redraw,
             PickerOutcome::Close => {
-                if let Some(picker) = self.diagnostics_picker.take() {
-                    self.set_focused_mode(picker.previous_mode);
-                }
+                self.diagnostics_picker = None;
                 UpdateEffect::Redraw
             },
             PickerOutcome::Select(idx) => {
@@ -4829,7 +4819,6 @@ impl Stoat {
                 let zero_based_line = entry.line.saturating_sub(1);
                 let zero_based_column = entry.column.saturating_sub(1);
                 let local_offset = entry.offset;
-                self.set_focused_mode(picker.previous_mode);
                 let offset = match path {
                     Some(path) => {
                         action_handlers::file::open_file(self, &path);
@@ -4853,9 +4842,7 @@ impl Stoat {
         match outcome {
             PickerOutcome::None => UpdateEffect::Redraw,
             PickerOutcome::Close => {
-                if let Some(picker) = self.location_picker.take() {
-                    self.set_focused_mode(picker.previous_mode);
-                }
+                self.location_picker = None;
                 UpdateEffect::Redraw
             },
             PickerOutcome::Select(idx) => {
@@ -4866,7 +4853,6 @@ impl Stoat {
                     Some(entry) => entry.clone(),
                     None => return UpdateEffect::Redraw,
                 };
-                self.set_focused_mode(picker.previous_mode);
                 action_handlers::lsp::apply_jump(self, &entry.path, entry.offset);
                 UpdateEffect::Redraw
             },
@@ -4929,9 +4915,7 @@ impl Stoat {
         match outcome {
             PickerOutcome::None => UpdateEffect::Redraw,
             PickerOutcome::Close => {
-                if let Some(picker) = self.global_search.take() {
-                    self.set_focused_mode(picker.previous_mode);
-                }
+                self.global_search = None;
                 UpdateEffect::Redraw
             },
             PickerOutcome::Select(idx) => {
@@ -4942,7 +4926,6 @@ impl Stoat {
                     Some(m) => (m.path.clone(), m.offset),
                     None => return UpdateEffect::Redraw,
                 };
-                self.set_focused_mode(picker.previous_mode);
                 action_handlers::dispatch(self, &OpenFile { path: target.0 });
                 self.jump_focused_to_match_offset(target.1);
                 UpdateEffect::Redraw
@@ -5950,7 +5933,7 @@ mod tests {
         h.stoat.set_focused_mode("insert".into());
         assert_eq!(h.stoat.focused_mode(), "insert");
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
         assert_eq!(
             h.stoat.focused_mode(),
             "prompt",
@@ -5972,14 +5955,14 @@ mod tests {
         h.stoat.set_focused_mode("insert".into());
         assert_eq!(h.stoat.focused_mode(), "insert");
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
         assert_eq!(
             h.stoat.focused_mode(),
             "normal",
             "the other pane keeps its own mode across the focus switch"
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
         assert_eq!(
             h.stoat.focused_mode(),
             "insert",

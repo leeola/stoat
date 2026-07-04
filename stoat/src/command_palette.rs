@@ -31,10 +31,6 @@ pub struct CommandPalette {
     /// the palette is collecting that command's trailing argument inline. The
     /// argument text is the input tail after the command token.
     pub(crate) command: Option<&'static registry::RegistryEntry>,
-    /// Mode to restore when the palette closes. Saved at `new()` time so
-    /// the palette can transition [`crate::app::Stoat::mode`] back to whatever
-    /// the user was in before `:` was pressed.
-    pub(crate) previous_mode: String,
     /// Which subset of actions the palette currently lists. Captured at
     /// open time and toggled by `PaletteScopeToggle` (Shift-Tab).
     pub(crate) scope: PaletteScope,
@@ -316,12 +312,7 @@ pub(crate) enum PaletteOutcome {
 }
 
 impl CommandPalette {
-    pub fn new(
-        ws: &mut Workspace,
-        executor: Executor,
-        previous_mode: String,
-        availability: Availability,
-    ) -> Self {
+    pub fn new(ws: &mut Workspace, executor: Executor, availability: Availability) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "prompt", 1);
         let scope = PaletteScope::Active;
         let mut filtered = Vec::new();
@@ -341,7 +332,6 @@ impl CommandPalette {
             match_indices,
             selected,
             command: None,
-            previous_mode,
             scope,
             availability,
             viewport_rows: None,

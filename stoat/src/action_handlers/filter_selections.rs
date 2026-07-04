@@ -10,7 +10,6 @@ use stoat_text::{Anchor, Selection};
 pub(crate) struct FilterSelectionsInputState {
     pub(crate) input: InputView,
     pub(crate) remove: bool,
-    pub(crate) previous_mode: String,
 }
 
 pub(super) fn open_keep(stoat: &mut Stoat) -> UpdateEffect {
@@ -25,7 +24,6 @@ fn open_with(stoat: &mut Stoat, remove: bool) -> UpdateEffect {
     if stoat.filter_selections_input.is_some() {
         return UpdateEffect::None;
     }
-    let previous_mode = stoat.focused_mode().to_string();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(
@@ -36,11 +34,7 @@ fn open_with(stoat: &mut Stoat, remove: bool) -> UpdateEffect {
         "prompt",
         1,
     );
-    stoat.filter_selections_input = Some(FilterSelectionsInputState {
-        input,
-        remove,
-        previous_mode,
-    });
+    stoat.filter_selections_input = Some(FilterSelectionsInputState { input, remove });
     stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
@@ -54,11 +48,9 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         return false;
     };
     let query = state.input.text(stoat.active_workspace());
-    let previous_mode = state.previous_mode.clone();
     let remove = state.remove;
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     if query.is_empty() {
         return true;
     }
@@ -97,10 +89,8 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.filter_selections_input.take() else {
         return false;
     };
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     true
 }
 

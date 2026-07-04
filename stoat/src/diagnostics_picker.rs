@@ -26,7 +26,6 @@ pub struct DiagnosticsPicker {
     entries: Vec<DiagnosticsEntry>,
     selected: usize,
     scope: PickerScope,
-    pub previous_mode: String,
 }
 
 pub struct DiagnosticsEntry {
@@ -63,7 +62,7 @@ impl DiagnosticsPicker {
     /// truncated to [`MESSAGE_MAX_CHARS`] and stripped of any
     /// embedded newlines so it fits the single-row layout.
     /// Entries are sorted by `(line, column)` ascending.
-    pub fn new(diagnostics: &[Diagnostic], buffer: &TextBuffer, previous_mode: String) -> Self {
+    pub fn new(diagnostics: &[Diagnostic], buffer: &TextBuffer) -> Self {
         let rope = buffer.rope();
         let rope_len = rope.len();
         let mut entries: Vec<DiagnosticsEntry> = diagnostics
@@ -88,7 +87,6 @@ impl DiagnosticsPicker {
             entries,
             selected: 0,
             scope: PickerScope::Local,
-            previous_mode,
         }
     }
 
@@ -98,7 +96,7 @@ impl DiagnosticsPicker {
     /// recomputes the real byte offset after opening the
     /// target file. Entries are sorted by `(path, line,
     /// column)` so the picker reads predictably.
-    pub fn workspace(diagnostics: &DiagnosticSet, previous_mode: String) -> Self {
+    pub fn workspace(diagnostics: &DiagnosticSet) -> Self {
         let mut entries: Vec<DiagnosticsEntry> = diagnostics
             .iter()
             .flat_map(|(path, diags)| {
@@ -129,7 +127,6 @@ impl DiagnosticsPicker {
             entries,
             selected: 0,
             scope: PickerScope::Workspace,
-            previous_mode,
         }
     }
 
@@ -239,7 +236,7 @@ mod tests {
             diag(2, 2, "third", DiagnosticSeverity::WARNING),
             diag(1, 1, "second", DiagnosticSeverity::INFORMATION),
         ];
-        let picker = DiagnosticsPicker::new(&diagnostics, &buffer, "normal".into());
+        let picker = DiagnosticsPicker::new(&diagnostics, &buffer);
         let entries = picker.entries();
         assert_eq!(entries.len(), 3);
         assert_eq!((entries[0].line, entries[0].column), (1, 1));
@@ -274,7 +271,7 @@ mod tests {
                 diag(2, 0, "a-second", DiagnosticSeverity::ERROR),
             ],
         );
-        let picker = DiagnosticsPicker::workspace(&set, "normal".into());
+        let picker = DiagnosticsPicker::workspace(&set);
         assert_eq!(picker.scope(), PickerScope::Workspace);
         let entries = picker.entries();
         assert_eq!(entries.len(), 4);
@@ -299,7 +296,7 @@ mod tests {
         let long = "a".repeat(200);
         let multi = format!("first\nsecond\n{long}");
         let diagnostics = vec![diag(0, 0, &multi, DiagnosticSeverity::ERROR)];
-        let picker = DiagnosticsPicker::new(&diagnostics, &buffer, "normal".into());
+        let picker = DiagnosticsPicker::new(&diagnostics, &buffer);
         let entry = &picker.entries()[0];
         assert_eq!(entry.message.chars().count(), MESSAGE_MAX_CHARS);
         assert!(!entry.message.contains('\n'));
@@ -309,7 +306,7 @@ mod tests {
     fn enter_returns_select() {
         let buffer = buf("a\n");
         let diagnostics = vec![diag(0, 0, "msg", DiagnosticSeverity::ERROR)];
-        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer, "normal".into());
+        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
         assert!(matches!(
             picker.handle_key(keys::key(KeyCode::Enter)),
             PickerOutcome::Select(_)
@@ -320,7 +317,7 @@ mod tests {
     fn esc_returns_close() {
         let buffer = buf("a\n");
         let diagnostics = vec![diag(0, 0, "msg", DiagnosticSeverity::ERROR)];
-        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer, "normal".into());
+        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
         assert!(matches!(
             picker.handle_key(keys::key(KeyCode::Esc)),
             PickerOutcome::Close
@@ -335,7 +332,7 @@ mod tests {
             diag(1, 0, "second", DiagnosticSeverity::ERROR),
             diag(2, 0, "third", DiagnosticSeverity::ERROR),
         ];
-        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer, "normal".into());
+        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
         picker.handle_key(keys::key(KeyCode::Up));
         picker.handle_key(keys::key(KeyCode::Up));
         assert_eq!(picker.selected(), 0);

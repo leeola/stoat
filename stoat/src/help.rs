@@ -55,11 +55,6 @@ static SET_MODE_PARAMS: &[ParamDef] = &[ParamDef {
 pub struct Help {
     pub(crate) input: InputView,
     scope: HelpScope,
-    /// Mode to restore when the help modal closes. Saved at `new()` time so
-    /// `close_help` in the action-handler layer can transition
-    /// [`crate::app::Stoat::mode`] back to whatever the user was in before
-    /// `?` was pressed.
-    pub(crate) previous_mode: String,
     snapshot_mode: String,
     active: Vec<(String, Vec<ResolvedAction>)>,
     entries: Vec<HelpEntry>,
@@ -109,13 +104,11 @@ impl Help {
         active: Vec<(String, Vec<ResolvedAction>)>,
         ws: &mut Workspace,
         executor: Executor,
-        previous_mode: String,
     ) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::HelpSearch, "", "prompt", 1);
         let mut help = Self {
             input,
             scope: HelpScope::Active,
-            previous_mode,
             snapshot_mode: snapshot_mode.to_owned(),
             active,
             entries: Vec::new(),
@@ -447,11 +440,10 @@ mod tests {
     /// `active` bindings. Also sets the focused mode to `"prompt"` so help
     /// starts in its Insert sub-mode, matching the real `OpenHelp` handler.
     fn open_help_with(h: &mut TestHarness, active: Vec<(String, Vec<ResolvedAction>)>) {
-        let previous_mode = h.stoat.focused_mode().to_string();
         let executor = h.stoat.executor.clone();
         let active_idx = h.stoat.active_workspace;
         let ws = &mut h.stoat.workspaces[active_idx];
-        h.stoat.help = Some(Help::new("normal", active, ws, executor, previous_mode));
+        h.stoat.help = Some(Help::new("normal", active, ws, executor));
         h.stoat.set_focused_mode("prompt".into());
     }
 

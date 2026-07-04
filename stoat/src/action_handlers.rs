@@ -151,16 +151,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::FileFinderPageDown => file_finder::file_finder_page(stoat, 1),
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),
         ActionKind::OpenCommandPalette => {
-            let previous_mode = stoat.focused_mode().to_string();
             let executor = stoat.executor.clone();
             let availability = crate::command_palette::Availability::from_stoat(stoat);
             let ws = stoat.active_workspace_mut();
-            stoat.command_palette = Some(CommandPalette::new(
-                ws,
-                executor,
-                previous_mode,
-                availability,
-            ));
+            stoat.command_palette = Some(CommandPalette::new(ws, executor, availability));
             stoat.set_focused_mode("prompt".into());
             UpdateEffect::Redraw
         },
@@ -168,9 +162,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             let active = stoat.active_bindings_for_current_mode();
             let mode = stoat.focused_mode().to_string();
             let executor = stoat.executor.clone();
-            let previous_mode = stoat.focused_mode().to_string();
             let ws = stoat.active_workspace_mut();
-            stoat.help = Some(Help::new(&mode, active, ws, executor, previous_mode));
+            stoat.help = Some(Help::new(&mode, active, ws, executor));
             stoat.set_focused_mode("prompt".into());
             UpdateEffect::Redraw
         },
@@ -758,7 +751,6 @@ fn open_global_search(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.global_search_input.is_some() {
         return UpdateEffect::None;
     }
-    let previous_mode = stoat.focused_mode().to_string();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = crate::input_view::InputView::create(
@@ -769,10 +761,7 @@ fn open_global_search(stoat: &mut Stoat) -> UpdateEffect {
         "prompt",
         1,
     );
-    stoat.global_search_input = Some(crate::global_search::GlobalSearchInputState {
-        input,
-        previous_mode,
-    });
+    stoat.global_search_input = Some(crate::global_search::GlobalSearchInputState { input });
     stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
@@ -787,29 +776,23 @@ pub(crate) fn global_search_submit(stoat: &mut Stoat) -> bool {
         return false;
     };
     let query = state.input.text(stoat.active_workspace());
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
     if query.is_empty() {
-        stoat.set_focused_mode(previous_mode);
         return true;
     }
     let git_root = stoat.active_workspace().git_root.clone();
     let matches = match crate::global_search::perform_search(&*stoat.fs_host, &git_root, &query) {
         Ok(m) => m,
         Err(_) => {
-            stoat.set_focused_mode(previous_mode);
             return true;
         },
     };
     if matches.is_empty() {
-        stoat.set_focused_mode(previous_mode);
         return true;
     }
     stoat.global_search = Some(crate::global_search::GlobalSearchPicker::new(
-        matches,
-        query,
-        previous_mode,
+        matches, query,
     ));
     true
 }
@@ -820,10 +803,8 @@ pub(crate) fn global_search_cancel(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.global_search_input.take() else {
         return false;
     };
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     true
 }
 
@@ -831,7 +812,6 @@ pub(crate) fn global_search_cancel(stoat: &mut Stoat) -> bool {
 /// focused editor's jumplist and stores it in
 /// [`Stoat::jumplist_picker`]. No-op when the jumplist is empty.
 fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let previous_mode = stoat.focused_mode().to_string();
     let ws = stoat.active_workspace_mut();
     let editor_id = match ws.focus {
         FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
@@ -855,7 +835,7 @@ fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
     };
     let picker = {
         let guard = buffer.read().expect("buffer poisoned");
-        crate::jumplist_picker::JumplistPicker::new(&jumplist, &guard, previous_mode)
+        crate::jumplist_picker::JumplistPicker::new(&jumplist, &guard)
     };
     stoat.jumplist_picker = Some(picker);
     UpdateEffect::Redraw
@@ -867,12 +847,10 @@ fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
 /// on `Stoat::diagnostics_picker`. No-op when the workspace
 /// has no diagnostics loaded.
 fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let previous_mode = stoat.focused_mode().to_string();
     if stoat.diagnostics.iter().next().is_none() {
         return UpdateEffect::None;
     }
-    let picker =
-        crate::diagnostics_picker::DiagnosticsPicker::workspace(&stoat.diagnostics, previous_mode);
+    let picker = crate::diagnostics_picker::DiagnosticsPicker::workspace(&stoat.diagnostics);
     if picker.entries().is_empty() {
         return UpdateEffect::None;
     }
@@ -886,7 +864,6 @@ fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
 /// when the focused pane is not an editor, the buffer has no
 /// path on disk, or the path has no diagnostics.
 fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let previous_mode = stoat.focused_mode().to_string();
     let ws = stoat.active_workspace_mut();
     let editor_id = match ws.focus {
         FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
@@ -914,7 +891,7 @@ fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
     };
     let picker = {
         let guard = buffer.read().expect("buffer poisoned");
-        crate::diagnostics_picker::DiagnosticsPicker::new(&diagnostics, &guard, previous_mode)
+        crate::diagnostics_picker::DiagnosticsPicker::new(&diagnostics, &guard)
     };
     stoat.diagnostics_picker = Some(picker);
     UpdateEffect::Redraw
@@ -980,7 +957,6 @@ pub(crate) fn close_help(stoat: &mut Stoat) {
     };
     let active_idx = stoat.active_workspace;
     help.dispose(&mut stoat.workspaces[active_idx]);
-    stoat.set_focused_mode(help.previous_mode.clone());
 }
 
 /// Read `path` through the supplied [`FsHost`] as a UTF-8 string.
@@ -2341,14 +2317,7 @@ mod tests {
             Some("OpenJumplistPicker"),
             "open should record the recall target"
         );
-        let previous_mode = stoat
-            .jumplist_picker
-            .as_ref()
-            .expect("modal open")
-            .previous_mode
-            .clone();
         stoat.jumplist_picker = None;
-        stoat.set_focused_mode(previous_mode);
         assert_eq!(
             dispatch(&mut stoat, &stoat_action::OpenLastPicker),
             UpdateEffect::Redraw

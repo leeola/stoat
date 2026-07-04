@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 /// `global_search_cancel`.
 pub(crate) struct GlobalSearchInputState {
     pub(crate) input: InputView,
-    pub(crate) previous_mode: String,
 }
 
 /// One match site surfaced by [`perform_search`].
@@ -26,7 +25,6 @@ pub struct GlobalSearchPicker {
     matches: Vec<SearchMatch>,
     selected: usize,
     query: String,
-    pub previous_mode: String,
 }
 
 pub enum PickerOutcome {
@@ -41,12 +39,11 @@ pub enum PickerOutcome {
 const SNIPPET_MAX_CHARS: usize = 80;
 
 impl GlobalSearchPicker {
-    pub fn new(matches: Vec<SearchMatch>, query: String, previous_mode: String) -> Self {
+    pub fn new(matches: Vec<SearchMatch>, query: String) -> Self {
         Self {
             matches,
             selected: 0,
             query,
-            previous_mode,
         }
     }
 
@@ -265,7 +262,6 @@ mod tests {
                 snippet: "hi".to_string(),
             }],
             "hi".into(),
-            "normal".into(),
         );
         assert!(matches!(
             picker.handle_key(keys::key(KeyCode::Enter)),
@@ -275,7 +271,7 @@ mod tests {
 
     #[test]
     fn picker_esc_returns_close() {
-        let mut picker = GlobalSearchPicker::new(Vec::new(), "x".into(), "normal".into());
+        let mut picker = GlobalSearchPicker::new(Vec::new(), "x".into());
         assert!(matches!(
             picker.handle_key(keys::key(KeyCode::Esc)),
             PickerOutcome::Close
@@ -295,7 +291,6 @@ mod tests {
                 })
                 .collect(),
             "x".into(),
-            "normal".into(),
         );
         picker.handle_key(keys::key(KeyCode::Up));
         assert_eq!(picker.selected(), 0);

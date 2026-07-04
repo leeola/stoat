@@ -2708,15 +2708,13 @@ pub(crate) struct RenamePrep {
 /// [`crate::input_view::InputView`] so render can paint the
 /// embedded editor and submit can read the typed name; carries
 /// the symbol's URI and request position so submit can build the
-/// `RenameParams` without touching the editor again. `previous_mode`
-/// restores the pre-rename mode on cancel.
+/// `RenameParams` without touching the editor again.
 #[derive(Debug)]
 pub(crate) struct RenameInputState {
     pub(crate) input: crate::input_view::InputView,
     pub(crate) source_uri: Uri,
     pub(crate) symbol_position: Position,
     pub(crate) anchor_offset: usize,
-    pub(crate) previous_mode: String,
 }
 
 /// Issue a `textDocument/prepareRename` request for the symbol under
@@ -2820,7 +2818,6 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 let head = editor.selections.newest_anchor().head();
                 buf_snap.resolve_anchor(&head)
             };
-            let previous_mode = stoat.focused_mode().to_string();
             let executor = stoat.executor.clone();
             let ws = stoat.active_workspace_mut();
             let input = crate::input_view::InputView::create(
@@ -2836,7 +2833,6 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 source_uri: prep.source_uri,
                 symbol_position: prep.symbol_position,
                 anchor_offset,
-                previous_mode,
             });
             stoat.set_focused_mode("prompt".into());
             true
@@ -2858,10 +2854,8 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
         return false;
     };
     let new_name = rename_state.input.text(stoat.active_workspace());
-    let previous_mode = rename_state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     rename_state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
 
     if new_name.is_empty() {
         return true;
@@ -2891,16 +2885,14 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// Cancel the rename input modal without firing rename. Restores the
-/// previous mode and disposes the embedded input.
+/// Cancel the rename input modal without firing rename. Disposes the
+/// embedded input.
 pub(crate) fn rename_input_cancel(stoat: &mut Stoat) -> bool {
     let Some(rename_state) = stoat.rename_input.take() else {
         return false;
     };
-    let previous_mode = rename_state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     rename_state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     true
 }
 
@@ -3152,13 +3144,11 @@ pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
 /// Open input modal for the workspace-symbol query. Carries the
 /// [`crate::input_view::InputView`] so render can paint the
 /// embedded editor and submit can read the typed query;
-/// `previous_mode` restores the pre-action mode on cancel/submit;
 /// `anchor_offset` anchors the modal popup to the cursor.
 #[derive(Debug)]
 pub(crate) struct WorkspaceSymbolInputState {
     pub(crate) input: crate::input_view::InputView,
     pub(crate) anchor_offset: usize,
-    pub(crate) previous_mode: String,
 }
 
 /// One entry in [`WorkspaceSymbolPicker`]. `title` is the symbol
@@ -3207,7 +3197,6 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         buf_snap.resolve_anchor(&head)
     };
 
-    let previous_mode = stoat.focused_mode().to_string();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = crate::input_view::InputView::create(
@@ -3221,25 +3210,22 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     stoat.workspace_symbol_input = Some(WorkspaceSymbolInputState {
         input,
         anchor_offset,
-        previous_mode,
     });
     stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
 
 /// Submit the workspace-symbol input: read the query text, fire
-/// `workspace/symbol`, restore previous mode, and tear down the
-/// modal. Returns true when the modal was open.
+/// `workspace/symbol` and tear down the modal. Returns true when the
+/// modal was open.
 pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.workspace_symbol_input.take() else {
         return false;
     };
     let query = state.input.text(stoat.active_workspace());
-    let previous_mode = state.previous_mode.clone();
     let anchor_offset = state.anchor_offset;
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
 
     let params = WorkspaceSymbolParams {
         query,
@@ -3266,16 +3252,14 @@ pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// Cancel the workspace-symbol input modal. Restores the previous
-/// mode and disposes the embedded input.
+/// Cancel the workspace-symbol input modal. Disposes the embedded
+/// input.
 pub(crate) fn workspace_symbol_cancel(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.workspace_symbol_input.take() else {
         return false;
     };
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     true
 }
 
@@ -3589,8 +3573,7 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
                     apply_jump(stoat, &entry.path, entry.offset);
                 },
                 _ => {
-                    let previous_mode = stoat.focused_mode().to_string();
-                    stoat.location_picker = Some(LocationPicker::new(entries, previous_mode));
+                    stoat.location_picker = Some(LocationPicker::new(entries));
                 },
             }
             true

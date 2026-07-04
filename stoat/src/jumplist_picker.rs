@@ -10,7 +10,6 @@ pub struct JumplistPicker {
     entries: Vec<JumplistEntry>,
     selected: usize,
     cursor_idx: usize,
-    pub previous_mode: String,
 }
 
 pub struct JumplistEntry {
@@ -39,7 +38,7 @@ impl JumplistPicker {
     /// that line. Stale offsets past the rope end clamp to the end.
     /// Empty input produces an empty picker; callers should treat that
     /// as a no-op rather than open the modal.
-    pub fn new(jumplist: &JumpList, buffer: &TextBuffer, previous_mode: String) -> Self {
+    pub fn new(jumplist: &JumpList, buffer: &TextBuffer) -> Self {
         let rope = buffer.rope();
         let rope_len = rope.len();
         let entries: Vec<JumplistEntry> = jumplist
@@ -65,7 +64,6 @@ impl JumplistPicker {
             entries,
             selected,
             cursor_idx,
-            previous_mode,
         }
     }
 
@@ -152,7 +150,7 @@ mod tests {
     fn new_lists_every_entry_with_line_col() {
         let buffer = buf("alpha\nbeta\ngamma\n");
         let jl = jumplist(&[0, 6, 11]);
-        let picker = JumplistPicker::new(&jl, &buffer, "normal".into());
+        let picker = JumplistPicker::new(&jl, &buffer);
         let entries = picker.entries();
         assert_eq!(entries.len(), 3);
         assert_eq!((entries[0].line, entries[0].column), (1, 1));
@@ -167,7 +165,7 @@ mod tests {
     fn new_clamps_offset_past_rope_end() {
         let buffer = buf("hi\n");
         let jl = jumplist(&[999]);
-        let picker = JumplistPicker::new(&jl, &buffer, "normal".into());
+        let picker = JumplistPicker::new(&jl, &buffer);
         assert_eq!(picker.entries()[0].offset, 3);
     }
 
@@ -175,7 +173,7 @@ mod tests {
     fn snippet_strips_leading_whitespace() {
         let buffer = buf("    indented\nflat\n");
         let jl = jumplist(&[0]);
-        let picker = JumplistPicker::new(&jl, &buffer, "normal".into());
+        let picker = JumplistPicker::new(&jl, &buffer);
         assert_eq!(picker.entries()[0].snippet, "indented");
     }
 
@@ -183,7 +181,7 @@ mod tests {
     fn enter_returns_select() {
         let buffer = buf("a\nb\n");
         let jl = jumplist(&[0, 2]);
-        let mut picker = JumplistPicker::new(&jl, &buffer, "normal".into());
+        let mut picker = JumplistPicker::new(&jl, &buffer);
         assert!(matches!(
             picker.handle_key(keys::key(KeyCode::Enter)),
             PickerOutcome::Select(_)
@@ -194,7 +192,7 @@ mod tests {
     fn esc_returns_close() {
         let buffer = buf("a\nb\n");
         let jl = jumplist(&[0]);
-        let mut picker = JumplistPicker::new(&jl, &buffer, "normal".into());
+        let mut picker = JumplistPicker::new(&jl, &buffer);
         assert!(matches!(
             picker.handle_key(keys::key(KeyCode::Esc)),
             PickerOutcome::Close
@@ -205,7 +203,7 @@ mod tests {
     fn down_and_up_clamp_at_ends() {
         let buffer = buf("a\nb\nc\n");
         let jl = jumplist(&[0, 2, 4]);
-        let mut picker = JumplistPicker::new(&jl, &buffer, "normal".into());
+        let mut picker = JumplistPicker::new(&jl, &buffer);
         picker.handle_key(keys::key(KeyCode::Up));
         picker.handle_key(keys::key(KeyCode::Up));
         assert_eq!(picker.selected(), 0);

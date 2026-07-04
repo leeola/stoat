@@ -41,8 +41,6 @@ pub enum OpenIntent {
 
 pub struct FileFinder {
     pub(crate) input: InputView,
-    /// Mode to restore when the finder closes.
-    pub(crate) previous_mode: String,
     /// What submit should do with the selected file.
     pub(crate) open_intent: OpenIntent,
     pub(crate) scope: FinderScope,
@@ -84,7 +82,6 @@ impl FileFinder {
     pub fn new(
         ws: &mut Workspace,
         executor: Executor,
-        previous_mode: String,
         open_intent: OpenIntent,
         initial_scope: FinderScope,
         git_root: PathBuf,
@@ -117,7 +114,6 @@ impl FileFinder {
 
         Self {
             input,
-            previous_mode,
             open_intent,
             scope,
             git_root,

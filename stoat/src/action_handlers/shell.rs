@@ -19,7 +19,6 @@ pub(crate) enum ShellAction {
 pub(crate) struct ShellInputState {
     pub(crate) input: InputView,
     pub(crate) action: ShellAction,
-    pub(crate) previous_mode: String,
 }
 
 pub(super) fn open_pipe(stoat: &mut Stoat) -> UpdateEffect {
@@ -46,15 +45,10 @@ fn open_with(stoat: &mut Stoat, action: ShellAction) -> UpdateEffect {
     if stoat.shell_input.is_some() {
         return UpdateEffect::None;
     }
-    let previous_mode = stoat.focused_mode().to_string();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::Shell, "", "prompt", 1);
-    stoat.shell_input = Some(ShellInputState {
-        input,
-        action,
-        previous_mode,
-    });
+    stoat.shell_input = Some(ShellInputState { input, action });
     stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
@@ -69,10 +63,8 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     };
     let cmd = state.input.text(stoat.active_workspace());
     let action = state.action;
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     if cmd.is_empty() {
         return true;
     }
@@ -92,10 +84,8 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.shell_input.take() else {
         return false;
     };
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     true
 }
 

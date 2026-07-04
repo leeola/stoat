@@ -31,15 +31,13 @@ pub(crate) enum PickerOutcome {
 pub(crate) struct LocationPicker {
     entries: Vec<LocationEntry>,
     selected: usize,
-    pub(crate) previous_mode: String,
 }
 
 impl LocationPicker {
-    pub(crate) fn new(entries: Vec<LocationEntry>, previous_mode: String) -> Self {
+    pub(crate) fn new(entries: Vec<LocationEntry>) -> Self {
         Self {
             entries,
             selected: 0,
-            previous_mode,
         }
     }
 
@@ -118,7 +116,7 @@ mod tests {
 
     #[test]
     fn enter_selects_the_highlighted_row() {
-        let mut picker = LocationPicker::new(vec![entry(1), entry(2), entry(3)], "normal".into());
+        let mut picker = LocationPicker::new(vec![entry(1), entry(2), entry(3)]);
         picker.handle_key(ctrl(KeyCode::Char('n')));
         assert!(matches!(
             picker.handle_key(key(KeyCode::Enter)),
@@ -128,7 +126,7 @@ mod tests {
 
     #[test]
     fn navigation_clamps_within_bounds() {
-        let mut picker = LocationPicker::new(vec![entry(1), entry(2)], "normal".into());
+        let mut picker = LocationPicker::new(vec![entry(1), entry(2)]);
         picker.handle_key(ctrl(KeyCode::Char('p')));
         assert_eq!(picker.selected(), 0);
         picker.handle_key(ctrl(KeyCode::Char('n')));

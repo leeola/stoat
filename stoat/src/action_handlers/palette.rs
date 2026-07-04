@@ -219,6 +219,5 @@ fn close_palette(stoat: &mut Stoat) -> bool {
         let workspaces = &mut stoat.workspaces;
         palette.dispose(&mut workspaces[active_idx]);
     }
-    stoat.set_focused_mode(palette.previous_mode.clone());
     true
 }

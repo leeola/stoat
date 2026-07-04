@@ -8,21 +8,16 @@ use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 /// into the input modal. Disposed by [`submit`] / [`cancel`].
 pub(crate) struct SplitSelectionInputState {
     pub(crate) input: InputView,
-    pub(crate) previous_mode: String,
 }
 
 pub(super) fn open(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.split_selection_input.is_some() {
         return UpdateEffect::None;
     }
-    let previous_mode = stoat.focused_mode().to_string();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::SplitSelection, "", "prompt", 1);
-    stoat.split_selection_input = Some(SplitSelectionInputState {
-        input,
-        previous_mode,
-    });
+    stoat.split_selection_input = Some(SplitSelectionInputState { input });
     stoat.set_focused_mode("prompt".into());
     UpdateEffect::Redraw
 }
@@ -37,10 +32,8 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         return false;
     };
     let query = state.input.text(stoat.active_workspace());
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     if query.is_empty() {
         return true;
     }
@@ -91,10 +84,8 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.split_selection_input.take() else {
         return false;
     };
-    let previous_mode = state.previous_mode.clone();
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
-    stoat.set_focused_mode(previous_mode);
     true
 }
 

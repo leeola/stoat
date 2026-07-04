@@ -30,9 +30,12 @@ pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
 /// Open the file finder. No-op if one is already open so that a second
 /// `space p` keystroke cannot stack modals or reset progress the user has
 /// made. Snapshots the workspace file list and the current git-modified
-/// list at open time. Always restores to normal mode on close: the finder
-/// is a top-level modal, so returning to a leader mode like `space`
-/// surfaces a confusing secondary menu instead of a clean editor state.
+/// list at open time.
+///
+/// Resets the underlying editor to normal mode as it opens. The finder is a
+/// top-level modal usually launched from a leader like `space`, so without
+/// this the editor it opened over keeps the leader mode and surfaces a
+/// confusing secondary menu when focus returns to it on close.
 pub(super) fn open_file_finder(
     stoat: &mut Stoat,
     open_intent: OpenIntent,
@@ -42,7 +45,8 @@ pub(super) fn open_file_finder(
         return UpdateEffect::None;
     }
 
-    let previous_mode = "normal".to_string();
+    stoat.set_focused_mode("normal".into());
+
     let executor = stoat.executor.clone();
     let git_root = stoat.active_workspace().git_root.clone();
     let (walk_rx, walk_task) = spawn_workspace_walk(stoat, git_root.clone());
@@ -53,7 +57,6 @@ pub(super) fn open_file_finder(
     stoat.file_finder = Some(FileFinder::new(
         ws,
         executor,
-        previous_mode,
         open_intent,
         initial_scope,
         git_root,
@@ -161,5 +164,4 @@ pub(crate) fn close_file_finder(stoat: &mut Stoat) {
         let active_idx = stoat.active_workspace;
         finder.dispose(&mut stoat.workspaces[active_idx]);
     }
-    stoat.set_focused_mode(finder.previous_mode.clone());
 }
