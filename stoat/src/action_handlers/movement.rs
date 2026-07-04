@@ -1180,22 +1180,34 @@ pub(super) enum OpenDir {
     Below,
 }
 
+/// One new line to open. It records the selection it belongs to, the offset
+/// where its `\n` (with any leading indent) is inserted, the inserted text, and
+/// how far past the insert point the cursor lands.
+struct OpenInsert {
+    id: usize,
+    offset: usize,
+    text: String,
+    cursor_within: usize,
+}
+
 pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
-    let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let editor_id = {
+        let ws = stoat.active_workspace();
+        match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => return UpdateEffect::None,
+        }
     };
 
     let (buffer_id, entries) = {
+        let ws = stoat.active_workspace_mut();
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let buffer_id = editor.buffer_id;
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
         let rope = buffer_snapshot.rope();
         let mut seen_rows = std::collections::HashSet::new();
-        let mut entries: Vec<(usize, usize)> = Vec::new();
+        let mut entries: Vec<(usize, usize, u32)> = Vec::new();
         for sel in editor.selections.all_anchors().iter() {
             let head_point = buffer_snapshot.point_for_anchor(&sel.head());
             if !seen_rows.insert(head_point.row) {
@@ -1207,7 +1219,7 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
                     rope.point_to_offset(Point::new(head_point.row, rope.line_len(head_point.row)))
                 },
             };
-            entries.push((sel.id, insert_offset));
+            entries.push((sel.id, insert_offset, head_point.row));
         }
         (buffer_id, entries)
     };
@@ -1216,37 +1228,63 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
         return UpdateEffect::None;
     }
 
-    let mut sorted_offsets: Vec<usize> = entries.iter().map(|(_, o)| *o).collect();
-    sorted_offsets.sort_unstable();
+    // A line opened below inherits the freshly opened block through the indents
+    // query. One opened above copies the current line's indentation.
+    let mut inserts: Vec<OpenInsert> = entries
+        .iter()
+        .map(|&(id, offset, row)| {
+            let (text, cursor_within) = match dir {
+                OpenDir::Below => {
+                    let indent = stoat.newline_indent_string(buffer_id, offset);
+                    (format!("\n{indent}"), 1 + indent.len())
+                },
+                OpenDir::Above => {
+                    let indent = stoat.line_indent_string(buffer_id, row);
+                    (format!("{indent}\n"), indent.len())
+                },
+            };
+            OpenInsert {
+                id,
+                offset,
+                text,
+                cursor_within,
+            }
+        })
+        .collect();
+    inserts.sort_by_key(|i| i.offset);
 
     {
+        let ws = stoat.active_workspace_mut();
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for offset in sorted_offsets.iter().rev() {
-            guard.edit(*offset..*offset, "\n");
+        for ins in inserts.iter().rev() {
+            guard.edit(ins.offset..ins.offset, &ins.text);
         }
     }
 
-    let id_to_pre_offset: std::collections::HashMap<usize, usize> =
-        entries.iter().copied().collect();
     let bias = match dir {
         OpenDir::Above => Bias::Left,
         OpenDir::Below => Bias::Right,
     };
-    let cursor_delta: usize = match dir {
-        OpenDir::Above => 0,
-        OpenDir::Below => 1,
-    };
+    let by_id: std::collections::HashMap<usize, (usize, usize)> = inserts
+        .iter()
+        .map(|i| (i.id, (i.offset, i.cursor_within)))
+        .collect();
 
+    let ws = stoat.active_workspace_mut();
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
 
     editor.selections.transform(new_buf, |sel| {
         let mut new = sel.clone();
-        if let Some(&pre_offset) = id_to_pre_offset.get(&sel.id) {
-            let earlier_inserts = sorted_offsets.iter().filter(|o| **o < pre_offset).count();
-            let cursor_offset = pre_offset + earlier_inserts + cursor_delta;
+        if let Some(&(pre_offset, cursor_within)) = by_id.get(&sel.id) {
+            let earlier_len: usize = inserts
+                .iter()
+                .filter(|i| i.offset < pre_offset)
+                .map(|i| i.text.len())
+                .sum();
+            let cursor_offset = pre_offset + earlier_len + cursor_within;
             let anchor = new_buf.anchor_at(cursor_offset, bias);
             new.start = anchor;
             new.end = anchor;

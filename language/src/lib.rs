@@ -1,6 +1,7 @@
 pub mod grammar;
 pub mod highlight;
 pub mod highlight_map;
+pub mod indent;
 pub mod language;
 pub mod structural_diff;
 pub mod symbols;
@@ -13,6 +14,7 @@ pub use highlight::{
     ExtractedHighlights, HighlightSpan, InjectionTreeCache, SyntaxState,
 };
 pub use highlight_map::{HighlightId, HighlightMap};
+pub use indent::{line_leading_whitespace, newline_indent, suggested_indent};
 pub use language::{Language, LanguageRegistry};
 pub use symbols::{extract_references, extract_symbols, RefKind, RefSite, SymbolDef, SymbolKind};
 pub use syntax_map::{LayerKey, SyntaxLayer, SyntaxMap, SyntaxSnapshot};

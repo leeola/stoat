@@ -3458,7 +3458,11 @@ impl Stoat {
                 } else if self.mode == "prompt" {
                     None
                 } else {
-                    self.editor_insert(editor_id, buffer_id, "\n");
+                    let indent = match self.newest_cursor_offset(editor_id) {
+                        Some(offset) => self.newline_indent_string(buffer_id, offset),
+                        None => String::new(),
+                    };
+                    self.editor_insert(editor_id, buffer_id, &format!("\n{indent}"));
                     Some(UpdateEffect::Redraw)
                 }
             },
@@ -3587,6 +3591,61 @@ impl Stoat {
             new.collapse_to(anchor, stoat_text::SelectionGoal::None);
             new
         });
+    }
+
+    /// Byte offset of the focused editor's newest cursor.
+    pub(crate) fn newest_cursor_offset(&mut self, editor_id: EditorId) -> Option<usize> {
+        let ws = self.active_workspace_mut();
+        let editor = ws.editors.get_mut(editor_id)?;
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        Some(buf.resolve_anchor(&editor.selections.newest_anchor().head()))
+    }
+
+    /// Leading whitespace to give a new line inserted at `cursor_offset`.
+    ///
+    /// Uses the buffer's `indents.scm` query against a fresh syntax tree. When
+    /// the tree is stale or the language has no indent query, it copies the
+    /// cursor row's own leading whitespace instead.
+    pub(crate) fn newline_indent_string(
+        &self,
+        buffer_id: BufferId,
+        cursor_offset: usize,
+    ) -> String {
+        let buffers = &self.active_workspace().buffers;
+        let Some(buffer) = buffers.get(buffer_id) else {
+            return String::new();
+        };
+        let guard = buffer.read().expect("buffer poisoned");
+        let rope = guard.rope();
+        let row = rope.offset_to_point(cursor_offset).row;
+
+        let fresh_tree = buffers
+            .language_for(buffer_id)
+            .and_then(|lang| lang.indent_query.is_some().then_some(lang))
+            .zip(buffers.syntax(buffer_id))
+            .filter(|(_, syntax)| syntax.version == guard.version());
+
+        match fresh_tree {
+            Some((lang, syntax)) => language::newline_indent(
+                lang.indent_query.as_ref().expect("indent query present"),
+                syntax.tree.root_node(),
+                &syntax.rope_snapshot,
+                cursor_offset,
+            ),
+            None => language::line_leading_whitespace(rope, row),
+        }
+    }
+
+    /// The leading whitespace of `row` in `buffer_id`, for opening a line at the
+    /// same indentation as an existing one.
+    pub(crate) fn line_indent_string(&self, buffer_id: BufferId, row: u32) -> String {
+        let buffers = &self.active_workspace().buffers;
+        let Some(buffer) = buffers.get(buffer_id) else {
+            return String::new();
+        };
+        let guard = buffer.read().expect("buffer poisoned");
+        language::line_leading_whitespace(guard.rope(), row)
     }
 
     fn editor_backspace(&mut self, editor_id: EditorId, buffer_id: BufferId) {
@@ -6038,6 +6097,55 @@ mod tests {
         assert!(h.stoat.editor_pool_panes().is_empty());
     }
 
+    fn focused_buffer_string(h: &crate::test_harness::TestHarness) -> String {
+        let ws = h.stoat.active_workspace();
+        let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("focused pane is not an editor");
+        };
+        let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+        ws.buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .rope()
+            .to_string()
+    }
+
+    fn open_indent_buffer(h: &mut crate::test_harness::TestHarness, name: &str, contents: &[u8]) {
+        let root = std::path::PathBuf::from("/indent");
+        let path = root.join(name);
+        h.fake_fs().insert_file(&path, contents);
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        // The parse job completes during settle, but its result is installed by
+        // drive_background (the per-tick background pass), so drive it to store
+        // the syntax tree before auto-indent reads it.
+        h.stoat.drive_background();
+        h.settle();
+    }
+
+    #[test]
+    fn enter_after_open_brace_auto_indents() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
+        h.type_keys("A");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\t\n}\n");
+    }
+
+    #[test]
+    fn enter_plaintext_copies_leading_whitespace() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "note.txt", b"\thello\n");
+        h.type_keys("A");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(focused_buffer_string(&h), "\thello\n\t\n");
+    }
+
     #[test]
     fn emit_smooth_scroll_retires_pools_in_overlay_mode() {
         use stoatty_protocol::command::Command;
@@ -7966,6 +8074,16 @@ mod tests {
         assert_eq!(h.stoat.mode, "insert");
         h.type_text("X");
         assert_eq!(buffer_text(&h, &path), "abc\nX\ndef\n");
+    }
+
+    #[test]
+    fn open_below_after_open_brace_auto_indents() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
+        h.type_keys("o");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_text("x");
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
     }
 
     #[test]

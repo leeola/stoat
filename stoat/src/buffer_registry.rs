@@ -305,6 +305,13 @@ impl BufferRegistry {
         self.buffers.get(&id)?.syntax.as_ref().map(|s| s.version)
     }
 
+    /// Borrow the stored [`SyntaxState`] (tree plus the rope it parsed) for `id`,
+    /// if the parse pipeline has produced one. Used by auto-indent to read the
+    /// syntax tree.
+    pub(crate) fn syntax(&self, id: BufferId) -> Option<&SyntaxState> {
+        self.buffers.get(&id)?.syntax.as_ref()
+    }
+
     pub(crate) fn store_syntax(&mut self, id: BufferId, state: SyntaxState) {
         if let Some(entry) = self.buffers.get_mut(&id) {
             // Send the displaced state to a background drainer so its
