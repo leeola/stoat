@@ -212,6 +212,15 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.syntax_highlight = !stoat.syntax_highlight;
             UpdateEffect::Redraw
         },
+        ActionKind::ToggleInlayHints => {
+            stoat.inlay_hints_enabled = !stoat.inlay_hints_enabled;
+            if !stoat.inlay_hints_enabled {
+                lsp::clear_inlay_hints(stoat);
+            }
+            stoat.last_inlay_hint_key = None;
+            stoat.pending_inlay_hint_request = None;
+            UpdateEffect::Redraw
+        },
         ActionKind::MoveLeft => movement::move_horizontal(stoat, -1, false),
         ActionKind::MoveRight => movement::move_horizontal(stoat, 1, false),
         ActionKind::MoveUp => movement::move_vertical(stoat, -1, false),

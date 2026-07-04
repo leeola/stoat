@@ -40,8 +40,8 @@ use crate::{
             ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection,
             SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
             SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
-            UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            ToggleInlayHints, ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion,
+            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::{ForceSaveBuffer, OpenBuffer, OpenFile},
         file_finder::{
@@ -473,6 +473,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ToggleSyntaxHighlight::DEF, |_| {
         Ok(Box::new(ToggleSyntaxHighlight))
     });
+    add(ToggleInlayHints::DEF, |_| Ok(Box::new(ToggleInlayHints)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -771,6 +772,7 @@ mod tests {
         "RotateSelectionsBackward",
         "TrimSelections",
         "ToggleSyntaxHighlight",
+        "ToggleInlayHints",
         "ReviewNextChunk",
         "ReviewPrevChunk",
         "ReviewStageChunk",
@@ -1038,8 +1040,9 @@ mod tests {
         // + 1 OpenBuffer.
         // + 1 ToggleDiff.
         // + 1 ToggleSyntaxHighlight.
+        // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
-        assert_eq!(all().count(), 290);
+        assert_eq!(all().count(), 291);
     }
 
     #[test]

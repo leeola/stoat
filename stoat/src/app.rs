@@ -235,6 +235,17 @@ pub struct Stoat {
     /// editor at paint time. Not a [`crate::config::Settings`] field:
     /// persistence can come later. Defaults to on.
     pub(crate) syntax_highlight: bool,
+    /// Whether LSP inlay hints are requested and rendered for the focused
+    /// editor. Toggled by `ToggleInlayHints`, off by default. Not persisted.
+    pub(crate) inlay_hints_enabled: bool,
+    /// In-flight viewport inlay-hint request, armed by
+    /// [`action_handlers::lsp::inlay_hints_trigger`] behind a debounce and
+    /// applied by [`action_handlers::lsp::pump_lsp_inlay_hints`].
+    pub(crate) pending_inlay_hint_request:
+        Option<stoat_scheduler::Task<Option<action_handlers::lsp::InlayHintResponse>>>,
+    /// `(buffer, version, first row, last row)` the inlay-hint trigger last
+    /// requested for, so an unchanged tick does not re-request.
+    pub(crate) last_inlay_hint_key: Option<(BufferId, u64, u32, u32)>,
     pub(crate) render_tick: u64,
     /// Transient one-line message painted in a reserved bottom row,
     /// such as a failed-save error. An action sets it during event
@@ -828,6 +839,9 @@ impl Stoat {
             pending_review_scan: None,
             modal_run: None,
             syntax_highlight: true,
+            inlay_hints_enabled: false,
+            pending_inlay_hint_request: None,
+            last_inlay_hint_key: None,
             render_tick: 0,
             pending_message: None,
             pending_count: None,
@@ -1703,6 +1717,7 @@ impl Stoat {
         action_handlers::lsp::notify_buffer_changes_pending(self);
         crate::completion::request::trigger(self);
         action_handlers::lsp::signature_help_trigger(self);
+        action_handlers::lsp::inlay_hints_trigger(self);
         effect
     }
 
@@ -4461,6 +4476,7 @@ impl Stoat {
         action_handlers::pump_lsp_jumps(self);
         action_handlers::lsp::pump_lsp_hover(self);
         action_handlers::lsp::pump_lsp_signature_help(self);
+        action_handlers::lsp::pump_lsp_inlay_hints(self);
         action_handlers::lsp::pump_lsp_code_actions(self);
         action_handlers::lsp::pump_lsp_code_action_resolve(self);
         action_handlers::lsp::pump_lsp_prepare_rename(self);

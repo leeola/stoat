@@ -415,6 +415,19 @@ impl DisplayMap {
         }
     }
 
+    /// Remove the inlays named by `remove` and add `insert` (each an anchor
+    /// position, display text, and kind), returning the ids of the added
+    /// inlays. A full replace passes the prior ids as `remove`. The next
+    /// [`Self::snapshot`] rebuilds the downstream layers, since [`InlayMap`]
+    /// bumps its version on splice.
+    pub fn splice_inlays(
+        &mut self,
+        remove: Vec<InlayId>,
+        insert: Vec<(Anchor, String, InlayKind)>,
+    ) -> Vec<InlayId> {
+        self.inlay_map.splice(remove, insert)
+    }
+
     pub fn insert_creases(
         &mut self,
         creases: impl IntoIterator<Item = Crease<Anchor>>,
@@ -1287,6 +1300,29 @@ mod tests {
             inlay_snap.to_inlay_point(Point::new(0, 15)),
             InlayPoint::new(0, 20)
         );
+    }
+
+    #[test]
+    fn mid_line_inlay_keeps_trailing_buffer_text() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "let x = 1\n");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+
+        let anchor = {
+            let snap = display_map.multi_buffer.snapshot();
+            let off = snap.rope().point_to_offset(Point::new(0, 5));
+            snap.anchor_at(off, stoat_text::Bias::Left)
+        };
+        display_map.inlay_map.splice(
+            Vec::new(),
+            vec![(anchor, ": u32".to_string(), InlayKind::Hint)],
+        );
+
+        let snapshot = display_map.snapshot();
+        let chunks: Vec<_> = snapshot.highlighted_chunks(0..1).collect();
+        let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(text, "let x: u32 = 1");
     }
 
     #[test]

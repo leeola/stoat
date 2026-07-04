@@ -840,7 +840,7 @@ impl WrapSnapshot {
                     fold.len()
                 } else {
                     let last_start = fold.row_start_offset(last_row);
-                    FoldOffset(last_start.0 + fold.line_len(last_row) as usize)
+                    FoldOffset(last_start.0 + fold.output_line_len(last_row) as usize)
                 };
                 (start, end)
             };
@@ -1067,7 +1067,7 @@ impl<'a> WrappedChunksInner<'a> {
             return None;
         }
         let row_start = fold.row_start_offset(tab_row);
-        let row_end = FoldOffset(row_start.0 + fold.line_len(tab_row) as usize);
+        let row_end = FoldOffset(row_start.0 + fold.output_line_len(tab_row) as usize);
 
         let tab_chunks =
             self.snapshot

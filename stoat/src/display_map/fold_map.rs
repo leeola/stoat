@@ -1170,6 +1170,25 @@ impl FoldSnapshot {
         }
     }
 
+    /// Inlay-expanded byte length of `fold_row`'s content, excluding the
+    /// trailing newline.
+    ///
+    /// [`Self::line_len`] measures only buffer text and fold placeholders, so a
+    /// row carrying a mid-row inlay reads shorter than it renders. A caller
+    /// bounding a rendered row by that shorter length clips the buffer content
+    /// sitting after the inlay. This counts the inlay text too, matching the
+    /// width the chunk stream actually produces.
+    ///
+    /// With no folds a fold offset equals an inlay offset, so the inlay layer's
+    /// own length is exact. Rows containing folds fall back to
+    /// [`Self::line_len`].
+    pub fn output_line_len(&self, fold_row: u32) -> u32 {
+        if self.fold_count() == 0 {
+            return self.inlay_snapshot.line_len(fold_row);
+        }
+        self.line_len(fold_row)
+    }
+
     pub fn line_len(&self, fold_row: u32) -> u32 {
         self.fold_line_chars(fold_row)
             .map(|ch| ch.len_utf8() as u32)

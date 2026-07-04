@@ -555,6 +555,7 @@ on key {
         i -> [Hover(), SetMode(normal)];
         a -> [CodeAction(), SetMode(normal)];
         f -> [Format(), SetMode(normal)];
+        h -> [ToggleInlayHints(), SetMode(normal)];
         r -> [RenameSymbol(), SetMode(normal)];
         s -> [OpenSymbolPicker(), SetMode(normal)];
         S -> OpenWorkspaceSymbolPicker();

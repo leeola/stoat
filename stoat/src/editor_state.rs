@@ -97,6 +97,10 @@ pub(crate) struct EditorState {
     /// resolved endpoints across repaints that change none of those. Transient
     /// render state, not persisted.
     pub(crate) highlight_endpoint_cache: Option<CachedHighlightEndpoints>,
+    /// Ids of the LSP inlay-hint inlays currently spliced into this editor's
+    /// display map. Kept so a refresh can remove the prior hints before adding
+    /// the new set. Transient render state, not persisted.
+    pub(crate) hint_inlay_ids: Vec<crate::display_map::InlayId>,
     /// Cached diagnostic gutter severity map, keyed by the diagnostic-set
     /// version. Transient render state, not persisted.
     pub(crate) gutter_severity_cache: Option<crate::render::editor::GutterSeverityCache>,
@@ -148,6 +152,7 @@ impl EditorState {
             jumplist: JumpList::new(),
             search_match_cache: None,
             highlight_endpoint_cache: None,
+            hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_width: 0,
             cursor_screen_cell: None,
@@ -177,6 +182,7 @@ impl EditorState {
             jumplist: JumpList::new(),
             search_match_cache: None,
             highlight_endpoint_cache: None,
+            hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_width: 0,
             cursor_screen_cell: None,

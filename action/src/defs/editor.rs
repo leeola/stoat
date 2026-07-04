@@ -141,6 +141,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleInlayHintsDef,
+    ToggleInlayHints,
+    "ToggleInlayHints",
+    ActionKind::ToggleInlayHints,
+    "toggle LSP inlay hints",
+    "Turn LSP inlay hints off or on for the session. When on, type and parameter hints for the visible region of the focused editor are requested from the language server and rendered inline. No-op when the server does not advertise inlay hints.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

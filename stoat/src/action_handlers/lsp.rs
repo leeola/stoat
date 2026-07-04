@@ -12,6 +12,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
+    display_map::{DisplayPoint, DisplaySnapshot, InlayKind},
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
 };
@@ -21,10 +22,11 @@ use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
     DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation, FormattingOptions,
-    GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, MarkedString, OneOf,
-    ParameterLabel, Position, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams,
-    RenameParams, ServerInfo, SignatureHelp, SignatureHelpParams, SignatureInformation,
-    SymbolInformation, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, InlayHint,
+    InlayHintLabel, InlayHintParams, MarkedString, OneOf, ParameterLabel, Position,
+    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams, ServerInfo,
+    SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
     WorkspaceSymbolParams, WorkspaceSymbolResponse,
@@ -40,7 +42,7 @@ use std::{
     time::Duration,
 };
 use stoat_log::TextProtoLog;
-use stoat_text::{patch::Patch, Point, Rope};
+use stoat_text::{patch::Patch, Bias, Point, Rope};
 
 /// Quiet window after the last edit before a buffer's `did_change`
 /// fires. Matches Helix's default and prevents per-keystroke storms
@@ -1256,6 +1258,231 @@ pub(crate) fn pump_lsp_signature_help(stoat: &mut Stoat) -> bool {
             stoat.pending_signature_help_request = Some(task);
             false
         },
+    }
+}
+
+/// Debounce before requesting inlay hints, so a burst of edits or scrolls
+/// collapses into a single viewport request.
+const INLAY_HINT_DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// One resolved inlay hint ready to splice into the display map. It bundles a
+/// byte offset in the request-time buffer with the rendered text and the kind.
+pub(crate) type InlayHintItem = (usize, String, InlayKind);
+
+/// A completed inlay-hint request's payload. It carries the buffer the request
+/// targeted and the hints resolved for its viewport.
+pub(crate) type InlayHintResponse = (BufferId, Vec<InlayHintItem>);
+
+/// Everything a viewport inlay-hint request carries. It names the target buffer
+/// and version, the visible display-row window, the rope for offset conversion,
+/// and the built request params.
+struct InlayHintRequest {
+    buffer_id: BufferId,
+    version: u64,
+    scroll_row: u32,
+    end_row: u32,
+    rope: Rope,
+    params: InlayHintParams,
+}
+
+/// Request inlay hints for the focused editor's viewport when enabled, the
+/// server supports them, and the (buffer, version, visible rows) key changed
+/// since the last request. Buffer edits and scrolls change the key and
+/// re-request. The response is applied by [`pump_lsp_inlay_hints`].
+pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
+    if !stoat.inlay_hints_enabled
+        || !stoat
+            .lsp_host
+            .supports_feature(LanguageServerFeature::InlayHints)
+    {
+        return;
+    }
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let Some(request) = build_inlay_hint_request(stoat, encoding) else {
+        return;
+    };
+
+    let key = (
+        request.buffer_id,
+        request.version,
+        request.scroll_row,
+        request.end_row,
+    );
+    if stoat.last_inlay_hint_key == Some(key) {
+        return;
+    }
+    stoat.last_inlay_hint_key = Some(key);
+
+    let InlayHintRequest {
+        buffer_id,
+        rope,
+        params,
+        ..
+    } = request;
+    let lsp = stoat.lsp_host.clone();
+    let executor = stoat.executor.clone();
+    let task = stoat.executor.spawn(async move {
+        executor.timer(INLAY_HINT_DEBOUNCE).await;
+        match lsp.range_inlay_hint(params).await {
+            Ok(Some(hints)) => Some((buffer_id, convert_inlay_hints(hints, &rope, encoding))),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "inlay_hint request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_inlay_hint_request = Some(task);
+}
+
+fn build_inlay_hint_request(
+    stoat: &mut Stoat,
+    encoding: OffsetEncoding,
+) -> Option<InlayHintRequest> {
+    let (buffer_id, version, scroll_row, end_row, rope, start_offset, end_offset) = {
+        let editor = crate::action_handlers::focused_editor_mut(stoat)?;
+        if editor.review_view.is_some() {
+            return None;
+        }
+        let viewport = editor.viewport_rows?;
+        let scroll_row = editor.scroll_row;
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let rope = buf_snap.rope().clone();
+        let end_row = (scroll_row + viewport).min(snapshot.line_count());
+        (
+            editor.buffer_id,
+            buf_snap.version(),
+            scroll_row,
+            end_row,
+            rope.clone(),
+            display_row_offset(&snapshot, &rope, scroll_row),
+            display_row_offset(&snapshot, &rope, end_row),
+        )
+    };
+
+    let path = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)?;
+    let uri = path_to_uri(&path)?;
+    let range = Range::new(
+        crate::lsp::util::byte_offset_to_lsp_pos(&rope, start_offset, encoding),
+        crate::lsp::util::byte_offset_to_lsp_pos(&rope, end_offset, encoding),
+    );
+    let params = InlayHintParams {
+        work_done_progress_params: Default::default(),
+        text_document: TextDocumentIdentifier { uri },
+        range,
+    };
+
+    Some(InlayHintRequest {
+        buffer_id,
+        version,
+        scroll_row,
+        end_row,
+        rope,
+        params,
+    })
+}
+
+/// Byte offset of the start of display `row`, clamped to the rope length.
+fn display_row_offset(snapshot: &DisplaySnapshot, rope: &Rope, row: u32) -> usize {
+    let rope_len = rope.len();
+    snapshot
+        .display_to_buffer(DisplayPoint::new(row, 0))
+        .map(|point| rope.point_to_offset(point))
+        .unwrap_or(rope_len)
+        .min(rope_len)
+}
+
+/// Convert LSP inlay hints into [`InlayHintItem`]s using the request-time rope.
+/// Both LSP hint kinds render as [`InlayKind::Hint`].
+fn convert_inlay_hints(
+    hints: Vec<InlayHint>,
+    rope: &Rope,
+    encoding: OffsetEncoding,
+) -> Vec<InlayHintItem> {
+    hints
+        .into_iter()
+        .map(|hint| {
+            let offset = crate::lsp::util::lsp_pos_to_byte_offset(rope, hint.position, encoding);
+            (offset, inlay_hint_text(&hint), InlayKind::Hint)
+        })
+        .collect()
+}
+
+/// The rendered text of a hint. The label is joined when the server sends parts,
+/// then wrapped in any requested left or right padding spaces.
+fn inlay_hint_text(hint: &InlayHint) -> String {
+    let core: String = match &hint.label {
+        InlayHintLabel::String(s) => s.clone(),
+        InlayHintLabel::LabelParts(parts) => parts.iter().map(|part| part.value.as_str()).collect(),
+    };
+    let mut text = String::new();
+    if hint.padding_left == Some(true) {
+        text.push(' ');
+    }
+    text.push_str(&core);
+    if hint.padding_right == Some(true) {
+        text.push(' ');
+    }
+    text
+}
+
+/// Poll any in-flight inlay-hint request and splice the results into the focused
+/// editor's display map, replacing the buffer's previous hint inlays. Returns
+/// true when state changed.
+pub(crate) fn pump_lsp_inlay_hints(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_inlay_hint_request.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some((buffer_id, items))) => {
+            apply_inlay_hints(stoat, buffer_id, items);
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_inlay_hint_request = Some(task);
+            false
+        },
+    }
+}
+
+fn apply_inlay_hints(stoat: &mut Stoat, buffer_id: BufferId, items: Vec<InlayHintItem>) {
+    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+        return;
+    };
+    if editor.buffer_id != buffer_id {
+        return;
+    }
+
+    let inserts: Vec<(stoat_text::Anchor, String, InlayKind)> = {
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        items
+            .into_iter()
+            .map(|(offset, text, kind)| (buf_snap.anchor_at(offset, Bias::Left), text, kind))
+            .collect()
+    };
+
+    let prev = std::mem::take(&mut editor.hint_inlay_ids);
+    editor.hint_inlay_ids = editor.display_map.splice_inlays(prev, inserts);
+}
+
+/// Remove all inlay hints from the focused editor's display map.
+pub(crate) fn clear_inlay_hints(stoat: &mut Stoat) {
+    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+        return;
+    };
+    let prev = std::mem::take(&mut editor.hint_inlay_ids);
+    if !prev.is_empty() {
+        editor.display_map.splice_inlays(prev, Vec::new());
     }
 }
 
@@ -4934,5 +5161,91 @@ mod tests {
         h.type_keys("space l f");
         h.settle();
         assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    }
+
+    fn enable_inlay_hints(h: &TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            inlay_hint_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
+    fn type_hint(line: u32, col: u32, label: &str) -> lsp_types::InlayHint {
+        use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
+        InlayHint {
+            position: Position::new(line, col),
+            label: InlayHintLabel::String(label.to_string()),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: None,
+            padding_right: None,
+            data: None,
+        }
+    }
+
+    fn hint_ids_len(h: &mut TestHarness) -> usize {
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .hint_inlay_ids
+            .len()
+    }
+
+    #[test]
+    fn snapshot_inlay_hints_render_when_enabled() {
+        let mut h = TestHarness::with_size(40, 8);
+        enable_inlay_hints(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = 1\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_range_inlay_hints(path.to_str().unwrap(), vec![type_hint(0, 5, ": u32")]);
+        h.capture("prime");
+        h.type_keys("space l h");
+        h.advance_clock(Duration::from_millis(150));
+        h.assert_snapshot("inlay_hints_enabled");
+    }
+
+    #[test]
+    fn inlay_hints_toggle_off_clears_inlays() {
+        let mut h = TestHarness::with_size(40, 8);
+        enable_inlay_hints(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = 1\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_range_inlay_hints(path.to_str().unwrap(), vec![type_hint(0, 5, ": u32")]);
+        h.capture("prime");
+        h.type_keys("space l h");
+        h.advance_clock(Duration::from_millis(150));
+        assert_eq!(hint_ids_len(&mut h), 1);
+
+        h.type_keys("space l h");
+        assert_eq!(hint_ids_len(&mut h), 0);
+    }
+
+    #[test]
+    fn inlay_hints_refresh_after_edit() {
+        let mut h = TestHarness::with_size(40, 8);
+        enable_inlay_hints(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = 1\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let p = path.to_str().unwrap();
+        h.fake_lsp()
+            .set_range_inlay_hints(p, vec![type_hint(0, 5, ": u32")]);
+        h.capture("prime");
+        h.type_keys("space l h");
+        h.advance_clock(Duration::from_millis(150));
+        assert_eq!(hint_ids_len(&mut h), 1);
+
+        h.fake_lsp()
+            .set_range_inlay_hints(p, vec![type_hint(0, 5, ": u32"), type_hint(0, 8, ": b")]);
+        h.type_keys("i");
+        h.type_text("z");
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(150));
+        assert_eq!(hint_ids_len(&mut h), 2);
     }
 }
