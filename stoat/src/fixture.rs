@@ -14,7 +14,7 @@
 //! Gated behind the non-default `fixture` feature so production builds carry no
 //! test-scaffolding code.
 
-use git2::{Commit, Repository, Signature, Time};
+use git2::{build::CheckoutBuilder, Commit, Repository, RepositoryInitOptions, Signature, Time};
 use snafu::{ResultExt, Snafu};
 use std::{
     io,
@@ -66,6 +66,72 @@ const UNSTAGED_WORK: &str = "\
 6 six
 ";
 
+const HISTORY_API: &str = "\
+GET /api/health
+GET /api/version
+";
+
+const HISTORY_APP: &str = "\
+name = fixture
+port = 8080
+";
+
+const HISTORY_CI: &str = "\
+steps:
+  - build
+  - test
+";
+
+const HISTORY_TESTS: &str = "\
+test health
+test version
+";
+
+const CONFLICT_BASE: &str = "\
+1 shared header
+2 middle line
+3 shared footer
+";
+
+const CONFLICT_OURS: &str = "\
+1 shared header
+2 ours edit
+3 shared footer
+";
+
+const CONFLICT_THEIRS: &str = "\
+1 shared header
+2 theirs edit
+3 shared footer
+";
+
+const RUST_LSP_CARGO: &str = r#"[package]
+name = "fixture-rust-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+"#;
+
+const RUST_LSP_MAIN: &str = r#"struct Greeter {
+    name: String,
+}
+
+impl Greeter {
+    fn greet(&self) -> String {
+        format!("hello, {}", self.name)
+    }
+}
+
+fn main() {
+    let unused = 1;
+    let greeter = Greeter {
+        name: "world".to_string(),
+    };
+    println!("{}", greeter.greet());
+}
+"#;
+
 /// Failure materializing a fixture repository.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -99,9 +165,16 @@ pub enum FixtureError {
 /// whose commits reproduce byte-for-byte across runs and machines. Every commit
 /// is authored with a pinned signature and clock, and no gitconfig is read.
 ///
-/// The only fixture currently defined is `basic-diff`, which commits two files
-/// at HEAD, then leaves one staged modification and one unstaged modification,
-/// so [`crate::host::GitRepo::changed_files`] reports one entry of each kind.
+/// The defined fixtures are:
+/// - `basic-diff`: two files at HEAD, then one staged and one unstaged modification, so
+///   [`crate::host::GitRepo::changed_files`] reports one entry of each kind.
+/// - `history`: a four-commit linear chain, each commit adding a distinct file, giving
+///   [`crate::host::GitRepo::log_commits`] and [`crate::host::GitRepo::commit_file_changes`] real
+///   history to walk.
+/// - `conflict`: a base commit with two divergent children on `main` and `theirs` editing the same
+///   lines, so [`crate::host::GitRepo::cherry_pick_tree`] between the tips conflicts.
+/// - `rust-lsp`: a clean, minimal cargo crate at HEAD (Cargo.toml plus src/main.rs) as a target for
+///   rust-analyzer.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -109,6 +182,9 @@ pub enum FixtureError {
 pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
     match name {
         "basic-diff" => materialize_basic_diff(dest),
+        "history" => materialize_history(dest),
+        "conflict" => materialize_conflict(dest),
+        "rust-lsp" => materialize_rust_lsp(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }
@@ -127,6 +203,38 @@ fn materialize_basic_diff(dest: &Path) -> Result<(), FixtureError> {
     Ok(())
 }
 
+fn materialize_history(dest: &Path) -> Result<(), FixtureError> {
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit("add api endpoints", &[("api.txt", HISTORY_API)])?;
+    repo.commit("add app config", &[("app.txt", HISTORY_APP)])?;
+    repo.commit("add ci pipeline", &[("ci.txt", HISTORY_CI)])?;
+    repo.commit("add tests", &[("tests.txt", HISTORY_TESTS)])?;
+    Ok(())
+}
+
+fn materialize_conflict(dest: &Path) -> Result<(), FixtureError> {
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit("base", &[("file.txt", CONFLICT_BASE)])?;
+    repo.branch("theirs")?;
+    repo.commit("ours change", &[("file.txt", CONFLICT_OURS)])?;
+    repo.checkout("theirs")?;
+    repo.commit("theirs change", &[("file.txt", CONFLICT_THEIRS)])?;
+    repo.checkout("main")?;
+    Ok(())
+}
+
+fn materialize_rust_lsp(dest: &Path) -> Result<(), FixtureError> {
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit(
+        "initial commit",
+        &[
+            ("Cargo.toml", RUST_LSP_CARGO),
+            ("src/main.rs", RUST_LSP_MAIN),
+        ],
+    )?;
+    Ok(())
+}
+
 /// Builder over a real git2 repository, modeled on the `TestRepo` helper used
 /// by the integration tests but authoring every commit with a deterministic
 /// signature so SHAs reproduce. Method vocabulary mirrors the in-memory
@@ -139,7 +247,12 @@ struct FixtureRepo {
 
 impl FixtureRepo {
     fn init(dest: &Path) -> Result<Self, FixtureError> {
-        let repo = Repository::init(dest).context(GitSnafu)?;
+        // Pin the initial branch to `main` rather than inheriting
+        // init.defaultBranch, so fixtures reference a fixed branch name and
+        // stay independent of the machine's gitconfig.
+        let mut opts = RepositoryInitOptions::new();
+        opts.initial_head("main");
+        let repo = Repository::init_opts(dest, &opts).context(GitSnafu)?;
         Ok(Self {
             repo,
             commit_count: 0,
@@ -201,6 +314,30 @@ impl FixtureRepo {
         Ok(self)
     }
 
+    /// Create a branch named `name` pointing at the current HEAD commit.
+    fn branch(&self, name: &str) -> Result<&Self, FixtureError> {
+        let head = self
+            .repo
+            .head()
+            .context(GitSnafu)?
+            .peel_to_commit()
+            .context(GitSnafu)?;
+        self.repo.branch(name, &head, false).context(GitSnafu)?;
+        Ok(self)
+    }
+
+    /// Point HEAD at branch `name` and reset the working tree and index to it,
+    /// so a following [`Self::commit`] extends that branch.
+    fn checkout(&self, name: &str) -> Result<&Self, FixtureError> {
+        let refname = format!("refs/heads/{name}");
+        let target = self.repo.revparse_single(&refname).context(GitSnafu)?;
+        self.repo
+            .checkout_tree(&target, Some(CheckoutBuilder::new().force()))
+            .context(GitSnafu)?;
+        self.repo.set_head(&refname).context(GitSnafu)?;
+        Ok(self)
+    }
+
     fn workdir(&self) -> PathBuf {
         self.repo
             .workdir()
@@ -230,7 +367,7 @@ impl FixtureRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{GitHost, LocalGit};
+    use crate::host::{CherryPickOutcome, CommitFileChangeKind, GitHost, LocalGit};
 
     #[test]
     fn basic_diff_reports_staged_and_unstaged_split() {
@@ -267,5 +404,52 @@ mod tests {
             head_sha(),
             "pinned signatures must reproduce the sha"
         );
+    }
+
+    #[test]
+    fn history_has_four_commit_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("history", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let log = repo.log_commits(None, 10);
+
+        assert_eq!(log.len(), 4, "four-commit linear chain");
+        let head_changes = repo.commit_file_changes(&log[0].sha);
+        assert!(head_changes
+            .iter()
+            .any(|c| c.rel_path.ends_with("tests.txt") && c.kind == CommitFileChangeKind::Added));
+    }
+
+    #[test]
+    fn conflict_cherry_pick_reports_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("conflict", dir.path()).unwrap();
+
+        let git = Repository::open(dir.path()).unwrap();
+        let ours = git.revparse_single("main").unwrap().id().to_string();
+        let theirs = git.revparse_single("theirs").unwrap().id().to_string();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        match repo.cherry_pick_tree(&theirs, &ours).unwrap() {
+            CherryPickOutcome::Conflict { files } => {
+                assert!(files.iter().any(|f| f.path.ends_with("file.txt")));
+            },
+            other => panic!("expected conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rust_lsp_is_clean_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("rust-lsp", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        assert!(repo.changed_files().is_empty(), "clean tree at HEAD");
+
+        let head = repo.log_commits(None, 1)[0].sha.clone();
+        let tree = repo.commit_tree(&head).unwrap();
+        assert!(tree.contains_key(Path::new("Cargo.toml")));
+        assert!(tree.contains_key(Path::new("src/main.rs")));
     }
 }
