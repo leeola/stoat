@@ -11,6 +11,9 @@ workspace = true
 # Compile in main-thread latency instrumentation. Off by default so release
 # builds carry no timing rings or per-frame measurement.
 perf = []
+# Compile in the deterministic git/rust fixture materializer. Off by default
+# so production builds carry no test-scaffolding code.
+fixture = []
 
 [dependencies]
 codegraph = { path = "../codegraph" }

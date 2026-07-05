@@ -19,6 +19,8 @@ pub mod display_map;
 pub mod dump;
 mod editor_state;
 pub mod file_finder;
+#[cfg(feature = "fixture")]
+pub mod fixture;
 pub mod fuzzy;
 pub(crate) mod global_search;
 pub(crate) mod goto_word;
