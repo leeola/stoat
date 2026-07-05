@@ -322,6 +322,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DiagnosticsPickerPrev => picker::diagnostics_picker_prev(stoat),
         ActionKind::DiagnosticsPickerSelect => picker::diagnostics_picker_select(stoat),
         ActionKind::DiagnosticsPickerClose => picker::diagnostics_picker_close(stoat),
+        ActionKind::LocationPickerNext => picker::location_picker_next(stoat),
+        ActionKind::LocationPickerPrev => picker::location_picker_prev(stoat),
+        ActionKind::LocationPickerSelect => picker::location_picker_select(stoat),
+        ActionKind::LocationPickerClose => picker::location_picker_close(stoat),
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
         },

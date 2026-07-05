@@ -81,3 +81,36 @@ pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     stoat.collapse_focused_cursor_to(offset);
     UpdateEffect::Redraw
 }
+
+pub(super) fn location_picker_next(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(picker) = stoat.location_picker.as_mut() {
+        picker.select_next();
+    }
+    UpdateEffect::Redraw
+}
+
+pub(super) fn location_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(picker) = stoat.location_picker.as_mut() {
+        picker.select_prev();
+    }
+    UpdateEffect::Redraw
+}
+
+pub(super) fn location_picker_close(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.location_picker = None;
+    UpdateEffect::Redraw
+}
+
+/// Jump the focused editor to the goto candidate under the picker's
+/// selection, reusing the same apply path a single-location goto takes.
+/// An empty picker just closes.
+pub(super) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(picker) = stoat.location_picker.take() else {
+        return UpdateEffect::None;
+    };
+    let Some(entry) = picker.entries().get(picker.selected()).cloned() else {
+        return UpdateEffect::Redraw;
+    };
+    super::lsp::apply_jump(stoat, &entry.path, entry.offset);
+    UpdateEffect::Redraw
+}

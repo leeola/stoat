@@ -87,3 +87,47 @@ define_action!(
     ActionPriority::Common,
     palette_visible = false
 );
+
+define_action!(
+    LocationPickerNextDef,
+    LocationPickerNext,
+    "LocationPickerNext",
+    ActionKind::LocationPickerNext,
+    "next location row",
+    "Move the goto-location picker's selection to the next row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    LocationPickerPrevDef,
+    LocationPickerPrev,
+    "LocationPickerPrev",
+    ActionKind::LocationPickerPrev,
+    "previous location row",
+    "Move the goto-location picker's selection to the previous row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    LocationPickerSelectDef,
+    LocationPickerSelect,
+    "LocationPickerSelect",
+    ActionKind::LocationPickerSelect,
+    "jump to selected location",
+    "Jump the focused editor to the goto candidate under the picker's selection.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    LocationPickerCloseDef,
+    LocationPickerClose,
+    "LocationPickerClose",
+    ActionKind::LocationPickerClose,
+    "close location picker",
+    "Dismiss the goto-location picker without jumping.",
+    ActionPriority::Common,
+    palette_visible = false
+);

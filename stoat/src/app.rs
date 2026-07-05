@@ -2728,10 +2728,6 @@ impl Stoat {
             // (Escape -> RunModalDismiss) resolve through the keymap.
         }
 
-        if self.location_picker.is_some() {
-            return self.dispatch_location_picker_key(key);
-        }
-
         if self.global_search.is_some() {
             return self.dispatch_global_search_key(key);
         }
@@ -4702,32 +4698,6 @@ impl Stoat {
         crate::completion::request::pump(self);
         action_handlers::completion::pump_completion_resolve(self);
         crate::completion::accept::pump_completion_accept(self);
-    }
-
-    fn dispatch_location_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        use crate::location_picker::PickerOutcome;
-        let outcome = match self.location_picker.as_mut() {
-            Some(picker) => picker.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PickerOutcome::None => UpdateEffect::Redraw,
-            PickerOutcome::Close => {
-                self.location_picker = None;
-                UpdateEffect::Redraw
-            },
-            PickerOutcome::Select(idx) => {
-                let Some(picker) = self.location_picker.take() else {
-                    return UpdateEffect::None;
-                };
-                let entry = match picker.entries().get(idx) {
-                    Some(entry) => entry.clone(),
-                    None => return UpdateEffect::Redraw,
-                };
-                action_handlers::lsp::apply_jump(self, &entry.path, entry.offset);
-                UpdateEffect::Redraw
-            },
-        }
     }
 
     /// Resolve a `(line, column)` 0-based point to a byte

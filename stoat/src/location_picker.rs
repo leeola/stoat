@@ -2,10 +2,10 @@
 //!
 //! Opened by [`crate::action_handlers::lsp::pump_lsp_jumps`] when a goto
 //! request resolves to more than one location. Presents the candidates
-//! as `path:line:col  target-line` rows. Enter jumps to the selected one
+//! as `path:line:col  target-line` rows. Navigation and selection route
+//! through the `modal == location` keymap block. Selecting a row jumps
 //! through the same apply path a single-location goto uses.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 
 /// One resolved goto candidate. Carries the byte offset to jump to plus
@@ -17,14 +17,6 @@ pub(crate) struct LocationEntry {
     pub(crate) line: u32,
     pub(crate) column: u32,
     pub(crate) text: String,
-}
-
-/// The action [`LocationPicker::handle_key`] resolved a key into. `Select`
-/// carries the row index. The dispatcher re-reads `entries()[idx]`.
-pub(crate) enum PickerOutcome {
-    None,
-    Close,
-    Select(usize),
 }
 
 /// Modal chooser over the candidates of a multi-location goto.
@@ -49,6 +41,14 @@ impl LocationPicker {
         self.selected
     }
 
+    pub(crate) fn select_next(&mut self) {
+        self.move_selection(1);
+    }
+
+    pub(crate) fn select_prev(&mut self) {
+        self.move_selection(-1);
+    }
+
     pub(crate) fn hint_bindings(&self) -> Vec<(&'static str, String)> {
         vec![
             ("Enter", "jump".to_string()),
@@ -56,33 +56,6 @@ impl LocationPicker {
             ("Ctrl-N", "next".to_string()),
             ("Ctrl-P", "prev".to_string()),
         ]
-    }
-
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> PickerOutcome {
-        match key.code {
-            KeyCode::Esc => PickerOutcome::Close,
-            KeyCode::Enter => match self.entries.get(self.selected) {
-                Some(_) => PickerOutcome::Select(self.selected),
-                None => PickerOutcome::Close,
-            },
-            KeyCode::Up => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Down => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            _ => PickerOutcome::None,
-        }
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -98,7 +71,6 @@ impl LocationPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_harness::keys::key;
 
     fn entry(line: u32) -> LocationEntry {
         LocationEntry {
@@ -110,31 +82,22 @@ mod tests {
         }
     }
 
-    fn ctrl(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::CONTROL)
-    }
-
     #[test]
-    fn enter_selects_the_highlighted_row() {
+    fn select_next_prev_track_selection() {
         let mut picker = LocationPicker::new(vec![entry(1), entry(2), entry(3)]);
-        picker.handle_key(ctrl(KeyCode::Char('n')));
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Enter)),
-            PickerOutcome::Select(1)
-        ));
+        picker.select_next();
+        assert_eq!(picker.selected(), 1);
+        picker.select_prev();
+        assert_eq!(picker.selected(), 0);
     }
 
     #[test]
     fn navigation_clamps_within_bounds() {
         let mut picker = LocationPicker::new(vec![entry(1), entry(2)]);
-        picker.handle_key(ctrl(KeyCode::Char('p')));
+        picker.select_prev();
         assert_eq!(picker.selected(), 0);
-        picker.handle_key(ctrl(KeyCode::Char('n')));
-        picker.handle_key(ctrl(KeyCode::Char('n')));
+        picker.select_next();
+        picker.select_next();
         assert_eq!(picker.selected(), 1);
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Esc)),
-            PickerOutcome::Close
-        ));
     }
 }
