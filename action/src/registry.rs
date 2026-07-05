@@ -1,7 +1,7 @@
 use crate::{
     defs::{
         agent::SpawnClaude,
-        app::{Quit, QuitAll, ShowVersion},
+        app::{Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
@@ -89,6 +89,7 @@ use crate::{
         terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace,
+            WorkspacePickerClose, WorkspacePickerNext, WorkspacePickerPrev, WorkspacePickerSelect,
         },
     },
     param::{MissingSnafu, WrongKindSnafu},
@@ -114,6 +115,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
+    add(QuitAllConfirm::DEF, |_| Ok(Box::new(QuitAllConfirm)));
+    add(QuitAllCancel::DEF, |_| Ok(Box::new(QuitAllCancel)));
     add(ShowVersion::DEF, |_| Ok(Box::new(ShowVersion)));
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
@@ -614,6 +617,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(NewWorkspace::DEF, |_| Ok(Box::new(NewWorkspace)));
     add(CopyWorkspace::DEF, |_| Ok(Box::new(CopyWorkspace)));
     add(SwitchWorkspace::DEF, |_| Ok(Box::new(SwitchWorkspace)));
+    add(WorkspacePickerNext::DEF, |_| {
+        Ok(Box::new(WorkspacePickerNext))
+    });
+    add(WorkspacePickerPrev::DEF, |_| {
+        Ok(Box::new(WorkspacePickerPrev))
+    });
+    add(WorkspacePickerSelect::DEF, |_| {
+        Ok(Box::new(WorkspacePickerSelect))
+    });
+    add(WorkspacePickerClose::DEF, |_| {
+        Ok(Box::new(WorkspacePickerClose))
+    });
     add(CloseWorkspace::DEF, |_| Ok(Box::new(CloseWorkspace)));
     add(RenameWorkspace::DEF, |params| {
         let raw = params
@@ -675,6 +690,8 @@ mod tests {
     const ZERO_ARG_NAMES: &[&str] = &[
         "Quit",
         "QuitAll",
+        "QuitAllConfirm",
+        "QuitAllCancel",
         "ShowVersion",
         "SplitRight",
         "SplitDown",
@@ -834,6 +851,10 @@ mod tests {
         "NewWorkspace",
         "CopyWorkspace",
         "SwitchWorkspace",
+        "WorkspacePickerNext",
+        "WorkspacePickerPrev",
+        "WorkspacePickerSelect",
+        "WorkspacePickerClose",
         "CloseWorkspace",
         "HelpSelectPrev",
         "HelpSelectNext",
@@ -1050,7 +1071,7 @@ mod tests {
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
         // + 1 GotoDeclaration.
-        assert_eq!(all().count(), 293);
+        assert_eq!(all().count(), 299);
     }
 
     #[test]

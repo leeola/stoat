@@ -98,6 +98,19 @@ impl WorkspacePicker {
         self.selected
     }
 
+    /// The workspace under the selection, or `None` when the picker is empty.
+    pub fn selected_id(&self) -> Option<WorkspaceId> {
+        self.entries.get(self.selected).map(|entry| entry.id)
+    }
+
+    pub fn select_next(&mut self) {
+        move_selection(self.entries.len(), &mut self.selected, 1);
+    }
+
+    pub fn select_prev(&mut self) {
+        move_selection(self.entries.len(), &mut self.selected, -1);
+    }
+
     /// How the per-row path column should render for this picker's entries.
     ///
     /// When every row has an identical `git_root`, returns [`PathDisplay::Omit`]

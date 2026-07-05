@@ -61,6 +61,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             }
         },
         ActionKind::QuitAll => quit_all(stoat),
+        ActionKind::QuitAllConfirm => quit_all_confirm(stoat),
+        ActionKind::QuitAllCancel => quit_all_cancel(stoat),
         ActionKind::ShowVersion => show_version(stoat),
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),
@@ -616,6 +618,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             ));
             UpdateEffect::Redraw
         },
+        ActionKind::WorkspacePickerNext => workspace::workspace_picker_next(stoat),
+        ActionKind::WorkspacePickerPrev => workspace::workspace_picker_prev(stoat),
+        ActionKind::WorkspacePickerSelect => workspace::workspace_picker_select(stoat),
+        ActionKind::WorkspacePickerClose => workspace::workspace_picker_close(stoat),
         ActionKind::CloseWorkspace => workspace::close_workspace(stoat),
         ActionKind::RenameWorkspace => {
             let action = action
@@ -913,6 +919,20 @@ fn quit_all(stoat: &mut Stoat) -> UpdateEffect {
     }
     let root = git_root.unwrap_or_else(|| stoat.active_workspace().git_root.clone());
     stoat.quit_all_confirm = Some(crate::quit_all_confirm::QuitAllConfirm::new(&dirty, &root));
+    UpdateEffect::Redraw
+}
+
+/// Confirm the quit-all prompt, exiting and discarding its unsaved buffers.
+fn quit_all_confirm(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.quit_all_confirm.is_none() {
+        return UpdateEffect::None;
+    }
+    UpdateEffect::Quit
+}
+
+/// Dismiss the quit-all prompt without exiting.
+fn quit_all_cancel(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.quit_all_confirm = None;
     UpdateEffect::Redraw
 }
 

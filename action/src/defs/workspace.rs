@@ -34,6 +34,50 @@ define_action!(
 );
 
 define_action!(
+    WorkspacePickerNextDef,
+    WorkspacePickerNext,
+    "WorkspacePickerNext",
+    ActionKind::WorkspacePickerNext,
+    "next workspace row",
+    "Move the workspace picker's selection to the next row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    WorkspacePickerPrevDef,
+    WorkspacePickerPrev,
+    "WorkspacePickerPrev",
+    ActionKind::WorkspacePickerPrev,
+    "previous workspace row",
+    "Move the workspace picker's selection to the previous row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    WorkspacePickerSelectDef,
+    WorkspacePickerSelect,
+    "WorkspacePickerSelect",
+    ActionKind::WorkspacePickerSelect,
+    "open selected workspace",
+    "Switch to the workspace under the picker's selection, saving the current one first.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    WorkspacePickerCloseDef,
+    WorkspacePickerClose,
+    "WorkspacePickerClose",
+    ActionKind::WorkspacePickerClose,
+    "close workspace picker",
+    "Dismiss the workspace picker without switching.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     CloseWorkspaceDef,
     CloseWorkspace,
     "CloseWorkspace",

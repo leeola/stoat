@@ -81,6 +81,43 @@ fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
     stoat.active_workspace_mut().layout(size);
 }
 
+pub(super) fn workspace_picker_next(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(picker) = stoat.workspace_picker.as_mut() {
+        picker.select_next();
+    }
+    UpdateEffect::Redraw
+}
+
+pub(super) fn workspace_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(picker) = stoat.workspace_picker.as_mut() {
+        picker.select_prev();
+    }
+    UpdateEffect::Redraw
+}
+
+pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.workspace_picker = None;
+    UpdateEffect::Redraw
+}
+
+/// Switch to the workspace under the picker's selection, saving the current
+/// one first. A selection on the already-active workspace or an empty picker
+/// just closes the picker.
+pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(picker) = stoat.workspace_picker.take() else {
+        return UpdateEffect::None;
+    };
+    let Some(id) = picker.selected_id() else {
+        return UpdateEffect::Redraw;
+    };
+    if id == stoat.active_workspace {
+        return UpdateEffect::Redraw;
+    }
+    stoat.save_workspace(stoat.active_workspace());
+    switch_active_workspace(stoat, id);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn handle_dump(stoat: &Stoat, name: &str) {
     match crate::dump::save(stoat, name, &*stoat.fs_host) {
         Ok(id) => tracing::info!(id = %id, "dump captured"),

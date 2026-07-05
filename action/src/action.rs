@@ -70,6 +70,18 @@ macro_rules! define_action {
         );
     };
     ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021) => {
+        $crate::action::define_action!(
+            $def,
+            $action,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = true
+        );
+    };
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021) => {
         #[derive(Debug)]
         pub struct $def;
 
@@ -96,6 +108,10 @@ macro_rules! define_action {
 
             fn priority(&self) -> $crate::ActionPriority {
                 $priority
+            }
+
+            fn palette_visible(&self) -> bool {
+                $visible
             }
         }
 

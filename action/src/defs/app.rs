@@ -21,6 +21,28 @@ define_action!(
 );
 
 define_action!(
+    QuitAllConfirmDef,
+    QuitAllConfirm,
+    "QuitAllConfirm",
+    ActionKind::QuitAllConfirm,
+    "confirm quit",
+    "Confirm the quit-all prompt and exit, discarding the unsaved buffers it warned about.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    QuitAllCancelDef,
+    QuitAllCancel,
+    "QuitAllCancel",
+    ActionKind::QuitAllCancel,
+    "cancel quit",
+    "Dismiss the quit-all prompt without exiting.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     ShowVersionDef,
     ShowVersion,
     "ShowVersion",
