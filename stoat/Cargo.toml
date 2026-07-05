@@ -58,3 +58,11 @@ brush-parser.workspace = true
 
 [dev-dependencies]
 insta = "1"
+
+# Live integration tests that drive a real headless Stoat against a
+# materialized fixture. Gated on the `fixture` feature so a plain `cargo test`
+# never builds or runs them. Opt in with `--features fixture`.
+[[test]]
+name = "fixture_live"
+path = "tests/fixture_live.rs"
+required-features = ["fixture"]
