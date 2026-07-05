@@ -38,6 +38,12 @@ pub struct CommonArgs {
     /// run exits on its own. Rejects non-finite or negative values.
     #[arg(long = "timeout", value_name = "SECONDS", value_parser = parse_timeout)]
     pub timeout: Option<f64>,
+
+    /// Materialize the named deterministic fixture into a fresh temp repo and
+    /// open the editor there. Requires a stoat built with the `fixture`
+    /// feature. A build without it rejects the flag at startup.
+    #[arg(long = "fixture", value_name = "NAME")]
+    pub fixture: Option<String>,
 }
 
 /// Parse and validate a `--timeout` value, rejecting non-finite or negative
@@ -74,6 +80,10 @@ impl CommonArgs {
             argv.push("--timeout".to_string());
             argv.push(timeout.to_string());
         }
+        if let Some(fixture) = &self.fixture {
+            argv.push("--fixture".to_string());
+            argv.push(fixture.clone());
+        }
         argv.extend(
             self.files
                 .iter()
@@ -109,6 +119,7 @@ mod tests {
             resume: false,
             inputs: None,
             timeout: None,
+            fixture: None,
         });
         round_trip(CommonArgs {
             files: Vec::new(),
@@ -116,6 +127,7 @@ mod tests {
             resume: true,
             inputs: None,
             timeout: None,
+            fixture: None,
         });
         round_trip(CommonArgs {
             files: vec![PathBuf::from("only.rs")],
@@ -123,6 +135,15 @@ mod tests {
             resume: false,
             inputs: Some("ifoo<Esc>".to_string()),
             timeout: Some(1.5),
+            fixture: None,
+        });
+        round_trip(CommonArgs {
+            files: Vec::new(),
+            continue_: false,
+            resume: false,
+            inputs: None,
+            timeout: None,
+            fixture: Some("basic-diff".to_string()),
         });
     }
 

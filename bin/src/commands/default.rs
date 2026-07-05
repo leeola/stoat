@@ -1,5 +1,7 @@
 use clap::{ArgAction, Parser, Subcommand};
 use crossterm::event::{Event, KeyEvent};
+#[cfg(not(feature = "fixture"))]
+use snafu::whatever;
 use snafu::{ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use stoat::{
@@ -121,6 +123,7 @@ fn run_tui(
         resume,
         inputs,
         timeout,
+        fixture,
     } = common;
 
     // Parse `--inputs` before taking over the terminal, so a malformed
@@ -173,6 +176,41 @@ fn run_tui(
         mode_badges: std::collections::BTreeMap::new(),
         lsp_servers: std::collections::BTreeMap::new(),
     };
+
+    // Materialize a requested fixture and switch into it before resolving the
+    // cwd below, so the git root, LSP root, and file positionals all land
+    // inside the fixture. The temp dir is kept (leaked) for the session.
+    if let Some(name) = fixture {
+        #[cfg(feature = "fixture")]
+        {
+            let dir = tempfile::Builder::new()
+                .prefix("stoat-fixture-")
+                .tempdir()
+                .whatever_context("create fixture temp dir")?;
+            stoat::fixture::materialize(&name, dir.path())
+                .with_whatever_context(|_| format!("materialize fixture `{name}`"))?;
+            // Canonicalize because macOS /tmp is a symlink to /private/tmp, and
+            // an uncanonicalized cwd breaks path-comparing consumers.
+            let root = dir
+                .keep()
+                .canonicalize()
+                .whatever_context("canonicalize fixture dir")?;
+            tracing::info!(
+                target: "stoat::bin",
+                fixture = %name,
+                path = %root.display(),
+                "materialized fixture into temp dir",
+            );
+            std::env::set_current_dir(&root).whatever_context("set cwd to fixture dir")?;
+        }
+        #[cfg(not(feature = "fixture"))]
+        {
+            whatever!(
+                "requested fixture `{name}`, but stoat was built without the \
+                 fixture feature (rebuild with --features fixture)"
+            );
+        }
+    }
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let initial_git_root = if resume {

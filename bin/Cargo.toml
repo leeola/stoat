@@ -21,6 +21,9 @@ workspace = true
 [features]
 # Forward the stoat crate's latency instrumentation. Off by default.
 perf = ["stoat/perf"]
+# Forward the stoat crate's fixture materializer, enabling `--fixture <NAME>`.
+# Off by default.
+fixture = ["stoat/fixture"]
 
 [dependencies]
 stoat = { path = "../stoat" }
