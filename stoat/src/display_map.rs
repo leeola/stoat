@@ -315,6 +315,11 @@ impl DisplayMap {
 
     pub fn insert_blocks(&mut self, blocks: Vec<BlockProperties>) {
         self.block_map.insert(blocks);
+        // A block insert marks the block map dirty but touches no buffer, fold,
+        // or inlay version, so the cached snapshot must be dropped explicitly or
+        // snapshot_with_companion short-circuits to it and the new blocks stay
+        // invisible until an unrelated version bump forces a rebuild.
+        self.cached_snapshot = None;
     }
 
     pub fn fold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
@@ -989,7 +994,10 @@ impl Iterator for ReversedBufferCharsAt<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockRowKind, DisplayMap, DisplayPoint, DisplayRow, InlayKind, InlayPoint};
+    use super::{
+        BlockPlacement, BlockProperties, BlockRowKind, BlockStyle, DisplayMap, DisplayPoint,
+        DisplayRow, InlayKind, InlayPoint,
+    };
     use crate::{
         buffer::{BufferId, TextBuffer},
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
@@ -1066,6 +1074,23 @@ mod tests {
         let mut display_map = create_display_map("line1\nline2\nline3");
         let snapshot = display_map.snapshot();
         assert_eq!(snapshot.line_count(), 3);
+    }
+
+    #[test]
+    fn insert_blocks_after_snapshot_grows_line_count() {
+        let mut display_map = create_display_map("line1\nline2\nline3");
+        // Prime the snapshot cache, then insert a one-row block. The next
+        // snapshot must rebuild and reflect the added row rather than return
+        // the cached snapshot taken before the insert.
+        assert_eq!(display_map.snapshot().line_count(), 3);
+
+        display_map.insert_blocks(vec![BlockProperties::from_text(
+            BlockPlacement::Below(0),
+            vec!["extra".to_string()],
+            BlockStyle::Fixed,
+        )]);
+
+        assert_eq!(display_map.snapshot().line_count(), 4);
     }
 
     #[test]
