@@ -265,7 +265,7 @@ mod tests {
         h.open_commits("/repo");
         h.type_keys("j"); // select second commit
         h.type_keys("o"); // open review of it
-        assert_eq!(h.stoat.focused_mode(), "review");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
         let session_sha = match h
             .stoat
             .active_workspace()
@@ -278,7 +278,7 @@ mod tests {
         };
         assert_eq!(session_sha, "c1000002");
         h.type_keys("q"); // close review
-        assert_eq!(h.stoat.focused_mode(), "commits");
+        assert_eq!(h.stoat.current_view(), Some("commits"));
         let state = h
             .stoat
             .active_workspace()
@@ -305,7 +305,7 @@ mod tests {
             );
         h.open_commits("/repo");
         h.type_keys("o");
-        assert_eq!(h.stoat.focused_mode(), "review");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
 
         // Stage the only chunk then dispatch removal.
         h.set_review_status(0, ChunkStatus::Staged);
@@ -320,7 +320,7 @@ mod tests {
         // modification was reverted), so scan_commit produces no
         // session and `close_review` bounces us back to commits mode.
         assert!(h.stoat.active_workspace().review.is_none());
-        assert_eq!(h.stoat.focused_mode(), "commits");
+        assert_eq!(h.stoat.current_view(), Some("commits"));
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
         h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.type_keys("o");
-        assert_eq!(h.stoat.focused_mode(), "review");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewApplyStaged);
         let patches = h.fake_git().applied_patches(std::path::Path::new("/repo"));

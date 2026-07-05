@@ -1038,7 +1038,7 @@ mod tests {
     fn review_close_restores_normal_mode() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
-        assert_eq!(h.stoat.focused_mode(), "review");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
         h.type_keys("q");
         assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(h.stoat.active_workspace().review.is_none());
@@ -1082,7 +1082,7 @@ mod tests {
             REVIEW_TWO_HUNK_BUFFER
         );
         assert_eq!(session.order.len(), 2);
-        assert_eq!(h.stoat.focused_mode(), "review");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
     }
 
     #[test]

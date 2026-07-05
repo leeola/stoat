@@ -4,7 +4,7 @@ expression: text
 ---
 actions: n
 focused: #1 of 1
-mode: review
+mode: normal
 size: 80x20
 ---
 [0m[33ma.rs --- 1/1 --- rust[0m                  [0m[90m│[0m
@@ -26,4 +26,4 @@ size: 80x20
 
 
 
-[0m[1m[30m[46m REV [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                       [0m
+[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[36m[100m review [0m[97m[100m[scratch]                                               [0m

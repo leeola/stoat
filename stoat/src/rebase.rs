@@ -201,7 +201,7 @@ mod tests {
         // Navigate to oldest commit (c1) so todo = [c2, c3] onto c1.
         h.type_keys("G");
         h.type_keys("i");
-        assert_eq!(h.stoat.focused_mode(), "rebase");
+        assert_eq!(h.stoat.current_view(), Some("rebase"));
         h.assert_snapshot("rebase_open_todo");
     }
 
@@ -241,7 +241,7 @@ mod tests {
         h.open_commits("/repo");
         // Cursor defaults to selected=0 (HEAD). `i` should refuse.
         h.type_keys("i");
-        assert_eq!(h.stoat.focused_mode(), "commits");
+        assert_eq!(h.stoat.current_view(), Some("commits"));
         assert!(h.stoat.active_workspace().rebase.is_none());
         let ws = h.stoat.active_workspace();
         let badge_id = ws
@@ -261,7 +261,7 @@ mod tests {
         // Move down once: selected = 1 (c2).
         h.type_keys("j");
         h.type_keys("i");
-        assert_eq!(h.stoat.focused_mode(), "rebase");
+        assert_eq!(h.stoat.current_view(), Some("rebase"));
         let state = h.stoat.active_workspace().rebase.as_ref().unwrap();
         assert_eq!(state.onto, "c2", "cursor's commit becomes onto");
         assert_eq!(state.todo.len(), 1, "only c3 above cursor");
@@ -304,7 +304,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("Enter");
         // The stepper paused on conflict and entered conflict mode.
-        assert_eq!(h.stoat.focused_mode(), "conflict");
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
         let ws = h.stoat.active_workspace();
         assert!(
             ws.rebase_active.is_some(),
@@ -331,26 +331,25 @@ mod tests {
         h.type_keys("r");
         h.type_keys("Enter");
         assert_eq!(
-            h.stoat.focused_mode(),
-            "reword",
-            "stepper paused into reword normal sub-mode"
+            h.stoat.current_view(),
+            Some("reword"),
+            "stepper paused into the reword screen"
         );
 
         // Enter insert sub-mode, delete the preloaded "c2: middle", type
         // a new message, exit to normal, then save.
         h.type_keys("i");
-        assert_eq!(h.stoat.focused_mode(), "reword_insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         for _ in 0.."c2: middle".len() {
             h.type_keys("Backspace");
         }
         h.type_text("reworded!");
         h.type_keys("Escape");
-        assert_eq!(h.stoat.focused_mode(), "reword");
+        assert_eq!(h.stoat.current_view(), Some("reword"));
         h.type_keys("ctrl-s");
 
         // Stepper resumes and completes.
-        assert_ne!(h.stoat.focused_mode(), "reword");
-        assert_ne!(h.stoat.focused_mode(), "reword_insert");
+        assert_ne!(h.stoat.current_view(), Some("reword"));
         let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
         let msgs: Vec<_> = log.iter().map(|c| c.summary.clone()).collect();
@@ -370,11 +369,11 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "reword");
+        assert_eq!(h.stoat.current_view(), Some("reword"));
         h.type_keys("i");
-        assert_eq!(h.stoat.focused_mode(), "reword_insert");
+        assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_keys("Escape");
-        assert_eq!(h.stoat.focused_mode(), "reword");
+        assert_eq!(h.stoat.current_view(), Some("reword"));
     }
 
     #[test]
@@ -389,7 +388,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "reword");
+        assert_eq!(h.stoat.current_view(), Some("reword"));
 
         h.type_keys("i");
         for _ in 0.."c2: middle".len() {
@@ -420,13 +419,12 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "reword");
+        assert_eq!(h.stoat.current_view(), Some("reword"));
 
         // Abort without entering insert sub-mode.
         h.type_keys("Escape");
         assert!(h.stoat.active_workspace().rebase_active.is_none());
-        assert_ne!(h.stoat.focused_mode(), "reword");
-        assert_ne!(h.stoat.focused_mode(), "reword_insert");
+        assert_ne!(h.stoat.current_view(), Some("reword"));
     }
 
     #[test]
@@ -441,7 +439,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "reword");
+        assert_eq!(h.stoat.current_view(), Some("reword"));
 
         h.type_keys("i");
         for _ in 0.."c2: middle".len() {
@@ -452,7 +450,7 @@ mod tests {
         h.type_text("line two");
         h.type_keys("Escape");
         h.type_keys("ctrl-s");
-        assert_ne!(h.stoat.focused_mode(), "reword");
+        assert_ne!(h.stoat.current_view(), Some("reword"));
 
         let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
@@ -485,7 +483,7 @@ mod tests {
         h.type_keys("e");
         h.type_keys("Enter");
         // Stepper paused; opened review of the just-picked commit.
-        assert_eq!(h.stoat.focused_mode(), "review");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
         assert!(
             h.stoat.active_workspace().rebase_active.is_some(),
             "rebase execution state retained during edit"
@@ -519,7 +517,7 @@ mod tests {
         h.resize(90, 16);
         h.open_review_from_texts(&[("a.rs", "fn a() {}\n", "fn a_renamed() {}\n")]);
 
-        assert_eq!(h.stoat.focused_mode(), "review");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
         assert!(
             h.stoat.active_workspace().rebase_active.is_none(),
             "a plain review has no rebase in flight"
@@ -537,8 +535,8 @@ mod tests {
 
         h.type_keys("C");
         assert_eq!(
-            h.stoat.focused_mode(),
-            "review",
+            h.stoat.current_view(),
+            Some("diff"),
             "C is inert without a rebase"
         );
         assert!(h.stoat.active_workspace().rebase_active.is_none());
@@ -556,7 +554,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "conflict");
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
 
         // Take theirs on the selected file, then apply.
         h.type_keys("t");
@@ -564,7 +562,7 @@ mod tests {
 
         // Stepper resumed past the conflict; rebase_active dropped.
         assert!(h.stoat.active_workspace().rebase_active.is_none());
-        assert_ne!(h.stoat.focused_mode(), "conflict");
+        assert_ne!(h.stoat.current_view(), Some("conflict"));
 
         let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
@@ -583,7 +581,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "conflict");
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
 
         h.type_keys("s"); // skip the conflicted entry
         assert!(h.stoat.active_workspace().rebase_active.is_none());
@@ -604,10 +602,10 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "conflict");
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
         h.type_keys("a");
         assert!(h.stoat.active_workspace().rebase_active.is_none());
-        assert_ne!(h.stoat.focused_mode(), "conflict");
+        assert_ne!(h.stoat.current_view(), Some("conflict"));
     }
 
     #[test]
@@ -620,7 +618,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("r");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "reword");
+        assert_eq!(h.stoat.current_view(), Some("reword"));
         h.assert_snapshot("rebase_reword_mode");
     }
 
@@ -634,7 +632,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.focused_mode(), "conflict");
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
         h.assert_snapshot("rebase_conflict_mode");
     }
 
@@ -646,9 +644,9 @@ mod tests {
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
-        assert_eq!(h.stoat.focused_mode(), "rebase");
+        assert_eq!(h.stoat.current_view(), Some("rebase"));
         h.type_keys("q");
-        assert_eq!(h.stoat.focused_mode(), "commits");
+        assert_eq!(h.stoat.current_view(), Some("commits"));
         assert!(h.stoat.active_workspace().rebase.is_none());
         assert!(h
             .fake_git

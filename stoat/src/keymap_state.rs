@@ -85,6 +85,16 @@ impl StoatKeymapState {
         self
     }
 
+    /// Set the `view` predicate value on an otherwise flag-built state.
+    ///
+    /// Lets the hint-overlay renderer scope bindings to the foreground screen
+    /// (`view == diff`) without a full [`Self::from_stoat`], which it cannot call
+    /// while holding a workspace borrow.
+    pub(crate) fn with_view(mut self, view: Option<&str>) -> Self {
+        self.view = view.map(|v| StateValue::String(v.into()));
+        self
+    }
+
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         let ws = stoat.active_workspace();
         let flags = Flags {
@@ -120,9 +130,14 @@ impl KeymapState for StoatKeymapState {
 }
 
 /// The `View` of the active workspace's focused pane or dock.
+///
+/// The authoritative split-pane focus is [`crate::pane::PaneTree::focus`], not
+/// the id embedded in [`FocusTarget::SplitPane`], which can dangle after a pane
+/// is closed. Reading the tree's focus keeps this in step with
+/// [`Stoat::focused_editor_ids`].
 fn focused_view(ws: &Workspace) -> Option<&View> {
     match ws.focus {
-        FocusTarget::SplitPane(pane_id) => Some(&ws.panes.pane(pane_id).view),
+        FocusTarget::SplitPane(_) => Some(&ws.panes.pane(ws.panes.focus()).view),
         FocusTarget::Dock(dock_id) => Some(&ws.docks.get(dock_id)?.view),
     }
 }
@@ -155,7 +170,11 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     match ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref()) {
         Some(RebasePause::Reword { .. }) => return Some("reword"),
         Some(RebasePause::Conflict { .. }) => return Some("conflict"),
-        _ => {},
+        // An Edit pause reviews the picked commit. It normally installs a review
+        // session (caught by the `diff` check above), but the no-session
+        // fallback still needs the diff screen so RebaseContinue stays bound.
+        Some(RebasePause::Edit { .. }) => return Some("diff"),
+        None => {},
     }
     if ws.rebase.is_some() {
         return Some("rebase");
@@ -374,8 +393,8 @@ mod tests {
         assert_eq!(field(&state, "view"), Some("commits".to_string()));
         assert_eq!(
             field(&state, "mode"),
-            Some("commits".to_string()),
-            "commits is still a mode until the screen-view switch lands"
+            Some("normal".to_string()),
+            "the commits screen is a view, so the editor stays in normal mode"
         );
     }
 

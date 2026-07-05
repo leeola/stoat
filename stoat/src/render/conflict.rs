@@ -23,7 +23,7 @@ pub(crate) fn render_conflict(
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, "conflict", buf);
+    render_overlay_status(status_area, is_focused, frame, buf);
     if inner.width < 20 || inner.height < 4 {
         return;
     }

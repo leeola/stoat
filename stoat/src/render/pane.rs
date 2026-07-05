@@ -107,7 +107,6 @@ pub(crate) fn render_overlay_status(
     area: Rect,
     is_focused: bool,
     frame: FrameCtx<'_>,
-    label: &str,
     buf: &mut Buffer,
 ) {
     let workspace_name = frame.workspace_name;
@@ -148,15 +147,17 @@ pub(crate) fn render_overlay_status(
             base_style.add_modifier(Modifier::BOLD),
         );
     }
-    let left_pad = if cursor == area.x { " " } else { "" };
-    paint_segment(
-        buf,
-        y,
-        cursor,
-        end_x,
-        &format!("{left_pad}{label} "),
-        base_style,
-    );
+    if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
+        let left_pad = if cursor == area.x { " " } else { "" };
+        paint_segment(
+            buf,
+            y,
+            cursor,
+            end_x,
+            &format!("{left_pad}{screen_label} "),
+            base_style.fg(screen_color),
+        );
+    }
 }
 
 pub(crate) fn render_pane_dividers(
@@ -234,6 +235,16 @@ fn render_pane_status(
             &format!(" {workspace_name} "),
             ws_style,
         );
+        if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
+            cursor = paint_segment(
+                buf,
+                y,
+                cursor,
+                end_x,
+                &format!(" {screen_label} "),
+                base_style.fg(screen_color),
+            );
+        }
     }
 
     let (filename, dirty, cursor_pos) = pane_status_info(view, workspace_root, editors, buffers);
@@ -439,11 +450,6 @@ pub(crate) fn mode_segment(
         "select" => ("SEL", Color::Yellow, scope::UI_STATUSLINE_SELECT),
         "prompt" => ("PMT", Color::Green, scope::UI_STATUSLINE_PROMPT),
         "run" => ("RUN", Color::Magenta, scope::UI_STATUSLINE_RUN),
-        "commits" => ("COM", Color::Yellow, scope::UI_STATUSLINE_COMMITS),
-        "rebase" => ("REB", Color::Red, scope::UI_STATUSLINE_REBASE),
-        "reword" | "reword_insert" => ("RWD", Color::Red, scope::UI_STATUSLINE_REWORD),
-        "conflict" => ("CNF", Color::LightRed, scope::UI_STATUSLINE_CONFLICT),
-        "review" => ("REV", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
         "goto" => ("GTO", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
         "z" => ("VWA", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
         "bracket_next" => ("BNX", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
@@ -467,6 +473,32 @@ pub(crate) fn mode_segment(
         None => std::borrow::Cow::Borrowed(default_label),
     };
     (label, color)
+}
+
+/// The status-bar label and color for the foreground app `screen`, or `None`
+/// for a plain editor with no screen over it.
+///
+/// App screens are no longer editor modes, so they are labelled separately from
+/// the mode cell. Color resolves through the same `ui.statusline.<screen>`
+/// scopes [`mode_segment`] used, so a theme restyles both consistently.
+pub(crate) fn screen_segment(
+    screen: Option<&str>,
+    theme: &crate::theme::Theme,
+) -> Option<(&'static str, Color)> {
+    use crate::theme::scope;
+    let (label, default, screen_scope) = match screen? {
+        "diff" => ("review", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
+        "commits" => ("commits", Color::Yellow, scope::UI_STATUSLINE_COMMITS),
+        "rebase" => ("rebase", Color::Red, scope::UI_STATUSLINE_REBASE),
+        "reword" => ("reword", Color::Red, scope::UI_STATUSLINE_REWORD),
+        "conflict" => ("conflict", Color::LightRed, scope::UI_STATUSLINE_CONFLICT),
+        _ => return None,
+    };
+    let color = theme
+        .try_get(screen_scope)
+        .and_then(|s| s.fg)
+        .unwrap_or(default);
+    Some((label, color))
 }
 
 fn pane_status_info(

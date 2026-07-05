@@ -957,7 +957,7 @@ fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> 
 }
 
 pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::{badge::BadgeSource, review_session::ReviewOrigin};
+    use crate::badge::BadgeSource;
 
     // Cancel and drop any in-flight scan so it stops diffing and never installs
     // a session into the review the user just closed. Clear its scanning badge
@@ -979,14 +979,8 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
     for token in std::mem::take(&mut session.watch_tokens) {
         fs_watch_host.unwatch(token);
     }
-    let origin = session.origin;
     ws.badges.remove_by_source(BadgeSource::Review);
-    let next_mode = match origin {
-        ReviewOrigin::FromCommits if ws.commits.is_some() => "commits",
-        _ => "normal",
-    };
     let Some(review_editor_id) = session.view_editor else {
-        stoat.set_focused_mode(next_mode.to_string());
         return UpdateEffect::Redraw;
     };
 
@@ -1013,7 +1007,6 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
         ws.editors.remove(review_editor_id);
     }
 
-    stoat.set_focused_mode(next_mode.to_string());
     UpdateEffect::Redraw
 }
 
@@ -1360,7 +1353,6 @@ fn toggle_diff_on(stoat: &mut Stoat) -> UpdateEffect {
         super::gc_editor_if_unreferenced(ws, file_id);
     }
 
-    stoat.set_focused_mode("review".to_string());
     UpdateEffect::Redraw
 }
 
@@ -1860,8 +1852,6 @@ fn render_review_editor(stoat: &mut Stoat) {
             crate::action_handlers::gc_editor_if_unreferenced(ws, stale);
         }
     }
-
-    stoat.set_focused_mode("review".to_string());
 }
 
 /// Mirror this session's freshly-extracted hunks into the diff cache so
@@ -2279,9 +2269,9 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
 
         assert_eq!(
-            h.stoat.focused_mode(),
-            "review",
-            "toggling back re-enters review mode"
+            h.stoat.current_view(),
+            Some("diff"),
+            "toggling back re-enters the diff screen"
         );
         assert!(!h.with_review(|s| s.toggled_off), "the session is unparked");
         let is_review = crate::action_handlers::focused_editor_mut(&mut h.stoat)
@@ -2319,7 +2309,7 @@ mod tests {
         // rescanning the working tree.
         h.stoat.open_review();
 
-        assert_eq!(h.stoat.focused_mode(), "review");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
         assert!(
             h.stoat.pending_review_scan.is_none(),
             "re-entry swaps the parked editor back rather than arming a scan",

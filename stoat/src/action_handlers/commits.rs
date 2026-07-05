@@ -40,7 +40,6 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     ));
 
     stoat.active_workspace_mut().commits = Some(state);
-    stoat.set_focused_mode("commits".to_string());
     drain_commits_tasks(stoat);
     ensure_selected_preview(stoat);
     drain_commits_tasks(stoat);

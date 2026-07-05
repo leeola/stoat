@@ -65,6 +65,10 @@ pub(crate) struct FrameCtx<'a> {
     pub(crate) workspace_name: &'a str,
     pub(crate) workspace_root: &'a Path,
     pub(crate) mode: &'a str,
+    /// The app screen in the foreground, from [`crate::keymap_state::view_predicate`].
+    /// Drives the status-bar screen label. `None` or `Some("file")` for a plain
+    /// editor with no screen over it.
+    pub(crate) screen: Option<&'static str>,
     pub(crate) theme: &'a crate::theme::Theme,
     /// Mid-typing count prefix waiting on a motion (e.g. `4` between
     /// keypresses on the way to `4j`). The status bar shows it so the
@@ -137,15 +141,7 @@ pub(crate) fn perf_label(seg: PerfSegment) -> String {
     )
 }
 
-pub(crate) const PRIMARY_MODES: &[&str] = &[
-    "normal",
-    "insert",
-    "commits",
-    "rebase",
-    "reword",
-    "reword_insert",
-    "conflict",
-];
+pub(crate) const PRIMARY_MODES: &[&str] = &["normal", "insert"];
 
 /// Reserves the bottom row for the pane status bar so the hints overlay
 /// does not paint over it.
@@ -195,14 +191,8 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
 
     ws.layout(size);
 
-    let commits_mode = mode == "commits";
-    let rebase_mode = mode == "rebase";
-    let reword_mode = mode == "reword" || mode == "reword_insert";
-    let conflict_mode = mode == "conflict";
-    let overlay_pane = if (commits_mode && ws.commits.is_some())
-        || (rebase_mode && ws.rebase.is_some())
-        || ((reword_mode || conflict_mode) && ws.rebase_active.is_some())
-    {
+    let screen = crate::keymap_state::view_predicate(ws);
+    let overlay_pane = if matches!(screen, Some("commits" | "rebase" | "reword" | "conflict")) {
         Some(ws.panes.focus())
     } else {
         None
@@ -222,6 +212,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         workspace_name: &workspace_name,
         workspace_root: &ws.git_root,
         mode: &mode,
+        screen,
         theme: &stoat.theme,
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
@@ -269,7 +260,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
     if let Some(pane_id) = overlay_pane {
         let pane = ws.panes.pane(pane_id);
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane(id) if id == pane_id);
-        if commits_mode {
+        if screen == Some("commits") {
             if let Some(state) = ws.commits.as_mut() {
                 commits::render_commits(
                     pane,
@@ -280,11 +271,11 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
                     frame.stoatty.then_some(&mut *scene),
                 );
             }
-        } else if rebase_mode {
+        } else if screen == Some("rebase") {
             if let Some(state) = ws.rebase.as_ref() {
                 rebase::render_rebase(pane, is_focused, state, frame, buf);
             }
-        } else if reword_mode {
+        } else if screen == Some("reword") {
             let reword_ctx = ws
                 .rebase_active
                 .as_ref()
@@ -306,7 +297,9 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             {
                 reword::render_reword(pane, is_focused, editor, &sha, &orig, frame, buf);
             }
-        } else if conflict_mode && let Some(active) = ws.rebase_active.as_ref() {
+        } else if screen == Some("conflict")
+            && let Some(active) = ws.rebase_active.as_ref()
+        {
             conflict::render_conflict(
                 pane,
                 is_focused,
@@ -578,7 +571,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-    } else if !PRIMARY_MODES.contains(&mode.as_str()) {
+    } else if !PRIMARY_MODES.contains(&mode.as_str()) || screen == Some("diff") {
         // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
         // mutable borrow of the active workspace, so read the flags directly.
         let state = StoatKeymapState::with_flags(
@@ -589,8 +582,15 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
                 finder_open: stoat.file_finder.is_some(),
                 rebase_exec: ws.rebase_active.is_some(),
             },
-        );
-        let raw = stoat.keymap.active_bindings(&state);
+        )
+        .with_view(screen);
+        // The diff screen rides on normal mode, so scope to its own `view ==
+        // diff` bindings. A chord sub-mode owns its whole mode, so take them all.
+        let raw = if screen == Some("diff") {
+            stoat.keymap.scoped_bindings(&state, "view", "diff")
+        } else {
+            stoat.keymap.active_bindings(&state)
+        };
         let bindings: Vec<_> = raw
             .iter()
             .map(|(key, actions)| {
@@ -598,7 +598,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
                 (key.as_str(), desc)
             })
             .collect();
-        let footer = if mode == "review" {
+        let footer = if screen == Some("diff") {
             ws.review.as_ref().map(|session| {
                 let p = session.progress();
                 let complete = session.is_complete();
@@ -621,8 +621,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         } else {
             None
         };
+        let hint_label = if screen == Some("diff") {
+            "review"
+        } else {
+            mode.as_str()
+        };
         hints::render_hints(
-            &mode,
+            hint_label,
             &bindings,
             footer.as_ref(),
             &stoat.theme,

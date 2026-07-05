@@ -20,7 +20,7 @@ pub(crate) fn render_rebase(
 ) {
     let theme = frame.theme;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, "rebase", buf);
+    render_overlay_status(status_area, is_focused, frame, buf);
 
     if inner.width < 10 || inner.height == 0 {
         return;

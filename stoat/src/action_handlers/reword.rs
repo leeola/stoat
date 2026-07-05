@@ -25,11 +25,6 @@ pub(super) fn reword_abort(stoat: &mut Stoat) -> UpdateEffect {
         "rebase aborted during reword",
         Some("HEAD left at partial rebase state".into()),
     );
-    stoat.set_focused_mode(if stoat.active_workspace().commits.is_some() {
-        "commits".into()
-    } else {
-        "normal".into()
-    });
     UpdateEffect::Redraw
 }
 
@@ -68,11 +63,6 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
             "rebase aborted: empty commit message",
             Some("HEAD left at partial rebase state".into()),
         );
-        stoat.set_focused_mode(if stoat.active_workspace().commits.is_some() {
-            "commits".into()
-        } else {
-            "normal".into()
-        });
         return UpdateEffect::Redraw;
     }
 
@@ -113,9 +103,10 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Create an [`InputView`] seeded with `original_message`, place the cursor
 /// at end, and install a [`crate::rebase::RebasePause::Reword`] pointing at
-/// the new input. Caller is responsible for transitioning the focused mode to
-/// `"reword"` after this returns so the Helix-scratch-buffer workflow
-/// (normal mode default, `Ctrl-s` to submit) applies.
+/// the new input. The input is born in normal mode, and the `reword` screen is
+/// derived from the pause, so the Helix-scratch-buffer workflow (normal mode
+/// default, `i`/`a` to edit, `Ctrl-s` to submit) applies without a mode
+/// assignment.
 pub(super) fn install_reword_pause(
     stoat: &mut Stoat,
     cherry_picked_commit: String,
@@ -131,7 +122,7 @@ pub(super) fn install_reword_pause(
         executor,
         SubmitTarget::Reword,
         &original_message,
-        "reword",
+        "normal",
         u16::MAX,
     );
 

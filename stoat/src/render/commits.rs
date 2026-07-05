@@ -30,7 +30,7 @@ pub(crate) fn render_commits(
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, "commits", buf);
+    render_overlay_status(status_area, is_focused, frame, buf);
 
     let Some(left_area) = commits_list_rect(pane.area) else {
         return;

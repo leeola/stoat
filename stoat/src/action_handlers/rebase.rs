@@ -56,7 +56,6 @@ pub(super) fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
         .collect();
 
     stoat.active_workspace_mut().rebase = Some(RebaseState::new(workdir, onto, entries));
-    stoat.set_focused_mode("rebase".to_string());
     UpdateEffect::Redraw
 }
 
@@ -65,11 +64,6 @@ pub(super) fn abort_rebase(stoat: &mut Stoat) -> UpdateEffect {
     if ws.rebase.take().is_none() {
         return UpdateEffect::None;
     }
-    stoat.set_focused_mode(if stoat.active_workspace().commits.is_some() {
-        "commits".into()
-    } else {
-        "normal".into()
-    });
     UpdateEffect::Redraw
 }
 
@@ -172,11 +166,6 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                             &final_head[..final_head.len().min(7)]
                         ),
                     );
-                    stoat.set_focused_mode(if stoat.active_workspace().commits.is_some() {
-                        "commits".into()
-                    } else {
-                        "normal".into()
-                    });
                     commits_refresh(stoat);
                     return UpdateEffect::Redraw;
                 },
@@ -225,21 +214,20 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                                 RebaseTodoOp::Pick => continue,
                                 RebaseTodoOp::Reword => {
                                     install_reword_pause(stoat, new_sha, message.clone());
-                                    stoat.set_focused_mode("reword".into());
                                     return UpdateEffect::Redraw;
                                 },
                                 RebaseTodoOp::Edit => {
                                     active.pause = Some(RebasePause::Edit {
                                         cherry_picked_commit: new_sha.clone(),
                                     });
-                                    match scan_commit(stoat, &workdir, &new_sha) {
-                                        Some(mut session) => {
-                                            session.origin = ReviewOrigin::FromRebaseEdit;
-                                            install_review_session(stoat, session);
-                                        },
-                                        _ => {
-                                            stoat.set_focused_mode("review".into());
-                                        },
+                                    // With no session to review the Edit pause
+                                    // still derives the diff view, so
+                                    // RebaseContinue stays bound.
+                                    if let Some(mut session) =
+                                        scan_commit(stoat, &workdir, &new_sha)
+                                    {
+                                        session.origin = ReviewOrigin::FromRebaseEdit;
+                                        install_review_session(stoat, session);
                                     }
                                     return UpdateEffect::Redraw;
                                 },
@@ -263,7 +251,6 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                             selected: 0,
                             resolutions: std::collections::HashMap::new(),
                         });
-                        stoat.set_focused_mode("conflict".into());
                         return UpdateEffect::Redraw;
                     },
                     Err(GitApplyError::Backend { reason, .. }) => {
@@ -349,7 +336,6 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                             selected: 0,
                             resolutions: std::collections::HashMap::new(),
                         });
-                        stoat.set_focused_mode("conflict".into());
                         return UpdateEffect::Redraw;
                     },
                     Err(GitApplyError::Backend { reason, .. }) => {

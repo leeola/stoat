@@ -31,7 +31,7 @@ pub(crate) fn render_reword(
     let current_mode = frame.mode;
     let theme = frame.theme;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, "reword", buf);
+    render_overlay_status(status_area, is_focused, frame, buf);
     if inner.width < 10 || inner.height < 4 {
         return;
     }
@@ -50,7 +50,7 @@ pub(crate) fn render_reword(
         &format!("reword {short} [{current_mode}]"),
         header_style,
     );
-    let help = if current_mode == "reword_insert" {
+    let help = if current_mode == "insert" {
         "Escape normal   Ctrl-s save   (empty message aborts)"
     } else {
         "i insert   h/j/k/l move   Ctrl-s save   Escape abort"

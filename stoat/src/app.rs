@@ -2774,7 +2774,7 @@ impl Stoat {
             return self.route_key_to_term(agent_id, key);
         }
 
-        if (self.focused_mode() == "insert" || self.focused_mode() == "reword_insert")
+        if self.focused_mode() == "insert"
             && let Some(effect) = self.handle_insert_key(key)
         {
             // If help is open, keep its filtered list in sync after every
@@ -3613,6 +3613,14 @@ impl Stoat {
         crate::keymap_state::modal_predicate(self).is_some()
     }
 
+    /// The foreground app screen as the `view` predicate reports it, or `None`
+    /// for a plain editor with nothing focused. Screens (review/commits/rebase/
+    /// reword/conflict) are derived from session state rather than the mode.
+    #[cfg(test)]
+    pub(crate) fn current_view(&self) -> Option<&'static str> {
+        crate::keymap_state::view_predicate(self.active_workspace())
+    }
+
     /// The focused terminal or agent pane's [`TermId`], if the focused pane is
     /// one. Unlike [`Self::term_input_target`] this does not gate on the mode,
     /// so [`Self::focused_mode`] can consult it without recursing.
@@ -4192,11 +4200,12 @@ impl Stoat {
             return;
         };
 
-        // A full-screen overlay mode hides every editor, so nothing is pooled this
-        // frame and any live pools are retired.
+        // A full-screen overlay screen hides every editor, so nothing is pooled
+        // this frame and any live pools are retired. The diff screen renders in
+        // the real editor pool, so it is not an overlay.
         let overlay = matches!(
-            self.focused_mode(),
-            "commits" | "rebase" | "reword" | "reword_insert" | "conflict"
+            crate::keymap_state::view_predicate(self.active_workspace()),
+            Some("commits" | "rebase" | "reword" | "conflict")
         );
         let panes = if overlay {
             Vec::new()
@@ -4999,7 +5008,7 @@ impl Stoat {
 /// `reword_insert` only; `prompt` and `run` write to scratch
 /// inputs that should not surface in the dot register.
 fn is_insert_run_mode(mode: &str) -> bool {
-    mode == "insert" || mode == "reword_insert"
+    mode == "insert"
 }
 
 /// The byte sequence a VT terminal sends for `key`, or `None` when the key has
@@ -6383,8 +6392,12 @@ mod tests {
             "first emit declares the editor pool, got {first:?}"
         );
 
-        // Entering a full-screen overlay mode retires the editor pool.
-        h.stoat.set_focused_mode("rebase".into());
+        // Entering a full-screen overlay screen retires the editor pool.
+        h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+            std::path::PathBuf::from("/pool"),
+            "onto".into(),
+            vec![],
+        ));
         h.stoat.emit_smooth_scroll();
         let cmds = drain_apc(&mut rx);
         assert!(

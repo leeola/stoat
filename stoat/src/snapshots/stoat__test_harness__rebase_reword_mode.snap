@@ -4,10 +4,10 @@ expression: text
 ---
 actions: enter
 focused: #1 of 1
-mode: reword
+mode: normal
 size: 90x12
 ---
-[0m[1m[35mreword commit- [reword][0m
+[0m[1m[35mreword commit- [normal][0m
 [0m[90mi insert   h/j/k/l move   Ctrl-s save   Escape abort[0m
 [0m[90moriginal: c2: middle[0m
 
@@ -18,4 +18,4 @@ size: 90x12
 
 
 
-[0m[1m[30m[41m RWD [0m[1m[97m[100m repo [0m[97m[100mreword                                                                         [0m
+[0m[1m[30m[44m NOR [0m[1m[97m[100m repo [0m[31m[100mreword [0m[97m[100m                                                                        [0m

@@ -4,7 +4,7 @@ expression: text
 ---
 actions: J
 focused: #1 of 1
-mode: rebase
+mode: normal
 size: 90x12
 ---
 [0m[32mpick  [0m [0m[36mc3[0m [0m[97mc3: tip[0m
@@ -18,4 +18,4 @@ size: 90x12
 
 [0m[90mj/k move  K/J reorder  p/s/f/d set op  Enter run  q abort[0m
 [0m[90m2 entries, onto c1[0m
-[0m[1m[30m[41m REB [0m[1m[97m[100m repo [0m[97m[100mrebase                                                                         [0m
+[0m[1m[30m[44m NOR [0m[1m[97m[100m repo [0m[31m[100mrebase [0m[97m[100m                                                                        [0m

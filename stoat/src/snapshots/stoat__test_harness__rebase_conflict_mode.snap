@@ -4,7 +4,7 @@ expression: text
 ---
 actions: enter
 focused: #1 of 1
-mode: conflict
+mode: normal
 size: 100x18
 ---
 [0m[1m[31mconflict picking c3[0m              [0m[90m│[0m
@@ -24,4 +24,4 @@ size: 100x18
                                  [0m[90m│--- ancestor ---[0m
                                  [0m[90m│line1[0m
                                  [0m[90m│line2[0m
-[0m[1m[30m[101m CNF [0m[1m[97m[100m repo [0m[97m[100mconflict                                                                                 [0m
+[0m[1m[30m[44m NOR [0m[1m[97m[100m repo [0m[91m[100mconflict [0m[97m[100m                                                                                [0m

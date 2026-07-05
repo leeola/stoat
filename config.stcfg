@@ -366,7 +366,7 @@ on key {
         | -> [ExtendGotoColumn(), SetMode(select)];
         : -> OpenCommandPalette();
     }
-    mode == commits {
+    view == commits && mode == normal {
         Escape -> CloseCommits();
         q -> CloseCommits();
         j -> CommitsNext();
@@ -381,7 +381,7 @@ on key {
         i -> EnterRebase();
         : -> OpenCommandPalette();
     }
-    mode == rebase {
+    view == rebase && mode == normal {
         Escape -> AbortRebase();
         q -> AbortRebase();
         j -> RebaseNext();
@@ -397,11 +397,11 @@ on key {
         Enter -> ExecuteRebase();
         : -> OpenCommandPalette();
     }
-    mode == reword {
+    view == reword && mode == normal {
         Escape -> RewordAbort();
         Ctrl-s -> RewordConfirm();
-        i -> SetMode(reword_insert);
-        a -> SetMode(reword_insert);
+        i -> SetMode(insert);
+        a -> SetMode(insert);
         h -> MoveLeft();
         j -> MoveDown();
         k -> MoveUp();
@@ -411,11 +411,11 @@ on key {
         b -> MovePrevWordStart();
         : -> OpenCommandPalette();
     }
-    mode == reword_insert {
-        Escape -> SetMode(reword);
+    view == reword && mode == insert {
+        Escape -> SetMode(normal);
         Ctrl-s -> RewordConfirm();
     }
-    mode == conflict {
+    view == conflict && mode == normal {
         Escape -> ConflictAbort();
         a -> ConflictAbort();
         j -> ConflictNextFile();
@@ -426,7 +426,7 @@ on key {
         Enter -> ConflictApply();
         : -> OpenCommandPalette();
     }
-    mode == review {
+    view == diff && mode == normal {
         Escape -> CloseReview();
         q -> CloseReview();
         Tab -> ToggleDiff();
@@ -457,7 +457,7 @@ on key {
         r -> ReviewRefresh();
         : -> OpenCommandPalette();
     }
-    mode == review && rebase_exec {
+    view == diff && rebase_exec {
         C -> RebaseContinue();
     }
     mode == insert {
