@@ -2322,29 +2322,6 @@ impl Stoat {
         }
     }
 
-    /// Routes left-button Down/Drag/Up events on a focused run pane into
-    /// the active block's [`GridSelection`]. Returns `true` when the event
-    /// mutated state. `Up(Left)` finalises the drag by extracting the
-    /// row-major selection text and pushing it to the
-    /// [`crate::host::ClipboardHost`]; the selection itself persists in
-    /// place. Click-without-drag (`anchor == head`) is a no-op.
-    /// The focused run pane's [`RunId`], if the focus (a split pane or a dock)
-    /// currently holds a [`View::Run`].
-    ///
-    /// Run input now rides the standard insert/normal modes, so keys gate on
-    /// run focus rather than a bespoke `"run"` mode.
-    fn focused_run_pane(&self) -> Option<RunId> {
-        let ws = self.active_workspace();
-        let view = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => &ws.panes.pane(pane_id).view,
-            FocusTarget::Dock(dock_id) => &ws.docks.get(dock_id)?.view,
-        };
-        match view {
-            View::Run(id) => Some(*id),
-            _ => None,
-        }
-    }
-
     fn handle_run_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
         let target = {
             let ws = self.active_workspace();
@@ -2701,14 +2678,19 @@ impl Stoat {
             if self.global_search.take().is_some() {
                 return UpdateEffect::Redraw;
             }
-            if self.focused_run_pane().is_some() {
-                return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
-            }
             if let Some(agent_id) = self.term_input_target() {
                 self.write_to_term(agent_id, &[0x03]);
                 return UpdateEffect::None;
             }
-            return UpdateEffect::Quit;
+            // Ctrl-C with a keymap binding (`pane == run` -> RunInterrupt) routes
+            // through the keymap below. An unbound Ctrl-C quits.
+            let bound = {
+                let state = StoatKeymapState::from_stoat(self);
+                self.keymap.lookup(&state, &key).is_some()
+            };
+            if !bound {
+                return UpdateEffect::Quit;
+            }
         }
 
         let key = normalize_shift_event(key);
@@ -2733,17 +2715,17 @@ impl Stoat {
         }
 
         if let Some(run_id) = self.modal_run {
-            let finished = self
+            let running = self
                 .active_workspace()
                 .runs
                 .get(run_id)
-                .is_some_and(|r| !r.is_running());
-            if finished && key.code == KeyCode::Esc {
-                self.active_workspace_mut().runs.remove(run_id);
-                self.modal_run = None;
-                return UpdateEffect::Redraw;
+                .is_some_and(|r| r.is_running());
+            if running {
+                // Swallow input while the command is still running.
+                return UpdateEffect::None;
             }
-            return UpdateEffect::None;
+            // Once finished, keys fall through so the `modal == run` bindings
+            // (Escape -> RunModalDismiss) resolve through the keymap.
         }
 
         if self.workspace_picker.is_some() {
@@ -2774,19 +2756,35 @@ impl Stoat {
             return self.route_key_to_term(agent_id, key);
         }
 
-        if self.focused_mode() == "insert"
-            && let Some(effect) = self.handle_insert_key(key)
-        {
-            // If help is open, keep its filtered list in sync after every
-            // text mutation in the prompt input.
-            if self.help.is_some() {
-                let active_idx = self.active_workspace;
-                let workspaces = &mut self.workspaces;
-                if let Some(help) = self.help.as_mut() {
-                    help.sync_filter(&workspaces[active_idx]);
+        if self.focused_mode() == "insert" {
+            // A non-printable key the keymap binds falls through to the lookup
+            // below, so bindings like `pane == run { Enter -> RunSubmit }`
+            // override the built-in insert arms. Printable characters always
+            // type, and an unbound key keeps today's insert defaults.
+            let printable = matches!(key.code, KeyCode::Char(_))
+                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
+            // handle_insert_key keeps priority for printable typing and for its
+            // transient sub-modes (a completion popup, a pending insert
+            // register), whose keys it owns; otherwise a keymap binding for a
+            // non-printable key wins over the built-in defaults.
+            let insert_first =
+                printable || self.pending_completion.is_some() || self.pending_insert_register;
+            let keymap_binds = !insert_first && {
+                let state = StoatKeymapState::from_stoat(self);
+                self.keymap.lookup(&state, &key).is_some()
+            };
+            if !keymap_binds && let Some(effect) = self.handle_insert_key(key) {
+                // If help is open, keep its filtered list in sync after every
+                // text mutation in the prompt input.
+                if self.help.is_some() {
+                    let active_idx = self.active_workspace;
+                    let workspaces = &mut self.workspaces;
+                    if let Some(help) = self.help.as_mut() {
+                        help.sync_filter(&workspaces[active_idx]);
+                    }
                 }
+                return effect;
             }
-            return effect;
         }
 
         if (self.focused_mode() == "normal" || self.focused_mode() == "select")
@@ -3473,18 +3471,12 @@ impl Stoat {
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Enter if key.modifiers.is_empty() => {
-                if self.focused_run_pane().is_some() {
-                    Some(action_handlers::dispatch(self, &stoat_action::RunSubmit))
-                } else if self.has_open_modal() {
-                    None
-                } else {
-                    let indent = match self.newest_cursor_offset(editor_id) {
-                        Some(offset) => self.newline_indent_string(buffer_id, offset),
-                        None => String::new(),
-                    };
-                    self.editor_insert(editor_id, buffer_id, &format!("\n{indent}"));
-                    Some(UpdateEffect::Redraw)
-                }
+                let indent = match self.newest_cursor_offset(editor_id) {
+                    Some(offset) => self.newline_indent_string(buffer_id, offset),
+                    None => String::new(),
+                };
+                self.editor_insert(editor_id, buffer_id, &format!("\n{indent}"));
+                Some(UpdateEffect::Redraw)
             },
             KeyCode::Left => {
                 action_handlers::dispatch(self, &stoat_action::MoveLeft);
@@ -3509,19 +3501,11 @@ impl Stoat {
                 action_handlers::completion::arm_completion_resolve(self);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Up if self.focused_run_pane().is_some() => Some(action_handlers::dispatch(
-                self,
-                &stoat_action::RunHistoryPrev,
-            )),
-            KeyCode::Down if self.focused_run_pane().is_some() => Some(action_handlers::dispatch(
-                self,
-                &stoat_action::RunHistoryNext,
-            )),
-            KeyCode::Up if !self.has_open_modal() => {
+            KeyCode::Up => {
                 action_handlers::dispatch(self, &stoat_action::MoveUp);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Down if !self.has_open_modal() => {
+            KeyCode::Down => {
                 action_handlers::dispatch(self, &stoat_action::MoveDown);
                 Some(UpdateEffect::Redraw)
             },
@@ -3599,18 +3583,6 @@ impl Stoat {
             return;
         }
         self.fallback_mode = mode;
-    }
-
-    /// Whether a modal overlay currently owns focus, per the `modal` keymap
-    /// predicate.
-    ///
-    /// In [`Self::handle_insert_key`] this separates a modal text input - whose
-    /// Enter/Up/Down are bound in the keymap - from an ordinary insert-mode
-    /// buffer, whose Enter/Up/Down are handled inline. The pickers `modal` also
-    /// reports are intercepted earlier in [`Self::handle_key`], so only text
-    /// inputs reach that comparison.
-    pub(crate) fn has_open_modal(&self) -> bool {
-        crate::keymap_state::modal_predicate(self).is_some()
     }
 
     /// The foreground app screen as the `view` predicate reports it, or `None`
@@ -7588,6 +7560,84 @@ mod tests {
             h.stoat.focused_mode(),
             "insert",
             "opening a run pane enters insert mode"
+        );
+    }
+
+    #[test]
+    fn run_pane_enter_binds_run_submit_through_keymap() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        let actions = h
+            .stoat
+            .keymap
+            .lookup(&state, &enter)
+            .expect("Enter is bound in a run pane");
+        assert!(
+            actions.iter().any(|a| a.name == "RunSubmit"),
+            "run-pane Enter resolves to RunSubmit, got {actions:?}"
+        );
+    }
+
+    #[test]
+    fn editor_enter_is_unbound_so_it_inserts() {
+        let mut h = Stoat::test();
+        h.stoat.set_focused_mode("insert".into());
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        assert!(
+            h.stoat.keymap.lookup(&state, &enter).is_none(),
+            "editor Enter has no keymap binding, so it falls to the insert newline"
+        );
+    }
+
+    #[test]
+    fn run_pane_ctrl_c_interrupts_instead_of_quitting() {
+        let mut h = Stoat::test();
+        h.open_run();
+
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let actions = h
+            .stoat
+            .keymap
+            .lookup(&state, &ctrl_c)
+            .expect("Ctrl-C is bound in a run pane");
+        assert!(
+            actions.iter().any(|a| a.name == "RunInterrupt"),
+            "run-pane Ctrl-C resolves to RunInterrupt, got {actions:?}"
+        );
+
+        let effect = h.stoat.handle_key(ctrl_c);
+        assert!(
+            !matches!(effect, UpdateEffect::Quit),
+            "a bound Ctrl-C routes to the keymap rather than quitting"
+        );
+    }
+
+    #[test]
+    fn finished_modal_run_escape_dismisses_via_keymap() {
+        let mut h = Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let run_id = {
+            let ws = h.stoat.active_workspace_mut();
+            let run = crate::run::RunState::new(std::path::PathBuf::from("/tmp"), ws, executor);
+            ws.runs.insert(run)
+        };
+        h.stoat.modal_run = Some(run_id);
+
+        // A fresh run has no in-flight block, so it reads as finished.
+        h.stoat
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert!(
+            h.stoat.modal_run.is_none(),
+            "Escape on a finished modal run dismisses it"
+        );
+        assert!(
+            h.stoat.active_workspace().runs.get(run_id).is_none(),
+            "the dismissed run is removed from the registry"
         );
     }
 

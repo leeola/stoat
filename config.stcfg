@@ -504,6 +504,17 @@ on key {
         Up -> MoveUp();
         Down -> MoveDown();
     }
+    modal == run {
+        Escape -> RunModalDismiss();
+    }
+    pane == run && mode == insert {
+        Enter -> RunSubmit();
+        Up -> RunHistoryPrev();
+        Down -> RunHistoryNext();
+    }
+    pane == run {
+        Ctrl-c -> RunInterrupt();
+    }
     mode == space {
         Escape -> SetMode(normal);
         q -> Quit();
