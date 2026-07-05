@@ -318,6 +318,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::JumplistPickerPrev => picker::jumplist_picker_prev(stoat),
         ActionKind::JumplistPickerSelect => picker::jumplist_picker_select(stoat),
         ActionKind::JumplistPickerClose => picker::jumplist_picker_close(stoat),
+        ActionKind::DiagnosticsPickerNext => picker::diagnostics_picker_next(stoat),
+        ActionKind::DiagnosticsPickerPrev => picker::diagnostics_picker_prev(stoat),
+        ActionKind::DiagnosticsPickerSelect => picker::diagnostics_picker_select(stoat),
+        ActionKind::DiagnosticsPickerClose => picker::diagnostics_picker_close(stoat),
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
         },

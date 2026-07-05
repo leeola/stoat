@@ -43,3 +43,47 @@ define_action!(
     ActionPriority::Common,
     palette_visible = false
 );
+
+define_action!(
+    DiagnosticsPickerNextDef,
+    DiagnosticsPickerNext,
+    "DiagnosticsPickerNext",
+    ActionKind::DiagnosticsPickerNext,
+    "next diagnostic row",
+    "Move the diagnostics picker's selection to the next row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    DiagnosticsPickerPrevDef,
+    DiagnosticsPickerPrev,
+    "DiagnosticsPickerPrev",
+    ActionKind::DiagnosticsPickerPrev,
+    "previous diagnostic row",
+    "Move the diagnostics picker's selection to the previous row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    DiagnosticsPickerSelectDef,
+    DiagnosticsPickerSelect,
+    "DiagnosticsPickerSelect",
+    ActionKind::DiagnosticsPickerSelect,
+    "jump to selected diagnostic",
+    "Jump the focused editor to the diagnostic under the picker's selection, opening its file first for workspace-scope entries.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    DiagnosticsPickerCloseDef,
+    DiagnosticsPickerClose,
+    "DiagnosticsPickerClose",
+    ActionKind::DiagnosticsPickerClose,
+    "close diagnostics picker",
+    "Dismiss the diagnostics picker without jumping.",
+    ActionPriority::Common,
+    palette_visible = false
+);

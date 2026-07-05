@@ -1,5 +1,4 @@
 use crate::{buffer::TextBuffer, diagnostics::DiagnosticSet};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use std::path::PathBuf;
 use stoat_text::Point;
@@ -7,8 +6,8 @@ use stoat_text::Point;
 /// Whether the picker lists the focused buffer's diagnostics
 /// only (`Local`) or every workspace path (`Workspace`). The
 /// renderer paints a path column when scope is `Workspace`,
-/// and the dispatch arm opens the entry's file before jumping
-/// when scope is `Workspace`.
+/// and selecting a `Workspace` entry opens its file before
+/// jumping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerScope {
     Local,
@@ -18,10 +17,13 @@ pub enum PickerScope {
 /// Modal listing diagnostics in either the focused buffer
 /// (Local scope) or every path in `Stoat::diagnostics`
 /// (Workspace scope). Built from a snapshot of the diagnostic
-/// set so render and key dispatch can run without re-entering
-/// buffer locks. Selection collapses the focused editor's
-/// cursor at the entry's diagnostic; workspace entries open
-/// the target file first.
+/// set so render can run without re-entering buffer locks.
+/// Selecting an entry collapses the focused editor's cursor at
+/// its diagnostic. Workspace entries open the target file first.
+///
+/// Navigation and selection route through the `modal == diagnostics`
+/// keymap block. [`Self::select_next`] and [`Self::select_prev`] move
+/// the highlight, and [`Self::selected`] reports the row to jump to.
 pub struct DiagnosticsPicker {
     entries: Vec<DiagnosticsEntry>,
     selected: usize,
@@ -32,8 +34,8 @@ pub struct DiagnosticsEntry {
     /// Byte offset in the entry's source buffer. Meaningful
     /// only for Local entries -- workspace entries set this to
     /// 0 because the target buffer may not be open at picker
-    /// construction time. The dispatcher recomputes the offset
-    /// from `(line, column)` after opening the file.
+    /// construction time. The select handler recomputes the
+    /// offset from `(line, column)` after opening the file.
     pub offset: usize,
     pub line: u32,
     pub column: u32,
@@ -44,12 +46,6 @@ pub struct DiagnosticsEntry {
     /// focused editor's path); `Some` for Workspace-scope
     /// entries.
     pub path: Option<PathBuf>,
-}
-
-pub enum PickerOutcome {
-    None,
-    Close,
-    Select(usize),
 }
 
 const MESSAGE_MAX_CHARS: usize = 80;
@@ -142,6 +138,14 @@ impl DiagnosticsPicker {
         self.selected
     }
 
+    pub fn select_next(&mut self) {
+        self.move_selection(1);
+    }
+
+    pub fn select_prev(&mut self) {
+        self.move_selection(-1);
+    }
+
     pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {
         vec![
             ("Enter", "jump".to_string()),
@@ -149,33 +153,6 @@ impl DiagnosticsPicker {
             ("Ctrl-N", "next".to_string()),
             ("Ctrl-P", "prev".to_string()),
         ]
-    }
-
-    pub fn handle_key(&mut self, key: KeyEvent) -> PickerOutcome {
-        match key.code {
-            KeyCode::Esc => PickerOutcome::Close,
-            KeyCode::Enter => match self.entries.get(self.selected) {
-                Some(_) => PickerOutcome::Select(self.selected),
-                None => PickerOutcome::Close,
-            },
-            KeyCode::Up => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Down => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            _ => PickerOutcome::None,
-        }
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -198,7 +175,7 @@ fn render_message(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{buffer::BufferId, test_harness::keys};
+    use crate::buffer::BufferId;
     use lsp_types::{Position, Range};
 
     fn buf(text: &str) -> TextBuffer {
@@ -303,29 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_returns_select() {
-        let buffer = buf("a\n");
-        let diagnostics = vec![diag(0, 0, "msg", DiagnosticSeverity::ERROR)];
-        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Enter)),
-            PickerOutcome::Select(_)
-        ));
-    }
-
-    #[test]
-    fn esc_returns_close() {
-        let buffer = buf("a\n");
-        let diagnostics = vec![diag(0, 0, "msg", DiagnosticSeverity::ERROR)];
-        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Esc)),
-            PickerOutcome::Close
-        ));
-    }
-
-    #[test]
-    fn down_and_up_clamp_at_ends() {
+    fn select_next_prev_clamp_at_ends() {
         let buffer = buf("a\nb\nc\n");
         let diagnostics = vec![
             diag(0, 0, "first", DiagnosticSeverity::ERROR),
@@ -333,12 +288,12 @@ mod tests {
             diag(2, 0, "third", DiagnosticSeverity::ERROR),
         ];
         let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
-        picker.handle_key(keys::key(KeyCode::Up));
-        picker.handle_key(keys::key(KeyCode::Up));
+        picker.select_prev();
+        picker.select_prev();
         assert_eq!(picker.selected(), 0);
-        picker.handle_key(keys::key(KeyCode::Down));
-        picker.handle_key(keys::key(KeyCode::Down));
-        picker.handle_key(keys::key(KeyCode::Down));
+        picker.select_next();
+        picker.select_next();
+        picker.select_next();
         assert_eq!(picker.selected(), 2);
     }
 }

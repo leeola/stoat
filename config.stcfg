@@ -179,6 +179,14 @@ on key {
         Enter -> JumplistPickerSelect();
         Escape -> JumplistPickerClose();
     }
+    modal == diagnostics {
+        Up -> DiagnosticsPickerPrev();
+        Down -> DiagnosticsPickerNext();
+        Ctrl-p -> DiagnosticsPickerPrev();
+        Ctrl-n -> DiagnosticsPickerNext();
+        Enter -> DiagnosticsPickerSelect();
+        Escape -> DiagnosticsPickerClose();
+    }
     mode == normal {
         Enter -> RunSubmit();
         q -> ReplayMacro();

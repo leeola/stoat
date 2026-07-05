@@ -4032,6 +4032,44 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_picker_enter_jumps_focused_cursor() {
+        use crate::test_harness::keys;
+        use crossterm::event::{Event, KeyCode};
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenDiagnosticsPicker);
+        assert!(h.stoat.diagnostics_picker.is_some());
+
+        h.stoat.update(Event::Key(keys::key(KeyCode::Down)));
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert!(h.stoat.diagnostics_picker.is_none());
+        assert_eq!(cursor_offset(&mut h), 8);
+    }
+
+    #[test]
+    fn diagnostics_picker_esc_closes_without_jumping() {
+        use crate::test_harness::keys;
+        use crossterm::event::{Event, KeyCode};
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(1, 0, "first")]);
+        let before = cursor_offset(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenDiagnosticsPicker);
+        h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
+        assert!(h.stoat.diagnostics_picker.is_none());
+        assert_eq!(cursor_offset(&mut h), before);
+    }
+
+    #[test]
     fn goto_diagnostic_no_op_with_empty_diagnostics() {
         let mut h = TestHarness::with_size(80, 24);
         let root = seed(&mut h, &[("a.rs", "abc\n")]);

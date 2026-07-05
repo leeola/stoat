@@ -66,7 +66,9 @@ use crate::{
             ToggleDockRight,
         },
         picker::{
-            JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect,
+            DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
+            DiagnosticsPickerSelect, JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev,
+            JumplistPickerSelect,
         },
         prompt::{
             CancelPromptInput, PalettePageDown, PalettePageUp, PaletteScopeToggle,
@@ -345,6 +347,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(JumplistPickerClose::DEF, |_| {
         Ok(Box::new(JumplistPickerClose))
+    });
+    add(DiagnosticsPickerNext::DEF, |_| {
+        Ok(Box::new(DiagnosticsPickerNext))
+    });
+    add(DiagnosticsPickerPrev::DEF, |_| {
+        Ok(Box::new(DiagnosticsPickerPrev))
+    });
+    add(DiagnosticsPickerSelect::DEF, |_| {
+        Ok(Box::new(DiagnosticsPickerSelect))
+    });
+    add(DiagnosticsPickerClose::DEF, |_| {
+        Ok(Box::new(DiagnosticsPickerClose))
     });
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
     add(KeepSelections::DEF, |_| Ok(Box::new(KeepSelections)));
@@ -874,6 +888,10 @@ mod tests {
         "JumplistPickerPrev",
         "JumplistPickerSelect",
         "JumplistPickerClose",
+        "DiagnosticsPickerNext",
+        "DiagnosticsPickerPrev",
+        "DiagnosticsPickerSelect",
+        "DiagnosticsPickerClose",
         "CloseWorkspace",
         "HelpSelectPrev",
         "HelpSelectNext",
@@ -1091,7 +1109,8 @@ mod tests {
         // + 1 ShowVersion.
         // + 1 GotoDeclaration.
         // + 4 JumplistPicker Next/Prev/Select/Close.
-        assert_eq!(all().count(), 303);
+        // + 4 DiagnosticsPicker Next/Prev/Select/Close.
+        assert_eq!(all().count(), 307);
     }
 
     #[test]
