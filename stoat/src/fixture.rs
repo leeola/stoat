@@ -21,6 +21,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod harness;
+
+pub use harness::LiveHarness;
+
 /// Unix epoch seconds for the first commit's author/committer clock. Each
 /// subsequent commit advances by one second, keeping the timeline monotonic
 /// while fully determined by commit order rather than wall-clock time.
