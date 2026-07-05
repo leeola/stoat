@@ -1,13 +1,15 @@
 use crate::buffer_registry::DirtyBuffer;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::Path;
 
 /// Modal that lists every dirty buffer when [`stoat_action::QuitAll`]
-/// fires with unsaved work pending. The user confirms with `y` / Enter
-/// to discard and quit, or cancels with `n` / Esc / Ctrl-c. Constructed
-/// fresh on every QuitAll dispatch; pre-rendered display strings are
-/// captured at construction so the renderer doesn't need to borrow back
-/// into [`crate::workspace::Workspace`] state.
+/// fires with unsaved work pending. Confirming the prompt discards the
+/// listed buffers and quits. Cancelling dismisses it without quitting.
+/// The `modal == quit_confirm` keymap block binds those keys to
+/// [`stoat_action::QuitAllConfirm`] and [`stoat_action::QuitAllCancel`].
+///
+/// Constructed fresh on every QuitAll dispatch. Pre-rendered display
+/// strings are captured at construction so the renderer doesn't need to
+/// borrow back into [`crate::workspace::Workspace`] state.
 pub struct QuitAllConfirm {
     entries: Vec<DirtyEntry>,
 }
@@ -15,15 +17,6 @@ pub struct QuitAllConfirm {
 /// One dirty-buffer row in the modal.
 pub struct DirtyEntry {
     pub display: String,
-}
-
-pub enum ConfirmOutcome {
-    /// Re-render but keep the modal open.
-    None,
-    /// User cancelled; caller should drop the modal.
-    Cancel,
-    /// User confirmed; caller should treat this as a quit signal.
-    Confirm,
 }
 
 impl QuitAllConfirm {
@@ -46,23 +39,12 @@ impl QuitAllConfirm {
     pub fn entries(&self) -> &[DirtyEntry] {
         &self.entries
     }
-
-    pub fn handle_key(&mut self, key: KeyEvent) -> ConfirmOutcome {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => ConfirmOutcome::Confirm,
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => ConfirmOutcome::Cancel,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                ConfirmOutcome::Cancel
-            },
-            _ => ConfirmOutcome::None,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{buffer::BufferId, test_harness::keys};
+    use crate::buffer::BufferId;
     use std::path::PathBuf;
 
     fn dirty(id: u64, path: Option<&str>) -> DirtyBuffer {
@@ -93,58 +75,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["<scratch>"]
         );
-    }
-
-    #[test]
-    fn y_confirms() {
-        let mut modal = QuitAllConfirm::new(&[dirty(1, Some("/r/a.rs"))], Path::new("/r"));
-        assert!(matches!(
-            modal.handle_key(keys::key(KeyCode::Char('y'))),
-            ConfirmOutcome::Confirm
-        ));
-    }
-
-    #[test]
-    fn enter_confirms() {
-        let mut modal = QuitAllConfirm::new(&[dirty(1, Some("/r/a.rs"))], Path::new("/r"));
-        assert!(matches!(
-            modal.handle_key(keys::key(KeyCode::Enter)),
-            ConfirmOutcome::Confirm
-        ));
-    }
-
-    #[test]
-    fn n_cancels() {
-        let mut modal = QuitAllConfirm::new(&[dirty(1, Some("/r/a.rs"))], Path::new("/r"));
-        assert!(matches!(
-            modal.handle_key(keys::key(KeyCode::Char('n'))),
-            ConfirmOutcome::Cancel
-        ));
-    }
-
-    #[test]
-    fn esc_cancels() {
-        let mut modal = QuitAllConfirm::new(&[dirty(1, Some("/r/a.rs"))], Path::new("/r"));
-        assert!(matches!(
-            modal.handle_key(keys::key(KeyCode::Esc)),
-            ConfirmOutcome::Cancel
-        ));
-    }
-
-    #[test]
-    fn ctrl_c_cancels() {
-        let mut modal = QuitAllConfirm::new(&[dirty(1, Some("/r/a.rs"))], Path::new("/r"));
-        let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(matches!(modal.handle_key(event), ConfirmOutcome::Cancel));
-    }
-
-    #[test]
-    fn other_keys_keep_modal_open() {
-        let mut modal = QuitAllConfirm::new(&[dirty(1, Some("/r/a.rs"))], Path::new("/r"));
-        assert!(matches!(
-            modal.handle_key(keys::key(KeyCode::Char('x'))),
-            ConfirmOutcome::None
-        ));
     }
 
     #[test]

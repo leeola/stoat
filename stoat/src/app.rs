@@ -17,7 +17,7 @@ use crate::{
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
     pane::{FocusTarget, NodeId, Placement, View},
-    quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
+    quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
     register,
     review_session::ReviewSource,
@@ -25,7 +25,7 @@ use crate::{
     term_session::TermId,
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
-    workspace_picker::{PickerOutcome, WorkspacePicker},
+    workspace_picker::WorkspacePicker,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -2728,14 +2728,6 @@ impl Stoat {
             // (Escape -> RunModalDismiss) resolve through the keymap.
         }
 
-        if self.workspace_picker.is_some() {
-            return self.dispatch_workspace_picker_key(key);
-        }
-
-        if self.quit_all_confirm.is_some() {
-            return self.dispatch_quit_all_confirm_key(key);
-        }
-
         if self.jumplist_picker.is_some() {
             return self.dispatch_jumplist_picker_key(key);
         }
@@ -4720,46 +4712,6 @@ impl Stoat {
         crate::completion::accept::pump_completion_accept(self);
     }
 
-    fn dispatch_workspace_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        let outcome = match self.workspace_picker.as_mut() {
-            Some(picker) => picker.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PickerOutcome::None => UpdateEffect::Redraw,
-            PickerOutcome::Close => {
-                self.workspace_picker = None;
-                UpdateEffect::Redraw
-            },
-            PickerOutcome::Select(id) => {
-                self.workspace_picker = None;
-                if id == self.active_workspace {
-                    return UpdateEffect::Redraw;
-                }
-                self.save_workspace(self.active_workspace());
-                self.active_workspace = id;
-                let size = self.size;
-                self.active_workspace_mut().layout(size);
-                UpdateEffect::Redraw
-            },
-        }
-    }
-
-    fn dispatch_quit_all_confirm_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        let outcome = match self.quit_all_confirm.as_mut() {
-            Some(modal) => modal.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            ConfirmOutcome::None => UpdateEffect::Redraw,
-            ConfirmOutcome::Cancel => {
-                self.quit_all_confirm = None;
-                UpdateEffect::Redraw
-            },
-            ConfirmOutcome::Confirm => UpdateEffect::Quit,
-        }
-    }
-
     fn dispatch_jumplist_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
         use crate::jumplist_picker::PickerOutcome;
         let outcome = match self.jumplist_picker.as_mut() {
@@ -5916,6 +5868,22 @@ mod tests {
         h.stoat.handle_key(bare(KeyCode::Char('x')));
         assert!(h.stoat.user_vars.get("mode").is_none());
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    #[test]
+    fn workspace_picker_binding_is_rebindable() {
+        let mut h = Stoat::test();
+        h.stoat.keymap =
+            compile_keymap("on key { modal == workspace_picker { q -> WorkspacePickerClose(); } }");
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchWorkspace);
+        assert!(h.stoat.workspace_picker.is_some());
+
+        // `q` is not a default picker binding, so closing on it proves the
+        // `modal == workspace_picker` block drives the picker, not hardcoded
+        // dispatch.
+        h.stoat.handle_key(bare(KeyCode::Char('q')));
+        assert!(h.stoat.workspace_picker.is_none());
     }
 
     #[test]

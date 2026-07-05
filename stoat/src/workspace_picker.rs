@@ -2,13 +2,15 @@ use crate::{
     paths,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use slotmap::SlotMap;
 use std::path::{Path, PathBuf};
 
-/// Modal list of open workspaces. Rendered as a centered overlay when
-/// [`SwitchWorkspace`] fires; navigates between in-memory workspaces and
-/// emits [`PickerOutcome::Select`] once the user confirms a row.
+/// Modal list of open workspaces, rendered as a centered overlay when
+/// the `SwitchWorkspace` action fires.
+///
+/// Navigation and selection route through the `modal == workspace_picker`
+/// keymap block. [`Self::select_next`] and [`Self::select_prev`] move the
+/// highlight, and [`Self::selected_id`] reports the row to switch to.
 pub struct WorkspacePicker {
     entries: Vec<PickerEntry>,
     selected: usize,
@@ -26,16 +28,6 @@ pub struct PickerEntry {
     pub buffer_count: usize,
     pub run_count: usize,
     pub editor_count: usize,
-}
-
-pub enum PickerOutcome {
-    /// Re-render but keep the picker open.
-    None,
-    /// User cancelled; caller should drop the picker.
-    Close,
-    /// User selected a row; caller should switch to this workspace and drop
-    /// the picker.
-    Select(WorkspaceId),
 }
 
 /// Rendering strategy for the picker's per-row path column. Selected once
@@ -146,33 +138,6 @@ impl WorkspacePicker {
             ("\u{2191}", "prev".to_string()),
         ]
     }
-
-    pub fn handle_key(&mut self, key: KeyEvent) -> PickerOutcome {
-        match key.code {
-            KeyCode::Esc => PickerOutcome::Close,
-            KeyCode::Enter => match self.entries.get(self.selected) {
-                Some(entry) => PickerOutcome::Select(entry.id),
-                None => PickerOutcome::Close,
-            },
-            KeyCode::Up => {
-                move_selection(self.entries.len(), &mut self.selected, -1);
-                PickerOutcome::None
-            },
-            KeyCode::Down => {
-                move_selection(self.entries.len(), &mut self.selected, 1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                move_selection(self.entries.len(), &mut self.selected, -1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                move_selection(self.entries.len(), &mut self.selected, 1);
-                PickerOutcome::None
-            },
-            _ => PickerOutcome::None,
-        }
-    }
 }
 
 fn move_selection(len: usize, selected: &mut usize, delta: i32) {
@@ -188,7 +153,7 @@ fn move_selection(len: usize, selected: &mut usize, delta: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_harness::keys, workspace::Workspace};
+    use crate::workspace::Workspace;
     use std::sync::Arc;
     use stoat_scheduler::{Executor, TestScheduler};
 
@@ -220,57 +185,30 @@ mod tests {
     }
 
     #[test]
-    fn down_and_up_clamp_at_ends() {
+    fn select_next_prev_clamp_at_ends() {
         let exec = executor();
         let (workspaces, active) = slotmap_with_two(&exec);
         let mut picker = WorkspacePicker::new(&workspaces, active);
 
-        picker.handle_key(keys::key(KeyCode::Down));
+        picker.select_next();
         assert_eq!(picker.selected(), 1);
-        picker.handle_key(keys::key(KeyCode::Down));
+        picker.select_next();
         assert_eq!(picker.selected(), 1);
-        picker.handle_key(keys::key(KeyCode::Up));
+        picker.select_prev();
         assert_eq!(picker.selected(), 0);
-        picker.handle_key(keys::key(KeyCode::Up));
-        assert_eq!(picker.selected(), 0);
-    }
-
-    #[test]
-    fn ctrl_n_and_ctrl_p_move_selection() {
-        let exec = executor();
-        let (workspaces, active) = slotmap_with_two(&exec);
-        let mut picker = WorkspacePicker::new(&workspaces, active);
-
-        picker.handle_key(keys::ctrl('n'));
-        assert_eq!(picker.selected(), 1);
-        picker.handle_key(keys::ctrl('p'));
+        picker.select_prev();
         assert_eq!(picker.selected(), 0);
     }
 
     #[test]
-    fn enter_selects_focused_entry() {
+    fn selected_id_tracks_selection() {
         let exec = executor();
         let (workspaces, active) = slotmap_with_two(&exec);
         let mut picker = WorkspacePicker::new(&workspaces, active);
 
-        picker.handle_key(keys::key(KeyCode::Down));
-        let sibling_id = picker.entries()[1].id;
-        match picker.handle_key(keys::key(KeyCode::Enter)) {
-            PickerOutcome::Select(id) => assert_eq!(id, sibling_id),
-            _ => panic!("expected Select outcome"),
-        }
-    }
-
-    #[test]
-    fn escape_closes_picker() {
-        let exec = executor();
-        let (workspaces, active) = slotmap_with_two(&exec);
-        let mut picker = WorkspacePicker::new(&workspaces, active);
-
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Esc)),
-            PickerOutcome::Close
-        ));
+        assert_eq!(picker.selected_id(), Some(active));
+        picker.select_next();
+        assert_eq!(picker.selected_id(), Some(picker.entries()[1].id));
     }
 
     #[test]

@@ -155,6 +155,22 @@ on key {
         PageDown -> HelpScrollDetailDown();
         BackTab -> HelpScopeToggle();
     }
+    modal == workspace_picker {
+        Up -> WorkspacePickerPrev();
+        Down -> WorkspacePickerNext();
+        Ctrl-p -> WorkspacePickerPrev();
+        Ctrl-n -> WorkspacePickerNext();
+        Enter -> WorkspacePickerSelect();
+        Escape -> WorkspacePickerClose();
+    }
+    modal == quit_confirm {
+        y -> QuitAllConfirm();
+        Y -> QuitAllConfirm();
+        Enter -> QuitAllConfirm();
+        n -> QuitAllCancel();
+        N -> QuitAllCancel();
+        Escape -> QuitAllCancel();
+    }
     mode == normal {
         Enter -> RunSubmit();
         q -> ReplayMacro();
