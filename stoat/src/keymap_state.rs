@@ -11,35 +11,22 @@ use stoat_action::Action;
 
 /// The predicate field names [`StoatKeymapState`] derives itself, which a
 /// `SetVar` user variable may not shadow.
-pub(crate) const BUILTIN_FIELDS: &[&str] = &[
-    "mode",
-    "pane",
-    "view",
-    "modal",
-    "palette_open",
-    "help_open",
-    "finder_open",
-    "rebase_exec",
-];
+pub(crate) const BUILTIN_FIELDS: &[&str] = &["mode", "pane", "view", "modal", "rebase_exec"];
 
-/// The still-hand-set modal booleans a keymap state carries besides `mode`.
+/// The hand-set booleans a keymap state carries besides the derived
+/// `mode`/`pane`/`view`/`modal` predicates.
 ///
-/// Passed to [`StoatKeymapState::with_flags`] so a caller sets only the flags it
-/// needs and the derived `pane`/`view`/`modal` predicates do not ripple through
-/// its signature. Retired incrementally by the keymap rework's cleanup step.
+/// Passed to [`StoatKeymapState::with_flags`] so callers that cannot run the
+/// full [`StoatKeymapState::from_stoat`] derivation (e.g. while holding a
+/// workspace borrow) still set the fields they need without those predicates
+/// rippling through the signature.
 #[derive(Default)]
 pub(crate) struct Flags {
-    pub(crate) palette_open: bool,
-    pub(crate) help_open: bool,
-    pub(crate) finder_open: bool,
     pub(crate) rebase_exec: bool,
 }
 
 pub(crate) struct StoatKeymapState {
     mode_value: StateValue,
-    palette_open: StateValue,
-    help_open: StateValue,
-    finder_open: StateValue,
     rebase_exec: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
@@ -64,9 +51,6 @@ impl StoatKeymapState {
     pub(crate) fn with_flags(mode: &str, flags: Flags) -> Self {
         Self {
             mode_value: StateValue::String(mode.into()),
-            palette_open: StateValue::Bool(flags.palette_open),
-            help_open: StateValue::Bool(flags.help_open),
-            finder_open: StateValue::Bool(flags.finder_open),
             rebase_exec: StateValue::Bool(flags.rebase_exec),
             pane: None,
             view: None,
@@ -98,9 +82,6 @@ impl StoatKeymapState {
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         let ws = stoat.active_workspace();
         let flags = Flags {
-            palette_open: stoat.command_palette.is_some(),
-            help_open: stoat.help.is_some(),
-            finder_open: stoat.file_finder.is_some(),
             rebase_exec: ws.rebase_active.is_some(),
         };
         Self {
@@ -117,9 +98,6 @@ impl KeymapState for StoatKeymapState {
     fn get(&self, field: &str) -> Option<&StateValue> {
         match field {
             "mode" => Some(&self.mode_value),
-            "palette_open" => Some(&self.palette_open),
-            "help_open" => Some(&self.help_open),
-            "finder_open" => Some(&self.finder_open),
             "rebase_exec" => Some(&self.rebase_exec),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),

@@ -577,9 +577,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
         let state = StoatKeymapState::with_flags(
             &mode,
             Flags {
-                palette_open: stoat.command_palette.is_some(),
-                help_open: stoat.help.is_some(),
-                finder_open: stoat.file_finder.is_some(),
                 rebase_exec: ws.rebase_active.is_some(),
             },
         )
