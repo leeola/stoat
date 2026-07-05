@@ -190,6 +190,7 @@ pub enum ActionKind {
     OpenRun,
     RunSubmit,
     RunInterrupt,
+    RunModalDismiss,
     Run,
     SpawnClaude,
     Terminal,

@@ -425,6 +425,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::Terminal => terminal::open_terminal_pane(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),
+        ActionKind::RunModalDismiss => run::run_modal_dismiss(stoat),
         ActionKind::RunHistoryPrev => run::run_history_prev(stoat),
         ActionKind::RunHistoryNext => run::run_history_next(stoat),
         ActionKind::HelpSelectPrev => help::help_select_prev(stoat),

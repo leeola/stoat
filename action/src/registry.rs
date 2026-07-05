@@ -83,7 +83,9 @@ use crate::{
             ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
             ReviewUnstageChunk, ToggleDiff,
         },
-        run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
+        run::{
+            OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
+        },
         terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace,
@@ -531,6 +533,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Terminal::DEF, |_| Ok(Box::new(Terminal)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
+    add(RunModalDismiss::DEF, |_| Ok(Box::new(RunModalDismiss)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
     add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
     add(HelpSelectPrev::DEF, |_| Ok(Box::new(HelpSelectPrev)));
@@ -823,6 +826,7 @@ mod tests {
         "terminal",
         "RunSubmit",
         "RunInterrupt",
+        "RunModalDismiss",
         "RunHistoryPrev",
         "RunHistoryNext",
         "ToggleDockRight",
@@ -1046,7 +1050,7 @@ mod tests {
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
         // + 1 GotoDeclaration.
-        assert_eq!(all().count(), 292);
+        assert_eq!(all().count(), 293);
     }
 
     #[test]

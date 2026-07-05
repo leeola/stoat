@@ -106,6 +106,18 @@ pub(super) fn run_interrupt(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Dismiss the finished modal run, dropping its overlay and removing the run.
+///
+/// Bound under `modal == run`, reachable only once the run has finished
+/// because the in-flight run swallows keys before the keymap sees them.
+pub(super) fn run_modal_dismiss(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(run_id) = stoat.modal_run.take() else {
+        return UpdateEffect::None;
+    };
+    stoat.active_workspace_mut().runs.remove(run_id);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn run_history_prev(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
     let ws = &mut stoat.workspaces[active_idx];

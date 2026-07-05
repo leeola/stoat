@@ -33,6 +33,15 @@ define_action!(
 );
 
 define_action!(
+    RunModalDismissDef,
+    RunModalDismiss,
+    "RunModalDismiss",
+    ActionKind::RunModalDismiss,
+    "dismiss finished run",
+    "Remove a finished modal run and close its overlay."
+);
+
+define_action!(
     RunHistoryPrevDef,
     RunHistoryPrev,
     "RunHistoryPrev",
