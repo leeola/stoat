@@ -12,6 +12,7 @@ pub(crate) mod marks;
 pub(crate) mod movement;
 mod palette;
 mod pane;
+mod picker;
 mod prompt;
 mod rebase;
 mod review;
@@ -313,6 +314,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenDiagnosticsPicker => open_diagnostics_picker(stoat),
         ActionKind::OpenWorkspaceDiagnosticsPicker => open_workspace_diagnostics_picker(stoat),
         ActionKind::OpenGlobalSearch => open_global_search(stoat),
+        ActionKind::JumplistPickerNext => picker::jumplist_picker_next(stoat),
+        ActionKind::JumplistPickerPrev => picker::jumplist_picker_prev(stoat),
+        ActionKind::JumplistPickerSelect => picker::jumplist_picker_select(stoat),
+        ActionKind::JumplistPickerClose => picker::jumplist_picker_close(stoat),
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
         },

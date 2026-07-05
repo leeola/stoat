@@ -2728,10 +2728,6 @@ impl Stoat {
             // (Escape -> RunModalDismiss) resolve through the keymap.
         }
 
-        if self.jumplist_picker.is_some() {
-            return self.dispatch_jumplist_picker_key(key);
-        }
-
         if self.diagnostics_picker.is_some() {
             return self.dispatch_diagnostics_picker_key(key);
         }
@@ -4712,32 +4708,6 @@ impl Stoat {
         crate::completion::accept::pump_completion_accept(self);
     }
 
-    fn dispatch_jumplist_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        use crate::jumplist_picker::PickerOutcome;
-        let outcome = match self.jumplist_picker.as_mut() {
-            Some(picker) => picker.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PickerOutcome::None => UpdateEffect::Redraw,
-            PickerOutcome::Close => {
-                self.jumplist_picker = None;
-                UpdateEffect::Redraw
-            },
-            PickerOutcome::Select(idx) => {
-                let Some(picker) = self.jumplist_picker.take() else {
-                    return UpdateEffect::None;
-                };
-                let target_offset = match picker.entries().get(idx) {
-                    Some(entry) => entry.offset,
-                    None => return UpdateEffect::Redraw,
-                };
-                self.jump_focused_to_offset(target_offset, idx);
-                UpdateEffect::Redraw
-            },
-        }
-    }
-
     fn dispatch_diagnostics_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
         use crate::diagnostics_picker::PickerOutcome;
         let outcome = match self.diagnostics_picker.as_mut() {
@@ -4899,7 +4869,7 @@ impl Stoat {
         });
     }
 
-    fn jump_focused_to_offset(&mut self, offset: usize, jumplist_idx: usize) {
+    pub(crate) fn jump_focused_to_offset(&mut self, offset: usize, jumplist_idx: usize) {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
             FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {

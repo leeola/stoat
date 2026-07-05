@@ -171,6 +171,14 @@ on key {
         N -> QuitAllCancel();
         Escape -> QuitAllCancel();
     }
+    modal == jumplist {
+        Up -> JumplistPickerPrev();
+        Down -> JumplistPickerNext();
+        Ctrl-p -> JumplistPickerPrev();
+        Ctrl-n -> JumplistPickerNext();
+        Enter -> JumplistPickerSelect();
+        Escape -> JumplistPickerClose();
+    }
     mode == normal {
         Enter -> RunSubmit();
         q -> ReplayMacro();

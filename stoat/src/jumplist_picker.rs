@@ -1,11 +1,14 @@
 use crate::{buffer::TextBuffer, jumplist::JumpList};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Modal listing every entry in the focused editor's [`JumpList`].
 /// Constructed from a snapshot of the jumplist's offsets paired with
 /// (line, column, snippet) pre-formatted for render. The picker does
-/// not borrow back into the workspace, so render and key dispatch can
-/// run without re-entering buffer locks.
+/// not borrow back into the workspace, so render can run without
+/// re-entering buffer locks.
+///
+/// Navigation and selection route through the `modal == jumplist` keymap
+/// block. [`Self::select_next`] and [`Self::select_prev`] move the
+/// highlight, and [`Self::selected`] reports the row to jump to.
 pub struct JumplistPicker {
     entries: Vec<JumplistEntry>,
     selected: usize,
@@ -17,16 +20,6 @@ pub struct JumplistEntry {
     pub line: u32,
     pub column: u32,
     pub snippet: String,
-}
-
-pub enum PickerOutcome {
-    /// Re-render but keep the modal open.
-    None,
-    /// User cancelled; caller should drop the modal.
-    Close,
-    /// User selected entry index `usize`; caller should jump and drop
-    /// the modal.
-    Select(usize),
 }
 
 const SNIPPET_MAX_CHARS: usize = 80;
@@ -83,6 +76,14 @@ impl JumplistPicker {
         self.cursor_idx
     }
 
+    pub fn select_next(&mut self) {
+        self.move_selection(1);
+    }
+
+    pub fn select_prev(&mut self) {
+        self.move_selection(-1);
+    }
+
     pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {
         vec![
             ("Enter", "jump".to_string()),
@@ -90,33 +91,6 @@ impl JumplistPicker {
             ("Ctrl-N", "next".to_string()),
             ("Ctrl-P", "prev".to_string()),
         ]
-    }
-
-    pub fn handle_key(&mut self, key: KeyEvent) -> PickerOutcome {
-        match key.code {
-            KeyCode::Esc => PickerOutcome::Close,
-            KeyCode::Enter => match self.entries.get(self.selected) {
-                Some(_) => PickerOutcome::Select(self.selected),
-                None => PickerOutcome::Close,
-            },
-            KeyCode::Up => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Down => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            _ => PickerOutcome::None,
-        }
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -132,7 +106,7 @@ impl JumplistPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{buffer::BufferId, test_harness::keys};
+    use crate::buffer::BufferId;
 
     fn buf(text: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(1), text)
@@ -178,38 +152,16 @@ mod tests {
     }
 
     #[test]
-    fn enter_returns_select() {
-        let buffer = buf("a\nb\n");
-        let jl = jumplist(&[0, 2]);
-        let mut picker = JumplistPicker::new(&jl, &buffer);
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Enter)),
-            PickerOutcome::Select(_)
-        ));
-    }
-
-    #[test]
-    fn esc_returns_close() {
-        let buffer = buf("a\nb\n");
-        let jl = jumplist(&[0]);
-        let mut picker = JumplistPicker::new(&jl, &buffer);
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Esc)),
-            PickerOutcome::Close
-        ));
-    }
-
-    #[test]
-    fn down_and_up_clamp_at_ends() {
+    fn select_next_prev_clamp_at_ends() {
         let buffer = buf("a\nb\nc\n");
         let jl = jumplist(&[0, 2, 4]);
         let mut picker = JumplistPicker::new(&jl, &buffer);
-        picker.handle_key(keys::key(KeyCode::Up));
-        picker.handle_key(keys::key(KeyCode::Up));
+        picker.select_prev();
+        picker.select_prev();
         assert_eq!(picker.selected(), 0);
-        picker.handle_key(keys::key(KeyCode::Down));
-        picker.handle_key(keys::key(KeyCode::Down));
-        picker.handle_key(keys::key(KeyCode::Down));
+        picker.select_next();
+        picker.select_next();
+        picker.select_next();
         assert_eq!(picker.selected(), 2);
     }
 

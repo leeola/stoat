@@ -65,6 +65,9 @@ use crate::{
             FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight, ToggleDockLeft,
             ToggleDockRight,
         },
+        picker::{
+            JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect,
+        },
         prompt::{
             CancelPromptInput, PalettePageDown, PalettePageUp, PaletteScopeToggle,
             PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline, SubmitPromptInput,
@@ -331,6 +334,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenWorkspaceDiagnosticsPicker))
     });
     add(OpenGlobalSearch::DEF, |_| Ok(Box::new(OpenGlobalSearch)));
+    add(JumplistPickerNext::DEF, |_| {
+        Ok(Box::new(JumplistPickerNext))
+    });
+    add(JumplistPickerPrev::DEF, |_| {
+        Ok(Box::new(JumplistPickerPrev))
+    });
+    add(JumplistPickerSelect::DEF, |_| {
+        Ok(Box::new(JumplistPickerSelect))
+    });
+    add(JumplistPickerClose::DEF, |_| {
+        Ok(Box::new(JumplistPickerClose))
+    });
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
     add(KeepSelections::DEF, |_| Ok(Box::new(KeepSelections)));
     add(RemoveSelections::DEF, |_| Ok(Box::new(RemoveSelections)));
@@ -855,6 +870,10 @@ mod tests {
         "WorkspacePickerPrev",
         "WorkspacePickerSelect",
         "WorkspacePickerClose",
+        "JumplistPickerNext",
+        "JumplistPickerPrev",
+        "JumplistPickerSelect",
+        "JumplistPickerClose",
         "CloseWorkspace",
         "HelpSelectPrev",
         "HelpSelectNext",
@@ -1071,7 +1090,8 @@ mod tests {
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
         // + 1 GotoDeclaration.
-        assert_eq!(all().count(), 299);
+        // + 4 JumplistPicker Next/Prev/Select/Close.
+        assert_eq!(all().count(), 303);
     }
 
     #[test]
