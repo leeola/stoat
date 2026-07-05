@@ -326,6 +326,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::LocationPickerPrev => picker::location_picker_prev(stoat),
         ActionKind::LocationPickerSelect => picker::location_picker_select(stoat),
         ActionKind::LocationPickerClose => picker::location_picker_close(stoat),
+        ActionKind::GlobalSearchPickerNext => picker::global_search_picker_next(stoat),
+        ActionKind::GlobalSearchPickerPrev => picker::global_search_picker_prev(stoat),
+        ActionKind::GlobalSearchPickerSelect => picker::global_search_picker_select(stoat),
+        ActionKind::GlobalSearchPickerClose => picker::global_search_picker_close(stoat),
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
         },
@@ -1226,6 +1230,23 @@ mod tests {
             UpdateEffect::Redraw
         );
         assert!(h.stoat.global_search.is_none());
+    }
+
+    #[test]
+    fn global_search_picker_enter_opens_and_jumps() {
+        let mut h = Stoat::test();
+        let root = std::path::PathBuf::from("/repo");
+        h.fake_fs().insert_file(root.join("a.rs"), b"alpha\nbeta\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
+        h.type_text("beta");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert!(h.stoat.global_search.is_some());
+
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        h.settle();
+        assert!(h.stoat.global_search.is_none());
+        assert_eq!(editor::head_offsets(&mut h.stoat), vec![6]);
     }
 
     #[test]

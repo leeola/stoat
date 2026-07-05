@@ -2728,10 +2728,6 @@ impl Stoat {
             // (Escape -> RunModalDismiss) resolve through the keymap.
         }
 
-        if self.global_search.is_some() {
-            return self.dispatch_global_search_key(key);
-        }
-
         if let Some(agent_id) = self.term_input_target() {
             return self.route_key_to_term(agent_id, key);
         }
@@ -4747,34 +4743,7 @@ impl Stoat {
         });
     }
 
-    fn dispatch_global_search_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        use crate::global_search::PickerOutcome;
-        let outcome = match self.global_search.as_mut() {
-            Some(picker) => picker.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PickerOutcome::None => UpdateEffect::Redraw,
-            PickerOutcome::Close => {
-                self.global_search = None;
-                UpdateEffect::Redraw
-            },
-            PickerOutcome::Select(idx) => {
-                let Some(picker) = self.global_search.take() else {
-                    return UpdateEffect::None;
-                };
-                let target = match picker.matches().get(idx) {
-                    Some(m) => (m.path.clone(), m.offset),
-                    None => return UpdateEffect::Redraw,
-                };
-                action_handlers::dispatch(self, &OpenFile { path: target.0 });
-                self.jump_focused_to_match_offset(target.1);
-                UpdateEffect::Redraw
-            },
-        }
-    }
-
-    fn jump_focused_to_match_offset(&mut self, offset: usize) {
+    pub(crate) fn jump_focused_to_match_offset(&mut self, offset: usize) {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
             FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {

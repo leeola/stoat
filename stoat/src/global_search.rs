@@ -1,5 +1,4 @@
 use crate::{host::FsHost, input_view::InputView};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 
@@ -21,19 +20,14 @@ pub struct SearchMatch {
 }
 
 /// Modal showing the result list after a regex submit.
+///
+/// Navigation and selection route through the `modal == search` keymap
+/// block. [`Self::select_next`] and [`Self::select_prev`] move the
+/// highlight, and [`Self::selected`] reports the row to open.
 pub struct GlobalSearchPicker {
     matches: Vec<SearchMatch>,
     selected: usize,
     query: String,
-}
-
-pub enum PickerOutcome {
-    /// Re-render but keep the modal open.
-    None,
-    /// User cancelled; caller should drop the modal.
-    Close,
-    /// User selected match index `usize`; caller should open and jump.
-    Select(usize),
 }
 
 const SNIPPET_MAX_CHARS: usize = 80;
@@ -59,6 +53,14 @@ impl GlobalSearchPicker {
         &self.query
     }
 
+    pub fn select_next(&mut self) {
+        self.move_selection(1);
+    }
+
+    pub fn select_prev(&mut self) {
+        self.move_selection(-1);
+    }
+
     pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {
         vec![
             ("Enter", "open".to_string()),
@@ -66,33 +68,6 @@ impl GlobalSearchPicker {
             ("Ctrl-N", "next".to_string()),
             ("Ctrl-P", "prev".to_string()),
         ]
-    }
-
-    pub fn handle_key(&mut self, key: KeyEvent) -> PickerOutcome {
-        match key.code {
-            KeyCode::Esc => PickerOutcome::Close,
-            KeyCode::Enter => match self.matches.get(self.selected) {
-                Some(_) => PickerOutcome::Select(self.selected),
-                None => PickerOutcome::Close,
-            },
-            KeyCode::Up => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Down => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            _ => PickerOutcome::None,
-        }
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -169,6 +144,7 @@ fn line_snippet(text: &str, offset: usize) -> String {
 mod tests {
     use super::*;
     use crate::{host::FakeFs, test_harness::keys};
+    use crossterm::event::KeyCode;
 
     fn fake_with(files: &[(&str, &str)]) -> (FakeFs, PathBuf) {
         let fs = FakeFs::new();
@@ -252,33 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn picker_enter_returns_select() {
-        let mut picker = GlobalSearchPicker::new(
-            vec![SearchMatch {
-                path: PathBuf::from("/r/a.rs"),
-                offset: 0,
-                line: 1,
-                column: 1,
-                snippet: "hi".to_string(),
-            }],
-            "hi".into(),
-        );
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Enter)),
-            PickerOutcome::Select(0)
-        ));
-    }
-
-    #[test]
-    fn picker_esc_returns_close() {
-        let mut picker = GlobalSearchPicker::new(Vec::new(), "x".into());
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Esc)),
-            PickerOutcome::Close
-        ));
-    }
-
-    #[test]
     fn picker_navigation_clamps_at_ends() {
         let mut picker = GlobalSearchPicker::new(
             (0..3)
@@ -292,11 +241,11 @@ mod tests {
                 .collect(),
             "x".into(),
         );
-        picker.handle_key(keys::key(KeyCode::Up));
+        picker.select_prev();
         assert_eq!(picker.selected(), 0);
-        picker.handle_key(keys::key(KeyCode::Down));
-        picker.handle_key(keys::key(KeyCode::Down));
-        picker.handle_key(keys::key(KeyCode::Down));
+        picker.select_next();
+        picker.select_next();
+        picker.select_next();
         assert_eq!(picker.selected(), 2);
     }
 

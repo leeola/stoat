@@ -67,9 +67,10 @@ use crate::{
         },
         picker::{
             DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
-            DiagnosticsPickerSelect, JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev,
-            JumplistPickerSelect, LocationPickerClose, LocationPickerNext, LocationPickerPrev,
-            LocationPickerSelect,
+            DiagnosticsPickerSelect, GlobalSearchPickerClose, GlobalSearchPickerNext,
+            GlobalSearchPickerPrev, GlobalSearchPickerSelect, JumplistPickerClose,
+            JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect, LocationPickerClose,
+            LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
         },
         prompt::{
             CancelPromptInput, PalettePageDown, PalettePageUp, PaletteScopeToggle,
@@ -372,6 +373,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(LocationPickerClose::DEF, |_| {
         Ok(Box::new(LocationPickerClose))
+    });
+    add(GlobalSearchPickerNext::DEF, |_| {
+        Ok(Box::new(GlobalSearchPickerNext))
+    });
+    add(GlobalSearchPickerPrev::DEF, |_| {
+        Ok(Box::new(GlobalSearchPickerPrev))
+    });
+    add(GlobalSearchPickerSelect::DEF, |_| {
+        Ok(Box::new(GlobalSearchPickerSelect))
+    });
+    add(GlobalSearchPickerClose::DEF, |_| {
+        Ok(Box::new(GlobalSearchPickerClose))
     });
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
     add(KeepSelections::DEF, |_| Ok(Box::new(KeepSelections)));
@@ -909,6 +922,10 @@ mod tests {
         "LocationPickerPrev",
         "LocationPickerSelect",
         "LocationPickerClose",
+        "GlobalSearchPickerNext",
+        "GlobalSearchPickerPrev",
+        "GlobalSearchPickerSelect",
+        "GlobalSearchPickerClose",
         "CloseWorkspace",
         "HelpSelectPrev",
         "HelpSelectNext",
@@ -1128,7 +1145,8 @@ mod tests {
         // + 4 JumplistPicker Next/Prev/Select/Close.
         // + 4 DiagnosticsPicker Next/Prev/Select/Close.
         // + 4 LocationPicker Next/Prev/Select/Close.
-        assert_eq!(all().count(), 311);
+        // + 4 GlobalSearchPicker Next/Prev/Select/Close.
+        assert_eq!(all().count(), 315);
     }
 
     #[test]

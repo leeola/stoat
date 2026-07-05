@@ -131,3 +131,47 @@ define_action!(
     ActionPriority::Common,
     palette_visible = false
 );
+
+define_action!(
+    GlobalSearchPickerNextDef,
+    GlobalSearchPickerNext,
+    "GlobalSearchPickerNext",
+    ActionKind::GlobalSearchPickerNext,
+    "next search result",
+    "Move the global-search results picker's selection to the next row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    GlobalSearchPickerPrevDef,
+    GlobalSearchPickerPrev,
+    "GlobalSearchPickerPrev",
+    ActionKind::GlobalSearchPickerPrev,
+    "previous search result",
+    "Move the global-search results picker's selection to the previous row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    GlobalSearchPickerSelectDef,
+    GlobalSearchPickerSelect,
+    "GlobalSearchPickerSelect",
+    ActionKind::GlobalSearchPickerSelect,
+    "open selected result",
+    "Open the file under the global-search picker's selection and jump to the match.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    GlobalSearchPickerCloseDef,
+    GlobalSearchPickerClose,
+    "GlobalSearchPickerClose",
+    ActionKind::GlobalSearchPickerClose,
+    "close search results",
+    "Dismiss the global-search results picker without jumping.",
+    ActionPriority::Common,
+    palette_visible = false
+);
