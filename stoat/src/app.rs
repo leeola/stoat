@@ -409,6 +409,15 @@ pub struct Stoat {
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
     pub(crate) editor_drag: Option<(EditorId, BufferId)>,
+    /// Terminal cell the mouse last rested over a focused editor pane, or
+    /// `None` before any motion. The render resolves the diagnostic under it
+    /// to raise a hover popover. Motion events only arrive with mouse capture
+    /// enabled, so with capture off this stays `None` and only the cursor
+    /// trigger fires.
+    pub(crate) hover_cell: Option<(u16, u16)>,
+    /// Index of the diagnostic the mouse last resolved to, used to redraw only
+    /// when the hovered diagnostic changes rather than on every motion event.
+    pub(crate) hover_diag: Option<usize>,
     /// Set on `MouseEventKind::Down(Left)` over a split divider. While `Some`,
     /// `Drag(Left)` moves that boundary via `set_divider` and `Up(Left)` clears
     /// it. Takes over the pointer so pane handlers never see the drag.
@@ -932,6 +941,8 @@ impl Stoat {
             selected_register: None,
             pending_insert_register: false,
             editor_drag: None,
+            hover_cell: None,
+            hover_diag: None,
             divider_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
@@ -2243,6 +2254,9 @@ impl Stoat {
         ) {
             return self.handle_mouse_scroll(mouse);
         }
+        if let MouseEventKind::Moved = mouse.kind {
+            return self.handle_hover(mouse.column, mouse.row);
+        }
         // A divider drag owns the pointer once armed. It resizes on drag,
         // releases on up, and swallows the rest so pane handlers never see it.
         if self.divider_drag.is_some() {
@@ -2449,29 +2463,64 @@ impl Stoat {
     /// text area saturate to the nearest valid offset via
     /// `clip_point` (Bias::Left). Returns `true` when the event
     /// mutated state.
-    fn handle_editor_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
-        let target = {
-            let ws = self.active_workspace();
+    /// The focused pane's editor id and area, or `None` when the focus is not
+    /// on an editor view.
+    fn focused_editor_target(&self) -> Option<(EditorId, Rect)> {
+        let ws = self.active_workspace();
+        match ws.focus {
+            FocusTarget::SplitPane(pane_id) => {
+                let pane = ws.panes.pane(pane_id);
+                if let View::Editor(id) = pane.view {
+                    Some((id, pane.area))
+                } else {
+                    None
+                }
+            },
+            FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).and_then(|dock| {
+                if let View::Editor(id) = dock.view {
+                    Some((id, dock.area))
+                } else {
+                    None
+                }
+            }),
+        }
+    }
 
-            match ws.focus {
-                FocusTarget::SplitPane(pane_id) => {
-                    let pane = ws.panes.pane(pane_id);
-                    if let View::Editor(id) = pane.view {
-                        Some((id, pane.area))
-                    } else {
-                        None
-                    }
-                },
-                FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).and_then(|dock| {
-                    if let View::Editor(id) = dock.view {
-                        Some((id, dock.area))
-                    } else {
-                        None
-                    }
-                }),
-            }
+    /// Index of the diagnostic under the terminal cell `(column, row)` in the
+    /// focused editor pane, or `None` when the pointer is off a diagnostic or
+    /// off the focused editor.
+    fn resolve_hover_diagnostic(&mut self, column: u16, row: u16) -> Option<usize> {
+        let (col, row) = self.translate_mouse_to_focused(column, row)?;
+        let (editor_id, area) = self.focused_editor_target()?;
+        let offset = self.editor_screen_to_offset(editor_id, area, col, row)?;
+
+        let path = {
+            let ws = self.active_workspace();
+            let editor = ws.editors.get(editor_id)?;
+            ws.buffers.path_for(editor.buffer_id)?.to_owned()
         };
-        let Some((editor_id, area)) = target else {
+        let snapshot = {
+            let ws = self.active_workspace_mut();
+            ws.editors.get_mut(editor_id)?.display_map.snapshot()
+        };
+        let rope = snapshot.buffer_snapshot().rope();
+        crate::render::editor::diagnostic_at_offset(&self.diagnostics, &path, rope, offset)
+    }
+
+    /// Track the hovered cell and redraw only when the diagnostic under it
+    /// changes, so mouse motion within one span does not repaint every event.
+    fn handle_hover(&mut self, column: u16, row: u16) -> UpdateEffect {
+        self.hover_cell = Some((column, row));
+        let resolved = self.resolve_hover_diagnostic(column, row);
+        if self.hover_diag == resolved {
+            return UpdateEffect::None;
+        }
+        self.hover_diag = resolved;
+        UpdateEffect::Redraw
+    }
+
+    fn handle_editor_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
+        let Some((editor_id, area)) = self.focused_editor_target() else {
             return false;
         };
 
@@ -2588,16 +2637,10 @@ impl Stoat {
         }
         let ws = self.active_workspace_mut();
         let editor = ws.editors.get_mut(editor_id)?;
-        let display_row = editor.scroll_row + row as u32;
-        // Subtract the diagnostic gutter inset the last render shifted the text
-        // rect by, so a click lands on the glyph under the pointer. A click on
-        // the gutter column itself saturates to column 0.
-        let display_col = (col as u32).saturating_sub(editor.gutter_width as u32);
+        let scroll_row = editor.scroll_row;
+        let gutter_width = editor.gutter_width;
         let snapshot = editor.display_map.snapshot();
-        let raw = crate::display_map::DisplayPoint::new(display_row, display_col);
-        let clipped = snapshot.clip_point(raw, Bias::Left);
-        let buffer_pt = snapshot.display_to_buffer(clipped)?;
-        Some(snapshot.buffer_snapshot().rope().point_to_offset(buffer_pt))
+        crate::render::editor::display_cell_to_offset(&snapshot, scroll_row, gutter_width, col, row)
     }
 
     /// Returns the focused element's area-relative cell for the given
@@ -6383,6 +6426,52 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(c, Command::Bar(_))),
             "a severity mark emits a sub-cell bar, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn diagnostic_popover_emits_a_popover_frame_inside_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_diagnostic_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/diag-popover");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"let x = 1;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        // A span covering the start, so the cursor at offset zero sits inside it.
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: 0,
+                        character: 5,
+                    },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                message: "unexpected token".to_string(),
+                ..Default::default()
+            }],
+        );
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::Popover(_))),
+            "a diagnostic under the cursor emits a popover frame, got {cmds:?}"
         );
     }
 

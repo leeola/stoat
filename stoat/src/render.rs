@@ -109,6 +109,10 @@ pub(crate) struct FrameCtx<'a> {
     /// resolved from `editor.line_numbers` (default enabled). When unset the
     /// pane keeps the diagnostic-only gutter column.
     pub(crate) line_numbers: bool,
+    /// Terminal cell the mouse last rested over, or `None` when it has not
+    /// moved over a pane. The focused editor resolves the diagnostic under it
+    /// to raise a hover popover.
+    pub(crate) hover_cell: Option<(u16, u16)>,
     /// Latency readout for the status bar, or `None` before any frame has
     /// been painted. Present only under the `perf` feature.
     #[cfg(feature = "perf")]
@@ -237,6 +241,7 @@ pub(crate) fn frame(
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         stoatty: stoat.stoatty,
         line_numbers: stoat.settings.editor_line_numbers.unwrap_or(true),
+        hover_cell: stoat.hover_cell,
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),
     };

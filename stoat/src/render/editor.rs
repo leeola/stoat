@@ -14,10 +14,13 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 use std::{collections::BTreeMap, ops::Range, path::Path};
-use stoat_text::{cursor_offset, Point, Rope};
+use stoat_text::{cursor_offset, Bias, Point, Rope};
+use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
     bar::Bar,
     gutter::{Diagnostic, Gutter, GutterLine},
+    icon::Icon,
+    popover::Popover,
     ApcScene,
 };
 
@@ -47,6 +50,7 @@ pub(crate) fn render_editor(
         None,
         None,
         None,
+        None,
     );
 }
 
@@ -60,10 +64,11 @@ pub(crate) fn render_editor_with_overlay(
     is_focused: bool,
     stoatty: bool,
     line_numbers: bool,
+    hover_cell: Option<(u16, u16)>,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
-    scene: Option<&mut ApcScene>,
+    mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut Vec<UndercurlSpan>>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
@@ -106,6 +111,9 @@ pub(crate) fn render_editor_with_overlay(
         None => &empty_severity,
     };
     let severity = severity_colors(theme);
+    // The pane content area before the gutter inset below, used to resolve a
+    // mouse hover cell back to a buffer offset for the diagnostic popover.
+    let content_area = inner;
     let gutter_w = if line_numbers {
         draw_line_number_gutter(
             &snapshot,
@@ -117,7 +125,7 @@ pub(crate) fn render_editor_with_overlay(
             fallback_style,
             theme,
             stoatty,
-            scene,
+            scene.as_deref_mut(),
             buf,
         )
     } else if row_severity.is_empty() {
@@ -125,7 +133,10 @@ pub(crate) fn render_editor_with_overlay(
     } else {
         // Rich mode emits a sub-cell severity bar per row instead of the glyph,
         // engaging only inside stoatty with every severity color resolved to RGB.
-        let rich = scene.filter(|_| stoatty).zip(severity.as_ref());
+        let rich = scene
+            .as_deref_mut()
+            .filter(|_| stoatty)
+            .zip(severity.as_ref());
         match rich {
             Some((scene, colors)) => {
                 let area = Rect {
@@ -352,12 +363,68 @@ pub(crate) fn render_editor_with_overlay(
 
     if let Some((path, set)) = diagnostic_info {
         let cursor = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
+        let cursor_diag = diagnostic_at_offset(set, path, rope, cursor);
+        let hover_diag = hover_cell.and_then(|(hx, hy)| {
+            let col = hx.checked_sub(content_area.x)?;
+            let row = hy.checked_sub(content_area.y)?;
+            if col >= content_area.width || row >= content_area.height {
+                return None;
+            }
+            let offset = display_cell_to_offset(&snapshot, editor.scroll_row, gutter_w, col, row)?;
+            diagnostic_at_offset(set, path, rope, offset)
+        });
+
+        // The mouse hover wins over the cursor when both land in a span. The
+        // popover renders only inside stoatty with the severity and background
+        // colors resolved to RGB, and its presence suppresses the same
+        // diagnostic's redundant EOL message.
+        let mut suppress = None;
+        if let (Some(index), true) = (hover_diag.or(cursor_diag), stoatty) {
+            let bg = style_rgb(fallback_style.bg.or_else(|| {
+                theme
+                    .try_get(crate::theme::scope::UI_BACKGROUND)
+                    .and_then(|style| style.bg)
+            }));
+            if let (Some(scene), Some(colors), Some(bg)) = (scene, severity.as_ref(), bg) {
+                let diag = &set.get(path)[index];
+                let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+                let start = rope.point_to_offset(Point::new(
+                    diag.range.start.line,
+                    diag.range.start.character,
+                ));
+                let display = snapshot.buffer_to_display(rope.offset_to_point(start));
+                let rel_col = display.column.min(u32::from(content_area.width)) as u16;
+                let rel_row = display
+                    .row
+                    .saturating_sub(editor.scroll_row)
+                    .min(u32::from(content_area.height)) as u16;
+                let anchor_col = content_area
+                    .x
+                    .saturating_add(gutter_w)
+                    .saturating_add(rel_col);
+                let anchor_row = content_area.y.saturating_add(rel_row);
+                if render_diagnostic_popover(
+                    scene,
+                    buf,
+                    diag,
+                    severity_color(sev, colors),
+                    darken(bg),
+                    anchor_col,
+                    anchor_row,
+                    content_area,
+                ) {
+                    suppress = Some(index);
+                }
+            }
+        }
+
         paint_cursor_line_diagnostic(
             set,
             path,
             rope,
             &snapshot,
             cursor,
+            suppress,
             theme,
             editor.scroll_row,
             end_row,
@@ -761,6 +828,7 @@ fn paint_cursor_line_diagnostic(
     rope: &Rope,
     snapshot: &DisplaySnapshot,
     cursor: usize,
+    suppress: Option<usize>,
     theme: &crate::theme::Theme,
     scroll_row: u32,
     end_row: u32,
@@ -775,14 +843,19 @@ fn paint_cursor_line_diagnostic(
     }
 
     let cursor_line = cursor_point.row;
-    let Some(diag) = set
+    let Some((index, diag)) = set
         .get(path)
         .iter()
-        .filter(|d| d.range.start.line <= cursor_line && cursor_line <= d.range.end.line)
-        .min_by_key(|d| severity_rank(d.severity.unwrap_or(DiagnosticSeverity::ERROR)))
+        .enumerate()
+        .filter(|(_, d)| d.range.start.line <= cursor_line && cursor_line <= d.range.end.line)
+        .min_by_key(|(_, d)| severity_rank(d.severity.unwrap_or(DiagnosticSeverity::ERROR)))
     else {
         return;
     };
+    // The popover already shows this diagnostic, so skip the redundant EOL text.
+    if Some(index) == suppress {
+        return;
+    }
 
     let message = diag.message.lines().next().unwrap_or("");
     if message.is_empty() {
@@ -800,6 +873,174 @@ fn paint_cursor_line_diagnostic(
         }
         buf[(x as u16, y)].set_char(ch).set_style(style);
     }
+}
+
+/// Byte offset of the buffer position under the pane-content cell `(col, row)`,
+/// or `None` when it maps to no buffer point.
+///
+/// `col`/`row` are relative to the pane's content area. `gutter_width` is the
+/// column inset the gutter shifted the text by, subtracted so a cell over the
+/// glyph resolves to that glyph. This is the shared screen-to-offset math both
+/// mouse clicks and the diagnostic popover resolve through.
+pub(crate) fn display_cell_to_offset(
+    snapshot: &DisplaySnapshot,
+    scroll_row: u32,
+    gutter_width: u16,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    let display_row = scroll_row + row as u32;
+    let display_col = (col as u32).saturating_sub(gutter_width as u32);
+    let clipped = snapshot.clip_point(DisplayPoint::new(display_row, display_col), Bias::Left);
+    let buffer_pt = snapshot.display_to_buffer(clipped)?;
+    Some(snapshot.buffer_snapshot().rope().point_to_offset(buffer_pt))
+}
+
+/// Index into `set.get(path)` of the highest-severity diagnostic whose byte
+/// range contains `offset`, or `None` when none do.
+///
+/// The worst severity wins a tie, matching the gutter and the EOL message.
+pub(crate) fn diagnostic_at_offset(
+    set: &crate::diagnostics::DiagnosticSet,
+    path: &Path,
+    rope: &Rope,
+    offset: usize,
+) -> Option<usize> {
+    let rope_len = rope.len();
+    set.get(path)
+        .iter()
+        .enumerate()
+        .filter(|(_, diag)| {
+            let start = rope
+                .point_to_offset(Point::new(
+                    diag.range.start.line,
+                    diag.range.start.character,
+                ))
+                .min(rope_len);
+            let end = rope
+                .point_to_offset(Point::new(diag.range.end.line, diag.range.end.character))
+                .min(rope_len);
+            start < end && start <= offset && offset < end
+        })
+        .min_by_key(|(_, diag)| severity_rank(diag.severity.unwrap_or(DiagnosticSeverity::ERROR)))
+        .map(|(index, _)| index)
+}
+
+/// Place a `w`x`h` popover for a span whose start sits at cell `(anchor_col,
+/// anchor_row)`, clamped inside `pane`.
+///
+/// The box sits one row below the span, flipping to sit above it when it would
+/// cross the pane's bottom edge, and shifts left to stay within the right edge.
+fn popover_rect(anchor_col: u16, anchor_row: u16, w: u16, h: u16, pane: Rect) -> Rect {
+    let w = w.min(pane.width);
+    let h = h.min(pane.height);
+
+    let max_x = (pane.x + pane.width).saturating_sub(w);
+    let x = anchor_col.clamp(pane.x, max_x.max(pane.x));
+
+    let below = anchor_row.saturating_add(1);
+    let y = if below.saturating_add(h) <= pane.y + pane.height {
+        below
+    } else {
+        anchor_row.saturating_sub(h)
+    };
+    let max_y = (pane.y + pane.height).saturating_sub(h);
+    let y = y.clamp(pane.y, max_y.max(pane.y));
+
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
+}
+
+/// Scale each channel of `rgb` to 82% to darken a fill roughly 18% below the
+/// editor background, so a popover reads as a raised surface over the text.
+fn darken(rgb: [u8; 3]) -> [u8; 3] {
+    rgb.map(|c| (c as u16 * 82 / 100) as u8)
+}
+
+/// The `IconKind` for a severity. Hint has no icon of its own and shares Info's.
+fn icon_kind(sev: DiagnosticSeverity) -> IconKind {
+    match sev {
+        DiagnosticSeverity::ERROR => IconKind::Error,
+        DiagnosticSeverity::WARNING => IconKind::Warning,
+        DiagnosticSeverity::INFORMATION | DiagnosticSeverity::HINT => IconKind::Info,
+        _ => IconKind::Error,
+    }
+}
+
+/// The `&str` prefix of `s` up to `max` characters, respecting UTF-8 boundaries.
+fn clip_chars(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((byte, _)) => &s[..byte],
+        None => s,
+    }
+}
+
+/// Render `diag` as a floating popover anchored at `(anchor_col, anchor_row)`,
+/// with a severity icon in its first cell. Returns whether it rendered.
+///
+/// The content is the first four message lines, each clipped to 40 columns. The
+/// box is sized to fit and placed by [`popover_rect`]. A message with no text
+/// draws nothing.
+#[allow(clippy::too_many_arguments)]
+fn render_diagnostic_popover(
+    scene: &mut ApcScene,
+    buf: &mut Buffer,
+    diag: &lsp_types::Diagnostic,
+    color: [u8; 3],
+    fill: [u8; 3],
+    anchor_col: u16,
+    anchor_row: u16,
+    pane: Rect,
+) -> bool {
+    let lines: Vec<&str> = diag
+        .message
+        .lines()
+        .take(4)
+        .map(|l| clip_chars(l, 40))
+        .collect();
+    if lines.iter().all(|l| l.is_empty()) {
+        return false;
+    }
+    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let content = lines.join("\n");
+
+    let w = (longest as u16).saturating_add(4);
+    let h = (lines.len() as u16).saturating_add(2);
+    let rect = popover_rect(anchor_col, anchor_row, w, h, pane);
+    if rect.width < 3 || rect.height < 3 {
+        return false;
+    }
+
+    let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+    Popover {
+        fill,
+        border: color,
+        content_fg: color,
+        scale: 1,
+        offset: [3, 6],
+        content: &content,
+    }
+    .render(rect, buf, scene);
+    Icon {
+        kind: icon_kind(sev),
+        color,
+        size: 1,
+    }
+    .render(
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: 1,
+            height: 1,
+        },
+        buf,
+        scene,
+    );
+    true
 }
 
 /// Paint `style` over every character cell in the buffer byte range `range`,
@@ -1023,6 +1264,94 @@ mod tests {
             [0, 9, 10, 99, 100, 1000].map(super::decimal_digits),
             [1, 1, 2, 2, 3, 4]
         );
+    }
+
+    fn span_diag(start: u32, end: u32, sev: DiagnosticSeverity) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: start,
+                },
+                end: Position {
+                    line: 0,
+                    character: end,
+                },
+            },
+            severity: Some(sev),
+            message: String::new(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn diagnostic_at_offset_finds_worst_containing_span() {
+        use stoat_text::Rope;
+        let rope = Rope::from("let x = 1;\n");
+        let path = PathBuf::from("/a");
+        let mut set = crate::diagnostics::DiagnosticSet::new();
+        // A warning over just `x` [4,5) and an error over `x = 1` [4,9).
+        set.replace_for_path(
+            path.clone(),
+            vec![
+                span_diag(4, 5, DiagnosticSeverity::WARNING),
+                span_diag(4, 9, DiagnosticSeverity::ERROR),
+            ],
+        );
+
+        // Offset 4 is in both, so the worse severity (the error) wins.
+        assert_eq!(super::diagnostic_at_offset(&set, &path, &rope, 4), Some(1));
+        // Offset 7 is inside only the error span.
+        assert_eq!(super::diagnostic_at_offset(&set, &path, &rope, 7), Some(1));
+        // Offset 0 is outside both.
+        assert_eq!(super::diagnostic_at_offset(&set, &path, &rope, 0), None);
+    }
+
+    #[test]
+    fn popover_rect_sits_below_then_flips_and_clamps() {
+        use ratatui::layout::Rect;
+        let pane = Rect::new(0, 0, 40, 10);
+        // Fits below the anchor row.
+        assert_eq!(
+            super::popover_rect(5, 2, 12, 4, pane),
+            Rect::new(5, 3, 12, 4)
+        );
+        // Would cross the bottom, so it flips above the anchor.
+        assert_eq!(
+            super::popover_rect(5, 8, 12, 4, pane),
+            Rect::new(5, 4, 12, 4)
+        );
+        // Shifts left to stay within the right edge.
+        assert_eq!(
+            super::popover_rect(35, 2, 12, 4, pane),
+            Rect::new(28, 3, 12, 4)
+        );
+    }
+
+    #[test]
+    fn darken_scales_channels_to_82_percent() {
+        assert_eq!(super::darken([40, 44, 52]), [32, 36, 42]);
+        assert_eq!(super::darken([0, 100, 200]), [0, 82, 164]);
+    }
+
+    #[test]
+    fn clip_chars_respects_utf8_boundaries() {
+        assert_eq!(super::clip_chars("hello", 3), "hel");
+        assert_eq!(super::clip_chars("hi", 5), "hi");
+        assert_eq!(super::clip_chars("café", 3), "caf");
+    }
+
+    #[test]
+    fn icon_kind_maps_hint_to_info() {
+        use stoatty_protocol::command::IconKind;
+        assert!(matches!(
+            super::icon_kind(DiagnosticSeverity::HINT),
+            IconKind::Info
+        ));
+        assert!(matches!(
+            super::icon_kind(DiagnosticSeverity::ERROR),
+            IconKind::Error
+        ));
     }
 
     #[test]
