@@ -1,10 +1,11 @@
 //! Instanced modal-chrome panel pass.
 //!
-//! Draws each [`Panel`] as a soft drop shadow, an optional interior fill, and a
-//! hairline stroke frame with rounded corners. Unlike the opaque overlay pass, a
-//! panel is chrome layered with the grid rather than over it, so this pass runs
-//! before the grid text. The framed cells render over the fill, and text outside
-//! the frame renders over the shadow.
+//! Draws each [`Panel`] as a soft drop shadow confined to the box exterior, an
+//! optional interior fill, and a hairline stroke frame with rounded corners.
+//! Unlike the opaque overlay pass, a panel is chrome layered with the grid
+//! rather than over it, so this pass runs before the grid text. The framed cells
+//! render over the fill, and text outside the frame renders over the shadow. An
+//! unfilled panel leaves its interior showing the grid beneath it.
 
 use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};

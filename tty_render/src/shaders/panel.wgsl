@@ -18,8 +18,9 @@ const STYLE_HEAVY: u32 = 1u;
 const STYLE_DOUBLE: u32 = 2u;
 const STYLE_ROUNDED: u32 = 3u;
 
-// Drop-shadow color and peak alpha. The alpha falls off to zero across the
-// shadow margin, so this is the opacity directly beneath the box edge.
+// Drop-shadow color and peak alpha. The shadow paints only outside the box
+// exterior (fs_main gates it by interior coverage); this is its peak opacity
+// just past the box edge, falling to zero across the shadow margin.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const SHADOW_ALPHA: f32 = 0.4;
 
@@ -137,11 +138,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let shadow_min = in.box_min + offset;
     let shadow_max = in.box_max + offset;
     let d = max(vec2<f32>(0.0, 0.0), max(shadow_min - p, p - shadow_max));
+    // Gate the shadow to the box exterior so an unfilled panel's interior is not
+    // washed by its own shadow. `interior` is 1 inside the box and 0 outside.
     let shadow_alpha = select(
         0.0,
         SHADOW_ALPHA * (1.0 - smoothstep(0.0, margin, length(d))),
         margin > 0.0
-    );
+    ) * (1.0 - interior);
 
     // Composite bottom-up: the shadow, then the optional fill, then the stroke.
     var color = SHADOW_COLOR;
