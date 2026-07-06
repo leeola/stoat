@@ -32,6 +32,7 @@ use crate::{
         applicable_sources, CompletionContext, CompletionItem, CompletionPopup, CompletionSource,
     },
     host::{FsHost, LanguageServerFeature, LspHost, OffsetEncoding},
+    keymap_state,
     lsp::util,
     pane::{FocusTarget, View},
 };
@@ -129,10 +130,15 @@ pub(crate) fn record_dismiss(stoat: &mut Stoat) {
 }
 
 /// Per-event entry point. In insert mode with a focused
-/// [`View::Editor`] pane, computes the cursor context and arms a
-/// debounced completion request. Outside that gate, clears any
-/// in-flight request, the popup, and the suppression signature so
-/// re-entering insert mode starts from a clean slate.
+/// [`View::Editor`] pane and no modal open, computes the cursor
+/// context and arms a debounced completion request. Outside that gate,
+/// clears any in-flight request, the popup, and the suppression
+/// signature so re-entering insert mode starts from a clean slate.
+///
+/// A modal input (finder, palette, isearch, ...) owns the keystream
+/// while open, so completion never triggers beneath one: opening a
+/// modal flows through the clearing branch and dismisses any live
+/// popup.
 pub(crate) fn trigger(stoat: &mut Stoat) {
     if !insert_mode_in_editor_pane(stoat) {
         stoat.pending_completion_request = None;
@@ -271,6 +277,13 @@ struct EditorSnapshot {
 
 fn insert_mode_in_editor_pane(stoat: &Stoat) -> bool {
     if stoat.focused_mode() != "insert" {
+        return false;
+    }
+    // A modal input (finder, palette, isearch, rename, ...) is an off-pane
+    // InputView that leaves `ws.focus` on the editor, so the mode and focus
+    // checks below still pass while one is open. It owns the keystream, so
+    // completion must not arm from the editor's cursor beneath it.
+    if keymap_state::modal_predicate(stoat).is_some() {
         return false;
     }
     let ws = stoat.active_workspace();
@@ -609,6 +622,30 @@ mod harness_tests {
                 trigger_kind: CompletionTriggerKind::INVOKED,
                 trigger_character: None,
             }),
+        );
+    }
+
+    #[test]
+    fn a_modal_open_over_a_mid_word_cursor_does_not_trigger_completion() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "Greeter");
+
+        // Sit the editor cursor inside `Greeter`, then open the finder over it.
+        // The finder is an insert-mode input that leaves focus on the editor, so
+        // without the modal gate `trigger` would arm a completion for the word.
+        h.type_keys("ll");
+        h.type_keys("space p");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        h.settle();
+
+        assert!(
+            h.fake_lsp().observed_completions().is_empty(),
+            "a modal open must not arm a completion from the editor cursor"
+        );
+        assert!(
+            h.stoat.pending_completion.is_none(),
+            "no completion popup shows beneath a modal"
         );
     }
 
