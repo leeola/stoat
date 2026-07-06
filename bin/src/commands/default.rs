@@ -1,14 +1,12 @@
 use clap::{ArgAction, Parser, Subcommand};
 use crossterm::event::{Event, KeyEvent};
-#[cfg(not(feature = "fixture"))]
-use snafu::whatever;
-use snafu::{ResultExt, Whatever};
+use snafu::{whatever, ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use stoat::{
     host::{LocalFs, LocalFsWatcher},
     input_parse, Axis, Settings, Stoat,
 };
-use stoat_cli::CommonArgs;
+use stoat_cli::{CommonArgs, FixtureArgs, FixtureSub};
 use stoat_scheduler::{Executor, TokioScheduler};
 use tokio::sync::mpsc::Sender;
 
@@ -86,6 +84,9 @@ enum Command {
         #[command(subcommand)]
         sub: crate::commands::query::QueryCommand,
     },
+    /// Materialize a deterministic fixture and open the editor inside it. `ls`
+    /// lists the catalog.
+    Fixture(FixtureArgs),
 }
 
 pub fn run(args: Args) -> Result<(), Whatever> {
@@ -102,8 +103,35 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         Some(Command::AgentApi { sub }) => crate::commands::agent_api::run(sub),
         Some(Command::Editor { file }) => crate::commands::editor::run(file),
         Some(Command::Query { sub }) => crate::commands::query::run(sub),
+        Some(Command::Fixture(fixture)) => run_fixture(fixture, text_proto_log, common),
         Some(Command::Review) => run_tui(text_proto_log, common, TuiStart::Review),
         None => run_tui(text_proto_log, common, TuiStart::Files),
+    }
+}
+
+/// Run the `fixture` subcommand. `ls` prints the catalog. A bare fixture name
+/// materializes and opens it through the same startup path as `--fixture`.
+///
+/// A name given both as the positional and via `--fixture` is rejected rather
+/// than silently picking one.
+fn run_fixture(
+    args: FixtureArgs,
+    text_proto_log: Option<bool>,
+    mut common: CommonArgs,
+) -> Result<(), Whatever> {
+    match (args.sub, args.name) {
+        (Some(FixtureSub::Ls), _) => {
+            crate::commands::fixture::run_ls();
+            Ok(())
+        },
+        (None, Some(name)) => {
+            if common.fixture.is_some() {
+                whatever!("`--fixture` conflicts with the fixture subcommand");
+            }
+            common.fixture = Some(name);
+            run_tui(text_proto_log, common, TuiStart::Files)
+        },
+        (None, None) => whatever!("specify a fixture name or `ls`"),
     }
 }
 
@@ -375,5 +403,33 @@ mod tests {
             got.push(event);
         }
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn fixture_subcommand_parses_ls_and_a_name() {
+        let ls = Args::try_parse_from(["stoat", "fixture", "ls"]).expect("parse ls");
+        let Some(Command::Fixture(args)) = ls.command else {
+            panic!("expected fixture subcommand");
+        };
+        assert_eq!(args.sub, Some(FixtureSub::Ls));
+        assert_eq!(args.name, None);
+
+        let named = Args::try_parse_from(["stoat", "fixture", "rust-lsp"]).expect("parse name");
+        let Some(Command::Fixture(args)) = named.command else {
+            panic!("expected fixture subcommand");
+        };
+        assert_eq!(args.sub, None);
+        assert_eq!(args.name.as_deref(), Some("rust-lsp"));
+    }
+
+    #[test]
+    fn fixture_subcommand_composes_with_top_level_flags() {
+        let args = Args::try_parse_from(["stoat", "--timeout", "2", "fixture", "rust-lsp"])
+            .expect("parse");
+        assert_eq!(args.common.timeout, Some(2.0));
+        let Some(Command::Fixture(fixture)) = args.command else {
+            panic!("expected fixture subcommand");
+        };
+        assert_eq!(fixture.name.as_deref(), Some("rust-lsp"));
     }
 }
