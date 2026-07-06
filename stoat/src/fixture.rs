@@ -257,6 +257,60 @@ fn main() {
 }
 "#;
 
+const RUST_DIFF_MAIN_HEAD: &str = r#"mod util;
+
+struct Greeter {
+    name: String,
+}
+
+impl Greeter {
+    fn greet(&self) -> String {
+        format!("hello, {}", self.name)
+    }
+}
+
+fn main() {
+    let greeter = Greeter {
+        name: "world".to_string(),
+    };
+    println!("{}", util::shout(&greeter.greet()));
+}
+"#;
+
+const RUST_DIFF_MAIN_WORK: &str = r#"mod util;
+
+struct Greeter {
+    name: String,
+}
+
+impl Greeter {
+    fn greet(&self) -> String {
+        format!("hey there, {}", self.name)
+    }
+}
+
+fn main() {
+    let greeter = Greeter {
+        name: "world".to_string(),
+    };
+    println!("{}", util::shout(&greeter.greet()));
+}
+"#;
+
+const RUST_DIFF_UTIL_HEAD: &str = r#"pub fn shout(text: &str) -> String {
+    text.to_uppercase()
+}
+"#;
+
+const RUST_DIFF_UTIL_WORK: &str = r#"pub fn shout(text: &str) -> String {
+    emphasize(&text.to_uppercase())
+}
+
+fn emphasize(text: &str) -> String {
+    format!("{text}!")
+}
+"#;
+
 /// Failure materializing a fixture repository.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -309,6 +363,10 @@ pub enum FixtureError {
 ///   lines, so [`crate::host::GitRepo::cherry_pick_tree`] between the tips conflicts.
 /// - `rust-lsp`: a clean, minimal cargo crate at HEAD (Cargo.toml plus src/main.rs) as a target for
 ///   rust-analyzer.
+/// - `rust-diff`: the minimal `rust-lsp` cargo crate plus a live working-tree diff -- a staged
+///   change to `src/util.rs` and an unstaged change to `src/main.rs`, with every layer (HEAD,
+///   index, worktree) compiling so `cargo build` stays green and rust-analyzer runs against a dirty
+///   tree.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -321,6 +379,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "history" => materialize_history(dest),
         "conflict" => materialize_conflict(dest),
         "rust-lsp" => materialize_rust_lsp(dest),
+        "rust-diff" => materialize_rust_diff(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }
@@ -413,6 +472,21 @@ fn materialize_rust_lsp(dest: &Path) -> Result<(), FixtureError> {
             ("src/main.rs", RUST_LSP_MAIN),
         ],
     )?;
+    Ok(())
+}
+
+fn materialize_rust_diff(dest: &Path) -> Result<(), FixtureError> {
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit(
+        "initial commit",
+        &[
+            ("Cargo.toml", RUST_LSP_CARGO),
+            ("src/main.rs", RUST_DIFF_MAIN_HEAD),
+            ("src/util.rs", RUST_DIFF_UTIL_HEAD),
+        ],
+    )?;
+    repo.staged_file("src/util.rs", RUST_DIFF_UTIL_WORK)?;
+    repo.unstaged_file("src/main.rs", RUST_DIFF_MAIN_WORK)?;
     Ok(())
 }
 
@@ -736,5 +810,38 @@ mod tests {
         let tree = repo.commit_tree(&head).unwrap();
         assert!(tree.contains_key(Path::new("Cargo.toml")));
         assert!(tree.contains_key(Path::new("src/main.rs")));
+    }
+
+    #[test]
+    fn rust_diff_reports_staged_util_and_unstaged_main() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("rust-diff", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let workdir = repo.workdir().unwrap();
+        let got: Vec<(String, bool)> = repo
+            .changed_files()
+            .iter()
+            .map(|f| {
+                (
+                    f.path
+                        .strip_prefix(&workdir)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                    f.staged,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            got,
+            vec![
+                ("src/util.rs".to_string(), true),
+                ("src/main.rs".to_string(), false),
+            ],
+            "staged util.rs before unstaged main.rs",
+        );
     }
 }
