@@ -268,6 +268,11 @@ pub(crate) fn frame(
         );
     }
 
+    // Record each undercurl span's cells now, after the editor panes painted but
+    // before the overlay stack, so the re-stamp can drop cells a later layer
+    // repaints and never draw over an overlay covering a diagnostic.
+    undercurl::snapshot_cells(buf, undercurls);
+
     pane::render_pane_dividers(
         &ws.panes.dividers(),
         &stoat.theme,

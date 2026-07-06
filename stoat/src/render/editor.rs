@@ -810,6 +810,7 @@ fn paint_diagnostic_spans(
                 y,
                 len,
                 color,
+                cells: Vec::new(),
             }));
         }
     }
