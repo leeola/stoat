@@ -230,6 +230,18 @@ const CONFLICT_THEIRS: &str = "\
 3 shared footer
 ";
 
+const REBASE_BASE: &str = "base module\n";
+
+const REBASE_DEPLOY: &str = "deploy pipeline\n";
+
+const REBASE_DOCS: &str = "documentation\n";
+
+const REBASE_PARSER: &str = "parser stage\n";
+
+const REBASE_LEXER: &str = "lexer stage\n";
+
+const REBASE_AST: &str = "ast nodes\n";
+
 const RUST_LSP_CARGO: &str = r#"[package]
 name = "fixture-rust-lsp"
 version = "0.1.0"
@@ -361,6 +373,10 @@ pub enum FixtureError {
 ///   history to walk.
 /// - `conflict`: a base commit with two divergent children on `main` and `theirs` editing the same
 ///   lines, so [`crate::host::GitRepo::cherry_pick_tree`] between the tips conflicts.
+/// - `rebase`: a base commit with `main` and `feature` diverging over disjoint files -- two commits
+///   advance `main`, three advance `feature` -- so [`crate::host::GitRepo::run_rebase`] replays
+///   `feature` onto `main` cleanly. The non-conflicting complement to `conflict`; HEAD is left on
+///   `feature`.
 /// - `rust-lsp`: a clean, minimal cargo crate at HEAD (Cargo.toml plus src/main.rs) as a target for
 ///   rust-analyzer.
 /// - `rust-diff`: the minimal `rust-lsp` cargo crate plus a live working-tree diff -- a staged
@@ -378,6 +394,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "many-files" => materialize_many_files(dest),
         "history" => materialize_history(dest),
         "conflict" => materialize_conflict(dest),
+        "rebase" => materialize_rebase(dest),
         "rust-lsp" => materialize_rust_lsp(dest),
         "rust-diff" => materialize_rust_diff(dest),
         _ => UnknownFixtureSnafu {
@@ -460,6 +477,19 @@ fn materialize_conflict(dest: &Path) -> Result<(), FixtureError> {
     repo.checkout("theirs")?;
     repo.commit("theirs change", &[("file.txt", CONFLICT_THEIRS)])?;
     repo.checkout("main")?;
+    Ok(())
+}
+
+fn materialize_rebase(dest: &Path) -> Result<(), FixtureError> {
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit("base", &[("base.txt", REBASE_BASE)])?;
+    repo.branch("feature")?;
+    repo.commit("deploy", &[("deploy.txt", REBASE_DEPLOY)])?;
+    repo.commit("docs", &[("docs.txt", REBASE_DOCS)])?;
+    repo.checkout("feature")?;
+    repo.commit("parser", &[("parser.txt", REBASE_PARSER)])?;
+    repo.commit("lexer", &[("lexer.txt", REBASE_LEXER)])?;
+    repo.commit("ast", &[("ast.txt", REBASE_AST)])?;
     Ok(())
 }
 
@@ -655,7 +685,10 @@ impl FixtureRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{CherryPickOutcome, CommitFileChangeKind, GitHost, LocalGit};
+    use crate::host::{
+        CherryPickOutcome, CommitFileChangeKind, GitHost, LocalGit, RebaseTodo, RebaseTodoOp,
+    };
+    use git2::Sort;
 
     #[test]
     fn basic_diff_reports_staged_and_unstaged_split() {
@@ -842,6 +875,53 @@ mod tests {
                 ("src/main.rs".to_string(), false),
             ],
             "staged util.rs before unstaged main.rs",
+        );
+    }
+
+    #[test]
+    fn rebase_replays_feature_onto_main_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("rebase", dir.path()).unwrap();
+
+        let git = Repository::open(dir.path()).unwrap();
+        let main_tip = git.revparse_single("main").unwrap().id();
+        let feature_tip = git.revparse_single("feature").unwrap().id();
+
+        let feature_shas: Vec<String> = {
+            let mut walk = git.revwalk().unwrap();
+            walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE).unwrap();
+            walk.push(feature_tip).unwrap();
+            walk.hide(main_tip).unwrap();
+            walk.map(|oid| oid.unwrap().to_string()).collect()
+        };
+
+        let todo: Vec<RebaseTodo> = feature_shas
+            .iter()
+            .map(|sha| RebaseTodo {
+                op: RebaseTodoOp::Pick,
+                sha: sha.clone(),
+                message: String::new(),
+            })
+            .collect();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let new_sha = repo
+            .run_rebase(&main_tip.to_string(), &todo)
+            .expect("disjoint-file feature rebases onto main without conflict");
+
+        let tree = repo.commit_tree(&new_sha).unwrap();
+        let files: Vec<&str> = tree.keys().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(
+            files,
+            vec![
+                "ast.txt",
+                "base.txt",
+                "deploy.txt",
+                "docs.txt",
+                "lexer.txt",
+                "parser.txt",
+            ],
+            "rebased feature tip carries all six files from both branches",
         );
     }
 }
