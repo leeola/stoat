@@ -69,10 +69,9 @@ struct TextInstance {
     dim: [f32; 2],
     /// Atlas sub-rect as `[u_min, v_min, u_max, v_max]`, normalized.
     uv: [f32; 4],
-    /// Foreground color, normalized sRGB.
+    /// Foreground color, normalized sRGB. The glyph is emitted premultiplied by
+    /// its coverage and alpha-blends over whatever the framebuffer already holds.
     fg: [f32; 3],
-    /// Cell background color, normalized sRGB, the glyph composites over.
-    bg: [f32; 3],
     /// Atlas to sample: [`KIND_MASK`] or [`KIND_COLOR`].
     kind: u32,
 }
@@ -90,6 +89,20 @@ struct UnderlineInstance {
     color: [f32; 3],
     /// Underline shape: one of the `STYLE_*` constants.
     style: u32,
+}
+
+/// One opaque background rect behind a scaled text run's glyphs. It masks
+/// whatever it sits over (a panel hairline) across the run's full span, spaces
+/// included, where the per-glyph draw would leave gaps.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RectInstance {
+    /// Top-left of the rect in physical pixels.
+    pos: [f32; 2],
+    /// Rect size in physical pixels.
+    dim: [f32; 2],
+    /// Fill color, normalized sRGB.
+    color: [f32; 3],
 }
 
 /// Uniform shared by every instance: the surface resolution the vertex shader
@@ -182,6 +195,13 @@ pub struct TextPass {
     composite_underline_instances: Buffer,
     composite_underline_capacity: usize,
     composite_underline_count: u32,
+    /// One opaque background rect per scaled text run, drawn before the run's
+    /// glyphs so they alpha-blend over it. Grid cells take their background from
+    /// the background pass instead, so these cover only the off-grid runs.
+    rect_pipeline: RenderPipeline,
+    rect_instances: Buffer,
+    rect_capacity: usize,
+    rect_count: u32,
     atlas: GlyphAtlas,
     font_system: FontSystem,
     /// The resolved primary shaping family: the first configured `font_family`
@@ -318,8 +338,7 @@ impl TextPass {
                         1 => Float32x2,
                         2 => Float32x4,
                         3 => Float32x3,
-                        4 => Float32x3,
-                        5 => Uint32,
+                        4 => Uint32,
                     ],
                 }],
             },
@@ -329,7 +348,7 @@ impl TextPass {
                 compilation_options: Default::default(),
                 targets: &[Some(ColorTargetState {
                     format,
-                    blend: Some(BlendState::REPLACE),
+                    blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
             }),
@@ -341,6 +360,7 @@ impl TextPass {
         });
 
         let underline_pipeline = build_underline_pipeline(device, &shader, &globals_layout, format);
+        let rect_pipeline = build_rect_pipeline(device, &shader, &globals_layout, format);
 
         // Three globals buffers share one layout but carry a different scroll_y,
         // so the plain, region, and screen-anchored draws each scroll correctly
@@ -388,6 +408,11 @@ impl TextPass {
             device,
             "text run instances",
             instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+        );
+        let rect_instances = alloc_instances(
+            device,
+            "text run rect instances",
+            instance_bytes::<RectInstance>(INITIAL_CAPACITY),
         );
         #[cfg(feature = "perf")]
         let hud_instances = alloc_instances(
@@ -448,6 +473,10 @@ impl TextPass {
             composite_underline_instances,
             composite_underline_capacity: INITIAL_CAPACITY,
             composite_underline_count: 0,
+            rect_pipeline,
+            rect_instances,
+            rect_capacity: INITIAL_CAPACITY,
+            rect_count: 0,
             atlas,
             font_system,
             family,
@@ -559,6 +588,7 @@ impl TextPass {
         // here, before atlas_grew, so a text-run atlas grow is reflected in the
         // grid-instance build below instead of invalidating its UVs.
         let text_run_instances = self.build_text_run_instances(device, queue, grid);
+        let run_rects = self.build_run_rects(grid);
 
         let region = grid.scroll_region();
 
@@ -689,6 +719,15 @@ impl TextPass {
             &mut self.text_run_instances,
             &mut self.text_run_capacity,
             "text run instances",
+        );
+        self.rect_count = run_rects.len() as u32;
+        upload_instances(
+            device,
+            queue,
+            &run_rects,
+            &mut self.rect_instances,
+            &mut self.rect_capacity,
+            "text run rect instances",
         );
 
         // The bind group references only the atlas texture views, which are
@@ -880,7 +919,6 @@ impl TextPass {
                 dim,
                 uv: info.uv,
                 fg: rgb_f32(glyph.fg),
-                bg: rgb_f32(glyph.bg),
                 kind: kind_flag(info.kind),
             });
         }
@@ -964,12 +1002,39 @@ impl TextPass {
                     dim: [info.size[0] as f32, info.size[1] as f32],
                     uv: info.uv,
                     fg: rgb_f32(run.color),
-                    bg: rgb_f32(run.bg),
                     kind: kind_flag(info.kind),
                 });
             }
         }
         instances
+    }
+
+    /// One opaque background rect per scaled text run, painted before its glyphs
+    /// so they alpha-blend over it.
+    ///
+    /// The rect spans the run's full character width (including spaces) and one
+    /// full cell height, so it masks any panel hairline the run sits over across
+    /// the whole span, not just where glyphs land.
+    fn build_run_rects(&self, grid: &Grid) -> Vec<RectInstance> {
+        let mut rects = Vec::new();
+        for run in grid.text_runs() {
+            let scale = f32::from(run.scale) / 256.0;
+            if scale <= 0.0 {
+                continue;
+            }
+            let width = run.text.chars().count() as f32 * scale * self.metrics.width;
+            if width <= 0.0 {
+                continue;
+            }
+            let col = f32::from(run.col) / 16.0;
+            let row = f32::from(run.row) / 16.0;
+            rects.push(RectInstance {
+                pos: [col * self.metrics.width, row * self.metrics.height],
+                dim: [width, self.metrics.height],
+                color: rgb_f32(run.bg),
+            });
+        }
+        rects
     }
 
     /// Rebuild and re-upload only the damaged rows' underline instances.
@@ -1096,6 +1161,16 @@ impl TextPass {
     /// scissor is set; run it after the grid text so the runs sit on top. A
     /// no-op when no text run is present.
     pub fn draw_text_runs(&self, render_pass: &mut RenderPass<'_>) {
+        // Opaque run backgrounds first, so the glyphs alpha-blend over them. A
+        // run of only spaces still paints its rect (masking a hairline) with no
+        // glyphs to follow.
+        if self.rect_count > 0 {
+            render_pass.set_pipeline(&self.rect_pipeline);
+            render_pass.set_bind_group(0, &self.static_globals_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.rect_instances.slice(..));
+            render_pass.draw(0..6, 0..self.rect_count);
+        }
+
         if self.text_run_count == 0 {
             return;
         }
@@ -1111,8 +1186,8 @@ impl TextPass {
     /// entry stacked downward, into the screen-anchored HUD glyph buffer.
     ///
     /// Glyphs go through the shared atlas at `scale` relative to the body font
-    /// and composite over the panel background, so the readout blends onto the
-    /// HUD rather than the grid behind it.
+    /// and alpha-blend over the HUD panel already drawn beneath them, so the
+    /// readout blends onto the HUD rather than the grid behind it.
     #[cfg(feature = "perf")]
     pub fn set_hud_text(
         &mut self,
@@ -1122,7 +1197,6 @@ impl TextPass {
         scale: f32,
         lines: &[String],
     ) {
-        const PANEL_BG: [f32; 3] = [0.05, 0.05, 0.08];
         const READOUT_FG: [f32; 3] = [0.85, 0.85, 0.9];
 
         let mut instances = Vec::new();
@@ -1154,7 +1228,6 @@ impl TextPass {
                     dim: [info.size[0] as f32, info.size[1] as f32],
                     uv: info.uv,
                     fg: READOUT_FG,
-                    bg: PANEL_BG,
                     kind: kind_flag(info.kind),
                 });
             }
@@ -1468,7 +1541,7 @@ impl TextPass {
                 end += 1;
             }
 
-            let (fg, bg) = cell.draw_colors();
+            let (fg, _) = cell.draw_colors();
             let (text, col_of_byte) = run_text_and_columns(&run);
             for (offset, key) in
                 shape_run(&mut self.font_system, &text, self.metrics, shaping.primary)
@@ -1492,7 +1565,6 @@ impl TextPass {
                         col: glyph_col,
                         source: GlyphSource::Font(key),
                         fg,
-                        bg,
                         scale: 1.0,
                         cell_fill: false,
                     });
@@ -1517,7 +1589,7 @@ impl TextPass {
         col: usize,
         scale: f32,
     ) -> Option<PendingGlyph> {
-        let (fg, bg) = cell.draw_colors();
+        let (fg, _) = cell.draw_colors();
         let cp = u32::from(cell.ch);
         if powerline::is_geometric(cp) {
             let (width, height) = cell_fill_pixels(scale, self.metrics);
@@ -1530,7 +1602,6 @@ impl TextPass {
                 col,
                 source: GlyphSource::Procedural { cp, width, height },
                 fg,
-                bg,
                 scale,
                 cell_fill: false,
             });
@@ -1549,7 +1620,6 @@ impl TextPass {
             col,
             source: GlyphSource::Font(key),
             fg,
-            bg,
             scale,
             cell_fill: is_cell_fill(cell.ch),
         })
@@ -1600,7 +1670,6 @@ impl TextPass {
                         col,
                         source: GlyphSource::Font(key),
                         fg: overlay.content_fg,
-                        bg: overlay.fill,
                         scale: f32::from(scale),
                         cell_fill: false,
                     });
@@ -1664,7 +1733,6 @@ struct PendingGlyph {
     col: usize,
     source: GlyphSource,
     fg: Rgb,
-    bg: Rgb,
     /// Multiple of the cell size this glyph is rasterized and drawn at. Integer
     /// for cell and overlay glyphs; the text-run path uses fractional scales.
     scale: f32,
@@ -1714,10 +1782,10 @@ fn instance_bytes<T>(capacity: usize) -> u64 {
 
 /// Upload `instances` into `buffer`, growing it (and `capacity`) when the count
 /// outgrows it. A no-op for an empty set, leaving the prior buffer in place.
-fn upload_instances(
+fn upload_instances<T: Pod>(
     device: &Device,
     queue: &Queue,
-    instances: &[TextInstance],
+    instances: &[T],
     buffer: &mut Buffer,
     capacity: &mut usize,
     label: &str,
@@ -1728,7 +1796,7 @@ fn upload_instances(
 
     if instances.len() > *capacity {
         *capacity = instances.len().next_power_of_two();
-        *buffer = alloc_instances(device, label, instance_bytes::<TextInstance>(*capacity));
+        *buffer = alloc_instances(device, label, instance_bytes::<T>(*capacity));
     }
     queue.write_buffer(buffer, 0, bytemuck::cast_slice(instances));
 }
@@ -1773,6 +1841,58 @@ fn build_underline_pipeline(
             targets: &[Some(ColorTargetState {
                 format,
                 blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Build the run-background rect pipeline sharing `shader` with the glyph pass.
+///
+/// Binds only the globals and writes opaquely, so each scaled text run's
+/// background box replaces whatever it sits over before the run's glyphs
+/// alpha-blend on top.
+fn build_rect_pipeline(
+    device: &Device,
+    shader: &ShaderModule,
+    globals_layout: &BindGroupLayout,
+    format: TextureFormat,
+) -> RenderPipeline {
+    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("text run rect"),
+        bind_group_layouts: &[Some(globals_layout)],
+        immediate_size: 0,
+    });
+
+    device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("text run rect"),
+        layout: Some(&layout),
+        vertex: VertexState {
+            module: shader,
+            entry_point: Some("vs_rect"),
+            compilation_options: Default::default(),
+            buffers: &[VertexBufferLayout {
+                array_stride: size_of::<RectInstance>() as u64,
+                step_mode: VertexStepMode::Instance,
+                attributes: &vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32x2,
+                    2 => Float32x3,
+                ],
+            }],
+        },
+        fragment: Some(FragmentState {
+            module: shader,
+            entry_point: Some("fs_rect"),
+            compilation_options: Default::default(),
+            targets: &[Some(ColorTargetState {
+                format,
+                blend: Some(BlendState::REPLACE),
                 write_mask: ColorWrites::ALL,
             })],
         }),

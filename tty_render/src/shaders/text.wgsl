@@ -2,11 +2,12 @@
 // quad corners are generated from the vertex index, so the only vertex buffer
 // is the per-glyph instance stream.
 //
-// The fragment composites the glyph over its cell background in linear light,
-// then encodes back to sRGB, so thin glyphs on dark backgrounds keep their
-// weight. The cell background travels in the instance because the shader
-// cannot read the framebuffer; the background pass has already painted that
-// same color underneath, so an opaque composited write is correct.
+// The fragment returns premultiplied-alpha coverage and the pipeline blends it
+// over the framebuffer, so a glyph composites over whatever is already there
+// (the background pass, a panel, a run-background rect) rather than an assumed
+// color. The target is not sRGB, so fixed-function blending with raw coverage
+// is a per-channel sRGB-space blend, which keeps thin glyphs on dark
+// backgrounds weighted without an explicit gamma correction.
 
 struct Globals {
     resolution: vec2<f32>,
@@ -28,8 +29,7 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) fg: vec3<f32>,
-    @location(2) @interpolate(flat) bg: vec3<f32>,
-    @location(3) @interpolate(flat) kind: u32,
+    @location(2) @interpolate(flat) kind: u32,
 }
 
 @vertex
@@ -39,8 +39,7 @@ fn vs_main(
     @location(1) dim: vec2<f32>,
     @location(2) uv: vec4<f32>,
     @location(3) fg: vec3<f32>,
-    @location(4) bg: vec3<f32>,
-    @location(5) kind: u32,
+    @location(4) kind: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -62,75 +61,22 @@ fn vs_main(
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = mix(uv.xy, uv.zw, corner);
     out.fg = fg;
-    out.bg = bg;
     out.kind = kind;
     return out;
 }
 
-fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
-    let cutoff = c <= vec3<f32>(0.04045);
-    let lower = c / 12.92;
-    let higher = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
-    return select(higher, lower, cutoff);
-}
-
-fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
-    let cutoff = c <= vec3<f32>(0.0031308);
-    let lower = c * 12.92;
-    let higher = pow(c, vec3<f32>(1.0 / 2.4)) * 1.055 - 0.055;
-    return select(higher, lower, cutoff);
-}
-
-fn srgb_to_linear_1(c: f32) -> f32 {
-    if c <= 0.04045 {
-        return c / 12.92;
-    }
-    return pow((c + 0.055) / 1.055, 2.4);
-}
-
-fn linear_to_srgb_1(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        return c * 12.92;
-    }
-    return pow(c, 1.0 / 2.4) * 1.055 - 0.055;
-}
-
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
-// Remap glyph coverage so the linear-space blend reproduces the heavier weight
-// of a gamma-incorrect blend, keeping thin stems from washing out. The blend
-// is evaluated on luminance in sRGB space and mapped back to the alpha a linear
-// interpolation from bg to fg would need. Lifted from ghostty's linear
-// correction.
-fn correct_coverage(coverage: f32, fg_lin: vec3<f32>, bg_lin: vec3<f32>) -> f32 {
-    let fg_l = luminance(fg_lin);
-    let bg_l = luminance(bg_lin);
-    if abs(fg_l - bg_l) <= 0.001 {
-        return coverage;
-    }
-    let blend = linear_to_srgb_1(fg_l) * coverage + linear_to_srgb_1(bg_l) * (1.0 - coverage);
-    let blend_l = srgb_to_linear_1(blend);
-    return clamp((blend_l - bg_l) / (fg_l - bg_l), 0.0, 1.0);
-}
-
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let bg_lin = srgb_to_linear(in.bg);
-
+    // Premultiplied-alpha coverage. The pipeline blends this over the
+    // framebuffer, and because the target is not sRGB, that fixed-function
+    // blend is a per-channel sRGB-space mix from the destination to `fg`.
     if in.kind == KIND_COLOR {
         let texel = textureSampleLevel(color_atlas, atlas_sampler, in.uv, 0.0);
-        let fg_lin = srgb_to_linear(texel.rgb);
-        let blended = mix(bg_lin, fg_lin, texel.a);
-        return vec4<f32>(linear_to_srgb(blended), 1.0);
+        return vec4<f32>(texel.rgb * texel.a, texel.a);
     }
 
     let coverage = textureSampleLevel(mask_atlas, atlas_sampler, in.uv, 0.0).r;
-    let fg_lin = srgb_to_linear(in.fg);
-    let a = correct_coverage(coverage, fg_lin, bg_lin);
-    let blended = mix(bg_lin, fg_lin, a);
-    return vec4<f32>(linear_to_srgb(blended), 1.0);
+    return vec4<f32>(in.fg * coverage, coverage);
 }
 
 // Decorated-underline pass. One instance per underlined cell draws a quad over
@@ -215,4 +161,48 @@ fn fs_underline(in: UnderlineVsOut) -> @location(0) vec4<f32> {
     let pos = in.local * globals.cell_size;
     let coverage = underline_coverage(in.style, pos, globals.cell_size);
     return vec4<f32>(in.color, coverage);
+}
+
+// Run-background pass. One opaque rect per scaled text run, drawn before the
+// run's glyphs so they alpha-blend over it (grid cells get their background
+// from the background pass instead). The rect also masks any panel hairline the
+// run sits over.
+
+struct RectVsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec3<f32>,
+}
+
+@vertex
+fn vs_rect(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) pos: vec2<f32>,
+    @location(1) dim: vec2<f32>,
+    @location(2) color: vec3<f32>,
+) -> RectVsOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0)
+    );
+    let corner = corners[vertex_index];
+
+    let pixel = pos + corner * dim + vec2<f32>(0.0, globals.scroll_y);
+    let ndc = vec2<f32>(
+        pixel.x / globals.resolution.x * 2.0 - 1.0,
+        1.0 - pixel.y / globals.resolution.y * 2.0
+    );
+
+    var out: RectVsOut;
+    out.clip = vec4<f32>(ndc, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_rect(in: RectVsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
 }

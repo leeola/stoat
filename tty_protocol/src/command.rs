@@ -241,9 +241,9 @@ pub enum IconKind {
 /// fractional. The run advances one scaled cell width per character and is
 /// vertically centered within the target row.
 ///
-/// `bg` is the background the run composites over: the renderer paints each
-/// glyph's box opaquely, so for the run to blend cleanly `bg` must match the
-/// color already beneath it (a gutter passes the editor's background).
+/// `bg` is the run's background. The renderer paints it as one opaque box
+/// spanning the run's full width, spaces included, and the glyphs alpha-blend
+/// over it, so `bg` need not match whatever already lies beneath the run.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TextRunCommand {
     pub col: i16,

@@ -165,11 +165,11 @@ pub(crate) fn vline(
 /// The fallback -- taken when `scene` is absent, `style`'s foreground is not
 /// RGB, or `bg` is `None` -- writes glyphs cell-by-cell styled with `style`,
 /// stopping before `end_x`, exactly as the text sites did before. Under stoatty
-/// it emits one [`TextRun`] at `scale` (256ths of a cell) anchored at the cell
-/// and composited over `bg`, painting no glyphs.
+/// it emits one [`TextRun`] at `scale` (256ths of a cell) anchored at the cell,
+/// with `bg` as its background box and no grid glyphs.
 ///
-/// `bg` is the color beneath the run. The renderer paints each glyph box
-/// opaquely, so it must match the surface the text sits on for a clean blend.
+/// `bg` is the run's own background. The renderer paints it as one opaque box
+/// behind the alpha-blended glyphs, so it need not match the surface beneath.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn text(
     buf: &mut Buffer,
