@@ -886,6 +886,10 @@ impl GpuContext {
     /// out, occluded, or a validation error already raised elsewhere) and
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
+    ///
+    /// When the acquired drawable's size disagrees with the configured size,
+    /// the frame adopts the drawable's size so a live resize cannot trip
+    /// scissor validation.
     pub fn render(&mut self, grid: &Grid, frame: Frame<'_>) {
         self.perf.begin_frame();
         let surface_frame = match self.surface.get_current_texture() {
@@ -901,6 +905,11 @@ impl GpuContext {
             | CurrentSurfaceTexture::Validation => return,
         };
         self.perf.mark_acquired();
+
+        self.adopt_drawable_size(
+            surface_frame.texture.width(),
+            surface_frame.texture.height(),
+        );
 
         let view = surface_frame.texture.create_view(&TextureViewDescriptor {
             format: Some(self.view_format),
@@ -946,7 +955,9 @@ impl GpuContext {
     /// empty slice renders just the live grid.
     ///
     /// Skips and re-configures on the same transient surface states as
-    /// [`Self::render`].
+    /// [`Self::render`], and adopts the acquired drawable's size the same way,
+    /// so its pool and cursor scissors stay within the render target during a
+    /// live resize.
     pub fn render_with_pools(
         &mut self,
         live_grid: &Grid,
@@ -968,6 +979,11 @@ impl GpuContext {
             | CurrentSurfaceTexture::Validation => return,
         };
         self.perf.mark_acquired();
+
+        self.adopt_drawable_size(
+            surface_frame.texture.width(),
+            surface_frame.texture.height(),
+        );
 
         let view = surface_frame.texture.create_view(&TextureViewDescriptor {
             format: Some(self.view_format),
@@ -1037,6 +1053,25 @@ impl GpuContext {
         if let Some(gpu) = self.renderer.take_gpu_time() {
             self.perf.attach_gpu(gpu);
         }
+    }
+
+    /// Adopt a drawable's `width`x`height` when it disagrees with the
+    /// configured surface size.
+    ///
+    /// macOS live resize can hand back a drawable already at the layer's new
+    /// size before the app processes the pending `Resized`. The frame then
+    /// adopts the drawable's real size rather than tripping scissor validation,
+    /// so every scissor derived from the surface size stays within the render
+    /// target until the queued `Resized` re-fits the grid and PTY a moment
+    /// later.
+    fn adopt_drawable_size(&mut self, width: u32, height: u32) {
+        if width == self.config.width && height == self.config.height {
+            return;
+        }
+
+        self.config.width = width;
+        self.config.height = height;
+        self.renderer.set_size(width, height);
     }
 
     /// The per-frame timing recorder, read by the perf HUD.
