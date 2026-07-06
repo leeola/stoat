@@ -24,6 +24,7 @@ theme default_dark {
     let info    = cyan;
     let special = magenta;
     let muted   = dark_gray;
+    let subtle  = "#333842";
     let dim     = gray;
     let text    = white;
 
@@ -34,8 +35,8 @@ theme default_dark {
     ui.selection.editor = { bg: muted };
     ui.selection.reversed = { fg: black, bg: text, modifiers: [reversed] };
     ui.search.match = { fg: black, bg: warning };
-    ui.highlight.read = { bg: muted };
-    ui.highlight.write = { bg: muted, modifiers: [underlined] };
+    ui.highlight.read = { bg: subtle };
+    ui.highlight.write = { bg: subtle, modifiers: [underlined] };
 
     ui.border.focused.fg = accent;
     ui.border.inactive.fg = muted;
