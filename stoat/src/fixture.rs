@@ -150,6 +150,47 @@ const DIFF_HUNKS_WORK: &str = "\
 20 tango
 ";
 
+const MANY_FILES_STAGED: &[(&str, &str, &str)] = &[
+    ("src/alpha.txt", "alpha original\n", "alpha staged edit\n"),
+    ("src/bravo.txt", "bravo original\n", "bravo staged edit\n"),
+    (
+        "docs/charlie.txt",
+        "charlie original\n",
+        "charlie staged edit\n",
+    ),
+    ("docs/delta.txt", "delta original\n", "delta staged edit\n"),
+    ("config/echo.txt", "echo original\n", "echo staged edit\n"),
+];
+
+const MANY_FILES_UNSTAGED: &[(&str, &str, &str)] = &[
+    (
+        "src/foxtrot.txt",
+        "foxtrot original\n",
+        "foxtrot unstaged edit\n",
+    ),
+    ("src/golf.txt", "golf original\n", "golf unstaged edit\n"),
+    (
+        "docs/hotel.txt",
+        "hotel original\n",
+        "hotel unstaged edit\n",
+    ),
+    (
+        "config/india.txt",
+        "india original\n",
+        "india unstaged edit\n",
+    ),
+    (
+        "config/juliet.txt",
+        "juliet original\n",
+        "juliet unstaged edit\n",
+    ),
+];
+
+const MANY_FILES_CLEAN: &[(&str, &str)] = &[
+    ("src/kilo.txt", "kilo unchanged\n"),
+    ("docs/lima.txt", "lima unchanged\n"),
+];
+
 const HISTORY_API: &str = "\
 GET /api/health
 GET /api/version
@@ -257,6 +298,10 @@ pub enum FixtureError {
 ///   rename, and a two-hunk unstaged edit. A probe for the status surface: under the current
 ///   [`crate::host::GitRepo::changed_files`] options the untracked file, both deletions, and the
 ///   rename source stay hidden, so it reports three staged and two unstaged entries.
+/// - `many-files`: one HEAD commit of twelve files across `src/`, `docs/`, and `config/`, then five
+///   staged and five unstaged modifications with two left clean, so
+///   [`crate::host::GitRepo::changed_files`] reports ten changed files spanning nested directories
+///   for file-list navigation and scale testing.
 /// - `history`: a four-commit linear chain, each commit adding a distinct file, giving
 ///   [`crate::host::GitRepo::log_commits`] and [`crate::host::GitRepo::commit_file_changes`] real
 ///   history to walk.
@@ -272,6 +317,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
     match name {
         "basic-diff" => materialize_basic_diff(dest),
         "diff-kinds" => materialize_diff_kinds(dest),
+        "many-files" => materialize_many_files(dest),
         "history" => materialize_history(dest),
         "conflict" => materialize_conflict(dest),
         "rust-lsp" => materialize_rust_lsp(dest),
@@ -314,6 +360,27 @@ fn materialize_diff_kinds(dest: &Path) -> Result<(), FixtureError> {
     repo.unstaged_delete("deleted-unstaged.txt")?;
     repo.staged_rename("renamed-from.txt", "renamed-to.txt")?;
     repo.unstaged_file("hunks.txt", DIFF_HUNKS_WORK)?;
+    Ok(())
+}
+
+fn materialize_many_files(dest: &Path) -> Result<(), FixtureError> {
+    let mut repo = FixtureRepo::init(dest)?;
+
+    let mut head_files: Vec<(&str, &str)> = Vec::new();
+    for &(path, head, _work) in MANY_FILES_STAGED.iter().chain(MANY_FILES_UNSTAGED) {
+        head_files.push((path, head));
+    }
+    for &(path, content) in MANY_FILES_CLEAN {
+        head_files.push((path, content));
+    }
+    repo.commit("initial commit", &head_files)?;
+
+    for &(path, _head, work) in MANY_FILES_STAGED {
+        repo.staged_file(path, work)?;
+    }
+    for &(path, _head, work) in MANY_FILES_UNSTAGED {
+        repo.unstaged_file(path, work)?;
+    }
     Ok(())
 }
 
@@ -558,6 +625,47 @@ mod tests {
                 ("modified-unstaged.txt".to_string(), false),
             ],
             "untracked file, both deletions, and the rename source stay hidden under current status options",
+        );
+    }
+
+    #[test]
+    fn many_files_reports_ten_changed_across_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("many-files", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let workdir = repo.workdir().unwrap();
+        let got: Vec<(String, bool)> = repo
+            .changed_files()
+            .iter()
+            .map(|f| {
+                (
+                    f.path
+                        .strip_prefix(&workdir)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                    f.staged,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            got,
+            vec![
+                ("config/echo.txt".to_string(), true),
+                ("docs/charlie.txt".to_string(), true),
+                ("docs/delta.txt".to_string(), true),
+                ("src/alpha.txt".to_string(), true),
+                ("src/bravo.txt".to_string(), true),
+                ("config/india.txt".to_string(), false),
+                ("config/juliet.txt".to_string(), false),
+                ("docs/hotel.txt".to_string(), false),
+                ("src/foxtrot.txt".to_string(), false),
+                ("src/golf.txt".to_string(), false),
+            ],
+            "ten changed files, staged block then unstaged block, each sorted by path; two clean files absent",
         );
     }
 
