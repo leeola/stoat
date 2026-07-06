@@ -216,7 +216,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         None
     };
 
-    let task = stoat.executor.spawn(run_request(
+    let task = stoat.spawn_woken(run_request(
         executor,
         owned,
         sources,

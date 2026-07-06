@@ -66,7 +66,7 @@ pub(crate) fn arm_completion_resolve(stoat: &mut Stoat) {
     };
     let lsp = stoat.lsp_host.clone();
     let executor = stoat.executor.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         executor.timer(RESOLVE_DEBOUNCE).await;
         let resolved = lsp.completion_resolve(raw).await.ok()?;
         Some(ResolvedCompletion {

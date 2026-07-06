@@ -148,7 +148,7 @@ fn apply_or_resolve_additional_edits(
     let raw = (**lsp_item).clone();
     let lsp = stoat.lsp_host.clone();
     let executor = stoat.executor.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         let resolve = std::pin::pin!(lsp.completion_resolve(raw));
         let timer = std::pin::pin!(executor.timer(Duration::from_millis(300)));
         let resolved = match futures::future::select(resolve, timer).await {

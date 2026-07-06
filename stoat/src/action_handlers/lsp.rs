@@ -618,7 +618,7 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
     let fs = stoat.fs_host.clone();
     let source_path = site.path;
     let source_rope = site.rope;
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         let locations = match lsp.references(params).await {
             Ok(Some(locations)) => locations,
             Ok(None) => return Vec::new(),
@@ -763,7 +763,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     let fs = stoat.fs_host.clone();
     let source_path = site.path;
     let source_rope = site.rope;
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         let result = match kind {
             LspJumpKind::Definition => lsp.goto_definition(params).await,
             LspJumpKind::Declaration => lsp.goto_declaration(params).await,
@@ -1272,7 +1272,7 @@ pub(crate) fn request_signature_help(stoat: &mut Stoat) {
     };
 
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         match lsp.signature_help(params).await {
             Ok(Some(help)) => signature_help_to_popup(help, anchor_offset),
             Ok(None) => None,
@@ -1422,7 +1422,7 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
     } = request;
     let lsp = stoat.lsp_host.clone();
     let executor = stoat.executor.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         executor.timer(INLAY_HINT_DEBOUNCE).await;
         match lsp.range_inlay_hint(params).await {
             Ok(Some(hints)) => Some((buffer_id, convert_inlay_hints(hints, &rope, encoding))),
@@ -1635,7 +1635,7 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
 
     let lsp = stoat.lsp_host.clone();
     let executor = stoat.executor.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         executor.timer(DOCUMENT_HIGHLIGHT_DEBOUNCE).await;
         match lsp.document_highlight(params).await {
             Ok(Some(highlights)) => Some((
@@ -1856,7 +1856,7 @@ pub(crate) fn pull_diagnostics_trigger(stoat: &mut Stoat) {
         let lsp = stoat.lsp_host.clone();
         let executor = stoat.executor.clone();
         let path = plan.path;
-        let task = stoat.executor.spawn(async move {
+        let task = stoat.spawn_woken(async move {
             executor.timer(PULL_DIAGNOSTICS_DEBOUNCE).await;
             match lsp.document_diagnostic(params).await {
                 Ok(Some(report)) => parse_pull_report(report, path),
@@ -2028,7 +2028,7 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
 
     let lsp = stoat.lsp_host.clone();
     let executor = stoat.executor.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         executor.timer(SEMANTIC_TOKENS_DEBOUNCE).await;
         match lsp.semantic_tokens_full(params).await {
             Ok(Some(result)) => Some((
@@ -2272,7 +2272,7 @@ pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
 
     let lsp = stoat.lsp_host.clone();
     let executor = stoat.executor.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         executor.timer(FOLDING_RANGE_DEBOUNCE).await;
         match lsp.folding_range(params).await {
             Ok(Some(ranges)) => Some((buffer_id, convert_folding_ranges(ranges, &rope))),
@@ -2502,7 +2502,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         match lsp.code_action(params).await {
             Ok(Some(actions)) => Some(actions),
             Ok(None) => None,
@@ -2643,7 +2643,7 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
         },
         CodeActionEntry::NeedsResolve { action, .. } => {
             let lsp = stoat.lsp_host.clone();
-            let task = stoat.executor.spawn(async move {
+            let task = stoat.spawn_woken(async move {
                 match lsp.code_action_resolve(*action).await {
                     Ok(resolved) => resolved.edit,
                     Err(err) => {
@@ -2767,7 +2767,7 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         let response = match lsp.prepare_rename(params).await {
             Ok(Some(resp)) => resp,
             Ok(None) => return None,
@@ -2871,7 +2871,7 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         match lsp.rename(params).await {
             Ok(edit) => edit,
             Err(err) => {
@@ -2994,7 +2994,7 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         match lsp.document_symbol(params).await {
             Ok(resp) => resp,
             Err(err) => {
@@ -3231,7 +3231,7 @@ pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
     };
 
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         match lsp.workspace_symbol(params).await {
             Ok(resp) => resp,
             Err(err) => {
@@ -3430,7 +3430,7 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         match lsp.range_formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
                 uri: source_uri,
@@ -3494,7 +3494,7 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         match lsp.formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
                 uri: source_uri,
