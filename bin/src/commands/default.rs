@@ -170,6 +170,7 @@ fn run_tui(
         theme: None,
         mouse_capture: None,
         scrolloff: None,
+        editor_line_numbers: None,
         terminal_shell: None,
         terminal_args: None,
         review_follow: None,

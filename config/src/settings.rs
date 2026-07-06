@@ -45,6 +45,10 @@ pub struct Settings {
     /// edge when following it. `None` falls back to 3. Set via
     /// `editor.scrolloff = N;` in stcfg.
     pub scrolloff: Option<u32>,
+    /// Whether the editor gutter shows absolute line numbers. `None` falls back
+    /// to enabled. Set `editor.line_numbers = false;` in stcfg to restore the
+    /// diagnostic-only gutter.
+    pub editor_line_numbers: Option<bool>,
     /// Program a terminal pane spawns as its subshell. `None` lets the spawn
     /// site fall back to `$SHELL`, then `/bin/sh`. Set via
     /// `terminal.shell = "/bin/zsh";` in stcfg.
@@ -100,6 +104,7 @@ impl Settings {
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             scrolloff: other.scrolloff.or(self.scrolloff),
+            editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
             mode_badges,
@@ -153,6 +158,11 @@ impl Settings {
             ["editor", "scrolloff"] => {
                 if let Value::Number(n) = setting.value.node {
                     self.scrolloff = Some(n as u32);
+                }
+            },
+            ["editor", "line_numbers"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.editor_line_numbers = Some(b);
                 }
             },
             ["terminal", "shell"] => {
@@ -213,6 +223,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
@@ -225,6 +236,15 @@ mod tests {
     fn from_config_extracts_review_follow() {
         let config = parse_ok("on init { review.follow = false; }");
         assert_eq!(Settings::from_config(&config).review_follow, Some(false));
+    }
+
+    #[test]
+    fn from_config_extracts_editor_line_numbers() {
+        let config = parse_ok("on init { editor.line_numbers = false; }");
+        assert_eq!(
+            Settings::from_config(&config).editor_line_numbers,
+            Some(false)
+        );
     }
 
     #[test]
@@ -251,6 +271,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
@@ -271,6 +292,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
@@ -300,6 +322,7 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
@@ -312,6 +335,7 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
@@ -326,6 +350,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
@@ -343,6 +368,7 @@ mod tests {
             theme: None,
             mouse_capture: None,
             scrolloff: None,
+            editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
@@ -358,6 +384,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
+                editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
@@ -386,6 +413,7 @@ mod tests {
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
+                editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
@@ -406,6 +434,7 @@ mod tests {
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
+                editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
                 mode_badges: BTreeMap::new(),
@@ -423,6 +452,7 @@ mod tests {
             theme: Some("a".into()),
             mouse_capture: None,
             scrolloff: None,
+            editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
@@ -435,6 +465,7 @@ mod tests {
             theme: Some("b".into()),
             mouse_capture: None,
             scrolloff: None,
+            editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
             mode_badges: BTreeMap::new(),
