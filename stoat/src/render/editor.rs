@@ -13,7 +13,7 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::StatefulWidget,
 };
-use std::{collections::BTreeMap, ops::Range, path::Path};
+use std::{cmp::Reverse, collections::BTreeMap, ops::Range, path::Path};
 use stoat_text::{cursor_offset, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
@@ -767,7 +767,17 @@ fn paint_diagnostic_spans(
     colors: Option<&SeverityColors>,
 ) {
     let rope_len = rope.len();
-    for diag in set.get(path) {
+    // Paint least-severe first so the worst severity lands last, on top, for
+    // both the cell foreground and the collected undercurl spans. rust-analyzer
+    // can publish overlapping diagnostics (a WARNING and a HINT over `unused`)
+    // in any order, and publish order alone would let the hint's grey win.
+    let mut ordered: Vec<_> = set.get(path).iter().collect();
+    ordered.sort_by_key(|d| {
+        Reverse(severity_rank(
+            d.severity.unwrap_or(DiagnosticSeverity::ERROR),
+        ))
+    });
+    for diag in ordered {
         let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
         let start = rope
             .point_to_offset(Point::new(
@@ -1467,6 +1477,68 @@ mod tests {
             }],
         );
         h.assert_snapshot("diagnostic_inline_underline_span");
+    }
+
+    fn overlap_diag(line: u32, start: u32, end: u32, sev: DiagnosticSeverity) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line,
+                    character: start,
+                },
+                end: Position {
+                    line,
+                    character: end,
+                },
+            },
+            severity: Some(sev),
+            message: String::new(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn snapshot_diagnostic_overlap_warning_beats_hint() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-overlap-warn");
+        let path = root.join("a.rs");
+        h.fake_fs()
+            .insert_file(&path, b"let x = 1;\nlet y = 2;\nlet z = 3;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        // Same span, warning then hint in rust-analyzer's publish order. The
+        // worse severity must win the span color over the later-published hint,
+        // so the underline stays warning yellow rather than turning hint grey.
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![
+                overlap_diag(1, 4, 5, DiagnosticSeverity::WARNING),
+                overlap_diag(1, 4, 5, DiagnosticSeverity::HINT),
+            ],
+        );
+        h.assert_snapshot("diagnostic_overlap_warning_beats_hint");
+    }
+
+    #[test]
+    fn snapshot_diagnostic_overlap_error_beats_hint() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-overlap-error");
+        let path = root.join("a.rs");
+        h.fake_fs()
+            .insert_file(&path, b"let x = 1;\nlet y = 2;\nlet z = 3;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        // Hint then error in publish order. Error must win the span color.
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![
+                overlap_diag(1, 4, 5, DiagnosticSeverity::HINT),
+                overlap_diag(1, 4, 5, DiagnosticSeverity::ERROR),
+            ],
+        );
+        h.assert_snapshot("diagnostic_overlap_error_beats_hint");
     }
 
     #[test]
