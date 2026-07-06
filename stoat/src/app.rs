@@ -6431,6 +6431,40 @@ mod tests {
     }
 
     #[test]
+    fn help_modal_emits_a_panel_under_the_default_theme() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.settle();
+
+        let size = h.stoat.size();
+        let mut buf = Buffer::empty(size);
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let modal = crate::render::help::help_layout(size)
+            .expect("help modal fits the test viewport")
+            .modal;
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::Panel(p)
+                    if p.top == modal.y
+                        && p.left == modal.x
+                        && p.width == modal.width
+                        && p.height == modal.height
+            )),
+            "the shipped default theme resolves named colors to RGB, so the \
+             help modal takes the rich arm and emits a panel, got {cmds:?}"
+        );
+    }
+
+    #[test]
     fn help_separator_emits_a_hairline_bar_inside_stoatty() {
         use stoatty_protocol::command::Command;
 

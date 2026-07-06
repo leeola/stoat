@@ -10,6 +10,7 @@ theme default_dark {
     let dim     = gray;
     let text    = white;
 
+    ui.background.bg = black;
     ui.cursor = { modifiers: [reversed] };
     ui.cursor.input = { fg: black, bg: text };
     ui.selection = { fg: black, bg: accent };

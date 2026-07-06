@@ -461,11 +461,64 @@ fn status_bar_color(status: ChunkStatus, is_current: bool, colors: &RichColors) 
     }
 }
 
+/// Stoatty's default 16-color ANSI palette, indices 0-7 normal and 8-15
+/// bright, copied from `tty_term`'s `Theme::default` because `stoat` does not
+/// depend on that crate.
+const STOATTY_ANSI: [[u8; 3]; 16] = [
+    [0x00, 0x00, 0x00],
+    [0xcd, 0x00, 0x00],
+    [0x00, 0xcd, 0x00],
+    [0xcd, 0xcd, 0x00],
+    [0x00, 0x00, 0xee],
+    [0xcd, 0x00, 0xcd],
+    [0x00, 0xcd, 0xcd],
+    [0xe5, 0xe5, 0xe5],
+    [0x7f, 0x7f, 0x7f],
+    [0xff, 0x00, 0x00],
+    [0x00, 0xff, 0x00],
+    [0xff, 0xff, 0x00],
+    [0x5c, 0x5c, 0xff],
+    [0xff, 0x00, 0xff],
+    [0x00, 0xff, 0xff],
+    [0xff, 0xff, 0xff],
+];
+
+/// Resolve a themed color to an RGB triple for the stoatty rich-chrome path.
+///
+/// Returns `None` when the color has no fixed RGB. That covers an unset color,
+/// `Reset`, and any 256-color index outside the named 0-15 range. A `None`
+/// disables the rich arm at its call site, so the frame falls back to glyphs
+/// rather than mixing the two.
+///
+/// Named ANSI colors and palette indices 0-15 resolve against stoatty's
+/// *default* palette ([`STOATTY_ANSI`]). This is a wart: a stoatty instance
+/// that overrides its ansi palette renders chrome (borders, bars, title runs)
+/// against these baked values while its grid text uses the live palette, so
+/// the two mismatch. It holds until palette colors move into the protocol and
+/// stoat can resolve against the live palette rather than a copy.
 pub(crate) fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
-    match color {
-        Some(Color::Rgb(r, g, b)) => Some([r, g, b]),
-        _ => None,
-    }
+    let index = match color? {
+        Color::Rgb(r, g, b) => return Some([r, g, b]),
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Indexed(i @ 0..=15) => i as usize,
+        Color::Reset | Color::Indexed(_) => return None,
+    };
+    Some(STOATTY_ANSI[index])
 }
 
 pub(crate) fn render_side_num(buf: &mut Buffer, x: u16, y: u16, num: u32, style: Style) {
