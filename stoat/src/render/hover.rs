@@ -9,6 +9,10 @@ use ratatui::{
     widgets::{Clear, Widget},
 };
 
+/// Hover-body text size under stoatty, in 256ths of a cell (0.85x), matching
+/// the hints overlay so popovers and hint rows share one scale.
+const HOVER_TEXT_SCALE: u16 = 218;
+
 /// Paint the hover popup, if any, anchored to the focused editor's
 /// primary cursor. Renders above the cursor when there is room above,
 /// otherwise below. Truncates lines that exceed the popup's interior
@@ -20,7 +24,7 @@ use ratatui::{
 pub(crate) fn render_hover(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let popup = match &stoat.pending_hover {
         Some(p) => p.clone(),
@@ -89,7 +93,15 @@ pub(crate) fn render_hover(
         Some(" hover "),
         modal_style,
         &stoat.theme,
-        scene,
+        scene.as_deref_mut(),
+    );
+
+    let end_x = inner.x + inner.width;
+    let run_bg = crate::render::review::style_rgb(
+        stoat
+            .theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|s| s.bg),
     );
 
     for (row_idx, line) in body.iter().enumerate() {
@@ -97,13 +109,17 @@ pub(crate) fn render_hover(
         if row >= inner.y + inner.height {
             break;
         }
-        for (col_idx, ch) in line.chars().enumerate() {
-            let col = inner.x + col_idx as u16;
-            if col >= inner.x + inner.width {
-                break;
-            }
-            buf[(col, row)].set_char(ch).set_style(modal_style);
-        }
+        crate::render::chrome::text(
+            buf,
+            inner.x,
+            row,
+            end_x,
+            line,
+            modal_style,
+            run_bg,
+            HOVER_TEXT_SCALE,
+            scene.as_deref_mut(),
+        );
     }
 }
 

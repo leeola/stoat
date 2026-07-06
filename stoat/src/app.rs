@@ -6525,6 +6525,43 @@ mod tests {
     }
 
     #[test]
+    fn hover_body_emits_scaled_text_runs_inside_stoatty() {
+        use lsp_types::{HoverProviderCapability, ServerCapabilities};
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..Default::default()
+        });
+
+        let root = std::path::PathBuf::from("/hover-apc");
+        let path = root.join("main.rs");
+        h.fake_fs().insert_file(&path, b"fn foo() {}\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "fn foo() -> u32");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::TextRun(t) if t.scale == 218)),
+            "the hover body emits 0.85x scaled text runs under stoatty, got {cmds:?}"
+        );
+    }
+
+    #[test]
     fn pane_divider_emits_a_hairline_bar_inside_stoatty() {
         use crate::pane::DividerOrientation;
         use stoatty_protocol::command::{BarCommand, Command};
