@@ -1434,6 +1434,32 @@ mod tests {
     }
 
     #[test]
+    fn move_prev_word_start_over_forward_selection_keeps_trailing_char() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
+        // `e` makes a forward selection whose block cursor sits on the last
+        // word char, one cell back from the head. `b` must scan from there
+        // rather than the head, or it swallows the char after the cursor.
+        dispatch(&mut stoat, &MoveNextWordEnd);
+        dispatch(&mut stoat, &MovePrevWordStart);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![0]);
+    }
+
+    #[test]
+    fn move_prev_word_end_over_forward_selection_keeps_trailing_char() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "foo bar baz");
+        for _ in 0..4 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        dispatch(&mut stoat, &MoveNextWordEnd);
+        dispatch(&mut stoat, &MovePrevWordEnd);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 7, true)]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
+    }
+
+    #[test]
     fn move_prev_word_start_at_start_is_noop() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");

@@ -377,7 +377,26 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
     let rope = buffer_snapshot.rope();
     editor.selections.transform(buffer_snapshot, |sel| {
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
-        let mut target_offset = head_offset;
+        // Prev-word motions scan from the block cursor, which a forward
+        // selection draws one cell back from the head. Re-base the seed there so
+        // `b` and `ge` do not overshoot by the trailing character, matching every
+        // other motion and helix's word_move. Next motions keep the raw head.
+        let seed = if matches!(
+            target,
+            WordTarget::PrevStart
+                | WordTarget::PrevEnd
+                | WordTarget::PrevLongStart
+                | WordTarget::PrevLongEnd
+        ) {
+            cursor_offset(
+                rope,
+                buffer_snapshot.resolve_anchor(&sel.tail()),
+                head_offset,
+            )
+        } else {
+            head_offset
+        };
+        let mut target_offset = seed;
         for _ in 0..count {
             let next = match target {
                 WordTarget::NextStart => next_word_start(rope, target_offset),
@@ -394,7 +413,7 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
             }
             target_offset = next;
         }
-        if target_offset == head_offset {
+        if target_offset == seed {
             return sel.clone();
         }
 
@@ -421,7 +440,7 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
             );
         }
 
-        if target_offset > head_offset {
+        if target_offset > seed {
             let end_offset = target_offset;
             let tail_anchor = buffer_snapshot.anchor_at(head_offset, Bias::Right);
             let head_anchor = buffer_snapshot.anchor_at(end_offset, Bias::Right);
@@ -439,10 +458,7 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
                 target_offset
             };
             let head_anchor = buffer_snapshot.anchor_at(resolved_head_offset, Bias::Right);
-            let tail_offset = match rope.chars_at(head_offset).next() {
-                Some(ch) => head_offset + ch.len_utf8(),
-                None => head_offset,
-            };
+            let tail_offset = next_char_boundary(rope, seed);
             let tail_anchor = buffer_snapshot.anchor_at(tail_offset, Bias::Right);
             Selection {
                 id: sel.id,
