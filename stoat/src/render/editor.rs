@@ -1,5 +1,5 @@
 use crate::{
-    display_map::{tab_map, DisplayPoint, DisplaySnapshot},
+    display_map::{tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
     render::{
         review::{render_review, style_rgb},
@@ -15,7 +15,15 @@ use ratatui::{
 };
 use std::{collections::BTreeMap, ops::Range, path::Path};
 use stoat_text::{cursor_offset, Point, Rope};
-use stoatty_widgets::{bar::Bar, ApcScene};
+use stoatty_widgets::{
+    bar::Bar,
+    gutter::{Diagnostic, Gutter, GutterLine},
+    ApcScene,
+};
+
+/// Line-number glyph size in 256ths of a cell, so numbers read smaller than the
+/// body text.
+const NUMBER_SCALE: u16 = 160;
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -32,6 +40,7 @@ pub(crate) fn render_editor(
         theme,
         buf,
         is_focused,
+        false,
         false,
         None,
         None,
@@ -50,6 +59,7 @@ pub(crate) fn render_editor_with_overlay(
     buf: &mut Buffer,
     is_focused: bool,
     stoatty: bool,
+    line_numbers: bool,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
@@ -95,25 +105,33 @@ pub(crate) fn render_editor_with_overlay(
         },
         None => &empty_severity,
     };
-    let gutter_w: u16 = if row_severity.is_empty() { 0 } else { 1 };
-    let inner = Rect {
-        x: inner.x + gutter_w,
-        y: inner.y,
-        width: inner.width.saturating_sub(gutter_w),
-        height: inner.height,
-    };
     let severity = severity_colors(theme);
-    if gutter_w > 0 {
-        let gutter_x = inner.x - gutter_w;
+    let gutter_w = if line_numbers {
+        draw_line_number_gutter(
+            &snapshot,
+            editor.scroll_row,
+            inner,
+            end_row,
+            row_severity,
+            severity.as_ref(),
+            fallback_style,
+            theme,
+            stoatty,
+            scene,
+            buf,
+        )
+    } else if row_severity.is_empty() {
+        0
+    } else {
         // Rich mode emits a sub-cell severity bar per row instead of the glyph,
         // engaging only inside stoatty with every severity color resolved to RGB.
         let rich = scene.filter(|_| stoatty).zip(severity.as_ref());
         match rich {
             Some((scene, colors)) => {
                 let area = Rect {
-                    x: gutter_x,
+                    x: inner.x,
                     y: inner.y,
-                    width: gutter_w,
+                    width: 1,
                     height: inner.height,
                 };
                 for display_row in editor.scroll_row..end_row {
@@ -136,7 +154,7 @@ pub(crate) fn render_editor_with_overlay(
             },
             None => paint_diagnostic_gutter(
                 row_severity,
-                gutter_x,
+                inner.x,
                 inner.y,
                 inner.height,
                 editor.scroll_row,
@@ -145,9 +163,17 @@ pub(crate) fn render_editor_with_overlay(
                 buf,
             ),
         }
-    }
-    // Record the inset so click-to-offset can subtract the same shift the text
-    // rect took above. Written after the `row_severity` borrow of `editor` ends.
+        1
+    };
+
+    // Inset the text rect by the gutter, and record the width so click-to-offset
+    // subtracts the same shift. Written after the `row_severity` borrow ends.
+    let inner = Rect {
+        x: inner.x + gutter_w,
+        y: inner.y,
+        width: inner.width.saturating_sub(gutter_w),
+        height: inner.height,
+    };
     editor.gutter_width = gutter_w;
 
     let right = inner.x + inner.width;
@@ -470,16 +496,185 @@ fn paint_diagnostic_gutter(
         let Some(sev) = row_severity.get(&display_row) else {
             continue;
         };
-        let glyph = match *sev {
-            DiagnosticSeverity::ERROR => 'E',
-            DiagnosticSeverity::WARNING => 'W',
-            DiagnosticSeverity::INFORMATION => 'I',
-            DiagnosticSeverity::HINT => 'H',
-            _ => 'E',
-        };
         let style = theme.get(severity_scope(*sev));
-        buf[(x, y + row_offset)].set_char(glyph).set_style(style);
+        buf[(x, y + row_offset)]
+            .set_char(severity_mark(*sev))
+            .set_style(style);
     }
+}
+
+/// The single-letter severity mark drawn in the cell-fallback gutter.
+fn severity_mark(sev: DiagnosticSeverity) -> char {
+    match sev {
+        DiagnosticSeverity::ERROR => 'E',
+        DiagnosticSeverity::WARNING => 'W',
+        DiagnosticSeverity::INFORMATION => 'I',
+        DiagnosticSeverity::HINT => 'H',
+        _ => 'E',
+    }
+}
+
+/// One display row's role when folding the gutter: the first row of a buffer
+/// line, or a soft-wrap or block row belonging to the line above it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RowKind {
+    LineStart(u32),
+    Continuation,
+}
+
+fn row_kind(snapshot: &DisplaySnapshot, display_row: u32) -> RowKind {
+    if snapshot.is_wrap_continuation(display_row) {
+        return RowKind::Continuation;
+    }
+    match snapshot.classify_row(display_row) {
+        BlockRowKind::BufferRow { buffer_row } => RowKind::LineStart(buffer_row),
+        BlockRowKind::Block { .. } => RowKind::Continuation,
+    }
+}
+
+/// Fold per-display-row classifications into one gutter entry per logical line,
+/// as `(line_number, height)`.
+///
+/// Each `LineStart(buffer_row)` opens an entry numbered `buffer_row + 1`;
+/// `Continuation` rows (soft wraps and blocks) extend the current entry's
+/// height, so the number sits at the top and a severity bar spans the whole
+/// line. Continuations before the first `LineStart` -- a viewport opening
+/// mid-line or on a block row -- attach to `lead_number`, the buffer line they
+/// belong to.
+fn fold_gutter_lines(rows: &[RowKind], lead_number: u32) -> Vec<(u32, u16)> {
+    let mut out: Vec<(u32, u16)> = Vec::new();
+    for kind in rows {
+        match kind {
+            RowKind::LineStart(buffer_row) => out.push((buffer_row + 1, 1)),
+            RowKind::Continuation => match out.last_mut() {
+                Some(last) => last.1 += 1,
+                None => out.push((lead_number, 1)),
+            },
+        }
+    }
+    out
+}
+
+/// Decimal digit count of `n`, at least 1.
+fn decimal_digits(mut n: u32) -> u16 {
+    let mut digits = 1;
+    while n >= 10 {
+        n /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+/// Draw the absolute-line-number gutter and return the cell columns it reserves.
+///
+/// Inside stoatty with every gutter color resolved to RGB, draws the rich
+/// sub-cell gutter (scaled numbers, severity bars, hairline separator). Any
+/// other terminal, or a theme whose colors are not RGB, gets right-aligned cell
+/// numbers and a one-column severity mark styled from the theme, so the numbers
+/// still show.
+#[allow(clippy::too_many_arguments)]
+fn draw_line_number_gutter(
+    snapshot: &DisplaySnapshot,
+    scroll_row: u32,
+    inner: Rect,
+    end_row: u32,
+    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    severity: Option<&SeverityColors>,
+    fallback_style: Style,
+    theme: &crate::theme::Theme,
+    stoatty: bool,
+    scene: Option<&mut ApcScene>,
+    buf: &mut Buffer,
+) -> u16 {
+    use crate::theme::scope as s;
+
+    let visible = end_row.saturating_sub(scroll_row).min(inner.height as u32);
+    let rows: Vec<RowKind> = (scroll_row..scroll_row + visible)
+        .map(|display_row| row_kind(snapshot, display_row))
+        .collect();
+    let lead_number = snapshot
+        .display_to_buffer(DisplayPoint::new(scroll_row, 0))
+        .map(|point| point.row + 1)
+        .unwrap_or(1);
+    let folded = fold_gutter_lines(&rows, lead_number);
+
+    let width_digits = decimal_digits(snapshot.buffer_line_count()).max(2);
+
+    // Rich mode needs stoatty, a scene, and every gutter color as RGB.
+    let rich = scene.filter(|_| stoatty).and_then(|scene| {
+        let colors = severity?;
+        let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
+        let bg = style_rgb(
+            fallback_style
+                .bg
+                .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg)),
+        )?;
+        Some((scene, colors, number_fg, bg))
+    });
+
+    match rich {
+        Some((scene, colors, number_fg, bg)) => {
+            let lines: Vec<GutterLine> = folded
+                .iter()
+                .map(|&(number, height)| GutterLine {
+                    number,
+                    height,
+                    git: None,
+                    diagnostic: row_severity.get(&(number - 1)).map(|sev| Diagnostic {
+                        color: severity_color(*sev, colors),
+                        mark: severity_mark(*sev),
+                    }),
+                })
+                .collect();
+            let gutter = Gutter {
+                lines: &lines,
+                bar_width: 5,
+                pad: 2,
+                number_scale: NUMBER_SCALE,
+                width_digits,
+                number_fg,
+                separator: number_fg,
+                bg,
+            };
+            gutter.draw_components(inner, buf, scene);
+            gutter.cell_width()
+        },
+        None => draw_fallback_line_numbers(&folded, width_digits, row_severity, inner, theme, buf),
+    }
+}
+
+/// Paint right-aligned cell line numbers and a one-column severity mark for a
+/// terminal without the sub-cell components. Returns the reserved cell columns.
+fn draw_fallback_line_numbers(
+    folded: &[(u32, u16)],
+    width_digits: u16,
+    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    inner: Rect,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) -> u16 {
+    let mark_w = 1u16;
+    let gap = 1u16;
+    let width = mark_w + width_digits + gap;
+    let number_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+
+    let mut top = 0u16;
+    for &(number, height) in folded {
+        let y = inner.y + top;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        if let Some(sev) = row_severity.get(&(number - 1)) {
+            buf[(inner.x, y)]
+                .set_char(severity_mark(*sev))
+                .set_style(theme.get(severity_scope(*sev)));
+        }
+        let text = format!("{number}");
+        let start = inner.x + mark_w + width_digits.saturating_sub(text.len() as u16);
+        buf.set_stringn(start, y, &text, text.len(), number_style);
+        top += height;
+    }
+    width
 }
 
 /// Underline every visible diagnostic's text span in its severity color.
@@ -800,6 +995,37 @@ mod tests {
     }
 
     #[test]
+    fn fold_gutter_lines_numbers_and_folds_wraps_and_blocks() {
+        use super::RowKind::{Continuation, LineStart};
+        // Line 1, then line 2 soft-wrapped over two extra rows with a block row
+        // folded under it, then line 3.
+        let rows = [
+            LineStart(0),
+            LineStart(1),
+            Continuation,
+            Continuation,
+            LineStart(2),
+        ];
+        assert_eq!(super::fold_gutter_lines(&rows, 1), [(1, 1), (2, 3), (3, 1)]);
+    }
+
+    #[test]
+    fn fold_gutter_lines_attaches_leading_continuations_to_lead() {
+        use super::RowKind::{Continuation, LineStart};
+        // Viewport opens on wrap continuations of buffer line 7 (number 8).
+        let rows = [Continuation, Continuation, LineStart(8)];
+        assert_eq!(super::fold_gutter_lines(&rows, 8), [(8, 2), (9, 1)]);
+    }
+
+    #[test]
+    fn decimal_digits_counts_digits() {
+        assert_eq!(
+            [0, 9, 10, 99, 100, 1000].map(super::decimal_digits),
+            [1, 1, 2, 2, 3, 4]
+        );
+    }
+
+    #[test]
     fn severity_colors_resolve_under_the_shipped_theme() {
         let h = Stoat::test();
         assert!(
@@ -983,13 +1209,14 @@ mod tests {
 
         h.stoat.stoatty = true;
         h.snapshot();
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((0, 0)));
+        // Column 3 is the line-number gutter width the cursor sits past.
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((3, 0)));
 
         for _ in 0..6 {
             dispatch(&mut h.stoat, &MoveRight);
         }
         h.snapshot();
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((6, 0)));
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((9, 0)));
 
         h.stoat.stoatty = false;
         h.snapshot();
@@ -1008,7 +1235,8 @@ mod tests {
 
         h.stoat.stoatty = true;
         h.snapshot();
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((0, 0)));
+        // Column 3 is the line-number gutter width the cursor sits past.
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((3, 0)));
 
         dispatch(&mut h.stoat, &OpenFileFinder);
         h.settle();

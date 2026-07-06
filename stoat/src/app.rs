@@ -6249,6 +6249,10 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
+        // Line numbers off so the paint carries no off-grid gutter and the
+        // scene stays genuinely widget-free.
+        h.stoat.settings.editor_line_numbers = Some(false);
+
         let root = std::path::PathBuf::from("/scene");
         let path = root.join("a.txt");
         h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
@@ -6330,6 +6334,8 @@ mod tests {
             ui.diagnostic.warning.fg = "#ffff00";
             ui.diagnostic.info.fg = "#00ffff";
             ui.diagnostic.hint.fg = "#808080";
+            ui.text.muted.fg = "#606060";
+            ui.background.bg = "#282c34";
         }"##;
         let (config, _) = stoat_config::parse(src);
         crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbdiag")
@@ -8666,6 +8672,45 @@ mod tests {
         )
     }
 
+    fn focused_gutter_width(h: &crate::test_harness::TestHarness) -> u16 {
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        h.stoat
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .expect("editor exists")
+            .gutter_width
+    }
+
+    #[test]
+    fn line_numbers_setting_toggles_the_gutter() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/ln-toggle");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        h.stoat.settings.editor_line_numbers = Some(true);
+        h.stoat.render();
+        let with_numbers = focused_gutter_width(&h);
+
+        h.stoat.settings.editor_line_numbers = Some(false);
+        h.stoat.render();
+        let without = focused_gutter_width(&h);
+
+        assert!(
+            with_numbers > without,
+            "line numbers widen the gutter ({with_numbers}) past the \
+             diagnostic-only column ({without})"
+        );
+        assert_eq!(
+            without, 0,
+            "with no diagnostics and no line numbers there is no gutter"
+        );
+    }
+
     #[test]
     fn editor_mouse_down_collapses_cursor_at_clicked_offset() {
         let mut h = Stoat::test();
@@ -8682,7 +8727,7 @@ mod tests {
 
     #[test]
     fn editor_click_excludes_the_diagnostic_gutter() {
-        // The no-gutter case for the same click (offset 3) is covered by
+        // The no-gutter path (no render leaves gutter_width zero) is covered by
         // editor_mouse_down_collapses_cursor_at_clicked_offset above.
         let mut h = Stoat::test();
         let root = PathBuf::from("/gutter-click");
@@ -8711,16 +8756,17 @@ mod tests {
         );
         h.stoat.render();
 
+        let gutter_w = focused_gutter_width(&h);
         let area = focused_editor_pane_area(&h);
         h.stoat.update(mouse_event(
             MouseEventKind::Down(MouseButton::Left),
-            area.x + 3,
+            area.x + gutter_w + 2,
             area.y,
         ));
         assert_eq!(
             focused_primary_offsets(&mut h),
             (2, 2),
-            "the gutter shifts text right one column, so the click excludes it"
+            "the line-number gutter shifts text right, so the click excludes it"
         );
     }
 

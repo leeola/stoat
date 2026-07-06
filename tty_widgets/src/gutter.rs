@@ -92,7 +92,12 @@ impl Gutter<'_> {
         self.lines.iter().map(|line| line.height).sum()
     }
 
-    fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
+    /// Draw only the off-grid components (sub-cell numbers, bars, separator).
+    ///
+    /// An app that composites rich chrome itself calls this instead of the
+    /// [`StatefulWidget`] render, which also lays down the degraded cell gutter
+    /// and would double under the components inside a rich terminal.
+    pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
         let number_right = self.number_right_edge();
         let git_x = self.git_x();
 
@@ -147,7 +152,10 @@ impl Gutter<'_> {
         .render(area, buf, scene);
     }
 
-    fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
+    /// Draw only the degraded cell gutter (a right-aligned number and a
+    /// one-column severity mark) into the buffer, for a terminal without the
+    /// off-grid components.
+    pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
         let width = self.cell_width();
         if width == 0 {
             return;

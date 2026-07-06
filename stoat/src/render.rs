@@ -105,6 +105,10 @@ pub(crate) struct FrameCtx<'a> {
     /// document editor delegates its primary cursor to the terminal cursor
     /// (which stoatty eases) instead of painting a styled grid cell.
     pub(crate) stoatty: bool,
+    /// Whether document editor panes show the absolute-line-number gutter,
+    /// resolved from `editor.line_numbers` (default enabled). When unset the
+    /// pane keeps the diagnostic-only gutter column.
+    pub(crate) line_numbers: bool,
     /// Latency readout for the status bar, or `None` before any frame has
     /// been painted. Present only under the `perf` feature.
     #[cfg(feature = "perf")]
@@ -232,6 +236,7 @@ pub(crate) fn frame(
         diagnostics: &stoat.diagnostics,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         stoatty: stoat.stoatty,
+        line_numbers: stoat.settings.editor_line_numbers.unwrap_or(true),
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),
     };

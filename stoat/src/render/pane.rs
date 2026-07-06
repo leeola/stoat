@@ -71,6 +71,7 @@ pub(crate) fn render_pane(
                     buf,
                     is_focused,
                     frame.stoatty,
+                    frame.line_numbers,
                     labels,
                     frame.search_query,
                     diagnostic_info,
