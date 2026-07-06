@@ -737,6 +737,16 @@ mod tests {
     }
 
     #[test]
+    fn severity_colors_resolve_under_the_shipped_theme() {
+        let h = Stoat::test();
+        assert!(
+            super::severity_colors(&h.stoat.theme).is_some(),
+            "the shipped default theme must resolve every diagnostic severity \
+             to RGB so the sub-cell gutter engages under stoatty",
+        );
+    }
+
+    #[test]
     fn snapshot_diagnostic_gutter_renders_severity_glyphs() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/diag-test");

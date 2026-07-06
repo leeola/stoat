@@ -9,25 +9,25 @@ size: 80x24
 ---
 [0m[7m [0m
 
-  [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
-  [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
-  [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[97m Diff                [0m[90mopen a diff of working-tree changes[0m[97m                  [0m[35m│[0m
-  [0m[35m│[0m[97m ForceSaveBuffer     [0m[90msave the focused buffer, overwriting external changes[0m[35m│[0m
-  [0m[35m│[0m[97m Format              [0m[90mformat document via LSP[0m[97m                              [0m[35m│[0m
-  [0m[35m│[0m[97m FormatSelections    [0m[90mformat selection via LSP[0m[97m                             [0m[35m│[0m
-  [0m[35m│[0m[97m GotoDeclaration     [0m[90mjump to symbol declaration[0m[97m                           [0m[35m│[0m
-  [0m[35m│[0m[97m GotoDefinition      [0m[90mjump to symbol definition[0m[97m                            [0m[35m│[0m
-  [0m[35m│[0m[97m GotoImplementation  [0m[90mjump to symbol implementation[0m[97m                        [0m[35m│[0m
-  [0m[35m│[0m[97m GotoTypeDefinition  [0m[90mjump to type definition[0m[97m                              [0m[35m│[0m
-  [0m[35m│[0m[97m Hover               [0m[90mshow hover documentation[0m[97m                             [0m[35m│[0m
-  [0m[35m│[0m[30m[46m KeepSelections      keep selections matching regex                       [0m[35m│[0m
-  [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mOpen an input modal for a regex patt[0m[33m┌ palette ──────────────────────────────┐[0m
-  [0m[35m│[0m[37mselections whose contents match the [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
-  [0m[35m│[0m[37mwould empty the selection set, leave[0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m    [0m[33m│[0m
-  [0m[35m│[0m[37mis a silent no-op.[0m                  [0m[33m│[0m[36m    C-f[0m[97m   page palette down[0m            [0m[33m│[0m
-  [0m[35m│[0m                                    [0m[33m│[0m[36m    C-b[0m[97m   page palette up[0m              [0m[33m│[0m
-  [0m[35m└────────────────────────────────────[0m[33m│[0m[36m  S-Tab[0m[97m   toggle command palette scope[0m [0m[33m│[0m
-                                       [0m[33m└───────────────────────────────────────┘[0m
-[0m[1m[30m[42m INS [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m
+  [0m[38;2;198;120;221m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
+  [0m[38;2;198;120;221m│[0m[38;2;229;192;123m:[0m [0m[7m [0m                                                                       [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;99;109;131m──────────────────────────────────────────────────────────────────────────[0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m Diff                [0m[38;2;99;109;131mopen a diff of working-tree changes[0m[38;2;250;250;250m                  [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m ForceSaveBuffer     [0m[38;2;99;109;131msave the focused buffer, overwriting external changes[0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m Format              [0m[38;2;99;109;131mformat document via LSP[0m[38;2;250;250;250m                              [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m FormatSelections    [0m[38;2;99;109;131mformat selection via LSP[0m[38;2;250;250;250m                             [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m GotoDeclaration     [0m[38;2;99;109;131mjump to symbol declaration[0m[38;2;250;250;250m                           [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m GotoDefinition      [0m[38;2;99;109;131mjump to symbol definition[0m[38;2;250;250;250m                            [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m GotoImplementation  [0m[38;2;99;109;131mjump to symbol implementation[0m[38;2;250;250;250m                        [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m GotoTypeDefinition  [0m[38;2;99;109;131mjump to type definition[0m[38;2;250;250;250m                              [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;250;250;250m Hover               [0m[38;2;99;109;131mshow hover documentation[0m[38;2;250;250;250m                             [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;40;44;52m[48;2;86;182;194m KeepSelections      keep selections matching regex                       [0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;99;109;131m──────────────────────────────────────────────────────────────────────────[0m[38;2;198;120;221m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;171;178;191mOpen an input modal for a regex patt[0m[38;2;229;192;123m┌ palette ──────────────────────────────┐[0m
+  [0m[38;2;198;120;221m│[0m[38;2;171;178;191mselections whose contents match the [0m[38;2;229;192;123m│[0m[38;2;86;182;194mUp, C-p[0m[38;2;250;250;250m   select previous palette entry[0m[38;2;229;192;123m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;171;178;191mwould empty the selection set, leave[0m[38;2;229;192;123m│[0m[38;2;86;182;194mDn, C-n[0m[38;2;250;250;250m   select next palette entry[0m    [0m[38;2;229;192;123m│[0m
+  [0m[38;2;198;120;221m│[0m[38;2;171;178;191mis a silent no-op.[0m                  [0m[38;2;229;192;123m│[0m[38;2;86;182;194m    C-f[0m[38;2;250;250;250m   page palette down[0m            [0m[38;2;229;192;123m│[0m
+  [0m[38;2;198;120;221m│[0m                                    [0m[38;2;229;192;123m│[0m[38;2;86;182;194m    C-b[0m[38;2;250;250;250m   page palette up[0m              [0m[38;2;229;192;123m│[0m
+  [0m[38;2;198;120;221m└────────────────────────────────────[0m[38;2;229;192;123m│[0m[38;2;86;182;194m  S-Tab[0m[38;2;250;250;250m   toggle command palette scope[0m [0m[38;2;229;192;123m│[0m
+                                       [0m[38;2;229;192;123m└───────────────────────────────────────┘[0m
+[0m[1m[38;2;40;44;52m[48;2;152;195;121m INS [0m[1m[38;2;250;250;250m[48;2;99;109;131m (unnamed) [0m[38;2;250;250;250m[48;2;99;109;131m[scratch]                                                   1:1 [0m

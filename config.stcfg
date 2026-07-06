@@ -1,4 +1,21 @@
 theme default_dark {
+    let black         = "#282c34";
+    let red           = "#e06c75";
+    let green         = "#98c379";
+    let yellow        = "#e5c07b";
+    let blue          = "#61afef";
+    let magenta       = "#c678dd";
+    let cyan          = "#56b6c2";
+    let gray          = "#abb2bf";
+    let dark_gray     = "#636d83";
+    let white         = "#fafafa";
+    let light_red     = "#ea858b";
+    let light_green   = "#aad581";
+    let light_yellow  = "#ffd885";
+    let light_blue    = "#85c1ff";
+    let light_magenta = "#d398eb";
+    let light_cyan    = "#6ed5de";
+
     let accent  = cyan;
     let primary = blue;
     let success = green;
