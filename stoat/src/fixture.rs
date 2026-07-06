@@ -70,6 +70,86 @@ const UNSTAGED_WORK: &str = "\
 6 six
 ";
 
+const DIFF_MODIFIED_STAGED_HEAD: &str = "\
+1 modified-staged
+2 original line
+3 tail
+";
+
+const DIFF_MODIFIED_STAGED_WORK: &str = "\
+1 modified-staged
+2 staged edit
+3 tail
+";
+
+const DIFF_MODIFIED_UNSTAGED_HEAD: &str = "\
+1 modified-unstaged
+2 original line
+3 tail
+";
+
+const DIFF_MODIFIED_UNSTAGED_WORK: &str = "\
+1 modified-unstaged
+2 unstaged edit
+3 tail
+";
+
+const DIFF_DELETED_STAGED: &str = "staged deletion: removed from index and tree\n";
+
+const DIFF_DELETED_UNSTAGED: &str = "unstaged deletion: removed from working tree only\n";
+
+const DIFF_RENAMED: &str = "content carried across a staged rename\n";
+
+const DIFF_ADDED_STAGED: &str = "freshly added and staged file\n";
+
+const DIFF_UNTRACKED: &str = "untracked working-tree file\n";
+
+const DIFF_HUNKS_HEAD: &str = "\
+01 alpha
+02 bravo
+03 charlie
+04 delta
+05 echo
+06 foxtrot
+07 golf
+08 hotel
+09 india
+10 juliet
+11 kilo
+12 lima
+13 mike
+14 november
+15 oscar
+16 papa
+17 quebec
+18 romeo
+19 sierra
+20 tango
+";
+
+const DIFF_HUNKS_WORK: &str = "\
+01 alpha
+02 bravo
+03 charlie edited
+04 delta
+05 echo
+06 foxtrot
+07 golf
+08 hotel
+09 india
+10 juliet
+11 kilo
+12 lima
+13 mike
+14 november
+15 oscar
+16 papa
+17 quebec edited
+18 romeo
+19 sierra
+20 tango
+";
+
 const HISTORY_API: &str = "\
 GET /api/health
 GET /api/version
@@ -172,6 +252,11 @@ pub enum FixtureError {
 /// The defined fixtures are:
 /// - `basic-diff`: two files at HEAD, then one staged and one unstaged modification, so
 ///   [`crate::host::GitRepo::changed_files`] reports one entry of each kind.
+/// - `diff-kinds`: one working tree carrying every git change kind at once -- staged and unstaged
+///   modifications, a staged addition, an untracked file, staged and unstaged deletions, a staged
+///   rename, and a two-hunk unstaged edit. A probe for the status surface: under the current
+///   [`crate::host::GitRepo::changed_files`] options the untracked file, both deletions, and the
+///   rename source stay hidden, so it reports three staged and two unstaged entries.
 /// - `history`: a four-commit linear chain, each commit adding a distinct file, giving
 ///   [`crate::host::GitRepo::log_commits`] and [`crate::host::GitRepo::commit_file_changes`] real
 ///   history to walk.
@@ -186,6 +271,7 @@ pub enum FixtureError {
 pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
     match name {
         "basic-diff" => materialize_basic_diff(dest),
+        "diff-kinds" => materialize_diff_kinds(dest),
         "history" => materialize_history(dest),
         "conflict" => materialize_conflict(dest),
         "rust-lsp" => materialize_rust_lsp(dest),
@@ -204,6 +290,30 @@ fn materialize_basic_diff(dest: &Path) -> Result<(), FixtureError> {
     )?;
     repo.staged_file("staged.txt", STAGED_WORK)?;
     repo.unstaged_file("unstaged.txt", UNSTAGED_WORK)?;
+    Ok(())
+}
+
+fn materialize_diff_kinds(dest: &Path) -> Result<(), FixtureError> {
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit(
+        "initial commit",
+        &[
+            ("modified-staged.txt", DIFF_MODIFIED_STAGED_HEAD),
+            ("modified-unstaged.txt", DIFF_MODIFIED_UNSTAGED_HEAD),
+            ("deleted-staged.txt", DIFF_DELETED_STAGED),
+            ("deleted-unstaged.txt", DIFF_DELETED_UNSTAGED),
+            ("renamed-from.txt", DIFF_RENAMED),
+            ("hunks.txt", DIFF_HUNKS_HEAD),
+        ],
+    )?;
+    repo.staged_file("modified-staged.txt", DIFF_MODIFIED_STAGED_WORK)?;
+    repo.unstaged_file("modified-unstaged.txt", DIFF_MODIFIED_UNSTAGED_WORK)?;
+    repo.staged_file("added-staged.txt", DIFF_ADDED_STAGED)?;
+    repo.unstaged_file("untracked.txt", DIFF_UNTRACKED)?;
+    repo.staged_delete("deleted-staged.txt")?;
+    repo.unstaged_delete("deleted-unstaged.txt")?;
+    repo.staged_rename("renamed-from.txt", "renamed-to.txt")?;
+    repo.unstaged_file("hunks.txt", DIFF_HUNKS_WORK)?;
     Ok(())
 }
 
@@ -318,6 +428,39 @@ impl FixtureRepo {
         Ok(self)
     }
 
+    /// Remove `name` from both the working tree and the index, leaving a staged
+    /// deletion against HEAD.
+    fn staged_delete(&mut self, name: &str) -> Result<&mut Self, FixtureError> {
+        let path = self.workdir().join(name);
+        std::fs::remove_file(&path).context(IoSnafu { path })?;
+        let mut index = self.repo.index().context(GitSnafu)?;
+        index.remove_path(Path::new(name)).context(GitSnafu)?;
+        index.write().context(GitSnafu)?;
+        Ok(self)
+    }
+
+    /// Remove `name` from the working tree only, leaving an unstaged deletion
+    /// against the index.
+    fn unstaged_delete(&mut self, name: &str) -> Result<&mut Self, FixtureError> {
+        let path = self.workdir().join(name);
+        std::fs::remove_file(&path).context(IoSnafu { path })?;
+        Ok(self)
+    }
+
+    /// Rename `old` to `new` in both the working tree and the index, leaving a
+    /// staged rename against HEAD. Status carries no rename detection, so this
+    /// surfaces as a deletion of `old` plus an addition of `new`.
+    fn staged_rename(&mut self, old: &str, new: &str) -> Result<&mut Self, FixtureError> {
+        let workdir = self.workdir();
+        let from = workdir.join(old);
+        std::fs::rename(&from, workdir.join(new)).context(IoSnafu { path: from })?;
+        let mut index = self.repo.index().context(GitSnafu)?;
+        index.remove_path(Path::new(old)).context(GitSnafu)?;
+        index.add_path(Path::new(new)).context(GitSnafu)?;
+        index.write().context(GitSnafu)?;
+        Ok(self)
+    }
+
     /// Create a branch named `name` pointing at the current HEAD commit.
     fn branch(&self, name: &str) -> Result<&Self, FixtureError> {
         let head = self
@@ -386,6 +529,36 @@ mod tests {
         assert!(files[0].path.ends_with("staged.txt"));
         assert!(!files[1].staged);
         assert!(files[1].path.ends_with("unstaged.txt"));
+    }
+
+    #[test]
+    fn diff_kinds_surfaces_supported_change_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("diff-kinds", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let got: Vec<(String, bool)> = repo
+            .changed_files()
+            .iter()
+            .map(|f| {
+                (
+                    f.path.file_name().unwrap().to_str().unwrap().to_string(),
+                    f.staged,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            got,
+            vec![
+                ("added-staged.txt".to_string(), true),
+                ("modified-staged.txt".to_string(), true),
+                ("renamed-to.txt".to_string(), true),
+                ("hunks.txt".to_string(), false),
+                ("modified-unstaged.txt".to_string(), false),
+            ],
+            "untracked file, both deletions, and the rename source stay hidden under current status options",
+        );
     }
 
     #[test]
