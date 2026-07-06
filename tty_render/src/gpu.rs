@@ -505,6 +505,10 @@ impl Renderer {
         shift_rows: f32,
         content_changed: bool,
     ) {
+        let Some(scissor) = clamp_scissor(scissor, self.width, self.height) else {
+            return;
+        };
+
         let resolution = [self.width as f32, self.height as f32];
         self.background.prepare_composite(
             device,
@@ -570,6 +574,15 @@ impl Renderer {
         grid_scroll: f32,
         scissor: Option<[u32; 4]>,
     ) {
+        let scissor = if let Some(s) = scissor {
+            let Some(clamped) = clamp_scissor(s, self.width, self.height) else {
+                return;
+            };
+            Some(clamped)
+        } else {
+            None
+        };
+
         self.background.prepare_cursor(
             queue,
             resolution,
@@ -684,6 +697,29 @@ pub struct PoolComposite<'a> {
     /// it built last frame and only re-apply the shift, rather than reshape and
     /// re-upload identical rows.
     pub content_changed: bool,
+}
+
+/// Clamp `scissor` (`[x, y, width, height]` in physical pixels) to a
+/// `width`x`height` render target, or `None` when nothing of it remains inside.
+///
+/// Pool and cursor scissors are sized from the app's grid, which can lag a live
+/// resize and describe a rectangle larger than the freshly shrunk drawable.
+/// wgpu aborts the process when a scissor exceeds the render target, so the
+/// origin is pulled back to the target and the extent trimmed to what is left.
+/// An origin at or past an edge, or a zero input extent, leaves an empty
+/// rectangle the caller skips instead of encoding.
+fn clamp_scissor(scissor: [u32; 4], width: u32, height: u32) -> Option<[u32; 4]> {
+    let [x, y, w, h] = scissor;
+    let x = x.min(width);
+    let y = y.min(height);
+    let w = w.min(width - x);
+    let h = h.min(height - y);
+
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    Some([x, y, w, h])
 }
 
 /// The GPU swapchain wrapping a [`Renderer`] for an on-screen window.
@@ -1146,7 +1182,7 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{grid_dims, surface_formats, TextureFormat};
+    use super::{clamp_scissor, grid_dims, surface_formats, TextureFormat};
     use crate::render::CellMetrics;
 
     #[test]
@@ -1155,6 +1191,30 @@ mod tests {
         assert_eq!(dims(15), (33, 88));
         assert_eq!(dims(30), (16, 44));
         assert_eq!(dims(60), (8, 22));
+    }
+
+    #[test]
+    fn clamp_scissor_keeps_in_bounds_trims_overhang_and_drops_empty() {
+        assert_eq!(
+            clamp_scissor([10, 10, 20, 20], 100, 100),
+            Some([10, 10, 20, 20]),
+            "an in-bounds rect passes through unchanged"
+        );
+        assert_eq!(
+            clamp_scissor([90, 90, 20, 20], 100, 100),
+            Some([90, 90, 10, 10]),
+            "an overhanging rect keeps its origin and trims its extent to the edge"
+        );
+        assert_eq!(
+            clamp_scissor([100, 10, 20, 20], 100, 100),
+            None,
+            "an origin at the right edge leaves nothing inside"
+        );
+        assert_eq!(
+            clamp_scissor([10, 10, 0, 20], 100, 100),
+            None,
+            "a zero-width input is empty"
+        );
     }
 
     #[test]
