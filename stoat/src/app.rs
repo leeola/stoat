@@ -1851,6 +1851,23 @@ impl Stoat {
         }
     }
 
+    /// Spawn `future` on the executor and wake the run loop once it
+    /// resolves, so a background result that drives a render lands
+    /// without waiting for the next keystroke.
+    ///
+    /// Binds [`Executor::spawn_with_redraw`] to this app's
+    /// [`Self::redraw_notify`]. The wake fires inside the returned task's
+    /// final poll, so [`Self::run`]'s `drive_background` always polls a
+    /// completed task when it observes the notification.
+    pub(crate) fn spawn_woken<F>(&self, future: F) -> stoat_scheduler::Task<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.executor
+            .spawn_with_redraw(self.redraw_notify.clone(), future)
+    }
+
     /// Schedule a debounced [`ReviewExternalEdit`] dispatch for
     /// `path`. Inserting into [`Self::review_pending_external_edits`]
     /// drops any prior task for the same path, which cancels the

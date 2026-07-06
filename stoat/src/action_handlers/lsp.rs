@@ -971,7 +971,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let lsp = stoat.lsp_host.clone();
-    let task = stoat.executor.spawn(async move {
+    let task = stoat.spawn_woken(async move {
         match lsp.hover(params).await {
             Ok(Some(hover)) => Some(HoverResponse {
                 lines: flatten_hover_contents(hover.contents),
@@ -3617,6 +3617,7 @@ mod tests {
         agent_ipc::{AgentControl, AgentQuery},
         test_harness::TestHarness,
     };
+    use futures::FutureExt;
     use lsp_types::TextDocumentSyncKind;
     use std::{
         path::{Path, PathBuf},
@@ -4620,6 +4621,36 @@ mod tests {
         let popup = h.stoat.pending_hover.as_ref().expect("popup");
         assert_eq!(popup.lines, vec!["fn foo() -> u32".to_string()]);
         assert_eq!(popup.anchor_offset, 0);
+    }
+
+    #[test]
+    fn hover_response_signals_redraw_notify() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "fn foo() -> u32");
+
+        // open_buffer's parse/reindex also wakes redraw_notify. Consume that
+        // permit (against an Arc clone, so the observer never borrows `h`
+        // across settle) before triggering hover, leaving the hover
+        // response's wake as the only one to observe. Notify holds at most
+        // one permit, so a single drain clears it.
+        let redraw = h.stoat.redraw_notify.clone();
+        let _ = redraw.notified().now_or_never();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        let notified = redraw.notified();
+        tokio::pin!(notified);
+        assert!(
+            notified.enable(),
+            "hover response should wake redraw_notify so the popup paints \
+             without waiting for the next keystroke",
+        );
     }
 
     #[test]
