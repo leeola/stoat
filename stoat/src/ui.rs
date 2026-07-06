@@ -33,6 +33,11 @@ use tokio::sync::{
 pub struct RenderFrame {
     pub buffer: Arc<Buffer>,
     pub cursor: Option<(u16, u16)>,
+    /// Raw VT that re-stamps diagnostic curly underlines over `buffer` after it
+    /// is drawn, empty outside stoatty or when no diagnostic span is visible.
+    /// Written to stdout right after the grid draw so it decorates the exact
+    /// frame it was built for. See [`crate::render::undercurl`].
+    pub undercurl: Vec<u8>,
     /// When the frame's first event arrived, for measuring input-to-flush
     /// latency on the UI thread. `Some` only for input-driven frames; `None`
     /// for redraw-notify and PTY wakes, which carry no input to time.
@@ -156,7 +161,7 @@ async fn run(
                 // lock the render thread needs to publish the next frame.
                 #[cfg(feature = "perf")]
                 let mut input_time = None;
-                let cursor = {
+                let (cursor, undercurl) = {
                     let latest = render_rx.borrow_and_update();
                     match latest.as_ref() {
                         Some(src) => {
@@ -166,9 +171,9 @@ async fn run(
                             {
                                 input_time = src.input_time;
                             }
-                            Some(src.cursor)
+                            (Some(src.cursor), src.undercurl.clone())
                         },
-                        None => None,
+                        None => (None, Vec::new()),
                     }
                 };
                 if let Some(cursor) = cursor {
@@ -183,6 +188,13 @@ async fn run(
                             f.set_cursor_position((col, row));
                         }
                     })?;
+                }
+                // Re-stamp diagnostic curly underlines over the grid just drawn,
+                // before the APC batches composite over the same stdout.
+                if !undercurl.is_empty() {
+                    let mut stdout = io::stdout();
+                    stdout.write_all(&undercurl)?;
+                    stdout.flush()?;
                 }
                 // Write any stoatty APC byte batches the app pushed for this
                 // frame to the same stdout, after the grid frame so the pool

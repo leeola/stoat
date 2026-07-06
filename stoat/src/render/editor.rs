@@ -1,7 +1,10 @@
 use crate::{
     display_map::{tab_map, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
-    render::review::{render_review, style_rgb},
+    render::{
+        review::{render_review, style_rgb},
+        undercurl::UndercurlSpan,
+    },
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{
@@ -34,6 +37,7 @@ pub(crate) fn render_editor(
         None,
         None,
         None,
+        None,
     );
 }
 
@@ -50,6 +54,7 @@ pub(crate) fn render_editor_with_overlay(
     search_query: Option<&str>,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
     scene: Option<&mut ApcScene>,
+    undercurls: Option<&mut Vec<UndercurlSpan>>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -97,11 +102,12 @@ pub(crate) fn render_editor_with_overlay(
         width: inner.width.saturating_sub(gutter_w),
         height: inner.height,
     };
+    let severity = severity_colors(theme);
     if gutter_w > 0 {
         let gutter_x = inner.x - gutter_w;
         // Rich mode emits a sub-cell severity bar per row instead of the glyph,
         // engaging only inside stoatty with every severity color resolved to RGB.
-        let rich = scene.filter(|_| stoatty).zip(severity_colors(theme));
+        let rich = scene.filter(|_| stoatty).zip(severity.as_ref());
         match rich {
             Some((scene, colors)) => {
                 let area = Rect {
@@ -123,7 +129,7 @@ pub(crate) fn render_editor_with_overlay(
                         y: row_offset * 16,
                         width: 6,
                         height: 16,
-                        color: severity_color(*sev, &colors),
+                        color: severity_color(*sev, colors),
                     }
                     .render(area, buf, &mut *scene);
                 }
@@ -192,6 +198,8 @@ pub(crate) fn render_editor_with_overlay(
             right,
             bottom,
             buf,
+            if stoatty { undercurls } else { None },
+            severity.as_ref(),
         );
     }
 
@@ -247,6 +255,7 @@ pub(crate) fn render_editor_with_overlay(
                 right,
                 bottom,
                 buf,
+                None,
             );
         }
     }
@@ -286,6 +295,7 @@ pub(crate) fn render_editor_with_overlay(
                 right,
                 bottom,
                 buf,
+                None,
             );
         }
 
@@ -491,6 +501,8 @@ fn paint_diagnostic_spans(
     right: u16,
     bottom: u16,
     buf: &mut Buffer,
+    mut undercurls: Option<&mut Vec<UndercurlSpan>>,
+    colors: Option<&SeverityColors>,
 ) {
     let rope_len = rope.len();
     for diag in set.get(path) {
@@ -510,6 +522,11 @@ fn paint_diagnostic_spans(
         let style = theme
             .get(severity_scope(sev))
             .add_modifier(Modifier::UNDERLINED);
+
+        // Collect the painted runs only when the stoatty undercurl overlay is
+        // live, then re-stamp each as a severity-colored curl span.
+        let mut runs: Vec<(u16, u16, u16)> = Vec::new();
+        let collect = undercurls.is_some() && colors.is_some();
         paint_offset_range(
             rope,
             snapshot,
@@ -522,7 +539,17 @@ fn paint_diagnostic_spans(
             right,
             bottom,
             buf,
+            collect.then_some(&mut runs),
         );
+        if let (Some(undercurls), Some(colors)) = (undercurls.as_deref_mut(), colors) {
+            let color = severity_color(sev, colors);
+            undercurls.extend(runs.into_iter().map(|(x, y, len)| UndercurlSpan {
+                x,
+                y,
+                len,
+                color,
+            }));
+        }
     }
 }
 
@@ -607,6 +634,7 @@ fn paint_offset_range(
     right: u16,
     bottom: u16,
     buf: &mut Buffer,
+    runs: Option<&mut Vec<(u16, u16, u16)>>,
 ) {
     let map_simple =
         snapshot.fold_snapshot().fold_count() == 0 && !snapshot.inlay_snapshot().has_inlays();
@@ -614,6 +642,8 @@ fn paint_offset_range(
     let max_expansion_column = snapshot.tab_snapshot().max_expansion_column();
     let line_count = snapshot.line_count();
 
+    let collect = runs.is_some();
+    let mut painted: Vec<(u16, u16)> = Vec::new();
     let mut paint = |display_row: u32, display_col: u32| {
         if display_row < scroll_row || display_row >= end_row {
             return;
@@ -622,6 +652,9 @@ fn paint_offset_range(
         let x = inner.x + display_col as u16;
         if x < right && y < bottom {
             buf[(x, y)].set_style(style);
+            if collect {
+                painted.push((x, y));
+            }
         }
     };
 
@@ -672,6 +705,36 @@ fn paint_offset_range(
                 offset += ch.len_utf8();
             }
         }
+    }
+
+    if let Some(runs) = runs {
+        coalesce_runs(&painted, runs);
+    }
+}
+
+/// Coalesce painted cells, in paint order, into `(x, y, len)` runs of
+/// horizontally adjacent same-row cells, appending them to `out`.
+///
+/// A diagnostic span paints its cells left to right within each display row, so
+/// adjacency breaks exactly at a row change or a gap (a tab or wide-char
+/// expansion the span skipped), which is where the underline should break too.
+fn coalesce_runs(painted: &[(u16, u16)], out: &mut Vec<(u16, u16, u16)>) {
+    let mut cur: Option<(u16, u16, u16)> = None;
+    for &(x, y) in painted {
+        match cur {
+            Some((rx, ry, rlen)) if ry == y && rx + rlen == x => {
+                cur = Some((rx, ry, rlen + 1));
+            },
+            _ => {
+                if let Some(run) = cur.take() {
+                    out.push(run);
+                }
+                cur = Some((x, y, 1));
+            },
+        }
+    }
+    if let Some(run) = cur {
+        out.push(run);
     }
 }
 
@@ -743,6 +806,36 @@ mod tests {
             super::severity_colors(&h.stoat.theme).is_some(),
             "the shipped default theme must resolve every diagnostic severity \
              to RGB so the sub-cell gutter engages under stoatty",
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_span_collects_an_undercurl_under_stoatty() {
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = PathBuf::from("/undercurl-test");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(0, DiagnosticSeverity::WARNING)]);
+
+        let _ = h.stoat.render();
+
+        assert_eq!(
+            h.stoat.pending_undercurls.len(),
+            1,
+            "the warning span paints one underline run",
+        );
+        assert_eq!(
+            h.stoat.pending_undercurls[0].color,
+            [0xe5, 0xc0, 0x7b],
+            "the run carries the shipped warning severity color",
         );
     }
 

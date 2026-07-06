@@ -7,6 +7,7 @@ use crate::{
         layout::split_pane_status,
         run_pane::render_run_pane,
         term_pane::render_term_pane,
+        undercurl::UndercurlSpan,
         FrameCtx, PaneCtx,
     },
 };
@@ -29,6 +30,7 @@ pub(crate) fn render_pane(
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
+    undercurls: &mut Vec<UndercurlSpan>,
 ) {
     let theme = frame.theme;
     let text_style = if is_focused {
@@ -73,6 +75,7 @@ pub(crate) fn render_pane(
                     frame.search_query,
                     diagnostic_info,
                     Some(scene),
+                    Some(undercurls),
                 );
             }
         },

@@ -28,9 +28,11 @@ pub(crate) mod signature_help;
 pub(crate) mod symbol_picker;
 pub(crate) mod term_pane;
 pub(crate) mod text;
+pub(crate) mod undercurl;
 pub(crate) mod workspace_picker;
 pub(crate) mod workspace_symbol_picker;
 
+use self::undercurl::UndercurlSpan;
 use crate::{
     app::Stoat,
     buffer_registry::BufferRegistry,
@@ -159,7 +161,12 @@ pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
 ///
 /// When [`Stoat::pending_message`] is set the bottom row is reserved for it and
 /// the body layout shrinks by one row. Otherwise the panes keep full height.
-pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
+pub(crate) fn frame(
+    stoat: &mut Stoat,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+    undercurls: &mut Vec<UndercurlSpan>,
+) {
     let full = stoat.size();
     let message = if full.height >= 2 {
         stoat.pending_message.clone()
@@ -247,6 +254,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
             frame,
             buf,
             scene,
+            undercurls,
         );
     }
 

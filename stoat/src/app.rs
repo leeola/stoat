@@ -20,6 +20,7 @@ use crate::{
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
     register,
+    render::undercurl::{self, UndercurlSpan},
     review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
     term_session::TermId,
@@ -739,6 +740,11 @@ pub struct Stoat {
     /// frames while painting; [`Self::emit_apc_scene`] diffs it against the last
     /// flush so unchanged decoration costs no bytes. Empty until a widget appends.
     pub(crate) apc_scene: ApcScene,
+    /// Diagnostic underline spans collected during the current paint. The editor
+    /// renderer fills this while painting under stoatty; [`Self::paint_into`]
+    /// turns it into the curly-underline VT re-stamp carried on the frame. Reused
+    /// across frames like [`Self::apc_scene`] to avoid a per-frame allocation.
+    pub(crate) pending_undercurls: Vec<UndercurlSpan>,
     /// Smooth-scroll pool emit state for the focused editor. Tracks the
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
@@ -991,6 +997,7 @@ impl Stoat {
             stoatty: false,
             apc_tx: None,
             apc_scene: ApcScene::new(),
+            pending_undercurls: Vec::new(),
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
         }
     }
@@ -1254,19 +1261,21 @@ impl Stoat {
             match effect {
                 UpdateEffect::Redraw => {
                     self.drive_background();
-                    let buffer = {
+                    let (buffer, undercurl) = {
                         let mut b = Buffer::empty(self.size);
                         #[cfg(feature = "perf")]
                         let painted = std::time::Instant::now();
                         self.paint_into(&mut b);
                         #[cfg(feature = "perf")]
                         self.perf.record_paint(painted.elapsed());
-                        Arc::new(b)
+                        let undercurl = undercurl::build(&b, &self.pending_undercurls);
+                        (Arc::new(b), undercurl)
                     };
                     let cursor = self.primary_cursor_screen_pos();
                     render.send_replace(Some(RenderFrame {
                         buffer,
                         cursor,
+                        undercurl,
                         #[cfg(feature = "perf")]
                         input_time: t_event,
                     }));
@@ -4114,12 +4123,16 @@ impl Stoat {
             editor.display_map.set_syntax_highlighting(syntax);
         }
 
-        // Take the scene out so `frame` can hold a `&mut ApcScene` alongside its
-        // `&mut self` borrow. Widgets append into it during the paint.
+        // Take the scene and undercurl buffers out so `frame` can hold `&mut`
+        // to them alongside its `&mut self` borrow. Widgets append into the
+        // scene and the editor renderer records diagnostic spans during paint.
         let mut scene = std::mem::take(&mut self.apc_scene);
         scene.clear();
-        crate::render::frame(self, buf, &mut scene);
+        let mut undercurls = std::mem::take(&mut self.pending_undercurls);
+        undercurls.clear();
+        crate::render::frame(self, buf, &mut scene, &mut undercurls);
         self.apc_scene = scene;
+        self.pending_undercurls = undercurls;
     }
 
     /// Flush the frame's APC decoration scene to the channel, when it changed.
