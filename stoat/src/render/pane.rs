@@ -229,13 +229,28 @@ fn render_pane_status(
     }
 
     let (left, right) = status_segments(view, is_focused, area, frame, editors, buffers);
+    render_status_segments(area, base_style, frame, &left, &right, buf, scene);
+}
 
-    // Rich mode needs stoatty, a scene, and every segment color as RGB. When any
-    // color falls outside RGB the whole bar drops to the cell fallback.
+/// Render the built status segments as rich APC components inside stoatty, or
+/// into cells otherwise.
+///
+/// Rich mode needs stoatty, a scene, and every segment color as RGB. When any
+/// color falls outside RGB the whole bar drops to the cell fallback, so a theme
+/// without RGB status colors keeps today's cell rendering.
+fn render_status_segments(
+    area: Rect,
+    base_style: Style,
+    frame: FrameCtx<'_>,
+    left: &[StatusSeg],
+    right: &[StatusSeg],
+    buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
+) {
     let rich = scene.filter(|_| frame.stoatty).and_then(|scene| {
         let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_TEXT_MUTED).fg)?;
-        let left_rich = resolve_rich_segments(&left, base_style)?;
-        let right_rich = resolve_rich_segments(&right, base_style)?;
+        let left_rich = resolve_rich_segments(left, base_style)?;
+        let right_rich = resolve_rich_segments(right, base_style)?;
         Some((scene, separator, left_rich, right_rich))
     });
 
@@ -249,7 +264,7 @@ fn render_pane_status(
             }
             .draw_components(area, buf, scene);
         },
-        None => paint_status_fallback(buf, area, &left, &right),
+        None => paint_status_fallback(buf, area, left, right),
     }
 }
 
