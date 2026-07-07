@@ -209,15 +209,10 @@ fn render_pane_status(
         return;
     }
 
-    let workspace_name = frame.workspace_name;
-    let workspace_root = frame.workspace_root;
-    let mode = frame.mode;
-    let theme = frame.theme;
-
     let base_style = if is_focused {
-        theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+        frame.theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
     } else {
-        theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
+        frame.theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
     };
 
     let y = area.y;
@@ -226,33 +221,68 @@ fn render_pane_status(
         buf[(x, y)].set_char(' ').set_style(base_style);
     }
 
+    let (left, right) = status_segments(view, is_focused, area, frame, editors, buffers);
+    paint_status_fallback(buf, area, &left, &right);
+}
+
+/// One built status-bar segment pairing painted text with its cell style.
+type StatusSeg = (String, Style);
+
+/// Build the left- and right-anchored status segments as `(text, style)` pairs
+/// in paint order.
+///
+/// Both the cell fallback and the rich status path consume these, so the two
+/// renderings stay in lockstep. The left cursor and right anchor track the same
+/// cell arithmetic [`paint_segment`] applies, so a segment enters the list only
+/// when it would be painted and the `lsp_message` truncation matches today's.
+fn status_segments(
+    view: &View,
+    is_focused: bool,
+    area: Rect,
+    frame: FrameCtx<'_>,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+) -> (Vec<StatusSeg>, Vec<StatusSeg>) {
+    let theme = frame.theme;
+    let base_style = if is_focused {
+        theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+    } else {
+        theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
+    };
+    let end_x = area.x + area.width;
+
+    let mut left: Vec<(String, Style)> = Vec::new();
     let mut cursor = area.x;
     if is_focused {
-        let (label, mode_bg) = mode_segment(mode, theme, frame.mode_badges);
+        let (label, mode_bg) = mode_segment(frame.mode, theme, frame.mode_badges);
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
-        cursor = paint_segment(buf, y, cursor, end_x, &format!(" {label} "), mode_style);
-        let ws_style = base_style.add_modifier(Modifier::BOLD);
-        cursor = paint_segment(
-            buf,
-            y,
-            cursor,
+        push_left(
+            &mut left,
+            &mut cursor,
             end_x,
-            &format!(" {workspace_name} "),
-            ws_style,
+            format!(" {label} "),
+            mode_style,
+        );
+        push_left(
+            &mut left,
+            &mut cursor,
+            end_x,
+            format!(" {} ", frame.workspace_name),
+            base_style.add_modifier(Modifier::BOLD),
         );
         if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
-            cursor = paint_segment(
-                buf,
-                y,
-                cursor,
+            push_left(
+                &mut left,
+                &mut cursor,
                 end_x,
-                &format!(" {screen_label} "),
+                format!(" {screen_label} "),
                 base_style.fg(screen_color),
             );
         }
     }
 
-    let (filename, dirty, cursor_pos) = pane_status_info(view, workspace_root, editors, buffers);
+    let (filename, dirty, cursor_pos) =
+        pane_status_info(view, frame.workspace_root, editors, buffers);
     if let Some(name) = filename {
         let left_pad = if cursor == area.x { " " } else { "" };
         let text = if dirty {
@@ -260,16 +290,17 @@ fn render_pane_status(
         } else {
             format!("{left_pad}{name} ")
         };
-        cursor = paint_segment(buf, y, cursor, end_x, &text, base_style);
+        push_left(&mut left, &mut cursor, end_x, text, base_style);
     }
 
+    let mut right: Vec<(String, Style)> = Vec::new();
     let mut right_anchor = end_x;
     if let Some((line, col)) = cursor_pos {
         let text = format!(" {line}:{col} ");
         let width = text.chars().count() as u16;
         let start = right_anchor.saturating_sub(width);
         if start >= cursor {
-            paint_segment(buf, y, start, right_anchor, &text, base_style);
+            right.push((text, base_style));
             right_anchor = start;
         }
     }
@@ -279,14 +310,7 @@ fn render_pane_status(
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                paint_segment(
-                    buf,
-                    y,
-                    start,
-                    right_anchor,
-                    &text,
-                    base_style.add_modifier(Modifier::BOLD),
-                );
+                right.push((text, base_style.add_modifier(Modifier::BOLD)));
                 right_anchor = start;
             }
         }
@@ -299,7 +323,7 @@ fn render_pane_status(
                 let badge_style = base_style
                     .add_modifier(Modifier::BOLD)
                     .patch(theme.get(diagnostic_severity_scope(worst)));
-                paint_segment(buf, y, start, right_anchor, &text, badge_style);
+                right.push((text, badge_style));
                 right_anchor = start;
             }
         }
@@ -314,7 +338,7 @@ fn render_pane_status(
                 } else {
                     base_style
                 };
-                paint_segment(buf, y, start, right_anchor, &text, style);
+                right.push((text, style));
                 right_anchor = start;
             }
         }
@@ -323,14 +347,7 @@ fn render_pane_status(
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                paint_segment(
-                    buf,
-                    y,
-                    start,
-                    right_anchor,
-                    &text,
-                    base_style.add_modifier(Modifier::ITALIC),
-                );
+                right.push((text, base_style.add_modifier(Modifier::ITALIC)));
                 #[cfg(feature = "perf")]
                 {
                     right_anchor = start;
@@ -343,18 +360,44 @@ fn render_pane_status(
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                paint_segment(
-                    buf,
-                    y,
-                    start,
-                    right_anchor,
-                    &text,
-                    base_style.add_modifier(Modifier::DIM),
-                );
+                right.push((text, base_style.add_modifier(Modifier::DIM)));
             }
         }
     }
     let _ = cursor;
+    let _ = right_anchor;
+    (left, right)
+}
+
+/// Append a left-anchored segment and advance `cursor` as [`paint_segment`]
+/// would, clamping at `end_x`.
+fn push_left(left: &mut Vec<StatusSeg>, cursor: &mut u16, end_x: u16, text: String, style: Style) {
+    *cursor = cursor
+        .saturating_add(text.chars().count() as u16)
+        .min(end_x);
+    left.push((text, style));
+}
+
+/// Paint the built status segments into cells through [`paint_segment`], the
+/// graceful-degradation path for a terminal without the rich components.
+fn paint_status_fallback(buf: &mut Buffer, area: Rect, left: &[StatusSeg], right: &[StatusSeg]) {
+    let y = area.y;
+    let end_x = area.x + area.width;
+
+    let mut cursor = area.x;
+    for (text, style) in left {
+        cursor = paint_segment(buf, y, cursor, end_x, text, *style);
+    }
+
+    let mut right_anchor = end_x;
+    for (text, style) in right {
+        let width = text.chars().count() as u16;
+        let start = right_anchor.saturating_sub(width);
+        paint_segment(buf, y, start, right_anchor, text, *style);
+        right_anchor = start;
+    }
+    let _ = cursor;
+    let _ = right_anchor;
 }
 
 /// Builds the status-bar diagnostic label for the focused pane's
