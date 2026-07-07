@@ -53,6 +53,7 @@ futures = { version = "0.3", default-features = false }
 compact_str = "0.9"
 arrayvec = "0.7"
 smallvec = { version = "1", features = ["const_generics"] }
+pulldown-cmark = { version = "0.13", default-features = false }
 unicode-width = "0.2"
 slotmap = { version = "1", features = ["serde"] }
 bytes = "1"

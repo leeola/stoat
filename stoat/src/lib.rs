@@ -34,6 +34,9 @@ pub mod keymap;
 mod keymap_state;
 pub(crate) mod location_picker;
 pub mod lsp;
+// FIXME: drop the allow once the hover pipeline consumes render_markdown.
+#[allow(dead_code)]
+pub(crate) mod markdown;
 pub mod multi_buffer;
 pub mod pane;
 mod paths;
