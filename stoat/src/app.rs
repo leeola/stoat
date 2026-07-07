@@ -4315,6 +4315,7 @@ impl Stoat {
                 pool: u32,
                 width: u16,
                 height: u16,
+                gutter: crate::smooth_scroll::PageGutter,
             },
             Review {
                 snapshot: crate::display_map::DisplaySnapshot,
@@ -4327,6 +4328,8 @@ impl Stoat {
         }
         let mut async_jobs: Vec<PoolFill> = Vec::new();
         let syntax_highlight = self.syntax_highlight;
+        let line_numbers = self.settings.editor_line_numbers.unwrap_or(true);
+        let stoatty = self.stoatty;
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -4352,11 +4355,23 @@ impl Stoat {
             // Review rows regenerate on accept/reject and their gutter glyphs
             // change on stage/unstage, so the session version is the pool's
             // content version. Plain editors stay stable while scrolling, save
-            // for the syntax-highlight toggle, which recolors every pooled row.
-            let content_version = editor
-                .review_view
-                .as_ref()
-                .map_or(u64::from(!syntax_highlight), |view| view.session_version);
+            // for the syntax-highlight toggle (recolors every row), a diagnostics
+            // change (restyles the gutter), and a gutter-width change (reflows the
+            // inset), so a buffered page must refill when any of those move.
+            let content_version = match editor.review_view.as_ref() {
+                Some(view) => view.session_version,
+                None => {
+                    let mut hasher = DefaultHasher::new();
+                    (!syntax_highlight).hash(&mut hasher);
+                    editor.gutter_width.hash(&mut hasher);
+                    editor
+                        .gutter_severity_cache
+                        .as_ref()
+                        .map_or(0, |cache| cache.version)
+                        .hash(&mut hasher);
+                    hasher.finish()
+                },
+            };
             let entered = crate::smooth_scroll::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,
@@ -4383,12 +4398,25 @@ impl Stoat {
                         height: region.height,
                     });
                 } else {
+                    let severity = editor
+                        .gutter_severity_cache
+                        .as_ref()
+                        .map(|cache| cache.map.clone())
+                        .unwrap_or_default();
+                    let rich =
+                        crate::render::editor::resolve_rich_gutter(theme, fallback_style, stoatty);
                     async_jobs.push(PoolFill::Editor {
                         snapshot,
                         pages: entered,
                         pool: region.pool,
                         width: region.width,
                         height: region.height,
+                        gutter: crate::smooth_scroll::PageGutter::new(
+                            line_numbers,
+                            severity,
+                            theme.clone(),
+                            rich,
+                        ),
                     });
                 }
             }
@@ -4635,9 +4663,11 @@ impl Stoat {
                     pool,
                     width,
                     height,
+                    gutter,
                 } => {
                     for index in pages {
                         let snapshot = snapshot.clone();
+                        let gutter = gutter.clone();
                         let apc_tx = apc_tx.clone();
                         self.executor
                             .spawn_blocking(move || {
@@ -4648,6 +4678,7 @@ impl Stoat {
                                     fallback_style,
                                     width,
                                     height,
+                                    &gutter,
                                 );
                                 let _ = apc_tx.send(fill);
                             })

@@ -464,8 +464,8 @@ pub(crate) fn render_editor_with_overlay(
 /// diagnostic set's version changes, so the gutter is not rebuilt from the
 /// full diagnostic list every frame.
 pub(crate) struct GutterSeverityCache {
-    version: u64,
-    map: BTreeMap<u32, DiagnosticSeverity>,
+    pub(crate) version: u64,
+    pub(crate) map: BTreeMap<u32, DiagnosticSeverity>,
 }
 
 /// Build a per-buffer-row map from `path`'s diagnostics, picking the
@@ -514,6 +514,7 @@ fn severity_scope(sev: DiagnosticSeverity) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct SeverityColors {
     error: [u8; 3],
     warning: [u8; 3],
@@ -542,6 +543,42 @@ fn severity_color(sev: DiagnosticSeverity, colors: &SeverityColors) -> [u8; 3] {
         DiagnosticSeverity::HINT => colors.hint,
         _ => colors.error,
     }
+}
+
+/// The resolved colors the rich sub-cell page gutter needs.
+#[derive(Clone)]
+pub(crate) struct RichGutterColors {
+    pub(crate) colors: SeverityColors,
+    pub(crate) number_fg: [u8; 3],
+    pub(crate) bg: [u8; 3],
+}
+
+/// Resolve the rich page-gutter colors, or `None` outside stoatty or when a
+/// gutter color is not RGB.
+///
+/// Mirrors the live gutter's rich gate so an off-run-loop page render and the
+/// live render agree on rich versus fallback for the same theme.
+pub(crate) fn resolve_rich_gutter(
+    theme: &crate::theme::Theme,
+    fallback_style: Style,
+    stoatty: bool,
+) -> Option<RichGutterColors> {
+    use crate::theme::scope as s;
+    if !stoatty {
+        return None;
+    }
+    let colors = severity_colors(theme)?;
+    let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
+    let bg = style_rgb(
+        fallback_style
+            .bg
+            .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg)),
+    )?;
+    Some(RichGutterColors {
+        colors,
+        number_fg,
+        bg,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

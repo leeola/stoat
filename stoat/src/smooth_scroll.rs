@@ -35,12 +35,17 @@ use crate::{
         command_palette::paint_palette_rows,
         commits::paint_commit_rows,
         completion::paint_completion_rows,
+        editor::{
+            draw_fallback_line_numbers, gutter_component_lines, gutter_geometry, rich_gutter,
+            RichGutterColors,
+        },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
         review::render_review_rows,
     },
     review_session::ReviewViewState,
 };
+use lsp_types::DiagnosticSeverity;
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, ops::Range};
 use stoat_action::registry::RegistryEntry;
@@ -48,6 +53,7 @@ use stoatty_protocol::command::{
     encode_fill_end_into, encode_fill_into, encode_pool_drop_into, encode_pool_region_into,
     encode_reposition_into, encode_scroll_into, PoolRegionCommand, ScrollCommand,
 };
+use stoatty_widgets::ApcScene;
 
 /// Pages kept buffered around each pool's visible page, the pool's working
 /// window. Wide enough that the visible page and its straddle neighbour (when a
@@ -300,6 +306,7 @@ pub(crate) fn render_page_fill(
     fallback_style: Style,
     region_width: u16,
     region_height: u16,
+    gutter: &PageGutter,
 ) -> Vec<u8> {
     let top_row = index
         .saturating_mul(region_height as u64)
@@ -310,6 +317,7 @@ pub(crate) fn render_page_fill(
         fallback_style,
         region_width,
         region_height,
+        gutter,
     );
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
@@ -327,16 +335,22 @@ pub(crate) fn render_page_fill(
 /// text needs, and the uncached [`DisplaySnapshot::highlighted_chunks`] keeps the
 /// render from touching the editor's shared endpoint cache.
 ///
-/// Paints text and syntax highlights only -- the same cells the unfocused live
-/// grid paints for these rows, minus the cursor and selection a pooled page never
-/// carries. Rows past the document end stay blank, and the [`serialize_buffer`]
-/// bytes fully repaint the slot regardless of its prior contents.
+/// Paints the line-number gutter, then the text and syntax highlights inset past
+/// it -- the same cells the unfocused live grid paints for these rows, minus the
+/// cursor and selection a pooled page never carries. Rows past the document end
+/// stay blank, and the [`serialize_buffer`] bytes fully repaint the slot
+/// regardless of its prior contents.
+///
+/// Inside stoatty the rich gutter's sub-cell components ride as APC frames
+/// appended after the serialized cells, so the terminal captures them onto the
+/// page slot. Every other terminal gets degraded cell numbers in the buffer.
 pub(crate) fn render_page_from_snapshot(
     snapshot: &DisplaySnapshot,
     top_row: u32,
     fallback_style: Style,
     region_width: u16,
     region_height: u16,
+    gutter: &PageGutter,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
     let mut buf = Buffer::empty(area);
@@ -344,10 +358,14 @@ pub(crate) fn render_page_from_snapshot(
     let end_row = top_row
         .saturating_add(region_height as u32)
         .min(snapshot.line_count());
+
+    let (gutter_w, apc) = paint_page_gutter(snapshot, top_row, end_row, &mut buf, area, gutter);
+
     if end_row > top_row {
         let right = area.x + area.width;
         let bottom = area.y + area.height;
-        let mut x = area.x;
+        let text_x = area.x + gutter_w;
+        let mut x = text_x;
         let mut y = area.y;
         'chunks: for chunk in snapshot.highlighted_chunks(top_row..end_row) {
             let style = chunk
@@ -358,7 +376,7 @@ pub(crate) fn render_page_from_snapshot(
             for ch in chunk.text.chars() {
                 if ch == '\n' {
                     y += 1;
-                    x = area.x;
+                    x = text_x;
                     if y >= bottom {
                         break 'chunks;
                     }
@@ -373,7 +391,89 @@ pub(crate) fn render_page_from_snapshot(
         }
     }
 
-    serialize_buffer(&buf)
+    let mut bytes = serialize_buffer(&buf);
+    bytes.extend_from_slice(&apc);
+    bytes
+}
+
+/// The gutter inputs an off-run-loop editor page render needs to paint the
+/// line-number gutter identically to the live render.
+///
+/// [`Self::rich`] is `Some` only inside stoatty with every gutter color RGB. The
+/// page then emits sub-cell components as APC frames. Otherwise it paints
+/// degraded cell numbers styled from [`Self::theme`].
+#[derive(Clone)]
+pub(crate) struct PageGutter {
+    line_numbers: bool,
+    severity: BTreeMap<u32, DiagnosticSeverity>,
+    theme: crate::theme::Theme,
+    rich: Option<RichGutterColors>,
+}
+
+impl PageGutter {
+    /// Bundle the gutter inputs resolved on the run loop for an editor page fill.
+    ///
+    /// `line_numbers` off yields a gutterless page whose text starts at column
+    /// zero, matching a live render with the gutter disabled.
+    pub(crate) fn new(
+        line_numbers: bool,
+        severity: BTreeMap<u32, DiagnosticSeverity>,
+        theme: crate::theme::Theme,
+        rich: Option<RichGutterColors>,
+    ) -> PageGutter {
+        PageGutter {
+            line_numbers,
+            severity,
+            theme,
+            rich,
+        }
+    }
+}
+
+/// Paint the page's line-number gutter, returning the cell columns it reserves
+/// and the rich APC frames to append after the page cells.
+///
+/// Returns `(0, empty)` when line numbers are off, so the page text then starts
+/// at column zero exactly as before. In rich mode the sub-cell components draw
+/// into a scratch scene whose bytes ride the fill, leaving the gutter cells in
+/// `buf` at the page background. In fallback mode the degraded numbers paint
+/// into `buf` and no bytes are returned.
+fn paint_page_gutter(
+    snapshot: &DisplaySnapshot,
+    top_row: u32,
+    end_row: u32,
+    buf: &mut Buffer,
+    area: Rect,
+    gutter: &PageGutter,
+) -> (u16, Vec<u8>) {
+    if !gutter.line_numbers {
+        return (0, Vec::new());
+    }
+
+    let visible = end_row.saturating_sub(top_row).min(area.height as u32);
+    let (folded, width_digits) = gutter_geometry(snapshot, top_row, visible);
+
+    match &gutter.rich {
+        Some(rich) => {
+            let lines = gutter_component_lines(&folded, &gutter.severity, &rich.colors);
+            let widget = rich_gutter(&lines, width_digits, rich.number_fg, rich.bg);
+            let mut scene = ApcScene::new();
+            let mut scratch = Buffer::empty(area);
+            widget.draw_components(area, &mut scratch, &mut scene);
+            (widget.cell_width(), scene.buffer().clone())
+        },
+        None => {
+            let width = draw_fallback_line_numbers(
+                &folded,
+                width_digits,
+                &gutter.severity,
+                area,
+                &gutter.theme,
+                buf,
+            );
+            (width, Vec::new())
+        },
+    }
 }
 
 /// Render review page `index` from owned parts and wrap it in the pool fill
@@ -623,14 +723,14 @@ mod tests {
     /// exercising the page offset and the bottom/right clipping.
     #[test]
     fn page_from_snapshot_matches_unfocused_render_editor() {
-        use super::{render_page_from_snapshot, serialize_buffer, Buffer, Rect};
+        use super::{render_page_from_snapshot, serialize_buffer, Buffer, PageGutter, Rect};
         use crate::{
             action_handlers::{self, dispatch},
-            render::editor::render_editor,
+            render::editor::render_editor_with_overlay,
             theme::{scope, Theme},
             Stoat,
         };
-        use std::path::PathBuf;
+        use std::{collections::BTreeMap, path::PathBuf};
         use stoat_action::OpenFile;
 
         let mut h = Stoat::test();
@@ -648,17 +748,36 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
 
+        // With line numbers on in fallback mode, the page's degraded cell gutter
+        // must match the live render's so the settle handoff shows no shift.
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None);
+
         for top_row in [0u32, 4, 8, 40] {
             let area = Rect::new(0, 0, 12, 4);
             let mut expected = Buffer::empty(area);
             let saved = editor.scroll_row;
             editor.scroll_row = top_row;
-            render_editor(editor, area, fallback, &theme, &mut expected, false);
+            render_editor_with_overlay(
+                editor,
+                area,
+                fallback,
+                &theme,
+                &mut expected,
+                false,
+                false,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
             editor.scroll_row = saved;
             let expected = serialize_buffer(&expected);
 
             let snapshot = editor.display_map.snapshot();
-            let got = render_page_from_snapshot(&snapshot, top_row, fallback, 12, 4);
+            let got = render_page_from_snapshot(&snapshot, top_row, fallback, 12, 4, &gutter);
 
             assert_eq!(got, expected, "page at top_row {top_row}");
         }
@@ -799,13 +918,13 @@ mod tests {
 
     #[test]
     fn render_page_fill_wraps_the_page_in_fill_frames() {
-        use super::{render_page_fill, render_page_from_snapshot};
+        use super::{render_page_fill, render_page_from_snapshot, PageGutter};
         use crate::{
             action_handlers::{self, dispatch},
             theme::{scope, Theme},
             Stoat,
         };
-        use std::path::PathBuf;
+        use std::{collections::BTreeMap, path::PathBuf};
         use stoat_action::OpenFile;
         use stoatty_protocol::command::FillCommand;
 
@@ -821,8 +940,9 @@ mod tests {
         let fallback = Theme::empty().get(scope::UI_TEXT);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
+        let gutter = PageGutter::new(false, BTreeMap::new(), Theme::empty(), None);
 
-        let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3);
+        let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3, &gutter);
 
         let cmds = commands(&frame);
         assert!(
@@ -834,10 +954,53 @@ mod tests {
             "frame closes the fill, got {cmds:?}"
         );
 
-        let page = render_page_from_snapshot(&snapshot, 2 * 3, fallback, 12, 3);
+        let page = render_page_from_snapshot(&snapshot, 2 * 3, fallback, 12, 3, &gutter);
         assert!(
             find(&frame, &page).is_some(),
             "the page bytes ride between the fill markers"
+        );
+    }
+
+    #[test]
+    fn rich_page_fill_carries_gutter_component_frames() {
+        use super::{render_page_fill, PageGutter};
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::resolve_rich_gutter,
+            theme::scope,
+            Stoat,
+        };
+        use std::{collections::BTreeMap, path::PathBuf};
+        use stoat_action::OpenFile;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/rich-page");
+        let path = root.join("doc.txt");
+        h.fake_fs()
+            .insert_file(&path, b"alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let rich = resolve_rich_gutter(&theme, fallback, true)
+            .expect("the shipped theme resolves the rich gutter colors");
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), Some(rich));
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+
+        let frame = render_page_fill(&snapshot, 3, 0, fallback, 12, 4, &gutter);
+        let cmds = commands(&frame);
+
+        assert!(
+            cmds.iter().any(|cmd| matches!(cmd, Command::TextRun(_))),
+            "the rich page fill carries the scaled line-number runs, got {cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|cmd| matches!(cmd, Command::Bar(_))),
+            "the rich page fill carries the gutter separator bar, got {cmds:?}"
         );
     }
 
