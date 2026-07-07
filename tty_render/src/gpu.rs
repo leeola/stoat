@@ -526,6 +526,8 @@ impl Renderer {
             shift_rows,
             content_changed,
         );
+        self.bar
+            .prepare_composite(device, queue, pool_grid.bars(), resolution, shift_rows);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
 
@@ -550,6 +552,10 @@ impl Renderer {
             render_pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
             self.background.draw_composite(&mut render_pass);
             self.text.draw_composite(&mut render_pass);
+            // Off-grid gutter chrome sits above the page glyphs but below the
+            // cursor. Bars fill behind the scaled run text.
+            self.bar.draw_composite(&mut render_pass);
+            self.text.draw_composite_text_runs(&mut render_pass);
         }
 
         queue.submit([encoder.finish()]);

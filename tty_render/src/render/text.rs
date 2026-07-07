@@ -177,6 +177,13 @@ pub struct TextPass {
     text_run_instances: Buffer,
     text_run_capacity: usize,
     text_run_count: u32,
+    /// Text-run glyph instances of a composited pool grid, kept separate from
+    /// [`Self::text_run_instances`] like [`Self::composite_instances`]. Drawn
+    /// with the pool-shift globals, not the screen-anchored ones, so the runs
+    /// glide with the page.
+    composite_text_run_instances: Buffer,
+    composite_text_run_capacity: usize,
+    composite_text_run_count: u32,
     /// Screen-anchored glyphs for the perf HUD readout, laid out in pixel space
     /// and drawn topmost with the text-run pipeline.
     #[cfg(feature = "perf")]
@@ -202,6 +209,11 @@ pub struct TextPass {
     rect_instances: Buffer,
     rect_capacity: usize,
     rect_count: u32,
+    /// Run-background rects of a composited pool grid, kept separate from
+    /// [`Self::rect_instances`] like [`Self::composite_instances`].
+    composite_rect_instances: Buffer,
+    composite_rect_capacity: usize,
+    composite_rect_count: u32,
     atlas: GlyphAtlas,
     font_system: FontSystem,
     /// The resolved primary shaping family: the first configured `font_family`
@@ -430,6 +442,16 @@ impl TextPass {
             "composite underline instances",
             instance_bytes::<UnderlineInstance>(INITIAL_CAPACITY),
         );
+        let composite_text_run_instances = alloc_instances(
+            device,
+            "composite text run instances",
+            instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+        );
+        let composite_rect_instances = alloc_instances(
+            device,
+            "composite text run rect instances",
+            instance_bytes::<RectInstance>(INITIAL_CAPACITY),
+        );
 
         TextPass {
             pipeline,
@@ -460,6 +482,9 @@ impl TextPass {
             text_run_instances,
             text_run_capacity: INITIAL_CAPACITY,
             text_run_count: 0,
+            composite_text_run_instances,
+            composite_text_run_capacity: INITIAL_CAPACITY,
+            composite_text_run_count: 0,
             #[cfg(feature = "perf")]
             hud_instances,
             #[cfg(feature = "perf")]
@@ -477,6 +502,9 @@ impl TextPass {
             rect_instances,
             rect_capacity: INITIAL_CAPACITY,
             rect_count: 0,
+            composite_rect_instances,
+            composite_rect_capacity: INITIAL_CAPACITY,
+            composite_rect_count: 0,
             atlas,
             font_system,
             family,
@@ -815,12 +843,39 @@ impl TextPass {
             );
         }
 
+        // Pack the composite text runs and their background rects before the
+        // grid glyphs, so a run-glyph atlas grow reflects in the grid resolve
+        // below rather than invalidating its UVs. The runs carry the pool shift
+        // through the composite globals, so they glide with the page cells.
+        let atlas_dims = self.atlas.texture_dims();
+
+        let run_instances = self.build_text_run_instances(device, queue, grid);
+        self.composite_text_run_count = run_instances.len() as u32;
+        upload_instances(
+            device,
+            queue,
+            &run_instances,
+            &mut self.composite_text_run_instances,
+            &mut self.composite_text_run_capacity,
+            "composite text run instances",
+        );
+
+        let run_rects = self.build_run_rects(grid);
+        self.composite_rect_count = run_rects.len() as u32;
+        upload_instances(
+            device,
+            queue,
+            &run_rects,
+            &mut self.composite_rect_instances,
+            &mut self.composite_rect_capacity,
+            "composite text run rect instances",
+        );
+
         // Shape every pool row fresh through the same per-row primitive
         // rasterize_visible uses, but into a local vec, so glyph_row_cache and
         // its sibling shaping state stay the live frame's. rasterize_row inserts
         // each glyph into the shared atlas, so build_text_instances below reads
         // final UVs once the atlas has reached its size for this pool.
-        let atlas_dims = self.atlas.texture_dims();
         let pending = {
             let primary_name = self.family.clone();
             let primary = shape_family(&primary_name);
@@ -1153,6 +1208,33 @@ impl TextPass {
             render_pass.set_vertex_buffer(0, self.composite_underline_instances.slice(..));
             render_pass.draw(0..6, 0..self.composite_underline_count);
         }
+    }
+
+    /// Record a composited pool's run-background and text-run glyph draw into
+    /// `render_pass`.
+    ///
+    /// A no-op until [`Self::prepare_composite`] has run. Reads the composite run
+    /// buffers, leaving the live text-run instances untouched. Binds the
+    /// grid-scroll globals [`Self::prepare_composite`] wrote, so the runs glide
+    /// with the page rather than staying screen-anchored like
+    /// [`Self::draw_text_runs`].
+    pub fn draw_composite_text_runs(&self, render_pass: &mut RenderPass<'_>) {
+        if self.composite_rect_count > 0 {
+            render_pass.set_pipeline(&self.rect_pipeline);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.composite_rect_instances.slice(..));
+            render_pass.draw(0..6, 0..self.composite_rect_count);
+        }
+
+        if self.composite_text_run_count == 0 {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.composite_text_run_instances.slice(..));
+        render_pass.draw(0..6, 0..self.composite_text_run_count);
     }
 
     /// Record the off-grid text-run glyph draw into `render_pass`.

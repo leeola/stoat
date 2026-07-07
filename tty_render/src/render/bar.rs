@@ -52,6 +52,12 @@ pub struct BarPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    /// Bars of a pool grid being composited over the live grid, built by
+    /// [`Self::prepare_composite`] into a buffer separate from
+    /// [`Self::instances`] so a pool draw leaves the live bars intact.
+    composite_instances: Buffer,
+    composite_capacity: usize,
+    composite_count: u32,
     metrics: CellMetrics,
 }
 
@@ -134,6 +140,7 @@ impl BarPass {
         });
 
         let instances = alloc_instances(device, INITIAL_CAPACITY);
+        let composite_instances = alloc_instances(device, INITIAL_CAPACITY);
 
         BarPass {
             pipeline,
@@ -142,6 +149,9 @@ impl BarPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            composite_instances,
+            composite_capacity: INITIAL_CAPACITY,
+            composite_count: 0,
             metrics,
         }
     }
@@ -162,7 +172,7 @@ impl BarPass {
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
-        let instances = build_bar_instances(bars);
+        let instances = build_bar_instances(bars, 0.0);
         self.count = instances.len() as u32;
         if instances.is_empty() {
             return;
@@ -173,6 +183,43 @@ impl BarPass {
             self.instances = alloc_instances(device, self.capacity);
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+    }
+
+    /// Upload one instance per bar of a pool grid being composited, offset down
+    /// by the pool's eased `shift_rows` so the bars glide with the page cells.
+    ///
+    /// Writes a buffer separate from the live [`Self::prepare`], reusing the
+    /// shared globals uniform the live pass already wrote this frame. Reallocates
+    /// only when the bar count outgrows the composite capacity.
+    pub fn prepare_composite(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        bars: &[Bar],
+        resolution: [f32; 2],
+        shift_rows: f32,
+    ) {
+        let globals = Globals {
+            resolution,
+            cell_size: [self.metrics.width, self.metrics.height],
+        };
+        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+
+        let instances = build_bar_instances(bars, shift_rows);
+        self.composite_count = instances.len() as u32;
+        if instances.is_empty() {
+            return;
+        }
+
+        if instances.len() > self.composite_capacity {
+            self.composite_capacity = instances.len().next_power_of_two();
+            self.composite_instances = alloc_instances(device, self.composite_capacity);
+        }
+        queue.write_buffer(
+            &self.composite_instances,
+            0,
+            bytemuck::cast_slice(&instances),
+        );
     }
 
     /// Record the bar draw into `render_pass`.
@@ -190,6 +237,22 @@ impl BarPass {
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
         render_pass.draw(0..6, 0..self.count);
     }
+
+    /// Record the composited pool's bar draw into `render_pass`.
+    ///
+    /// A no-op until [`Self::prepare_composite`] has run. Reads the composite
+    /// buffer, so a pool draw leaves the live bars a prior [`Self::prepare`]
+    /// uploaded untouched. Inherits the pool pass's scissor.
+    pub fn draw_composite(&self, render_pass: &mut RenderPass<'_>) {
+        if self.composite_count == 0 {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.composite_instances.slice(..));
+        render_pass.draw(0..6, 0..self.composite_count);
+    }
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
@@ -203,10 +266,18 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 
 /// One instance per bar, in draw order, converting the sixteenth-cell wire units
 /// to the cell-fraction units the shader scales by the cell size.
-fn build_bar_instances(bars: &[Bar]) -> Vec<BarInstance> {
+///
+/// `shift_rows` offsets each bar down by that many cells, baked into the origin.
+/// The live path passes zero. A pool composite passes the eased sub-cell scroll
+/// so slot-bound bars glide with the page, since the bar shader carries no
+/// scroll uniform of its own.
+fn build_bar_instances(bars: &[Bar], shift_rows: f32) -> Vec<BarInstance> {
     bars.iter()
         .map(|bar| BarInstance {
-            origin: [f32::from(bar.x) / SIXTEENTHS, f32::from(bar.y) / SIXTEENTHS],
+            origin: [
+                f32::from(bar.x) / SIXTEENTHS,
+                f32::from(bar.y) / SIXTEENTHS + shift_rows,
+            ],
             size: [
                 f32::from(bar.width) / SIXTEENTHS,
                 f32::from(bar.height) / SIXTEENTHS,
@@ -251,7 +322,7 @@ mod tests {
             color: Rgb::new(220, 50, 47),
         }];
 
-        let instances = build_bar_instances(&bars);
+        let instances = build_bar_instances(&bars, 0.0);
 
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].origin, [0.5, 1.0]);
@@ -259,6 +330,25 @@ mod tests {
         assert_eq!(
             instances[0].color,
             [220.0 / 255.0, 50.0 / 255.0, 47.0 / 255.0]
+        );
+    }
+
+    #[test]
+    fn composite_shift_offsets_the_bar_origin_by_whole_cells() {
+        let bars = [Bar {
+            x: 0,
+            y: 16,
+            width: 2,
+            height: 16,
+            color: Rgb::new(1, 2, 3),
+        }];
+
+        let instances = build_bar_instances(&bars, -0.5);
+
+        assert_eq!(
+            instances[0].origin,
+            [0.0, 0.5],
+            "row 1 shifted up half a cell lands at 0.5"
         );
     }
 }
