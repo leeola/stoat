@@ -32,15 +32,16 @@ use lsp_types::{
     DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     Documentation, FoldingRange, FoldingRangeParams, FormattingOptions, GotoDefinitionParams,
     GotoDefinitionResponse, HoverContents, HoverParams, InlayHint, InlayHintLabel, InlayHintParams,
-    MarkedString, OneOf, ParameterLabel, Position, PrepareRenameResponse, Range, ReferenceContext,
-    ReferenceParams, RenameParams, SemanticToken, SemanticTokenType, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo, SignatureHelp,
-    SignatureHelpParams, SignatureInformation, SymbolInformation, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, VersionedTextDocumentIdentifier,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    MarkedString, MarkupKind, OneOf, ParameterLabel, Position, PrepareRenameResponse, Range,
+    ReferenceContext, ReferenceParams, RenameParams, SemanticToken, SemanticTokenType,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo,
+    SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
+use ratatui::style::Style;
 use serde_json::{json, Value};
 use std::{
     future::Future,
@@ -882,15 +883,17 @@ fn line_text(rope: &Rope, line: u32) -> String {
     rope.slice(start..end).to_string().trim().to_string()
 }
 
-/// Hover response carried from the spawned task to
-/// [`pump_lsp_hover`]. `lines` is the flattened text content; the
-/// renderer treats markdown as plain text in v1. `anchor_offset` is
-/// the cursor byte offset captured when the request fired so the
-/// popup can be anchored at the symbol even if the cursor moves
-/// (though [`Stoat::dispatch_key`] clears the popup on motion).
+/// Hover response carried from the spawned task to [`pump_lsp_hover`].
+///
+/// `text` is the flattened markdown, awaiting parsing on the main-loop side
+/// where the theme lives. `plain` marks PlainText content that must render
+/// verbatim rather than as markdown. `anchor_offset` is the cursor byte offset
+/// captured when the request fired so the popup anchors at the symbol even if
+/// the cursor moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HoverResponse {
-    pub(crate) lines: Vec<String>,
+    pub(crate) text: String,
+    pub(crate) plain: bool,
     pub(crate) anchor_offset: usize,
 }
 
@@ -899,7 +902,8 @@ pub(crate) struct HoverResponse {
 /// task slot) so the renderer can borrow it without polling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HoverPopup {
-    pub(crate) lines: Vec<String>,
+    /// Rendered content, one line per entry, each a list of styled spans.
+    pub(crate) lines: Vec<Vec<(String, Style)>>,
     pub(crate) anchor_offset: usize,
     /// Half-page scroll offset applied by [`crate::render::hover::render_hover`],
     /// advanced by Ctrl-d/Ctrl-u while the popup is open. Clamped to the content
@@ -977,10 +981,14 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
     let lsp = stoat.lsp_host.clone();
     let task = stoat.spawn_woken(async move {
         match lsp.hover(params).await {
-            Ok(Some(hover)) => Some(HoverResponse {
-                lines: flatten_hover_contents(hover.contents),
-                anchor_offset,
-            }),
+            Ok(Some(hover)) => {
+                let (text, plain) = flatten_hover_contents(hover.contents);
+                Some(HoverResponse {
+                    text,
+                    plain,
+                    anchor_offset,
+                })
+            },
             Ok(None) => None,
             Err(err) => {
                 tracing::warn!(target: "stoat::lsp", ?err, "hover request failed");
@@ -1070,28 +1078,36 @@ pub(crate) fn answer_agent_query(
     }
 }
 
-/// Flatten an LSP [`HoverContents`] payload into a list of plain-text
-/// lines. Markdown is intentionally not parsed in v1 -- the markup
-/// text passes through verbatim so callers can read code fences and
-/// signatures as-is.
-fn flatten_hover_contents(contents: HoverContents) -> Vec<String> {
-    fn marked_to_string(m: MarkedString) -> String {
+/// Flatten an LSP [`HoverContents`] payload into a markdown string and a flag
+/// marking whether it is PlainText.
+///
+/// A [`MarkedString::LanguageString`] becomes a fenced code block so the
+/// language is highlighted, except a `markdown` language passes through as-is.
+/// PlainText markup is returned verbatim with the flag set, so the caller
+/// renders it without interpreting markdown syntax.
+fn flatten_hover_contents(contents: HoverContents) -> (String, bool) {
+    fn marked_to_markdown(m: MarkedString) -> String {
         match m {
             MarkedString::String(s) => s,
-            MarkedString::LanguageString(ls) => ls.value,
+            MarkedString::LanguageString(ls) if ls.language == "markdown" => ls.value,
+            MarkedString::LanguageString(ls) => {
+                format!("```{}\n{}\n```", ls.language, ls.value)
+            },
         }
     }
 
-    let raw = match contents {
-        HoverContents::Scalar(m) => marked_to_string(m),
-        HoverContents::Array(items) => items
-            .into_iter()
-            .map(marked_to_string)
-            .collect::<Vec<_>>()
-            .join("\n"),
-        HoverContents::Markup(markup) => markup.value,
-    };
-    raw.lines().map(str::to_string).collect()
+    match contents {
+        HoverContents::Scalar(m) => (marked_to_markdown(m), false),
+        HoverContents::Array(items) => (
+            items
+                .into_iter()
+                .map(marked_to_markdown)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            false,
+        ),
+        HoverContents::Markup(markup) => (markup.value, markup.kind == MarkupKind::PlainText),
+    }
 }
 
 /// Poll any in-flight hover request ([`Stoat::pending_hover_request`])
@@ -1107,8 +1123,17 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(Some(response)) => {
+            let lines = if response.plain {
+                response
+                    .text
+                    .lines()
+                    .map(|line| vec![(line.to_string(), Style::default())])
+                    .collect()
+            } else {
+                crate::markdown::render_markdown(&response.text, &stoat.theme)
+            };
             stoat.pending_hover = Some(HoverPopup {
-                lines: response.lines,
+                lines,
                 anchor_offset: response.anchor_offset,
                 scroll_half_pages: 0,
             });
@@ -3624,6 +3649,7 @@ mod tests {
     };
     use futures::FutureExt;
     use lsp_types::TextDocumentSyncKind;
+    use ratatui::style::Style;
     use std::{
         path::{Path, PathBuf},
         time::Duration,
@@ -4624,7 +4650,10 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
         let popup = h.stoat.pending_hover.as_ref().expect("popup");
-        assert_eq!(popup.lines, vec!["fn foo() -> u32".to_string()]);
+        assert_eq!(
+            popup.lines,
+            vec![vec![("fn foo() -> u32".to_string(), Style::default())]]
+        );
         assert_eq!(popup.anchor_offset, 0);
     }
 
@@ -4907,7 +4936,10 @@ mod tests {
         h.type_keys("space l i");
         h.settle();
         let popup = h.stoat.pending_hover.as_ref().expect("popup");
-        assert_eq!(popup.lines, vec!["documentation".to_string()]);
+        assert_eq!(
+            popup.lines,
+            vec![vec![("documentation".to_string(), Style::default())]]
+        );
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
@@ -5052,14 +5084,14 @@ mod tests {
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
+        let literal = h.stoat.theme.get("syntax.markup.text.literal");
         let popup = h.stoat.pending_hover.as_ref().expect("popup");
         assert_eq!(
             popup.lines,
             vec![
-                "```rust".to_string(),
-                "fn foo()".to_string(),
-                "```".to_string(),
-                "Docs here".to_string(),
+                vec![("fn foo()".to_string(), literal)],
+                vec![],
+                vec![("Docs here".to_string(), Style::default())],
             ]
         );
     }
@@ -5111,7 +5143,10 @@ mod tests {
             .pending_hover
             .as_ref()
             .expect("hover popup over the diff");
-        assert_eq!(popup.lines, vec!["the changed line".to_string()]);
+        assert_eq!(
+            popup.lines,
+            vec![vec![("the changed line".to_string(), Style::default())]]
+        );
     }
 
     #[test]

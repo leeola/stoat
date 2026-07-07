@@ -6,8 +6,10 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Clear, Widget},
+    style::Style,
+    widgets::{Clear, StatefulWidget, Widget},
 };
+use stoatty_widgets::text_run::TextRun;
 
 /// Hover-body text size under stoatty, in 256ths of a cell (0.85x), matching
 /// the hints overlay so popovers and hint rows share one scale.
@@ -59,12 +61,12 @@ pub(crate) fn render_hover(
     if interior_width == 0 {
         return;
     }
-    let body: Vec<String> = popup
+    let body: Vec<Vec<(String, Style)>> = popup
         .lines
         .iter()
-        .map(|line| truncate_to_width(line, interior_width as usize))
+        .map(|line| truncate_line(line, interior_width as usize))
         .collect();
-    let max_line_width = body.iter().map(|s| s.chars().count()).max().unwrap_or(0) as u16;
+    let max_line_width = body.iter().map(|line| line_width(line)).max().unwrap_or(0) as u16;
     let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
     let popup_height = (body.len() as u16 + 2).clamp(3, content_area.height.max(3));
 
@@ -117,22 +119,56 @@ pub(crate) fn render_hover(
         open.scroll_half_pages = scroll / half_page;
     }
 
-    for (row_idx, line) in body.iter().skip(scroll).enumerate() {
-        let row = inner.y + row_idx as u16;
-        if row >= inner.y + inner.height {
-            break;
-        }
-        crate::render::chrome::text(
-            buf,
-            inner.x,
-            row,
-            end_x,
-            line,
-            modal_style,
-            run_bg,
-            HOVER_TEXT_SCALE,
-            scene.as_deref_mut(),
-        );
+    // A span's style is a delta over the modal base, so a plain span keeps the
+    // modal look. The rich arm needs an RGB modal fg and background to compose
+    // one TextRun per span. Without them it falls back to painting cells.
+    let modal_fg = crate::render::review::style_rgb(modal_style.fg);
+    match (scene, modal_fg, run_bg) {
+        (Some(scene), Some(modal_fg), Some(run_bg)) => {
+            for (row_idx, line) in body.iter().skip(scroll).enumerate() {
+                let row = inner.y + row_idx as u16;
+                if row >= inner.y + inner.height {
+                    break;
+                }
+                let mut chars_before = 0u16;
+                for (text, style) in line {
+                    let col = (chars_before * HOVER_TEXT_SCALE + 8) / 16;
+                    let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
+                    TextRun {
+                        col,
+                        row: 0,
+                        scale: HOVER_TEXT_SCALE,
+                        color,
+                        bg: run_bg,
+                        text,
+                    }
+                    .render(Rect::new(inner.x, row, 1, 1), buf, scene);
+                    chars_before += text.chars().count() as u16;
+                }
+            }
+        },
+        _ => {
+            for (row_idx, line) in body.iter().skip(scroll).enumerate() {
+                let row = inner.y + row_idx as u16;
+                if row >= inner.y + inner.height {
+                    break;
+                }
+                let mut x = inner.x;
+                for (text, style) in line {
+                    if x >= end_x {
+                        break;
+                    }
+                    let (next_x, _) = buf.set_stringn(
+                        x,
+                        row,
+                        text,
+                        (end_x - x) as usize,
+                        modal_style.patch(*style),
+                    );
+                    x = next_x;
+                }
+            }
+        },
     }
 }
 
@@ -169,4 +205,31 @@ pub(crate) fn truncate_to_width(line: &str, width: usize) -> String {
         return line.to_string();
     }
     line.chars().take(width).collect()
+}
+
+/// Total character width of a styled line, summed across its spans.
+fn line_width(line: &[(String, Style)]) -> usize {
+    line.iter().map(|(text, _)| text.chars().count()).sum()
+}
+
+/// Truncate a styled line to `width` characters, clipping the span that crosses
+/// the limit and dropping the rest.
+fn truncate_line(line: &[(String, Style)], width: usize) -> Vec<(String, Style)> {
+    let mut out = Vec::new();
+    let mut used = 0;
+    for (text, style) in line {
+        if used >= width {
+            break;
+        }
+        let remaining = width - used;
+        let chars = text.chars().count();
+        if chars <= remaining {
+            out.push((text.clone(), *style));
+            used += chars;
+        } else {
+            out.push((text.chars().take(remaining).collect(), *style));
+            break;
+        }
+    }
+    out
 }
