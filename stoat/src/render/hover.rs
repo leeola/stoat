@@ -104,7 +104,20 @@ pub(crate) fn render_hover(
             .and_then(|s| s.bg),
     );
 
-    for (row_idx, line) in body.iter().enumerate() {
+    // Clamp the half-page scroll to the content that overflows the interior, then
+    // write the clamped counter back so scrolling up past the bottom takes effect
+    // on the first Ctrl-u rather than after replaying the over-scroll.
+    let interior = inner.height as usize;
+    let half_page = (interior / 2).max(1);
+    let scroll = body
+        .len()
+        .saturating_sub(interior)
+        .min(popup.scroll_half_pages * half_page);
+    if let Some(open) = stoat.pending_hover.as_mut() {
+        open.scroll_half_pages = scroll / half_page;
+    }
+
+    for (row_idx, line) in body.iter().skip(scroll).enumerate() {
         let row = inner.y + row_idx as u16;
         if row >= inner.y + inner.height {
             break;

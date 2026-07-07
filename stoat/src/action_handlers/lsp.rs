@@ -901,6 +901,10 @@ pub(crate) struct HoverResponse {
 pub(crate) struct HoverPopup {
     pub(crate) lines: Vec<String>,
     pub(crate) anchor_offset: usize,
+    /// Half-page scroll offset applied by [`crate::render::hover::render_hover`],
+    /// advanced by Ctrl-d/Ctrl-u while the popup is open. Clamped to the content
+    /// height at render, so an over-scroll past the bottom does not accumulate.
+    pub(crate) scroll_half_pages: usize,
 }
 
 /// Issue a `textDocument/hover` request for the symbol under the
@@ -1106,6 +1110,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             stoat.pending_hover = Some(HoverPopup {
                 lines: response.lines,
                 anchor_offset: response.anchor_offset,
+                scroll_half_pages: 0,
             });
             true
         },
@@ -4735,6 +4740,65 @@ mod tests {
             "insert",
             "and the key still dispatches"
         );
+    }
+
+    fn hover_scroll(h: &TestHarness) -> usize {
+        h.stoat
+            .pending_hover
+            .as_ref()
+            .expect("popup")
+            .scroll_half_pages
+    }
+
+    #[test]
+    fn hover_scrolls_by_half_pages() {
+        use crate::test_harness::keys;
+        use crossterm::event::Event;
+        let mut h = TestHarness::with_size(80, 24);
+        open_hover(&mut h);
+
+        h.stoat.update(Event::Key(keys::ctrl('d')));
+        h.stoat.update(Event::Key(keys::ctrl('d')));
+        assert_eq!(hover_scroll(&h), 2);
+        h.stoat.update(Event::Key(keys::ctrl('u')));
+        assert_eq!(hover_scroll(&h), 1);
+        assert!(
+            h.stoat.pending_hover.is_some(),
+            "scrolling consumes the key without closing the popup"
+        );
+    }
+
+    #[test]
+    fn hover_scroll_up_saturates_at_the_top() {
+        use crate::test_harness::keys;
+        use crossterm::event::Event;
+        let mut h = TestHarness::with_size(80, 24);
+        open_hover(&mut h);
+
+        h.stoat.update(Event::Key(keys::ctrl('u')));
+        assert_eq!(hover_scroll(&h), 0);
+        assert!(h.stoat.pending_hover.is_some());
+    }
+
+    #[test]
+    fn snapshot_hover_scrolled_down() {
+        use crate::test_harness::keys;
+        use crossterm::event::Event;
+        let mut h = TestHarness::with_size(40, 12);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let body = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        h.fake_lsp().set_hover(path.to_str().unwrap(), 0, 0, &body);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        h.stoat.update(Event::Key(keys::ctrl('d')));
+        h.stoat.update(Event::Key(keys::ctrl('d')));
+        h.assert_snapshot("snapshot_hover_scrolled");
     }
 
     #[test]

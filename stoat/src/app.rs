@@ -3008,14 +3008,31 @@ impl Stoat {
             self.pending_workspace_symbol_request = None;
         }
 
-        // A hover popup auto-closes on the next key press (Helix's popup
-        // behavior). Escape is consumed by the close; every other key closes the
-        // popup and then dispatches, which also covers the SetMode-only keys that
-        // `continue` before the post-dispatch clear below. Ctrl-c is consumed by
-        // the close in the Ctrl-c block above, so it never reaches here.
+        // A hover popup consumes half-page scroll keys and auto-closes on any
+        // other key (Helix's popup behavior). Ctrl-d/PageDown and Ctrl-u/PageUp
+        // scroll it while open, shadowing normal-mode half-page motion. Escape
+        // closes and is consumed. Every other key closes it and then dispatches,
+        // which also covers the SetMode-only keys that `continue` before the
+        // post-dispatch clear below. Ctrl-c is consumed by the close in the
+        // Ctrl-c block above, so it never reaches here.
         if (self.focused_mode() == "normal" || self.focused_mode() == "select")
             && self.pending_hover.is_some()
         {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let scroll_down =
+                matches!(key.code, KeyCode::PageDown) || (ctrl && key.code == KeyCode::Char('d'));
+            let scroll_up =
+                matches!(key.code, KeyCode::PageUp) || (ctrl && key.code == KeyCode::Char('u'));
+            if scroll_down || scroll_up {
+                if let Some(popup) = self.pending_hover.as_mut() {
+                    if scroll_down {
+                        popup.scroll_half_pages += 1;
+                    } else {
+                        popup.scroll_half_pages = popup.scroll_half_pages.saturating_sub(1);
+                    }
+                }
+                return UpdateEffect::Redraw;
+            }
             self.pending_hover = None;
             self.pending_hover_request = None;
             if matches!(key.code, KeyCode::Esc) {
