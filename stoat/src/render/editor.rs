@@ -514,7 +514,7 @@ fn severity_scope(sev: DiagnosticSeverity) -> &'static str {
     }
 }
 
-struct SeverityColors {
+pub(crate) struct SeverityColors {
     error: [u8; 3],
     warning: [u8; 3],
     info: [u8; 3],
@@ -584,12 +584,12 @@ fn severity_mark(sev: DiagnosticSeverity) -> char {
 /// One display row's role when folding the gutter: the first row of a buffer
 /// line, or a soft-wrap or block row belonging to the line above it.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum RowKind {
+pub(crate) enum RowKind {
     LineStart(u32),
     Continuation,
 }
 
-fn row_kind(snapshot: &DisplaySnapshot, display_row: u32) -> RowKind {
+pub(crate) fn row_kind(snapshot: &DisplaySnapshot, display_row: u32) -> RowKind {
     if snapshot.is_wrap_continuation(display_row) {
         return RowKind::Continuation;
     }
@@ -608,7 +608,7 @@ fn row_kind(snapshot: &DisplaySnapshot, display_row: u32) -> RowKind {
 /// line. Continuations before the first `LineStart` -- a viewport opening
 /// mid-line or on a block row -- attach to `lead_number`, the buffer line they
 /// belong to.
-fn fold_gutter_lines(rows: &[RowKind], lead_number: u32) -> Vec<(u32, u16)> {
+pub(crate) fn fold_gutter_lines(rows: &[RowKind], lead_number: u32) -> Vec<(u32, u16)> {
     let mut out: Vec<(u32, u16)> = Vec::new();
     for kind in rows {
         match kind {
@@ -630,6 +630,69 @@ fn decimal_digits(mut n: u32) -> u16 {
         digits += 1;
     }
     digits
+}
+
+/// The folded gutter lines and digit width for `visible` display rows from
+/// `scroll_row`.
+///
+/// Shared by the live gutter and the pooled-page gutter so both number and fold
+/// wrap and block rows identically, keeping the settle handoff pixel-identical.
+pub(crate) fn gutter_geometry(
+    snapshot: &DisplaySnapshot,
+    scroll_row: u32,
+    visible: u32,
+) -> (Vec<(u32, u16)>, u16) {
+    let rows: Vec<RowKind> = (scroll_row..scroll_row + visible)
+        .map(|display_row| row_kind(snapshot, display_row))
+        .collect();
+    let lead_number = snapshot
+        .display_to_buffer(DisplayPoint::new(scroll_row, 0))
+        .map(|point| point.row + 1)
+        .unwrap_or(1);
+    let folded = fold_gutter_lines(&rows, lead_number);
+    let width_digits = decimal_digits(snapshot.buffer_line_count()).max(2);
+    (folded, width_digits)
+}
+
+/// Build the rich gutter's [`GutterLine`]s from `folded`, coloring each line's
+/// diagnostic mark from `colors`.
+pub(crate) fn gutter_component_lines(
+    folded: &[(u32, u16)],
+    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    colors: &SeverityColors,
+) -> Vec<GutterLine> {
+    folded
+        .iter()
+        .map(|&(number, height)| GutterLine {
+            number,
+            height,
+            git: None,
+            diagnostic: row_severity.get(&(number - 1)).map(|sev| Diagnostic {
+                color: severity_color(*sev, colors),
+                mark: severity_mark(*sev),
+            }),
+        })
+        .collect()
+}
+
+/// The sub-cell [`Gutter`] widget for `lines`, carrying the geometry the live
+/// and pooled-page renders share.
+pub(crate) fn rich_gutter(
+    lines: &[GutterLine],
+    width_digits: u16,
+    number_fg: [u8; 3],
+    bg: [u8; 3],
+) -> Gutter<'_> {
+    Gutter {
+        lines,
+        bar_width: 5,
+        pad: 2,
+        number_scale: NUMBER_SCALE,
+        width_digits,
+        number_fg,
+        separator: number_fg,
+        bg,
+    }
 }
 
 /// Draw the absolute-line-number gutter and return the cell columns it reserves.
@@ -656,16 +719,7 @@ fn draw_line_number_gutter(
     use crate::theme::scope as s;
 
     let visible = end_row.saturating_sub(scroll_row).min(inner.height as u32);
-    let rows: Vec<RowKind> = (scroll_row..scroll_row + visible)
-        .map(|display_row| row_kind(snapshot, display_row))
-        .collect();
-    let lead_number = snapshot
-        .display_to_buffer(DisplayPoint::new(scroll_row, 0))
-        .map(|point| point.row + 1)
-        .unwrap_or(1);
-    let folded = fold_gutter_lines(&rows, lead_number);
-
-    let width_digits = decimal_digits(snapshot.buffer_line_count()).max(2);
+    let (folded, width_digits) = gutter_geometry(snapshot, scroll_row, visible);
 
     // Rich mode needs stoatty, a scene, and every gutter color as RGB.
     let rich = scene.filter(|_| stoatty).and_then(|scene| {
@@ -681,28 +735,8 @@ fn draw_line_number_gutter(
 
     match rich {
         Some((scene, colors, number_fg, bg)) => {
-            let lines: Vec<GutterLine> = folded
-                .iter()
-                .map(|&(number, height)| GutterLine {
-                    number,
-                    height,
-                    git: None,
-                    diagnostic: row_severity.get(&(number - 1)).map(|sev| Diagnostic {
-                        color: severity_color(*sev, colors),
-                        mark: severity_mark(*sev),
-                    }),
-                })
-                .collect();
-            let gutter = Gutter {
-                lines: &lines,
-                bar_width: 5,
-                pad: 2,
-                number_scale: NUMBER_SCALE,
-                width_digits,
-                number_fg,
-                separator: number_fg,
-                bg,
-            };
+            let lines = gutter_component_lines(&folded, row_severity, colors);
+            let gutter = rich_gutter(&lines, width_digits, number_fg, bg);
             gutter.draw_components(inner, buf, scene);
             gutter.cell_width()
         },
@@ -712,7 +746,7 @@ fn draw_line_number_gutter(
 
 /// Paint right-aligned cell line numbers and a one-column severity mark for a
 /// terminal without the sub-cell components. Returns the reserved cell columns.
-fn draw_fallback_line_numbers(
+pub(crate) fn draw_fallback_line_numbers(
     folded: &[(u32, u16)],
     width_digits: u16,
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
