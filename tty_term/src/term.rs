@@ -178,12 +178,23 @@ pub struct Terminal {
     /// `(0, 0)` until the app calls [`Self::set_cell_pixels`]. A query is left
     /// unanswered while unset, since a zero-size reply is worse than none.
     cell_pixels: (u16, u16),
+    /// Decoration commands deferred while a DEC 2026 synchronized update buffers,
+    /// applied in arrival order once it ends.
+    ///
+    /// A frame that redraws its decoration scene emits `Gstoatty;reset` then
+    /// re-stamps every component. Applying that immediately would expose a
+    /// cleared or partial scene to any projection landing mid-update, so the
+    /// mutations stage here and [`Self::drain_staged`] commits them atomically at
+    /// the update's end. Holds only the accumulating decoration commands (see
+    /// [`Self::apply_decoration`]); stream-routing and pool commands act at feed
+    /// time regardless.
+    sync_staged: Vec<Command>,
 }
 
 /// Per-component "changed since last projection" flags for the accumulated APC
 /// decorations, so [`Terminal::project`] re-stamps only what changed.
 ///
-/// Set by [`Terminal::apply_command`] when a command arrives (and all set by
+/// Set by [`Terminal::apply_decoration`] when a command lands (and all set by
 /// [`Terminal::clear_decorations`], which empties every list), cleared once a
 /// projection has applied them.
 #[derive(Default)]
@@ -415,6 +426,7 @@ impl Terminal {
             capture: None,
             pending_events: Vec::new(),
             cell_pixels: (0, 0),
+            sync_staged: Vec::new(),
         }
     }
 
@@ -447,12 +459,14 @@ impl Terminal {
     pub fn advance(&mut self, bytes: &[u8]) -> bool {
         let redraw = self.advance_inner(bytes);
         self.drain_listener_events();
+        self.drain_staged();
         redraw
     }
 
     /// The parse body of [`Self::advance`], split out so the wrapper drains the
     /// listener events once no matter which of the three return points fires.
     fn advance_inner(&mut self, bytes: &[u8]) -> bool {
+        let was_syncing = self.syncing();
         let redirecting = self.fill.is_some() || self.capture.is_some();
 
         // The APC and XTVERSION scanners only act on ESC-prefixed sequences, so
@@ -554,7 +568,11 @@ impl Terminal {
         }
         self.feed_segment(&bytes[start..]);
 
-        true
+        // Mirror the non-redirect sync gate (above): a chunk that began and
+        // ended inside an active update presented nothing, so it warrants no
+        // redraw. A chunk that opened the update still returns true, so the
+        // reader wakes the main loop to arm the timeout flush.
+        !(was_syncing && self.syncing())
     }
 
     /// The instant the in-progress synchronized update must be flushed by, or
@@ -574,6 +592,7 @@ impl Terminal {
     pub fn flush_synchronized_update(&mut self) {
         self.parser.stop_sync(&mut self.term);
         self.drain_listener_events();
+        self.drain_staged();
     }
 
     /// Take the bytes the terminal wants written back to the PTY, leaving none
@@ -701,28 +720,28 @@ impl Terminal {
 
     /// Apply a decoded stoatty command to the terminal.
     ///
-    /// The seam every feature sub-code hooks into. A border command is recorded
-    /// and stamped onto the grid by [`Self::project`], since it persists across
-    /// frames while the VT projection rewrites cells.
+    /// The seam every feature sub-code hooks into. Commands that steer stream
+    /// routing (fill and capture open/close) or pool state act immediately. The
+    /// accumulating decoration commands route through [`Self::stage_or_apply`],
+    /// so they defer while a DEC 2026 synchronized update buffers and commit
+    /// atomically when it ends.
     fn apply_command(&mut self, command: Command) {
         match command {
-            Command::Border(border) => {
-                self.borders.push(border);
-                self.decorations_dirty.borders = true;
-            },
-            Command::Panel(panel) => {
-                self.panels.push(panel);
-                self.decorations_dirty.panels = true;
-            },
-            Command::Scale(scale) => {
-                self.scales.push(scale);
-                self.decorations_dirty.scales = true;
-            },
+            Command::Border(_)
+            | Command::Panel(_)
+            | Command::Scale(_)
+            | Command::ScrollRegion(_)
+            | Command::Icon(_)
+            | Command::LineLayout(_) => self.stage_or_apply(command),
             Command::Popover(popover) => self.begin_capture(CaptureTarget::Popover(popover)),
             Command::PopoverEnd => self.commit_capture(),
-            Command::ScrollRegion(region) => {
-                self.scroll_region = Some(region);
-                self.decorations_dirty.scroll_region = true;
+            Command::TextRun(text_run) => self.begin_capture(CaptureTarget::TextRun(text_run)),
+            Command::TextRunEnd => self.commit_capture(),
+            // A page-targeted bar rides the open fill's slot at feed time. A live
+            // bar accumulates onto the grid and stages like the other decorations.
+            Command::Bar(bar) => match &mut self.fill {
+                Some(fill) => fill.bars.push(bar),
+                None => self.stage_or_apply(Command::Bar(bar)),
             },
             Command::PoolRegion(region) => match self.pools.get_mut(&region.pool) {
                 Some(pool) => {
@@ -737,23 +756,6 @@ impl Terminal {
                 None => {
                     self.pools.insert(region.pool, Pool::new(region));
                 },
-            },
-            Command::Icon(icon) => {
-                self.icons.push(icon);
-                self.decorations_dirty.icons = true;
-            },
-            Command::TextRun(text_run) => self.begin_capture(CaptureTarget::TextRun(text_run)),
-            Command::TextRunEnd => self.commit_capture(),
-            Command::Bar(bar) => match &mut self.fill {
-                Some(fill) => fill.bars.push(bar),
-                None => {
-                    self.bars.push(bar);
-                    self.decorations_dirty.bars = true;
-                },
-            },
-            Command::LineLayout(layout) => {
-                self.line_layout = Some(layout);
-                self.decorations_dirty.line_layout = true;
             },
             Command::Fill(fill) => self.begin_fill(fill.pool, fill.index),
             Command::FillEnd => self.commit_fill(),
@@ -780,14 +782,108 @@ impl Terminal {
                     self.fill = None;
                 }
             },
-            // A reset is also a fill/capture close trigger: commit any open page
-            // or content capture before clearing decoration state and restoring
-            // the live grid.
+            // A reset is also a fill/capture close trigger. The fill and capture
+            // commits must run at feed time, but the decoration clear stages so a
+            // mid-update reset does not blank the live scene before the re-stamp.
             Command::Reset => {
                 self.commit_fill();
                 self.commit_capture();
-                self.clear_decorations();
+                self.stage_or_apply(Command::Reset);
             },
+        }
+    }
+
+    /// Route a decoration command to the live lists now, or defer it while a DEC
+    /// 2026 synchronized update is buffering.
+    ///
+    /// Deferred commands accumulate in [`Self::sync_staged`] and replay in
+    /// arrival order through [`Self::apply_decoration`] once the update ends (see
+    /// [`Self::drain_staged`]), so a frame's reset-then-re-stamp scene cycle
+    /// commits atomically rather than exposing a cleared or partial scene.
+    fn stage_or_apply(&mut self, command: Command) {
+        if self.syncing() {
+            self.sync_staged.push(command);
+        } else {
+            self.apply_decoration(command);
+        }
+    }
+
+    /// Apply a decoration command to its live list, marking that list dirty so the
+    /// next [`Self::project`] re-stamps it.
+    ///
+    /// The completed `Popover` and `TextRun` commands arrive here already carrying
+    /// their captured text from [`Self::commit_capture`], so they push directly
+    /// rather than reopening a capture. Only the accumulating decoration commands
+    /// and `Reset` reach this method. The stream-routing and pool commands act at
+    /// feed time in [`Self::apply_command`] and never route here.
+    fn apply_decoration(&mut self, command: Command) {
+        match command {
+            Command::Border(border) => {
+                self.borders.push(border);
+                self.decorations_dirty.borders = true;
+            },
+            Command::Panel(panel) => {
+                self.panels.push(panel);
+                self.decorations_dirty.panels = true;
+            },
+            Command::Scale(scale) => {
+                self.scales.push(scale);
+                self.decorations_dirty.scales = true;
+            },
+            Command::ScrollRegion(region) => {
+                self.scroll_region = Some(region);
+                self.decorations_dirty.scroll_region = true;
+            },
+            Command::Icon(icon) => {
+                self.icons.push(icon);
+                self.decorations_dirty.icons = true;
+            },
+            Command::LineLayout(layout) => {
+                self.line_layout = Some(layout);
+                self.decorations_dirty.line_layout = true;
+            },
+            Command::Bar(bar) => {
+                self.bars.push(bar);
+                self.decorations_dirty.bars = true;
+            },
+            Command::Popover(popover) => {
+                self.popovers.push(popover);
+                self.decorations_dirty.popovers = true;
+            },
+            Command::TextRun(text_run) => {
+                self.text_runs.push(text_run);
+                self.decorations_dirty.text_runs = true;
+            },
+            Command::Reset => self.clear_decorations(),
+            Command::Fill(_)
+            | Command::FillEnd
+            | Command::PopoverEnd
+            | Command::TextRunEnd
+            | Command::PoolRegion(_)
+            | Command::Scroll(_)
+            | Command::Reposition(_)
+            | Command::PoolDrop(_) => {},
+        }
+    }
+
+    /// Whether a DEC 2026 synchronized update is currently buffering.
+    fn syncing(&self) -> bool {
+        self.sync_deadline().is_some()
+    }
+
+    /// Commit the decoration commands staged during a synchronized update, in
+    /// arrival order, once the update has ended.
+    ///
+    /// A no-op while an update is still buffering or nothing was staged. Runs
+    /// after every [`Self::advance`] and [`Self::flush_synchronized_update`], so
+    /// the staged scene lands the moment the update's ESU or timeout flush ends
+    /// it.
+    fn drain_staged(&mut self) {
+        if self.syncing() || self.sync_staged.is_empty() {
+            return;
+        }
+        for command in mem::take(&mut self.sync_staged) {
+            self.apply_decoration(command);
         }
     }
 
@@ -1002,17 +1098,13 @@ impl Terminal {
         match capture.target {
             CaptureTarget::Popover(mut command) => {
                 command.content = text;
-                self.popovers.push(command);
-                self.decorations_dirty.popovers = true;
+                self.stage_or_apply(Command::Popover(command));
             },
             CaptureTarget::TextRun(mut command) => {
                 command.text = text;
                 match &mut self.fill {
                     Some(fill) => fill.text_runs.push(command),
-                    None => {
-                        self.text_runs.push(command);
-                        self.decorations_dirty.text_runs = true;
-                    },
+                    None => self.stage_or_apply(Command::TextRun(command)),
                 }
             },
         }
@@ -3618,6 +3710,90 @@ mod tests {
         assert!(
             terminal.advance(b"\x1b[?2026l"),
             "the ESU flush warrants a redraw"
+        );
+    }
+
+    /// A `Gstoatty;text_run` frame carrying `text`, so a test can stamp a
+    /// distinguishable run and read it back off the projected grid.
+    fn text_run_frame(text: &str) -> Vec<u8> {
+        encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 160,
+            color: [200, 200, 200],
+            bg: [0, 0, 0],
+            text: text.to_owned(),
+        })
+    }
+
+    /// The text of each run on the projected grid, in order.
+    fn run_labels(grid: &Grid) -> Vec<&str> {
+        grid.text_runs()
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect()
+    }
+
+    /// Commit a one-run scene "A", then open a synchronized update and stage a
+    /// reset plus a replacement run "B" without closing it, asserting the
+    /// on-screen scene still reads "A" mid-update. The caller then commits it.
+    fn stage_reset_and_run_under_sync(terminal: &mut Terminal, grid: &mut Grid) {
+        terminal.advance(&text_run_frame("A"));
+        terminal.project(grid);
+        assert_eq!(run_labels(grid), ["A"], "the initial scene commits");
+
+        terminal.advance(b"\x1b[?2026h");
+        terminal.advance(&encode_reset());
+        terminal.advance(&text_run_frame("B"));
+        terminal.project(grid);
+        assert_eq!(run_labels(grid), ["A"], "the prior scene holds mid-update");
+    }
+
+    #[test]
+    fn synchronized_update_commits_staged_decorations_on_esu() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        stage_reset_and_run_under_sync(&mut terminal, &mut grid);
+
+        terminal.advance(b"\x1b[?2026l");
+        terminal.project(&mut grid);
+        assert_eq!(
+            run_labels(&grid),
+            ["B"],
+            "ESU commits the staged reset and run atomically"
+        );
+    }
+
+    #[test]
+    fn synchronized_update_commits_staged_decorations_on_flush() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        stage_reset_and_run_under_sync(&mut terminal, &mut grid);
+
+        terminal.flush_synchronized_update();
+        terminal.project(&mut grid);
+        assert_eq!(
+            run_labels(&grid),
+            ["B"],
+            "the timeout flush commits the staged scene"
+        );
+    }
+
+    #[test]
+    fn advance_defers_redraw_for_decorations_inside_an_update() {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+
+        assert!(
+            terminal.advance(b"\x1b[?2026h"),
+            "the BSU chunk wakes the main loop"
+        );
+        assert!(
+            !terminal.advance(&text_run_frame("B")),
+            "a decoration chunk wholly inside the update warrants no redraw"
+        );
+        assert!(
+            terminal.advance(b"\x1b[?2026l"),
+            "the ESU chunk warrants a redraw"
         );
     }
 
