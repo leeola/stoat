@@ -1872,7 +1872,7 @@ mod tests {
 
         let colored = h.stoat.render();
 
-        super::dispatch(&mut h.stoat, &stoat_action::ToggleSyntaxHighlight);
+        dispatch(&mut h.stoat, &stoat_action::ToggleSyntaxHighlight);
         let plain = h.stoat.render();
         assert_ne!(
             colored, plain,
@@ -1882,7 +1882,7 @@ mod tests {
         // foreground with search/diagnostic highlights still available.
         h.assert_snapshot("toggle_syntax_off");
 
-        super::dispatch(&mut h.stoat, &stoat_action::ToggleSyntaxHighlight);
+        dispatch(&mut h.stoat, &stoat_action::ToggleSyntaxHighlight);
         let restored = h.stoat.render();
         assert_eq!(
             colored, restored,
@@ -1890,7 +1890,7 @@ mod tests {
         );
     }
 
-    fn version_badge_label(stoat: &crate::app::Stoat) -> Option<String> {
+    fn version_badge_label(stoat: &Stoat) -> Option<String> {
         let id = stoat
             .badges
             .find_by_source(crate::badge::BadgeSource::Version)?;
@@ -1906,7 +1906,7 @@ mod tests {
         h.fake_env()
             .set("STOATTY_VERSION", "0.2.0 (bbb 2026-07-03)");
 
-        super::dispatch(&mut h.stoat, &stoat_action::ShowVersion);
+        dispatch(&mut h.stoat, &stoat_action::ShowVersion);
 
         assert_eq!(
             version_badge_label(&h.stoat).as_deref(),
@@ -1919,7 +1919,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.set_version_info("0.1.0 (aaa 2026-07-03)");
 
-        super::dispatch(&mut h.stoat, &stoat_action::ShowVersion);
+        dispatch(&mut h.stoat, &stoat_action::ShowVersion);
 
         assert_eq!(
             version_badge_label(&h.stoat).as_deref(),
@@ -1930,7 +1930,7 @@ mod tests {
     #[test]
     fn show_version_badge_is_dismissed_on_the_next_key() {
         let mut h = Stoat::test();
-        super::dispatch(&mut h.stoat, &stoat_action::ShowVersion);
+        dispatch(&mut h.stoat, &stoat_action::ShowVersion);
         assert!(
             version_badge_label(&h.stoat).is_some(),
             "the badge is shown after ShowVersion",

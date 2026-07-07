@@ -970,6 +970,10 @@ mod tests {
         assert_eq!(edits[0].new, 5..11);
     }
 
+    /// An edit-sequence test case pairing the initial text with the ordered
+    /// `(range, replacement)` edits applied to it in turn.
+    type EditCase<'a> = (&'a str, &'a [(Range<usize>, &'a str)]);
+
     #[test]
     fn edits_since_reconstructs_multi_region_changes() {
         // Applying the patch in reverse to the pre-edit text must reproduce the
@@ -977,7 +981,7 @@ mod tests {
         // later change's absolute-old offset, which the accumulation must keep
         // monotonic rather than compose edits across the shifted region -- the
         // last case otherwise underflows Edit::old_len.
-        let cases: &[(&str, &[(Range<usize>, &str)])] = &[
+        let cases: &[EditCase<'_>] = &[
             ("0123456789", &[(2..2, "ABCDEFGHIJKLMNOPQR"), (23..26, "")]),
             ("0123456789", &[(1..1, "ABCDEFGHIJ"), (13..17, "")]),
             (

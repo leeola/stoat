@@ -5821,7 +5821,7 @@ mod tests {
 
         // `j` is inert until `x` sets the variable.
         h.stoat.handle_key(bare(KeyCode::Char('j')));
-        assert!(h.stoat.user_vars.get("pressed").is_none());
+        assert!(!h.stoat.user_vars.contains_key("pressed"));
 
         h.stoat.handle_key(bare(KeyCode::Char('x')));
         h.stoat.handle_key(bare(KeyCode::Char('j')));
@@ -5837,7 +5837,7 @@ mod tests {
         h.stoat.keymap = compile_keymap("on key { x -> SetVar(mode, hacked); }");
 
         h.stoat.handle_key(bare(KeyCode::Char('x')));
-        assert!(h.stoat.user_vars.get("mode").is_none());
+        assert!(!h.stoat.user_vars.contains_key("mode"));
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
@@ -8854,7 +8854,7 @@ mod tests {
         let path = root.join("a.txt");
         h.fake_fs().insert_file(&path, b"abcdef\nghi\n");
         h.stoat.active_workspace_mut().git_root = root;
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path: path.clone() });
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
         h.stoat.diagnostics.replace_for_path(
             path,

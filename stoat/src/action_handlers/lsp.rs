@@ -5037,10 +5037,8 @@ mod tests {
         let mut h = TestHarness::with_size(80, 24);
         enable_goto_definition(&h);
         h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
-        h.fake_fs().insert_file(
-            &PathBuf::from("/work/lib.rs"),
-            b"fn one() {}\nfn two() {}\n",
-        );
+        h.fake_fs()
+            .insert_file(PathBuf::from("/work/lib.rs"), b"fn one() {}\nfn two() {}\n");
         h.stoat.open_review();
         h.settle();
 
