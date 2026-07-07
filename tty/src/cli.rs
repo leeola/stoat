@@ -64,6 +64,14 @@ pub enum TtyCommand {
     /// Materialize a deterministic fixture and open the editor inside it. `ls`
     /// lists the catalog. Forwarded to the stoat child.
     Fixture(FixtureArgs),
+
+    /// Print a shell completion script to stdout, e.g. `stoatty completions fish >
+    /// ~/.config/fish/completions/stoatty.fish` (zsh and bash install the same
+    /// way).
+    Completions {
+        /// The shell to generate completions for.
+        shell: clap_complete::Shell,
+    },
 }
 
 impl Cli {
@@ -170,5 +178,23 @@ mod tests {
         let cli = Cli::parse_from(["stoatty", "--fixture", "basic-diff"]);
         assert!(cli.command_sub.is_none());
         assert_eq!(cli.common.fixture.as_deref(), Some("basic-diff"));
+    }
+
+    #[test]
+    fn completions_carry_the_fixture_names() {
+        use clap::CommandFactory;
+
+        let mut out = Vec::new();
+        clap_complete::generate(
+            clap_complete::Shell::Fish,
+            &mut <Cli as CommandFactory>::command(),
+            "stoatty",
+            &mut out,
+        );
+        let script = String::from_utf8(out).expect("fish script is utf8");
+        assert!(
+            script.contains("rust-lsp"),
+            "generated completions must offer the fixture names"
+        );
     }
 }

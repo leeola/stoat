@@ -23,6 +23,7 @@ stoat_cli = { path = "../cli" }
 alacritty_terminal.workspace = true
 arboard.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 winit.workspace = true
 portable-pty.workspace = true
 libc.workspace = true

@@ -2,15 +2,15 @@
 //! running the requested command (or the user's shell), and drives the event
 //! loop until the window closes.
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use stoat_cli::FixtureSub;
 use stoatty::cli::{Cli, TtyCommand};
 
 fn main() {
     let mut cli = Cli::parse();
 
-    if let Some(TtyCommand::Fixture(args)) = cli.command_sub.take() {
-        match (args.sub, args.name) {
+    match cli.command_sub.take() {
+        Some(TtyCommand::Fixture(args)) => match (args.sub, args.name) {
             (Some(FixtureSub::Ls), _) => {
                 print!("{}", stoat_cli::ls_text());
                 return;
@@ -26,7 +26,17 @@ fn main() {
                 eprintln!("error: specify a fixture name or `ls`");
                 std::process::exit(1);
             },
-        }
+        },
+        Some(TtyCommand::Completions { shell }) => {
+            clap_complete::generate(
+                shell,
+                &mut <Cli as CommandFactory>::command(),
+                "stoatty",
+                &mut std::io::stdout(),
+            );
+            return;
+        },
+        None => {},
     }
 
     stoatty::app::run(

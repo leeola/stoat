@@ -1,4 +1,4 @@
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use crossterm::event::{Event, KeyEvent};
 use snafu::{whatever, ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -87,6 +87,14 @@ enum Command {
     /// Materialize a deterministic fixture and open the editor inside it. `ls`
     /// lists the catalog.
     Fixture(FixtureArgs),
+
+    /// Print a shell completion script to stdout, e.g. `stoat completions fish >
+    /// ~/.config/fish/completions/stoat.fish` (zsh and bash install the same
+    /// way).
+    Completions {
+        /// The shell to generate completions for.
+        shell: clap_complete::Shell,
+    },
 }
 
 pub fn run(args: Args) -> Result<(), Whatever> {
@@ -104,6 +112,10 @@ pub fn run(args: Args) -> Result<(), Whatever> {
         Some(Command::Editor { file }) => crate::commands::editor::run(file),
         Some(Command::Query { sub }) => crate::commands::query::run(sub),
         Some(Command::Fixture(fixture)) => run_fixture(fixture, text_proto_log, common),
+        Some(Command::Completions { shell }) => {
+            clap_complete::generate(shell, &mut Args::command(), "stoat", &mut std::io::stdout());
+            Ok(())
+        },
         Some(Command::Review) => run_tui(text_proto_log, common, TuiStart::Review),
         None => run_tui(text_proto_log, common, TuiStart::Files),
     }
@@ -431,5 +443,21 @@ mod tests {
             panic!("expected fixture subcommand");
         };
         assert_eq!(fixture.name.as_deref(), Some("rust-lsp"));
+    }
+
+    #[test]
+    fn completions_carry_the_fixture_names() {
+        let mut out = Vec::new();
+        clap_complete::generate(
+            clap_complete::Shell::Fish,
+            &mut Args::command(),
+            "stoat",
+            &mut out,
+        );
+        let script = String::from_utf8(out).expect("fish script is utf8");
+        assert!(
+            script.contains("rust-lsp"),
+            "generated completions must offer the fixture names"
+        );
     }
 }

@@ -33,6 +33,7 @@ stoat_scheduler = { path = "../scheduler" }
 viewport = { path = "../viewport" }
 blake3 = { workspace = true }
 clap.workspace = true
+clap_complete.workspace = true
 crossterm.workspace = true
 futures.workspace = true
 snafu.workspace = true
