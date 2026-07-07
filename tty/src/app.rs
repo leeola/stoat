@@ -32,7 +32,7 @@ use stoatty_render::{
     render,
 };
 use stoatty_term::{
-    grid::{Grid, Overlay},
+    grid::{Bar, Grid, Overlay, TextRun},
     term::{Cursor, CursorShape, Damage, TermEvent, Terminal},
     theme::Theme,
 };
@@ -1357,6 +1357,11 @@ impl ApplicationHandler<PtyEvent> for App {
 /// The scissor the renderer applies clips the composite to the region, so the
 /// surround outside it is never drawn and is left as it was rather than
 /// recleared each frame. Only a size change reblanks, via `Grid::resize`.
+///
+/// `document_grid`'s off-grid decorations (the pooled gutter's text runs and
+/// bars) are region-local sixteenths, so they are translated by the region
+/// origin and set on `pool_grid`, replacing any prior list. A decoration-free
+/// `document_grid` therefore clears stale decorations rather than leaving them.
 fn copy_pool_region(
     pool_grid: &mut Grid,
     document_grid: &Grid,
@@ -1383,6 +1388,31 @@ fn copy_pool_region(
         pool_grid.row_mut(top + r)[left..left + cols]
             .copy_from_slice(&document_grid.row(r)[..cols]);
     }
+
+    let dx = region.left as i16 * 16;
+    let dy = region.top as i16 * 16;
+    pool_grid.set_text_runs(
+        document_grid
+            .text_runs()
+            .iter()
+            .map(|run| TextRun {
+                col: run.col + dx,
+                row: run.row + dy,
+                ..run.clone()
+            })
+            .collect(),
+    );
+    pool_grid.set_bars(
+        document_grid
+            .bars()
+            .iter()
+            .map(|bar| Bar {
+                x: bar.x + dx,
+                y: bar.y + dy,
+                ..*bar
+            })
+            .collect(),
+    );
 }
 
 /// The cursor's cell position for the renderer, or `None` when it is hidden.
@@ -1940,7 +1970,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use stoatty_protocol::command::PoolRegionCommand;
     use stoatty_term::{
-        grid::{Grid, Overlay, Rgb},
+        grid::{Bar, Grid, Overlay, Rgb, TextRun},
         term::{Cursor, CursorShape},
     };
     use winit::{
@@ -2023,6 +2053,73 @@ mod tests {
             pool.get(4, 4).ch,
             's',
             "the surround is left untouched, not blanked"
+        );
+    }
+
+    #[test]
+    fn copy_pool_region_translates_decorations_and_clears_stale() {
+        let region = PoolRegionCommand {
+            pool: 0,
+            top: 1,
+            left: 1,
+            width: 2,
+            height: 2,
+        };
+        let live = Grid::new(5, 5);
+
+        let mut document = Grid::new(region.height as usize + 1, region.width as usize);
+        document.set_text_runs(vec![TextRun {
+            col: 5,
+            row: 3,
+            scale: 160,
+            color: Rgb::new(1, 2, 3),
+            bg: Rgb::new(4, 5, 6),
+            text: "42".to_string(),
+        }]);
+        document.set_bars(vec![Bar {
+            x: 2,
+            y: 4,
+            width: 8,
+            height: 1,
+            color: Rgb::new(7, 8, 9),
+        }]);
+
+        let mut pool = Grid::new(5, 5);
+        copy_pool_region(&mut pool, &document, &live, region);
+
+        assert_eq!(
+            pool.text_runs(),
+            [TextRun {
+                col: 21,
+                row: 19,
+                scale: 160,
+                color: Rgb::new(1, 2, 3),
+                bg: Rgb::new(4, 5, 6),
+                text: "42".to_string(),
+            }],
+            "the text run shifts by the region origin (left*16, top*16)"
+        );
+        assert_eq!(
+            pool.bars(),
+            [Bar {
+                x: 18,
+                y: 20,
+                width: 8,
+                height: 1,
+                color: Rgb::new(7, 8, 9),
+            }],
+            "the bar shifts by the region origin (left*16, top*16)"
+        );
+
+        let bare = Grid::new(region.height as usize + 1, region.width as usize);
+        copy_pool_region(&mut pool, &bare, &live, region);
+        assert!(
+            pool.text_runs().is_empty(),
+            "a decoration-free document clears stale text runs"
+        );
+        assert!(
+            pool.bars().is_empty(),
+            "a decoration-free document clears stale bars"
         );
     }
 
