@@ -679,6 +679,9 @@ pub struct Icon {
     pub kind: IconKind,
     pub color: Rgb,
     pub size: u8,
+    /// Signed `[x, y]` pixel offset from the anchor cell, carried from the
+    /// `IconCommand` so the icon can shift inside a popover's inset content.
+    pub offset: [i16; 2],
 }
 
 /// Which status icon an [`Icon`] draws.
@@ -951,6 +954,7 @@ mod tests {
             kind: IconKind::Error,
             color: Rgb::new(220, 50, 47),
             size: 1,
+            offset: [0, 0],
         };
         grid.set_icons(vec![icon]);
 
@@ -1083,6 +1087,7 @@ mod tests {
             kind: IconKind::Error,
             color: Rgb::new(1, 2, 3),
             size: 1,
+            offset: [0, 0],
         }]);
 
         assert!(

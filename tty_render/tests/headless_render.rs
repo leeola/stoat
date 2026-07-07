@@ -134,6 +134,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             kind: IconKind::Error,
             color: Rgb::new(220, 50, 47),
             size: 1,
+            offset: [0, 0],
         },
         Icon {
             top: 5,
@@ -141,6 +142,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             kind: IconKind::Warning,
             color: Rgb::new(255, 200, 0),
             size: 1,
+            offset: [0, 0],
         },
         Icon {
             top: 5,
@@ -148,6 +150,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             kind: IconKind::Info,
             color: Rgb::new(38, 139, 210),
             size: 2,
+            offset: [3, 6],
         },
     ]);
 

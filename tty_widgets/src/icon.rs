@@ -12,12 +12,15 @@ use stoatty_protocol::command::{self, IconCommand, IconKind};
 /// Emits an `icon` APC frame so a stoatty terminal draws the [`IconKind`]
 /// silhouette crisp at any `size`, and writes a single representative letter into
 /// the cell at the area's top-left so the same frame degrades to a severity mark
-/// in any other terminal. `size` shapes only the rich icon, not the one-cell
-/// fallback.
+/// in any other terminal. `size` and `offset` shape only the rich icon, not the
+/// one-cell fallback.
 pub struct Icon {
     pub kind: IconKind,
     pub color: [u8; 3],
     pub size: u8,
+    /// Signed `[x, y]` pixel offset from the anchor cell, so the icon can align
+    /// with a popover's inset content instead of snapping to the grid.
+    pub offset: [i16; 2],
 }
 
 impl StatefulWidget for Icon {
@@ -41,6 +44,7 @@ impl StatefulWidget for Icon {
                 kind: self.kind,
                 color: self.color,
                 size: self.size,
+                offset: self.offset,
             },
         );
     }
@@ -73,6 +77,7 @@ mod tests {
             kind: IconKind::Warning,
             color: [229, 192, 123],
             size: 2,
+            offset: [3, 6],
         }
         .render(area, &mut buf, &mut scene);
 
@@ -82,6 +87,7 @@ mod tests {
             kind: IconKind::Warning,
             color: [229, 192, 123],
             size: 2,
+            offset: [3, 6],
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }
@@ -96,6 +102,9 @@ mod tests {
                 kind,
                 color: [1, 2, 3],
                 size: 1,
+                // A non-zero offset shapes only the rich frame. The sigil
+                // fallback ignores it and still lands at the cell.
+                offset: [3, 6],
             }
             .render(area, &mut buf, &mut scene);
             buf.cell((0u16, 0u16)).expect("cell").symbol().to_owned()

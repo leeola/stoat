@@ -1088,7 +1088,14 @@ fn render_diagnostic_popover(
         return false;
     }
     let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let content = lines.join("\n");
+    // Prefix each line with the icon cell and a one-cell gap. The box is still
+    // sized from the unprefixed longest line, so w and h stay unchanged and the
+    // icon cell falls inside the one-cell content inset.
+    let content = lines
+        .iter()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let w = (longest as u16).saturating_add(4);
     let h = (lines.len() as u16).saturating_add(2);
@@ -1111,11 +1118,12 @@ fn render_diagnostic_popover(
         kind: icon_kind(sev),
         color,
         size: 1,
+        offset: [3, 6],
     }
     .render(
         Rect {
-            x: rect.x,
-            y: rect.y,
+            x: rect.x + 1,
+            y: rect.y + 1,
             width: 1,
             height: 1,
         },

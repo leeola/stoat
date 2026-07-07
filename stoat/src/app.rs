@@ -6616,6 +6616,11 @@ mod tests {
             cmds.iter().any(|c| matches!(c, Command::Popover(_))),
             "a diagnostic under the cursor emits a popover frame, got {cmds:?}"
         );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::Icon(icon) if icon.offset == [3, 6])),
+            "the severity icon carries the popover offset so it sits inside the card, got {cmds:?}"
+        );
     }
 
     /// modal_frame's rich arm engages only when the border fg and the mask bg

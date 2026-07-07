@@ -2240,6 +2240,7 @@ fn apply_icons(grid: &mut Grid, commands: &[IconCommand]) {
             kind: grid_icon_kind(command.kind),
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
             size: command.size,
+            offset: command.offset,
         })
         .collect();
     grid.set_icons(icons);
@@ -3432,6 +3433,7 @@ mod tests {
             kind: ProtoIconKind::Warning,
             color: [255, 200, 0],
             size: 2,
+            offset: [3, 6],
         });
 
         let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -3447,6 +3449,7 @@ mod tests {
                 kind: IconKind::Warning,
                 color: Rgb::new(255, 200, 0),
                 size: 2,
+                offset: [3, 6],
             }]
         );
     }
@@ -3647,6 +3650,7 @@ mod tests {
             kind: ProtoIconKind::Warning,
             color: [255, 200, 0],
             size: 2,
+            offset: [0, 0],
         });
 
         let mut terminal = Terminal::new(4, 4, Theme::default());

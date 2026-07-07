@@ -30,6 +30,7 @@ fn vs_main(
     @location(1) size: f32,
     @location(2) color: vec3<f32>,
     @location(3) kind: u32,
+    @location(4) offset: vec2<f32>,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -42,7 +43,7 @@ fn vs_main(
     let corner = corners[vertex_index];
 
     let extent = vec2<f32>(size, size) * globals.cell_size;
-    let pixel = cell * globals.cell_size + corner * extent;
+    let pixel = cell * globals.cell_size + offset + corner * extent;
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0

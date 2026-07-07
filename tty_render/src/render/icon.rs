@@ -34,6 +34,7 @@ struct IconInstance {
     size: f32,
     color: [f32; 3],
     kind: u32,
+    offset: [f32; 2],
 }
 
 /// Uniform shared by every instance: the surface resolution and cell size the
@@ -99,6 +100,7 @@ impl IconPass {
                         1 => Float32,
                         2 => Float32x3,
                         3 => Uint32,
+                        4 => Float32x2,
                     ],
                 }],
             },
@@ -218,6 +220,7 @@ fn build_icon_instances(icons: &[Icon]) -> Vec<IconInstance> {
             size: icon.size.max(1) as f32,
             color: rgb_f32(icon.color),
             kind: kind_code(icon.kind),
+            offset: [icon.offset[0] as f32, icon.offset[1] as f32],
         })
         .collect()
 }
@@ -256,13 +259,14 @@ mod tests {
     }
 
     #[test]
-    fn icon_instance_maps_anchor_size_color_and_kind() {
+    fn icon_instance_maps_anchor_size_color_kind_and_offset() {
         let icons = [Icon {
             top: 3,
             left: 5,
             kind: IconKind::Warning,
             color: Rgb::new(255, 200, 0),
             size: 2,
+            offset: [3, 6],
         }];
 
         let instances = build_icon_instances(&icons);
@@ -272,5 +276,6 @@ mod tests {
         assert_eq!(instances[0].size, 2.0);
         assert_eq!(instances[0].color, [1.0, 200.0 / 255.0, 0.0]);
         assert_eq!(instances[0].kind, KIND_WARNING);
+        assert_eq!(instances[0].offset, [3.0, 6.0]);
     }
 }

@@ -122,6 +122,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
             kind: IconKind::Error,
             color: ERROR,
             size: 1,
+            offset: [0, 0],
         },
         Rect::new(ERROR_COL, ERROR_ROW + 1, 1, 1),
         scene,
