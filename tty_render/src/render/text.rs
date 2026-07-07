@@ -2407,17 +2407,20 @@ fn cursor_cell(cursor: Option<[f32; 2]>) -> Option<(usize, usize)> {
 /// `scale` times the cell size.
 ///
 /// Content is laid out line by line down the box from its top-left: each
-/// `\n`-separated line starts a new row, its characters running rightward from
-/// the left edge. Each glyph occupies a `scale` by `scale` cell block, so chars
-/// advance `scale` columns and lines advance `scale` rows, and a line fits
-/// `width / scale` chars before the box clips it. Every line is emitted,
-/// including those past the box height, so they can scroll into view; the
-/// overlay-text draw scissors to the box to clip the vertical overflow. `scale`
-/// must be at least 1.
+/// The content is inset one cell from the box edge, matching the cell fallback,
+/// so it does not jam against the border. A `\n`-separated line starts a new
+/// row, its characters running rightward from that inset left edge. Each glyph
+/// occupies a `scale` by `scale` cell block, so chars advance `scale` columns
+/// and lines advance `scale` rows, and a line fits `(width - 2) / scale` chars
+/// before the box clips it.
+///
+/// Every line is emitted, including those past the box height, so they can
+/// scroll into view. The overlay-text draw scissors to the box to clip the
+/// vertical overflow. `scale` must be at least 1.
 fn overlay_content_cells(overlay: &Overlay, scale: usize) -> Vec<(usize, usize, char)> {
-    let left = overlay.left as usize;
-    let top = overlay.top as usize;
-    let cols = overlay.width as usize / scale;
+    let left = overlay.left as usize + 1;
+    let top = overlay.top as usize + 1;
+    let cols = (overlay.width as usize).saturating_sub(2) / scale;
 
     overlay
         .content
@@ -2678,10 +2681,9 @@ mod tests {
             content: "Hello".to_owned(),
         };
 
-        assert_eq!(
-            overlay_content_cells(&overlay, 1),
-            [(5, 2, 'H'), (6, 2, 'e'), (7, 2, 'l')]
-        );
+        // Inset one cell to (6, 3), and the 3-wide box holds one char after the
+        // inset trims a cell from each side.
+        assert_eq!(overlay_content_cells(&overlay, 1), [(6, 3, 'H')]);
     }
 
     #[test]
@@ -2699,17 +2701,12 @@ mod tests {
             content: "abcd\nef".to_owned(),
         };
 
-        // At scale 2 each glyph owns a 2x2 block: chars advance two columns,
-        // lines advance two rows, and the 6-cell-wide box fits three chars.
+        // At scale 2 each glyph owns a 2x2 block, so chars advance two columns
+        // and lines advance two rows. Inset one cell to (5, 3), the 6-cell box
+        // holds two chars once the inset trims a cell from each side.
         assert_eq!(
             overlay_content_cells(&overlay, 2),
-            [
-                (4, 2, 'a'),
-                (6, 2, 'b'),
-                (8, 2, 'c'),
-                (4, 4, 'e'),
-                (6, 4, 'f')
-            ]
+            [(5, 3, 'a'), (7, 3, 'b'), (5, 5, 'e'), (7, 5, 'f')]
         );
     }
 
@@ -2728,19 +2725,12 @@ mod tests {
             content: "abcd\nef\nXY".to_owned(),
         };
 
-        // Every line is emitted and width-clipped. The box height no longer
-        // drops the third line, since the scissor now clips vertical overflow.
+        // Every line is emitted and width-clipped. Inset one cell to (6, 3), the
+        // 3-wide box holds one char per line, and all three lines still emit
+        // since the scissor clips vertical overflow rather than the box height.
         assert_eq!(
             overlay_content_cells(&overlay, 1),
-            [
-                (5, 2, 'a'),
-                (6, 2, 'b'),
-                (7, 2, 'c'),
-                (5, 3, 'e'),
-                (6, 3, 'f'),
-                (5, 4, 'X'),
-                (6, 4, 'Y'),
-            ]
+            [(6, 3, 'a'), (6, 4, 'e'), (6, 5, 'X')]
         );
     }
 

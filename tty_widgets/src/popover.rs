@@ -16,9 +16,11 @@ use stoatty_protocol::command;
 /// any other terminal. The box fills the render area.
 ///
 /// `content` is borrowed so a caller can pass a slice it already holds rather
-/// than own a string per frame. `scale` is in 256ths of the cell size and
-/// `offset` is a signed pixel nudge from the anchor; both shape only the rich
-/// rendering, not the cell fallback.
+/// than own a string per frame. `scale` is an integer multiple of the cell size
+/// (1 draws one cell per glyph, 2 a 2x2 block) and `offset` is a signed pixel
+/// nudge from the anchor. Both shape only the rich rendering, not the cell
+/// fallback. Rich content is inset one cell from the border, matching the cell
+/// fallback's inset.
 pub struct Popover<'a> {
     pub fill: [u8; 3],
     pub border: [u8; 3],
