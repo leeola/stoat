@@ -22,7 +22,7 @@ const STYLE_ROUNDED: u32 = 3u;
 // exterior (fs_main gates it by interior coverage); this is its peak opacity
 // just past the box edge, falling to zero across the shadow margin.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const SHADOW_ALPHA: f32 = 0.4;
+const SHADOW_ALPHA: f32 = 0.22;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,

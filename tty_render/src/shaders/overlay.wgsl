@@ -15,7 +15,7 @@ var<uniform> globals: Globals;
 // Drop-shadow color and peak alpha. The alpha falls off to zero across the
 // shadow margin, so this is the opacity directly beneath the box edge.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const SHADOW_ALPHA: f32 = 0.4;
+const SHADOW_ALPHA: f32 = 0.22;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
