@@ -16,6 +16,7 @@ pub mod panel;
 pub mod popover;
 pub mod scale;
 pub mod scroll_region;
+pub mod status_bar;
 pub mod text_run;
 
 /// The reused emission buffer a frame's widgets append their APC frames into.
