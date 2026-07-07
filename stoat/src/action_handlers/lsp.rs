@@ -4679,6 +4679,64 @@ mod tests {
         assert!(h.stoat.pending_hover_request.is_none());
     }
 
+    /// Populate a hover popup over `main.rs`, leaving the editor in normal mode.
+    fn open_hover(h: &mut TestHarness) {
+        enable_hover(h);
+        let root = seed(h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "details");
+        h.type_keys("space l i");
+        h.settle();
+        assert!(h.stoat.pending_hover.is_some(), "popup should be open");
+    }
+
+    #[test]
+    fn hover_dismissed_by_escape() {
+        use crate::test_harness::keys;
+        use crossterm::event::{Event, KeyCode};
+        let mut h = TestHarness::with_size(80, 24);
+        open_hover(&mut h);
+
+        h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
+        assert!(h.stoat.pending_hover.is_none());
+        assert!(h.stoat.pending_hover_request.is_none());
+    }
+
+    #[test]
+    fn hover_dismissed_by_ctrl_c_without_quitting() {
+        use crate::{test_harness::keys, UpdateEffect};
+        use crossterm::event::Event;
+        let mut h = TestHarness::with_size(80, 24);
+        open_hover(&mut h);
+
+        let effect = h.stoat.update(Event::Key(keys::ctrl('c')));
+        assert!(
+            matches!(effect, UpdateEffect::Redraw),
+            "Ctrl-c closes the hover rather than quitting the app"
+        );
+        assert!(h.stoat.pending_hover.is_none());
+    }
+
+    #[test]
+    fn hover_dismissed_entering_insert_mode() {
+        use crate::test_harness::keys;
+        use crossterm::event::{Event, KeyCode};
+        let mut h = TestHarness::with_size(80, 24);
+        open_hover(&mut h);
+
+        // `i` is SetMode(insert)-only, so it skips the post-dispatch clear; the
+        // auto-close intercept closes the popup and the key still enters insert.
+        h.stoat.update(Event::Key(keys::key(KeyCode::Char('i'))));
+        assert!(h.stoat.pending_hover.is_none(), "the popup closes");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "and the key still dispatches"
+        );
+    }
+
     #[test]
     fn query_diagnostics_returns_seeded_set() {
         use lsp_types::Diagnostic;

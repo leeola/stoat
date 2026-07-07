@@ -581,9 +581,12 @@ pub struct Stoat {
         Option<stoat_scheduler::Task<Option<action_handlers::lsp::HoverResponse>>>,
 
     /// Hover popup content waiting to be painted. Set by
-    /// [`action_handlers::pump_lsp_hover`] when a hover response lands;
-    /// cleared by [`Self::dispatch_key`] on any non-Hover action so the
-    /// popup vanishes on cursor motion.
+    /// [`action_handlers::pump_lsp_hover`] when a hover response lands.
+    ///
+    /// In normal or select mode the next key press closes it (the auto-close
+    /// intercept in [`Self::handle_key`]): Escape and Ctrl-c are consumed by the
+    /// close, every other key closes it and then dispatches. Any non-Hover action
+    /// also clears it, so the popup vanishes on cursor motion.
     pub(crate) pending_hover: Option<action_handlers::lsp::HoverPopup>,
 
     /// In-flight `textDocument/signatureHelp` request, armed by
@@ -2747,6 +2750,11 @@ impl Stoat {
             if self.global_search.take().is_some() {
                 return UpdateEffect::Redraw;
             }
+            if self.pending_hover.is_some() {
+                self.pending_hover = None;
+                self.pending_hover_request = None;
+                return UpdateEffect::Redraw;
+            }
             if let Some(agent_id) = self.term_input_target() {
                 self.write_to_term(agent_id, &[0x03]);
                 return UpdateEffect::None;
@@ -2998,6 +3006,21 @@ impl Stoat {
             }
             self.pending_workspace_symbol_picker = None;
             self.pending_workspace_symbol_request = None;
+        }
+
+        // A hover popup auto-closes on the next key press (Helix's popup
+        // behavior). Escape is consumed by the close; every other key closes the
+        // popup and then dispatches, which also covers the SetMode-only keys that
+        // `continue` before the post-dispatch clear below. Ctrl-c is consumed by
+        // the close in the Ctrl-c block above, so it never reaches here.
+        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
+            && self.pending_hover.is_some()
+        {
+            self.pending_hover = None;
+            self.pending_hover_request = None;
+            if matches!(key.code, KeyCode::Esc) {
+                return UpdateEffect::Redraw;
+            }
         }
 
         if (self.focused_mode() == "normal" || self.focused_mode() == "select")
