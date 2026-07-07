@@ -3,9 +3,32 @@
 //! loop until the window closes.
 
 use clap::Parser;
+use stoat_cli::FixtureSub;
+use stoatty::cli::{Cli, TtyCommand};
 
 fn main() {
-    let cli = stoatty::cli::Cli::parse();
+    let mut cli = Cli::parse();
+
+    if let Some(TtyCommand::Fixture(args)) = cli.command_sub.take() {
+        match (args.sub, args.name) {
+            (Some(FixtureSub::Ls), _) => {
+                print!("{}", stoat_cli::ls_text());
+                return;
+            },
+            (None, Some(name)) => {
+                if cli.common.fixture.is_some() {
+                    eprintln!("error: `--fixture` conflicts with the fixture subcommand");
+                    std::process::exit(1);
+                }
+                cli.common.fixture = Some(name);
+            },
+            (None, None) => {
+                eprintln!("error: specify a fixture name or `ls`");
+                std::process::exit(1);
+            },
+        }
+    }
+
     stoatty::app::run(
         cli.command(),
         cli.working_directory,

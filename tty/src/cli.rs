@@ -1,6 +1,6 @@
-use clap::{Parser, ValueHint};
+use clap::{Parser, Subcommand, ValueHint};
 use std::path::PathBuf;
-use stoat_cli::CommonArgs;
+use stoat_cli::{CommonArgs, FixtureArgs};
 
 /// The version string `stoatty --version` prints, and the value exported to
 /// child programs via `STOATTY_VERSION` so an inner stoat can report it.
@@ -26,6 +26,9 @@ pub(crate) const VERSION_INFO: &str = concat!(
     version = VERSION_INFO
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command_sub: Option<TtyCommand>,
+
     /// Run PROGRAM (with any following arguments) instead of the shell, e.g.
     /// `stoatty -e nvim --clean`. Overrides the `[shell]` config for this run.
     #[arg(
@@ -53,6 +56,14 @@ pub struct Cli {
     /// names its own program.
     #[arg(long = "terminal", conflicts_with = "command")]
     pub terminal: bool,
+}
+
+/// Subcommands stoatty handles before opening a window.
+#[derive(Subcommand)]
+pub enum TtyCommand {
+    /// Materialize a deterministic fixture and open the editor inside it. `ls`
+    /// lists the catalog. Forwarded to the stoat child.
+    Fixture(FixtureArgs),
 }
 
 impl Cli {
@@ -133,5 +144,31 @@ mod tests {
     #[test]
     fn terminal_conflicts_with_command() {
         assert!(Cli::try_parse_from(["stoatty", "--terminal", "-e", "sh"]).is_err());
+    }
+
+    #[test]
+    fn fixture_subcommand_parses_ls_and_a_name() {
+        use stoat_cli::FixtureSub;
+
+        let cli = Cli::parse_from(["stoatty", "fixture", "ls"]);
+        let Some(super::TtyCommand::Fixture(args)) = cli.command_sub else {
+            panic!("expected the fixture subcommand");
+        };
+        assert_eq!(args.sub, Some(FixtureSub::Ls));
+        assert_eq!(args.name, None);
+
+        let cli = Cli::parse_from(["stoatty", "fixture", "conflict"]);
+        let Some(super::TtyCommand::Fixture(args)) = cli.command_sub else {
+            panic!("expected the fixture subcommand");
+        };
+        assert_eq!(args.sub, None);
+        assert_eq!(args.name.as_deref(), Some("conflict"));
+    }
+
+    #[test]
+    fn fixture_flag_parses_without_a_subcommand() {
+        let cli = Cli::parse_from(["stoatty", "--fixture", "basic-diff"]);
+        assert!(cli.command_sub.is_none());
+        assert_eq!(cli.common.fixture.as_deref(), Some("basic-diff"));
     }
 }
