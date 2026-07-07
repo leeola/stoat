@@ -6320,6 +6320,11 @@ mod tests {
     #[test]
     fn apc_scene_emits_nothing_for_a_plain_editor_frame() {
         let mut h = Stoat::test();
+        // The default theme resolves status colors to RGB, which drives the
+        // status bar into the scene as sub-cell components. A theme without RGB
+        // status colors keeps the status bar in cells, so with line numbers off
+        // the frame stays genuinely widget-free.
+        h.stoat.theme = rgb_review_theme();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -6399,6 +6404,41 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(c, Command::Bar(_))),
             "status marks and the separator emit as sub-cell bars, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_emits_sub_cell_components_inside_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        // Line numbers off so the only off-grid components are the status bar's.
+        h.stoat.settings.editor_line_numbers = Some(false);
+
+        let root = std::path::PathBuf::from("/status");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::TextRun(t) if t.col == 0)),
+            "the mode segment emits as a text run at col 0, got {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::Bar(b) if b.height == 1)),
+            "the status hairline emits as a one-sixteenth bar, got {cmds:?}"
         );
     }
 

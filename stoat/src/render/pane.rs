@@ -5,6 +5,7 @@ use crate::{
     render::{
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
+        review::style_rgb,
         run_pane::render_run_pane,
         term_pane::render_term_pane,
         undercurl::UndercurlSpan,
@@ -21,7 +22,10 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::path::Path;
-use stoatty_widgets::ApcScene;
+use stoatty_widgets::{
+    status_bar::{StatusBar, StatusSegment},
+    ApcScene,
+};
 
 pub(crate) fn render_pane(
     pane: &Pane,
@@ -76,7 +80,7 @@ pub(crate) fn render_pane(
                     labels,
                     frame.search_query,
                     diagnostic_info,
-                    Some(scene),
+                    Some(&mut *scene),
                     Some(undercurls),
                 );
             }
@@ -101,6 +105,7 @@ pub(crate) fn render_pane(
         editors,
         buffers,
         buf,
+        Some(scene),
     );
 }
 
@@ -196,6 +201,7 @@ pub(crate) fn render_pane_dividers(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_pane_status(
     view: &View,
     is_focused: bool,
@@ -204,6 +210,7 @@ fn render_pane_status(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -222,7 +229,28 @@ fn render_pane_status(
     }
 
     let (left, right) = status_segments(view, is_focused, area, frame, editors, buffers);
-    paint_status_fallback(buf, area, &left, &right);
+
+    // Rich mode needs stoatty, a scene, and every segment color as RGB. When any
+    // color falls outside RGB the whole bar drops to the cell fallback.
+    let rich = scene.filter(|_| frame.stoatty).and_then(|scene| {
+        let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_TEXT_MUTED).fg)?;
+        let left_rich = resolve_rich_segments(&left, base_style)?;
+        let right_rich = resolve_rich_segments(&right, base_style)?;
+        Some((scene, separator, left_rich, right_rich))
+    });
+
+    match rich {
+        Some((scene, separator, left_rich, right_rich)) => {
+            StatusBar {
+                left: &left_rich,
+                right: &right_rich,
+                scale: 160,
+                separator,
+            }
+            .draw_components(area, buf, scene);
+        },
+        None => paint_status_fallback(buf, area, &left, &right),
+    }
 }
 
 /// One built status-bar segment pairing painted text with its cell style.
@@ -398,6 +426,26 @@ fn paint_status_fallback(buf: &mut Buffer, area: Rect, left: &[StatusSeg], right
     }
     let _ = cursor;
     let _ = right_anchor;
+}
+
+/// Resolve each segment's fg/bg to RGB for the rich path, defaulting a missing
+/// channel to `base`'s.
+///
+/// Returns `None` if any resolved color is not RGB, since a theme that cannot
+/// supply RGB status colors drives the cell fallback rather than the rich bar.
+fn resolve_rich_segments(segments: &[StatusSeg], base: Style) -> Option<Vec<StatusSegment<'_>>> {
+    segments
+        .iter()
+        .map(|(text, style)| {
+            let fg = style_rgb(style.fg.or(base.fg))?;
+            let bg = style_rgb(style.bg.or(base.bg))?;
+            Some(StatusSegment {
+                text: text.as_str(),
+                fg,
+                bg,
+            })
+        })
+        .collect()
 }
 
 /// Builds the status-bar diagnostic label for the focused pane's
