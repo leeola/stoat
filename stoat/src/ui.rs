@@ -7,7 +7,8 @@
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
-    execute,
+    execute, queue,
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use futures::StreamExt;
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -156,6 +157,11 @@ async fn run(
                 if changed.is_err() {
                     break;
                 }
+                // Open a synchronized update so the cell diff, undercurl re-stamp,
+                // and APC batch below commit as one frame. Queued rather than
+                // flushed, so ratatui's draw flush carries it ahead of the cell
+                // diff in the same write.
+                queue!(io::stdout(), BeginSynchronizedUpdate)?;
                 // Copy the latest frame into `frame` and drop the watch borrow
                 // before drawing, so the slow terminal flush never holds the
                 // lock the render thread needs to publish the next frame.
@@ -200,6 +206,9 @@ async fn run(
                 // frame to the same stdout, after the grid frame so the pool
                 // composites over the content just drawn.
                 drain_apc(apc_rx)?;
+                // Close the synchronized update so the cell diff, undercurl, and
+                // APC batch commit as one atomic frame.
+                execute!(io::stdout(), EndSynchronizedUpdate)?;
                 // The frame's bytes are out, so stop the input-to-flush clock.
                 #[cfg(feature = "perf")]
                 if let Some(started) = input_time {
@@ -214,8 +223,13 @@ async fn run(
             batch = apc_rx.recv() => {
                 let Some(batch) = batch else { break };
                 let mut stdout = io::stdout();
+                // Wrap the batch, and any it coalesces via drain_apc, in a
+                // synchronized update so an async scene re-emit or multi-KB pool
+                // fill commits atomically. The existing flush carries the ESU.
+                queue!(stdout, BeginSynchronizedUpdate)?;
                 stdout.write_all(&batch)?;
                 drain_apc(apc_rx)?;
+                queue!(stdout, EndSynchronizedUpdate)?;
                 stdout.flush()?;
             }
         }
