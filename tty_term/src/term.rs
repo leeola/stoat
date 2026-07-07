@@ -329,6 +329,12 @@ struct FillTarget {
     index: u64,
     term: Term<ResponseSink>,
     parser: Processor,
+    /// Page-targeted text runs captured while this page paints, moved onto the
+    /// pool slot when the fill commits.
+    text_runs: Vec<TextRunCommand>,
+    /// Page-targeted bars captured while this page paints. See
+    /// [`Self::text_runs`].
+    bars: Vec<BarCommand>,
 }
 
 impl FillTarget {
@@ -346,6 +352,8 @@ impl FillTarget {
             index,
             term,
             parser: Processor::new(),
+            text_runs: Vec::new(),
+            bars: Vec::new(),
         }
     }
 }
@@ -522,14 +530,13 @@ impl Terminal {
             start = prefix + end;
 
             if let Some(command) = command {
-                // Mid-redirect only the fill/capture-control commands act. A
-                // decoration command in a redirected stream is target-bound, so
-                // applying it would leak onto the live grid; it is dropped to
-                // keep the live state untouched while a page paints or a content
-                // capture runs.
-                // FIXME: capture page-targeted decorations onto the page grid
-                // rather than dropping them.
-                let control = matches!(
+                // Fill and capture controls always act. A Bar and a TextRun's
+                // capture are page-targeted decorations the open fill stores on
+                // its slot (the Bar arm and commit_capture route them there), so
+                // they act too. Every other decoration is target-bound and would
+                // leak onto the live grid, so it is dropped while a page paints
+                // or a content capture runs.
+                let routed = matches!(
                     command,
                     Command::Fill(_)
                         | Command::FillEnd
@@ -538,8 +545,9 @@ impl Terminal {
                         | Command::PopoverEnd
                         | Command::TextRun(_)
                         | Command::TextRunEnd
+                        | Command::Bar(_)
                 );
-                if control || (self.fill.is_none() && self.capture.is_none()) {
+                if routed || (self.fill.is_none() && self.capture.is_none()) {
                     self.apply_command(command);
                 }
             }
@@ -736,9 +744,12 @@ impl Terminal {
             },
             Command::TextRun(text_run) => self.begin_capture(CaptureTarget::TextRun(text_run)),
             Command::TextRunEnd => self.commit_capture(),
-            Command::Bar(bar) => {
-                self.bars.push(bar);
-                self.decorations_dirty.bars = true;
+            Command::Bar(bar) => match &mut self.fill {
+                Some(fill) => fill.bars.push(bar),
+                None => {
+                    self.bars.push(bar);
+                    self.decorations_dirty.bars = true;
+                },
             },
             Command::LineLayout(layout) => {
                 self.line_layout = Some(layout);
@@ -841,12 +852,14 @@ impl Terminal {
         }
 
         let doc_rows = doc_scroll * page_rows as f32;
-        let top = doc_rows.floor();
-        let frac = doc_rows - top;
+        let top = doc_rows.floor() as i64;
+        let frac = doc_rows - top as f32;
 
-        pool.page_pool
-            .compose(top as i64, out)
-            .then_some((frac, top as i64))
+        if !pool.page_pool.compose(top, out) {
+            return None;
+        }
+        stamp_pool_decorations(&pool.page_pool, out, top, page_rows);
+        Some((frac, top))
     }
 
     /// Compose a straddled scrollback-history window into `out` at the eased
@@ -931,9 +944,10 @@ impl Terminal {
     /// Commit the open page fill onto its pool's slot and restore the live grid.
     ///
     /// Projects the fill context's painted cells onto the recycled slot for its
-    /// page index in the target pool. A no-op when no fill is open, so every
-    /// close trigger (`fill_end`, the next `fill`, `reset`) can call it
-    /// unconditionally; the painted page is discarded if its pool was dropped
+    /// page index in the target pool. The bars and text runs captured while the
+    /// page painted move onto the slot with it. A no-op when no fill is open, so
+    /// every close trigger (`fill_end`, the next `fill`, `reset`) can call it
+    /// unconditionally. The painted page is discarded if its pool was dropped
     /// mid-fill.
     fn commit_fill(&mut self) {
         let Some(fill) = self.fill.take() else {
@@ -945,6 +959,8 @@ impl Terminal {
 
         let grid = pool.page_pool.fill(fill.index);
         project_term_cells(grid, &fill.term, &self.theme, &self.palette);
+        pool.page_pool
+            .set_decorations(fill.index, fill.text_runs, fill.bars);
         pool.content_version = pool.content_version.wrapping_add(1);
     }
 
@@ -991,20 +1007,28 @@ impl Terminal {
             },
             CaptureTarget::TextRun(mut command) => {
                 command.text = text;
-                self.text_runs.push(command);
-                self.decorations_dirty.text_runs = true;
+                match &mut self.fill {
+                    Some(fill) => fill.text_runs.push(command),
+                    None => {
+                        self.text_runs.push(command);
+                        self.decorations_dirty.text_runs = true;
+                    },
+                }
             },
         }
     }
 
-    /// Route a run of VT bytes to the active write target: the open fill
-    /// context's parser when a fill redirect is in effect, the content buffer when
-    /// a content capture is in effect, otherwise the live parser.
+    /// Route a run of VT bytes to the active write target.
+    ///
+    /// A content capture takes precedence over an open fill, so a text run
+    /// nested inside a page captures its text rather than painting it into the
+    /// page cells. An open fill with no capture takes the bytes, and with
+    /// neither open the live parser does.
     fn feed_segment(&mut self, segment: &[u8]) {
-        if let Some(fill) = &mut self.fill {
-            fill.parser.advance(&mut fill.term, segment);
-        } else if let Some(capture) = &mut self.capture {
+        if let Some(capture) = &mut self.capture {
             capture.content.extend_from_slice(segment);
+        } else if let Some(fill) = &mut self.fill {
+            fill.parser.advance(&mut fill.term, segment);
         } else {
             self.parser.advance(&mut self.term, segment);
         }
@@ -2145,6 +2169,54 @@ fn apply_line_layout(grid: &mut Grid, command: Option<&LineLayoutCommand>) {
             .map(|command| command.heights.clone())
             .unwrap_or_default(),
     );
+}
+
+/// Stamp the buffered pages' text runs and bars into the composed `out` grid,
+/// translated from page-local rows to the window's rows.
+///
+/// Each page the window straddles contributes its slot decorations shifted by
+/// the whole-row gap between the page's document start and the window top `top`,
+/// in the commands' sixteenth-cell units. A decoration lying fully above or
+/// below the composed rows is dropped. The sub-cell scroll fraction stays with
+/// the renderer, so these shift by the same pixel offset as the cells
+/// [`PagePool::compose`] copied.
+fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: usize) {
+    let out_rows = out.rows() as i64;
+    let out_rows_16 = out_rows * 16;
+    let first_page = top.div_euclid(page_rows as i64);
+    let last_page = (top + out_rows - 1).div_euclid(page_rows as i64);
+
+    let mut text_runs = Vec::new();
+    let mut bars = Vec::new();
+    for page in first_page..=last_page {
+        let Some((page_runs, page_bars)) = pool.page_decorations(page as u64) else {
+            continue;
+        };
+        let shift = 16 * (page * page_rows as i64 - top);
+
+        for run in page_runs {
+            let row = run.row as i64 + shift;
+            if row + 16 <= 0 || row >= out_rows_16 {
+                continue;
+            }
+            if let Ok(row) = i16::try_from(row) {
+                text_runs.push(TextRunCommand { row, ..run.clone() });
+            }
+        }
+
+        for bar in page_bars {
+            let y = bar.y as i64 + shift;
+            if y + bar.height as i64 <= 0 || y >= out_rows_16 {
+                continue;
+            }
+            if let Ok(y) = i16::try_from(y) {
+                bars.push(BarCommand { y, ..*bar });
+            }
+        }
+    }
+
+    apply_text_runs(out, &text_runs);
+    apply_bars(out, &bars);
 }
 
 /// Replace the grid's text-run list with each stored text-run command's run.
@@ -3663,6 +3735,144 @@ mod tests {
             grid.get(0, 0).borders.top,
             None,
             "page border spares the live grid"
+        );
+    }
+
+    #[test]
+    fn fill_captures_bar_and_text_run_onto_the_slot() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        declare_pool(&mut terminal, 0, 2, 4);
+        // A bar and a text run streamed inside the page ride onto its slot, not
+        // the live grid. The text run's content proves the capture wins over the
+        // fill parser.
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(&encode_bar(&BarCommand {
+            x: 0,
+            y: 16,
+            width: 3,
+            height: 16,
+            color: [220, 50, 47],
+        }));
+        stream.extend_from_slice(&encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 16,
+            scale: 160,
+            color: [150, 160, 170],
+            bg: [24, 26, 32],
+            text: "42".to_owned(),
+        }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let (runs, bars) = terminal.pools[&0]
+            .page_pool
+            .page_decorations(0)
+            .expect("page buffered");
+        assert_eq!(
+            runs,
+            [TextRunCommand {
+                col: 0,
+                row: 16,
+                scale: 160,
+                color: [150, 160, 170],
+                bg: [24, 26, 32],
+                text: "42".to_owned(),
+            }]
+        );
+        assert_eq!(
+            bars,
+            [BarCommand {
+                x: 0,
+                y: 16,
+                width: 3,
+                height: 16,
+                color: [220, 50, 47],
+            }]
+        );
+
+        terminal.project(&mut grid);
+        assert!(
+            grid.text_runs().is_empty() && grid.bars().is_empty(),
+            "page decorations spare the live grid"
+        );
+    }
+
+    #[test]
+    fn project_pool_stamps_translated_decorations_and_culls_off_window() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut out = Grid::new(3, 4);
+
+        declare_pool(&mut terminal, 0, 2, 4);
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(&encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: [0, 0, 0],
+            text: "aa".to_owned(),
+        }));
+        stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
+        stream.extend_from_slice(&encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 160,
+            color: [4, 5, 6],
+            bg: [0, 0, 0],
+            text: "bb".to_owned(),
+        }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        // Half a page down puts the window over page 0's last row and all of
+        // page 1, so page 1's run (page row 0 to window row 1, y 16) is stamped
+        // and page 0's (page row 0, above the window) is culled.
+        let projected = terminal.project_pool(0, &mut out, 0.5);
+        assert_eq!(projected, Some((0.0, 1)));
+        assert_eq!(
+            out.text_runs(),
+            [TextRun {
+                col: 0,
+                row: 16,
+                scale: 160,
+                color: Rgb::new(4, 5, 6),
+                bg: Rgb::new(0, 0, 0),
+                text: "bb".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn refilling_a_slot_clears_its_decorations() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+
+        declare_pool(&mut terminal, 0, 2, 4);
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(&encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 16,
+            color: [1, 2, 3],
+        }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        // Refilling the same slot with a decoration-free page drops the old bar.
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(b"x");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let (runs, bars) = terminal.pools[&0]
+            .page_pool
+            .page_decorations(0)
+            .expect("page buffered");
+        assert!(
+            runs.is_empty() && bars.is_empty(),
+            "recycled slot drops the previous page's decorations"
         );
     }
 

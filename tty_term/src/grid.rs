@@ -6,6 +6,7 @@
 //! are stored fully resolved, so the renderer needs no palette of its own.
 
 use std::ops::{BitOr, BitOrAssign};
+use stoatty_protocol::command::{BarCommand, TextRunCommand};
 
 /// A rectangular grid of [`Cell`]s addressed by row and column.
 ///
@@ -306,6 +307,8 @@ impl PagePool {
             .map(|_| Page {
                 index: None,
                 grid: Grid::new(rows, cols),
+                text_runs: Vec::new(),
+                bars: Vec::new(),
             })
             .collect();
         PagePool { pages }
@@ -316,13 +319,42 @@ impl PagePool {
     ///
     /// [`Self::page`] resolves `index` to this grid afterward. If the slot held
     /// a different page, that page is dropped and its buffer reused in place, so
-    /// a sliding window allocates nothing.
+    /// a sliding window allocates nothing. Any page-targeted decorations from
+    /// the departed page are dropped too. The caller writes the new page's via
+    /// [`Self::set_decorations`].
     pub fn fill(&mut self, index: u64) -> &mut Grid {
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
         page.index = Some(index);
         page.grid.clear();
+        page.text_runs.clear();
+        page.bars.clear();
         &mut page.grid
+    }
+
+    /// Store the page-targeted `text_runs` and `bars` captured for document page
+    /// `index`, replacing any already on its slot.
+    ///
+    /// Written by the terminal when a fill commits, after [`Self::fill`] has
+    /// recycled the slot and its cells are painted. The commands are page-local.
+    /// The terminal translates them to the window when it projects the pool.
+    pub fn set_decorations(
+        &mut self,
+        index: u64,
+        text_runs: Vec<TextRunCommand>,
+        bars: Vec<BarCommand>,
+    ) {
+        let slot = self.slot(index);
+        let page = &mut self.pages[slot];
+        page.text_runs = text_runs;
+        page.bars = bars;
+    }
+
+    /// The page-targeted text runs and bars buffered for document page `index`,
+    /// or `None` when that page is not currently in the pool's window.
+    pub fn page_decorations(&self, index: u64) -> Option<(&[TextRunCommand], &[BarCommand])> {
+        let page = &self.pages[self.slot(index)];
+        (page.index == Some(index)).then_some((&page.text_runs, &page.bars))
     }
 
     /// The buffered grid for document page `index`, or `None` when that page is
@@ -387,6 +419,8 @@ impl PagePool {
         for page in &mut self.pages {
             page.index = None;
             page.grid.resize(rows, cols);
+            page.text_runs.clear();
+            page.bars.clear();
         }
     }
 
@@ -427,6 +461,13 @@ impl DocumentOffset {
 struct Page {
     index: Option<u64>,
     grid: Grid,
+    /// Page-targeted text runs captured from the fill that painted this slot,
+    /// page-local. Empty for a plain page. The terminal's pool projection stamps
+    /// them into the composite grid, translated to the window's rows.
+    text_runs: Vec<TextRunCommand>,
+    /// Page-targeted bars captured from the fill that painted this slot,
+    /// page-local. See [`Self::text_runs`].
+    bars: Vec<BarCommand>,
 }
 
 /// A single grid cell: one character and how to render it.
