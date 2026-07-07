@@ -1130,7 +1130,11 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
                     .map(|line| vec![(line.to_string(), Style::default())])
                     .collect()
             } else {
-                crate::markdown::render_markdown(&response.text, &stoat.theme)
+                crate::markdown::render_markdown(
+                    &response.text,
+                    &stoat.theme,
+                    &stoat.language_registry,
+                )
             };
             stoat.pending_hover = Some(HoverPopup {
                 lines,
@@ -5070,7 +5074,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_multiline_markup_split_by_newline() {
+    fn hover_renders_highlighted_code_and_prose() {
         let mut h = TestHarness::with_size(80, 24);
         enable_hover(&h);
         let root = seed(&mut h, &[("main.rs", "abc\n")]);
@@ -5084,15 +5088,17 @@ mod tests {
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
-        let literal = h.stoat.theme.get("syntax.markup.text.literal");
         let popup = h.stoat.pending_hover.as_ref().expect("popup");
-        assert_eq!(
-            popup.lines,
-            vec![
-                vec![("fn foo()".to_string(), literal)],
-                vec![],
-                vec![("Docs here".to_string(), Style::default())],
-            ]
+
+        let texts: Vec<String> = popup
+            .lines
+            .iter()
+            .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
+            .collect();
+        assert_eq!(texts, vec!["fn foo()", "", "Docs here"]);
+        assert!(
+            popup.lines[0].len() > 1,
+            "the rust code line is syntax-highlighted into multiple spans"
         );
     }
 

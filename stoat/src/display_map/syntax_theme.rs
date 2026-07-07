@@ -68,6 +68,18 @@ pub(crate) fn theme_scope_for_key(key: &str) -> String {
     }
 }
 
+/// Translate a theme-driven [`HighlightId`] into its hierarchical theme scope,
+/// returning `None` for [`HighlightId::DEFAULT`]. The id indexes [`THEME_KEYS`],
+/// whose stem feeds [`theme_scope_for_key`].
+pub(crate) fn theme_scope_for_id(id: HighlightId) -> Option<String> {
+    if id.is_default() {
+        return None;
+    }
+    THEME_KEYS
+        .get(id.0 as usize)
+        .map(|key| theme_scope_for_key(key))
+}
+
 #[derive(Clone)]
 pub struct SyntaxStyles {
     pub interner: Arc<HighlightStyleInterner>,
