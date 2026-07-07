@@ -17,10 +17,11 @@ pub(crate) fn render_rebase(
     state: &RebaseState,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     let theme = frame.theme;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, buf);
+    render_overlay_status(status_area, is_focused, frame, buf, scene);
 
     if inner.width < 10 || inner.height == 0 {
         return;

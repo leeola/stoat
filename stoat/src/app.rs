@@ -6442,6 +6442,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn overlay_status_bar_emits_sub_cell_components_inside_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        // A rebase overlay routes its status row through render_overlay_status.
+        h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+            std::path::PathBuf::from("/overlay"),
+            "onto".into(),
+            vec![],
+        ));
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::TextRun(t) if t.col == 0)),
+            "the overlay status row emits a text run at col 0, got {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::Bar(b) if b.height == 1)),
+            "the overlay status hairline emits as a one-sixteenth bar, got {cmds:?}"
+        );
+    }
+
     fn rgb_diagnostic_theme() -> crate::theme::Theme {
         let src = r##"theme rgbdiag {
             ui.diagnostic.error.fg = "#ff0000";

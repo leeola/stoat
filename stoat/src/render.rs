@@ -296,7 +296,14 @@ pub(crate) fn frame(
             }
         } else if screen == Some("rebase") {
             if let Some(state) = ws.rebase.as_ref() {
-                rebase::render_rebase(pane, is_focused, state, frame, buf);
+                rebase::render_rebase(
+                    pane,
+                    is_focused,
+                    state,
+                    frame,
+                    buf,
+                    frame.stoatty.then_some(&mut *scene),
+                );
             }
         } else if screen == Some("reword") {
             let reword_ctx = ws
@@ -318,7 +325,16 @@ pub(crate) fn frame(
             if let Some((sha, orig, editor_id)) = reword_ctx
                 && let Some(editor) = ws.editors.get_mut(editor_id)
             {
-                reword::render_reword(pane, is_focused, editor, &sha, &orig, frame, buf);
+                reword::render_reword(
+                    pane,
+                    is_focused,
+                    editor,
+                    &sha,
+                    &orig,
+                    frame,
+                    buf,
+                    frame.stoatty.then_some(&mut *scene),
+                );
             }
         } else if screen == Some("conflict")
             && let Some(active) = ws.rebase_active.as_ref()

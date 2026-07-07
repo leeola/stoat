@@ -118,56 +118,73 @@ pub(crate) fn render_overlay_status(
     is_focused: bool,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
 ) {
-    let workspace_name = frame.workspace_name;
-    let mode = frame.mode;
-    let theme = frame.theme;
     if area.width == 0 || area.height == 0 {
         return;
     }
     let base_style = if is_focused {
-        theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+        frame.theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
     } else {
-        theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
+        frame.theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
     };
+
     let y = area.y;
     let end_x = area.x + area.width;
     for x in area.x..end_x {
         buf[(x, y)].set_char(' ').set_style(base_style);
     }
 
+    let left = overlay_status_segments(is_focused, area, frame);
+    render_status_segments(area, base_style, frame, &left, &[], buf, scene);
+}
+
+/// Build the overlay status bar's left segments in paint order.
+///
+/// Mode and workspace show only when focused, then a screen label that shows
+/// unconditionally, left-padded when it leads. The screen segment differs from
+/// the pane status's focus-gated one.
+fn overlay_status_segments(is_focused: bool, area: Rect, frame: FrameCtx<'_>) -> Vec<StatusSeg> {
+    let theme = frame.theme;
+    let base_style = if is_focused {
+        theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+    } else {
+        theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
+    };
+    let end_x = area.x + area.width;
+
+    let mut left: Vec<StatusSeg> = Vec::new();
     let mut cursor = area.x;
     if is_focused {
-        let (mode_label, mode_bg) = mode_segment(mode, theme, frame.mode_badges);
+        let (mode_label, mode_bg) = mode_segment(frame.mode, theme, frame.mode_badges);
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
-        cursor = paint_segment(
-            buf,
-            y,
-            cursor,
+        push_left(
+            &mut left,
+            &mut cursor,
             end_x,
-            &format!(" {mode_label} "),
+            format!(" {mode_label} "),
             mode_style,
         );
-        cursor = paint_segment(
-            buf,
-            y,
-            cursor,
+        push_left(
+            &mut left,
+            &mut cursor,
             end_x,
-            &format!(" {workspace_name} "),
+            format!(" {} ", frame.workspace_name),
             base_style.add_modifier(Modifier::BOLD),
         );
     }
     if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
         let left_pad = if cursor == area.x { " " } else { "" };
-        paint_segment(
-            buf,
-            y,
-            cursor,
+        push_left(
+            &mut left,
+            &mut cursor,
             end_x,
-            &format!("{left_pad}{screen_label} "),
+            format!("{left_pad}{screen_label} "),
             base_style.fg(screen_color),
         );
     }
+    let _ = cursor;
+    left
 }
 
 pub(crate) fn render_pane_dividers(
