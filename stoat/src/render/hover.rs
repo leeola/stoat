@@ -90,7 +90,7 @@ pub(crate) fn render_hover(
     let inner = crate::render::chrome::modal_frame(
         buf,
         popup_area,
-        Some(" hover "),
+        None,
         modal_style,
         &stoat.theme,
         scene.as_deref_mut(),
