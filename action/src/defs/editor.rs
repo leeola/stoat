@@ -846,7 +846,7 @@ define_action!(
     "SelectTextobjectAround",
     ActionKind::SelectTextobjectAround,
     "select around textobject",
-    "Wait for the next char keypress (`f` function, `t` class, `p` paragraph, `a` parameter, `c` comment, `w` word, `W` WORD, `m` closest surrounding pair, or any non-alphanumeric char as its own pair), then expand the primary selection to enclose the textobject containing the cursor. `Around` includes surrounding context (e.g. function signature plus body, a word plus its trailing whitespace, or a pair's delimiters). Tree-sitter-driven for `f`/`t`/`a`/`c` (no-op for languages without a `textobjects.scm`); line-based walk for `p`; category scan for `w`/`W`; bracket / quote search for `m` and pair chars. No-op when no matching textobject contains the cursor.",
+    "Wait for the next char keypress (`f` function, `t` class, `p` paragraph, `a` parameter, `c` comment, `T` test, `e` entry, `w` word, `W` WORD, `m` closest surrounding pair, or any non-alphanumeric char as its own pair), then expand the primary selection to enclose the textobject containing the cursor. `Around` includes surrounding context (e.g. function signature plus body, a word plus its trailing whitespace, or a pair's delimiters). Tree-sitter-driven for `f`/`t`/`a`/`c`/`T`/`e` (no-op for languages without a `textobjects.scm`); line-based walk for `p`; category scan for `w`/`W`; bracket / quote search for `m` and pair chars. No-op when no matching textobject contains the cursor.",
     ActionPriority::Rare
 );
 
@@ -856,7 +856,7 @@ define_action!(
     "SelectTextobjectInner",
     ActionKind::SelectTextobjectInner,
     "select inside textobject",
-    "Wait for the next char keypress (`f` function, `t` class, `p` paragraph, `a` parameter, `c` comment, `w` word, `W` WORD, `m` closest surrounding pair, or any non-alphanumeric char as its own pair), then collapse the primary selection onto the textobject's inner content (e.g. function body without the signature, a word without surrounding whitespace, or a pair's content without its delimiters). Tree-sitter-driven for `f`/`t`/`a`/`c` (no-op for languages without a `textobjects.scm`); line-based walk for `p`; category scan for `w`/`W`; bracket / quote search for `m` and pair chars. No-op when no matching textobject contains the cursor.",
+    "Wait for the next char keypress (`f` function, `t` class, `p` paragraph, `a` parameter, `c` comment, `T` test, `e` entry, `w` word, `W` WORD, `m` closest surrounding pair, or any non-alphanumeric char as its own pair), then collapse the primary selection onto the textobject's inner content (e.g. function body without the signature, a word without surrounding whitespace, or a pair's content without its delimiters). Tree-sitter-driven for `f`/`t`/`a`/`c`/`T`/`e` (no-op for languages without a `textobjects.scm`); line-based walk for `p`; category scan for `w`/`W`; bracket / quote search for `m` and pair chars. No-op when no matching textobject contains the cursor.",
     ActionPriority::Rare
 );
 

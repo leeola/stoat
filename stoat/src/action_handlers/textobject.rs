@@ -4,9 +4,9 @@
 //! next char keypress is intercepted by [`crate::app::Stoat::handle_key`]
 //! and dispatched to [`execute_select_textobject`]. Type chars follow
 //! Helix's defaults: `f` (function), `t` (class / type), `p` (paragraph),
-//! `a` (parameter), `c` (comment), `w` (word), `W` (WORD), `m` (closest
-//! surrounding pair), and any non-alphanumeric char as its own literal
-//! pair (e.g. `(`, `"`).
+//! `a` (parameter), `c` (comment), `T` (test), `e` (entry), `w` (word),
+//! `W` (WORD), `m` (closest surrounding pair), and any non-alphanumeric
+//! char as its own literal pair (e.g. `(`, `"`).
 //!
 //! Tree-sitter-driven types use the language's `textobjects_query`
 //! (compiled from `textobjects.scm`), then pick the smallest capture
@@ -77,12 +77,14 @@ pub(crate) fn execute_select_textobject(
             let guard = buffer.read().expect("poisoned");
             find_textobject_paragraph(guard.rope(), cursor, mode)
         },
-        'f' | 't' | 'a' | 'c' => {
+        'f' | 't' | 'a' | 'c' | 'T' | 'e' => {
             let kind = match ch {
                 'f' => "function",
                 't' => "class",
                 'a' => "parameter",
                 'c' => "comment",
+                'T' => "test",
+                'e' => "entry",
                 _ => unreachable!(),
             };
             find_textobject_treesitter(ws, buffer_id, cursor, kind, mode)
@@ -747,5 +749,66 @@ mod tests {
         jump(&mut h, 2);
         h.type_keys("m i W");
         assert_eq!(primary_range(&mut h), (0, 7));
+    }
+
+    #[test]
+    fn test_around_selects_attributed_function() {
+        let mut h = TestHarness::with_size(60, 20);
+        let src = "#[test]\nfn checks() {\n    assert!(true);\n}\n";
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        let body_off = src.find("assert").expect("body present");
+        jump(&mut h, body_off);
+        h.type_keys("m a T");
+        let (start, end) = primary_range(&mut h);
+        let span = &src[start..end];
+        assert!(
+            span.contains("fn checks"),
+            "around should cover the fn, got {span:?}"
+        );
+        assert!(span.contains("assert!(true)"));
+    }
+
+    #[test]
+    fn entry_inner_selects_field_value() {
+        let mut h = TestHarness::with_size(60, 20);
+        let src = "struct S { x: u32 }\nfn f() -> S { S { x: 42 } }\n";
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        let val_off = src.rfind("42").expect("value present");
+        jump(&mut h, val_off);
+        h.type_keys("m i e");
+        let (start, end) = primary_range(&mut h);
+        assert_eq!(&src[start..end], "42");
+    }
+
+    #[test]
+    fn entry_around_selects_array_element() {
+        let mut h = TestHarness::with_size(60, 20);
+        let src = "fn f() {\n    let a = [1, 2, 3];\n}\n";
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        let elem_off = src.find('2').expect("element present");
+        jump(&mut h, elem_off);
+        h.type_keys("m a e");
+        let (start, end) = primary_range(&mut h);
+        assert_eq!(&src[start..end], "2");
+    }
+
+    #[test]
+    fn entry_inner_on_array_element_is_noop() {
+        let mut h = TestHarness::with_size(60, 20);
+        let src = "fn f() {\n    let a = [1, 2, 3];\n}\n";
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        let elem_off = src.find('2').expect("element present");
+        jump(&mut h, elem_off);
+        let before = primary_range(&mut h);
+        h.type_keys("m i e");
+        assert_eq!(
+            primary_range(&mut h),
+            before,
+            "array elements have only entry.around"
+        );
     }
 }
