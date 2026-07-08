@@ -2556,10 +2556,6 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         (buffer_id, head_offset, ch)
     };
 
-    let Some((open, close, forward)) = bracket_pair(ch) else {
-        return UpdateEffect::None;
-    };
-
     let tree_opt: Option<stoat_language::Tree> = ws
         .buffers
         .syntax_map(buffer_id)
@@ -2572,8 +2568,10 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
 
     // A brackets query captures only structural delimiters, so a bracket inside
     // a string, char, or comment literal resolves to no pair instead of
-    // false-matching. When the language ships one it is authoritative. The text
-    // scanner below only runs for languages without a query (e.g. toml).
+    // false-matching. When the language ships one it is authoritative and matches
+    // from within a pair, not only on a delimiter, so the char under the cursor
+    // does not gate the query path. The text scanner below only runs for
+    // languages without a query (e.g. toml).
     if let (Some(query), Some(tree)) = (bracket_query, tree_opt.as_ref()) {
         let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
         let display_snapshot = editor.display_map.snapshot();
@@ -2589,6 +2587,13 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         apply_primary_range(editor, target..target);
         return UpdateEffect::Redraw;
     }
+
+    // No brackets query (e.g. toml). The text scan matches only when the cursor
+    // is on a bracket delimiter, Helix's plaintext behavior. From-within
+    // matching is a syntax-path feature.
+    let Some((open, close, forward)) = bracket_pair(ch) else {
+        return UpdateEffect::None;
+    };
 
     if let Some(ref tree) = tree_opt
         && is_in_string_or_comment(tree, head_offset)

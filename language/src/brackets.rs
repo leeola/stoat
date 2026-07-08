@@ -11,13 +11,18 @@ use std::ops::Range;
 use stoat_text::Rope;
 use tree_sitter::{Node, Query, StreamingIterator};
 
-/// Byte offset of the bracket matching the delimiter at `offset`, resolved from
-/// the `brackets.scm` query's `@open`/`@close` captures.
+/// Byte offset of the bracket matching the cursor at `offset`, resolved from the
+/// `brackets.scm` query's `@open`/`@close` captures.
 ///
-/// When `offset` falls on an `@open` token, returns the paired `@close` token's
-/// start. On a `@close`, returns the `@open`'s start. Returns `None` when no
-/// captured pair covers `offset`, including any bracket character inside a
-/// string, char, or comment literal, which the query never captures.
+/// On an `@open` token, returns the paired `@close` token's start. On a
+/// `@close`, returns the `@open`'s start. When `offset` sits strictly between a
+/// pair's delimiters and on neither, returns the innermost enclosing pair's
+/// `@close` start, so the cursor jumps out to its bracket.
+///
+/// Returns `None` when no captured pair covers or encloses `offset`. A bracket
+/// inside a string, char, or comment literal is never captured, so it matches
+/// nothing. The quote delimiters themselves are captured pairs, so a cursor
+/// inside a string resolves to its closing quote.
 pub fn matching_bracket(
     query: &Query,
     root: Node<'_>,
@@ -30,6 +35,11 @@ pub fn matching_bracket(
     let provider = RopeTextProvider { rope };
     let mut cursor = QueryCursorHandle::new();
     let mut matches = cursor.matches(query, root, provider);
+
+    // Innermost pair whose delimiters enclose `offset`, as (open.start,
+    // close.start). Kept for the from-within case, resolved only if no delimiter
+    // is hit directly.
+    let mut enclosing: Option<(usize, usize)> = None;
 
     while let Some(m) = matches.next() {
         let mut open: Option<Range<usize>> = None;
@@ -51,8 +61,15 @@ pub fn matching_bracket(
         if close.contains(&offset) {
             return Some(open.start);
         }
+        if open.end <= offset && offset < close.start {
+            let tighter = enclosing.is_none_or(|(best_open, _)| open.start > best_open);
+            if tighter {
+                enclosing = Some((open.start, close.start));
+            }
+        }
     }
-    None
+
+    enclosing.map(|(_, close_start)| close_start)
 }
 
 #[cfg(test)]
@@ -102,9 +119,36 @@ mod tests {
     }
 
     #[test]
-    fn rust_bracket_in_char_literal_has_no_match() {
+    fn rust_char_literal_bracket_is_not_a_delimiter() {
         // `fn a() { let c = '('; }`: the `(` at 18 sits inside a char literal, so
-        // it is not a bracket token and must not pair with the code `)`/`}`.
-        assert_eq!(match_at("rust", "fn a() { let c = '('; }\n", 18), None);
+        // it is not a captured bracket token and cannot pair with the code
+        // `)`/`}`. From within the fn body it resolves to the enclosing `}` at 22
+        // (offset 18 is between `{` at 7 and `}` at 22), not to a false mate.
+        assert_eq!(match_at("rust", "fn a() { let c = '('; }\n", 18), Some(22));
+    }
+
+    #[test]
+    fn rust_from_inside_returns_enclosing_close() {
+        // `fn a() { let x = 1; }`: the `{` is at 7 and `}` at 20. A cursor at 9
+        // (on `let`, no delimiter) resolves to the enclosing block's `}`.
+        assert_eq!(match_at("rust", "fn a() { let x = 1; }\n", 9), Some(20));
+    }
+
+    #[test]
+    fn rust_from_inside_picks_innermost_pair() {
+        // `fn a() { { } }`: the inner block `{` is at 9 and `}` at 11, nested in
+        // the fn body `{` at 7 / `}` at 13. A cursor at 10 picks the innermost.
+        assert_eq!(match_at("rust", "fn a() { { } }\n", 10), Some(11));
+    }
+
+    #[test]
+    fn rust_from_inside_string_returns_closing_quote() {
+        // `fn a() { let s = "hi"; }`: the opening `"` is at 17 and closing at 20.
+        // A cursor at 18 (on `h`, inside the string) resolves to the close quote,
+        // since the quote delimiters are a captured pair.
+        assert_eq!(
+            match_at("rust", "fn a() { let s = \"hi\"; }\n", 18),
+            Some(20)
+        );
     }
 }

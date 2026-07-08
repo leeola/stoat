@@ -3770,6 +3770,27 @@ mod tests {
     }
 
     #[test]
+    fn match_brackets_from_inside_jumps_to_enclosing() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() { let x = 1; }\n");
+        h.open_file(&path);
+        // Cursor at offset 9 (`let`), between the braces but on no delimiter.
+        h.type_keys("9 l m m");
+        assert_eq!(
+            h.primary_head_offset(),
+            20,
+            "from inside the braces, mm lands on the closing brace"
+        );
+        // Now on `}`, so mm returns to the opening brace.
+        h.type_keys("m m");
+        assert_eq!(
+            h.primary_head_offset(),
+            7,
+            "on the closing brace, mm returns to the opening brace"
+        );
+    }
+
+    #[test]
     fn match_brackets_no_op_unbalanced() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "(abc\n");
@@ -3818,7 +3839,7 @@ mod tests {
     }
 
     #[test]
-    fn match_brackets_no_op_when_cursor_in_string() {
+    fn match_brackets_from_inside_string_jumps_to_quote() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 5);
         let path = h.write_file("s.rs", "fn f() { let s = \"()\"; }\n");
         h.open_file(&path);
@@ -3831,13 +3852,13 @@ mod tests {
         h.type_keys("m m");
         assert_eq!(
             h.primary_head_offset(),
-            18,
-            "cursor in string should not match brackets"
+            20,
+            "the string quotes are a captured pair, so mm jumps to the closing quote"
         );
     }
 
     #[test]
-    fn match_brackets_skips_paren_in_char_literal() {
+    fn match_brackets_char_literal_paren_resolves_to_enclosing() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 5);
         let path = h.write_file("s.rs", "fn f() { let c = '('; }\n");
         h.open_file(&path);
@@ -3850,8 +3871,8 @@ mod tests {
         h.type_keys("m m");
         assert_eq!(
             h.primary_head_offset(),
-            18,
-            "`(` in a char literal is not a bracket token and must not match"
+            22,
+            "the char literal `(` is not a captured delimiter, so mm resolves to the enclosing brace"
         );
     }
 

@@ -29,9 +29,9 @@ pub struct Language {
     /// injections configured.
     pub injection_query: Option<Query>,
     /// Bracket-pair query loaded from `brackets.scm`. Captures `@open` and
-    /// `@close` for matched bracket-like tokens. Loaded but not yet wired
-    /// into a runtime consumer; reserved for grammar-driven bracket
-    /// matching.
+    /// `@close` for matched bracket-like tokens, driving the editor's
+    /// match-brackets motion through [`crate::matching_bracket`]. `None` for
+    /// grammars that ship no `brackets.scm`.
     pub bracket_query: Option<Query>,
     /// Indent query loaded from `indents.scm`. Captures `@indent` and
     /// `@end` markers for grammar-driven auto-indentation. Loaded but
