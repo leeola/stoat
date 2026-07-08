@@ -44,6 +44,7 @@ impl StatefulWidget for Panel {
                 corner_radius: self.corner_radius,
                 fill: self.fill,
                 shadow: self.shadow,
+                title_gap: None,
             },
         );
     }
@@ -100,6 +101,7 @@ mod tests {
             corner_radius: 6,
             fill: Some([40, 44, 52]),
             shadow: true,
+            title_gap: None,
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }

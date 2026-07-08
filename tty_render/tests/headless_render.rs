@@ -113,6 +113,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         corner_radius: 6,
         fill: Some(Rgb::new(30, 30, 50)),
         shadow: true,
+        title_gap: None,
     }]);
 
     // A scroll region with a glyph inside it, scrolled by a non-zero offset, so

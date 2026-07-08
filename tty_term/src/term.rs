@@ -2399,6 +2399,7 @@ fn panel_grid(command: &PanelCommand) -> Panel {
         corner_radius: command.corner_radius,
         fill: command.fill.map(|[r, g, b]| Rgb::new(r, g, b)),
         shadow: command.shadow,
+        title_gap: command.title_gap,
     }
 }
 
@@ -3141,6 +3142,7 @@ mod tests {
             corner_radius: 6,
             fill: Some([10, 20, 30]),
             shadow: true,
+            title_gap: Some((16, 64)),
         });
 
         let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -3160,6 +3162,7 @@ mod tests {
                 corner_radius: 6,
                 fill: Some(Rgb::new(10, 20, 30)),
                 shadow: true,
+                title_gap: Some((16, 64)),
             }]
         );
     }
@@ -3176,6 +3179,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            title_gap: None,
         });
 
         let mut terminal = Terminal::new(4, 4, Theme::default());
@@ -3199,6 +3203,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            title_gap: None,
         });
 
         let mut terminal = Terminal::new(4, 3, Theme::default());

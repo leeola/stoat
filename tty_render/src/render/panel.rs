@@ -46,6 +46,10 @@ struct PanelInstance {
     corner_radius: f32,
     fill_flag: f32,
     style: u32,
+    /// Top-edge title-gap span `[start, end]` in cell-x units relative to the
+    /// box's left edge. Both zero leaves the top hairline unbroken. The vertex
+    /// shader scales this by the cell width to box-relative pixels.
+    gap: [f32; 2],
 }
 
 /// The uniform shared by every instance. Carries the surface resolution and cell
@@ -116,6 +120,7 @@ impl PanelPass {
                         6 => Float32,
                         7 => Float32,
                         8 => Uint32,
+                        9 => Float32x2,
                     ],
                 }],
             },
@@ -231,6 +236,13 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
             } else {
                 ([0.0, 0.0], 0.0)
             };
+            let gap = match panel.title_gap {
+                Some((start, width)) => {
+                    let start = start as f32 / 16.0;
+                    [start, start + width as f32 / 16.0]
+                },
+                None => [0.0, 0.0],
+            };
             PanelInstance {
                 cell: [panel.left as f32, panel.top as f32],
                 size: [panel.width as f32, panel.height as f32],
@@ -241,6 +253,7 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
                 corner_radius: panel.corner_radius as f32,
                 fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
                 style: style_code(panel.style),
+                gap,
             }
         })
         .collect()
@@ -292,6 +305,7 @@ mod tests {
             corner_radius: 6,
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: true,
+            title_gap: Some((48, 64)),
         }];
 
         let instances = build_panel_instances(&panels);
@@ -306,6 +320,7 @@ mod tests {
         assert_eq!(instances[0].corner_radius, 6.0);
         assert_eq!(instances[0].fill_flag, 1.0);
         assert_eq!(instances[0].style, style_code(BorderStyle::Heavy));
+        assert_eq!(instances[0].gap, [3.0, 7.0]);
     }
 
     #[test]
@@ -320,6 +335,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            title_gap: None,
         }];
 
         let instances = build_panel_instances(&panels);
@@ -327,5 +343,6 @@ mod tests {
         assert_eq!(instances[0].fill_flag, 0.0);
         assert_eq!(instances[0].shadow_offset, [0.0, 0.0]);
         assert_eq!(instances[0].shadow_margin, 0.0);
+        assert_eq!(instances[0].gap, [0.0, 0.0]);
     }
 }

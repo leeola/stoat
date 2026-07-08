@@ -632,6 +632,10 @@ pub struct Panel {
     pub corner_radius: u8,
     pub fill: Option<Rgb>,
     pub shadow: bool,
+    /// Span where the top hairline is suppressed for a title, as `(start,
+    /// width)` in sixteenths of a cell from the left edge, or [`None`] for an
+    /// unbroken top edge.
+    pub title_gap: Option<(u16, u16)>,
 }
 
 /// A scrollable sub-rectangle of the grid.

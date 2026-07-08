@@ -89,6 +89,7 @@ fn grid_glyph_blends_over_the_framebuffer_not_an_assumed_bg() {
         corner_radius: 6,
         fill: Some(fill),
         shadow: false,
+        title_gap: None,
     };
 
     // A white glyph deep in the panel interior, its cell background left neutral.

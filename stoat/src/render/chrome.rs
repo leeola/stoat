@@ -66,6 +66,7 @@ pub(crate) fn modal_frame(
                     corner_radius: 6,
                     fill: None,
                     shadow: true,
+                    title_gap: None,
                 },
             );
             if let Some(title) = title {
@@ -274,6 +275,7 @@ mod tests {
             corner_radius: 6,
             fill: None,
             shadow: true,
+            title_gap: None,
         });
         assert!(
             scene.buffer().starts_with(&panel),
