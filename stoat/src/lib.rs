@@ -41,6 +41,7 @@ mod paths;
 #[cfg(feature = "perf")]
 pub mod perf;
 pub(crate) mod picker;
+pub(crate) mod project_env;
 pub(crate) mod quit_all_confirm;
 mod rebase;
 mod register;

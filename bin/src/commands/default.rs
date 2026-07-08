@@ -275,6 +275,7 @@ fn run_tui(
         stoat.set_stoatty_apc(stoatty, apc_tx);
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);
+        stoat.set_env_auto_load(true);
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }

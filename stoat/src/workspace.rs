@@ -104,6 +104,8 @@ pub struct Workspace {
     /// the renderer into the `git_root.file_name()` fallback used by tests.
     pub(crate) name: String,
     pub git_root: PathBuf,
+    /// The workspace's resolved project environment, loaded from direnv.
+    pub(crate) env: crate::project_env::WorkspaceEnv,
     pub panes: PaneTree,
     pub(crate) docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
@@ -190,6 +192,7 @@ impl Workspace {
             uid,
             name,
             git_root,
+            env: crate::project_env::WorkspaceEnv::default(),
             panes,
             docks: SlotMap::with_key(),
             focus: FocusTarget::SplitPane(initial_focus),

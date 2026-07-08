@@ -539,6 +539,15 @@ pub struct Stoat {
     /// returned because the spawn runs detached on [`Self::executor`]
     /// and cannot borrow `self`.
     pub(crate) pending_lsp_host: Arc<std::sync::Mutex<Option<Arc<dyn LspHost>>>>,
+    /// Whether workspaces automatically load their direnv environment. Off
+    /// by default so the test harness never spawns direnv. The binary
+    /// turns it on for a live session via [`Self::set_env_auto_load`].
+    pub(crate) env_auto_load: bool,
+    /// Landing slot for a finished direnv load, drained by
+    /// [`crate::project_env::install_pending`] in [`Self::drive_background`].
+    /// Shared rather than returned because the load runs detached on
+    /// [`Self::executor`] and cannot borrow `self`.
+    pub(crate) pending_env: Arc<std::sync::Mutex<Option<crate::project_env::PendingEnvLoad>>>,
     /// System-clipboard writes route through this trait. Defaults to
     /// [`NoopClipboard`] so headless or display-less environments do
     /// not error on the first clipboard event; tests install
@@ -976,6 +985,8 @@ impl Stoat {
             lsp_auto_spawn: false,
             lsp_spawn_attempted: false,
             pending_lsp_host: Arc::new(std::sync::Mutex::new(None)),
+            env_auto_load: false,
+            pending_env: Arc::new(std::sync::Mutex::new(None)),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
@@ -1125,6 +1136,13 @@ impl Stoat {
     /// the [`NoopLsp`] placeholder performs no IO.
     pub fn set_lsp_auto_spawn(&mut self, enabled: bool) {
         self.lsp_auto_spawn = enabled;
+    }
+
+    /// Enable or disable automatic direnv environment loading. Off by
+    /// default so tests never spawn direnv. The binary enables it for a
+    /// live session.
+    pub fn set_env_auto_load(&mut self, enabled: bool) {
+        self.env_auto_load = enabled;
     }
 
     /// Returns the active [`LspHost`].
@@ -4884,6 +4902,8 @@ impl Stoat {
         self.drain_lsp_notifications();
         self.drain_lsp_incoming_requests();
         self.install_pending_lsp_host();
+        crate::project_env::ensure_loaded(self);
+        crate::project_env::install_pending(self);
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
         self.drive_parse_jobs();
