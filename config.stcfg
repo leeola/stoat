@@ -151,6 +151,14 @@ on init {
     # Override the language server for a language. The first list element is
     # the executable and the rest are arguments. An empty list disables it.
     # lsp.server.rust = ["rust-analyzer"];
+
+    # Load the workspace's direnv environment automatically (nix flakes,
+    # `.envrc`). Default on. Set false to disable all automatic loading.
+    # direnv.load = false;
+
+    # Reload the direnv environment when the working directory changes.
+    # Default on. Ignored when direnv.load is off.
+    # direnv.reload_on_cd = false;
 }
 
 on key {

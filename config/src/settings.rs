@@ -56,6 +56,14 @@ pub struct Settings {
     /// Arguments passed to the terminal pane's subshell. `None` spawns with no
     /// arguments. Set via `terminal.args = ["-l"];` in stcfg.
     pub terminal_args: Option<Vec<String>>,
+    /// Whether workspaces load their direnv environment automatically. `None`
+    /// falls back to enabled. Set `direnv.load = false;` in stcfg to disable
+    /// automatic env loading. The manual reload action ignores this.
+    pub direnv_load: Option<bool>,
+    /// Whether changing the working directory reloads the workspace's direnv
+    /// environment. `None` falls back to enabled, and has no effect when
+    /// `direnv.load` is off. Set `direnv.reload_on_cd = false;` in stcfg.
+    pub direnv_reload_on_cd: Option<bool>,
     /// Per-mode status-line badge label overrides, keyed by mode name.
     /// Set via `ui.mode_badge.<name> = "ABC";` in stcfg. Renderer
     /// consults this map before falling back to its hardcoded badge
@@ -107,6 +115,8 @@ impl Settings {
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
+            direnv_load: other.direnv_load.or(self.direnv_load),
+            direnv_reload_on_cd: other.direnv_reload_on_cd.or(self.direnv_reload_on_cd),
             mode_badges,
             lsp_servers,
         }
@@ -195,6 +205,16 @@ impl Settings {
                     self.lsp_servers.insert((*language).to_string(), argv);
                 }
             },
+            ["direnv", "load"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.direnv_load = Some(b);
+                }
+            },
+            ["direnv", "reload_on_cd"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.direnv_reload_on_cd = Some(b);
+                }
+            },
             _ => {},
         }
     }
@@ -226,6 +246,8 @@ mod tests {
                 editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
+                direnv_load: None,
+                direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
             }
@@ -274,6 +296,8 @@ mod tests {
                 editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
+                direnv_load: None,
+                direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
             }
@@ -295,6 +319,8 @@ mod tests {
                 editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
+                direnv_load: None,
+                direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
             }
@@ -325,6 +351,8 @@ mod tests {
             editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
+            direnv_load: None,
+            direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
         };
@@ -338,6 +366,8 @@ mod tests {
             editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
+            direnv_load: None,
+            direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
         };
@@ -353,6 +383,8 @@ mod tests {
                 editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
+                direnv_load: None,
+                direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
             }
@@ -371,6 +403,8 @@ mod tests {
             editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
+            direnv_load: None,
+            direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
         };
@@ -387,6 +421,8 @@ mod tests {
                 editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
+                direnv_load: None,
+                direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
             }
@@ -416,6 +452,8 @@ mod tests {
                 editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
+                direnv_load: None,
+                direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
             }
@@ -437,6 +475,8 @@ mod tests {
                 editor_line_numbers: None,
                 terminal_shell: None,
                 terminal_args: None,
+                direnv_load: None,
+                direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
             }
@@ -455,6 +495,8 @@ mod tests {
             editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
+            direnv_load: None,
+            direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
         };
@@ -468,6 +510,8 @@ mod tests {
             editor_line_numbers: None,
             terminal_shell: None,
             terminal_args: None,
+            direnv_load: None,
+            direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
         };
@@ -521,6 +565,34 @@ mod tests {
             left.merge(right).mouse_capture,
             Some(MouseCapturePolicy::Never)
         );
+    }
+
+    #[test]
+    fn from_config_extracts_direnv_load() {
+        let config = parse_ok("on init { direnv.load = false; }");
+        assert_eq!(Settings::from_config(&config).direnv_load, Some(false));
+    }
+
+    #[test]
+    fn from_config_extracts_direnv_reload_on_cd() {
+        let config = parse_ok("on init { direnv.reload_on_cd = false; }");
+        assert_eq!(
+            Settings::from_config(&config).direnv_reload_on_cd,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn merge_right_overrides_direnv_load() {
+        let left = Settings {
+            direnv_load: Some(true),
+            ..Settings::default()
+        };
+        let right = Settings {
+            direnv_load: Some(false),
+            ..Settings::default()
+        };
+        assert_eq!(left.merge(right).direnv_load, Some(false));
     }
 
     #[test]

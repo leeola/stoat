@@ -213,6 +213,8 @@ fn run_tui(
         editor_line_numbers: None,
         terminal_shell: None,
         terminal_args: None,
+        direnv_load: None,
+        direnv_reload_on_cd: None,
         review_follow: None,
         mode_badges: std::collections::BTreeMap::new(),
         lsp_servers: std::collections::BTreeMap::new(),
