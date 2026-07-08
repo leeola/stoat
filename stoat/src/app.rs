@@ -5106,42 +5106,55 @@ pub(crate) fn parse_buffer_step(
         },
     };
 
-    let prev_injection_trees = prior
-        .take()
-        .map(|prev| prev.injection_trees)
-        .unwrap_or_default();
+    prior.take();
 
-    let extracted =
-        language::extract_highlights_rope_with_cache(lang, &tree, &new_rope, prev_injection_trees);
-    // Theme-driven path: span.id is set to the theme key index by
-    // collect_highlights_into via language.highlight_map(). Spans whose id
-    // is DEFAULT (capture not in the active theme) are skipped because
-    // they have no rendered style.
-    let tokens: Arc<[SemanticTokenHighlight]> = extracted
-        .spans
-        .into_iter()
-        .filter_map(|sp| {
-            let style_id = styles.id_for_highlight(sp.id)?;
-            Some(SemanticTokenHighlight {
-                // Insertions at the start of a token attach to the previous
-                // span, not this one; insertions at the end attach to the
-                // next span. Keeps a typed character from silently extending
-                // a keyword or string into neighboring text.
-                range: snapshot.anchor_at(sp.byte_range.start, Bias::Right)
-                    ..snapshot.anchor_at(sp.byte_range.end, Bias::Left),
-                style: style_id,
-            })
-        })
-        .collect();
-
-    // Drive the multi-layer SyntaxMap alongside the legacy SyntaxState.
-    // We don't have an interpolation pass on the host side yet (it would
-    // need anchored byte offsets), so each parse produces a fresh SyntaxMap
-    // from scratch; the prior_syntax_map is consumed but only its captured
-    // tree is reused via SyntaxMap::reparse's internal `prior_injections`
-    // snapshot.
-    let mut syntax_map = prior_syntax_map.take().unwrap_or_default();
+    // Rebuild the multi-layer SyntaxMap from scratch, then read highlights from
+    // its captures. There is no host-side interpolation pass to replay this
+    // version's edits onto the prior layers, so reusing the prior map would
+    // reparse incrementally against a stale, un-edited tree and drop every
+    // highlight past the edit. Drop the prior map and parse fresh.
+    //
+    // FIXME: full-parses every keystroke. A host-side interpolation pass would
+    // let the prior layers be reused for incremental reparse.
+    prior_syntax_map.take();
+    let mut syntax_map = stoat_language::SyntaxMap::default();
     let _ = syntax_map.reparse(&new_rope, lang.clone(), cur_version);
+
+    // A capture resolves to a theme key index through its originating layer's
+    // highlight_map(). A DEFAULT id (capture absent from the active theme)
+    // carries no style and is skipped. captures() document order
+    // (start, Reverse(end), depth) is kept so deeper injection layers land later
+    // and win under the display map's endpoint precedence. highlight_map() clones
+    // a locked map, so memoize it per layer language.
+    let tokens: Arc<[SemanticTokenHighlight]> = {
+        use std::collections::HashMap;
+
+        let mut highlight_maps = HashMap::new();
+        syntax_map
+            .snapshot()
+            .captures(0..new_rope.len(), &new_rope, |l| Some(&l.highlight_query))
+            .into_iter()
+            .filter_map(|cap| {
+                let range = cap.node.byte_range();
+                if range.start == range.end {
+                    return None;
+                }
+                let map = highlight_maps
+                    .entry(cap.language as *const Language as usize)
+                    .or_insert_with(|| cap.language.highlight_map());
+                let style_id = styles.id_for_highlight(map.get(cap.index))?;
+                Some(SemanticTokenHighlight {
+                    // Insertions at the start of a token attach to the previous
+                    // span, not this one; insertions at the end attach to the
+                    // next span. Keeps a typed character from silently extending
+                    // a keyword or string into neighboring text.
+                    range: snapshot.anchor_at(range.start, Bias::Right)
+                        ..snapshot.anchor_at(range.end, Bias::Left),
+                    style: style_id,
+                })
+            })
+            .collect()
+    };
 
     Some(ParseJobOutput {
         buffer_id,
@@ -5149,7 +5162,6 @@ pub(crate) fn parse_buffer_step(
             tree,
             version: cur_version,
             rope_snapshot: new_rope,
-            injection_trees: extracted.injection_trees,
         },
         syntax_map,
         tokens,

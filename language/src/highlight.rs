@@ -20,10 +20,6 @@ pub struct SyntaxState {
     pub tree: Tree,
     pub version: u64,
     pub rope_snapshot: Rope,
-    /// Per-host-node injection trees from the most recent extraction. Used
-    /// as `old_tree` inputs on the next reparse so injected sub-trees can
-    /// be re-used incrementally instead of full-parsed every keystroke.
-    pub injection_trees: InjectionTreeCache,
 }
 
 /// Send `state` to a background drainer thread for destruction. Dropping a
