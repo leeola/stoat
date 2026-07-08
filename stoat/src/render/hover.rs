@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers::lsp::HoverPopup,
     app::Stoat,
     pane::{FocusTarget, View},
     render::layout::split_pane_status,
@@ -7,9 +8,9 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Clear, StatefulWidget, Widget},
+    widgets::{Block, Borders, Clear, StatefulWidget, Widget},
 };
-use stoatty_widgets::text_run::TextRun;
+use stoatty_widgets::{text_run::TextRun, ApcScene};
 
 /// Hover-body text size under stoatty, in 256ths of a cell (0.85x), matching
 /// the hints overlay so popovers and hint rows share one scale.
@@ -31,43 +32,108 @@ const MIN_HEIGHT: u16 = 6;
 ///
 /// No-op when [`Stoat::pending_hover`] is `None`, when the focused
 /// pane is not an editor, or when the cursor is off-screen.
-pub(crate) fn render_hover(
-    stoat: &mut Stoat,
-    buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
-) {
+pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Option<&mut ApcScene>) {
     let popup = match &stoat.pending_hover {
         Some(p) => p.clone(),
         None => return,
     };
 
-    let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let Some((popup_area, _)) = hover_popup_layout(stoat) else {
         return;
-    };
-
-    let pane = ws.panes.pane(pane_id);
-    let View::Editor(editor_id) = pane.view else {
-        return;
-    };
-    let pane_area = pane.area;
-    let (content_area, _) = split_pane_status(pane_area);
-
-    let editor = match ws.editors.get_mut(editor_id) {
-        Some(e) => e,
-        None => return,
-    };
-
-    let cursor_screen = match cursor_screen_position(editor, content_area, popup.anchor_offset) {
-        Some(p) => p,
-        None => return,
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
 
+    Clear.render(popup_area, buf);
+    let inner = crate::render::chrome::modal_frame(
+        buf,
+        popup_area,
+        None,
+        modal_style,
+        &stoat.theme,
+        scene.as_deref_mut(),
+    );
+
+    // Clamp the half-page scroll to the content that overflows the interior, then
+    // write the clamped counter back so scrolling up past the bottom takes effect
+    // on the first Ctrl-u rather than after replaying the over-scroll.
+    let interior = inner.height as usize;
+    let half_page = (interior / 2).max(1);
+    let scroll = popup
+        .lines
+        .len()
+        .saturating_sub(interior)
+        .min(popup.scroll_half_pages * half_page);
+    if let Some(open) = stoat.pending_hover.as_mut() {
+        open.scroll_half_pages = scroll / half_page;
+        open.area = popup_area;
+    }
+
+    // Under stoatty the HOVER smooth-scroll pool owns the body and eases it (see
+    // emit_smooth_scroll), so this frame draws only the frame and lets the pool
+    // composite the body. Other terminals paint the body cells below.
+    if scene.is_some() {
+        return;
+    }
+
+    let end_x = inner.x + inner.width;
+    let body: Vec<Vec<(String, Style)>> = popup
+        .lines
+        .iter()
+        .map(|line| truncate_line(line, inner.width as usize))
+        .collect();
+    for (row_idx, line) in body.iter().skip(scroll).enumerate() {
+        let row = inner.y + row_idx as u16;
+        if row >= inner.y + inner.height {
+            break;
+        }
+        let mut x = inner.x;
+        for (text, style) in line {
+            if x >= end_x {
+                break;
+            }
+            let (next_x, _) = buf.set_stringn(
+                x,
+                row,
+                text,
+                (end_x - x) as usize,
+                modal_style.patch(*style),
+            );
+            x = next_x;
+        }
+    }
+}
+
+/// Compute the hover popup's screen rect and its interior rect.
+///
+/// Returns [`None`] when no popup is anchorable, which happens with no pending
+/// hover, non-editor focus, an off-screen cursor, or a pane too narrow for
+/// content.
+///
+/// The single source of the placement math, shared by [`render_hover`] and the
+/// smooth-scroll emit so the live frame and the pooled body agree on geometry.
+/// Placement is below-biased. The popup sits below the cursor when at least
+/// [`MIN_HEIGHT`] rows remain there, and flips above otherwise, shrinking to the
+/// chosen side's free space so it never renders past the pane.
+pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
+    let popup = stoat.pending_hover.as_ref()?.clone();
+
+    let ws = stoat.active_workspace_mut();
+    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+        return None;
+    };
+    let pane = ws.panes.pane(pane_id);
+    let View::Editor(editor_id) = pane.view else {
+        return None;
+    };
+    let (content_area, _) = split_pane_status(pane.area);
+
+    let editor = ws.editors.get_mut(editor_id)?;
+    let cursor_screen = cursor_screen_position(editor, content_area, popup.anchor_offset)?;
+
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
-        return;
+        return None;
     }
     let body: Vec<Vec<(String, Style)>> = popup
         .lines
@@ -77,10 +143,6 @@ pub(crate) fn render_hover(
     let max_line_width = body.iter().map(|line| line_width(line)).max().unwrap_or(0) as u16;
     let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
 
-    // Below-biased placement (Helix popup.rs). Sit below the cursor when at
-    // least MIN_HEIGHT rows remain there, else flip above, shrinking the popup
-    // to the chosen side's free space so it never renders past the pane. The
-    // scroll clamp below handles a body taller than that space.
     let rel_y = cursor_screen.1.saturating_sub(content_area.y);
     let below = content_area.height > rel_y + MIN_HEIGHT;
     let max_height = if below {
@@ -108,90 +170,66 @@ pub(crate) fn render_hover(
         width: popup_width,
         height: popup_height,
     };
+    let inner = Block::default().borders(Borders::ALL).inner(popup_area);
+    Some((popup_area, inner))
+}
 
-    Clear.render(popup_area, buf);
-    let inner = crate::render::chrome::modal_frame(
-        buf,
-        popup_area,
-        None,
-        modal_style,
-        &stoat.theme,
-        scene.as_deref_mut(),
-    );
+/// Render hover body page `page` as a self-contained VT plus APC byte stream for
+/// the HOVER smooth-scroll pool.
+///
+/// The `region_height` body lines starting at `page * region_height` paint as
+/// sub-cell text runs at the 0.85x hover scale, appended after an empty region
+/// buffer the way the rich gutter rides its pool pages. Coordinates are
+/// region-local because the pool composites the page at the region origin.
+pub(crate) fn render_hover_page(
+    popup: &HoverPopup,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let buf = Buffer::empty(area);
 
-    let end_x = inner.x + inner.width;
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    let modal_fg = crate::render::review::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
     let run_bg = crate::render::review::style_rgb(
-        stoat
-            .theme
+        theme
             .try_get(crate::theme::scope::UI_BACKGROUND)
             .and_then(|s| s.bg),
-    );
+    )
+    .unwrap_or([0, 0, 0]);
 
-    // Clamp the half-page scroll to the content that overflows the interior, then
-    // write the clamped counter back so scrolling up past the bottom takes effect
-    // on the first Ctrl-u rather than after replaying the over-scroll.
-    let interior = inner.height as usize;
-    let half_page = (interior / 2).max(1);
-    let scroll = body
-        .len()
-        .saturating_sub(interior)
-        .min(popup.scroll_half_pages * half_page);
-    if let Some(open) = stoat.pending_hover.as_mut() {
-        open.scroll_half_pages = scroll / half_page;
-        open.area = popup_area;
+    let start_row = page.saturating_mul(region_height as u64) as usize;
+
+    let mut scene = ApcScene::new();
+    let mut scratch = Buffer::empty(area);
+    for row_idx in 0..region_height {
+        let Some(line) = popup.lines.get(start_row + row_idx as usize) else {
+            break;
+        };
+        let line = truncate_line(line, region_width as usize);
+        let mut chars_before = 0u16;
+        for (text, style) in &line {
+            let col = (chars_before * HOVER_TEXT_SCALE + 8) / 16;
+            let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
+            TextRun {
+                col,
+                row: 0,
+                scale: HOVER_TEXT_SCALE,
+                color,
+                bg: run_bg,
+                text,
+            }
+            .render(Rect::new(0, row_idx, 1, 1), &mut scratch, &mut scene);
+            chars_before += text.chars().count() as u16;
+        }
     }
 
-    // A span's style is a delta over the modal base, so a plain span keeps the
-    // modal look. The rich arm needs an RGB modal fg and background to compose
-    // one TextRun per span. Without them it falls back to painting cells.
-    let modal_fg = crate::render::review::style_rgb(modal_style.fg);
-    match (scene, modal_fg, run_bg) {
-        (Some(scene), Some(modal_fg), Some(run_bg)) => {
-            for (row_idx, line) in body.iter().skip(scroll).enumerate() {
-                let row = inner.y + row_idx as u16;
-                if row >= inner.y + inner.height {
-                    break;
-                }
-                let mut chars_before = 0u16;
-                for (text, style) in line {
-                    let col = (chars_before * HOVER_TEXT_SCALE + 8) / 16;
-                    let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
-                    TextRun {
-                        col,
-                        row: 0,
-                        scale: HOVER_TEXT_SCALE,
-                        color,
-                        bg: run_bg,
-                        text,
-                    }
-                    .render(Rect::new(inner.x, row, 1, 1), buf, scene);
-                    chars_before += text.chars().count() as u16;
-                }
-            }
-        },
-        _ => {
-            for (row_idx, line) in body.iter().skip(scroll).enumerate() {
-                let row = inner.y + row_idx as u16;
-                if row >= inner.y + inner.height {
-                    break;
-                }
-                let mut x = inner.x;
-                for (text, style) in line {
-                    if x >= end_x {
-                        break;
-                    }
-                    let (next_x, _) = buf.set_stringn(
-                        x,
-                        row,
-                        text,
-                        (end_x - x) as usize,
-                        modal_style.patch(*style),
-                    );
-                    x = next_x;
-                }
-            }
-        },
-    }
+    let apc = scene.buffer().clone();
+    let mut bytes = crate::smooth_scroll::serialize_buffer(&buf);
+    bytes.extend_from_slice(&apc);
+    bytes
 }
 
 pub(crate) fn cursor_screen_position(
@@ -254,4 +292,48 @@ fn truncate_line(line: &[(String, Style)], width: usize) -> Vec<(String, Style)>
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_hover_page, HoverPopup};
+    use ratatui::{layout::Rect, style::Style};
+
+    fn popup(lines: &[&str]) -> HoverPopup {
+        HoverPopup {
+            lines: lines
+                .iter()
+                .map(|l| vec![(l.to_string(), Style::default())])
+                .collect(),
+            anchor_offset: 0,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+        }
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn hover_page_carries_text_runs_for_its_line_slice() {
+        let theme = crate::theme::Theme::empty();
+        let popup = popup(&["alpha", "bravo"]);
+
+        let page0 = render_hover_page(&popup, 0, &theme, 10, 4);
+        assert!(
+            contains(&page0, b"text_run"),
+            "page 0 emits a text_run frame"
+        );
+        assert!(
+            contains(&page0, b"alpha") && contains(&page0, b"bravo"),
+            "page 0 carries both body lines"
+        );
+
+        let past_end = render_hover_page(&popup, 1, &theme, 10, 4);
+        assert!(
+            !contains(&past_end, b"text_run"),
+            "a page past the body emits no text run"
+        );
+    }
 }

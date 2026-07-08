@@ -84,6 +84,7 @@ pub(crate) mod non_pane_pool {
     pub(crate) const HELP_DETAIL: u32 = BASE + 5;
     pub(crate) const SYMBOL: u32 = BASE + 6;
     pub(crate) const WORKSPACE_SYMBOL: u32 = BASE + 7;
+    pub(crate) const HOVER: u32 = BASE + 8;
 }
 
 /// Per-app smooth-scroll emit state: what has been declared to the terminal for
@@ -692,7 +693,7 @@ pub(crate) fn render_commits_page(
 /// regardless of what that slot held before. Cursor moves are absolute, so the
 /// stream is positioned for the page's top-left independent of the live grid
 /// cursor.
-fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
+pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
     use ratatui::backend::{Backend, CrosstermBackend};
 
     let mut bytes = Vec::new();
@@ -1230,7 +1231,7 @@ mod tests {
     #[test]
     fn non_pane_pool_ids_are_distinct_and_above_the_base() {
         use super::non_pane_pool::{
-            BASE, COMMITS, COMPLETION, FINDER, HELP_DETAIL, HELP_LIST, PALETTE, SYMBOL,
+            BASE, COMMITS, COMPLETION, FINDER, HELP_DETAIL, HELP_LIST, HOVER, PALETTE, SYMBOL,
             WORKSPACE_SYMBOL,
         };
         use std::collections::BTreeSet;
@@ -1244,6 +1245,7 @@ mod tests {
             HELP_DETAIL,
             SYMBOL,
             WORKSPACE_SYMBOL,
+            HOVER,
         ];
         assert!(
             ids.iter().all(|&id| id >= BASE),
