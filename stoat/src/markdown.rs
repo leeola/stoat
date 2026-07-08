@@ -180,21 +180,7 @@ fn code_block_language(tags: &[Tag<'_>], languages: &LanguageRegistry) -> Option
     let Some(Tag::CodeBlock(CodeBlockKind::Fenced(token))) = tags.last() else {
         return None;
     };
-    let token = token.trim();
-    if token.is_empty() {
-        return None;
-    }
-    languages
-        .languages()
-        .iter()
-        .find(|lang| {
-            lang.name.eq_ignore_ascii_case(token)
-                || lang
-                    .extensions
-                    .iter()
-                    .any(|ext| ext.eq_ignore_ascii_case(token))
-        })
-        .cloned()
+    languages.language_for_fence_token(token)
 }
 
 /// Highlight `code` as `language`, or style it literal when `language` is

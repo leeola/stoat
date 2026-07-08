@@ -134,6 +134,35 @@ impl LanguageRegistry {
     pub fn languages(&self) -> &[Arc<Language>] {
         &self.languages
     }
+
+    /// Resolve a fenced code block's info-string `token` to a registered
+    /// language, matching its name or one extension case-insensitively.
+    pub fn language_for_fence_token(&self, token: &str) -> Option<Arc<Language>> {
+        language_for_fence_token(token, &self.languages)
+    }
+}
+
+/// Resolve a fenced code block's info-string `token` to a language in
+/// `languages`, matching its name or one extension case-insensitively.
+///
+/// Returns [`None`] for an empty or whitespace-only token, or one that names no
+/// registered language. Shared by the hover renderer and the buffer fence
+/// injection so both resolve fences identically.
+pub fn language_for_fence_token(token: &str, languages: &[Arc<Language>]) -> Option<Arc<Language>> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    languages
+        .iter()
+        .find(|lang| {
+            lang.name.eq_ignore_ascii_case(token)
+                || lang
+                    .extensions
+                    .iter()
+                    .any(|ext| ext.eq_ignore_ascii_case(token))
+        })
+        .cloned()
 }
 
 /// Optional auxiliary query sources bundled alongside `highlights.scm`.
@@ -367,6 +396,30 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.RS")).unwrap().name, "rust");
         assert!(reg.for_path(Path::new("a.txt")).is_none());
         assert!(reg.for_path(Path::new("noext")).is_none());
+    }
+
+    #[test]
+    fn language_for_fence_token_matches_name_or_extension() {
+        let reg = LanguageRegistry::standard();
+        let name = |t: &str| reg.language_for_fence_token(t).map(|l| l.name);
+
+        // Name match, case-insensitive.
+        assert_eq!(name("rust"), Some("rust"));
+        assert_eq!(name("RUST"), Some("rust"));
+        assert_eq!(name("Json"), Some("json"));
+
+        // Extension match, case-insensitive.
+        assert_eq!(name("rs"), Some("rust"));
+        assert_eq!(name("RS"), Some("rust"));
+        assert_eq!(name("md"), Some("markdown"));
+
+        // Surrounding whitespace is trimmed off the token.
+        assert_eq!(name("  rust  "), Some("rust"));
+
+        // Empty, whitespace-only, and unknown tokens resolve to nothing.
+        assert_eq!(name(""), None);
+        assert_eq!(name("   "), None);
+        assert_eq!(name("cobol"), None);
     }
 
     #[test]
