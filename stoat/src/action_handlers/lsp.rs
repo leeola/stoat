@@ -4835,6 +4835,33 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_hover_below_when_tall() {
+        let mut h = TestHarness::with_size(40, 20);
+        enable_hover(&h);
+        let source = (0..12)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let root = seed(&mut h, &[("main.rs", &source)]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+
+        // Cursor on buffer line 5, leaving room below for the tall body.
+        if let Some(editor) = crate::action_handlers::focused_editor_mut(&mut h.stoat) {
+            crate::action_handlers::movement::set_cursor_row(editor, 5);
+        }
+
+        let body = (0..10)
+            .map(|i| format!("hover {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        h.fake_lsp().set_hover(path.to_str().unwrap(), 5, 0, &body);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        h.assert_snapshot("snapshot_hover_below_when_tall");
+    }
+
+    #[test]
     fn query_diagnostics_returns_seeded_set() {
         use lsp_types::Diagnostic;
 

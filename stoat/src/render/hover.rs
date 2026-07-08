@@ -15,11 +15,19 @@ use stoatty_widgets::text_run::TextRun;
 /// the hints overlay so popovers and hint rows share one scale.
 const HOVER_TEXT_SCALE: u16 = 218;
 
+/// Rows that must remain below the cursor for the popup to open there. With
+/// fewer, placement flips above the cursor. Matches Helix's popup bias
+/// threshold.
+const MIN_HEIGHT: u16 = 6;
+
 /// Paint the hover popup, if any, anchored to the focused editor's
-/// primary cursor. Renders above the cursor when there is room above,
-/// otherwise below. Truncates lines that exceed the popup's interior
-/// width; truncates the trailing rows when the popup would extend past
-/// the focused pane.
+/// primary cursor.
+///
+/// Placement is below-biased. The popup sits below the cursor when at least
+/// [`MIN_HEIGHT`] rows remain there, and flips above otherwise. Its height
+/// shrinks to the chosen side's free space so it never renders past the pane,
+/// and content that overflows scrolls. Lines wider than the popup interior are
+/// truncated.
 ///
 /// No-op when [`Stoat::pending_hover`] is `None`, when the focused
 /// pane is not an editor, or when the cursor is off-screen.
@@ -68,17 +76,30 @@ pub(crate) fn render_hover(
         .collect();
     let max_line_width = body.iter().map(|line| line_width(line)).max().unwrap_or(0) as u16;
     let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
-    let popup_height = (body.len() as u16 + 2).clamp(3, content_area.height.max(3));
+
+    // Below-biased placement (Helix popup.rs). Sit below the cursor when at
+    // least MIN_HEIGHT rows remain there, else flip above, shrinking the popup
+    // to the chosen side's free space so it never renders past the pane. The
+    // scroll clamp below handles a body taller than that space.
+    let rel_y = cursor_screen.1.saturating_sub(content_area.y);
+    let below = content_area.height > rel_y + MIN_HEIGHT;
+    let max_height = if below {
+        content_area.height.saturating_sub(rel_y + 1)
+    } else {
+        rel_y
+    };
+    let popup_height = (body.len() as u16 + 2).min(max_height.max(3));
 
     let popup_x = cursor_screen
         .0
         .min(content_area.x + content_area.width.saturating_sub(popup_width));
-    let popup_y = if cursor_screen.1 >= content_area.y + popup_height {
-        cursor_screen.1 - popup_height
-    } else if cursor_screen.1 + 1 + popup_height <= content_area.y + content_area.height {
+    let popup_y = if below {
         cursor_screen.1 + 1
     } else {
-        content_area.y
+        cursor_screen
+            .1
+            .saturating_sub(popup_height)
+            .max(content_area.y)
     };
 
     let popup_area = Rect {
