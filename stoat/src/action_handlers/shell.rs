@@ -104,7 +104,7 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
             let end = buffer_snapshot.resolve_anchor(&sel.end);
             let stdin: String = rope.chunks_in_range(start..end).collect();
             shell_host
-                .run(cmd, stdin.as_bytes())
+                .run(cmd, stdin.as_bytes(), None, &[])
                 .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
                 .unwrap_or_default()
         })
@@ -178,12 +178,12 @@ fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd
         let start = buffer_snapshot.resolve_anchor(&sel.start);
         let end = buffer_snapshot.resolve_anchor(&sel.end);
         let stdin: String = rope.chunks_in_range(start..end).collect();
-        let _ = shell_host.run(cmd, stdin.as_bytes());
+        let _ = shell_host.run(cmd, stdin.as_bytes(), None, &[]);
     }
 }
 
 fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
-    let output = match shell_host.run(cmd, b"") {
+    let output = match shell_host.run(cmd, b"", None, &[]) {
         Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
         Err(_) => return,
     };
@@ -216,7 +216,7 @@ fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
 }
 
 fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
-    let output = match shell_host.run(cmd, b"") {
+    let output = match shell_host.run(cmd, b"", None, &[]) {
         Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
         Err(_) => return,
     };
@@ -264,7 +264,7 @@ fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, c
             let end = buffer_snapshot.resolve_anchor(&sel.end);
             let stdin: String = rope.chunks_in_range(start..end).collect();
             shell_host
-                .run(cmd, stdin.as_bytes())
+                .run(cmd, stdin.as_bytes(), None, &[])
                 .map(|out| out.exit_code == 0)
                 .unwrap_or(false)
         })
