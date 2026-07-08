@@ -125,14 +125,15 @@ pub(crate) fn surround_pair_for(ch: char) -> (char, char) {
 }
 
 /// Apply the consumed-char keypress to the pending surround_delete
-/// chord: for every selection's primary cursor, find the nearest
-/// enclosing surround pair for `ch` via [`find_surround_pair`]
-/// and remove its open / close. Selections whose cursor is not
-/// enclosed by a pair are skipped. Pairs are deduped before edits
-/// run, so two cursors inside the same pair produce one edit.
+/// chord. For every selection's primary cursor, find the nearest
+/// enclosing surround pair and remove its open / close. `ch` names the
+/// pair type, except `m`, which means the nearest pair of any type (so a
+/// literal `m...m` pair is unreachable). Selections whose cursor is not
+/// enclosed by a matching pair are skipped. Pairs are deduped before
+/// edits run, so two cursors inside the same pair produce one edit.
 pub(crate) fn execute_surround_delete(stoat: &mut Stoat, ch: char) -> UpdateEffect {
-    let (open, close) = surround_pair_for(ch);
-    let pairs = match collect_surround_pairs(stoat, open, close) {
+    let pair = (ch != 'm').then(|| surround_pair_for(ch));
+    let pairs = match collect_surround_pairs(stoat, pair) {
         Some(p) if !p.is_empty() => p,
         _ => return UpdateEffect::None,
     };
@@ -141,26 +142,24 @@ pub(crate) fn execute_surround_delete(stoat: &mut Stoat, ch: char) -> UpdateEffe
     let ws = stoat.active_workspace_mut();
     let buffer = ws.buffers.get(buffer_id).expect("buffer");
     let mut guard = buffer.write().expect("poisoned");
-    let open_len = open.len_utf8();
-    let close_len = close.len_utf8();
-    for (open_off, close_off) in pairs.iter().rev() {
-        guard.edit(*close_off..*close_off + close_len, "");
-        guard.edit(*open_off..*open_off + open_len, "");
+    for (open_off, close_off, open, close) in pairs.iter().rev() {
+        guard.edit(*close_off..*close_off + close.len_utf8(), "");
+        guard.edit(*open_off..*open_off + open.len_utf8(), "");
     }
     UpdateEffect::Redraw
 }
 
 /// Apply the consumed two-char keypresses to the pending
-/// surround_replace chord: for every selection's primary cursor,
-/// find the nearest enclosing surround pair for `from` via
-/// [`find_surround_pair`] and replace its open / close with
-/// the canonical pair for `to`. Selections whose cursor is not
-/// enclosed by a `from` pair are skipped. Pairs are deduped before
-/// edits run.
+/// surround_replace chord. For every selection's primary cursor, find
+/// the nearest enclosing surround pair and replace its open / close with
+/// the canonical pair for `to`. `from` names the pair type, except `m`,
+/// which means the nearest pair of any type. `to` is always a literal
+/// pair char. Selections whose cursor is not enclosed by a matching pair
+/// are skipped. Pairs are deduped before edits run.
 pub(crate) fn execute_surround_replace(stoat: &mut Stoat, from: char, to: char) -> UpdateEffect {
-    let (old_open, old_close) = surround_pair_for(from);
+    let from_pair = (from != 'm').then(|| surround_pair_for(from));
     let (new_open, new_close) = surround_pair_for(to);
-    let pairs = match collect_surround_pairs(stoat, old_open, old_close) {
+    let pairs = match collect_surround_pairs(stoat, from_pair) {
         Some(p) if !p.is_empty() => p,
         _ => return UpdateEffect::None,
     };
@@ -169,28 +168,34 @@ pub(crate) fn execute_surround_replace(stoat: &mut Stoat, from: char, to: char) 
     let ws = stoat.active_workspace_mut();
     let buffer = ws.buffers.get(buffer_id).expect("buffer");
     let mut guard = buffer.write().expect("poisoned");
-    let old_open_len = old_open.len_utf8();
-    let old_close_len = old_close.len_utf8();
     let new_open_str = new_open.to_string();
     let new_close_str = new_close.to_string();
-    for (open_off, close_off) in pairs.iter().rev() {
-        guard.edit(*close_off..*close_off + old_close_len, &new_close_str);
-        guard.edit(*open_off..*open_off + old_open_len, &new_open_str);
+    for (open_off, close_off, old_open, old_close) in pairs.iter().rev() {
+        guard.edit(
+            *close_off..*close_off + old_close.len_utf8(),
+            &new_close_str,
+        );
+        guard.edit(*open_off..*open_off + old_open.len_utf8(), &new_open_str);
     }
     UpdateEffect::Redraw
 }
 
 /// Walk every selection's primary cursor in the focused editor and
-/// gather the enclosing surround pair for `(open, close)` per cursor.
-/// Returns the deduped pair offsets sorted ascending by `open_off`,
-/// or `None` when the focused pane is not an editor. Each per-cursor
-/// lookup runs through [`surround_pair_at`], so brackets inside
-/// string / comment nodes are skipped when the buffer has a syntax map.
+/// gather the enclosing surround pair per cursor, each carrying its own
+/// delimiter chars as `(open_off, close_off, open, close)`. Returns the
+/// deduped pairs sorted ascending, or `None` when the focused pane is
+/// not an editor.
+///
+/// The `pair` argument chooses how each cursor resolves.
+/// `Some((open, close))` finds the enclosing pair of that one type via
+/// [`surround_pair_at`]. `None` (the `m` case) finds the innermost
+/// enclosing pair of any type via [`closest_pair_at`], which may resolve
+/// different types across cursors. Either way brackets inside string /
+/// comment nodes are skipped when the buffer has a syntax map.
 fn collect_surround_pairs(
     stoat: &mut Stoat,
-    open: char,
-    close: char,
-) -> Option<Vec<(usize, usize)>> {
+    pair: Option<(char, char)>,
+) -> Option<Vec<(usize, usize, char, char)>> {
     let (buffer_id, cursors) = {
         let ws = stoat.active_workspace_mut();
         let focused = ws.panes.focus();
@@ -212,9 +217,13 @@ fn collect_surround_pairs(
     };
 
     let ws = stoat.active_workspace();
-    let mut pairs: Vec<(usize, usize)> = cursors
+    let mut pairs: Vec<(usize, usize, char, char)> = cursors
         .into_iter()
-        .filter_map(|head| surround_pair_at(ws, buffer_id, head, open, close))
+        .filter_map(|head| match pair {
+            Some((open, close)) => surround_pair_at(ws, buffer_id, head, open, close)
+                .map(|(open_off, close_off)| (open_off, close_off, open, close)),
+            None => closest_pair_at(ws, buffer_id, head),
+        })
         .collect();
     pairs.sort_unstable();
     pairs.dedup();
@@ -239,6 +248,23 @@ pub(crate) fn surround_pair_at(
     let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
     let tree = deepest_tree_at(snapshot, cursor);
     find_surround_pair(&rope, cursor, open, close, tree)
+}
+
+/// The innermost enclosing pair of any type around `cursor`, as
+/// `(open_off, close_off, open, close)`. The `None`-pair variant of
+/// [`surround_pair_at`], driving `m d m` / `m r m`. Delegates to
+/// [`closest_surround_pair`] over the deepest covering syntax layer.
+fn closest_pair_at(
+    ws: &crate::workspace::Workspace,
+    buffer_id: crate::buffer::BufferId,
+    cursor: usize,
+) -> Option<(usize, usize, char, char)> {
+    let buffer = ws.buffers.get(buffer_id)?;
+    let rope = buffer.read().expect("poisoned").rope().clone();
+    let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
+    let tree = deepest_tree_at(snapshot, cursor);
+    closest_surround_pair(&rope, cursor, tree)
+        .map(|(open, close, open_off, close_off)| (open_off, close_off, open, close))
 }
 
 /// The tree of the deepest syntax layer whose byte span covers
@@ -894,5 +920,25 @@ mod tests {
         h.type_keys("m r \" '");
         assert_eq!(buffer_text(&h, &path), "'abc'\n");
         assert_eq!(cursor_offset(&mut h), 2);
+    }
+
+    #[test]
+    fn surround_delete_closest_removes_pair() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(abc)\n");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
+        h.type_keys("m d m");
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn surround_replace_closest_rewrites_innermost() {
+        let mut h = TestHarness::with_size(40, 10);
+        let src = "[(x)]\n";
+        let path = seed(&mut h, src);
+        let cursor = src.find('x').expect("target present");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m r m ]");
+        assert_eq!(buffer_text(&h, &path), "[[x]]\n");
     }
 }
