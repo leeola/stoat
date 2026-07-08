@@ -31,7 +31,8 @@
 use crate::{
     edit_tree,
     highlight::{QueryCursorHandle, RopeTextProvider},
-    parse_rope, parse_rope_range, Language,
+    language::InjectionInner,
+    language_for_fence_token, parse_rope, parse_rope_range, Language,
 };
 use std::{
     cmp::Reverse,
@@ -412,17 +413,78 @@ impl SyntaxMap {
                     let Some(injection) = parent_lang.injections.get(pattern_index) else {
                         continue;
                     };
-                    for capture in m.captures {
-                        let inner_start = capture.node.start_byte();
-                        let inner_end = capture.node.end_byte();
-                        if inner_end <= inner_start {
-                            continue;
-                        }
-                        grouped
-                            .entry(injection.inner.name)
-                            .or_insert_with(|| (injection.inner.clone(), Vec::new()))
-                            .1
-                            .push(inner_start..inner_end);
+                    match &injection.inner {
+                        InjectionInner::Fixed(inner_lang) => {
+                            for capture in m.captures {
+                                let inner_start = capture.node.start_byte();
+                                let inner_end = capture.node.end_byte();
+                                if inner_end <= inner_start {
+                                    continue;
+                                }
+                                grouped
+                                    .entry(inner_lang.name)
+                                    .or_insert_with(|| (inner_lang.clone(), Vec::new()))
+                                    .1
+                                    .push(inner_start..inner_end);
+                            }
+                        },
+                        InjectionInner::Fence => {
+                            // A fence names its own language and is its own
+                            // document, so resolve the info string and parse the
+                            // content as a standalone layer per match rather than
+                            // grouping it with the combined injections above.
+                            let names = injection_query.capture_names();
+                            let mut token: Option<String> = None;
+                            let mut content: Option<Range<usize>> = None;
+                            for capture in m.captures {
+                                match names.get(capture.index as usize).copied() {
+                                    Some("injection.language") => {
+                                        token = Some(
+                                            rope.chunks_in_range(capture.node.byte_range())
+                                                .collect(),
+                                        );
+                                    },
+                                    Some("injection.content") => {
+                                        let r = capture.node.byte_range();
+                                        if r.end > r.start {
+                                            content = Some(r);
+                                        }
+                                    },
+                                    _ => {},
+                                }
+                            }
+                            let (Some(token), Some(content)) = (token, content) else {
+                                continue;
+                            };
+                            let Some(candidates) = parent_lang.fence_candidates.get() else {
+                                continue;
+                            };
+                            let Some(inner_lang) = language_for_fence_token(&token, candidates)
+                            else {
+                                continue;
+                            };
+                            let prior = prior_injections.iter().find(|p| {
+                                p.start_offset == content.start as u32
+                                    && p.end_offset == content.end as u32
+                                    && p.language_name == inner_lang.name
+                            });
+                            let Some(inner_tree) = parse_rope_range(
+                                &inner_lang,
+                                rope,
+                                content.clone(),
+                                prior.map(|p| &p.tree),
+                            ) else {
+                                continue;
+                            };
+                            new_layers.push(SyntaxLayer {
+                                depth: parent_depth + 1,
+                                start_offset: content.start as u32,
+                                end_offset: content.end as u32,
+                                language: inner_lang,
+                                tree: inner_tree,
+                            });
+                            queue.push_back(new_layers.len() - 1);
+                        },
                     }
                 }
             }
@@ -856,6 +918,93 @@ mod tests {
                         .is_some_and(|n| n.contains("emphasis"))
             }),
             "expected an emphasis capture inside the doc comment's **bold**"
+        );
+    }
+
+    #[test]
+    fn reparse_markdown_fence_injects_named_language() {
+        // A rust fence in a markdown buffer parses as rust. The SyntaxMap gains
+        // a depth-1 rust layer over the fence content and captures its keyword.
+        let lang = markdown_lang();
+        let source = "```rust\nfn a() {}\n```\n";
+        let rope = Rope::from(source);
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang, 1).unwrap();
+
+        let layers: Vec<(u32, &str)> = map
+            .snapshot()
+            .iter_layers()
+            .map(|l| (l.depth, l.language.name))
+            .collect();
+        assert!(
+            layers.iter().any(|&(d, n)| d == 1 && n == "rust"),
+            "depth-1 rust layer over the fence, got {layers:?}"
+        );
+
+        let fn_start = source.find("fn").unwrap();
+        let captures = map
+            .snapshot()
+            .captures(0..rope.len(), &rope, |l| Some(&l.highlight_query));
+        assert!(
+            captures.iter().any(|c| {
+                c.language.name == "rust"
+                    && c.node.byte_range().start == fn_start
+                    && c.language
+                        .highlight_capture_names()
+                        .get(c.index as usize)
+                        .is_some_and(|n| n.contains("keyword"))
+            }),
+            "expected a rust keyword capture at the fence's fn"
+        );
+    }
+
+    #[test]
+    fn reparse_markdown_unknown_fence_token_adds_no_layer() {
+        // A fence naming no registered language stays literal. Only markdown
+        // layers appear, with no injected code language.
+        let lang = markdown_lang();
+        let rope = Rope::from("```cobol\nMOVE X TO Y\n```\n");
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang, 1).unwrap();
+
+        assert!(
+            map.snapshot()
+                .iter_layers()
+                .all(|l| l.language.name.starts_with("markdown")),
+            "unknown fence token must not inject a code language, got {:?}",
+            map.snapshot()
+                .iter_layers()
+                .map(|l| (l.depth, l.language.name))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reparse_rust_doc_comment_fence_nests_three_layers() {
+        // A rust fence inside a rust doc comment's markdown nests three layers:
+        // rust (0) -> markdown (1) -> rust (2).
+        let lang = rust_lang();
+        let source = "/// ```rust\n/// fn b() {}\n/// ```\nfn a() {}\n";
+        let rope = Rope::from(source);
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang, 1).unwrap();
+
+        let layers: Vec<(u32, &str)> = map
+            .snapshot()
+            .iter_layers()
+            .map(|l| (l.depth, l.language.name))
+            .collect();
+        assert!(
+            layers.iter().any(|&(d, n)| d == 0 && n == "rust"),
+            "depth-0 rust, got {layers:?}"
+        );
+        assert!(
+            layers.iter().any(|&(d, n)| d == 1 && n == "markdown"),
+            "depth-1 markdown, got {layers:?}"
+        );
+        assert!(
+            layers.iter().any(|&(d, n)| d == 2 && n == "rust"),
+            "depth-2 rust fence, got {layers:?}"
         );
     }
 

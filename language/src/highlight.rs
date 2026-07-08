@@ -1,4 +1,4 @@
-use crate::language::Language;
+use crate::language::{InjectionInner, Language};
 use std::{
     cell::Cell,
     ops::{ControlFlow, Deref, DerefMut, Range},
@@ -409,6 +409,12 @@ pub fn extract_highlights_rope_with_cache(
             let Some(injection) = language.injections.get(pattern_index) else {
                 continue;
             };
+            // This single-level walk resolves only fixed injections. Fence
+            // injections need per-fence language resolution and the recursive
+            // multi-layer SyntaxMap path.
+            let InjectionInner::Fixed(inner) = &injection.inner else {
+                continue;
+            };
             for capture in m.captures {
                 let inner_start = capture.node.start_byte();
                 let inner_end = capture.node.end_byte();
@@ -416,20 +422,17 @@ pub fn extract_highlights_rope_with_cache(
                     continue;
                 }
                 let host_range = inner_start..inner_end;
-                let lang_name = injection.inner.name;
+                let lang_name = inner.name;
                 let prev_tree = prev_cache.take(&host_range, lang_name);
                 // Parse the host node's bytes via included_ranges so the
                 // inner tree's nodes already carry rope-absolute byte
                 // offsets. No flat-string allocation, no offset translation.
-                let Some(inner_tree) = parse_rope_range(
-                    &injection.inner,
-                    rope,
-                    host_range.clone(),
-                    prev_tree.as_ref(),
-                ) else {
+                let Some(inner_tree) =
+                    parse_rope_range(inner, rope, host_range.clone(), prev_tree.as_ref())
+                else {
                     continue;
                 };
-                collect_highlights_into(&mut raw, &injection.inner, &inner_tree, rope);
+                collect_highlights_into(&mut raw, inner, &inner_tree, rope);
                 new_cache.push(host_range, lang_name, inner_tree);
             }
         }

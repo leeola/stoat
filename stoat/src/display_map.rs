@@ -1575,6 +1575,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_markdown_fence_highlight() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 8);
+        let path = h.write_file("doc.md", "# Title\n\n```rust\nfn a() {}\n```\n");
+
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_markdown_fence_highlight");
+    }
+
+    #[test]
     fn snapshot_open_rust_file_with_fold() {
         use stoat_text::Point;
         let mut h = crate::test_harness::TestHarness::with_size(40, 8);

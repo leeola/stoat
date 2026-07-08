@@ -1,7 +1,7 @@
 use crate::{grammar, highlight_map::HighlightMap};
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use tree_sitter::{Language as TsLanguage, Query};
 
@@ -19,9 +19,9 @@ pub struct Language {
     /// spans whose id is `DEFAULT` are rendered without a foreground.
     pub highlight_map: Mutex<HighlightMap>,
     /// Inner languages parsed inside specific node kinds of this grammar.
-    /// Markdown injects the markdown-inline grammar inside `inline` nodes, and
-    /// rust injects markdown inside `doc_comment` nodes. Could support code-fence
-    /// injections later.
+    /// Markdown injects the markdown-inline grammar inside `inline` nodes and
+    /// resolves fenced code blocks to their info-string language. Rust injects
+    /// markdown inside `doc_comment` nodes.
     pub injections: Vec<LanguageInjection>,
     /// Compiled query that captures injection host nodes by kind. Built
     /// from [`Language::injections`] when the language is constructed; the
@@ -63,6 +63,13 @@ pub struct Language {
     /// comments (e.g. JSON, markdown). Used by the `ToggleComments`
     /// action to insert / remove the prefix on each line.
     pub line_comment: Option<&'static str>,
+    /// Languages a fenced code block's info string may resolve to, for a
+    /// grammar carrying an [`InjectionInner::Fence`] injection. Late-bound: the
+    /// registry fills it after every language exists, since a fence host (e.g.
+    /// markdown) may need to resolve to a language that already holds it (e.g.
+    /// rust, which injects markdown into doc comments). Empty for grammars with
+    /// no fence injection.
+    pub fence_candidates: OnceLock<Vec<Arc<Language>>>,
 }
 
 impl Language {
@@ -89,12 +96,26 @@ impl Language {
     }
 }
 
-/// Pairs an inner [`Language`] with the host node kind it should be parsed
-/// inside. The host parser produces a tree; for each node whose kind matches
-/// `host_node_kind`, the inner parser is run over that node's byte range.
+/// How a [`LanguageInjection`] resolves the language to parse a host range as.
+pub enum InjectionInner {
+    /// Parse each host node's byte range as this fixed language.
+    Fixed(Arc<Language>),
+    /// Parse each fenced code block's content as the language its info string
+    /// names, resolved against the host language's `fence_candidates`. The
+    /// injection's `host_node_kind` is ignored, since the query matches fenced
+    /// blocks directly.
+    Fence,
+}
+
+/// Pairs an inner-language rule with the host node kind it applies to.
+///
+/// The host parser produces a tree. For each node whose kind matches
+/// `host_node_kind` the inner parser runs over its byte range. A
+/// [`InjectionInner::Fence`] rule instead matches fenced code blocks and
+/// resolves each fence's language from its info string.
 pub struct LanguageInjection {
     pub host_node_kind: &'static str,
-    pub inner: Arc<Language>,
+    pub inner: InjectionInner,
 }
 
 pub struct LanguageRegistry {
@@ -110,9 +131,9 @@ impl LanguageRegistry {
         let markdown_inline = Arc::new(make_markdown_inline());
         let markdown = Arc::new(make_markdown_with_injections(vec![LanguageInjection {
             host_node_kind: "inline",
-            inner: markdown_inline.clone(),
+            inner: InjectionInner::Fixed(markdown_inline.clone()),
         }]));
-        Self {
+        let registry = Self {
             languages: vec![
                 Arc::new(make_rust(markdown.clone())),
                 Arc::new(make_json()),
@@ -120,7 +141,21 @@ impl LanguageRegistry {
                 markdown,
                 markdown_inline,
             ],
+        };
+        // A fence injection resolves its info-string token against every
+        // registered language. Late-bind the candidate set now that all exist.
+        // Build time is too early, since rust already holds markdown for doc
+        // comments, so markdown cannot hold rust back then.
+        for lang in &registry.languages {
+            if lang
+                .injections
+                .iter()
+                .any(|i| matches!(i.inner, InjectionInner::Fence))
+            {
+                let _ = lang.fence_candidates.set(registry.languages.clone());
+            }
         }
+        registry
     }
 
     pub fn for_path(&self, path: &Path) -> Option<Arc<Language>> {
@@ -230,6 +265,7 @@ fn make_language_with_injections(
         outline_query,
         tags_query,
         line_comment: aux.line_comment,
+        fence_candidates: OnceLock::new(),
     }
 }
 
@@ -260,9 +296,19 @@ fn build_injection_query(
     }
     let mut source = String::new();
     for injection in injections {
-        source.push_str("((");
-        source.push_str(injection.host_node_kind);
-        source.push_str(") @injection)\n");
+        match &injection.inner {
+            InjectionInner::Fixed(_) => {
+                source.push_str("((");
+                source.push_str(injection.host_node_kind);
+                source.push_str(") @injection)\n");
+            },
+            InjectionInner::Fence => {
+                source.push_str(
+                    "(fenced_code_block (info_string (language) @injection.language) \
+                     (code_fence_content) @injection.content)\n",
+                );
+            },
+        }
     }
     let query = Query::new(grammar, &source)
         .unwrap_or_else(|e| panic!("injection query for {name} failed to compile: {e}"));
@@ -280,7 +326,7 @@ fn make_rust(markdown: Arc<Language>) -> Language {
         // after the `///` marker. The marker keeps its rust comment style.
         vec![LanguageInjection {
             host_node_kind: "doc_comment",
-            inner: markdown,
+            inner: InjectionInner::Fixed(markdown),
         }],
         AuxQuerySources {
             brackets: Some(include_str!(
@@ -340,7 +386,12 @@ fn make_toml() -> Language {
     )
 }
 
-fn make_markdown_with_injections(injections: Vec<LanguageInjection>) -> Language {
+fn make_markdown_with_injections(mut injections: Vec<LanguageInjection>) -> Language {
+    // Fenced code blocks parse as the language their info string names.
+    injections.push(LanguageInjection {
+        host_node_kind: "fenced_code_block",
+        inner: InjectionInner::Fence,
+    });
     make_language_with_injections(
         "markdown",
         &["md", "markdown"],
