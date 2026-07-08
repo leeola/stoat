@@ -797,15 +797,66 @@ mod tests {
 
     #[test]
     fn reparse_rust_produces_no_injection_layers() {
-        // The bundled rust grammar has no entries in Language::injections,
-        // so its synthesized injection_query is empty. Verify reparse
-        // stays at a single root layer.
+        // Rust injects markdown into `doc_comment` nodes, but this rope has no
+        // doc comment, so reparse stays at a single root layer.
         let lang = rust_lang();
         let rope = Rope::from("fn main() { let x = 1; }");
         let mut map = SyntaxMap::new();
         map.reparse(&rope, lang, 1).unwrap();
         assert_eq!(map.snapshot().layer_count(), 1);
         assert_eq!(map.snapshot().iter_layers().next().unwrap().depth, 0);
+    }
+
+    #[test]
+    fn reparse_rust_doc_comment_injects_markdown() {
+        // A rust doc comment hosts a combined markdown injection, so `**bold**`
+        // and a link inside `///` produce a depth-1 markdown layer over the
+        // doc_comment range and a depth-2 markdown-inline layer inside it.
+        let lang = rust_lang();
+        let source = "/// **bold** [text](url)\nfn a() {}\n";
+        let rope = Rope::from(source);
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang, 1).unwrap();
+
+        let layers: Vec<(u32, &str)> = map
+            .snapshot()
+            .iter_layers()
+            .map(|l| (l.depth, l.language.name))
+            .collect();
+        assert!(
+            layers.iter().any(|&(d, n)| d == 0 && n == "rust"),
+            "root rust layer, got {layers:?}"
+        );
+        assert!(
+            layers.iter().any(|&(d, n)| d == 1 && n == "markdown"),
+            "depth-1 markdown layer, got {layers:?}"
+        );
+        assert!(
+            layers
+                .iter()
+                .any(|&(d, n)| d == 2 && n == "markdown-inline"),
+            "depth-2 markdown-inline layer, got {layers:?}"
+        );
+
+        // The `**bold**` markup is captured by the markdown-inline layer inside
+        // the doc comment.
+        let bold_start = source.find("**bold**").unwrap();
+        let bold_end = bold_start + "**bold**".len();
+        let captures = map
+            .snapshot()
+            .captures(0..rope.len(), &rope, |l| Some(&l.highlight_query));
+        assert!(
+            captures.iter().any(|c| {
+                let r = c.node.byte_range();
+                r.start >= bold_start
+                    && r.end <= bold_end
+                    && c.language
+                        .highlight_capture_names()
+                        .get(c.index as usize)
+                        .is_some_and(|n| n.contains("emphasis"))
+            }),
+            "expected an emphasis capture inside the doc comment's **bold**"
+        );
     }
 
     #[test]

@@ -19,8 +19,9 @@ pub struct Language {
     /// spans whose id is `DEFAULT` are rendered without a foreground.
     pub highlight_map: Mutex<HighlightMap>,
     /// Inner languages parsed inside specific node kinds of this grammar.
-    /// Used by markdown to inject the markdown-inline grammar inside
-    /// `inline` nodes, and could support code-fence injections later.
+    /// Markdown injects the markdown-inline grammar inside `inline` nodes, and
+    /// rust injects markdown inside `doc_comment` nodes. Could support code-fence
+    /// injections later.
     pub injections: Vec<LanguageInjection>,
     /// Compiled query that captures injection host nodes by kind. Built
     /// from [`Language::injections`] when the language is constructed; the
@@ -113,7 +114,7 @@ impl LanguageRegistry {
         }]));
         Self {
             languages: vec![
-                Arc::new(make_rust()),
+                Arc::new(make_rust(markdown.clone())),
                 Arc::new(make_json()),
                 Arc::new(make_toml()),
                 markdown,
@@ -239,12 +240,19 @@ fn build_injection_query(
     Some(query)
 }
 
-fn make_rust() -> Language {
-    make_language(
+fn make_rust(markdown: Arc<Language>) -> Language {
+    make_language_with_injections(
         "rust",
         &["rs"],
         grammar::rust(),
         include_str!("../../vendor/zed/crates/languages/src/rust/highlights.scm"),
+        // Doc comments host a combined markdown injection, so `/// **bold**`
+        // renders as styled markdown. The `doc_comment` node covers the text
+        // after the `///` marker. The marker keeps its rust comment style.
+        vec![LanguageInjection {
+            host_node_kind: "doc_comment",
+            inner: markdown,
+        }],
         AuxQuerySources {
             brackets: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/rust/brackets.scm"

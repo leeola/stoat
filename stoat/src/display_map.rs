@@ -1563,6 +1563,18 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_rust_doc_comment_markdown() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = h.write_file(
+            "doc.rs",
+            "/// A **bold** word and a [link](url).\nfn a() {}\n",
+        );
+
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_rust_doc_comment_markdown");
+    }
+
+    #[test]
     fn snapshot_open_rust_file_with_fold() {
         use stoat_text::Point;
         let mut h = crate::test_harness::TestHarness::with_size(40, 8);
