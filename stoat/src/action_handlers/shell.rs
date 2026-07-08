@@ -89,6 +89,7 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
 }
 
 fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
+    let diff = stoat.active_workspace().env.diff.clone();
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return;
     };
@@ -104,7 +105,7 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
             let end = buffer_snapshot.resolve_anchor(&sel.end);
             let stdin: String = rope.chunks_in_range(start..end).collect();
             shell_host
-                .run(cmd, stdin.as_bytes(), None, &[])
+                .run(cmd, stdin.as_bytes(), None, &diff)
                 .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
                 .unwrap_or_default()
         })
@@ -168,6 +169,7 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
 }
 
 fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
+    let diff = stoat.active_workspace().env.diff.clone();
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return;
     };
@@ -178,12 +180,13 @@ fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd
         let start = buffer_snapshot.resolve_anchor(&sel.start);
         let end = buffer_snapshot.resolve_anchor(&sel.end);
         let stdin: String = rope.chunks_in_range(start..end).collect();
-        let _ = shell_host.run(cmd, stdin.as_bytes(), None, &[]);
+        let _ = shell_host.run(cmd, stdin.as_bytes(), None, &diff);
     }
 }
 
 fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
-    let output = match shell_host.run(cmd, b"", None, &[]) {
+    let diff = stoat.active_workspace().env.diff.clone();
+    let output = match shell_host.run(cmd, b"", None, &diff) {
         Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
         Err(_) => return,
     };
@@ -216,7 +219,8 @@ fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
 }
 
 fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
-    let output = match shell_host.run(cmd, b"", None, &[]) {
+    let diff = stoat.active_workspace().env.diff.clone();
+    let output = match shell_host.run(cmd, b"", None, &diff) {
         Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
         Err(_) => return,
     };
@@ -249,6 +253,7 @@ fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
 }
 
 fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
+    let diff = stoat.active_workspace().env.diff.clone();
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return;
     };
@@ -264,7 +269,7 @@ fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, c
             let end = buffer_snapshot.resolve_anchor(&sel.end);
             let stdin: String = rope.chunks_in_range(start..end).collect();
             shell_host
-                .run(cmd, stdin.as_bytes(), None, &[])
+                .run(cmd, stdin.as_bytes(), None, &diff)
                 .map(|out| out.exit_code == 0)
                 .unwrap_or(false)
         })

@@ -10,6 +10,10 @@ pub struct SpawnArgs {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// Environment variables to unset on the child, removing them from the
+    /// inherited environment. Applied before [`Self::env`] so a set there
+    /// wins over an unset here on the same key.
+    pub env_remove: Vec<String>,
     pub cwd: PathBuf,
     pub width: u16,
     pub rows: u16,
@@ -157,6 +161,9 @@ pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> 
 
     let mut cmd = CommandBuilder::new(args.program);
     cmd.args(&args.args);
+    for key in &args.env_remove {
+        cmd.env_remove(key);
+    }
     for (k, v) in &args.env {
         cmd.env(k, v);
     }
@@ -167,6 +174,23 @@ pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> 
     let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
 
     Ok(PtyTerminalSession::new(pair.master, writer, child, reader))
+}
+
+/// Fold a project-environment diff into `args`, so a child spawn applies
+/// the workspace's direnv overrides.
+///
+/// Each `Some(value)` entry is appended to [`SpawnArgs::env`] and each
+/// `None` key to [`SpawnArgs::env_remove`]. Producers call this before
+/// appending their own built-in vars, so those built-ins land later in
+/// `env` and win any key conflict under the last-writer semantics of
+/// [`open_local_pty`].
+pub(crate) fn merge_env_diff(args: &mut SpawnArgs, diff: &[(String, Option<String>)]) {
+    for (key, value) in diff {
+        match value {
+            Some(value) => args.env.push((key.clone(), value.clone())),
+            None => args.env_remove.push(key.clone()),
+        }
+    }
 }
 
 /// Resolve a pid to its command name from the OS process table. Linux
@@ -231,6 +255,7 @@ mod tests {
                 program: "bash".into(),
                 args: vec!["-c".into(), "printf hello".into()],
                 env: vec![("TERM".into(), "dumb".into())],
+                env_remove: Vec::new(),
                 cwd: std::env::temp_dir(),
                 width: 80,
                 rows: 24,
@@ -249,5 +274,35 @@ mod tests {
                 "expected hello in output, got {collected:?}",
             );
         });
+    }
+
+    #[test]
+    fn merge_env_diff_appends_sets_and_records_unsets() {
+        let mut args = SpawnArgs {
+            program: "x".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            cwd: PathBuf::from("/"),
+            width: 80,
+            rows: 24,
+        };
+        let diff = vec![
+            ("SET_ME".to_string(), Some("val".to_string())),
+            ("UNSET_ME".to_string(), None),
+        ];
+        merge_env_diff(&mut args, &diff);
+        // A built-in appended after the diff lands later in env, so it wins
+        // the key conflict under open_local_pty's last-writer semantics.
+        args.env.push(("SET_ME".into(), "builtin".into()));
+
+        assert_eq!(
+            args.env,
+            vec![
+                ("SET_ME".to_string(), "val".to_string()),
+                ("SET_ME".to_string(), "builtin".to_string()),
+            ]
+        );
+        assert_eq!(args.env_remove, vec!["UNSET_ME".to_string()]);
     }
 }

@@ -26,11 +26,12 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let uid = ws.uid;
     let cwd = ws.git_root.clone();
+    let diff = ws.env.diff.clone();
 
     // The local terminal host opens the PTY synchronously, so the spawn future
     // is ready on first poll. The run pane drives its session writes through
     // the same `now_or_never` path.
-    let session = match spawn_claude(&*host, uid, &cwd).now_or_never() {
+    let session = match spawn_claude(&*host, uid, &cwd, &diff).now_or_never() {
         Some(Ok(session)) => session,
         Some(Err(err)) => {
             tracing::warn!(target: "stoat::agent", %err, "failed to spawn claude session");

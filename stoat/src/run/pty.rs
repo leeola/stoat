@@ -1,6 +1,6 @@
 use super::RunId;
 use crate::{
-    host::terminal::{open_local_pty, SpawnArgs, TerminalHost, TerminalSession},
+    host::terminal::{merge_env_diff, open_local_pty, SpawnArgs, TerminalHost, TerminalSession},
     term_session::TermId,
     workspace::WorkspaceUid,
 };
@@ -62,30 +62,34 @@ pub fn spawn_shell(
     width: u16,
     pty_tx: mpsc::Sender<PtyNotification>,
     run_id: RunId,
+    diff: &[(String, Option<String>)],
 ) -> std::io::Result<ShellHandle> {
     use futures::FutureExt;
 
-    let args = SpawnArgs {
+    let mut args = SpawnArgs {
         program: "bash".into(),
         args: vec!["--noediting".into(), "--noprofile".into(), "--norc".into()],
-        env: vec![
-            ("PS1".into(), String::new()),
-            ("PS2".into(), String::new()),
-            // PS0 emits the OSC 133 command-start mark before each command
-            // runs. PROMPT_COMMAND emits the done mark with the exit code and
-            // an OSC 7 cwd report after it. The run pane reads these to bound
-            // output blocks and track the shell's working directory.
-            ("PS0".into(), "\x1b]133;C\x07".into()),
-            (
-                "PROMPT_COMMAND".into(),
-                "printf '\x1b]133;D;%s\x07\x1b]7;file://%s\x07' \"$?\" \"$PWD\"".into(),
-            ),
-            ("TERM".into(), "dumb".into()),
-        ],
+        env: Vec::new(),
+        env_remove: Vec::new(),
         cwd: cwd.to_path_buf(),
         width,
         rows: 24,
     };
+    merge_env_diff(&mut args, diff);
+    args.env.extend([
+        ("PS1".into(), String::new()),
+        ("PS2".into(), String::new()),
+        // PS0 emits the OSC 133 command-start mark before each command
+        // runs. PROMPT_COMMAND emits the done mark with the exit code and
+        // an OSC 7 cwd report after it. The run pane reads these to bound
+        // output blocks and track the shell's working directory.
+        ("PS0".into(), "\x1b]133;C\x07".into()),
+        (
+            "PROMPT_COMMAND".into(),
+            "printf '\x1b]133;D;%s\x07\x1b]7;file://%s\x07' \"$?\" \"$PWD\"".into(),
+        ),
+        ("TERM".into(), "dumb".into()),
+    ]);
     let session = match host.spawn(args).now_or_never() {
         Some(result) => result?,
         None => {
@@ -113,15 +117,19 @@ pub fn spawn_oneshot(
     width: u16,
     pty_tx: mpsc::Sender<PtyNotification>,
     run_id: RunId,
+    diff: &[(String, Option<String>)],
 ) -> std::io::Result<ShellHandle> {
-    let args = SpawnArgs {
+    let mut args = SpawnArgs {
         program: "bash".into(),
         args: vec!["-c".into(), command.to_string()],
-        env: vec![("TERM".into(), "dumb".into())],
+        env: Vec::new(),
+        env_remove: Vec::new(),
         cwd: cwd.to_path_buf(),
         width,
         rows: 24,
     };
+    merge_env_diff(&mut args, diff);
+    args.env.push(("TERM".into(), "dumb".into()));
     let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
     executor
         .spawn(reader_task(session.clone(), run_id, pty_tx))
@@ -141,11 +149,18 @@ pub async fn spawn_claude(
     host: &dyn TerminalHost,
     uid: WorkspaceUid,
     cwd: &Path,
+    diff: &[(String, Option<String>)],
 ) -> std::io::Result<Box<dyn TerminalSession>> {
     let socket_path = agent_socket_path(uid)?;
     let editor_command = editor_bridge_command();
-    host.spawn(claude_spawn_args(uid, cwd, &socket_path, &editor_command))
-        .await
+    host.spawn(claude_spawn_args(
+        uid,
+        cwd,
+        &socket_path,
+        &editor_command,
+        diff,
+    ))
+    .await
 }
 
 /// Spawn `program` as an owned subshell terminal session, returning its
@@ -160,16 +175,22 @@ pub async fn spawn_terminal(
     cwd: &Path,
     program: &str,
     args: &[String],
+    diff: &[(String, Option<String>)],
 ) -> std::io::Result<Box<dyn TerminalSession>> {
-    host.spawn(SpawnArgs {
+    let mut spawn_args = SpawnArgs {
         program: program.to_string(),
         args: args.to_vec(),
-        env: vec![("TERM".into(), "xterm-256color".into())],
+        env: Vec::new(),
+        env_remove: Vec::new(),
         cwd: cwd.to_path_buf(),
         width: 80,
         rows: 24,
-    })
-    .await
+    };
+    merge_env_diff(&mut spawn_args, diff);
+    spawn_args
+        .env
+        .push(("TERM".into(), "xterm-256color".into()));
+    host.spawn(spawn_args).await
 }
 
 /// Spawn the reader that pumps a term session's PTY output into its
@@ -232,23 +253,28 @@ fn claude_spawn_args(
     cwd: &Path,
     socket_path: &Path,
     editor_command: &str,
+    diff: &[(String, Option<String>)],
 ) -> SpawnArgs {
-    SpawnArgs {
+    let mut args = SpawnArgs {
         program: "claude".into(),
         args: Vec::new(),
-        env: vec![
-            ("STOAT_SESSION".into(), uid.to_string()),
-            (
-                "STOAT_AGENT_SOCK".into(),
-                socket_path.to_string_lossy().into_owned(),
-            ),
-            ("EDITOR".into(), editor_command.to_string()),
-            ("VISUAL".into(), editor_command.to_string()),
-        ],
+        env: Vec::new(),
+        env_remove: Vec::new(),
         cwd: cwd.to_path_buf(),
         width: 80,
         rows: 24,
-    }
+    };
+    merge_env_diff(&mut args, diff);
+    args.env.extend([
+        ("STOAT_SESSION".into(), uid.to_string()),
+        (
+            "STOAT_AGENT_SOCK".into(),
+            socket_path.to_string_lossy().into_owned(),
+        ),
+        ("EDITOR".into(), editor_command.to_string()),
+        ("VISUAL".into(), editor_command.to_string()),
+    ]);
+    args
 }
 
 /// The `$EDITOR` command the owned agent runs to compose prompts in the IDE.
@@ -312,17 +338,26 @@ mod tests {
     #[test]
     fn claude_args_inject_session_socket_and_editor_env() {
         let uid = WorkspaceUid(0xABCD);
+        let diff = vec![
+            ("FLAKE_VAR".to_string(), Some("1".to_string())),
+            ("OLD_VAR".to_string(), None),
+        ];
         let args = claude_spawn_args(
             uid,
             Path::new("/work"),
             Path::new("/run/agent.sock"),
             "/usr/bin/stoat editor",
+            &diff,
         );
         assert_eq!(args.program, "claude");
         assert_eq!(args.cwd, Path::new("/work"));
+        assert_eq!(args.env_remove, vec!["OLD_VAR".to_string()]);
         assert_eq!(
             args.env,
             vec![
+                // The diff's set lands first, so the built-ins below win any
+                // key conflict under open_local_pty's last-writer semantics.
+                ("FLAKE_VAR".to_string(), "1".to_string()),
                 ("STOAT_SESSION".to_string(), uid.to_string()),
                 (
                     "STOAT_AGENT_SOCK".to_string(),

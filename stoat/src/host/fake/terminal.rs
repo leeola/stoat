@@ -263,6 +263,7 @@ mod tests {
                     program: "claude".into(),
                     args: vec![],
                     env: vec![],
+                    env_remove: vec![],
                     cwd: "/tmp".into(),
                     width: 80,
                     rows: 24,

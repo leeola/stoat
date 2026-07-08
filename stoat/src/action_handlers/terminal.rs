@@ -95,10 +95,11 @@ fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let pty_tx = stoat.pty_tx.clone();
     let ws = stoat.active_workspace_mut();
     let cwd = ws.git_root.clone();
+    let diff = ws.env.diff.clone();
 
     // The local terminal host opens the PTY synchronously, so the spawn future
     // is ready on first poll, matching the claude pane's spawn path.
-    let session = match spawn_terminal(&*host, &cwd, &program, &args).now_or_never() {
+    let session = match spawn_terminal(&*host, &cwd, &program, &args, &diff).now_or_never() {
         Some(Ok(session)) => session,
         Some(Err(err)) => {
             tracing::warn!(target: "stoat::terminal", %err, "failed to spawn terminal session");

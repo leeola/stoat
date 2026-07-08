@@ -10,13 +10,15 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     let host = stoat.terminal_host.clone();
     let ws = stoat.active_workspace_mut();
     let cwd = ws.git_root.clone();
+    let diff = ws.env.diff.clone();
     let focused = ws.panes.focus();
     let width = ws.panes.pane(focused).area.width.saturating_sub(2).max(20);
 
     let state = RunState::new(cwd.clone(), ws, executor.clone());
     let run_id = ws.runs.insert(state);
 
-    if let Ok(handle) = crate::run::spawn_shell(&*host, &executor, &cwd, width, pty_tx, run_id)
+    if let Ok(handle) =
+        crate::run::spawn_shell(&*host, &executor, &cwd, width, pty_tx, run_id, &diff)
         && let Some(run_state) = ws.runs.get_mut(run_id)
     {
         run_state.shell_handle = Some(handle);
@@ -33,6 +35,7 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     let host = stoat.terminal_host.clone();
     let active_idx = stoat.active_workspace;
     let ws = &mut stoat.workspaces[active_idx];
+    let diff = ws.env.diff.clone();
     let focused = ws.panes.focus();
     let View::Run(id) = ws.panes.pane(focused).view else {
         return UpdateEffect::None;
@@ -80,7 +83,7 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(handle) = &mut run_state.shell_handle {
         handle.send_command(&text);
     } else if let Ok(handle) =
-        crate::run::spawn_shell(&*host, &executor, &run_state.cwd, width, pty_tx, id)
+        crate::run::spawn_shell(&*host, &executor, &run_state.cwd, width, pty_tx, id, &diff)
     {
         run_state.shell_handle = Some(handle);
         if let Some(h) = &mut run_state.shell_handle {
@@ -191,6 +194,7 @@ pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace();
     let cwd = ws.git_root.clone();
+    let diff = ws.env.diff.clone();
     let focused_area = ws.panes.pane(ws.panes.focus()).area;
     let width = focused_area.width.saturating_sub(8).max(20);
 
@@ -203,7 +207,7 @@ pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
         .push(OutputBlock::new(command.to_owned(), cwd.clone(), width));
     let id = ws.runs.insert(state);
 
-    match crate::run::spawn_oneshot(&stoat.executor, command, &cwd, width, pty_tx, id) {
+    match crate::run::spawn_oneshot(&stoat.executor, command, &cwd, width, pty_tx, id, &diff) {
         Ok(handle) => {
             let ws = stoat.active_workspace_mut();
             if let Some(run_state) = ws.runs.get_mut(id) {
