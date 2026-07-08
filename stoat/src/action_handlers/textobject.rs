@@ -4,8 +4,9 @@
 //! next char keypress is intercepted by [`crate::app::Stoat::handle_key`]
 //! and dispatched to [`execute_select_textobject`]. Type chars follow
 //! Helix's defaults: `f` (function), `t` (class / type), `p` (paragraph),
-//! `a` (parameter), `c` (comment), `m` (closest surrounding pair), and
-//! any non-alphanumeric char as its own literal pair (e.g. `(`, `"`).
+//! `a` (parameter), `c` (comment), `w` (word), `W` (WORD), `m` (closest
+//! surrounding pair), and any non-alphanumeric char as its own literal
+//! pair (e.g. `(`, `"`).
 //!
 //! Tree-sitter-driven types use the language's `textobjects_query`
 //! (compiled from `textobjects.scm`), then pick the smallest capture
@@ -17,7 +18,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     pane::View,
 };
-use stoat_text::{Bias, Point, Rope, SelectionGoal};
+use stoat_text::{Bias, CharCategory, Point, Rope, SelectionGoal};
 
 /// Around / inside selection mode for the active textobject chord.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +99,11 @@ pub(crate) fn execute_select_textobject(
                     pair_to_range(open, close, open_off, close_off, mode)
                 },
             )
+        },
+        'w' | 'W' => {
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            find_textobject_word(guard.rope(), cursor, mode, ch == 'W')
         },
         pair if !pair.is_ascii_alphanumeric() => {
             let (open, close) = super::surround::surround_pair_for(pair);
@@ -298,6 +304,108 @@ fn end_of_line_offset(rope: &Rope, row: u32) -> usize {
     } else {
         rope.point_to_offset(Point::new(row + 1, 0))
     }
+}
+
+/// Word textobject over the char at `cursor`. Inner spans the run of
+/// chars sharing the cursor char's category; Around also swallows the
+/// trailing whitespace run, or the leading run when there is no trailing
+/// whitespace. `long` (the `W` object) splits only on whitespace and
+/// line endings, so a token like `foo.bar` stays whole.
+///
+/// Returns `None` when the cursor sits on whitespace or a line ending,
+/// where there is no word to select.
+fn find_textobject_word(
+    rope: &Rope,
+    cursor: usize,
+    mode: TextobjectMode,
+    long: bool,
+) -> Option<std::ops::Range<usize>> {
+    let word_start = find_word_boundary(rope, cursor, false, long);
+    let word_end = match rope.chars_at(cursor).next() {
+        Some(c)
+            if !matches!(
+                stoat_text::categorize_char(c),
+                CharCategory::Whitespace | CharCategory::Eol
+            ) =>
+        {
+            find_word_boundary(rope, cursor + c.len_utf8(), true, long)
+        },
+        _ => cursor,
+    };
+
+    if word_start == word_end {
+        return None;
+    }
+
+    match mode {
+        TextobjectMode::Inner => Some(word_start..word_end),
+        TextobjectMode::Around => {
+            let trailing: usize = rope
+                .chars_at(word_end)
+                .take_while(|c| stoat_text::categorize_char(*c) == CharCategory::Whitespace)
+                .map(char::len_utf8)
+                .sum();
+            if trailing > 0 {
+                Some(word_start..word_end + trailing)
+            } else {
+                let leading: usize = rope
+                    .reversed_chars_at(word_start)
+                    .take_while(|c| stoat_text::categorize_char(*c) == CharCategory::Whitespace)
+                    .map(char::len_utf8)
+                    .sum();
+                Some(word_start - leading..word_end)
+            }
+        },
+    }
+}
+
+/// Byte offset of the word boundary reached by scanning from `pos` in
+/// one direction. The scan stops at whitespace and line endings. For
+/// short words (`long` false) it also stops where the char category
+/// changes (e.g. word to punctuation). `forward` scans toward the end
+/// of the buffer, otherwise toward the start.
+fn find_word_boundary(rope: &Rope, mut pos: usize, forward: bool, long: bool) -> usize {
+    let len = rope.len();
+    let boundary = |category: CharCategory, prev: CharCategory, at: usize| {
+        !long && category != prev && at != 0 && at != len
+    };
+
+    if forward {
+        let mut prev = rope
+            .reversed_chars_at(pos)
+            .next()
+            .map_or(CharCategory::Whitespace, stoat_text::categorize_char);
+        for ch in rope.chars_at(pos) {
+            match stoat_text::categorize_char(ch) {
+                CharCategory::Eol | CharCategory::Whitespace => return pos,
+                category => {
+                    if boundary(category, prev, pos) {
+                        return pos;
+                    }
+                    pos += ch.len_utf8();
+                    prev = category;
+                },
+            }
+        }
+    } else {
+        let mut prev = rope
+            .chars_at(pos)
+            .next()
+            .map_or(CharCategory::Whitespace, stoat_text::categorize_char);
+        for ch in rope.reversed_chars_at(pos) {
+            match stoat_text::categorize_char(ch) {
+                CharCategory::Eol | CharCategory::Whitespace => return pos,
+                category => {
+                    if boundary(category, prev, pos) {
+                        return pos;
+                    }
+                    pos = pos.saturating_sub(ch.len_utf8());
+                    prev = category;
+                },
+            }
+        }
+    }
+    pos
 }
 
 #[cfg(test)]
@@ -567,5 +675,77 @@ mod tests {
         let before = primary_range(&mut h);
         h.type_keys("m i (");
         assert_eq!(primary_range(&mut h), before);
+    }
+
+    #[test]
+    fn word_inner_selects_word() {
+        let r = rope_of("hello world\n");
+        assert_eq!(
+            find_textobject_word(&r, 2, TextobjectMode::Inner, false),
+            Some(0..5)
+        );
+    }
+
+    #[test]
+    fn word_around_includes_trailing_space() {
+        let r = rope_of("hello world\n");
+        assert_eq!(
+            find_textobject_word(&r, 2, TextobjectMode::Around, false),
+            Some(0..6)
+        );
+    }
+
+    #[test]
+    fn word_inner_selects_punctuation_run() {
+        let r = rope_of("a::b\n");
+        assert_eq!(
+            find_textobject_word(&r, 1, TextobjectMode::Inner, false),
+            Some(1..3)
+        );
+    }
+
+    #[test]
+    fn long_word_spans_punctuation() {
+        let r = rope_of("foo.bar\n");
+        assert_eq!(
+            find_textobject_word(&r, 2, TextobjectMode::Inner, true),
+            Some(0..7)
+        );
+    }
+
+    #[test]
+    fn word_on_whitespace_is_none() {
+        let r = rope_of("a b\n");
+        assert_eq!(
+            find_textobject_word(&r, 1, TextobjectMode::Inner, false),
+            None
+        );
+    }
+
+    #[test]
+    fn word_around_uses_leading_when_no_trailing() {
+        let r = rope_of("a bb\n");
+        assert_eq!(
+            find_textobject_word(&r, 3, TextobjectMode::Around, false),
+            Some(1..4)
+        );
+    }
+
+    #[test]
+    fn word_inner_via_chord() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "hello world\n");
+        jump(&mut h, 2);
+        h.type_keys("m i w");
+        assert_eq!(primary_range(&mut h), (0, 5));
+    }
+
+    #[test]
+    fn long_word_via_chord() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "foo.bar baz\n");
+        jump(&mut h, 2);
+        h.type_keys("m i W");
+        assert_eq!(primary_range(&mut h), (0, 7));
     }
 }
