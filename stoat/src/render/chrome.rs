@@ -54,6 +54,11 @@ pub(crate) fn modal_frame(
 
     match rich {
         Some((scene, border, mask)) => {
+            // The title TextRun anchors one cell in (col 16 sixteenths) and each
+            // char spans a full cell at scale 256, so the notch it needs is
+            // (16, chars * 16) sixteenths from the panel's left edge.
+            let title_gap = title.map(|t| (16, t.chars().count() as u16 * 16));
+
             command::encode_panel_into(
                 scene.buffer(),
                 &PanelCommand {
@@ -66,7 +71,7 @@ pub(crate) fn modal_frame(
                     corner_radius: 6,
                     fill: None,
                     shadow: true,
-                    title_gap: None,
+                    title_gap,
                 },
             );
             if let Some(title) = title {
@@ -275,7 +280,7 @@ mod tests {
             corner_radius: 6,
             fill: None,
             shadow: true,
-            title_gap: None,
+            title_gap: Some((16, 64)),
         });
         assert!(
             scene.buffer().starts_with(&panel),
