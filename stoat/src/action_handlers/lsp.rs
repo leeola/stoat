@@ -41,7 +41,7 @@ use lsp_types::{
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
     WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
-use ratatui::style::Style;
+use ratatui::{layout::Rect, style::Style};
 use serde_json::{json, Value};
 use std::{
     future::Future,
@@ -909,6 +909,11 @@ pub(crate) struct HoverPopup {
     /// advanced by Ctrl-d/Ctrl-u while the popup is open. Clamped to the content
     /// height at render, so an over-scroll past the bottom does not accumulate.
     pub(crate) scroll_half_pages: usize,
+    /// Screen rect the popup last painted over, stamped by
+    /// [`crate::render::hover::render_hover`]. The mouse handler hit-tests it so
+    /// a wheel over the popup scrolls it rather than the pane beneath. Empty
+    /// ([`Rect::default`]) until the first render.
+    pub(crate) area: Rect,
 }
 
 /// Issue a `textDocument/hover` request for the symbol under the
@@ -1140,6 +1145,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
                 lines,
                 anchor_offset: response.anchor_offset,
                 scroll_half_pages: 0,
+                area: Rect::default(),
             });
             true
         },
@@ -3651,6 +3657,7 @@ mod tests {
         agent_ipc::{AgentControl, AgentQuery},
         test_harness::TestHarness,
     };
+    use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
     use futures::FutureExt;
     use lsp_types::TextDocumentSyncKind;
     use ratatui::style::Style;
@@ -4783,6 +4790,15 @@ mod tests {
             .scroll_half_pages
     }
 
+    fn scroll_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
     #[test]
     fn hover_scrolls_by_half_pages() {
         use crate::test_harness::keys;
@@ -4811,6 +4827,46 @@ mod tests {
         h.stoat.update(Event::Key(keys::ctrl('u')));
         assert_eq!(hover_scroll(&h), 0);
         assert!(h.stoat.pending_hover.is_some());
+    }
+
+    #[test]
+    fn wheel_over_the_popup_scrolls_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        open_hover(&mut h);
+        // Render once so render_hover stamps the popup's screen rect.
+        h.stoat.render();
+
+        let area = h.stoat.pending_hover.as_ref().expect("popup").area;
+        h.stoat.update(scroll_event(
+            MouseEventKind::ScrollDown,
+            area.x + area.width / 2,
+            area.y + area.height / 2,
+        ));
+
+        assert_eq!(hover_scroll(&h), 1, "the wheel scrolls the popup");
+        assert!(h.stoat.pending_hover.is_some(), "and leaves it open");
+    }
+
+    #[test]
+    fn wheel_outside_the_popup_leaves_it_unscrolled() {
+        let mut h = TestHarness::with_size(80, 24);
+        open_hover(&mut h);
+        h.stoat.render();
+
+        let area = h.stoat.pending_hover.as_ref().expect("popup").area;
+        // Just past the popup's bottom edge, still over the editor pane.
+        h.stoat.update(scroll_event(
+            MouseEventKind::ScrollDown,
+            area.x,
+            area.y + area.height,
+        ));
+
+        assert_eq!(
+            hover_scroll(&h),
+            0,
+            "a wheel off the popup does not scroll it"
+        );
+        assert!(h.stoat.pending_hover.is_some(), "and leaves it open");
     }
 
     #[test]

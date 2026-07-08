@@ -2317,6 +2317,22 @@ impl Stoat {
     /// plain stepped scrolling of its output, three rows per notch, clamped to
     /// the top. Anything else drops the event.
     fn handle_mouse_scroll(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        // A wheel over the open hover popup scrolls the popup, not the pane
+        // beneath it. The bump mirrors the Ctrl-d/Ctrl-u path. render_hover
+        // clamps it to the content height.
+        if let Some(popup) = self.pending_hover.as_mut()
+            && popup.area.contains(Position::new(mouse.column, mouse.row))
+        {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => popup.scroll_half_pages += 1,
+                MouseEventKind::ScrollUp => {
+                    popup.scroll_half_pages = popup.scroll_half_pages.saturating_sub(1)
+                },
+                _ => {},
+            }
+            return UpdateEffect::Redraw;
+        }
+
         let Some(target) = self.target_at(mouse.column, mouse.row) else {
             return UpdateEffect::None;
         };

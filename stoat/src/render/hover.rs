@@ -138,6 +138,7 @@ pub(crate) fn render_hover(
         .min(popup.scroll_half_pages * half_page);
     if let Some(open) = stoat.pending_hover.as_mut() {
         open.scroll_half_pages = scroll / half_page;
+        open.area = popup_area;
     }
 
     // A span's style is a delta over the modal base, so a plain span keeps the
