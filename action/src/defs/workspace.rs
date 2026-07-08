@@ -145,7 +145,7 @@ impl Action for RenameWorkspace {
 const SET_CWD_PARAMS: &[ParamDef] = &[ParamDef {
     name: "path",
     kind: ParamKind::String,
-    value_source: ValueSource::None,
+    value_source: ValueSource::Directories,
     required: true,
     description: "Directory to set as the active workspace's working directory. A relative path resolves against the current root.",
 }];

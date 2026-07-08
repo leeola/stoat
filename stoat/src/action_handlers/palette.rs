@@ -26,7 +26,8 @@ pub(super) enum ArgCandidates {
 /// lists.
 ///
 /// `Files` streams workspace paths via the same background walk the file finder
-/// uses. `Buffers` returns the currently-open buffer paths. `None` yields no
+/// uses. `Directories` streams the workspace's directories derived from that
+/// walk. `Buffers` returns the currently-open buffer paths. `None` yields no
 /// picker.
 #[allow(dead_code)]
 pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCandidates> {
@@ -35,6 +36,11 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
         ValueSource::Files => {
             let git_root = stoat.active_workspace().git_root.clone();
             let (rx, task) = super::file_finder::spawn_workspace_walk(stoat, git_root);
+            Some(ArgCandidates::Walk { rx, task })
+        },
+        ValueSource::Directories => {
+            let git_root = stoat.active_workspace().git_root.clone();
+            let (rx, task) = super::file_finder::spawn_workspace_dir_walk(stoat, git_root);
             Some(ArgCandidates::Walk { rx, task })
         },
         ValueSource::Buffers => Some(ArgCandidates::Paths(

@@ -32,6 +32,9 @@ pub enum ValueSource {
     Files,
     /// Currently-open buffers.
     Buffers,
+    /// Workspace directories, derived from the file walk. A directory that
+    /// contains no files never appears.
+    Directories,
 }
 
 pub struct ParamDef {

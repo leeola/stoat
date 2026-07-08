@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     file_finder::{FileFinder, FinderScope, OpenIntent},
 };
-use std::{ops::ControlFlow, path::PathBuf};
+use std::{collections::HashSet, ops::ControlFlow, path::PathBuf};
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -88,6 +88,49 @@ pub(super) fn spawn_workspace_walk(
                 return ControlFlow::Break(());
             }
             redraw_notify.notify_one();
+            ControlFlow::Continue(())
+        });
+    });
+    (walk_rx, task)
+}
+
+/// Spawn a streaming walker that yields the workspace's directories, derived
+/// from the same file walk [`spawn_workspace_walk`] uses.
+///
+/// Each streamed file batch maps to its ancestor directories strictly below
+/// `git_root` (the root itself excluded), deduped across batches by a shared
+/// set so every directory is sent once. Directories containing no files never
+/// appear, an accepted limit of deriving from the file walk. Returns the
+/// receiver and the task, which must be held to keep the walk alive.
+pub(super) fn spawn_workspace_dir_walk(
+    stoat: &Stoat,
+    git_root: PathBuf,
+) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
+    let (walk_tx, walk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let fs_host = stoat.fs_host.clone();
+    let redraw_notify = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_blocking(move || {
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
+            let mut dirs = Vec::new();
+            for path in batch {
+                let mut ancestor = path.parent();
+                while let Some(dir) = ancestor {
+                    if dir == git_root || !dir.starts_with(&git_root) {
+                        break;
+                    }
+                    if seen.insert(dir.to_path_buf()) {
+                        dirs.push(dir.to_path_buf());
+                    }
+                    ancestor = dir.parent();
+                }
+            }
+            if !dirs.is_empty() {
+                if walk_tx.send(dirs).is_err() {
+                    return ControlFlow::Break(());
+                }
+                redraw_notify.notify_one();
+            }
             ControlFlow::Continue(())
         });
     });

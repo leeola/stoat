@@ -42,15 +42,17 @@ pub struct CommandPalette {
     /// palette lists actions so the half-page handler can size its step.
     /// `None` before the first render, where the step is a single row.
     pub(crate) viewport_rows: Option<usize>,
-    /// Inline value-picker shown while collecting a [`ValueSource::Files`]
-    /// argument (e.g. `:o `). `Some` once the streaming workspace walk has been
-    /// spawned, and held until the palette closes, where it is disposed. `None`
-    /// while listing commands or collecting a non-file argument.
+    /// Inline value-picker shown while collecting a picker-sourced argument
+    /// (e.g. `:o ` files, `:cd ` directories, `:b ` buffers). `Some` once the
+    /// candidate source has been spawned, and held until the palette closes,
+    /// where it is disposed. `None` while listing commands or collecting a
+    /// free-typed argument.
     pub(crate) arg_picker: Option<ArgPicker>,
 }
 
 /// The inline value-picker the palette shows while collecting a
-/// [`ValueSource::Files`] or [`ValueSource::Buffers`] argument.
+/// [`ValueSource::Files`], [`ValueSource::Directories`], or
+/// [`ValueSource::Buffers`] argument.
 ///
 /// A trimmed mirror of [`crate::file_finder::FileFinder`]'s picker half: it owns
 /// the candidate path set, the fuzzy [`PickList`] over it, and the live
@@ -177,6 +179,7 @@ impl ArgPicker {
         };
         let preview_source = match self.source {
             ValueSource::Buffers => ws.buffers.id_for_path(&path).map(PreviewSource::Buffer),
+            ValueSource::Directories => None,
             _ => Some(PreviewSource::File(path)),
         };
         match preview_source {
@@ -373,14 +376,14 @@ impl CommandPalette {
     }
 
     /// The value source of the current command's first argument when it drives
-    /// an inline picker ([`ValueSource::Files`] or [`ValueSource::Buffers`], e.g.
-    /// `:o ` or `:b `), or `None` otherwise. Gates rendering the picker and
-    /// routing selection keys to it.
+    /// an inline picker ([`ValueSource::Files`], [`ValueSource::Directories`],
+    /// or [`ValueSource::Buffers`], e.g. `:o `, `:cd `, or `:b `), or `None`
+    /// otherwise. Gates rendering the picker and routing selection keys to it.
     pub(crate) fn arg_source(&self) -> Option<ValueSource> {
         let param = self.command?.def.params().first()?;
         matches!(
             param.value_source,
-            ValueSource::Files | ValueSource::Buffers
+            ValueSource::Files | ValueSource::Directories | ValueSource::Buffers
         )
         .then_some(param.value_source)
     }
@@ -481,7 +484,7 @@ impl CommandPalette {
                 .filter(|_| {
                     matches!(
                         param.value_source,
-                        ValueSource::Files | ValueSource::Buffers
+                        ValueSource::Files | ValueSource::Directories | ValueSource::Buffers
                     )
                 })
                 .and_then(|picker| picker.selected_path())
@@ -1020,6 +1023,66 @@ mod tests {
             root,
             "an unresolvable path leaves the root untouched"
         );
+    }
+
+    #[test]
+    fn dir_arg_picker_lists_workspace_dirs() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(
+            &mut h,
+            &[("top.rs", ""), ("src/main.rs", ""), ("docs/readme.md", "")],
+        );
+        h.type_text(":cd ");
+        h.snapshot();
+        assert_eq!(
+            arg_picker(&h).picklist.filtered.len(),
+            2,
+            "lists src and docs; a root-level file contributes no directory",
+        );
+    }
+
+    #[test]
+    fn dir_arg_picker_narrows_on_typing() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("src/main.rs", ""), ("docs/readme.md", "")]);
+        h.type_text(":cd ");
+        h.snapshot();
+        assert_eq!(arg_picker(&h).picklist.filtered.len(), 2);
+
+        h.type_text("src");
+        h.snapshot();
+        let picker = arg_picker(&h);
+        assert_eq!(picker.picklist.filtered.len(), 1);
+        let idx = picker.picklist.filtered[0];
+        assert!(picker.picklist.base[idx].ends_with("src"));
+    }
+
+    #[test]
+    fn dir_arg_submit_sets_git_root() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("src/main.rs", "")]);
+        h.type_text(":cd src");
+        h.snapshot();
+        h.type_keys("enter");
+        assert!(h.stoat.command_palette.is_none());
+        assert_eq!(h.stoat.active_workspace().git_root, root.join("src"));
+    }
+
+    /// `:cd ` with no query lists the workspace's directories beside a cleared
+    /// preview pane.
+    #[test]
+    fn snapshot_command_palette_dir_arg() {
+        let mut h = TestHarness::with_size(120, 30);
+        seed_palette_workspace(
+            &mut h,
+            &[
+                ("src/main.rs", ""),
+                ("src/lib.rs", ""),
+                ("docs/readme.md", ""),
+            ],
+        );
+        h.type_text(":cd ");
+        h.assert_snapshot("command_palette_dir_arg");
     }
 
     #[test]
