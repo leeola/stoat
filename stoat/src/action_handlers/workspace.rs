@@ -2,6 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
 };
+use std::path::Path;
 
 pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
@@ -127,4 +128,39 @@ pub(super) fn handle_dump(stoat: &Stoat, name: &str) {
 
 pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
     stoat.active_workspace_mut().name = name.to_string();
+}
+
+/// Set the active workspace's `git_root` to `path`, the root the file finder,
+/// diff, and review resolve against.
+///
+/// A relative path resolves against the current root. An empty path, an
+/// unresolvable path, or a non-directory leaves the root untouched.
+pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
+    let path = path.trim();
+    if path.is_empty() {
+        tracing::warn!("cd: empty path");
+        return;
+    }
+
+    let raw = Path::new(path);
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        stoat.active_workspace().git_root.join(raw)
+    };
+
+    match stoat.fs_host.canonicalize(&candidate) {
+        Ok(abs)
+            if stoat
+                .fs_host
+                .metadata(&abs)
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.is_dir) =>
+        {
+            stoat.active_workspace_mut().git_root = abs;
+        },
+        Ok(_) => tracing::warn!("cd: not a directory: {}", candidate.display()),
+        Err(e) => tracing::warn!("cd: cannot resolve {}: {}", candidate.display(), e),
+    }
 }

@@ -95,7 +95,7 @@ use crate::{
         },
         terminal::Terminal,
         workspace::{
-            CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace,
+            CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SetCwd, SwitchWorkspace,
             WorkspacePickerClose, WorkspacePickerNext, WorkspacePickerPrev, WorkspacePickerSelect,
         },
     },
@@ -698,6 +698,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             name: raw.to_owned(),
         }))
     });
+    add(SetCwd::DEF, |params| {
+        let raw = params
+            .first()
+            .context(MissingSnafu { name: "path" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "path",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(SetCwd {
+            path: raw.to_owned(),
+        }))
+    });
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
     add(CancelPromptInput::DEF, |_| Ok(Box::new(CancelPromptInput)));
     add(PromptInsertNewline::DEF, |_| {
@@ -1146,7 +1159,8 @@ mod tests {
         // + 4 DiagnosticsPicker Next/Prev/Select/Close.
         // + 4 LocationPicker Next/Prev/Select/Close.
         // + 4 GlobalSearchPicker Next/Prev/Select/Close.
-        assert_eq!(all().count(), 315);
+        // + 1 SetCwd.
+        assert_eq!(all().count(), 316);
     }
 
     #[test]

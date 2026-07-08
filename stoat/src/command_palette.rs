@@ -988,6 +988,41 @@ mod tests {
     }
 
     #[test]
+    fn palette_cd_sets_git_root() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/cd-test");
+        let sub = root.join("sub");
+        h.fake_fs().insert_dir(&sub);
+        h.stoat.active_workspace_mut().git_root = root;
+
+        h.type_text(&format!(":cd {}", sub.display()));
+        h.type_keys("enter");
+
+        assert_eq!(h.stoat.active_workspace().git_root, sub);
+        assert!(
+            h.stoat.command_palette.is_none(),
+            "palette closes on submit"
+        );
+    }
+
+    #[test]
+    fn palette_cd_nonexistent_leaves_root() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/cd-test");
+        h.fake_fs().insert_dir(&root);
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        h.type_text(":cd /cd-test/nope");
+        h.type_keys("enter");
+
+        assert_eq!(
+            h.stoat.active_workspace().git_root,
+            root,
+            "an unresolvable path leaves the root untouched"
+        );
+    }
+
+    #[test]
     fn palette_w_bang_routes_to_force_save_buffer() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/palette-force");

@@ -299,6 +299,7 @@ pub enum ActionKind {
     WorkspacePickerClose,
     CloseWorkspace,
     RenameWorkspace,
+    SetCwd,
     SubmitPromptInput,
     CancelPromptInput,
     PromptInsertNewline,

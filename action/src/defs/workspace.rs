@@ -142,6 +142,66 @@ impl Action for RenameWorkspace {
     }
 }
 
+const SET_CWD_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "path",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: true,
+    description: "Directory to set as the active workspace's working directory. A relative path resolves against the current root.",
+}];
+
+#[derive(Debug)]
+pub struct SetCwdDef;
+
+impl ActionDef for SetCwdDef {
+    fn name(&self) -> &'static str {
+        "SetCwd"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::SetCwd
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        SET_CWD_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "change the working directory"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Set the active workspace's working directory to the given path. Subsequent file-finder, diff, and review operations resolve against the new root."
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["cd"]
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+
+#[derive(Debug)]
+pub struct SetCwd {
+    pub path: String,
+}
+
+impl SetCwd {
+    pub const DEF: &SetCwdDef = &SetCwdDef;
+}
+
+impl Action for SetCwd {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +221,21 @@ mod tests {
         };
         assert_eq!(rename.kind(), ActionKind::RenameWorkspace);
         assert_eq!(rename.def().name(), "RenameWorkspace");
+        let set_cwd = SetCwd {
+            path: "/x".to_string(),
+        };
+        assert_eq!(set_cwd.kind(), ActionKind::SetCwd);
+        assert_eq!(set_cwd.def().name(), "SetCwd");
+        assert_eq!(set_cwd.def().aliases(), &["cd"]);
+    }
+
+    #[test]
+    fn set_cwd_takes_path_param() {
+        let params = SetCwdDef.params();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "path");
+        assert_eq!(params[0].kind, ParamKind::String);
+        assert!(params[0].required);
     }
 
     #[test]

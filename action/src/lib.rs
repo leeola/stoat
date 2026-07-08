@@ -84,7 +84,9 @@ pub use defs::{
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     terminal::Terminal,
-    workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace},
+    workspace::{
+        CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SetCwd, SwitchWorkspace,
+    },
 };
 pub use kind::ActionKind;
 pub use param::{ParamDef, ParamError, ParamKind, ParamValue, ValueSource};

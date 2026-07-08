@@ -48,7 +48,7 @@ pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::path::Path;
 use stoat_action::{
     Action, ActionKind, Dump, OpenBuffer, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
-    OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run,
+    OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
 };
 pub(crate) use terminal::respawn_terminal_panes;
 
@@ -646,6 +646,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .downcast_ref::<RenameWorkspace>()
                 .expect("RenameWorkspace action downcast");
             workspace::rename_workspace(stoat, &action.name);
+            UpdateEffect::Redraw
+        },
+        ActionKind::SetCwd => {
+            let action = action
+                .as_any()
+                .downcast_ref::<SetCwd>()
+                .expect("SetCwd action downcast");
+            workspace::set_cwd(stoat, &action.path);
             UpdateEffect::Redraw
         },
         ActionKind::SubmitPromptInput => prompt::submit_prompt_input(stoat),
