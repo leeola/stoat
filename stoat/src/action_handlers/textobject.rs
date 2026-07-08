@@ -4,7 +4,8 @@
 //! next char keypress is intercepted by [`crate::app::Stoat::handle_key`]
 //! and dispatched to [`execute_select_textobject`]. Type chars follow
 //! Helix's defaults: `f` (function), `t` (class / type), `p` (paragraph),
-//! `a` (parameter), `c` (comment).
+//! `a` (parameter), `c` (comment), `m` (closest surrounding pair), and
+//! any non-alphanumeric char as its own literal pair (e.g. `(`, `"`).
 //!
 //! Tree-sitter-driven types use the language's `textobjects_query`
 //! (compiled from `textobjects.scm`), then pick the smallest capture
@@ -85,6 +86,24 @@ pub(crate) fn execute_select_textobject(
             };
             find_textobject_treesitter(ws, buffer_id, cursor, kind, mode)
         },
+        'm' => {
+            let rope = {
+                let buffer = ws.buffers.get(buffer_id).expect("buffer");
+                buffer.read().expect("poisoned").rope().clone()
+            };
+            let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
+            let tree = super::surround::deepest_tree_at(snapshot, cursor);
+            super::surround::closest_surround_pair(&rope, cursor, tree).map(
+                |(open, close, open_off, close_off)| {
+                    pair_to_range(open, close, open_off, close_off, mode)
+                },
+            )
+        },
+        pair if !pair.is_ascii_alphanumeric() => {
+            let (open, close) = super::surround::surround_pair_for(pair);
+            super::surround::surround_pair_at(ws, buffer_id, cursor, open, close)
+                .map(|(open_off, close_off)| pair_to_range(open, close, open_off, close_off, mode))
+        },
         _ => None,
     };
 
@@ -106,6 +125,22 @@ pub(crate) fn execute_select_textobject(
         new
     });
     UpdateEffect::Redraw
+}
+
+/// Byte range for a resolved surround pair, given the delimiter chars
+/// and their offsets. Inner excludes both delimiters; Around spans from
+/// the open delimiter through the close.
+fn pair_to_range(
+    open: char,
+    close: char,
+    open_off: usize,
+    close_off: usize,
+    mode: TextobjectMode,
+) -> std::ops::Range<usize> {
+    match mode {
+        TextobjectMode::Inner => open_off + open.len_utf8()..close_off,
+        TextobjectMode::Around => open_off..close_off + close.len_utf8(),
+    }
 }
 
 /// Run the focused buffer's [`textobjects_query`](stoat_language::Language::textobjects_query)
@@ -482,5 +517,55 @@ mod tests {
             before,
             "json has no textobjects.scm; function lookup should leave selection unchanged",
         );
+    }
+
+    #[test]
+    fn pair_char_inner_selects_content() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "(abc)\n");
+        jump(&mut h, 2);
+        h.type_keys("m i (");
+        assert_eq!(primary_range(&mut h), (1, 4));
+    }
+
+    #[test]
+    fn pair_char_around_includes_delimiters() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "(abc)\n");
+        jump(&mut h, 2);
+        h.type_keys("m a (");
+        assert_eq!(primary_range(&mut h), (0, 5));
+    }
+
+    #[test]
+    fn pair_char_quote_inner_selects_content() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "\"abc\"\n");
+        jump(&mut h, 2);
+        h.type_keys("m i \"");
+        assert_eq!(primary_range(&mut h), (1, 4));
+    }
+
+    #[test]
+    fn closest_pair_inner_picks_innermost() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "fn f() { let y = ([x]); }\n";
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        let x_off = src.find('x').expect("target present");
+        jump(&mut h, x_off);
+        h.type_keys("m i m");
+        let (start, end) = primary_range(&mut h);
+        assert_eq!(&src[start..end], "x", "innermost pair inner is just x");
+    }
+
+    #[test]
+    fn pair_char_no_enclosing_is_noop() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "buf.txt", "abc\n");
+        jump(&mut h, 1);
+        let before = primary_range(&mut h);
+        h.type_keys("m i (");
+        assert_eq!(primary_range(&mut h), before);
     }
 }

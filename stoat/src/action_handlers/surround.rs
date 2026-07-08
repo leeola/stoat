@@ -114,7 +114,7 @@ pub(crate) fn execute_surround_add(stoat: &mut Stoat, ch: char) -> UpdateEffect 
     UpdateEffect::Redraw
 }
 
-fn surround_pair_for(ch: char) -> (char, char) {
+pub(crate) fn surround_pair_for(ch: char) -> (char, char) {
     match ch {
         '(' | ')' => ('(', ')'),
         '[' | ']' => ('[', ']'),
@@ -183,62 +183,115 @@ pub(crate) fn execute_surround_replace(stoat: &mut Stoat, from: char, to: char) 
 /// Walk every selection's primary cursor in the focused editor and
 /// gather the enclosing surround pair for `(open, close)` per cursor.
 /// Returns the deduped pair offsets sorted ascending by `open_off`,
-/// or `None` when the focused pane is not an editor. When the buffer
-/// has a syntax map, the per-cursor pair lookup runs through the
-/// deepest covering layer's tree so brackets inside string / comment
-/// nodes are skipped; buffers without a syntax map fall back to the
-/// plain non-tree-sitter walk.
+/// or `None` when the focused pane is not an editor. Each per-cursor
+/// lookup runs through [`surround_pair_at`], so brackets inside
+/// string / comment nodes are skipped when the buffer has a syntax map.
 fn collect_surround_pairs(
     stoat: &mut Stoat,
     open: char,
     close: char,
 ) -> Option<Vec<(usize, usize)>> {
-    let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return None,
+    let (buffer_id, cursors) = {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => return None,
+        };
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let cursors: Vec<usize> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| buffer_snapshot.resolve_anchor(&sel.head()))
+            .collect();
+        (buffer_id, cursors)
     };
-    let editor = ws.editors.get_mut(editor_id).expect("editor");
-    let buffer_id = editor.buffer_id;
-    let snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope().clone();
-    let cursors: Vec<usize> = editor
-        .selections
-        .all_anchors()
-        .iter()
-        .map(|sel| buffer_snapshot.resolve_anchor(&sel.head()))
-        .collect();
-    drop(snapshot);
 
-    let syntax_map = ws.buffers.syntax_map(buffer_id);
-    let snapshot = syntax_map.map(|m| m.snapshot());
+    let ws = stoat.active_workspace();
     let mut pairs: Vec<(usize, usize)> = cursors
         .into_iter()
-        .filter_map(|head| {
-            let tree = snapshot.as_ref().and_then(|s| {
-                s.iter_layers()
-                    .fold(None::<&stoat_language::SyntaxLayer>, |acc, layer| {
-                        let lstart = layer.start_offset as usize;
-                        let lend = layer.end_offset as usize;
-                        if lstart <= head && lend >= head {
-                            match acc {
-                                Some(prev) if prev.depth >= layer.depth => acc,
-                                _ => Some(layer),
-                            }
-                        } else {
-                            acc
-                        }
-                    })
-                    .map(|layer| &layer.tree)
-            });
-            find_surround_pair(&rope, head, open, close, tree)
-        })
+        .filter_map(|head| surround_pair_at(ws, buffer_id, head, open, close))
         .collect();
     pairs.sort_unstable();
     pairs.dedup();
     Some(pairs)
+}
+
+/// The nearest enclosing `(open, close)` pair around `cursor` in the
+/// buffer's live rope, resolved against the deepest syntax layer
+/// covering the cursor so brackets inside string / comment nodes are
+/// skipped. `None` when no enclosing pair exists. Shared by the
+/// surround delete/replace collection and the `m i`/`m a` pair-char
+/// textobjects.
+pub(crate) fn surround_pair_at(
+    ws: &crate::workspace::Workspace,
+    buffer_id: crate::buffer::BufferId,
+    cursor: usize,
+    open: char,
+    close: char,
+) -> Option<(usize, usize)> {
+    let buffer = ws.buffers.get(buffer_id)?;
+    let rope = buffer.read().expect("poisoned").rope().clone();
+    let snapshot = ws.buffers.syntax_map(buffer_id).map(|m| m.snapshot());
+    let tree = deepest_tree_at(snapshot, cursor);
+    find_surround_pair(&rope, cursor, open, close, tree)
+}
+
+/// The tree of the deepest syntax layer whose byte span covers
+/// `offset`, or `None` when there is no syntax map or no covering
+/// layer. The pair search skips brackets inside string / comment nodes
+/// of this tree.
+pub(crate) fn deepest_tree_at(
+    snapshot: Option<&stoat_language::SyntaxSnapshot>,
+    offset: usize,
+) -> Option<&stoat_language::Tree> {
+    snapshot?
+        .iter_layers()
+        .fold(None::<&stoat_language::SyntaxLayer>, |acc, layer| {
+            let lstart = layer.start_offset as usize;
+            let lend = layer.end_offset as usize;
+            if lstart <= offset && lend >= offset {
+                match acc {
+                    Some(prev) if prev.depth >= layer.depth => acc,
+                    _ => Some(layer),
+                }
+            } else {
+                acc
+            }
+        })
+        .map(|layer| &layer.tree)
+}
+
+/// The innermost enclosing pair of any surround type around `cursor`,
+/// as `(open, close, open_off, close_off)`. Runs [`find_surround_pair`]
+/// for each bracket and quote pair and keeps the one with the greatest
+/// `open_off` (deepest enclosing). `None` when no pair type encloses
+/// the cursor. Drives the `m i m` / `m a m` closest-pair textobject.
+pub(crate) fn closest_surround_pair(
+    rope: &Rope,
+    cursor: usize,
+    tree: Option<&stoat_language::Tree>,
+) -> Option<(char, char, usize, usize)> {
+    const PAIRS: [(char, char); 7] = [
+        ('(', ')'),
+        ('[', ']'),
+        ('{', '}'),
+        ('<', '>'),
+        ('"', '"'),
+        ('\'', '\''),
+        ('`', '`'),
+    ];
+    PAIRS
+        .into_iter()
+        .filter_map(|(open, close)| {
+            find_surround_pair(rope, cursor, open, close, tree)
+                .map(|(open_off, close_off)| (open, close, open_off, close_off))
+        })
+        .max_by_key(|&(_, _, open_off, _)| open_off)
 }
 
 fn focused_buffer_id(stoat: &Stoat) -> Option<crate::buffer::BufferId> {
