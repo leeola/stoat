@@ -499,6 +499,24 @@ impl CommandPalette {
             };
         }
 
+        // While the selection sits at the default top slot, an exact name or
+        // alias match of the typed text wins over the fuzzy top candidate. The
+        // palette is the command line, so `w` must dispatch SaveBuffer rather
+        // than the fuzzy match for "w", and a name-free alias like `w!` (which
+        // the name-only fuzzy filter never surfaces) stays reachable. Arrowing
+        // to a candidate takes that highlighted entry instead.
+        if self.selected == 0
+            && let Some(entry) = registry::lookup_alias(text.trim())
+        {
+            if entry.def.params().is_empty() {
+                self.input.dispose(ws);
+                return PaletteOutcome::Dispatch(entry, Vec::new());
+            }
+            self.input
+                .replace_text(ws, &format!("{} ", entry.def.name()));
+            return PaletteOutcome::None;
+        }
+
         match self.filtered.get(self.selected).copied() {
             Some(entry) if entry.def.params().is_empty() => {
                 self.input.dispose(ws);
@@ -509,16 +527,7 @@ impl CommandPalette {
                     .replace_text(ws, &format!("{} ", entry.def.name()));
                 PaletteOutcome::None
             },
-            // The fuzzy filter only matches action names, so a name-free alias
-            // like `w!` produces no candidates. Fall back to resolving the raw
-            // input as a no-argument command alias so those stay dispatchable.
-            None => match registry::lookup_alias(text.trim()) {
-                Some(entry) if entry.def.params().is_empty() => {
-                    self.input.dispose(ws);
-                    PaletteOutcome::Dispatch(entry, Vec::new())
-                },
-                _ => PaletteOutcome::None,
-            },
+            None => PaletteOutcome::None,
         }
     }
 }
@@ -1066,6 +1075,84 @@ mod tests {
         h.type_keys("enter");
         assert!(h.stoat.command_palette.is_none());
         assert_eq!(h.stoat.active_workspace().git_root, root.join("src"));
+    }
+
+    /// Open the palette, type `typed`, and return the action name the Enter
+    /// handler dispatches, or `None` when it does not dispatch.
+    fn palette_dispatch_name(h: &mut TestHarness, typed: &str) -> Option<&'static str> {
+        h.type_text(typed);
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let ws = h.stoat.active_workspace_mut();
+        match palette.handle_submit(ws) {
+            PaletteOutcome::Dispatch(entry, _) => Some(entry.def.name()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn palette_alias_w_dispatches_save_buffer() {
+        let mut h = Stoat::test();
+        assert_eq!(palette_dispatch_name(&mut h, ":w"), Some("SaveBuffer"));
+    }
+
+    #[test]
+    fn palette_alias_write_dispatches_save_buffer() {
+        let mut h = Stoat::test();
+        assert_eq!(palette_dispatch_name(&mut h, ":write"), Some("SaveBuffer"));
+    }
+
+    #[test]
+    fn palette_alias_w_bang_dispatches_force_save_buffer() {
+        let mut h = Stoat::test();
+        assert_eq!(
+            palette_dispatch_name(&mut h, ":w!"),
+            Some("ForceSaveBuffer"),
+        );
+    }
+
+    #[test]
+    fn palette_partial_text_dispatches_fuzzy_selection() {
+        let mut h = Stoat::test();
+        h.type_text(":qui");
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let expected = palette.filtered[palette.selected].def.name();
+        let ws = h.stoat.active_workspace_mut();
+        match palette.handle_submit(ws) {
+            PaletteOutcome::Dispatch(entry, _) => assert_eq!(entry.def.name(), expected),
+            _ => panic!("partial fuzzy text should dispatch the top candidate"),
+        }
+    }
+
+    #[test]
+    fn palette_arrowed_selection_wins_over_alias() {
+        let mut h = Stoat::test();
+        h.type_text(":w");
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        assert!(
+            palette.filtered.len() >= 2,
+            "expected >=2 fuzzy candidates for `w`"
+        );
+        palette.selected = 1;
+        let expected = palette.filtered[1].def.name();
+        assert_ne!(
+            expected, "SaveBuffer",
+            "SaveBuffer is not a fuzzy `w` match"
+        );
+        let ws = h.stoat.active_workspace_mut();
+        match palette.handle_submit(ws) {
+            PaletteOutcome::Dispatch(entry, _) => assert_eq!(entry.def.name(), expected),
+            _ => panic!("an arrowed-to selection should dispatch that entry"),
+        }
+    }
+
+    #[test]
+    fn palette_param_alias_expands_to_name() {
+        let mut h = Stoat::test();
+        h.type_text(":o");
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let ws = h.stoat.active_workspace_mut();
+        assert!(matches!(palette.handle_submit(ws), PaletteOutcome::None));
+        assert_eq!(palette.input.text(ws), "OpenFile ");
     }
 
     /// `:cd ` with no query lists the workspace's directories beside a cleared
