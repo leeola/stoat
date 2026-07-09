@@ -442,12 +442,13 @@ impl CommandPalette {
             };
         }
 
-        // While the selection sits at the default top slot, an exact name or
-        // alias match of the typed text wins over the fuzzy top candidate. The
-        // palette is the command line, so `w` must dispatch SaveBuffer rather
-        // than the fuzzy match for "w", and a name-free alias like `w!` (which
-        // the name-only fuzzy filter never surfaces) stays reachable. Arrowing
-        // to a candidate takes that highlighted entry instead.
+        // refilter pins an exact name or alias match to the top slot, so the
+        // default selection already sits on that command. This branch is the
+        // belt for the frame between a keystroke and the next refilter. While
+        // the selection sits at the top slot, an exact name or alias match of
+        // the typed text wins, so `w` dispatches SaveBuffer and a name-free
+        // alias like `w!` stays reachable. Arrowing to a candidate takes that
+        // highlighted entry instead.
         if self.selected == 0
             && let Some(entry) = registry::lookup_alias(text.trim())
         {
@@ -499,13 +500,14 @@ pub(crate) fn refilter(
     match_indices: &mut Vec<Vec<u32>>,
     selected: &mut usize,
 ) {
-    let visible: Vec<&'static registry::RegistryEntry> = registry::all()
-        .filter(|entry| {
-            entry.def.palette_visible()
-                && (scope != PaletteScope::Active
-                    || action_is_available(entry.def.kind(), availability))
-        })
-        .collect();
+    let passes = |entry: &registry::RegistryEntry| {
+        entry.def.palette_visible()
+            && (scope != PaletteScope::Active
+                || action_is_available(entry.def.kind(), availability))
+    };
+
+    let visible: Vec<&'static registry::RegistryEntry> =
+        registry::all().filter(|entry| passes(entry)).collect();
 
     filtered.clear();
     match_indices.clear();
@@ -540,6 +542,31 @@ pub(crate) fn refilter(
     for m in matches {
         filtered.push(m.item);
         match_indices.push(m.matched_indices);
+    }
+
+    // Pin an exact name or alias match to the top so the displayed list agrees
+    // with what Enter dispatches. `w` (SaveBuffer) and `o` (OpenFile) resolve by
+    // alias, which the name-only fuzzy rank never surfaces first -- or at all,
+    // when the name lacks the typed characters.
+    let needle = input.trim();
+    if let Some(pinned) = registry::lookup_alias(needle)
+        && passes(pinned)
+    {
+        let indices = match filtered
+            .iter()
+            .position(|e| e.def.name() == pinned.def.name())
+        {
+            Some(pos) => {
+                filtered.remove(pos);
+                match_indices.remove(pos)
+            },
+            None if pinned.def.name().eq_ignore_ascii_case(needle) => {
+                (0..pinned.def.name().chars().count() as u32).collect()
+            },
+            None => Vec::new(),
+        };
+        filtered.insert(0, pinned);
+        match_indices.insert(0, indices);
     }
 
     if *selected >= filtered.len() {
@@ -715,6 +742,20 @@ mod tests {
                 "prefix matches must come before any fuzzy matches",
             );
         }
+    }
+
+    #[test]
+    fn exact_alias_match_pins_to_top() {
+        assert_eq!(
+            names_for("w").first().copied(),
+            Some("SaveBuffer"),
+            "`w` is SaveBuffer's alias and must pin to the top",
+        );
+        assert_eq!(
+            names_for("o").first().copied(),
+            Some("OpenFile"),
+            "`o` is OpenFile's alias and must pin to the top",
+        );
     }
 
     #[test]
