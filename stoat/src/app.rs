@@ -1040,7 +1040,7 @@ impl Stoat {
     /// to translate `ToMain::DiffRequest` into `ToViewport::DiffResponse`.
     pub fn handle_diff_lookup(&self, key: &crate::diff_cache::DiffCacheKey) -> Option<Vec<u8>> {
         let mut cache = self.diff_cache.lock().expect("diff_cache poisoned");
-        let hunks = cache.lookup(key)?;
+        let (hunks, _move_aware) = cache.lookup(key)?;
         Some(crate::diff_cache::serialize_hunks(&hunks))
     }
 

@@ -144,7 +144,7 @@ fn stream_review_inputs(
         return;
     }
 
-    let mut all_cached = true;
+    let mut all_cached_move_aware = true;
     for (index, input) in inputs.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return;
@@ -157,9 +157,14 @@ fn stream_review_inputs(
         );
         let cached = cache.lock().expect("diff_cache poisoned").lookup(&key);
         let hunks = match cached {
-            Some(hunks) => (*hunks).clone(),
+            Some((hunks, move_aware)) => {
+                if !move_aware {
+                    all_cached_move_aware = false;
+                }
+                (*hunks).clone()
+            },
             None => {
-                all_cached = false;
+                all_cached_move_aware = false;
                 review::extract_review_hunks_single(input, 3, Some(cancel))
             },
         };
@@ -183,13 +188,13 @@ fn stream_review_inputs(
         redraw.notify_one();
     }
 
-    // A changed file misses the cache, so re-run the whole-changeset move pass.
-    // On a full cache hit the streamed hunks are already move-aware and the
-    // session is final, so no Complete is sent.
+    // Re-run the whole-changeset move pass unless every file hit the cache with
+    // move-aware hunks. A miss, or a single-file warm's move-unaware hit,
+    // streams instantly but still forces the pass so cross-file move chips land.
     if cancel.load(Ordering::Relaxed) {
         return;
     }
-    if !all_cached {
+    if !all_cached_move_aware {
         let mut session = ReviewSession::new(source);
         session.add_files(inputs);
         if cancel.load(Ordering::Relaxed) {
@@ -1866,7 +1871,7 @@ fn populate_diff_cache(stoat: &Stoat, session: &ReviewSession) {
             .filter_map(|id| session.chunks.get(id).map(|c| c.hunk.clone()))
             .collect();
         let key = diff_cache_key(&file.base_text, &file.buffer_text, file.language.as_ref());
-        cache.insert(key, Arc::new(hunks));
+        cache.insert(key, Arc::new(hunks), true);
     }
 }
 
@@ -1935,8 +1940,54 @@ mod tests {
         };
         let cache = h.stoat.diff_cache();
         let mut guard = cache.lock().expect("diff_cache poisoned");
-        let hunks = guard.lookup(&key).expect("cache hit after install");
+        let (hunks, _move_aware) = guard.lookup(&key).expect("cache hit after install");
         assert!(!hunks.is_empty(), "cached hunks should not be empty");
+    }
+
+    #[test]
+    fn stream_forces_complete_on_non_move_aware_hit() {
+        use super::{diff_cache_key, stream_review_inputs, ReviewScanMsg};
+        use crate::{diff_cache::DiffCache, review::ReviewFileInput, review_session::ReviewSource};
+        use std::sync::{atomic::AtomicBool, mpsc, Arc, Mutex};
+
+        let input = ReviewFileInput {
+            path: PathBuf::from("a.txt"),
+            rel_path: "a.txt".to_string(),
+            language: None,
+            base_text: Arc::new("a\n".to_string()),
+            buffer_text: Arc::new("b\n".to_string()),
+        };
+        let cache = Arc::new(Mutex::new(DiffCache::new(4)));
+        let key = diff_cache_key(
+            &input.base_text,
+            &input.buffer_text,
+            input.language.as_ref(),
+        );
+        cache
+            .lock()
+            .unwrap()
+            .insert(key, Arc::new(Vec::new()), false);
+
+        let (tx, rx) = mpsc::channel();
+        let redraw = Arc::new(tokio::sync::Notify::new());
+        let cancel = AtomicBool::new(false);
+        stream_review_inputs(
+            &tx,
+            &redraw,
+            &cache,
+            &cancel,
+            ReviewSource::WorkingTree {
+                workdir: PathBuf::from("/x"),
+            },
+            vec![input],
+        );
+        drop(tx);
+
+        assert!(
+            rx.into_iter()
+                .any(|m| matches!(m, ReviewScanMsg::Complete(_))),
+            "a non-move-aware cache hit must still force the Complete pass"
+        );
     }
 
     #[test]

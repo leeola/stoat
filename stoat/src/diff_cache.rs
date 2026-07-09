@@ -26,6 +26,11 @@ pub struct DiffCacheKey {
 
 struct Entry {
     hunks: Arc<Vec<ReviewHunk>>,
+    /// Whether these hunks came from the whole-changeset pass and so already
+    /// reflect cross-file moves. A single-file warm writes `false`, which lets a
+    /// review open serve the hunks instantly yet still run the changeset pass to
+    /// recover move chips.
+    move_aware: bool,
     last_used: u64,
 }
 
@@ -53,11 +58,13 @@ impl DiffCache {
         }
     }
 
-    pub fn lookup(&mut self, key: &DiffCacheKey) -> Option<Arc<Vec<ReviewHunk>>> {
+    /// Look up cached hunks, returning them with their `move_aware` flag so the
+    /// caller can decide whether a full changeset pass is still needed.
+    pub fn lookup(&mut self, key: &DiffCacheKey) -> Option<(Arc<Vec<ReviewHunk>>, bool)> {
         let counter = self.tick();
         let hit = self.map.get_mut(key).map(|entry| {
             entry.last_used = counter;
-            entry.hunks.clone()
+            (entry.hunks.clone(), entry.move_aware)
         });
 
         #[cfg(test)]
@@ -84,12 +91,15 @@ impl DiffCache {
         self.misses
     }
 
-    pub fn insert(&mut self, key: DiffCacheKey, hunks: Arc<Vec<ReviewHunk>>) {
+    /// Cache `hunks` under `key`. `move_aware` records whether they came from
+    /// the whole-changeset pass. A single-file warm passes `false`.
+    pub fn insert(&mut self, key: DiffCacheKey, hunks: Arc<Vec<ReviewHunk>>, move_aware: bool) {
         let counter = self.tick();
         self.map.insert(
             key,
             Entry {
                 hunks,
+                move_aware,
                 last_used: counter,
             },
         );
@@ -179,16 +189,25 @@ mod tests {
     fn insert_then_lookup_hits() {
         let mut cache = DiffCache::new(4);
         let h = hunks("hello");
-        cache.insert(key(1, 2, Some("rust")), h.clone());
-        let got = cache.lookup(&key(1, 2, Some("rust"))).expect("hit");
+        cache.insert(key(1, 2, Some("rust")), h.clone(), true);
+        let (got, move_aware) = cache.lookup(&key(1, 2, Some("rust"))).expect("hit");
         assert!(Arc::ptr_eq(&got, &h));
+        assert!(move_aware, "move_aware round-trips through the cache");
+    }
+
+    #[test]
+    fn lookup_returns_stored_move_aware_flag() {
+        let mut cache = DiffCache::new(4);
+        cache.insert(key(1, 2, None), hunks("warm"), false);
+        let (_hunks, move_aware) = cache.lookup(&key(1, 2, None)).expect("hit");
+        assert!(!move_aware, "a single-file warm entry stays move-unaware");
     }
 
     #[test]
     fn key_distinguishes_language() {
         let mut cache = DiffCache::new(4);
-        cache.insert(key(1, 2, Some("rust")), hunks("rs"));
-        cache.insert(key(1, 2, Some("toml")), hunks("toml"));
+        cache.insert(key(1, 2, Some("rust")), hunks("rs"), true);
+        cache.insert(key(1, 2, Some("toml")), hunks("toml"), true);
         assert_eq!(cache.len(), 2);
         assert!(cache.lookup(&key(1, 2, None)).is_none());
     }
@@ -196,9 +215,9 @@ mod tests {
     #[test]
     fn lru_eviction_drops_oldest() {
         let mut cache = DiffCache::new(2);
-        cache.insert(key(1, 1, None), hunks("a"));
-        cache.insert(key(2, 2, None), hunks("b"));
-        cache.insert(key(3, 3, None), hunks("c"));
+        cache.insert(key(1, 1, None), hunks("a"), true);
+        cache.insert(key(2, 2, None), hunks("b"), true);
+        cache.insert(key(3, 3, None), hunks("c"), true);
         assert_eq!(cache.len(), 2);
         assert!(cache.lookup(&key(1, 1, None)).is_none(), "oldest evicted");
         assert!(cache.lookup(&key(2, 2, None)).is_some());
@@ -208,10 +227,10 @@ mod tests {
     #[test]
     fn lookup_refreshes_lru() {
         let mut cache = DiffCache::new(2);
-        cache.insert(key(1, 1, None), hunks("a"));
-        cache.insert(key(2, 2, None), hunks("b"));
+        cache.insert(key(1, 1, None), hunks("a"), true);
+        cache.insert(key(2, 2, None), hunks("b"), true);
         cache.lookup(&key(1, 1, None));
-        cache.insert(key(3, 3, None), hunks("c"));
+        cache.insert(key(3, 3, None), hunks("c"), true);
         assert!(
             cache.lookup(&key(2, 2, None)).is_none(),
             "key 2 should evict because key 1 was just touched"
