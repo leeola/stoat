@@ -101,15 +101,6 @@ impl FileFinder {
         self.scope
     }
 
-    /// Base list for the current scope.
-    pub(crate) fn base_paths(&self) -> &[PathBuf] {
-        match self.scope {
-            FinderScope::All => &self.core.all_paths,
-            FinderScope::Modified => &self.modified_paths,
-            FinderScope::Buffers => &self.buffer_paths,
-        }
-    }
-
     /// Absolute path of the currently selected filtered row, if any.
     pub(crate) fn selected_path(&self) -> Option<&Path> {
         self.core.selected_path()
@@ -480,7 +471,7 @@ mod tests {
         h.type_keys("space g");
         let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
         assert_eq!(finder.scope(), FinderScope::Modified);
-        let base: Vec<PathBuf> = finder.base_paths().to_vec();
+        let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
         assert_eq!(base.len(), 1, "Modified scope should list only b.rs");
         assert!(base[0].ends_with("b.rs"));
         assert_eq!(h.snapshot().mode, "insert");
@@ -513,7 +504,7 @@ mod tests {
         h.type_keys("space b b");
         let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
         assert_eq!(finder.scope(), FinderScope::Buffers);
-        let base: Vec<PathBuf> = finder.base_paths().to_vec();
+        let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
         assert_eq!(base.len(), 2, "Buffers scope should list only open buffers");
         assert!(base.iter().any(|p| p.ends_with("a.rs")));
         assert!(base.iter().any(|p| p.ends_with("c.rs")));
@@ -594,7 +585,7 @@ mod tests {
         h.type_keys("backtab");
         let finder = h.stoat.file_finder.as_ref().unwrap();
         assert_eq!(finder.scope(), FinderScope::All);
-        assert_eq!(finder.base_paths().len(), 3);
+        assert_eq!(finder.core.picklist.base.len(), 3);
     }
 
     #[test]
@@ -615,7 +606,7 @@ mod tests {
         h.type_keys("backtab");
         let finder = h.stoat.file_finder.as_ref().unwrap();
         assert_eq!(finder.scope(), FinderScope::All);
-        assert_eq!(finder.base_paths().len(), 3);
+        assert_eq!(finder.core.picklist.base.len(), 3);
     }
 
     #[test]
@@ -637,14 +628,14 @@ mod tests {
         {
             let finder = h.stoat.file_finder.as_ref().unwrap();
             assert_eq!(finder.scope(), FinderScope::All);
-            let base: Vec<PathBuf> = finder.base_paths().to_vec();
+            let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
             assert_eq!(base.len(), 3, "All scope should list all 3 files");
         }
         h.type_keys("backtab");
         {
             let finder = h.stoat.file_finder.as_ref().unwrap();
             assert_eq!(finder.scope(), FinderScope::Modified);
-            let base: Vec<PathBuf> = finder.base_paths().to_vec();
+            let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
             assert_eq!(base.len(), 1);
             assert!(base[0].ends_with("b.rs"));
         }
@@ -691,7 +682,7 @@ mod tests {
         let finder = h.stoat.file_finder.as_ref().unwrap();
         assert_eq!(finder.core.picklist.filtered.len(), 1);
         let idx = finder.core.picklist.filtered[0];
-        assert!(finder.base_paths()[idx].ends_with("alpha.rs"));
+        assert!(finder.core.picklist.base[idx].ends_with("alpha.rs"));
     }
 
     // ----- Snapshot tests -----

@@ -1,9 +1,6 @@
 use crate::{
-    file_finder::{display_row, FileFinder, FinderScope},
-    render::{
-        editor::render_editor,
-        text::{write_str, write_str_clipped},
-    },
+    file_finder::{FileFinder, FinderScope},
+    render::text::write_str,
     workspace::Workspace,
 };
 use ratatui::{
@@ -54,21 +51,14 @@ pub(crate) fn file_finder_layout(area: Rect) -> Option<FinderLayout> {
     }
     let body_width = inner.width;
 
-    let (list, preview) = if body_width >= 80 {
-        let list_width = (body_width * 40 / 100).max(24);
-        let preview_width = body_width.saturating_sub(list_width + 1);
-        (
-            Rect::new(inner.x, body_top, list_width, body_height),
-            Some(Rect::new(
-                inner.x + list_width + 1,
-                body_top,
-                preview_width,
-                body_height,
-            )),
-        )
-    } else {
-        (Rect::new(inner.x, body_top, body_width, body_height), None)
-    };
+    let (list, preview) = crate::render::picker::split_list_preview(
+        inner.x,
+        body_top,
+        body_width,
+        body_height,
+        80,
+        24,
+    );
 
     Some(FinderLayout {
         modal,
@@ -159,12 +149,10 @@ fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf
     paint_finder_rows(finder, area, start_row, theme, buf);
 }
 
-/// Paint finder result rows into `area` starting at `start_row`, one row per
-/// line, with the selected row and fuzzy-match characters highlighted.
+/// Paint finder result rows into `area` starting at `start_row`.
 ///
-/// Shared by the live list, which derives `start_row` from the selection, and
-/// the smooth-scroll pool, which paints absolute pages, so both render
-/// identical rows.
+/// A thin adapter over [`crate::render::picker::paint_path_rows`], kept because
+/// the smooth-scroll pool paints pages through a `&FileFinder`.
 pub(crate) fn paint_finder_rows(
     finder: &FileFinder,
     area: Rect,
@@ -172,51 +160,14 @@ pub(crate) fn paint_finder_rows(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
-    let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
-
-    let rows = area.height as usize;
-    if rows == 0 {
-        return;
-    }
-    let base = finder.base_paths();
-    let end_x = area.x + area.width;
-    let label_x = area.x + 1;
-
-    for (row_idx, (&idx, indices)) in finder
-        .core
-        .picklist
-        .filtered
-        .iter()
-        .zip(finder.core.picklist.match_indices.iter())
-        .skip(start_row)
-        .take(rows)
-        .enumerate()
-    {
-        let row = area.y + row_idx as u16;
-        let is_selected = start_row + row_idx == finder.core.picklist.selected;
-        let style = if is_selected {
-            selected_style
-        } else {
-            row_style
-        };
-        for col in area.x..end_x {
-            buf[(col, row)].set_char(' ').set_style(style);
-        }
-        let path = &base[idx];
-        let label = display_row(path, &finder.core.git_root);
-        write_str_clipped(buf, label_x, row, &label, style, end_x);
-        for (label_col, _) in label.chars().enumerate() {
-            let col = label_x + label_col as u16;
-            if col >= end_x {
-                break;
-            }
-            if indices.binary_search(&(label_col as u32)).is_ok() {
-                buf[(col, row)].set_style(match_style);
-            }
-        }
-    }
+    crate::render::picker::paint_path_rows(
+        &finder.core.picklist,
+        &finder.core.git_root,
+        area,
+        start_row,
+        theme,
+        buf,
+    );
 }
 
 fn render_preview(
@@ -226,11 +177,5 @@ fn render_preview(
     ws: &mut Workspace,
     buf: &mut Buffer,
 ) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let fallback = theme.get(crate::theme::scope::UI_TEXT);
-    if let Some(editor) = ws.editors.get_mut(finder.core.preview.editor) {
-        render_editor(editor, area, fallback, theme, buf, false);
-    }
+    crate::render::picker::render_picker_preview(&finder.core.preview, area, theme, ws, buf);
 }

@@ -1,11 +1,7 @@
 use crate::{
-    command_palette::{ArgPicker, CommandPalette, PaletteScope},
-    file_finder::display_row,
+    command_palette::{CommandPalette, PaletteScope},
     input_view::InputView,
-    render::{
-        editor::render_editor,
-        text::{wrap_text, write_str, write_str_clipped},
-    },
+    render::text::{wrap_text, write_str},
     workspace::Workspace,
 };
 use ratatui::{
@@ -171,7 +167,14 @@ fn render_palette_arg_picker(
     if body_height == 0 {
         return;
     }
-    let (list, preview) = arg_body_split(inner.x, body_top, inner.width, body_height);
+    let (list, preview) = crate::render::picker::split_list_preview(
+        inner.x,
+        body_top,
+        inner.width,
+        body_height,
+        50,
+        20,
+    );
 
     let Some(picker) = palette.arg_picker.as_mut() else {
         return;
@@ -185,92 +188,30 @@ fn render_palette_arg_picker(
             separator_style,
             scene,
         );
-        render_arg_preview(picker, preview_rect, theme, ws, buf);
+        crate::render::picker::render_picker_preview(
+            &picker.core.preview,
+            preview_rect,
+            theme,
+            ws,
+            buf,
+        );
     }
 
     picker.core.picklist.viewport_rows = Some(list.height as usize);
-    paint_arg_rows(picker, list, theme, buf);
-}
-
-/// Split the picker body into a result list and an optional preview pane.
-///
-/// The preview only appears when the body is wide enough to host a useful list
-/// and preview side by side. Below that the list takes the full width.
-fn arg_body_split(x: u16, y: u16, width: u16, height: u16) -> (Rect, Option<Rect>) {
-    if width >= 50 {
-        let list_width = (width * 40 / 100).max(20);
-        let preview_width = width.saturating_sub(list_width + 1);
-        (
-            Rect::new(x, y, list_width, height),
-            Some(Rect::new(x + list_width + 1, y, preview_width, height)),
-        )
-    } else {
-        (Rect::new(x, y, width, height), None)
-    }
-}
-
-/// Paint the picker's result rows into `area`, one repo-relative path per row,
-/// with the selected row and fuzzy-match characters highlighted.
-fn paint_arg_rows(picker: &ArgPicker, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
-    let rows = area.height as usize;
-    if rows == 0 {
-        return;
-    }
-    let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
-
-    let picklist = &picker.core.picklist;
-    let start_row = picklist.selected.saturating_sub(rows.saturating_sub(1));
-    let end_x = area.x + area.width;
-    let label_x = area.x + 1;
-
-    for (row_idx, (&idx, indices)) in picklist
-        .filtered
-        .iter()
-        .zip(picklist.match_indices.iter())
-        .skip(start_row)
-        .take(rows)
-        .enumerate()
-    {
-        let row = area.y + row_idx as u16;
-        let is_selected = start_row + row_idx == picklist.selected;
-        let style = if is_selected {
-            selected_style
-        } else {
-            row_style
-        };
-        for col in area.x..end_x {
-            buf[(col, row)].set_char(' ').set_style(style);
-        }
-        let label = display_row(&picklist.base[idx], &picker.core.git_root);
-        write_str_clipped(buf, label_x, row, &label, style, end_x);
-        for (label_col, _) in label.chars().enumerate() {
-            let col = label_x + label_col as u16;
-            if col >= end_x {
-                break;
-            }
-            if indices.binary_search(&(label_col as u32)).is_ok() {
-                buf[(col, row)].set_style(match_style);
-            }
-        }
-    }
-}
-
-fn render_arg_preview(
-    picker: &ArgPicker,
-    area: Rect,
-    theme: &crate::theme::Theme,
-    ws: &mut Workspace,
-    buf: &mut Buffer,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let fallback = theme.get(crate::theme::scope::UI_TEXT);
-    if let Some(editor) = ws.editors.get_mut(picker.core.preview.editor) {
-        render_editor(editor, area, fallback, theme, buf, false);
-    }
+    let rows = list.height as usize;
+    let start_row = picker
+        .core
+        .picklist
+        .selected
+        .saturating_sub(rows.saturating_sub(1));
+    crate::render::picker::paint_path_rows(
+        &picker.core.picklist,
+        &picker.core.git_root,
+        list,
+        start_row,
+        theme,
+        buf,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
