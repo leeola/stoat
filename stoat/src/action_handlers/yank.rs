@@ -24,21 +24,22 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
     ) {
         return UpdateEffect::None;
     }
-    let Some(content) = selections_joined_text(stoat) else {
+    let Some(fragments) = selection_fragments(stoat) else {
         return UpdateEffect::None;
     };
-    if content.is_empty() {
+    if fragments.is_empty() {
         return UpdateEffect::None;
     }
+    let count = fragments.len();
     match target {
         Register::Clipboard => {
-            if let Err(err) = stoat.clipboard_host().set(&content) {
+            if let Err(err) = stoat.clipboard_host().set(&fragments.join("\n")) {
                 tracing::warn!(target: "stoat::yank", ?err, "clipboard set failed");
             }
         },
         Register::Blackhole => {},
         Register::Unnamed | Register::Named(_) => {
-            stoat.registers.write(target, vec![content]);
+            stoat.registers.write(target, fragments);
         },
         Register::Search | Register::SelectionIndex | Register::LastInsert => {
             // Short-circuited above. Branch retained so the match
@@ -46,7 +47,8 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
             // hide future variants.
         },
     }
-    UpdateEffect::None
+    stoat.pending_message = Some(format!("yanked {count} selection(s)"));
+    UpdateEffect::Redraw
 }
 
 pub(super) fn select_register(stoat: &mut Stoat) -> UpdateEffect {
@@ -101,13 +103,13 @@ pub(super) fn paste_before(stoat: &mut Stoat) -> UpdateEffect {
 /// the active [`crate::host::ClipboardHost`]. No-op when every
 /// selection is collapsed.
 pub(super) fn yank_to_clipboard(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(content) = selections_joined_text(stoat) else {
+    let Some(fragments) = selection_fragments(stoat) else {
         return UpdateEffect::None;
     };
-    if content.is_empty() {
+    if fragments.is_empty() {
         return UpdateEffect::None;
     }
-    if let Err(err) = stoat.clipboard_host().set(&content) {
+    if let Err(err) = stoat.clipboard_host().set(&fragments.join("\n")) {
         tracing::warn!(target: "stoat::yank", ?err, "clipboard set failed");
     }
     UpdateEffect::None
@@ -181,11 +183,11 @@ enum PasteSide {
     Before,
 }
 
-/// Walk every selection in the focused editor in start-offset
-/// order, slice each non-collapsed range out of the rope, and
-/// join with `\n`. Returns `None` when the focused pane is not
-/// an editor.
-fn selections_joined_text(stoat: &mut Stoat) -> Option<String> {
+/// Walk every selection in the focused editor in start-offset order and
+/// slice each non-collapsed range out of the rope, one fragment per
+/// selection like Helix. Returns `None` when the focused pane is not an
+/// editor, and an empty vec when every selection is collapsed.
+fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -216,7 +218,7 @@ fn selections_joined_text(stoat: &mut Stoat) -> Option<String> {
         .into_iter()
         .map(|(lo, hi)| rope.slice(lo..hi).to_string())
         .collect();
-    Some(pieces.join("\n"))
+    Some(pieces)
 }
 
 /// Insert the caller-selected register's content (or the
@@ -542,6 +544,24 @@ mod tests {
             .read(crate::register::Register::Unnamed)
             .map(|f| f.join("\n"));
         assert_eq!(stored, Some("abc\ndef".to_string()));
+    }
+
+    #[test]
+    fn yank_stores_a_fragment_per_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        let stored = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(<[String]>::to_vec);
+        assert_eq!(stored, Some(vec!["abc".to_string(), "def".to_string()]));
+        assert_eq!(
+            h.stoat.pending_message,
+            Some("yanked 2 selection(s)".to_string())
+        );
     }
 
     #[test]
