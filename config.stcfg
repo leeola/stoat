@@ -343,7 +343,6 @@ on key {
         b -> [GotoWindowBottom(), SetMode(normal)];
         w -> [GotoWord(), SetMode(normal)];
         | -> [GotoColumn(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == z {
         Escape -> SetMode(normal);
@@ -352,7 +351,6 @@ on key {
         b -> [AlignViewBottom(), SetMode(normal)];
         j -> [ScrollDown(), SetMode(normal)];
         k -> [ScrollUp(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == bracket_next {
         Escape -> SetMode(normal);
@@ -362,7 +360,6 @@ on key {
         d -> [GotoNextDiagnostic(), SetMode(normal)];
         f -> [GotoNextFunction(), SetMode(normal)];
         t -> [GotoNextClass(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == bracket_prev {
         Escape -> SetMode(normal);
@@ -372,7 +369,6 @@ on key {
         d -> [GotoPrevDiagnostic(), SetMode(normal)];
         f -> [GotoPrevFunction(), SetMode(normal)];
         t -> [GotoPrevClass(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == match {
         Escape -> SetMode(normal);
@@ -382,7 +378,6 @@ on key {
         d -> [SurroundDelete(), SetMode(normal)];
         a -> [SelectTextobjectAround(), SetMode(normal)];
         i -> [SelectTextobjectInner(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == select {
         Escape -> SetMode(normal);
@@ -443,7 +438,6 @@ on key {
         c -> [ExtendGotoWindowCenter(), SetMode(select)];
         b -> [ExtendGotoWindowBottom(), SetMode(select)];
         | -> [ExtendGotoColumn(), SetMode(select)];
-        : -> OpenCommandPalette();
     }
     view == commits && mode == normal {
         Escape -> CloseCommits();
@@ -611,7 +605,6 @@ on key {
         k -> [JumpForward(), SetMode(normal)];
         / -> OpenGlobalSearch();
         ' -> [OpenLastPicker(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == space_clipboard {
         Escape -> SetMode(normal);
@@ -619,12 +612,10 @@ on key {
         Y -> [YankMainToClipboard(), SetMode(normal)];
         p -> [PasteClipboardAfter(), SetMode(normal)];
         P -> [PasteClipboardBefore(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == space_buffer {
         Escape -> SetMode(normal);
         b -> OpenBufferPicker();
-        : -> OpenCommandPalette();
     }
     mode == space_lsp {
         Escape -> SetMode(normal);
@@ -653,7 +644,6 @@ on key {
         S -> OpenWorkspaceSymbolPicker();
         d -> [OpenDiagnosticsPicker(), SetMode(normal)];
         D -> [OpenWorkspaceDiagnosticsPicker(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == space_workspace {
         Escape -> SetMode(normal);
@@ -661,7 +651,6 @@ on key {
         c -> [CopyWorkspace(), SetMode(normal)];
         s -> [SwitchWorkspace(), SetMode(normal)];
         x -> [CloseWorkspace(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == space_pane_nav {
         Escape -> SetMode(normal);
@@ -681,12 +670,10 @@ on key {
         Up -> [FocusUp(), SetMode(normal)];
         l -> [FocusRight(), SetMode(normal)];
         Right -> [FocusRight(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
     mode == space_pane_nav_new {
         Escape -> SetMode(normal);
         s -> [SplitNewRight(), SetMode(normal)];
         v -> [SplitNewDown(), SetMode(normal)];
-        : -> OpenCommandPalette();
     }
 }
