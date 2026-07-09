@@ -4358,13 +4358,6 @@ impl Stoat {
             .then(|| crate::render::help::help_layout(self.size()))
             .flatten();
 
-        // The hover popup is cursor-anchored like the completion popup. Its
-        // interior body region pools so Ctrl-u/Ctrl-d and the wheel ease. The
-        // layout reads the focused editor, so it borrows self.
-        let hover_layout = (!overlay)
-            .then(|| crate::render::hover::hover_popup_layout(self))
-            .flatten();
-
         let mut out = Vec::new();
         let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
         if finder_list.is_some() {
@@ -4382,9 +4375,6 @@ impl Stoat {
         if help_layout.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::HELP_LIST);
             active.push(crate::smooth_scroll::non_pane_pool::HELP_DETAIL);
-        }
-        if hover_layout.is_some() {
-            active.push(crate::smooth_scroll::non_pane_pool::HOVER);
         }
         self.smooth_scroll.drop_absent(&mut out, &active);
 
@@ -4733,50 +4723,6 @@ impl Stoat {
                         theme,
                         detail.width,
                         detail.height,
-                    )
-                },
-            );
-        }
-
-        if let (Some((_, inner)), Some(popup)) = (hover_layout, self.pending_hover.as_ref()) {
-            let region = stoatty_protocol::command::PoolRegionCommand {
-                pool: crate::smooth_scroll::non_pane_pool::HOVER,
-                top: inner.y,
-                left: inner.x,
-                width: inner.width,
-                height: inner.height,
-            };
-            let interior = inner.height.max(1) as usize;
-            let half_page = (interior / 2).max(1);
-            let scroll = popup
-                .lines
-                .len()
-                .saturating_sub(interior)
-                .min(popup.scroll_half_pages * half_page);
-            // The body changes only when a new hover replaces this one, so a hash
-            // of the line texts is the pool's content version.
-            let content_version = {
-                let mut hasher = DefaultHasher::new();
-                for line in &popup.lines {
-                    for (text, _) in line {
-                        text.hash(&mut hasher);
-                    }
-                }
-                hasher.finish()
-            };
-            crate::smooth_scroll::emit_into(
-                &mut out,
-                &mut self.smooth_scroll,
-                region,
-                scroll as f32,
-                content_version,
-                |page| {
-                    crate::render::hover::render_hover_page(
-                        popup,
-                        page,
-                        theme,
-                        inner.width,
-                        inner.height,
                     )
                 },
             );
@@ -6467,53 +6413,6 @@ mod tests {
     }
 
     #[test]
-    fn emit_smooth_scroll_pools_the_hover_and_retires_it_on_close() {
-        use crate::action_handlers::lsp::HoverPopup;
-        use ratatui::{layout::Rect, style::Style};
-        use stoatty_protocol::command::Command;
-
-        let mut h = Stoat::test();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
-
-        let root = std::path::PathBuf::from("/pool");
-        let path = root.join("a.txt");
-        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
-        h.stoat.active_workspace_mut().git_root = root;
-        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
-        h.settle();
-        let size = h.stoat.size();
-        h.stoat.active_workspace_mut().layout(size);
-
-        h.stoat.pending_hover = Some(HoverPopup {
-            lines: vec![vec![("hovered".to_string(), Style::default())]],
-            anchor_offset: 0,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-        });
-        h.stoat.emit_smooth_scroll();
-        let opened = drain_apc(&mut rx);
-        assert!(
-            opened.iter().any(|cmd| matches!(
-                cmd,
-                Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER
-            )),
-            "an open hover emits its pool region, got {opened:?}"
-        );
-
-        h.stoat.pending_hover = None;
-        h.stoat.emit_smooth_scroll();
-        let closed = drain_apc(&mut rx);
-        assert!(
-            closed.iter().any(|cmd| matches!(
-                cmd,
-                Command::PoolDrop(d) if d.pool == crate::smooth_scroll::non_pane_pool::HOVER
-            )),
-            "closing the hover retires its pool, got {closed:?}"
-        );
-    }
-
-    #[test]
     fn apc_scene_emits_nothing_for_a_plain_editor_frame() {
         let mut h = Stoat::test();
         // The default theme resolves status colors to RGB, which drives the
@@ -6961,12 +6860,9 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
 
-        // The hover body rides the HOVER smooth-scroll pool under stoatty, so its
-        // scaled runs land in the pool fill emit_smooth_scroll ships, not the live
-        // decoration scene.
-        let size = h.stoat.size();
-        h.stoat.active_workspace_mut().layout(size);
-        h.stoat.emit_smooth_scroll();
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
 
         let cmds = drain_apc(&mut rx);
         assert!(

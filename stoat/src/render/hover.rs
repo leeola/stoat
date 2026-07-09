@@ -1,5 +1,4 @@
 use crate::{
-    action_handlers::lsp::HoverPopup,
     app::Stoat,
     pane::{FocusTarget, View},
     render::layout::split_pane_status,
@@ -69,38 +68,70 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
         open.area = popup_area;
     }
 
-    // Under stoatty the HOVER smooth-scroll pool owns the body and eases it (see
-    // emit_smooth_scroll), so this frame draws only the frame and lets the pool
-    // composite the body. Other terminals paint the body cells below.
-    if scene.is_some() {
-        return;
-    }
-
     let end_x = inner.x + inner.width;
     let body: Vec<Vec<(String, Style)>> = popup
         .lines
         .iter()
         .map(|line| truncate_line(line, inner.width as usize))
         .collect();
-    for (row_idx, line) in body.iter().skip(scroll).enumerate() {
-        let row = inner.y + row_idx as u16;
-        if row >= inner.y + inner.height {
-            break;
-        }
-        let mut x = inner.x;
-        for (text, style) in line {
-            if x >= end_x {
-                break;
+
+    // A span's style is a delta over the modal base, so a plain span keeps the
+    // modal look. The rich arm needs an RGB modal fg and background to compose
+    // one TextRun per span at the popover text scale. Without them it paints
+    // cells.
+    let modal_fg = crate::render::review::style_rgb(modal_style.fg);
+    let run_bg = crate::render::review::style_rgb(
+        stoat
+            .theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|s| s.bg),
+    );
+    match (scene, modal_fg, run_bg) {
+        (Some(scene), Some(modal_fg), Some(run_bg)) => {
+            for (row_idx, line) in body.iter().skip(scroll).enumerate() {
+                let row = inner.y + row_idx as u16;
+                if row >= inner.y + inner.height {
+                    break;
+                }
+                let mut chars_before = 0u16;
+                for (text, style) in line {
+                    let col = (chars_before * HOVER_TEXT_SCALE + 8) / 16;
+                    let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
+                    TextRun {
+                        col,
+                        row: 0,
+                        scale: HOVER_TEXT_SCALE,
+                        color,
+                        bg: run_bg,
+                        text,
+                    }
+                    .render(Rect::new(inner.x, row, 1, 1), buf, scene);
+                    chars_before += text.chars().count() as u16;
+                }
             }
-            let (next_x, _) = buf.set_stringn(
-                x,
-                row,
-                text,
-                (end_x - x) as usize,
-                modal_style.patch(*style),
-            );
-            x = next_x;
-        }
+        },
+        _ => {
+            for (row_idx, line) in body.iter().skip(scroll).enumerate() {
+                let row = inner.y + row_idx as u16;
+                if row >= inner.y + inner.height {
+                    break;
+                }
+                let mut x = inner.x;
+                for (text, style) in line {
+                    if x >= end_x {
+                        break;
+                    }
+                    let (next_x, _) = buf.set_stringn(
+                        x,
+                        row,
+                        text,
+                        (end_x - x) as usize,
+                        modal_style.patch(*style),
+                    );
+                    x = next_x;
+                }
+            }
+        },
     }
 }
 
@@ -174,64 +205,6 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     Some((popup_area, inner))
 }
 
-/// Render hover body page `page` as a self-contained VT plus APC byte stream for
-/// the HOVER smooth-scroll pool.
-///
-/// The `region_height` body lines starting at `page * region_height` paint as
-/// sub-cell text runs at the 0.85x hover scale, appended after an empty region
-/// buffer the way the rich gutter rides its pool pages. Coordinates are
-/// region-local because the pool composites the page at the region origin.
-pub(crate) fn render_hover_page(
-    popup: &HoverPopup,
-    page: u64,
-    theme: &crate::theme::Theme,
-    region_width: u16,
-    region_height: u16,
-) -> Vec<u8> {
-    let area = Rect::new(0, 0, region_width, region_height);
-    let buf = Buffer::empty(area);
-
-    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let modal_fg = crate::render::review::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
-    let run_bg = crate::render::review::style_rgb(
-        theme
-            .try_get(crate::theme::scope::UI_BACKGROUND)
-            .and_then(|s| s.bg),
-    )
-    .unwrap_or([0, 0, 0]);
-
-    let start_row = page.saturating_mul(region_height as u64) as usize;
-
-    let mut scene = ApcScene::new();
-    let mut scratch = Buffer::empty(area);
-    for row_idx in 0..region_height {
-        let Some(line) = popup.lines.get(start_row + row_idx as usize) else {
-            break;
-        };
-        let line = truncate_line(line, region_width as usize);
-        let mut chars_before = 0u16;
-        for (text, style) in &line {
-            let col = (chars_before * HOVER_TEXT_SCALE + 8) / 16;
-            let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
-            TextRun {
-                col,
-                row: 0,
-                scale: HOVER_TEXT_SCALE,
-                color,
-                bg: run_bg,
-                text,
-            }
-            .render(Rect::new(0, row_idx, 1, 1), &mut scratch, &mut scene);
-            chars_before += text.chars().count() as u16;
-        }
-    }
-
-    let apc = scene.buffer().clone();
-    let mut bytes = crate::smooth_scroll::serialize_buffer(&buf);
-    bytes.extend_from_slice(&apc);
-    bytes
-}
-
 pub(crate) fn cursor_screen_position(
     editor: &mut crate::editor_state::EditorState,
     content_area: Rect,
@@ -292,48 +265,4 @@ fn truncate_line(line: &[(String, Style)], width: usize) -> Vec<(String, Style)>
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{render_hover_page, HoverPopup};
-    use ratatui::{layout::Rect, style::Style};
-
-    fn popup(lines: &[&str]) -> HoverPopup {
-        HoverPopup {
-            lines: lines
-                .iter()
-                .map(|l| vec![(l.to_string(), Style::default())])
-                .collect(),
-            anchor_offset: 0,
-            scroll_half_pages: 0,
-            area: Rect::default(),
-        }
-    }
-
-    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack.windows(needle.len()).any(|w| w == needle)
-    }
-
-    #[test]
-    fn hover_page_carries_text_runs_for_its_line_slice() {
-        let theme = crate::theme::Theme::empty();
-        let popup = popup(&["alpha", "bravo"]);
-
-        let page0 = render_hover_page(&popup, 0, &theme, 10, 4);
-        assert!(
-            contains(&page0, b"text_run"),
-            "page 0 emits a text_run frame"
-        );
-        assert!(
-            contains(&page0, b"alpha") && contains(&page0, b"bravo"),
-            "page 0 carries both body lines"
-        );
-
-        let past_end = render_hover_page(&popup, 1, &theme, 10, 4);
-        assert!(
-            !contains(&past_end, b"text_run"),
-            "a page past the body emits no text run"
-        );
-    }
 }
