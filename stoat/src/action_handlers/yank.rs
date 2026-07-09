@@ -3,7 +3,7 @@ use crate::{
     pane::View,
     register::Register,
 };
-use stoat_text::{Bias, SelectionGoal};
+use stoat_text::{Bias, Point, SelectionGoal};
 
 /// Copy every non-collapsed selection's content into the
 /// caller-selected register (or unnamed when none is set),
@@ -305,6 +305,11 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         return UpdateEffect::None;
     }
 
+    // Line-shaped register content (every fragment ends with a line ending)
+    // pastes as a line rather than splicing mid-line. After puts it below the
+    // line, Before at the line start.
+    let linewise = fragments.iter().all(|f| f.ends_with('\n'));
+
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -318,6 +323,8 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         let rope = buf_snap.rope();
+        let max_row = rope.max_point().row;
+        let rope_len = rope.len();
         let entries: Vec<(usize, usize)> = editor
             .selections
             .all_anchors()
@@ -330,9 +337,30 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                 } else {
                     (end, start)
                 };
-                let insert_at = match side {
-                    PasteSide::Before => lo,
-                    PasteSide::After => {
+                let insert_at = match (side, linewise) {
+                    (PasteSide::Before, true) => {
+                        let row = rope.offset_to_point(lo).row;
+                        rope.point_to_offset(Point::new(row, 0))
+                    },
+                    (PasteSide::After, true) => {
+                        // The line below the range's last content line. A range
+                        // ending at column 0 consumed the previous line's ending,
+                        // so its last content line is one above.
+                        let hi_point = rope.offset_to_point(hi);
+                        let last_line = if hi > lo && hi_point.column == 0 {
+                            hi_point.row.saturating_sub(1)
+                        } else {
+                            hi_point.row
+                        };
+                        let next = last_line + 1;
+                        if next > max_row {
+                            rope_len
+                        } else {
+                            rope.point_to_offset(Point::new(next, 0))
+                        }
+                    },
+                    (PasteSide::Before, false) => lo,
+                    (PasteSide::After, false) => {
                         if lo == hi {
                             rope.chars_at(hi).next().map_or(hi, |c| hi + c.len_utf8())
                         } else {
@@ -653,6 +681,32 @@ mod tests {
         h.type_keys("v l l d");
         assert_eq!(buffer_text(&h, &path), "def\n");
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    #[test]
+    fn linewise_paste_after_inserts_the_line_below() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "X\nY\nZ\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["X\n".to_string()]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "X\nY\nZ\nX\n");
+    }
+
+    #[test]
+    fn linewise_paste_before_inserts_the_line_above() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "X\nY\nZ\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["X\n".to_string()]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteBefore);
+        assert_eq!(buffer_text(&h, &path), "X\nY\nX\nZ\n");
     }
 
     #[test]
