@@ -9,8 +9,9 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 use stoat_language::LanguageRegistry;
-use stoat_scheduler::Executor;
+use stoat_scheduler::{Executor, Task};
 use stoat_text::{Bias, SelectionGoal};
+use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 /// Preview content cap. Keeps preview reads bounded so a stray large or binary
 /// file never stalls the render thread.
@@ -125,6 +126,167 @@ impl PickList {
     }
 }
 
+/// How a [`PathPicker`] previews its current selection.
+pub(crate) enum PreviewPolicy {
+    /// Read the selected path from disk.
+    File,
+    /// Preview the live in-memory buffer when the path has one open, else the
+    /// disk file. The finder's Buffers scope and the palette's buffer picker.
+    LiveBufferThenFile,
+    /// No preview -- e.g. a directory picker, which has nothing to show.
+    NoPreview,
+}
+
+/// A walk-fed path list, its fuzzy [`PickList`], and a [`Preview`] pane.
+///
+/// Drives both the file finder and the palette's inline argument picker, so a
+/// fix to walk draining, the refilter text-cache, or preview syncing reaches
+/// both instead of only the copy it was written against.
+pub(crate) struct PathPicker {
+    pub(crate) git_root: PathBuf,
+    /// Every candidate path. Grows as walk batches arrive via
+    /// [`PathPicker::pump_walk`] for a walked source. A caller-fed source leaves
+    /// it empty and drives [`PathPicker::refilter_with_base`] instead.
+    pub(crate) all_paths: Vec<PathBuf>,
+    walk_rx: Option<UnboundedReceiver<Vec<PathBuf>>>,
+    _walk_task: Option<Task<()>>,
+    pub(crate) picklist: PickList,
+    /// Last query run through the matcher, so a render tick with no typing
+    /// short-circuits. Cleared by [`PathPicker::invalidate`] when the base set
+    /// changes under a stable query.
+    pub(crate) last_filter_text: String,
+    pub(crate) preview: Preview,
+}
+
+impl PathPicker {
+    /// Create a picker over `git_root`. `walk` is the streaming walker for a
+    /// file source, or `None` for a caller-fed fixed set.
+    pub(crate) fn new(
+        ws: &mut Workspace,
+        executor: Executor,
+        git_root: PathBuf,
+        walk: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
+    ) -> Self {
+        let (walk_rx, walk_task) = match walk {
+            Some((rx, task)) => (Some(rx), Some(task)),
+            None => (None, None),
+        };
+        let preview = Preview::new(ws, executor);
+        Self {
+            git_root,
+            all_paths: Vec::new(),
+            walk_rx,
+            _walk_task: walk_task,
+            picklist: PickList::default(),
+            last_filter_text: String::new(),
+            preview,
+        }
+    }
+
+    pub(crate) fn selected_path(&self) -> Option<&Path> {
+        self.picklist.selected_path()
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: i32) {
+        self.picklist.move_selection(delta);
+    }
+
+    pub(crate) fn page(&mut self, dir: i32) {
+        self.picklist.page(dir);
+    }
+
+    /// Drain every walk batch since the last call into [`Self::all_paths`],
+    /// invalidating the filter cache when any arrived. Returns whether a batch
+    /// was consumed. No-op for a caller-fed source.
+    pub(crate) fn pump_walk(&mut self) -> bool {
+        let Some(rx) = self.walk_rx.as_mut() else {
+            return false;
+        };
+        let mut received_any = false;
+        loop {
+            match rx.try_recv() {
+                Ok(batch) => {
+                    self.all_paths.extend(batch);
+                    received_any = true;
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.walk_rx = None;
+                    break;
+                },
+            }
+        }
+        if received_any {
+            self.invalidate();
+        }
+        received_any
+    }
+
+    /// Force the next refilter to re-run the matcher, even under an unchanged
+    /// query. Callers whose base set changed (a walk batch, a scope flip) call
+    /// this so the stale filtered rows do not survive.
+    pub(crate) fn invalidate(&mut self) {
+        self.last_filter_text.clear();
+        self.picklist.filtered.clear();
+        self.picklist.match_indices.clear();
+    }
+
+    /// Refilter over this picker's own walk-fed [`Self::all_paths`], skipping
+    /// the work when the query is unchanged and rows are present.
+    pub(crate) fn refilter(&mut self, query: &str) {
+        if query == self.last_filter_text && !self.picklist.filtered.is_empty() {
+            return;
+        }
+        let base = self.all_paths.clone();
+        self.refilter_with_base(query, &base);
+    }
+
+    /// Refilter over a caller-owned `base` set. The query cache still applies,
+    /// so a caller that changes `base` under a stable query must
+    /// [`Self::invalidate`] first (the finder does this on a scope flip).
+    pub(crate) fn refilter_with_base(&mut self, query: &str, base: &[PathBuf]) {
+        if query == self.last_filter_text && !self.picklist.filtered.is_empty() {
+            return;
+        }
+        self.picklist.base = base.to_vec();
+        self.picklist.refilter(query, &self.git_root);
+        self.last_filter_text = query.to_string();
+    }
+
+    /// Sync the preview pane to the current selection per `policy`, clearing it
+    /// when nothing is selected.
+    pub(crate) fn sync_preview(
+        &mut self,
+        ws: &mut Workspace,
+        fs_host: &dyn FsHost,
+        language_registry: &LanguageRegistry,
+        policy: PreviewPolicy,
+    ) {
+        let Some(path) = self.selected_path().map(|p| p.to_path_buf()) else {
+            self.preview.clear(ws);
+            return;
+        };
+        let source = match policy {
+            PreviewPolicy::File => Some(PreviewSource::File(path)),
+            PreviewPolicy::LiveBufferThenFile => Some(match ws.buffers.id_for_path(&path) {
+                Some(id) => PreviewSource::Buffer(id),
+                None => PreviewSource::File(path),
+            }),
+            PreviewPolicy::NoPreview => None,
+        };
+        match source {
+            Some(source) => self.preview.sync(ws, fs_host, language_registry, source),
+            None => self.preview.clear(ws),
+        }
+    }
+
+    /// Tear down the preview's owned editor slot. Callers dispose their own
+    /// input widget separately.
+    pub(crate) fn dispose(&self, ws: &mut Workspace) {
+        self.preview.dispose(ws);
+    }
+}
+
 /// Where a [`Preview`] pulls its content from.
 ///
 /// `File` reads the path from disk. `Buffer` reads a live, possibly modified
@@ -133,10 +295,9 @@ impl PickList {
 #[derive(PartialEq)]
 pub(crate) enum PreviewSource {
     File(PathBuf),
-    /// Live in-memory buffer. The buffer picker that previews from it in
-    /// production lands later, so outside tests this variant is currently
-    /// unconstructed.
-    #[allow(dead_code)]
+    /// Live in-memory buffer, so the preview reflects unsaved edits rather than
+    /// the backing file. Used by the finder's Buffers scope and the palette's
+    /// buffer argument picker.
     Buffer(BufferId),
 }
 
@@ -282,6 +443,48 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn live_buffer_then_file_previews_disk_when_no_buffer() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let fs = crate::host::FakeFs::new();
+        fs.insert_files(std::iter::once((
+            p("/repo/on_disk.txt"),
+            b"disk content\n".as_slice(),
+        )));
+
+        let ws = h.stoat.active_workspace_mut();
+        let mut picker = PathPicker::new(ws, executor, p("/repo"), None);
+        picker.all_paths = vec![p("/repo/on_disk.txt")];
+        picker.refilter("");
+
+        // The selected path has no open buffer, so the unified LiveBufferThenFile
+        // policy -- the palette's buffer picker among them -- falls back to disk
+        // rather than clearing the pane.
+        picker.sync_preview(
+            ws,
+            &fs,
+            &language_registry,
+            PreviewPolicy::LiveBufferThenFile,
+        );
+
+        let shown = {
+            let buffer = ws
+                .buffers
+                .get(picker.preview.buffer)
+                .expect("preview buffer");
+            let guard = buffer.read().expect("preview buffer poisoned");
+            guard.rope().to_string()
+        };
+        assert!(
+            shown.contains("disk content"),
+            "no-buffer path falls back to the disk file, got {shown:?}"
+        );
+
+        picker.dispose(ws);
     }
 
     /// Display strings of the filtered rows after running `query` over `base`.

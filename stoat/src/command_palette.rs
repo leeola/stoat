@@ -4,7 +4,7 @@ use crate::{
     host::FsHost,
     input_view::{InputView, SubmitTarget},
     pane::{FocusTarget, View},
-    picker::{PickList, Preview, PreviewSource},
+    picker::{PathPicker, PreviewPolicy},
     rebase::RebasePause,
     workspace::Workspace,
 };
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use stoat_action::{registry, ActionKind, ParamValue, ValueSource};
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 pub struct CommandPalette {
     /// The single command-line input, holding the raw text typed after `:`.
@@ -54,37 +54,18 @@ pub struct CommandPalette {
 /// [`ValueSource::Files`], [`ValueSource::Directories`], or
 /// [`ValueSource::Buffers`] argument.
 ///
-/// A trimmed mirror of [`crate::file_finder::FileFinder`]'s picker half: it owns
-/// the candidate path set, the fuzzy [`PickList`] over it, and the live
-/// [`Preview`] pane. The palette parses the command's trailing argument and
-/// drives this list with it, so `:o src/ma` filters the same way the standalone
-/// finder does.
+/// Wraps a shared [`PathPicker`] with the argument's [`ValueSource`], exactly as
+/// [`crate::file_finder::FileFinder`] does. The palette parses the command's
+/// trailing argument and drives the core's fuzzy list with it, so `:o src/ma`
+/// filters the same way the standalone finder does.
 pub(crate) struct ArgPicker {
-    /// Whether this picker lists workspace files or open buffers. Selects the
-    /// preview source and whether a streaming walk feeds the list.
+    /// Whether this picker lists workspace files, directories, or open buffers.
+    /// Selects the preview policy and whether a streaming walk feeds the list.
     source: ValueSource,
-    /// Workspace root. The base for repo-relative row display (read by the
-    /// renderer) and fuzzy ranking, and the root a file walk runs from.
-    pub(crate) git_root: PathBuf,
-    /// Every candidate path. For a file picker it grows as walk batches arrive
-    /// via [`ArgPicker::pump_walk`]. For a buffer picker it is the fixed
-    /// open-buffer set captured at construction. Copied into [`PickList::base`]
-    /// on each refilter.
-    all_paths: Vec<PathBuf>,
-    /// Streaming receiver fed by the spawned walker, or `None` for a buffer
-    /// picker, which has no walk. Cleared once the sender drops.
-    walk_rx: Option<UnboundedReceiver<Vec<PathBuf>>>,
-    /// Held only to keep the spawned walker alive, or `None` for a buffer
-    /// picker. Dropping it cancels the in-flight walk on runtimes that propagate
-    /// cancellation.
-    _walk_task: Option<Task<()>>,
-    /// Fuzzy result list over [`Self::all_paths`], read by the renderer.
-    pub(crate) picklist: PickList,
-    /// Last argument text run through the matcher, so the per-frame sync skips
-    /// re-running it when nothing changed.
-    last_filter_text: String,
-    /// Preview pane shown beside the result list.
-    pub(crate) preview: Preview,
+    /// The shared walk / fuzzy-list / preview core. A file picker leaves its
+    /// walk feeding `all_paths`. A buffer picker seeds `all_paths` with the
+    /// fixed open-buffer set and has no walk.
+    pub(crate) core: PathPicker,
 }
 
 impl ArgPicker {
@@ -96,96 +77,46 @@ impl ArgPicker {
         walk: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
         all_paths: Vec<PathBuf>,
     ) -> Self {
-        let (walk_rx, walk_task) = match walk {
-            Some((rx, task)) => (Some(rx), Some(task)),
-            None => (None, None),
-        };
-        let preview = Preview::new(ws, executor);
-        Self {
-            source,
-            git_root,
-            all_paths,
-            walk_rx,
-            _walk_task: walk_task,
-            picklist: PickList::default(),
-            last_filter_text: String::new(),
-            preview,
-        }
+        let mut core = PathPicker::new(ws, executor, git_root, walk);
+        core.all_paths = all_paths;
+        Self { source, core }
     }
 
     /// Absolute path of the currently selected filtered row, if any.
     pub(crate) fn selected_path(&self) -> Option<&Path> {
-        self.picklist.selected_path()
+        self.core.selected_path()
     }
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        self.picklist.move_selection(delta);
+        self.core.move_selection(delta);
     }
 
-    /// Drain every batch the walker emitted since the last call into
-    /// [`Self::all_paths`], invalidating the filter cache so the next
-    /// [`Self::refilter`] re-runs against the larger base.
     fn pump_walk(&mut self) -> bool {
-        let Some(rx) = self.walk_rx.as_mut() else {
-            return false;
-        };
-        let mut received_any = false;
-        loop {
-            match rx.try_recv() {
-                Ok(batch) => {
-                    self.all_paths.extend(batch);
-                    received_any = true;
-                },
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.walk_rx = None;
-                    break;
-                },
-            }
-        }
-        if received_any {
-            self.last_filter_text.clear();
-            self.picklist.filtered.clear();
-            self.picklist.match_indices.clear();
-        }
-        received_any
+        self.core.pump_walk()
     }
 
-    /// Re-run the matcher for `query` over the discovered paths, short-circuiting
-    /// when the query is unchanged and the list is already populated.
     fn refilter(&mut self, query: &str) {
-        if query == self.last_filter_text && !self.picklist.filtered.is_empty() {
-            return;
-        }
-        self.picklist.base = self.all_paths.clone();
-        self.picklist.refilter(query, &self.git_root);
-        self.last_filter_text = query.to_string();
+        self.core.refilter(query);
     }
 
-    /// Sync the preview pane to the selected path, or clear it when nothing is
-    /// selected. A file picker previews the file on disk. A buffer picker
-    /// previews the live, possibly modified in-memory buffer, falling back to a
-    /// cleared pane when the path has no open buffer.
+    /// Sync the preview pane per this picker's source. A buffer source previews
+    /// the live in-memory buffer, falling back to the disk file when the path
+    /// has none. A directory source shows nothing. Every other source reads the
+    /// file from disk.
     fn sync_preview(
         &mut self,
         ws: &mut Workspace,
         fs_host: &dyn FsHost,
         language_registry: &LanguageRegistry,
     ) {
-        let Some(path) = self.selected_path().map(|p| p.to_path_buf()) else {
-            self.preview.clear(ws);
-            return;
+        let policy = match self.source {
+            ValueSource::Buffers => PreviewPolicy::LiveBufferThenFile,
+            ValueSource::Directories => PreviewPolicy::NoPreview,
+            _ => PreviewPolicy::File,
         };
-        let preview_source = match self.source {
-            ValueSource::Buffers => ws.buffers.id_for_path(&path).map(PreviewSource::Buffer),
-            ValueSource::Directories => None,
-            _ => Some(PreviewSource::File(path)),
-        };
-        match preview_source {
-            Some(source) => self.preview.sync(ws, fs_host, language_registry, source),
-            None => self.preview.clear(ws),
-        }
+        self.core
+            .sync_preview(ws, fs_host, language_registry, policy);
     }
 }
 
@@ -371,7 +302,7 @@ impl CommandPalette {
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
         if let Some(picker) = &self.arg_picker {
-            picker.preview.dispose(ws);
+            picker.core.preview.dispose(ws);
         }
     }
 
@@ -1044,7 +975,7 @@ mod tests {
         h.type_text(":cd ");
         h.snapshot();
         assert_eq!(
-            arg_picker(&h).picklist.filtered.len(),
+            arg_picker(&h).core.picklist.filtered.len(),
             2,
             "lists src and docs; a root-level file contributes no directory",
         );
@@ -1056,14 +987,14 @@ mod tests {
         seed_palette_workspace(&mut h, &[("src/main.rs", ""), ("docs/readme.md", "")]);
         h.type_text(":cd ");
         h.snapshot();
-        assert_eq!(arg_picker(&h).picklist.filtered.len(), 2);
+        assert_eq!(arg_picker(&h).core.picklist.filtered.len(), 2);
 
         h.type_text("src");
         h.snapshot();
         let picker = arg_picker(&h);
-        assert_eq!(picker.picklist.filtered.len(), 1);
-        let idx = picker.picklist.filtered[0];
-        assert!(picker.picklist.base[idx].ends_with("src"));
+        assert_eq!(picker.core.picklist.filtered.len(), 1);
+        let idx = picker.core.picklist.filtered[0];
+        assert!(picker.core.picklist.base[idx].ends_with("src"));
     }
 
     #[test]
@@ -1338,6 +1269,7 @@ mod tests {
             .arg_picker
             .as_mut()
             .expect("arg picker active")
+            .core
             .picklist
             .move_selection(1);
         h.assert_snapshot_one_frame("palette_arg_preview_highlighted_first_frame");
@@ -1349,7 +1281,7 @@ mod tests {
         seed_palette_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("sub/c.rs", "")]);
         h.type_text(":o ");
         h.snapshot();
-        assert_eq!(arg_picker(&h).picklist.filtered.len(), 3);
+        assert_eq!(arg_picker(&h).core.picklist.filtered.len(), 3);
     }
 
     #[test]
@@ -1361,14 +1293,14 @@ mod tests {
         );
         h.type_text(":o ");
         h.snapshot();
-        assert_eq!(arg_picker(&h).picklist.filtered.len(), 3);
+        assert_eq!(arg_picker(&h).core.picklist.filtered.len(), 3);
 
         h.type_text("alp");
         h.snapshot();
         let picker = arg_picker(&h);
-        assert_eq!(picker.picklist.filtered.len(), 1);
-        let idx = picker.picklist.filtered[0];
-        assert!(picker.picklist.base[idx].ends_with("alpha.rs"));
+        assert_eq!(picker.core.picklist.filtered.len(), 1);
+        let idx = picker.core.picklist.filtered[0];
+        assert!(picker.core.picklist.base[idx].ends_with("alpha.rs"));
     }
 
     #[test]
@@ -1377,11 +1309,11 @@ mod tests {
         seed_palette_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("c.rs", "")]);
         h.type_text(":o ");
         h.snapshot();
-        assert_eq!(arg_picker(&h).picklist.selected, 0);
+        assert_eq!(arg_picker(&h).core.picklist.selected, 0);
 
         h.type_keys("down");
         h.snapshot();
-        assert_eq!(arg_picker(&h).picklist.selected, 1);
+        assert_eq!(arg_picker(&h).core.picklist.selected, 1);
     }
 
     #[test]
@@ -1413,7 +1345,7 @@ mod tests {
         seed_palette_workspace(&mut h, &[("a.rs", "fn a() {}\n")]);
         h.type_text(":o ");
         h.snapshot();
-        let preview_id = arg_picker(&h).preview.buffer;
+        let preview_id = arg_picker(&h).core.preview.buffer;
         assert!(h.stoat.active_workspace().buffers.get(preview_id).is_some());
 
         h.type_keys("escape");
@@ -1468,7 +1400,7 @@ mod tests {
         h.type_text(":b ");
         h.snapshot();
         assert_eq!(
-            arg_picker(&h).picklist.filtered.len(),
+            arg_picker(&h).core.picklist.filtered.len(),
             2,
             "lists only the two open buffers, not every workspace file",
         );
@@ -1494,7 +1426,7 @@ mod tests {
 
         h.type_text(":b ");
         h.snapshot();
-        let preview_id = arg_picker(&h).preview.buffer;
+        let preview_id = arg_picker(&h).core.preview.buffer;
         let shown = {
             let buffer = h
                 .stoat

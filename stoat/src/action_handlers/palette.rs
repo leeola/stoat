@@ -172,7 +172,7 @@ pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
         && palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()
     {
-        picker.picklist.page(dir);
+        picker.core.page(dir);
         return UpdateEffect::Redraw;
     }
     let step = match stoat.command_palette.as_ref() {

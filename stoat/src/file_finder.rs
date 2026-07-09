@@ -2,12 +2,12 @@ use crate::{
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
-    picker::{PickList, Preview, PreviewSource},
+    picker::{PathPicker, PreviewPolicy},
     workspace::Workspace,
 };
 use std::path::{Path, PathBuf};
 use stoat_scheduler::{Executor, Task};
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 /// Which subset of files the finder currently lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,37 +44,17 @@ pub struct FileFinder {
     /// What submit should do with the selected file.
     pub(crate) open_intent: OpenIntent,
     pub(crate) scope: FinderScope,
-    pub(crate) git_root: PathBuf,
-    /// Absolute paths of every tracked file. Grows as
-    /// [`FileFinder::pump_walk`] drains batches off [`Self::walk_rx`].
-    pub(crate) all_paths: Vec<PathBuf>,
-    /// Streaming receiver fed by the spawned walker; each message is a
-    /// batch of paths discovered since the last batch. Cleared once
-    /// the sender drops, signalling the walk is exhausted.
-    walk_rx: Option<UnboundedReceiver<Vec<PathBuf>>>,
-    /// Walker task held only to keep the spawned worker alive --
-    /// dropping the [`Task`] would cancel the in-flight walk on
-    /// runtimes that propagate cancellation. The walker reports its
-    /// progress through [`Self::walk_rx`], not through the task value.
-    _walk_task: Task<()>,
     /// Absolute paths of currently-modified files. Re-queried on scope toggle.
     pub(crate) modified_paths: Vec<PathBuf>,
     /// Absolute paths of currently-open buffers. Captured once at open time;
     /// not re-queried on scope toggle.
     pub(crate) buffer_paths: Vec<PathBuf>,
-    /// Fuzzy result list over the active scope's paths. The active scope's
-    /// path `Vec` is copied into [`PickList::base`] on each refilter. The
-    /// renderer reads its `filtered`/`match_indices`/`selected`.
-    pub(crate) picklist: PickList,
-    /// Last input text that was run through the matcher. Lets
-    /// [`FileFinder::refilter_from_input`] short-circuit when the
-    /// render loop ticks without any typing.
-    pub(crate) last_filter_text: String,
-    pub(crate) last_filter_scope: FinderScope,
-    /// Preview pane shown beside the result list, reused across selection
-    /// changes. Created at [`FileFinder::new`], disposed in
-    /// [`FileFinder::dispose`].
-    pub(crate) preview: Preview,
+    /// The shared walk / fuzzy-list / preview core. Its `all_paths` is the
+    /// [`FinderScope::All`] base; Modified/Buffers feed their own vecs through
+    /// [`PathPicker::refilter_with_base`]. A scope toggle
+    /// [`PathPicker::invalidate`]s it to force a re-run under an unchanged
+    /// query.
+    pub(crate) core: PathPicker,
 }
 
 impl FileFinder {
@@ -98,34 +78,22 @@ impl FileFinder {
             "insert",
             1,
         );
-        let preview = Preview::new(ws, executor);
+        let mut core = PathPicker::new(ws, executor, git_root, Some((walk_rx, walk_task)));
 
         let scope = initial_scope;
-        let all_paths: Vec<PathBuf> = Vec::new();
-        let mut picklist = PickList {
-            base: match scope {
-                FinderScope::All => all_paths.clone(),
-                FinderScope::Modified => modified_paths.clone(),
-                FinderScope::Buffers => buffer_paths.clone(),
-            },
-            ..PickList::default()
-        };
-        picklist.refilter("", &git_root);
+        match scope {
+            FinderScope::All => core.refilter(""),
+            FinderScope::Modified => core.refilter_with_base("", &modified_paths),
+            FinderScope::Buffers => core.refilter_with_base("", &buffer_paths),
+        }
 
         Self {
             input,
             open_intent,
             scope,
-            git_root,
-            all_paths,
-            walk_rx: Some(walk_rx),
-            _walk_task: walk_task,
             modified_paths,
             buffer_paths,
-            picklist,
-            last_filter_text: String::new(),
-            last_filter_scope: scope,
-            preview,
+            core,
         }
     }
 
@@ -136,7 +104,7 @@ impl FileFinder {
     /// Base list for the current scope.
     pub(crate) fn base_paths(&self) -> &[PathBuf] {
         match self.scope {
-            FinderScope::All => &self.all_paths,
+            FinderScope::All => &self.core.all_paths,
             FinderScope::Modified => &self.modified_paths,
             FinderScope::Buffers => &self.buffer_paths,
         }
@@ -144,12 +112,12 @@ impl FileFinder {
 
     /// Absolute path of the currently selected filtered row, if any.
     pub(crate) fn selected_path(&self) -> Option<&Path> {
-        self.picklist.selected_path()
+        self.core.selected_path()
     }
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        self.picklist.move_selection(delta);
+        self.core.move_selection(delta);
     }
 
     /// Flip the scope, optionally refreshing the Modified list before
@@ -162,50 +130,15 @@ impl FileFinder {
     pub(crate) fn toggle_scope(&mut self, git_host: &dyn GitHost) {
         self.scope = match self.scope {
             FinderScope::All => {
-                self.modified_paths = query_modified(git_host, &self.git_root);
+                self.modified_paths = query_modified(git_host, &self.core.git_root);
                 FinderScope::Modified
             },
             FinderScope::Modified => FinderScope::All,
             FinderScope::Buffers => FinderScope::All,
         };
-        self.picklist.selected = 0;
-        self.last_filter_text = String::new();
-        // Force refilter + preview resync on next render.
-        self.picklist.filtered.clear();
-        self.picklist.match_indices.clear();
-    }
-
-    /// Drain every batch the walker has emitted since the last call,
-    /// extending [`Self::all_paths`]. The receiver closes when the walker
-    /// is exhausted, after which the file finder no longer polls.
-    /// Returns `true` when at least one batch was consumed; the
-    /// caller invalidates filter caches in that case so the next
-    /// [`Self::refilter_from_input`] re-runs the matcher against the
-    /// now-larger base.
-    pub(crate) fn pump_walk(&mut self) -> bool {
-        let Some(rx) = self.walk_rx.as_mut() else {
-            return false;
-        };
-        let mut received_any = false;
-        loop {
-            match rx.try_recv() {
-                Ok(batch) => {
-                    self.all_paths.extend(batch);
-                    received_any = true;
-                },
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.walk_rx = None;
-                    break;
-                },
-            }
-        }
-        if received_any {
-            self.last_filter_text.clear();
-            self.picklist.filtered.clear();
-            self.picklist.match_indices.clear();
-        }
-        received_any
+        self.core.picklist.selected = 0;
+        // Force refilter + preview resync on next render against the new base.
+        self.core.invalidate();
     }
 
     /// Re-run the matcher if the input text or scope has changed since last
@@ -213,18 +146,13 @@ impl FileFinder {
     /// sync hook. Drains any pending walk result first so freshly arrived
     /// paths participate in the same render tick.
     pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) {
-        self.pump_walk();
+        self.core.pump_walk();
         let text = self.input.text(ws);
-        if text == self.last_filter_text
-            && self.scope == self.last_filter_scope
-            && !self.picklist.filtered.is_empty()
-        {
-            return;
+        match self.scope {
+            FinderScope::All => self.core.refilter(&text),
+            FinderScope::Modified => self.core.refilter_with_base(&text, &self.modified_paths),
+            FinderScope::Buffers => self.core.refilter_with_base(&text, &self.buffer_paths),
         }
-        self.picklist.base = self.base_paths().to_vec();
-        self.picklist.refilter(&text, &self.git_root);
-        self.last_filter_text = text;
-        self.last_filter_scope = self.scope;
     }
 
     /// Sync the preview pane to the current selection. Clears the pane when
@@ -240,18 +168,12 @@ impl FileFinder {
         fs_host: &dyn FsHost,
         language_registry: &stoat_language::LanguageRegistry,
     ) {
-        let Some(path) = self.selected_path().map(|p| p.to_path_buf()) else {
-            self.preview.clear(ws);
-            return;
+        let policy = match self.scope {
+            FinderScope::Buffers => PreviewPolicy::LiveBufferThenFile,
+            _ => PreviewPolicy::File,
         };
-        let source = match self.scope {
-            FinderScope::Buffers => match ws.buffers.id_for_path(&path) {
-                Some(id) => PreviewSource::Buffer(id),
-                None => PreviewSource::File(path),
-            },
-            _ => PreviewSource::File(path),
-        };
-        self.preview.sync(ws, fs_host, language_registry, source);
+        self.core
+            .sync_preview(ws, fs_host, language_registry, policy);
     }
 
     /// Tear down owned editor slots. Called on every finder-close path.
@@ -261,7 +183,7 @@ impl FileFinder {
     /// across opens.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
-        self.preview.dispose(ws);
+        self.core.dispose(ws);
     }
 }
 
@@ -631,6 +553,7 @@ mod tests {
             .file_finder
             .as_ref()
             .expect("finder open")
+            .core
             .preview
             .buffer;
         let shown = {
@@ -757,6 +680,7 @@ mod tests {
                 .file_finder
                 .as_ref()
                 .unwrap()
+                .core
                 .picklist
                 .filtered
                 .len(),
@@ -765,8 +689,8 @@ mod tests {
         h.type_text("alp");
         let _ = h.snapshot();
         let finder = h.stoat.file_finder.as_ref().unwrap();
-        assert_eq!(finder.picklist.filtered.len(), 1);
-        let idx = finder.picklist.filtered[0];
+        assert_eq!(finder.core.picklist.filtered.len(), 1);
+        let idx = finder.core.picklist.filtered[0];
         assert!(finder.base_paths()[idx].ends_with("alpha.rs"));
     }
 
@@ -870,7 +794,7 @@ mod tests {
         h.type_keys("space p");
         h.snapshot();
         let finder = h.stoat.file_finder.as_ref().expect("finder open");
-        let preview_id = finder.preview.buffer;
+        let preview_id = finder.core.preview.buffer;
         let ws = h.stoat.active_workspace();
         let lang = ws.buffers.language_for(preview_id).expect("language set");
         assert_eq!(lang.name, "rust");
@@ -888,6 +812,7 @@ mod tests {
             .file_finder
             .as_ref()
             .expect("finder open")
+            .core
             .preview
             .buffer;
         let lang_first = h
@@ -922,6 +847,7 @@ mod tests {
             .file_finder
             .as_ref()
             .expect("finder open")
+            .core
             .preview
             .buffer;
         assert!(h.stoat.active_workspace().buffers.get(preview_id).is_some());
@@ -963,6 +889,7 @@ mod tests {
 
     #[test]
     fn buffer_preview_source_shows_live_text_not_disk() {
+        use crate::picker::{Preview, PreviewSource};
         let mut h = crate::Stoat::test();
         let executor = h.stoat.executor.clone();
         let language_registry = h.stoat.language_registry.clone();

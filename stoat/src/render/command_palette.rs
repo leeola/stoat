@@ -188,7 +188,7 @@ fn render_palette_arg_picker(
         render_arg_preview(picker, preview_rect, theme, ws, buf);
     }
 
-    picker.picklist.viewport_rows = Some(list.height as usize);
+    picker.core.picklist.viewport_rows = Some(list.height as usize);
     paint_arg_rows(picker, list, theme, buf);
 }
 
@@ -220,7 +220,7 @@ fn paint_arg_rows(picker: &ArgPicker, area: Rect, theme: &crate::theme::Theme, b
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
     let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
 
-    let picklist = &picker.picklist;
+    let picklist = &picker.core.picklist;
     let start_row = picklist.selected.saturating_sub(rows.saturating_sub(1));
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
@@ -243,7 +243,7 @@ fn paint_arg_rows(picker: &ArgPicker, area: Rect, theme: &crate::theme::Theme, b
         for col in area.x..end_x {
             buf[(col, row)].set_char(' ').set_style(style);
         }
-        let label = display_row(&picklist.base[idx], &picker.git_root);
+        let label = display_row(&picklist.base[idx], &picker.core.git_root);
         write_str_clipped(buf, label_x, row, &label, style, end_x);
         for (label_col, _) in label.chars().enumerate() {
             let col = label_x + label_col as u16;
@@ -268,7 +268,7 @@ fn render_arg_preview(
         return;
     }
     let fallback = theme.get(crate::theme::scope::UI_TEXT);
-    if let Some(editor) = ws.editors.get_mut(picker.preview.editor) {
+    if let Some(editor) = ws.editors.get_mut(picker.core.preview.editor) {
         render_editor(editor, area, fallback, theme, buf, false);
     }
 }

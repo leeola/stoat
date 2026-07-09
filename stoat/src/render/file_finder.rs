@@ -145,13 +145,14 @@ pub(crate) fn render_file_finder(
         render_preview(finder, preview_rect, theme, ws, buf);
     }
 
-    finder.picklist.viewport_rows = Some(layout.list.height as usize);
+    finder.core.picklist.viewport_rows = Some(layout.list.height as usize);
     render_list(finder, layout.list, theme, buf);
 }
 
 fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
     let rows = area.height as usize;
     let start_row = finder
+        .core
         .picklist
         .selected
         .saturating_sub(rows.saturating_sub(1));
@@ -184,16 +185,17 @@ pub(crate) fn paint_finder_rows(
     let label_x = area.x + 1;
 
     for (row_idx, (&idx, indices)) in finder
+        .core
         .picklist
         .filtered
         .iter()
-        .zip(finder.picklist.match_indices.iter())
+        .zip(finder.core.picklist.match_indices.iter())
         .skip(start_row)
         .take(rows)
         .enumerate()
     {
         let row = area.y + row_idx as u16;
-        let is_selected = start_row + row_idx == finder.picklist.selected;
+        let is_selected = start_row + row_idx == finder.core.picklist.selected;
         let style = if is_selected {
             selected_style
         } else {
@@ -203,7 +205,7 @@ pub(crate) fn paint_finder_rows(
             buf[(col, row)].set_char(' ').set_style(style);
         }
         let path = &base[idx];
-        let label = display_row(path, &finder.git_root);
+        let label = display_row(path, &finder.core.git_root);
         write_str_clipped(buf, label_x, row, &label, style, end_x);
         for (label_col, _) in label.chars().enumerate() {
             let col = label_x + label_col as u16;
@@ -228,7 +230,7 @@ fn render_preview(
         return;
     }
     let fallback = theme.get(crate::theme::scope::UI_TEXT);
-    if let Some(editor) = ws.editors.get_mut(finder.preview.editor) {
+    if let Some(editor) = ws.editors.get_mut(finder.core.preview.editor) {
         render_editor(editor, area, fallback, theme, buf, false);
     }
 }
