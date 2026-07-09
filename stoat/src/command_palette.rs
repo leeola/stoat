@@ -82,6 +82,13 @@ impl ArgPicker {
         Self { source, core }
     }
 
+    /// The argument source this picker was installed for. The palette compares
+    /// it against the currently-parsed command's argument source to detect a
+    /// stale picker after the command head is edited.
+    pub(crate) fn source(&self) -> ValueSource {
+        self.source
+    }
+
     /// Absolute path of the currently selected filtered row, if any.
     pub(crate) fn selected_path(&self) -> Option<&Path> {
         self.core.selected_path()
@@ -306,17 +313,27 @@ impl CommandPalette {
         }
     }
 
+    /// Tear down the installed argument picker, disposing its preview editor so
+    /// the scratch buffer does not leak. Called when the parsed command's
+    /// argument source changes so a fresh picker installs in its place.
+    pub(crate) fn dispose_arg_picker(&mut self, ws: &mut Workspace) {
+        if let Some(picker) = self.arg_picker.take() {
+            picker.core.preview.dispose(ws);
+        }
+    }
+
     /// The value source of the current command's first argument when it drives
     /// an inline picker ([`ValueSource::Files`], [`ValueSource::Directories`],
     /// or [`ValueSource::Buffers`], e.g. `:o `, `:cd `, or `:b `), or `None`
     /// otherwise. Gates rendering the picker and routing selection keys to it.
     pub(crate) fn arg_source(&self) -> Option<ValueSource> {
         let param = self.command?.def.params().first()?;
-        matches!(
-            param.value_source,
-            ValueSource::Files | ValueSource::Directories | ValueSource::Buffers
-        )
-        .then_some(param.value_source)
+        match param.value_source {
+            ValueSource::None => None,
+            source @ (ValueSource::Files | ValueSource::Directories | ValueSource::Buffers) => {
+                Some(source)
+            },
+        }
     }
 
     /// The trailing argument text in picker-argument mode, or `None` otherwise.
@@ -412,12 +429,7 @@ impl CommandPalette {
             let chosen = self
                 .arg_picker
                 .as_ref()
-                .filter(|_| {
-                    matches!(
-                        param.value_source,
-                        ValueSource::Files | ValueSource::Directories | ValueSource::Buffers
-                    )
-                })
+                .filter(|picker| picker.source() == param.value_source)
                 .and_then(|picker| picker.selected_path())
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_else(|| arg.to_string());
@@ -1006,6 +1018,66 @@ mod tests {
         h.type_keys("enter");
         assert!(h.stoat.command_palette.is_none());
         assert_eq!(h.stoat.active_workspace().git_root, root.join("src"));
+    }
+
+    /// Replace the open palette's input text, standing in for the user editing
+    /// the command head, so the next sync re-parses it.
+    fn replace_palette_input(h: &mut TestHarness, text: &str) {
+        let idx = h.stoat.active_workspace;
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        let ws = &mut h.stoat.workspaces[idx];
+        palette.input.replace_text(ws, text);
+    }
+
+    #[test]
+    fn arg_picker_follows_edited_command() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(
+            &mut h,
+            &[("top.rs", ""), ("src/main.rs", ""), ("docs/readme.md", "")],
+        );
+        h.type_text(":o ");
+        h.snapshot();
+        assert_eq!(arg_picker(&h).core.picklist.filtered.len(), 3);
+        let stale_preview = arg_picker(&h).core.preview.buffer;
+
+        replace_palette_input(&mut h, "cd ");
+        h.snapshot();
+
+        let picker = arg_picker(&h);
+        assert_eq!(picker.source(), ValueSource::Directories);
+        assert_eq!(
+            picker.core.picklist.filtered.len(),
+            2,
+            "the picker follows the parsed command to the two directories",
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(stale_preview)
+                .is_none(),
+            "the stale Files preview buffer is evicted, not leaked",
+        );
+    }
+
+    #[test]
+    fn arg_submit_after_flip_to_cd_sets_dir_not_file() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("src/main.rs", "")]);
+        h.type_text(":o ");
+        h.snapshot();
+
+        replace_palette_input(&mut h, "cd src");
+        h.snapshot();
+        h.type_keys("enter");
+
+        assert!(h.stoat.command_palette.is_none());
+        assert_eq!(
+            h.stoat.active_workspace().git_root,
+            root.join("src"),
+            "Enter after the flip sets cwd to the directory, not the stale file",
+        );
     }
 
     /// Open the palette, type `typed`, and return the action name the Enter

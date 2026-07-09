@@ -16,9 +16,8 @@ pub(super) enum ArgCandidates {
         rx: UnboundedReceiver<Vec<PathBuf>>,
         task: Task<()>,
     },
-    /// Fully-known path set, such as the currently-open buffer paths. Consumed
-    /// by the buffer picker that lands with the `OpenBuffer` action.
-    #[allow(dead_code)]
+    /// Fully-known path set, such as the currently-open buffer paths. Feeds the
+    /// buffer picker (the `:b ` argument source).
     Paths(Vec<PathBuf>),
 }
 
@@ -29,7 +28,6 @@ pub(super) enum ArgCandidates {
 /// uses. `Directories` streams the workspace's directories derived from that
 /// walk. `Buffers` returns the currently-open buffer paths. `None` yields no
 /// picker.
-#[allow(dead_code)]
 pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCandidates> {
     match source {
         ValueSource::None => None,
@@ -76,6 +74,21 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     let Some((source, tail)) = resolved else {
         return;
     };
+
+    // A picker installed for a different source than the input now parses to
+    // (the command head was edited, e.g. `:o ` to `cd `) is stale. Tear it down
+    // so the correct-source picker installs below.
+    {
+        let ws = &mut stoat.workspaces[active_idx];
+        if let Some(palette) = stoat.command_palette.as_mut()
+            && palette
+                .arg_picker
+                .as_ref()
+                .is_some_and(|picker| picker.source() != source)
+        {
+            palette.dispose_arg_picker(ws);
+        }
+    }
 
     let needs_picker = stoat
         .command_palette
