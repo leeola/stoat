@@ -78,7 +78,7 @@ pub fn scan_working_tree(
     Some((workdir, inputs))
 }
 
-fn read_utf8(fs: &dyn FsHost, path: &Path) -> std::io::Result<String> {
+pub(crate) fn read_utf8(fs: &dyn FsHost, path: &Path) -> std::io::Result<String> {
     let mut buf = Vec::new();
     fs.read(path, &mut buf)?;
     String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))

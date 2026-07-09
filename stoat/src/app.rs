@@ -505,6 +505,20 @@ pub struct Stoat {
     /// drained by [`Self::drain_pending_git_refresh`].
     review_git_refresh_tx: Sender<()>,
     review_git_refresh_rx: Receiver<()>,
+    /// Per-path debounce tasks for the incremental diff-warm of a file edited
+    /// while review is closed. Mirrors [`Self::review_pending_external_edits`];
+    /// re-arming a path drops the prior [`stoat_scheduler::Task`], cancelling
+    /// its timer so only the latest burst event warms.
+    pending_diff_warm_file: std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
+    /// Channel the diff-warm debounce tasks push a path onto once their timer
+    /// fires, drained by [`Self::drain_pending_diff_warm_files`].
+    diff_warm_file_tx: Sender<PathBuf>,
+    diff_warm_file_rx: Receiver<PathBuf>,
+    /// In-flight single-file diff warms. Held so their tasks are not dropped
+    /// (which would cancel them) and so the DiffWarm badge stays up until every
+    /// one finishes; [`crate::diff_warm::install_finished`] drops the completed
+    /// ones.
+    pub(crate) diff_warm_files: Vec<crate::diff_warm::PendingFileWarm>,
     /// Per-path debounce tasks for reindexing files changed outside the
     /// editor, mirroring [`Self::review_pending_external_edits`] but
     /// feeding the code graph instead of the review session.
@@ -880,6 +894,7 @@ impl Stoat {
         let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
         let (review_git_refresh_tx, review_git_refresh_rx) = tokio::sync::mpsc::channel(256);
+        let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
@@ -990,6 +1005,10 @@ impl Stoat {
             review_pending_git_refresh: None,
             review_git_refresh_tx,
             review_git_refresh_rx,
+            pending_diff_warm_file: std::collections::HashMap::new(),
+            diff_warm_file_tx,
+            diff_warm_file_rx,
+            diff_warm_files: Vec::new(),
             index_pending_external_edits: std::collections::HashMap::new(),
             index_external_edit_tx,
             index_external_edit_rx,
@@ -1795,6 +1814,7 @@ impl Stoat {
         self.drain_fs_watch_events();
         self.drain_pending_external_edits();
         self.drain_pending_git_refresh();
+        self.drain_pending_diff_warm_files();
         self.drain_pending_index_edits();
         self.pending_message = None;
         let effect = match event {
@@ -1880,6 +1900,11 @@ impl Stoat {
         // (ReviewRefresh) dispatches through a separate path and still works.
         let review_active =
             self.active_workspace().review.is_some() && self.settings.review_follow.unwrap_or(true);
+        // With no review open, keep the diff cache warm incrementally instead,
+        // gated the same as the full background warm.
+        let precompute = self.active_workspace().review.is_none()
+            && self.diff_warm_auto
+            && self.settings.review_precompute.unwrap_or(true);
         let git_root = self.active_workspace().git_root.clone();
         let git_dir = git_root.join(".git");
         let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
@@ -1905,6 +1930,20 @@ impl Stoat {
                     let repo = repo.get_or_insert_with(|| self.git_host.discover(&git_root));
                     if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
                         self.arm_review_git_refresh_debounce();
+                    }
+                }
+            } else if precompute {
+                if path.starts_with(&git_dir) {
+                    // A .git write moved HEAD and staled every cached base, so
+                    // re-arm the full warm through the shared git-refresh
+                    // debounce. Its drain clears the diff_warmed flag.
+                    self.arm_review_git_refresh_debounce();
+                } else if path.starts_with(&git_root) {
+                    // An edited working-tree file warms its own diff, unless
+                    // gitignored so build churn cannot thrash the recompute.
+                    let repo = repo.get_or_insert_with(|| self.git_host.discover(&git_root));
+                    if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
+                        self.arm_diff_warm_file_debounce(path.clone());
                     }
                 }
             }
@@ -1973,6 +2012,25 @@ impl Stoat {
         self.review_pending_git_refresh = Some(task);
     }
 
+    /// Schedule a debounced single-file diff warm for `path` edited while review
+    /// is closed. Mirrors [`Self::arm_review_external_edit_debounce`]: inserting
+    /// into [`Self::pending_diff_warm_file`] drops any prior task for the same
+    /// path, so only the latest burst event warms once its
+    /// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses. The spawned task
+    /// forwards `path` on [`Self::diff_warm_file_tx`], drained by
+    /// [`Self::drain_pending_diff_warm_files`], which spawns the warm off-thread.
+    fn arm_diff_warm_file_debounce(&mut self, path: PathBuf) {
+        let executor = self.executor.clone();
+        let tx = self.diff_warm_file_tx.clone();
+        let redraw = self.redraw_notify.clone();
+        let path_for_send = path.clone();
+        let task = self.executor.spawn_with_redraw(redraw, async move {
+            executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
+            let _ = tx.send(path_for_send).await;
+        });
+        self.pending_diff_warm_file.insert(path, task);
+    }
+
     /// Drain every path the per-path debounce tasks have pushed onto
     /// [`Self::review_external_edit_tx`] since the last call. Each
     /// path becomes one [`ReviewExternalEdit`] dispatch when a review
@@ -2001,8 +2059,10 @@ impl Stoat {
     /// Only a [`ReviewSource::WorkingTree`] session refreshes. Commit and
     /// commit-range sources are fixed snapshots the rebase edit-pause review
     /// relies on not churning, and in-memory agent-edit sources are not
-    /// git-backed. Returns `true` if a refresh dispatched so the test harness
-    /// settle loop re-iterates.
+    /// git-backed. With no working-tree review, a `.git` change instead re-arms
+    /// the full background warm, since HEAD moved and staled every cached base.
+    /// Returns `true` if a refresh dispatched so the test harness settle loop
+    /// re-iterates.
     pub(crate) fn drain_pending_git_refresh(&mut self) -> bool {
         let mut progressed = false;
         for _ in 0..256 {
@@ -2016,6 +2076,31 @@ impl Stoat {
             );
             if working_tree {
                 action_handlers::dispatch(self, &ReviewRefresh);
+                progressed = true;
+            } else {
+                self.active_workspace_mut().diff_warmed = false;
+            }
+        }
+        progressed
+    }
+
+    /// Drain the diff-warm debounce channel, spawning a single-file warm for
+    /// each path edited while review was closed.
+    ///
+    /// Mirrors [`Self::drain_pending_external_edits`]. Skips a path when review
+    /// has since opened -- its own refresh covers the edit -- or when
+    /// `review.precompute` or the warm auto-gate is off. Returns `true` if a
+    /// warm spawned so the test harness settle loop re-iterates.
+    pub(crate) fn drain_pending_diff_warm_files(&mut self) -> bool {
+        let mut progressed = false;
+        for _ in 0..256 {
+            let Ok(path) = self.diff_warm_file_rx.try_recv() else {
+                break;
+            };
+            self.pending_diff_warm_file.remove(&path);
+            let precompute = self.diff_warm_auto && self.settings.review_precompute.unwrap_or(true);
+            if precompute && self.active_workspace().review.is_none() {
+                crate::diff_warm::spawn_file_warm(self, path);
                 progressed = true;
             }
         }
