@@ -35,6 +35,10 @@ pub struct Settings {
     /// automatically. `None` falls back to enabled. Set `review.follow = false;`
     /// in stcfg to require a manual `r` instead.
     pub review_follow: Option<bool>,
+    /// Whether the diff cache is warmed in the background so opening review is
+    /// near-instant. `None` falls back to enabled. Set `review.precompute =
+    /// false;` in stcfg to turn the background diffing off.
+    pub review_precompute: Option<bool>,
     /// Name of the active theme block. Resolves against `theme NAME { ... }`
     /// blocks in the config. `None` means "use the compiled-in default".
     pub theme: Option<String>,
@@ -109,6 +113,7 @@ impl Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             format_on_save: other.format_on_save.or(self.format_on_save),
             review_follow: other.review_follow.or(self.review_follow),
+            review_precompute: other.review_precompute.or(self.review_precompute),
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             scrolloff: other.scrolloff.or(self.scrolloff),
@@ -138,6 +143,11 @@ impl Settings {
             ["review", "follow"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.review_follow = Some(b);
+                }
+            },
+            ["review", "precompute"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.review_precompute = Some(b);
                 }
             },
             ["theme"] => {
@@ -240,6 +250,7 @@ mod tests {
                 text_proto_log: Some(true),
                 format_on_save: None,
                 review_follow: None,
+                review_precompute: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -258,6 +269,15 @@ mod tests {
     fn from_config_extracts_review_follow() {
         let config = parse_ok("on init { review.follow = false; }");
         assert_eq!(Settings::from_config(&config).review_follow, Some(false));
+    }
+
+    #[test]
+    fn from_config_extracts_review_precompute() {
+        let config = parse_ok("on init { review.precompute = false; }");
+        assert_eq!(
+            Settings::from_config(&config).review_precompute,
+            Some(false)
+        );
     }
 
     #[test]
@@ -290,6 +310,7 @@ mod tests {
                 text_proto_log: Some(false),
                 format_on_save: None,
                 review_follow: None,
+                review_precompute: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -313,6 +334,7 @@ mod tests {
                 text_proto_log: Some(true),
                 format_on_save: None,
                 review_follow: None,
+                review_precompute: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -345,6 +367,7 @@ mod tests {
             text_proto_log: Some(false),
             format_on_save: None,
             review_follow: None,
+            review_precompute: None,
             theme: None,
             mouse_capture: None,
             scrolloff: None,
@@ -360,6 +383,7 @@ mod tests {
             text_proto_log: Some(true),
             format_on_save: None,
             review_follow: None,
+            review_precompute: None,
             theme: None,
             mouse_capture: None,
             scrolloff: None,
@@ -377,6 +401,7 @@ mod tests {
                 text_proto_log: Some(true),
                 format_on_save: None,
                 review_follow: None,
+                review_precompute: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -397,6 +422,7 @@ mod tests {
             text_proto_log: Some(true),
             format_on_save: None,
             review_follow: None,
+            review_precompute: None,
             theme: None,
             mouse_capture: None,
             scrolloff: None,
@@ -415,6 +441,7 @@ mod tests {
                 text_proto_log: Some(true),
                 format_on_save: None,
                 review_follow: None,
+                review_precompute: None,
                 theme: None,
                 mouse_capture: None,
                 scrolloff: None,
@@ -446,6 +473,7 @@ mod tests {
                 text_proto_log: None,
                 format_on_save: None,
                 review_follow: None,
+                review_precompute: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
@@ -469,6 +497,7 @@ mod tests {
                 text_proto_log: None,
                 format_on_save: None,
                 review_follow: None,
+                review_precompute: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 scrolloff: None,
@@ -489,6 +518,7 @@ mod tests {
             text_proto_log: None,
             format_on_save: None,
             review_follow: None,
+            review_precompute: None,
             theme: Some("a".into()),
             mouse_capture: None,
             scrolloff: None,
@@ -504,6 +534,7 @@ mod tests {
             text_proto_log: None,
             format_on_save: None,
             review_follow: None,
+            review_precompute: None,
             theme: Some("b".into()),
             mouse_capture: None,
             scrolloff: None,
