@@ -69,6 +69,35 @@ pub(crate) fn palette_filter_layout(area: Rect) -> Option<PaletteFilterLayout> {
     })
 }
 
+/// The arg-picker result-list rect, which is the smooth-scroll pool region for
+/// argument mode (`:o `/`:cd `/`:b `). `None` when the modal does not fit or the
+/// body has no rows.
+///
+/// Shared with [`render_palette_arg_picker`] through [`arg_body_split`] so the
+/// pooled region and the painted list are the same rect.
+pub(crate) fn palette_arg_list_rect(area: Rect) -> Option<Rect> {
+    let layout = palette_filter_layout(area)?;
+    arg_body_split(layout.inner).map(|(list, _)| list)
+}
+
+/// Split the arg-picker body below the `:` input into a result-list rect and an
+/// optional preview rect. `None` when the body has no rows.
+fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
+    let body_top = inner.y + 2;
+    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    if body_height == 0 {
+        return None;
+    }
+    Some(crate::render::picker::split_list_preview(
+        inner.x,
+        body_top,
+        inner.width,
+        body_height,
+        50,
+        20,
+    ))
+}
+
 pub(crate) fn render_command_palette(
     palette: &mut CommandPalette,
     ws: &mut Workspace,
@@ -162,19 +191,9 @@ fn render_palette_arg_picker(
         scene.as_deref_mut(),
     );
 
-    let body_top = inner.y + 2;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
-    if body_height == 0 {
+    let Some((list, preview)) = arg_body_split(inner) else {
         return;
-    }
-    let (list, preview) = crate::render::picker::split_list_preview(
-        inner.x,
-        body_top,
-        inner.width,
-        body_height,
-        50,
-        20,
-    );
+    };
 
     let Some(picker) = palette.arg_picker.as_mut() else {
         return;

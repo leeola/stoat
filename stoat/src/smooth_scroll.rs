@@ -26,6 +26,7 @@
 //! [`ScrollCommand::page`] and [`FillCommand::index`] carry.
 
 use crate::{
+    command_palette::ArgPicker,
     commit_list::CommitListState,
     completion::CompletionItem,
     display_map::DisplaySnapshot,
@@ -570,6 +571,38 @@ pub(crate) fn render_palette_page(
         filtered,
         match_indices,
         selected,
+        area,
+        start_row,
+        theme,
+        &mut buf,
+    );
+
+    serialize_buffer(&buf)
+}
+
+/// Render `region_height` rows of the palette's inline argument-picker list
+/// starting at row `page * region_height` into a fresh region-sized [`Buffer`],
+/// returning the page's self-contained VT byte stream.
+///
+/// Mirrors [`render_finder_page`] but paints the picker's path rows through the
+/// shared [`crate::render::picker::paint_path_rows`], so a pooled page matches
+/// the live inline picker. The picker is read-only here.
+pub(crate) fn render_arg_page(
+    picker: &ArgPicker,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+
+    let start_row = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+    crate::render::picker::paint_path_rows(
+        &picker.core.picklist,
+        &picker.core.git_root,
         area,
         start_row,
         theme,

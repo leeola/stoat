@@ -4371,9 +4371,9 @@ impl Stoat {
             .flatten()
             .map(|layout| layout.list);
 
-        // The command palette is a modal over normal mode like the finder; its
-        // fixed list region pools as a non-pane surface. Only command-filter
-        // mode has a list -- arg mode shows the inline picker, not a list.
+        // The command palette is a modal over normal mode like the finder. Its
+        // fixed list region pools as a non-pane surface. Command-filter mode
+        // pools the command list.
         let palette_list = (!overlay
             && self
                 .command_palette
@@ -4382,6 +4382,18 @@ impl Stoat {
         .then(|| crate::render::command_palette::palette_filter_layout(self.size()))
         .flatten()
         .map(|layout| layout.list);
+
+        // Argument mode (`:o `/`:cd `/`:b `) shows the inline picker in place of
+        // the command list, and its result list pools into the same PALETTE id.
+        // Filter and arg modes are mutually exclusive -- arg mode needs a parsed
+        // command, filter mode needs none -- so one pool id serves both.
+        let palette_arg_list = (!overlay
+            && self
+                .command_palette
+                .as_ref()
+                .is_some_and(|p| p.arg_picker.is_some() && p.arg_source().is_some()))
+        .then(|| crate::render::command_palette::palette_arg_list_rect(self.size()))
+        .flatten();
 
         // The commits overlay renders into the focused pane; its left list pools
         // as a non-pane surface while editor panes stay suppressed in this mode.
@@ -4419,7 +4431,7 @@ impl Stoat {
         if finder_list.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::FINDER);
         }
-        if palette_list.is_some() {
+        if palette_list.is_some() || palette_arg_list.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::PALETTE);
         }
         if commits_region.is_some() {
@@ -4613,10 +4625,13 @@ impl Stoat {
                 height: list.height,
             };
             let scroll_row = selected.saturating_sub(list.height.saturating_sub(1) as usize) as u32;
-            // The visible row set is the filtered entries; a re-filter changes it,
-            // so a hash of their names is the pool's content version.
+            // The visible row set is the filtered entries, so a hash of their
+            // names is the pool's content version and a re-filter refills it. The
+            // leading discriminant keeps a filter-mode list from aliasing an
+            // arg-mode list that shares this pool id and matches region and scroll.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
+                0u8.hash(&mut hasher);
                 for entry in filtered {
                     entry.def.name().hash(&mut hasher);
                 }
@@ -4633,6 +4648,54 @@ impl Stoat {
                         filtered,
                         match_indices,
                         *selected,
+                        page,
+                        theme,
+                        region.width,
+                        region.height,
+                    )
+                },
+            );
+        }
+
+        if let (Some(list), Some(picker)) = (
+            palette_arg_list,
+            self.command_palette
+                .as_ref()
+                .and_then(|palette| palette.arg_picker.as_ref()),
+        ) {
+            let region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+                top: list.y,
+                left: list.x,
+                width: list.width,
+                height: list.height,
+            };
+            let scroll_row = picker
+                .core
+                .picklist
+                .selected
+                .saturating_sub(list.height.saturating_sub(1) as usize)
+                as u32;
+            // The visible row set is the picker's filtered paths, so their hash
+            // is the pool's content version and a re-filter refills it. The
+            // leading discriminant keeps this arg-mode list from aliasing a
+            // filter-mode list that shares this pool id and matches region and
+            // scroll.
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                1u8.hash(&mut hasher);
+                picker.core.picklist.filtered.hash(&mut hasher);
+                hasher.finish()
+            };
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                region,
+                scroll_row as f32,
+                content_version,
+                |page| {
+                    crate::smooth_scroll::render_arg_page(
+                        picker,
                         page,
                         theme,
                         region.width,
@@ -7287,6 +7350,96 @@ mod tests {
                 pool: crate::smooth_scroll::non_pane_pool::PALETTE,
             })),
             "closing the palette retires its pool"
+        );
+    }
+
+    #[test]
+    fn palette_arg_list_is_pooled_and_retired() {
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/argpool");
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            h.fake_fs().insert_file(root.join(name), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        // Typing `:o ` opens the palette and installs the Files arg picker. The
+        // snapshot drives drive_background so the picker is live before emit.
+        h.type_text(":o ");
+        h.snapshot();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        let _ = drain_apc(&mut rx);
+
+        h.stoat.emit_smooth_scroll();
+        let list = crate::render::command_palette::palette_arg_list_rect(size)
+            .expect("the arg picker fits the test terminal");
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            top: list.y,
+            left: list.x,
+            width: list.width,
+            height: list.height,
+        };
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
+            "the arg-picker list declares a pool at its list rect"
+        );
+
+        h.stoat.command_palette = None;
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            })),
+            "closing the palette retires its pool"
+        );
+    }
+
+    #[test]
+    fn palette_filter_to_arg_flip_repools() {
+        use stoat_action::OpenCommandPalette;
+        use stoatty_protocol::command::{Command, PoolRegionCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/argflip");
+        for name in ["a.rs", "b.rs"] {
+            h.fake_fs().insert_file(root.join(name), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+
+        // Filter mode holds the PALETTE pool through the command list.
+        action_handlers::dispatch(&mut h.stoat, &OpenCommandPalette);
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        h.stoat.emit_smooth_scroll();
+        let _ = drain_apc(&mut rx);
+
+        // Flipping to arg mode re-declares the same pool at the arg-list rect.
+        h.type_text("o ");
+        h.snapshot();
+        h.stoat.active_workspace_mut().layout(size);
+        h.stoat.emit_smooth_scroll();
+
+        let arg_list = crate::render::command_palette::palette_arg_list_rect(size)
+            .expect("the arg picker fits the test terminal");
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            top: arg_list.y,
+            left: arg_list.x,
+            width: arg_list.width,
+            height: arg_list.height,
+        };
+        assert!(
+            drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
+            "flipping filter to arg mode re-declares the pool at the arg-list rect"
         );
     }
 
