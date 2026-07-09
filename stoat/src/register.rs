@@ -33,8 +33,8 @@ pub(crate) enum Register {
 
 #[derive(Debug, Default)]
 pub(crate) struct RegisterStore {
-    unnamed: Option<String>,
-    named: HashMap<char, String>,
+    unnamed: Option<Vec<String>>,
+    named: HashMap<char, Vec<String>>,
 }
 
 impl RegisterStore {
@@ -42,15 +42,16 @@ impl RegisterStore {
         Self::default()
     }
 
-    /// Write `content` to the unnamed or a named register. Special
-    /// registers (clipboard, search, blackhole, selection index,
-    /// last insert) are filtered by the action layer before
-    /// reaching this store and silently no-op when passed through.
-    pub(crate) fn write(&mut self, register: Register, content: String) {
+    /// Write `fragments` to the unnamed or a named register, one entry
+    /// per selection like Helix. Special registers (clipboard, search,
+    /// blackhole, selection index, last insert) are filtered by the
+    /// action layer before reaching this store and silently no-op when
+    /// passed through.
+    pub(crate) fn write(&mut self, register: Register, fragments: Vec<String>) {
         match register {
-            Register::Unnamed => self.unnamed = Some(content),
+            Register::Unnamed => self.unnamed = Some(fragments),
             Register::Named(c) => {
-                self.named.insert(c, content);
+                self.named.insert(c, fragments);
             },
             Register::Clipboard
             | Register::Search
@@ -60,14 +61,14 @@ impl RegisterStore {
         }
     }
 
-    /// Read the unnamed or a named register's content. Special
-    /// registers are routed through the action layer to their
-    /// backing state and bypass this store; reading them here
-    /// always returns `None`.
-    pub(crate) fn read(&self, register: Register) -> Option<&str> {
+    /// Read the unnamed or a named register's per-selection fragments.
+    /// Special registers are routed through the action layer to their
+    /// backing state and bypass this store. Reading one here always
+    /// returns `None`.
+    pub(crate) fn read(&self, register: Register) -> Option<&[String]> {
         match register {
             Register::Unnamed => self.unnamed.as_deref(),
-            Register::Named(c) => self.named.get(&c).map(String::as_str),
+            Register::Named(c) => self.named.get(&c).map(Vec::as_slice),
             Register::Clipboard
             | Register::Search
             | Register::Blackhole
@@ -81,43 +82,60 @@ impl RegisterStore {
 mod tests {
     use super::*;
 
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn read_frags(store: &RegisterStore, register: Register) -> Option<Vec<String>> {
+        store.read(register).map(<[String]>::to_vec)
+    }
+
     #[test]
     fn write_then_read_unnamed() {
         let mut store = RegisterStore::new();
-        store.write(Register::Unnamed, "hello".to_string());
-        assert_eq!(store.read(Register::Unnamed), Some("hello"));
+        store.write(Register::Unnamed, v(&["hello", "world"]));
+        assert_eq!(
+            read_frags(&store, Register::Unnamed),
+            Some(v(&["hello", "world"]))
+        );
     }
 
     #[test]
     fn write_overwrites_existing() {
         let mut store = RegisterStore::new();
-        store.write(Register::Unnamed, "first".to_string());
-        store.write(Register::Unnamed, "second".to_string());
-        assert_eq!(store.read(Register::Unnamed), Some("second"));
+        store.write(Register::Unnamed, v(&["first"]));
+        store.write(Register::Unnamed, v(&["second"]));
+        assert_eq!(read_frags(&store, Register::Unnamed), Some(v(&["second"])));
     }
 
     #[test]
     fn empty_store_returns_none() {
         let store = RegisterStore::new();
-        assert_eq!(store.read(Register::Unnamed), None);
+        assert_eq!(read_frags(&store, Register::Unnamed), None);
     }
 
     #[test]
     fn named_register_isolated_from_unnamed() {
         let mut store = RegisterStore::new();
-        store.write(Register::Unnamed, "anon".to_string());
-        store.write(Register::Named('a'), "alpha".to_string());
-        assert_eq!(store.read(Register::Unnamed), Some("anon"));
-        assert_eq!(store.read(Register::Named('a')), Some("alpha"));
-        assert_eq!(store.read(Register::Named('b')), None);
+        store.write(Register::Unnamed, v(&["anon"]));
+        store.write(Register::Named('a'), v(&["alpha"]));
+        assert_eq!(read_frags(&store, Register::Unnamed), Some(v(&["anon"])));
+        assert_eq!(
+            read_frags(&store, Register::Named('a')),
+            Some(v(&["alpha"]))
+        );
+        assert_eq!(read_frags(&store, Register::Named('b')), None);
     }
 
     #[test]
     fn named_registers_isolated_from_each_other() {
         let mut store = RegisterStore::new();
-        store.write(Register::Named('a'), "alpha".to_string());
-        store.write(Register::Named('b'), "beta".to_string());
-        assert_eq!(store.read(Register::Named('a')), Some("alpha"));
-        assert_eq!(store.read(Register::Named('b')), Some("beta"));
+        store.write(Register::Named('a'), v(&["alpha"]));
+        store.write(Register::Named('b'), v(&["beta"]));
+        assert_eq!(
+            read_frags(&store, Register::Named('a')),
+            Some(v(&["alpha"]))
+        );
+        assert_eq!(read_frags(&store, Register::Named('b')), Some(v(&["beta"])));
     }
 }

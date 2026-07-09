@@ -38,7 +38,7 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
         },
         Register::Blackhole => {},
         Register::Unnamed | Register::Named(_) => {
-            stoat.registers.write(target, content);
+            stoat.registers.write(target, vec![content]);
         },
         Register::Search | Register::SelectionIndex | Register::LastInsert => {
             // Short-circuited above. Branch retained so the match
@@ -239,7 +239,9 @@ fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
 /// when the focused pane has no selections.
 pub(crate) fn read_register_content(stoat: &mut Stoat, register: Register) -> Option<String> {
     match register {
-        Register::Unnamed | Register::Named(_) => stoat.registers.read(register).map(str::to_owned),
+        Register::Unnamed | Register::Named(_) => {
+            stoat.registers.read(register).map(|f| f.join("\n"))
+        },
         Register::Clipboard => match stoat.clipboard_host().get() {
             Ok(text) => text,
             Err(err) => {
@@ -420,7 +422,7 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(stored, Some("abc".to_string()));
     }
 
@@ -433,7 +435,7 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(stored, None);
     }
 
@@ -492,7 +494,7 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(stored, Some("abc".to_string()));
     }
 
@@ -538,7 +540,7 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(stored, Some("abc\ndef".to_string()));
     }
 
@@ -640,13 +642,13 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Named('a'))
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(stored, Some("abc".to_string()));
         let unnamed = h
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(unnamed, None);
     }
 
@@ -663,13 +665,13 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Named('a'))
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(stored_a, Some("abc".to_string()));
         let unnamed = h
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(unnamed, Some("abc".to_string()));
     }
 
@@ -677,9 +679,10 @@ mod tests {
     fn paste_from_named_register() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.stoat
-            .registers
-            .write(crate::register::Register::Named('a'), "xyz".to_string());
+        h.stoat.registers.write(
+            crate::register::Register::Named('a'),
+            vec!["xyz".to_string()],
+        );
         h.type_keys("v l l l");
         h.type_keys("escape");
         h.type_keys("\" a p");
@@ -697,7 +700,7 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(stored, Some("abc".to_string()));
     }
 
@@ -705,9 +708,10 @@ mod tests {
     fn insert_register_inserts_named_at_cursor() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.stoat
-            .registers
-            .write(crate::register::Register::Named('a'), "xyz".to_string());
+        h.stoat.registers.write(
+            crate::register::Register::Named('a'),
+            vec!["xyz".to_string()],
+        );
         h.type_keys("a");
         h.type_keys("Ctrl-r");
         h.type_keys("a");
@@ -720,7 +724,7 @@ mod tests {
         let path = seed(&mut h, "abc\n");
         h.stoat
             .registers
-            .write(crate::register::Register::Unnamed, "xyz".to_string());
+            .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
         h.type_keys("a");
         h.type_keys("Ctrl-r");
         h.type_keys("\"");
@@ -742,9 +746,10 @@ mod tests {
     fn insert_register_escape_cancels() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.stoat
-            .registers
-            .write(crate::register::Register::Named('a'), "xyz".to_string());
+        h.stoat.registers.write(
+            crate::register::Register::Named('a'),
+            vec!["xyz".to_string()],
+        );
         h.type_keys("a");
         h.type_keys("Ctrl-r");
         h.type_keys("escape");
@@ -764,7 +769,7 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(unnamed, None);
     }
 
@@ -790,7 +795,7 @@ mod tests {
             .stoat
             .registers
             .read(crate::register::Register::Unnamed)
-            .map(str::to_owned);
+            .map(|f| f.join("\n"));
         assert_eq!(unnamed, None);
         assert_eq!(h.fake_clipboard().writes(), Vec::<String>::new());
     }
