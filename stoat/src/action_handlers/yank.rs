@@ -628,6 +628,25 @@ mod tests {
     }
 
     #[test]
+    fn change_whole_line_opens_a_fresh_indented_line() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "    a\n    b\n    c\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SelectLineBelow);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ChangeSelection);
+        assert_eq!(buffer_text(&h, &path), "    a\n    \n    c\n");
+    }
+
+    #[test]
+    fn change_partial_line_deletes_inline() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abcdef\n");
+        h.type_keys("v l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ChangeSelection);
+        assert_eq!(buffer_text(&h, &path), "ef\n");
+    }
+
+    #[test]
     fn paste_after_with_line_match_pastes_line_per_selection() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\ndef\n");

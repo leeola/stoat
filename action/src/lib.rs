@@ -14,7 +14,7 @@ pub use defs::{
     dump::Dump,
     editor::{
         AcceptCompletion, AddSelectionBelow, AlignSelections, AlignViewBottom, AlignViewCenter,
-        AlignViewTop, CloseBuffer, CollapseSelection, Decrement, DeleteSelection,
+        AlignViewTop, ChangeSelection, CloseBuffer, CollapseSelection, Decrement, DeleteSelection,
         DeleteSelectionNoYank, ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar,
         ExtendGotoColumn, ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
         ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,

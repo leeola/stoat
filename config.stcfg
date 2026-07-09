@@ -241,7 +241,7 @@ on key {
         A -> [GotoLineEnd(), SetMode(insert)];
         o -> [OpenBelow(), SetMode(insert)];
         O -> [OpenAbove(), SetMode(insert)];
-        c -> [DeleteSelection(), SetMode(insert)];
+        c -> [ChangeSelection(), SetMode(insert)];
         Alt-c -> [DeleteSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
         v -> SetMode(select);
@@ -421,7 +421,7 @@ on key {
         = -> FormatSelections();
         d -> DeleteSelection();
         Alt-d -> DeleteSelectionNoYank();
-        c -> [DeleteSelection(), SetMode(insert)];
+        c -> [ChangeSelection(), SetMode(insert)];
         Alt-c -> [DeleteSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
         y -> [Yank(), SetMode(normal)];

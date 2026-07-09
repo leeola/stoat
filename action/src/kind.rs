@@ -183,6 +183,7 @@ pub enum ActionKind {
     Decrement,
     DeleteSelection,
     DeleteSelectionNoYank,
+    ChangeSelection,
     Undo,
     Redo,
     CommitUndoCheckpoint,

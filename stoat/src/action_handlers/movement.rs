@@ -1209,6 +1209,55 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Yank and delete every non-empty selection. When every selection covered
+/// whole lines, open a fresh auto-indented line above the deletion so a
+/// following insert types on its own line, matching Helix's linewise change. A
+/// partial-line selection is deleted in place.
+pub(super) fn change_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let whole_lines = selections_are_whole_lines(stoat);
+    let deleted = delete_selection_impl(stoat, true);
+    if whole_lines {
+        open_line(stoat, OpenDir::Above)
+    } else {
+        deleted
+    }
+}
+
+/// Whether the focused editor has selections and every one spans whole lines:
+/// starting at a line start and ending at a later line start or the buffer end.
+/// Empty and partial-line selections make it false, matching Helix's
+/// `selection_is_linewise`. False when the focused pane is not an editor.
+fn selections_are_whole_lines(stoat: &mut Stoat) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let View::Editor(editor_id) = ws.panes.pane(focused).view else {
+        return false;
+    };
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    let rope = buf_snap.rope();
+
+    let mut any = false;
+    for sel in editor.selections.all_anchors().iter() {
+        any = true;
+        let s = buf_snap.resolve_anchor(&sel.start);
+        let e = buf_snap.resolve_anchor(&sel.end);
+        let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
+        if lo >= hi {
+            return false;
+        }
+        let start = rope.offset_to_point(lo);
+        let end = rope.offset_to_point(hi);
+        let whole =
+            start.column == 0 && end.row > start.row && (end.column == 0 || hi == rope.len());
+        if !whole {
+            return false;
+        }
+    }
+    any
+}
+
 #[derive(Copy, Clone, Debug)]
 pub(super) enum OpenDir {
     Above,

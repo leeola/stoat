@@ -81,6 +81,16 @@ define_action!(
 );
 
 define_action!(
+    ChangeSelectionDef,
+    ChangeSelection,
+    "ChangeSelection",
+    ActionKind::ChangeSelection,
+    "change selected text",
+    "Yank and delete every non-empty selection, then, when every selection covered whole lines, open a fresh auto-indented line above the deletion so the following insert types on its own line. A partial-line selection is deleted in place. Pair with entering insert mode.",
+    ActionPriority::Rare
+);
+
+define_action!(
     UndoDef,
     Undo,
     "Undo",
