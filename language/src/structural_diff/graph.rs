@@ -257,23 +257,19 @@ pub fn levenshtein_pct(a: &str, b: &str) -> u8 {
     if a.is_empty() && b.is_empty() {
         return 100;
     }
-    let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
-    let n = a_chars.len();
+    let n = a.chars().count();
     let m = b_chars.len();
     if n == 0 || m == 0 {
         return 0;
     }
     let mut prev: Vec<usize> = (0..=m).collect();
     let mut curr: Vec<usize> = vec![0; m + 1];
-    for i in 1..=n {
+    for (row, a_char) in a.chars().enumerate() {
+        let i = row + 1;
         curr[0] = i;
         for j in 1..=m {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] {
-                0
-            } else {
-                1
-            };
+            let cost = if a_char == b_chars[j - 1] { 0 } else { 1 };
             curr[j] = (curr[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
@@ -455,11 +451,15 @@ pub fn neighbours(
             // diff doesn't show two unrelated Novel runs for a
             // tweaked comment/string.
             if let (Syntax::Atom(lhs_atom), Syntax::Atom(rhs_atom)) = (lhs_node, rhs_node) {
-                let levenshtein = levenshtein_pct(lhs_atom.content, rhs_atom.content);
-                if levenshtein > 20 {
-                    let kind_match_comment = is_comment_atom(lhs_node) && is_comment_atom(rhs_node);
-                    let kind_match_string = is_string_atom(lhs_node) && is_string_atom(rhs_node);
-                    if kind_match_comment || kind_match_string {
+                // The kind check is a cheap enum compare, while Levenshtein is
+                // an O(n*m) DP. Gate on the kind first so only same-kind
+                // comment/string pairs pay the similarity cost -- code atoms,
+                // the common case, never match here and would discard it.
+                let kind_match_comment = is_comment_atom(lhs_node) && is_comment_atom(rhs_node);
+                let kind_match_string = is_string_atom(lhs_node) && is_string_atom(rhs_node);
+                if kind_match_comment || kind_match_string {
+                    let levenshtein = levenshtein_pct(lhs_atom.content, rhs_atom.content);
+                    if levenshtein > 20 {
                         let edge = if kind_match_comment {
                             Edge::ReplacedComment {
                                 levenshtein_pct: levenshtein,
