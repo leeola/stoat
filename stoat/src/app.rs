@@ -3807,19 +3807,45 @@ impl Stoat {
         };
         let display_snapshot = editor.display_map.snapshot();
         let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
+        let rope = buf_snapshot.rope();
+
+        let mut inserts: Vec<(usize, usize)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let tail = buf_snapshot.resolve_anchor(&sel.tail());
+                let head = buf_snapshot.resolve_anchor(&sel.head());
+                (sel.id, stoat_text::cursor_offset(rope, tail, head))
+            })
+            .collect();
+        inserts.sort_by_key(|(id, offset)| (*offset, *id));
+
         {
             let mut guard = buffer.write().expect("poisoned");
-            guard.edit(offset..offset, text);
+            for (_, offset) in inserts.iter().rev() {
+                guard.edit(*offset..*offset, text);
+            }
         }
+
+        // Each cursor lands after its own inserted text. The k-th insertion in
+        // offset order is shifted by the k insertions before it plus its own,
+        // so its text ends at offset + (k + 1) * text.len().
+        let text_len = text.len();
+        let new_offsets: std::collections::HashMap<usize, usize> = inserts
+            .iter()
+            .enumerate()
+            .map(|(k, (id, offset))| (*id, offset + (k + 1) * text_len))
+            .collect();
+
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        let new_offset = offset + text.len();
-        let anchor = new_buf.anchor_at(new_offset, Bias::Right);
         editor.selections.transform(new_buf, |s| {
             let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            if let Some(&new_offset) = new_offsets.get(&s.id) {
+                let anchor = new_buf.anchor_at(new_offset, Bias::Right);
+                new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            }
             new
         });
     }
@@ -8637,6 +8663,27 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_keys("delete");
         assert_eq!(buffer_text(&h, &path), "abc");
+    }
+
+    #[test]
+    fn insert_types_at_every_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "aa\nbb\n");
+        h.type_keys("C");
+        h.type_keys("i");
+        h.type_text("XY");
+        assert_eq!(buffer_text(&h, &path), "XYaa\nXYbb\n");
+        assert_eq!(h.head_offsets(), vec![2, 7]);
+    }
+
+    #[test]
+    fn insert_single_cursor_advances_past_text() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("i");
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "Xabc");
+        assert_eq!(h.head_offsets(), vec![1]);
     }
 
     #[test]
