@@ -31,6 +31,22 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     }
     let count = fragments.len();
+    write_fragments_to_register(stoat, target, fragments);
+    stoat.pending_message = Some(format!("yanked {count} selection(s)"));
+    UpdateEffect::Redraw
+}
+
+/// Write per-selection `fragments` to `target`. The clipboard receives the
+/// fragments joined with newlines. Blackhole and the read-only registers
+/// (search, selection index, last insert) drop them.
+///
+/// Shared by yank and by delete, which yanks the removed text before deleting
+/// it.
+pub(super) fn write_fragments_to_register(
+    stoat: &mut Stoat,
+    target: Register,
+    fragments: Vec<String>,
+) {
     match target {
         Register::Clipboard => {
             if let Err(err) = stoat.clipboard_host().set(&fragments.join("\n")) {
@@ -41,14 +57,8 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
         Register::Unnamed | Register::Named(_) => {
             stoat.registers.write(target, fragments);
         },
-        Register::Search | Register::SelectionIndex | Register::LastInsert => {
-            // Short-circuited above. Branch retained so the match
-            // stays exhaustive without a wildcard arm that would
-            // hide future variants.
-        },
+        Register::Search | Register::SelectionIndex | Register::LastInsert => {},
     }
-    stoat.pending_message = Some(format!("yanked {count} selection(s)"));
-    UpdateEffect::Redraw
 }
 
 pub(super) fn select_register(stoat: &mut Stoat) -> UpdateEffect {
@@ -187,7 +197,7 @@ enum PasteSide {
 /// slice each non-collapsed range out of the rope, one fragment per
 /// selection like Helix. Returns `None` when the focused pane is not an
 /// editor, and an empty vec when every selection is collapsed.
-fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
+pub(super) fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -559,6 +569,44 @@ mod tests {
             h.stoat.pending_message,
             Some("yanked 2 selection(s)".to_string())
         );
+    }
+
+    #[test]
+    fn delete_yanks_the_removed_text_and_paste_restores_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelection);
+        assert_eq!(buffer_text(&h, &path), "\n");
+        let stored = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(|f| f.join("\n"));
+        assert_eq!(stored, Some("abc".to_string()));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteBefore);
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn blackhole_prefixed_delete_leaves_registers_untouched() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["keep".to_string()]);
+        h.type_keys("v l l l");
+        h.type_keys("escape");
+        h.type_keys("\" _");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelection);
+        assert_eq!(buffer_text(&h, &path), "\n");
+        let stored = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(|f| f.join("\n"));
+        assert_eq!(stored, Some("keep".to_string()));
     }
 
     #[test]

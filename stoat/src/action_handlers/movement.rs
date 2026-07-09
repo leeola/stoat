@@ -1125,6 +1125,15 @@ fn regroup_right(digits: &str, group_size: usize) -> String {
 }
 
 pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
+    // Yank the to-be-deleted text to the selected register first, like Helix,
+    // so d then p round-trips. Runs before ws is borrowed below.
+    if let Some(fragments) = crate::action_handlers::yank::selection_fragments(stoat)
+        && !fragments.is_empty()
+    {
+        let target = stoat.consume_selected_register();
+        crate::action_handlers::yank::write_fragments_to_register(stoat, target, fragments);
+    }
+
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
