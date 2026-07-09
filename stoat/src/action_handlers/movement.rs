@@ -1125,9 +1125,19 @@ fn regroup_right(digits: &str, group_size: usize) -> String {
 }
 
 pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
-    // Yank the to-be-deleted text to the selected register first, like Helix,
-    // so d then p round-trips. Runs before ws is borrowed below.
-    if let Some(fragments) = crate::action_handlers::yank::selection_fragments(stoat)
+    delete_selection_impl(stoat, true)
+}
+
+pub(super) fn delete_selection_no_yank(stoat: &mut Stoat) -> UpdateEffect {
+    delete_selection_impl(stoat, false)
+}
+
+fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
+    // With yank on, copy the to-be-deleted text to the selected register first,
+    // like Helix, so d then p round-trips. Alt-d/Alt-c pass yank off. Runs before
+    // ws is borrowed below.
+    if yank
+        && let Some(fragments) = crate::action_handlers::yank::selection_fragments(stoat)
         && !fragments.is_empty()
     {
         let target = stoat.consume_selected_register();

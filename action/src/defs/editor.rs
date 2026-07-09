@@ -71,6 +71,16 @@ define_action!(
 );
 
 define_action!(
+    DeleteSelectionNoYankDef,
+    DeleteSelectionNoYank,
+    "DeleteSelectionNoYank",
+    ActionKind::DeleteSelectionNoYank,
+    "delete selected text without yanking",
+    "Delete the contents of every non-empty selection and collapse each to a cursor at the deletion start, without copying the removed text to any register. Cursor-only selections (empty ranges) are left as-is.",
+    ActionPriority::Rare
+);
+
+define_action!(
     UndoDef,
     Undo,
     "Undo",

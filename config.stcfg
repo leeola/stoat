@@ -242,6 +242,7 @@ on key {
         o -> [OpenBelow(), SetMode(insert)];
         O -> [OpenAbove(), SetMode(insert)];
         c -> [DeleteSelection(), SetMode(insert)];
+        Alt-c -> [DeleteSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
         v -> SetMode(select);
         C -> AddSelectionBelow();
@@ -306,6 +307,7 @@ on key {
         Ctrl-a -> Increment();
         Ctrl-x -> Decrement();
         d -> DeleteSelection();
+        Alt-d -> DeleteSelectionNoYank();
         u -> Undo();
         U -> Redo();
         Ctrl-s -> CommitUndoCheckpoint();
@@ -418,7 +420,9 @@ on key {
         < -> UnindentSelection();
         = -> FormatSelections();
         d -> DeleteSelection();
+        Alt-d -> DeleteSelectionNoYank();
         c -> [DeleteSelection(), SetMode(insert)];
+        Alt-c -> [DeleteSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
         y -> [Yank(), SetMode(normal)];
         ~ -> SwitchCase();

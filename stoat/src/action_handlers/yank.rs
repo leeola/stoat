@@ -610,6 +610,24 @@ mod tests {
     }
 
     #[test]
+    fn delete_no_yank_deletes_but_leaves_registers_untouched() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["keep".to_string()]);
+        h.type_keys("v l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelectionNoYank);
+        assert_eq!(buffer_text(&h, &path), "\n");
+        let stored = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(|f| f.join("\n"));
+        assert_eq!(stored, Some("keep".to_string()));
+    }
+
+    #[test]
     fn paste_after_with_line_match_pastes_line_per_selection() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\ndef\n");
