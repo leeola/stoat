@@ -3918,11 +3918,13 @@ impl Stoat {
         let display_snapshot = editor.display_map.snapshot();
         let buf_snapshot = display_snapshot.buffer_snapshot();
         let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
+        let rope = buf_snapshot.rope();
+        let tail = buf_snapshot.resolve_anchor(&sel.tail());
+        let head = buf_snapshot.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(rope, tail, head);
         if offset == 0 {
             return;
         }
-        let rope = buf_snapshot.rope();
         let prev_len = rope
             .reversed_chars_at(offset)
             .next()
@@ -3956,8 +3958,11 @@ impl Stoat {
         let display_snapshot = editor.display_map.snapshot();
         let buf_snapshot = display_snapshot.buffer_snapshot();
         let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
-        let start = stoat_text::prev_word_start(buf_snapshot.rope(), offset);
+        let rope = buf_snapshot.rope();
+        let tail = buf_snapshot.resolve_anchor(&sel.tail());
+        let head = buf_snapshot.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(rope, tail, head);
+        let start = stoat_text::prev_word_start(rope, offset);
         if start == offset {
             return;
         }
@@ -3988,8 +3993,10 @@ impl Stoat {
         let display_snapshot = editor.display_map.snapshot();
         let buf_snapshot = display_snapshot.buffer_snapshot();
         let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
         let rope = buf_snapshot.rope();
+        let tail = buf_snapshot.resolve_anchor(&sel.tail());
+        let head = buf_snapshot.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(rope, tail, head);
         let next_len = rope
             .chars_at(offset)
             .next()
@@ -8447,6 +8454,21 @@ mod tests {
         guard.rope().to_string()
     }
 
+    fn select_forward(h: &mut crate::test_harness::TestHarness, start: usize, end: usize) {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let (start, end) = {
+            let snapshot = editor.display_map.snapshot();
+            let buf = snapshot.buffer_snapshot();
+            (
+                buf.anchor_at(start, Bias::Right),
+                buf.anchor_at(end, Bias::Right),
+            )
+        };
+        editor
+            .selections
+            .set_single_range(start, end, stoat_text::SelectionGoal::None);
+    }
+
     #[test]
     fn driven_input_sequence_types_text_into_the_buffer() {
         let mut h = Stoat::test();
@@ -8684,6 +8706,26 @@ mod tests {
         h.type_text("X");
         assert_eq!(buffer_text(&h, &path), "Xabc");
         assert_eq!(h.head_offsets(), vec![1]);
+    }
+
+    #[test]
+    fn insert_with_forward_selection_types_at_block_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef");
+        select_forward(&mut h, 0, 3);
+        h.stoat.transition_mode("insert".to_string());
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "abXcdef");
+    }
+
+    #[test]
+    fn backspace_with_forward_selection_acts_at_block_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef");
+        select_forward(&mut h, 0, 3);
+        h.stoat.transition_mode("insert".to_string());
+        h.type_keys("backspace");
+        assert_eq!(buffer_text(&h, &path), "acdef");
     }
 
     #[test]
