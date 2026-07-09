@@ -293,13 +293,16 @@ fn selection_index_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
     Some((1..=count).map(|i| i.to_string()).collect())
 }
 
-/// Insert one fragment at every selection, at each selection's `start`
-/// (Before) or `end` (After). Fragments distribute across selections in
-/// start-offset order. When the selections outnumber the fragments the
-/// last fragment repeats, so a single fragment lands at every selection.
-/// After the edit, every affected selection collapses to a cursor at the
-/// end of its inserted text. No-op when every fragment is empty or the
-/// focused pane is not an editor.
+/// Insert each fragment at every selection and leave the inserted text
+/// selected.
+///
+/// Each fragment lands at its selection's `start` (Before) or `end` (After),
+/// repeated by the pending count. Fragments distribute across selections in
+/// start-offset order, and the last fragment repeats when the selections
+/// outnumber them, so a single fragment lands at every selection. Each
+/// affected selection ends as a forward range over the text it inserted.
+///
+/// No-op when every fragment is empty or the focused pane is not an editor.
 fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> UpdateEffect {
     if fragments.iter().all(String::is_empty) {
         return UpdateEffect::None;
@@ -309,6 +312,8 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
     // pastes as a line rather than splicing mid-line. After puts it below the
     // line, Before at the line start.
     let linewise = fragments.iter().all(|f| f.ends_with('\n'));
+
+    let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
 
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -380,25 +385,28 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
 
     entries.sort_by_key(|(_, off)| *off);
 
-    // Each selection receives its fragment in start-offset order. Selections
-    // beyond the fragment count repeat the last fragment.
-    let payload_for = |idx: usize| -> &str { fragments[idx.min(fragments.len() - 1)].as_str() };
+    // Each selection receives its fragment in start-offset order, repeated by
+    // the pending count. Selections beyond the fragment count reuse the last
+    // fragment.
+    let payloads: Vec<String> = (0..entries.len())
+        .map(|idx| fragments[idx.min(fragments.len() - 1)].repeat(count))
+        .collect();
 
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
         for (idx, (_, off)) in entries.iter().enumerate().rev() {
-            guard.edit(*off..*off, payload_for(idx));
+            guard.edit(*off..*off, &payloads[idx]);
         }
     }
 
-    let mut id_to_caret: std::collections::HashMap<usize, usize> =
+    let mut id_to_range: std::collections::HashMap<usize, (usize, usize)> =
         std::collections::HashMap::with_capacity(entries.len());
     let mut shift: i64 = 0;
     for (idx, (id, off)) in entries.iter().enumerate() {
-        let payload_len = payload_for(idx).len();
-        let caret = (*off as i64 + shift) as usize + payload_len;
-        id_to_caret.insert(*id, caret);
+        let payload_len = payloads[idx].len();
+        let start = (*off as i64 + shift) as usize;
+        id_to_range.insert(*id, (start, start + payload_len));
         shift += payload_len as i64;
     }
 
@@ -407,9 +415,11 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
     let new_buf = new_display.buffer_snapshot();
     editor.selections.transform(new_buf, |sel| {
         let mut new = sel.clone();
-        if let Some(&caret) = id_to_caret.get(&sel.id) {
-            let anchor = new_buf.anchor_at(caret, Bias::Left);
-            new.collapse_to(anchor, SelectionGoal::None);
+        if let Some(&(start, end)) = id_to_range.get(&sel.id) {
+            new.start = new_buf.anchor_at(start, Bias::Left);
+            new.end = new_buf.anchor_at(end, Bias::Right);
+            new.reversed = false;
+            new.goal = SelectionGoal::None;
         }
         new
     });
@@ -518,6 +528,31 @@ mod tests {
         h.type_keys("h");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(buffer_text(&h, &path), "abcabc\n");
+    }
+
+    #[test]
+    fn paste_after_selects_inserted_text() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        h.type_keys("escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abcabc\n");
+        assert_eq!(h.selection_spans(), vec![(3, 6, false)]);
+    }
+
+    #[test]
+    fn paste_after_honors_count() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        h.type_keys("escape");
+        h.stoat.pending_count = Some(3);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abcabcabcabc\n");
+        assert_eq!(h.selection_spans(), vec![(3, 12, false)]);
     }
 
     #[test]
