@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers::lsp::HoverPopup,
     app::Stoat,
     pane::{FocusTarget, View},
     render::layout::split_pane_status,
@@ -203,6 +204,67 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     };
     let inner = Block::default().borders(Borders::ALL).inner(popup_area);
     Some((popup_area, inner))
+}
+
+/// Render hover body page `page` as a self-contained VT plus APC byte stream for
+/// the HOVER smooth-scroll pool.
+///
+/// The `region_height` body lines starting at `page * region_height` paint as
+/// sub-cell text runs at the 0.85x hover scale over the region's opaque cell
+/// background. Every cell carries a background (the default resolves to the
+/// theme background), so when the pool composites over the region during a
+/// glide it occludes the live body drawn there rather than double-rendering it.
+/// Coordinates are region-local because the pool composites the page at the
+/// region origin.
+pub(crate) fn render_hover_page(
+    popup: &HoverPopup,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let buf = Buffer::empty(area);
+
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    let modal_fg = crate::render::review::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
+    let run_bg = crate::render::review::style_rgb(
+        theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|s| s.bg),
+    )
+    .unwrap_or([0, 0, 0]);
+
+    let start_row = page.saturating_mul(region_height as u64) as usize;
+
+    let mut scene = ApcScene::new();
+    let mut scratch = Buffer::empty(area);
+    for row_idx in 0..region_height {
+        let Some(line) = popup.lines.get(start_row + row_idx as usize) else {
+            break;
+        };
+        let line = truncate_line(line, region_width as usize);
+        let mut chars_before = 0u16;
+        for (text, style) in &line {
+            let col = (chars_before * HOVER_TEXT_SCALE + 8) / 16;
+            let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
+            TextRun {
+                col,
+                row: 0,
+                scale: HOVER_TEXT_SCALE,
+                color,
+                bg: run_bg,
+                text,
+            }
+            .render(Rect::new(0, row_idx, 1, 1), &mut scratch, &mut scene);
+            chars_before += text.chars().count() as u16;
+        }
+    }
+
+    let apc = scene.buffer().clone();
+    let mut bytes = crate::smooth_scroll::serialize_buffer(&buf);
+    bytes.extend_from_slice(&apc);
+    bytes
 }
 
 pub(crate) fn cursor_screen_position(
