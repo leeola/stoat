@@ -95,8 +95,9 @@ use crate::{
         },
         terminal::Terminal,
         workspace::{
-            CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SetCwd, SwitchWorkspace,
-            WorkspacePickerClose, WorkspacePickerNext, WorkspacePickerPrev, WorkspacePickerSelect,
+            CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
+            SwitchWorkspace, WorkspacePickerClose, WorkspacePickerNext, WorkspacePickerPrev,
+            WorkspacePickerSelect,
         },
     },
     param::{MissingSnafu, WrongKindSnafu},
@@ -711,6 +712,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: raw.to_owned(),
         }))
     });
+    add(ReloadEnv::DEF, |_| Ok(Box::new(ReloadEnv)));
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
     add(CancelPromptInput::DEF, |_| Ok(Box::new(CancelPromptInput)));
     add(PromptInsertNewline::DEF, |_| {
@@ -940,6 +942,7 @@ mod tests {
         "GlobalSearchPickerSelect",
         "GlobalSearchPickerClose",
         "CloseWorkspace",
+        "ReloadEnv",
         "HelpSelectPrev",
         "HelpSelectNext",
         "HelpScopeToggle",
@@ -1160,7 +1163,8 @@ mod tests {
         // + 4 LocationPicker Next/Prev/Select/Close.
         // + 4 GlobalSearchPicker Next/Prev/Select/Close.
         // + 1 SetCwd.
-        assert_eq!(all().count(), 316);
+        // + 1 ReloadEnv.
+        assert_eq!(all().count(), 317);
     }
 
     #[test]

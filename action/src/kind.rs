@@ -300,6 +300,7 @@ pub enum ActionKind {
     CloseWorkspace,
     RenameWorkspace,
     SetCwd,
+    ReloadEnv,
     SubmitPromptInput,
     CancelPromptInput,
     PromptInsertNewline,

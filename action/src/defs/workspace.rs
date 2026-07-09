@@ -202,6 +202,56 @@ impl Action for SetCwd {
     }
 }
 
+#[derive(Debug)]
+pub struct ReloadEnvDef;
+
+impl ActionDef for ReloadEnvDef {
+    fn name(&self) -> &'static str {
+        "ReloadEnv"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ReloadEnv
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "reload the project environment"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Re-run direnv against the active workspace's root and replace its stored environment diff. Runs even when `direnv.load` is disabled, since invoking it is explicit intent. Child processes spawned after the reload pick up the new environment; already-running ones keep theirs."
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["reload-env"]
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+
+#[derive(Debug)]
+pub struct ReloadEnv;
+
+impl ReloadEnv {
+    pub const DEF: &ReloadEnvDef = &ReloadEnvDef;
+}
+
+impl Action for ReloadEnv {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +277,9 @@ mod tests {
         assert_eq!(set_cwd.kind(), ActionKind::SetCwd);
         assert_eq!(set_cwd.def().name(), "SetCwd");
         assert_eq!(set_cwd.def().aliases(), &["cd"]);
+        assert_eq!(ReloadEnv.kind(), ActionKind::ReloadEnv);
+        assert_eq!(ReloadEnv.def().name(), "ReloadEnv");
+        assert_eq!(ReloadEnv.def().aliases(), &["reload-env"]);
     }
 
     #[test]
@@ -244,6 +297,7 @@ mod tests {
         assert!(CopyWorkspace.def().params().is_empty());
         assert!(SwitchWorkspace.def().params().is_empty());
         assert!(CloseWorkspace.def().params().is_empty());
+        assert!(ReloadEnv.def().params().is_empty());
     }
 
     #[test]

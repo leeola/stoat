@@ -85,7 +85,8 @@ pub use defs::{
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     terminal::Terminal,
     workspace::{
-        CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SetCwd, SwitchWorkspace,
+        CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
+        SwitchWorkspace,
     },
 };
 pub use kind::ActionKind;

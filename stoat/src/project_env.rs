@@ -132,6 +132,29 @@ pub(crate) fn ensure_loaded(stoat: &mut Stoat) {
     }
 }
 
+/// Force a reload of the active workspace's project environment.
+///
+/// Backs the `ReloadEnv` action. Unlike [`ensure_loaded`], it ignores
+/// both `direnv.load` and the workspace's current state, because the
+/// user invoking it is explicit intent. A reload therefore runs even
+/// when automatic loading is disabled or a previous load already
+/// finished. A load already in flight is left alone and only reported.
+pub(crate) fn reload_active_workspace(stoat: &mut Stoat) {
+    let ws_id = stoat.active_workspace;
+    let in_flight = stoat
+        .workspaces
+        .get(ws_id)
+        .is_some_and(|ws| ws.env.state == EnvLoadState::Loading);
+
+    if in_flight {
+        stoat.pending_message = Some("direnv: reload already running".to_string());
+        return;
+    }
+
+    stoat.pending_message = Some("direnv: reloading...".to_string());
+    spawn_load(stoat, ws_id, true);
+}
+
 /// Install a finished background load onto its workspace and report it.
 ///
 /// Drains [`Stoat::pending_env`], a no-op when nothing finished. On
@@ -349,6 +372,51 @@ mod tests {
         assert!(
             fake.invocations().is_empty(),
             "direnv must not run when disabled"
+        );
+    }
+
+    #[test]
+    fn reload_env_runs_and_swaps_diff_even_when_load_disabled() {
+        let mut h = TestHarness::with_size(80, 24);
+        let fake = setup(&mut h, out(br#"{"FOO":"new"}"#, b"", 0));
+        h.stoat.settings.direnv_load = Some(false);
+        h.stoat.active_workspace_mut().env.diff =
+            vec![("OLD".to_string(), Some("stale".to_string()))];
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReloadEnv);
+        assert_eq!(h.stoat.active_workspace().env.state, EnvLoadState::Loading);
+        h.settle();
+        install_pending(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(ws.env.state, EnvLoadState::Loaded);
+        assert_eq!(
+            ws.env.diff,
+            vec![("FOO".to_string(), Some("new".to_string()))]
+        );
+        assert_eq!(fake.invocations().len(), 1, "reload must run direnv once");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("direnv: 1 vars (0 unset) from /proj")
+        );
+    }
+
+    #[test]
+    fn reload_env_while_loading_only_messages() {
+        let mut h = TestHarness::with_size(80, 24);
+        let fake = setup(&mut h, out(br#"{"FOO":"bar"}"#, b"", 0));
+        h.stoat.active_workspace_mut().env.state = EnvLoadState::Loading;
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReloadEnv);
+
+        assert_eq!(h.stoat.active_workspace().env.state, EnvLoadState::Loading);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("direnv: reload already running")
+        );
+        assert!(
+            fake.invocations().is_empty(),
+            "in-flight reload must not re-run direnv"
         );
     }
 }
