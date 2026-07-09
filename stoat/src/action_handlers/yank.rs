@@ -647,6 +647,15 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_delete_exits_to_normal() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abcdef\n");
+        h.type_keys("v l l d");
+        assert_eq!(buffer_text(&h, &path), "def\n");
+        assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    #[test]
     fn paste_after_with_line_match_pastes_line_per_selection() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\ndef\n");
