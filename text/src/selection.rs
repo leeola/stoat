@@ -104,6 +104,84 @@ impl<T: Copy + Ord> Selection<T> {
     }
 }
 
+impl Selection<usize> {
+    /// Move the block cursor to `target` under the 1-width-cursor model,
+    /// returning a selection whose ends stay at least one character apart.
+    ///
+    /// Without `extend` the result is the one-character block at `target`,
+    /// discarding the old selection. At the rope end, where there is no next
+    /// character, that block covers the previous character instead. With
+    /// `extend` the tail is held and the head moves to `target`, and when the
+    /// head crosses the tail the tail steps one character so the range never
+    /// collapses onto the anchor.
+    ///
+    /// The vertical-movement goal is reset, since this is a horizontal move.
+    pub fn put_cursor(&self, rope: &Rope, target: usize, extend: bool) -> Selection<usize> {
+        if !extend {
+            let point = Selection {
+                id: self.id,
+                start: target,
+                end: target,
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            return point.min_width_1(rope);
+        }
+
+        let anchor = self.tail();
+        let head = self.head();
+        let anchor = if head >= anchor && target < anchor {
+            next_char_boundary(rope, anchor)
+        } else if head < anchor && target >= anchor {
+            prev_char_boundary(rope, anchor)
+        } else {
+            anchor
+        };
+
+        let (start, end, reversed) = if anchor <= target {
+            (anchor, next_char_boundary(rope, target), false)
+        } else {
+            (target, anchor, true)
+        };
+
+        Selection {
+            id: self.id,
+            start,
+            end,
+            reversed,
+            goal: SelectionGoal::None,
+        }
+    }
+
+    /// Widen an empty selection to cover one character, leaving any non-empty
+    /// selection untouched, so the block cursor always has a cell.
+    ///
+    /// An empty selection widens its head forward over the next character, or
+    /// backward over the previous one at the rope end where there is no next
+    /// character. The vertical-movement goal is preserved.
+    pub fn min_width_1(&self, rope: &Rope) -> Selection<usize> {
+        if !self.is_empty() {
+            return self.clone();
+        }
+
+        let offset = self.start;
+        let forward = next_char_boundary(rope, offset);
+        let (start, end) = if forward > offset {
+            (offset, forward)
+        } else {
+            (prev_char_boundary(rope, offset), offset)
+        };
+
+        Selection {
+            id: self.id,
+            start,
+            end,
+            reversed: false,
+            goal: self.goal,
+        }
+    }
+}
+
 /// Returns the offset of the block-cursor cell for a selection spanning
 /// `anchor` to `head`.
 ///
@@ -134,11 +212,33 @@ pub fn next_char_boundary(rope: &Rope, offset: usize) -> usize {
         .unwrap_or(offset)
 }
 
+/// Offset one character before `offset`, or `offset` itself at the rope start.
+///
+/// Backward mirror of [`next_char_boundary`], stepping by a whole character
+/// the way [`cursor_offset`] does when a forward selection's block cursor sits
+/// one cell back from the head.
+pub fn prev_char_boundary(rope: &Rope, offset: usize) -> usize {
+    rope.reversed_chars_at(offset)
+        .next()
+        .map(|ch| offset - ch.len_utf8())
+        .unwrap_or(offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sel(start: i32, end: i32, reversed: bool) -> Selection<i32> {
+        Selection {
+            id: 7,
+            start,
+            end,
+            reversed,
+            goal: SelectionGoal::None,
+        }
+    }
+
+    fn usel(start: usize, end: usize, reversed: bool) -> Selection<usize> {
         Selection {
             id: 7,
             start,
@@ -254,5 +354,72 @@ mod tests {
         assert_eq!(cursor_offset(&Rope::from("café"), 0, 5), 3);
         assert_eq!(cursor_offset(&Rope::from("abcd"), 3, 3), 3);
         assert_eq!(cursor_offset(&Rope::from("abcd"), 5, 1), 1);
+    }
+
+    #[test]
+    fn put_cursor_without_extend_is_one_char_block_at_target() {
+        let r = Rope::from("abcdef");
+        assert_eq!(
+            usel(0, 0, false).put_cursor(&r, 2, false),
+            usel(2, 3, false)
+        );
+        assert_eq!(
+            usel(1, 4, false).put_cursor(&r, 0, false),
+            usel(0, 1, false)
+        );
+    }
+
+    #[test]
+    fn put_cursor_without_extend_covers_prev_char_at_eof() {
+        assert_eq!(
+            usel(1, 1, false).put_cursor(&Rope::from("abcd"), 4, false),
+            usel(3, 4, false)
+        );
+        assert_eq!(
+            usel(0, 0, false).put_cursor(&Rope::from("café"), 3, false),
+            usel(3, 5, false)
+        );
+    }
+
+    #[test]
+    fn put_cursor_extend_moves_head_and_widens_forward() {
+        let r = Rope::from("abcdefgh");
+        assert_eq!(usel(0, 0, false).put_cursor(&r, 0, true), usel(0, 1, false));
+        assert_eq!(usel(0, 0, false).put_cursor(&r, 2, true), usel(0, 3, false));
+        assert_eq!(usel(2, 8, false).put_cursor(&r, 4, true), usel(2, 5, false));
+    }
+
+    #[test]
+    fn put_cursor_extend_shifts_anchor_when_head_crosses() {
+        let r = Rope::from("abcdefgh");
+        assert_eq!(usel(5, 5, false).put_cursor(&r, 2, true), usel(2, 6, true));
+        assert_eq!(usel(3, 6, false).put_cursor(&r, 0, true), usel(0, 4, true));
+        assert_eq!(usel(3, 6, true).put_cursor(&r, 6, true), usel(5, 7, false));
+    }
+
+    #[test]
+    fn min_width_1_widens_empty_forward() {
+        let r = Rope::from("abcd");
+        assert_eq!(usel(2, 2, false).min_width_1(&r), usel(2, 3, false));
+        assert_eq!(usel(0, 0, false).min_width_1(&r), usel(0, 1, false));
+    }
+
+    #[test]
+    fn min_width_1_widens_backward_at_eof() {
+        assert_eq!(
+            usel(4, 4, false).min_width_1(&Rope::from("abcd")),
+            usel(3, 4, false)
+        );
+        assert_eq!(
+            usel(5, 5, false).min_width_1(&Rope::from("café")),
+            usel(3, 5, false)
+        );
+    }
+
+    #[test]
+    fn min_width_1_leaves_non_empty_unchanged() {
+        let r = Rope::from("abcd");
+        assert_eq!(usel(1, 3, false).min_width_1(&r), usel(1, 3, false));
+        assert_eq!(usel(1, 3, true).min_width_1(&r), usel(1, 3, true));
     }
 }
