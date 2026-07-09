@@ -147,7 +147,7 @@ fn paste_clipboard(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
             return UpdateEffect::None;
         },
     };
-    paste_text(stoat, &content, side)
+    paste_text(stoat, &[content], side)
 }
 
 /// Extract the focused editor's primary selection content as a
@@ -227,43 +227,48 @@ fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
 /// `end` (After).
 fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
     let source = stoat.consume_selected_register();
-    let Some(content) = read_register_content(stoat, source) else {
+    let Some(fragments) = read_register_fragments(stoat, source) else {
         return UpdateEffect::None;
     };
-    paste_text(stoat, &content, side)
+    paste_text(stoat, &fragments, side)
 }
 
-/// Resolve the textual content of `register` from its backing
-/// store: in-memory for named/unnamed, host services for
-/// clipboard/search/last-insert, the active selection set for
-/// `SelectionIndex`. Returns `None` for blackhole, for read-only
-/// registers whose backing is empty, and for `SelectionIndex`
-/// when the focused pane has no selections.
-pub(crate) fn read_register_content(stoat: &mut Stoat, register: Register) -> Option<String> {
+/// Resolve `register` to its per-selection fragments. Named and unnamed
+/// registers read from the in-memory store. Clipboard, search, and
+/// last-insert come from host services and each hold a single value, so
+/// they resolve to a one-element vec. `SelectionIndex` reads the active
+/// selection set, one index per selection.
+///
+/// Returns `None` for blackhole, for read-only registers whose backing
+/// is empty, and for `SelectionIndex` when the focused pane has no
+/// selections.
+pub(crate) fn read_register_fragments(
+    stoat: &mut Stoat,
+    register: Register,
+) -> Option<Vec<String>> {
     match register {
         Register::Unnamed | Register::Named(_) => {
-            stoat.registers.read(register).map(|f| f.join("\n"))
+            stoat.registers.read(register).map(<[String]>::to_vec)
         },
         Register::Clipboard => match stoat.clipboard_host().get() {
-            Ok(text) => text,
+            Ok(text) => text.map(|t| vec![t]),
             Err(err) => {
                 tracing::warn!(target: "stoat::yank", ?err, "clipboard read failed");
                 None
             },
         },
-        Register::Search => stoat.last_search.as_ref().map(|s| s.query.clone()),
+        Register::Search => stoat.last_search.as_ref().map(|s| vec![s.query.clone()]),
         Register::Blackhole => None,
-        Register::LastInsert => stoat.last_insert_text.clone(),
-        Register::SelectionIndex => selection_index_content(stoat),
+        Register::LastInsert => stoat.last_insert_text.clone().map(|t| vec![t]),
+        Register::SelectionIndex => selection_index_fragments(stoat),
     }
 }
 
-/// Build a newline-joined "1\n2\n...\nN" for the focused
-/// editor's selection count. The string drops into
-/// [`paste_text`]'s `line_aware` branch so each selection
-/// receives its own index. Returns `None` when the focused pane
-/// is not an editor or has no selections.
-fn selection_index_content(stoat: &mut Stoat) -> Option<String> {
+/// Build one index fragment per selection ("1", "2", ..., "N") for the
+/// focused editor, so paste distributes one index to each selection.
+/// Returns `None` when the focused pane is not an editor or has no
+/// selections.
+fn selection_index_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -275,20 +280,18 @@ fn selection_index_content(stoat: &mut Stoat) -> Option<String> {
     if count == 0 {
         return None;
     }
-    let pieces: Vec<String> = (1..=count).map(|i| i.to_string()).collect();
-    Some(pieces.join("\n"))
+    Some((1..=count).map(|i| i.to_string()).collect())
 }
 
-/// Insert `content` at every selection, either at each
-/// selection's `start` (Before) or `end` (After). When `content`
-/// has exactly one line per selection (and more than one
-/// selection), each selection receives the matching line in
-/// start-offset order; otherwise every selection receives the
-/// full content. After the edit, every affected selection
-/// collapses to a cursor at the end of its inserted text. No-op
-/// when `content` is empty or the focused pane is not an editor.
-fn paste_text(stoat: &mut Stoat, content: &str, side: PasteSide) -> UpdateEffect {
-    if content.is_empty() {
+/// Insert one fragment at every selection, at each selection's `start`
+/// (Before) or `end` (After). Fragments distribute across selections in
+/// start-offset order. When the selections outnumber the fragments the
+/// last fragment repeats, so a single fragment lands at every selection.
+/// After the edit, every affected selection collapses to a cursor at the
+/// end of its inserted text. No-op when every fragment is empty or the
+/// focused pane is not an editor.
+fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> UpdateEffect {
+    if fragments.iter().all(String::is_empty) {
         return UpdateEffect::None;
     }
 
@@ -339,15 +342,9 @@ fn paste_text(stoat: &mut Stoat, content: &str, side: PasteSide) -> UpdateEffect
 
     entries.sort_by_key(|(_, off)| *off);
 
-    let lines: Vec<&str> = content.split('\n').collect();
-    let line_aware = entries.len() > 1 && lines.len() == entries.len();
-    let payload_for = |idx: usize| -> &str {
-        if line_aware {
-            lines[idx]
-        } else {
-            content
-        }
-    };
+    // Each selection receives its fragment in start-offset order. Selections
+    // beyond the fragment count repeat the last fragment.
+    let payload_for = |idx: usize| -> &str { fragments[idx.min(fragments.len() - 1)].as_str() };
 
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
@@ -584,6 +581,44 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(buffer_text(&h, &path), "abab\ncd\nabef\nab");
+    }
+
+    #[test]
+    fn paste_distributes_one_fragment_per_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["A".to_string(), "B".to_string()],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abcA\ndefB\n");
+    }
+
+    #[test]
+    fn paste_repeats_last_fragment_across_extra_selections() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["A".to_string()]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abcA\ndefA\n");
+    }
+
+    #[test]
+    fn paste_keeps_a_newline_bearing_fragment_intact() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["x\ny".to_string(), "z".to_string()],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abcx\ny\ndefz\n");
     }
 
     #[test]
