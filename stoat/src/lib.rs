@@ -15,6 +15,7 @@ pub mod diff;
 pub mod diff_cache;
 pub mod diff_map;
 pub mod diff_render_cli;
+pub(crate) mod diff_warm;
 pub mod display_map;
 pub mod dump;
 mod editor_state;

@@ -106,6 +106,10 @@ pub struct Workspace {
     pub git_root: PathBuf,
     /// The workspace's resolved project environment, loaded from direnv.
     pub(crate) env: crate::project_env::WorkspaceEnv,
+    /// Whether the background diff-cache warm has run for this workspace's
+    /// current root. Set once by [`crate::diff_warm::ensure_diff_warm`], reset
+    /// when the cwd changes so the new root warms afresh.
+    pub(crate) diff_warmed: bool,
     pub panes: PaneTree,
     pub(crate) docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
@@ -193,6 +197,7 @@ impl Workspace {
             name,
             git_root,
             env: crate::project_env::WorkspaceEnv::default(),
+            diff_warmed: false,
             panes,
             docks: SlotMap::with_key(),
             focus: FocusTarget::SplitPane(initial_focus),

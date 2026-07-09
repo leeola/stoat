@@ -99,6 +99,11 @@ fn spawn_review_scan(
     if let Some(old) = stoat.pending_review_scan.as_ref() {
         old.cancel.store(true, Ordering::Relaxed);
     }
+    // A real scan supersedes any background warm over the same tree, so cancel
+    // it rather than let both diff to completion.
+    if let Some(warm) = stoat.pending_diff_warm.as_ref() {
+        warm.cancel();
+    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
@@ -207,7 +212,11 @@ fn stream_review_inputs(
 
 /// Cache key matching what [`populate_diff_cache`] writes, so a scan reads back
 /// the hunks a prior install stored for an unchanged file.
-fn diff_cache_key(base: &str, buffer: &str, language: Option<&Arc<Language>>) -> DiffCacheKey {
+pub(crate) fn diff_cache_key(
+    base: &str,
+    buffer: &str,
+    language: Option<&Arc<Language>>,
+) -> DiffCacheKey {
     DiffCacheKey {
         left_hash: blake3::hash(base.as_bytes()).into(),
         right_hash: blake3::hash(buffer.as_bytes()).into(),
@@ -1863,15 +1872,34 @@ fn render_review_editor(stoat: &mut Stoat) {
 /// a `stoat diff` CLI invocation that hashes the same `(base, buffer,
 /// language)` tuple gets a cache hit instead of recomputing.
 fn populate_diff_cache(stoat: &Stoat, session: &ReviewSession) {
-    let mut cache = stoat.diff_cache.lock().expect("diff_cache poisoned");
+    populate_diff_cache_from(&stoat.diff_cache, session, &AtomicBool::new(false));
+}
+
+/// Write each of `session`'s files' hunks into `cache` move-aware, so a later
+/// review open serves them without re-diffing.
+///
+/// Locks the cache once per file rather than for the whole session, and checks
+/// `cancel` between files, so the background warm ([`crate::diff_warm`]) can be
+/// superseded mid-write without blocking a real scan or leaving the lock held.
+pub(crate) fn populate_diff_cache_from(
+    cache: &Mutex<DiffCache>,
+    session: &ReviewSession,
+    cancel: &AtomicBool,
+) {
     for file in &session.files {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         let hunks: Vec<ReviewHunk> = file
             .chunks
             .iter()
             .filter_map(|id| session.chunks.get(id).map(|c| c.hunk.clone()))
             .collect();
         let key = diff_cache_key(&file.base_text, &file.buffer_text, file.language.as_ref());
-        cache.insert(key, Arc::new(hunks), true);
+        cache
+            .lock()
+            .expect("diff_cache poisoned")
+            .insert(key, Arc::new(hunks), true);
     }
 }
 

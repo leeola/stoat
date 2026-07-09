@@ -15,7 +15,7 @@ mod pane;
 mod picker;
 mod prompt;
 mod rebase;
-mod review;
+pub(crate) mod review;
 mod reword;
 mod run;
 pub(crate) mod search;

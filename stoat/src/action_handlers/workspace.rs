@@ -158,7 +158,10 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
                 .flatten()
                 .is_some_and(|m| m.is_dir) =>
         {
-            stoat.active_workspace_mut().git_root = abs;
+            let ws = stoat.active_workspace_mut();
+            ws.git_root = abs;
+            // A new root has its own diff to warm, so re-arm the warm pass.
+            ws.diff_warmed = false;
         },
         Ok(_) => tracing::warn!("cd: not a directory: {}", candidate.display()),
         Err(e) => tracing::warn!("cd: cannot resolve {}: {}", candidate.display(), e),

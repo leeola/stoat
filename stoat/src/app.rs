@@ -238,6 +238,9 @@ pub struct Stoat {
     /// off this task and installs it on the main loop, so opening a review
     /// never stalls input on the scan.
     pub(crate) pending_review_scan: Option<action_handlers::PendingReviewScan>,
+    /// An in-flight background diff-cache warm pass, drained by
+    /// [`crate::diff_warm::install_finished`] in [`Self::drive_background`].
+    pub(crate) pending_diff_warm: Option<crate::diff_warm::PendingDiffWarm>,
     pub(crate) modal_run: Option<RunId>,
     /// Session-wide toggle for tree-sitter syntax coloring, applied to every
     /// editor at paint time. Not a [`crate::config::Settings`] field:
@@ -549,6 +552,10 @@ pub struct Stoat {
     /// by default so the test harness never spawns direnv. The binary
     /// turns it on for a live session via [`Self::set_env_auto_load`].
     pub(crate) env_auto_load: bool,
+    /// Whether workspaces warm their diff cache in the background at open. Off
+    /// by default so the test harness never spawns a warm pass. The binary
+    /// turns it on for a live session via [`Self::set_diff_warm_auto`].
+    pub(crate) diff_warm_auto: bool,
     /// Landing slot for a finished direnv load, drained by
     /// [`crate::project_env::install_pending`] in [`Self::drive_background`].
     /// Shared rather than returned because the load runs detached on
@@ -922,6 +929,7 @@ impl Stoat {
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
             pending_review_scan: None,
+            pending_diff_warm: None,
             modal_run: None,
             syntax_highlight: true,
             inlay_hints_enabled: false,
@@ -993,6 +1001,7 @@ impl Stoat {
             lsp_spawn_deferred: None,
             pending_lsp_host: Arc::new(std::sync::Mutex::new(None)),
             env_auto_load: false,
+            diff_warm_auto: false,
             pending_env: Arc::new(std::sync::Mutex::new(None)),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
@@ -1150,6 +1159,12 @@ impl Stoat {
     /// live session.
     pub fn set_env_auto_load(&mut self, enabled: bool) {
         self.env_auto_load = enabled;
+    }
+
+    /// Enable background diff-cache warming at workspace open. Off by default so
+    /// the test harness never spawns a warm pass. The binary turns it on.
+    pub fn set_diff_warm_auto(&mut self, enabled: bool) {
+        self.diff_warm_auto = enabled;
     }
 
     /// Returns the active [`LspHost`].
@@ -4945,6 +4960,8 @@ impl Stoat {
         self.install_pending_lsp_host();
         crate::project_env::ensure_loaded(self);
         crate::project_env::install_pending(self);
+        crate::diff_warm::ensure_diff_warm(self);
+        crate::diff_warm::install_finished(self);
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
         self.drive_parse_jobs();
