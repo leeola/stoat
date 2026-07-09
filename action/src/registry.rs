@@ -1008,6 +1008,13 @@ mod tests {
     }
 
     #[test]
+    fn save_buffer_aliases_resolve() {
+        for token in ["w", "write", "W"] {
+            assert_eq!(lookup_alias(token).expect(token).def.name(), "SaveBuffer");
+        }
+    }
+
+    #[test]
     fn terminal_alias_resolves() {
         for token in ["term", "TERM"] {
             assert_eq!(lookup_alias(token).expect(token).def.name(), "terminal");
