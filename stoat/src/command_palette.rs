@@ -1175,6 +1175,25 @@ mod tests {
         h.assert_snapshot("command_palette_dir_arg");
     }
 
+    /// A free-typed argument command (no inline picker) shows the parameter it
+    /// is collecting -- the name and description, then the command's long
+    /// description -- instead of the emptied command list.
+    #[test]
+    fn snapshot_command_palette_free_arg() {
+        let mut h = TestHarness::with_size(120, 30);
+        h.type_text(":RenameWorkspace ");
+        h.assert_snapshot("command_palette_free_arg");
+    }
+
+    #[test]
+    fn free_arg_submit_dispatches() {
+        let mut h = Stoat::test();
+        assert_eq!(
+            palette_dispatch_name(&mut h, ":RenameWorkspace newname"),
+            Some("RenameWorkspace"),
+        );
+    }
+
     #[test]
     fn palette_w_bang_routes_to_force_save_buffer() {
         let mut h = Stoat::test();

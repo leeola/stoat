@@ -1,7 +1,7 @@
 use crate::{
     command_palette::{CommandPalette, PaletteScope},
     input_view::InputView,
-    render::text::{wrap_text, write_str},
+    render::text::{wrap_text, write_str, write_str_clipped},
     workspace::Workspace,
 };
 use ratatui::{
@@ -9,6 +9,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Borders, Clear, Widget},
 };
+use stoat_action::registry::RegistryEntry;
 
 const LIST_ROWS: u16 = 10;
 const DOC_ROWS: u16 = 6;
@@ -111,6 +112,17 @@ pub(crate) fn render_command_palette(
         return;
     }
 
+    // A parsed command whose argument has no inline picker (ValueSource::None)
+    // shows a hint naming the argument instead of the emptied command list. Key
+    // on the source, not picker presence -- a stale picker from an earlier
+    // source may linger a frame and must not win.
+    if let Some(entry) = palette.command
+        && palette.arg_source().is_none()
+    {
+        render_palette_free_arg(palette, entry, ws, theme, area, buf, scene);
+        return;
+    }
+
     let scope = palette.scope();
     if palette.command.is_none()
         && let Some(layout) = palette_filter_layout(area)
@@ -147,49 +159,14 @@ fn render_palette_arg_picker(
     buf: &mut Buffer,
     mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
-    let Some(layout) = palette_filter_layout(area) else {
+    let entry = palette.command.expect("arg picker requires a command");
+    let Some(layout) =
+        render_palette_command_prelude(palette, entry, ws, theme, area, buf, scene.as_deref_mut())
+    else {
         return;
     };
-    let entry = palette.command.expect("arg picker requires a command");
-
-    let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    let title = format!(" {} ", entry.def.name());
-    Clear.render(layout.modal, buf);
-    crate::render::chrome::modal_frame(
-        buf,
-        layout.modal,
-        Some(title.as_str()),
-        modal_style,
-        theme,
-        scene.as_deref_mut(),
-    );
-
     let inner = layout.inner;
-    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
     let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-
-    let input_row = inner.y;
-    write_str(buf, inner.x, input_row, ":", prompt_style);
-    let input_area = Rect::new(inner.x + 2, input_row, inner.width.saturating_sub(2), 1);
-    palette.input.render(
-        &mut ws.editors,
-        input_area,
-        true,
-        "prompt",
-        theme,
-        &std::collections::BTreeMap::new(),
-        buf,
-    );
-
-    let separator_row = inner.y + 1;
-    crate::render::chrome::hline(
-        buf,
-        inner.x,
-        separator_row,
-        inner.width,
-        separator_style,
-        scene.as_deref_mut(),
-    );
 
     let Some((list, preview)) = arg_body_split(inner) else {
         return;
@@ -233,10 +210,128 @@ fn render_palette_arg_picker(
     );
 }
 
+/// Render the body for a free-typed argument, a command whose first argument
+/// has no inline picker (`ValueSource::None`, e.g. `:RenameWorkspace `).
+///
+/// Names the parameter being collected -- its name and description, then the
+/// command's long description -- so the modal describes what to type instead of
+/// showing the emptied command list. State is synced before the frame, so this
+/// only paints.
+fn render_palette_free_arg(
+    palette: &mut CommandPalette,
+    entry: &'static RegistryEntry,
+    ws: &mut Workspace,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
+    let Some(layout) = render_palette_command_prelude(palette, entry, ws, theme, area, buf, scene)
+    else {
+        return;
+    };
+    let inner = layout.inner;
+
+    let body_top = inner.y + 2;
+    let body_bottom = inner.y + inner.height;
+    if body_top >= body_bottom {
+        return;
+    }
+
+    let text_style = theme.get(crate::theme::scope::UI_TEXT);
+    if let Some(param) = entry.def.params().first() {
+        let hint = format!("{}  {}", param.name, param.description);
+        write_str_clipped(
+            buf,
+            inner.x,
+            body_top,
+            &hint,
+            text_style,
+            inner.x + inner.width,
+        );
+    }
+
+    let doc_top = body_top + 2;
+    if doc_top < body_bottom {
+        let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
+        let doc_lines = wrap_text(entry.def.long_desc(), inner.width as usize);
+        for (i, line) in doc_lines
+            .iter()
+            .take((body_bottom - doc_top) as usize)
+            .enumerate()
+        {
+            write_str(buf, inner.x, doc_top + i as u16, line, doc_style);
+        }
+    }
+}
+
+/// Render the shared chrome of a command-argument modal. The chrome is the
+/// command-titled frame, the `:` prompt with the live input, and the separator
+/// beneath it.
+///
+/// Returns the modal layout so the caller paints its body -- an inline picker or
+/// the free-typed argument hint -- or `None` when the modal does not fit `area`.
+///
+/// See also:
+/// - [`render_palette_arg_picker`] for the inline-picker body.
+/// - [`render_palette_free_arg`] for the free-typed argument body.
+fn render_palette_command_prelude(
+    palette: &mut CommandPalette,
+    entry: &'static RegistryEntry,
+    ws: &mut Workspace,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+) -> Option<PaletteFilterLayout> {
+    let layout = palette_filter_layout(area)?;
+
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
+    let title = format!(" {} ", entry.def.name());
+    Clear.render(layout.modal, buf);
+    crate::render::chrome::modal_frame(
+        buf,
+        layout.modal,
+        Some(title.as_str()),
+        modal_style,
+        theme,
+        scene.as_deref_mut(),
+    );
+
+    let inner = layout.inner;
+    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
+    let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+
+    let input_row = inner.y;
+    write_str(buf, inner.x, input_row, ":", prompt_style);
+    let input_area = Rect::new(inner.x + 2, input_row, inner.width.saturating_sub(2), 1);
+    palette.input.render(
+        &mut ws.editors,
+        input_area,
+        true,
+        "prompt",
+        theme,
+        &std::collections::BTreeMap::new(),
+        buf,
+    );
+
+    let separator_row = inner.y + 1;
+    crate::render::chrome::hline(
+        buf,
+        inner.x,
+        separator_row,
+        inner.width,
+        separator_style,
+        scene,
+    );
+
+    Some(layout)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
-    filtered: &[&'static stoat_action::registry::RegistryEntry],
+    filtered: &[&'static RegistryEntry],
     match_indices: &[Vec<u32>],
     selected: usize,
     scope: PaletteScope,
@@ -327,7 +422,7 @@ fn render_palette_filter(
 /// the smooth-scroll pool, which paints absolute pages, so both render
 /// identical rows.
 pub(crate) fn paint_palette_rows(
-    filtered: &[&'static stoat_action::registry::RegistryEntry],
+    filtered: &[&'static RegistryEntry],
     match_indices: &[Vec<u32>],
     selected: usize,
     area: Rect,
