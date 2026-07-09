@@ -138,6 +138,10 @@ pub(crate) fn ensure_loaded(stoat: &mut Stoat) {
 /// success the diff replaces the workspace's env. On error the env is
 /// cleared. Either way the state becomes [`EnvLoadState::Loaded`]. The
 /// transient message follows the outcome and whether the load was manual.
+///
+/// A language-server spawn deferred while the env was loading (see
+/// [`crate::action_handlers::lsp::maybe_spawn_language_server`]) is re-fired
+/// here, now with the installed diff.
 pub(crate) fn install_pending(stoat: &mut Stoat) {
     let pending = stoat.pending_env.lock().expect("pending env mutex").take();
     let Some(PendingEnvLoad {
@@ -170,6 +174,12 @@ pub(crate) fn install_pending(stoat: &mut Stoat) {
 
     if let Some(message) = message {
         stoat.pending_message = Some(message);
+    }
+
+    // A language-server spawn deferred while the env loaded now runs with the
+    // freshly installed diff.
+    if let Some(buffer_id) = stoat.lsp_spawn_deferred.take() {
+        crate::action_handlers::lsp::maybe_spawn_language_server(stoat, buffer_id);
     }
 }
 

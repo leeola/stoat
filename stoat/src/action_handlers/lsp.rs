@@ -197,7 +197,7 @@ pub(crate) fn notify_buffer_opened(
 /// [`Stoat::pending_lsp_host`] for [`Stoat::update`] to install. A spawn
 /// or handshake failure is logged and leaves the placeholder in place
 /// with no retry.
-fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
+pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
     if !stoat.lsp_auto_spawn || stoat.lsp_spawn_attempted || !stoat.lsp_host.is_noop() {
         return;
     }
@@ -209,9 +209,21 @@ fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
     else {
         return;
     };
+
+    // The workspace's direnv environment is still loading. Park the spawn
+    // rather than race the load with the wrong PATH. install_pending re-fires
+    // it once the env lands, so the server starts with the project (e.g.
+    // flake) toolchain.
+    if stoat.active_workspace().env.state == crate::project_env::EnvLoadState::Loading {
+        stoat.lsp_spawn_deferred = Some(buffer_id);
+        return;
+    }
+
     stoat.lsp_spawn_attempted = true;
 
-    let root_uri = path_to_uri(&stoat.active_workspace().git_root);
+    let git_root = stoat.active_workspace().git_root.clone();
+    let env = stoat.active_workspace().env.diff.clone();
+    let root_uri = path_to_uri(&git_root);
     let slot = stoat.pending_lsp_host.clone();
     let wake = stoat.redraw_notify.clone();
     let transcript = if stoat.settings.text_proto_log == Some(true) {
@@ -229,7 +241,8 @@ fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
     stoat
         .executor
         .spawn(async move {
-            let host: Arc<dyn LspHost> = match LocalLsp::spawn(&command, &args, transcript, wake) {
+            let host: Arc<dyn LspHost> =
+                match LocalLsp::spawn(&command, &args, &env, &git_root, transcript, wake) {
                 Ok(host) => Arc::new(host),
                 Err(err) => {
                     tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
@@ -3727,6 +3740,65 @@ mod tests {
         assert!(
             !h.stoat.lsp_spawn_attempted,
             "FakeLsp is a non-noop host, so opening a rust buffer attempts no spawn",
+        );
+    }
+
+    #[test]
+    fn lsp_spawn_defers_while_env_loading() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat
+            .set_lsp_host(std::sync::Arc::new(crate::host::NoopLsp));
+        h.stoat.set_lsp_auto_spawn(true);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        h.stoat.active_workspace_mut().env.state = crate::project_env::EnvLoadState::Loading;
+
+        open_buffer(&mut h, root.join("a.rs"));
+
+        assert!(
+            !h.stoat.lsp_spawn_attempted,
+            "the spawn is deferred, not attempted, while the env loads",
+        );
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("a.rs"));
+        assert!(buffer_id.is_some());
+        assert_eq!(h.stoat.lsp_spawn_deferred, buffer_id);
+    }
+
+    #[test]
+    fn env_install_consumes_lsp_deferral() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat
+            .set_lsp_host(std::sync::Arc::new(crate::host::NoopLsp));
+        h.stoat.set_lsp_auto_spawn(true);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        let ws_id = h.stoat.active_workspace;
+        h.stoat.active_workspace_mut().env.state = crate::project_env::EnvLoadState::Loading;
+        open_buffer(&mut h, root.join("a.rs"));
+        assert!(h.stoat.lsp_spawn_deferred.is_some());
+
+        // Install a real host so the re-fired spawn is gated at the noop check,
+        // keeping the test free of a real language-server process, then land
+        // the env.
+        h.stoat
+            .set_lsp_host(std::sync::Arc::new(crate::host::FakeLsp::new()));
+        *h.stoat.pending_env.lock().expect("pending env mutex") =
+            Some(crate::project_env::PendingEnvLoad {
+                workspace: ws_id,
+                manual: false,
+                outcome: Ok(Vec::new()),
+            });
+        crate::project_env::install_pending(&mut h.stoat);
+
+        assert_eq!(
+            h.stoat.lsp_spawn_deferred, None,
+            "install consumes the deferral"
+        );
+        assert_eq!(
+            h.stoat.active_workspace().env.state,
+            crate::project_env::EnvLoadState::Loaded,
         );
     }
 

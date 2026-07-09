@@ -532,6 +532,12 @@ pub struct Stoat {
     /// even as more buffers open. A failed spawn leaves it set, with no
     /// retry.
     pub(crate) lsp_spawn_attempted: bool,
+    /// Buffer whose language-server spawn was deferred because the
+    /// workspace's direnv env was still loading when it opened. Re-fired
+    /// by [`crate::project_env::install_pending`] once the env lands, so
+    /// the server starts with the project environment rather than racing
+    /// the load.
+    pub(crate) lsp_spawn_deferred: Option<BufferId>,
     /// Landing slot for a language server that finished spawning and
     /// initializing on the detached spawn task. Drained by
     /// [`Self::install_pending_lsp_host`] in [`Self::update`], which
@@ -984,6 +990,7 @@ impl Stoat {
             lsp_host: Arc::new(NoopLsp),
             lsp_auto_spawn: false,
             lsp_spawn_attempted: false,
+            lsp_spawn_deferred: None,
             pending_lsp_host: Arc::new(std::sync::Mutex::new(None)),
             env_auto_load: false,
             pending_env: Arc::new(std::sync::Mutex::new(None)),

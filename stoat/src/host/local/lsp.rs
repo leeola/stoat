@@ -45,6 +45,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     io::{self, BufRead, BufReader, Read, Write},
+    path::Path,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicI64, Ordering},
@@ -95,6 +96,10 @@ pub struct LocalLsp {
 impl LocalLsp {
     /// Spawn `command` with `args` as a child process wired for stdio JSON-RPC.
     ///
+    /// The child runs in `cwd` with `env` applied over the inherited
+    /// environment. Each `Some` sets the variable, each `None` unsets it, which
+    /// is how the workspace's project environment reaches the server.
+    ///
     /// Starts the reader thread (stdout to the channels) and a stderr thread
     /// (server logs to the `stoat::lsp` tracing target). The reader signals
     /// `wake` on server-pushed traffic so the run loop drains it promptly. The
@@ -103,15 +108,24 @@ impl LocalLsp {
     pub fn spawn(
         command: &str,
         args: &[String],
+        env: &[(String, Option<String>)],
+        cwd: &Path,
         transcript: Option<LspTranscript>,
         wake: Arc<Notify>,
     ) -> io::Result<Self> {
-        let mut child = Command::new(command)
-            .args(args)
+        let mut cmd = Command::new(command);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .current_dir(cwd);
+        for (key, value) in env {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
+        let mut child = cmd.spawn()?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
