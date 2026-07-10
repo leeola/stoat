@@ -475,6 +475,80 @@ mod tests {
     }
 
     #[test]
+    fn cd_reloads_env_for_the_new_root() {
+        let mut h = TestHarness::with_size(80, 24);
+        let fake = setup(
+            &mut h,
+            out(br#"{"OLD":"1","DIRENV_FILE":"/proj/.envrc"}"#, b"", 0),
+        );
+        h.stoat.active_workspace_mut().env.diff = vec![("OLD".to_string(), Some("1".to_string()))];
+        h.fake_fs().insert_dir("/proj2");
+
+        fake.set_response(
+            "TERM=dumb direnv export json",
+            out(br#"{"NEW":"2","DIRENV_FILE":"/proj2/.envrc"}"#, b"", 0),
+        );
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::SetCwd {
+                path: "/proj2".to_string(),
+            },
+        );
+        h.settle();
+        install_pending(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(ws.git_root, PathBuf::from("/proj2"));
+        assert_eq!(
+            ws.env.diff,
+            vec![
+                ("DIRENV_FILE".to_string(), Some("/proj2/.envrc".to_string())),
+                ("NEW".to_string(), Some("2".to_string())),
+            ]
+        );
+        assert_eq!(
+            fake.invocations().last().and_then(|i| i.cwd.clone()),
+            Some(PathBuf::from("/proj2")),
+            "direnv reran in the new root"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("direnv: 2 vars (0 unset) from /proj2/.envrc")
+        );
+    }
+
+    #[test]
+    fn cd_with_reload_disabled_clears_diff_without_running() {
+        let mut h = TestHarness::with_size(80, 24);
+        let fake = setup(
+            &mut h,
+            out(br#"{"NEW":"2","DIRENV_FILE":"/proj2/.envrc"}"#, b"", 0),
+        );
+        h.stoat.settings.direnv_reload_on_cd = Some(false);
+        h.stoat.active_workspace_mut().env.diff = vec![("OLD".to_string(), Some("1".to_string()))];
+        h.fake_fs().insert_dir("/proj2");
+
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::SetCwd {
+                path: "/proj2".to_string(),
+            },
+        );
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(ws.git_root, PathBuf::from("/proj2"));
+        assert!(
+            ws.env.diff.is_empty(),
+            "the old root's diff is cleared even when the reload is disabled"
+        );
+        assert!(
+            fake.invocations().is_empty(),
+            "reload_on_cd = false runs no direnv"
+        );
+    }
+
+    #[test]
     fn reload_env_while_loading_only_messages() {
         let mut h = TestHarness::with_size(80, 24);
         let fake = setup(&mut h, out(br#"{"FOO":"bar"}"#, b"", 0));

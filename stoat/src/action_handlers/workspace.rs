@@ -158,10 +158,23 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
                 .flatten()
                 .is_some_and(|m| m.is_dir) =>
         {
-            let ws = stoat.active_workspace_mut();
-            ws.git_root = abs;
-            // A new root has its own diff to warm, so re-arm the warm pass.
-            ws.diff_warmed = false;
+            let ws_id = stoat.active_workspace;
+            {
+                let ws = stoat.active_workspace_mut();
+                ws.git_root = abs;
+                // A new root has its own diff to warm, so re-arm the warm pass.
+                ws.diff_warmed = false;
+                // The old root's direnv diff must never leak into spawns under
+                // the new root, so drop it. A reload below repopulates it.
+                ws.env = crate::project_env::WorkspaceEnv::default();
+            }
+
+            if stoat.env_auto_load
+                && stoat.settings.direnv_reload_on_cd.unwrap_or(true)
+                && stoat.settings.direnv_load.unwrap_or(true)
+            {
+                crate::project_env::spawn_load(stoat, ws_id, false);
+            }
         },
         Ok(_) => tracing::warn!("cd: not a directory: {}", candidate.display()),
         Err(e) => tracing::warn!("cd: cannot resolve {}: {}", candidate.display(), e),
