@@ -4,8 +4,8 @@ use std::{collections::HashMap, ops::Range, sync::Arc};
 pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
-    Anchor, Bias, Dimensions, Fragment, InsertionFragment, InsertionFragmentKey, Locator, Point,
-    Rope, Selection, SumTree, UndoMap, UndoOperation,
+    Anchor, Bias, Dimensions, Fragment, IndentStyle, InsertionFragment, InsertionFragmentKey,
+    Locator, Point, Rope, Selection, SumTree, UndoMap, UndoOperation,
 };
 
 pub struct TextBuffer {
@@ -49,6 +49,10 @@ pub struct TextBuffer {
     /// Named markers on the op log placed by `commit_undo_checkpoint`. Read by
     /// checkpoint-navigation actions; never mutated by `edit` / `undo` / `redo`.
     checkpoints: Vec<Checkpoint>,
+    /// Indentation unit this buffer uses, detected from its content at load and
+    /// falling back to [`IndentStyle::default`] when the content carries no
+    /// evidence. Cached rather than re-detected per edit.
+    indent_style: IndentStyle,
 }
 
 /// A single replayable mutation on a [`TextBuffer`]. Edits record the `(range,
@@ -158,6 +162,7 @@ impl TextBuffer {
             ops: Vec::new(),
             next_checkpoint_id: 0,
             checkpoints: Vec::new(),
+            indent_style: IndentStyle::default(),
         }
     }
 
@@ -167,7 +172,19 @@ impl TextBuffer {
             buf.edit(0..0, text);
             buf.mark_clean();
         }
+        buf.detect_indent_style();
         buf
+    }
+
+    /// The indentation unit this buffer uses, detected from its content.
+    pub fn indent_style(&self) -> IndentStyle {
+        self.indent_style
+    }
+
+    /// Re-detect and cache the buffer's indentation style from its current
+    /// content, falling back to the default when the content shows no evidence.
+    fn detect_indent_style(&mut self) {
+        self.indent_style = stoat_text::detect_indent_style(self.rope()).unwrap_or_default();
     }
 
     pub fn edit(&mut self, range: Range<usize>, text: &str) {
@@ -651,6 +668,7 @@ impl TextBuffer {
         }
         buf.saved_marker = history.saved_marker;
         buf.recompute_dirty();
+        buf.detect_indent_style();
         buf
     }
 }
@@ -885,10 +903,31 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 mod tests {
     use super::TextBuffer;
     use std::ops::Range;
-    use stoat_text::{Bias, BufferId, Point, Selection, SelectionGoal};
+    use stoat_text::{Bias, BufferId, IndentStyle, Point, Selection, SelectionGoal};
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
+    }
+
+    #[test]
+    fn indent_style_detected_from_tabs() {
+        let b = buf("fn a() {\n\tlet x = 1;\n\tif x {\n\t\tx;\n\t}\n}\n");
+        assert_eq!(b.indent_style(), IndentStyle::Tabs);
+    }
+
+    #[test]
+    fn indent_style_detected_from_spaces() {
+        let b = buf("fn a() {\n  let x = 1;\n  if x {\n    x;\n  }\n}\n");
+        assert_eq!(b.indent_style(), IndentStyle::Spaces(2));
+    }
+
+    #[test]
+    fn indent_style_defaults_without_evidence() {
+        assert_eq!(buf("alpha\nbravo\n").indent_style(), IndentStyle::default());
+        assert_eq!(
+            TextBuffer::new(BufferId::new(0)).indent_style(),
+            IndentStyle::default()
+        );
     }
 
     #[test]
