@@ -1481,6 +1481,26 @@ mod tests {
     }
 
     #[test]
+    fn move_next_word_start_from_whitespace_advances_anchor() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, " foo bar");
+        dispatch(&mut stoat, &MoveNextWordStart);
+        // The anchor advances past the leading space onto the word start, so the
+        // selection excludes the space and `dw` here would not eat it.
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 5, false)]);
+    }
+
+    #[test]
+    fn move_next_word_start_from_blank_line_runs_through_word() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "\nfoo");
+        dispatch(&mut stoat, &MoveNextWordStart);
+        // Starting on the blank line, the anchor skips the newline and the head
+        // runs through the following word to its end.
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 4, false)]);
+    }
+
+    #[test]
     fn move_next_word_end_creates_selection() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");

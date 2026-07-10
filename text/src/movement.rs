@@ -42,65 +42,112 @@ fn long_word_category(ch: char) -> CharCategory {
 }
 
 pub fn next_word_start(rope: &Rope, from: usize) -> usize {
-    next_word_start_with(rope, from, categorize_char)
+    next_word_start_with(rope, from, from, categorize_char).1
 }
 
 pub fn next_long_word_start(rope: &Rope, from: usize) -> usize {
-    next_word_start_with(rope, from, long_word_category)
+    next_word_start_with(rope, from, from, long_word_category).1
+}
+
+/// [`next_word_start`] as a Helix `range_to_target` step: given the origin
+/// `(anchor, head)`, returns the new `(anchor, head)`. The anchor advances past
+/// a leading newline run and past a single leading boundary char so a forward
+/// word motion from whitespace or a blank line does not select the gap.
+pub fn next_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
+    next_word_start_with(rope, anchor, head, categorize_char)
+}
+
+pub fn next_long_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
+    next_word_start_with(rope, anchor, head, long_word_category)
 }
 
 fn next_word_start_with<F: Fn(char) -> CharCategory>(
     rope: &Rope,
+    anchor_in: usize,
     from: usize,
     category: F,
-) -> usize {
-    let mut chars = rope.chars_at(from);
-    let Some(first_char) = chars.next() else {
-        return from;
-    };
-    let head_start = from + first_char.len_utf8();
-    let mut head = head_start;
-    let mut prev_ch = first_char;
-
-    loop {
-        let Some(ch) = chars.next() else {
-            return head;
-        };
-        let boundary = category(prev_ch) != category(ch);
-        let target = boundary && (char_is_line_ending(ch) || !ch.is_whitespace());
-        if target && head != head_start {
-            return head;
-        }
-        prev_ch = ch;
-        head += ch.len_utf8();
-    }
+) -> (usize, usize) {
+    forward_word_range(rope, anchor_in, from, &category, |_prev, ch, boundary| {
+        boundary && (char_is_line_ending(ch) || !ch.is_whitespace())
+    })
 }
 
 pub fn next_word_end(rope: &Rope, from: usize) -> usize {
-    next_word_end_with(rope, from, categorize_char)
+    next_word_end_with(rope, from, from, categorize_char).1
 }
 
 pub fn next_long_word_end(rope: &Rope, from: usize) -> usize {
-    next_word_end_with(rope, from, long_word_category)
+    next_word_end_with(rope, from, from, long_word_category).1
 }
 
-fn next_word_end_with<F: Fn(char) -> CharCategory>(rope: &Rope, from: usize, category: F) -> usize {
-    let mut chars = rope.chars_at(from);
+pub fn next_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
+    next_word_end_with(rope, anchor, head, categorize_char)
+}
+
+pub fn next_long_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
+    next_word_end_with(rope, anchor, head, long_word_category)
+}
+
+fn next_word_end_with<F: Fn(char) -> CharCategory>(
+    rope: &Rope,
+    anchor_in: usize,
+    from: usize,
+    category: F,
+) -> (usize, usize) {
+    forward_word_range(rope, anchor_in, from, &category, |prev, ch, boundary| {
+        boundary && (!prev.is_whitespace() || char_is_line_ending(ch))
+    })
+}
+
+/// Shared forward word-motion scan matching Helix's `range_to_target`. Scans
+/// from `from`, returning the target `head` and an `anchor` that starts at
+/// `anchor_in` and advances past a leading newline run (so the head runs through
+/// a blank line) and past a single leading boundary char (so the first target
+/// boundary at `head_start` moves the anchor onto the span start).
+fn forward_word_range<C, T>(
+    rope: &Rope,
+    anchor_in: usize,
+    from: usize,
+    category: C,
+    is_target: T,
+) -> (usize, usize)
+where
+    C: Fn(char) -> CharCategory,
+    T: Fn(char, char, bool) -> bool,
+{
+    let mut chars = rope.chars_at(from).peekable();
     let Some(first_char) = chars.next() else {
-        return from;
+        return (anchor_in, from);
     };
-    let head_start = from + first_char.len_utf8();
-    let mut head = head_start;
+
+    let mut anchor = anchor_in;
+    let mut head = from + first_char.len_utf8();
     let mut prev_ch = first_char;
 
+    if char_is_line_ending(first_char) {
+        while let Some(&ch) = chars.peek() {
+            if !char_is_line_ending(ch) {
+                break;
+            }
+            chars.next();
+            head += ch.len_utf8();
+            prev_ch = ch;
+        }
+        anchor = head;
+    }
+
+    let head_start = head;
     loop {
         let Some(ch) = chars.next() else {
-            return head;
+            return (anchor, head);
         };
         let boundary = category(prev_ch) != category(ch);
-        let target = boundary && (!prev_ch.is_whitespace() || char_is_line_ending(ch));
-        if target && head != head_start {
-            return head;
+        if is_target(prev_ch, ch, boundary) {
+            if head == head_start {
+                anchor = head;
+            } else {
+                return (anchor, head);
+            }
         }
         prev_ch = ch;
         head += ch.len_utf8();
@@ -466,6 +513,33 @@ mod tests {
     }
 
     #[test]
+    fn next_word_start_range_advances_anchor_like_helix() {
+        // Mirrors Helix's move_next_word_start, called as the handler does
+        // (anchor == head == seed) so the block-cursor prep already holds. Each
+        // string is short enough to read every offset directly.
+        let cases: &[(&str, usize, (usize, usize))] = &[
+            // On a word start: anchor stays, head reaches the next word.
+            ("ab cd", 0, (0, 3)),
+            // Mid-word: anchor stays at the seed.
+            ("hello", 2, (2, 5)),
+            // One leading space (a single boundary char): anchor advances past
+            // it and the head runs through the first word to the next.
+            (" ab cd", 0, (1, 4)),
+            // A multi-space run: anchor stays, head stops at the word start.
+            ("  ab cd", 0, (0, 2)),
+            // A leading newline run: anchor skips it, head runs through the word.
+            ("\n\nab cd", 0, (2, 5)),
+        ];
+        for (text, seed, expected) in cases {
+            assert_eq!(
+                next_word_start_range(&rope(text), *seed, *seed),
+                *expected,
+                "next_word_start on {text:?} from {seed}"
+            );
+        }
+    }
+
+    #[test]
     fn categorize_covers_main_classes() {
         assert_eq!(categorize_char('a'), CharCategory::Word);
         assert_eq!(categorize_char('1'), CharCategory::Word);
@@ -541,7 +615,9 @@ mod tests {
     fn next_word_start_bridges_consecutive_newlines() {
         let r = rope("foo\n\nbar");
         assert_eq!(next_word_start(&r, 0), 3);
-        assert_eq!(next_word_start(&r, 3), 5);
+        // From inside the blank run the head bridges both newlines and runs
+        // through the following word to its end, matching Helix.
+        assert_eq!(next_word_start(&r, 3), 8);
     }
 
     #[test]

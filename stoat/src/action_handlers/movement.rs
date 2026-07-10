@@ -9,9 +9,10 @@ use crate::{
 use stoat_language::structural_diff::BufferRef;
 use stoat_text::{
     cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end,
-    next_long_word_start, next_word_end, next_word_start, prev_long_word_end, prev_long_word_start,
-    prev_word_end, prev_word_start, Anchor, Bias, NumberKind, Point, Rope, Selection,
-    SelectionGoal,
+    next_long_word_end_range, next_long_word_start, next_long_word_start_range, next_word_end,
+    next_word_end_range, next_word_start, next_word_start_range, prev_long_word_end,
+    prev_long_word_start, prev_word_end, prev_word_start, Anchor, Bias, NumberKind, Point, Rope,
+    Selection, SelectionGoal,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -441,7 +442,11 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
 
         if target_offset > seed {
             let end_offset = target_offset;
-            let tail_anchor = buffer_snapshot.anchor_at(seed, Bias::Right);
+            // Advance the tail past a leading whitespace or newline run like
+            // Helix range_to_target, so `w` from whitespace does not select the
+            // gap (and `dw` there does not eat it).
+            let tail_offset = forward_word_anchor(rope, target, seed, count);
+            let tail_anchor = buffer_snapshot.anchor_at(tail_offset, Bias::Right);
             let head_anchor = buffer_snapshot.anchor_at(end_offset, Bias::Right);
             Selection {
                 id: sel.id,
@@ -469,6 +474,27 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
         }
     });
     UpdateEffect::Redraw
+}
+
+/// The advanced tail for a forward word motion, threading Helix's
+/// `range_to_target` anchor rule across `count`. Returns `seed` unchanged for a
+/// backward target (whose non-extend arm keeps its own tail).
+fn forward_word_anchor(rope: &Rope, target: WordTarget, seed: usize, count: u32) -> usize {
+    let (mut anchor, mut head) = (seed, seed);
+    for _ in 0..count {
+        let next = match target {
+            WordTarget::NextStart => next_word_start_range(rope, anchor, head),
+            WordTarget::NextEnd => next_word_end_range(rope, anchor, head),
+            WordTarget::NextLongStart => next_long_word_start_range(rope, anchor, head),
+            WordTarget::NextLongEnd => next_long_word_end_range(rope, anchor, head),
+            _ => return anchor,
+        };
+        if next == (anchor, head) {
+            break;
+        }
+        (anchor, head) = next;
+    }
+    anchor
 }
 
 fn extend_head(
