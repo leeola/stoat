@@ -246,6 +246,8 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
                 Ok(host) => Arc::new(host),
                 Err(err) => {
                     tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
+                    *slot.lock().expect("pending lsp host mutex") =
+                        Some(Err(format!("{command}: {err}")));
                     return;
                 },
             };
@@ -260,10 +262,12 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
                 },
                 Err(err) => {
                     tracing::warn!(target: "stoat::lsp", ?err, %command, "language server initialize failed");
+                    *slot.lock().expect("pending lsp host mutex") =
+                        Some(Err(format!("{command}: {err}")));
                     return;
                 },
             }
-            *slot.lock().expect("pending lsp host mutex") = Some(host);
+            *slot.lock().expect("pending lsp host mutex") = Some(Ok(host));
         })
         .detach();
 }

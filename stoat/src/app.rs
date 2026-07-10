@@ -97,6 +97,11 @@ impl UpdateEffect {
     }
 }
 
+/// Shared landing slot for the detached LSP spawn task's outcome. `Ok` is the
+/// ready host to install, `Err` the failure string to surface in the message
+/// row. See [`Stoat::pending_lsp_host`].
+type PendingLspHost = Arc<std::sync::Mutex<Option<Result<Arc<dyn LspHost>, String>>>>;
+
 pub struct Stoat {
     size: Rect,
     /// Fallback mode store, read and written only when the focused target has
@@ -555,13 +560,13 @@ pub struct Stoat {
     /// the server starts with the project environment rather than racing
     /// the load.
     pub(crate) lsp_spawn_deferred: Option<BufferId>,
-    /// Landing slot for a language server that finished spawning and
-    /// initializing on the detached spawn task. Drained by
-    /// [`Self::install_pending_lsp_host`] in [`Self::update`], which
-    /// swaps it in for the [`NoopLsp`] placeholder. Shared rather than
-    /// returned because the spawn runs detached on [`Self::executor`]
-    /// and cannot borrow `self`.
-    pub(crate) pending_lsp_host: Arc<std::sync::Mutex<Option<Arc<dyn LspHost>>>>,
+    /// Landing slot for the detached language-server spawn task's outcome.
+    /// Drained by [`Self::install_pending_lsp_host`] in [`Self::update`]:
+    /// `Ok` swaps the ready host in for the [`NoopLsp`] placeholder, `Err`
+    /// carries the failure string to surface in the message row while the
+    /// placeholder stays. Shared rather than returned because the spawn runs
+    /// detached on [`Self::executor`] and cannot borrow `self`.
+    pub(crate) pending_lsp_host: PendingLspHost,
     /// Whether workspaces automatically load their direnv environment. Off
     /// by default so the test harness never spawns direnv. The binary
     /// turns it on for a live session via [`Self::set_env_auto_load`].
@@ -2338,13 +2343,20 @@ impl Stoat {
     /// `did_open` for every open file-backed buffer so the real server
     /// receives the documents that opened while it was starting.
     fn install_pending_lsp_host(&mut self) {
-        let host = self
+        let pending = self
             .pending_lsp_host
             .lock()
             .expect("pending lsp host mutex")
             .take();
-        let Some(host) = host else {
-            return;
+        let host = match pending {
+            None => return,
+            Some(Ok(host)) => host,
+            Some(Err(msg)) => {
+                // The server never came up, so the NoopLsp placeholder stays and
+                // the failure surfaces in the message row rather than only the log.
+                self.pending_message = Some(format!("lsp: {msg}"));
+                return;
+            },
         };
 
         self.set_lsp_host(host);
@@ -7845,6 +7857,49 @@ mod tests {
             });
         h.drain_lsp();
         h.assert_snapshot("lsp_show_message_error");
+    }
+
+    #[test]
+    fn lsp_spawn_failure_surfaces_in_message_row() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
+        *stoat
+            .pending_lsp_host
+            .lock()
+            .expect("pending lsp host mutex") = Some(Err("rust-analyzer: NotFound".to_string()));
+
+        stoat.install_pending_lsp_host();
+
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("lsp: rust-analyzer: NotFound")
+        );
+        assert!(
+            stoat.lsp_host.is_noop(),
+            "the placeholder stays after a spawn failure"
+        );
+    }
+
+    #[test]
+    fn lsp_ready_host_installs_without_a_message() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
+        let host: Arc<dyn LspHost> = Arc::new(crate::host::FakeLsp::new());
+        *stoat
+            .pending_lsp_host
+            .lock()
+            .expect("pending lsp host mutex") = Some(Ok(host));
+
+        stoat.install_pending_lsp_host();
+
+        assert!(
+            !stoat.lsp_host.is_noop(),
+            "a ready host replaces the placeholder"
+        );
+        assert_eq!(
+            stoat.pending_message, None,
+            "a successful install shows no message"
+        );
     }
 
     #[test]
