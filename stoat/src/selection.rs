@@ -2534,12 +2534,32 @@ mod tests {
     }
 
     #[test]
-    fn unindent_selection_removes_up_to_four_leading_spaces() {
+    fn indent_selection_uses_space_indent_style() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
-        let path = h.write_file("s.txt", "      abc\n");
+        // The 2-space indent of the second line makes the buffer space-styled.
+        let path = h.write_file("s.txt", "a\n  b\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+        assert_eq!(focused_buffer_text(&mut h), "  a\n  b\n");
+    }
+
+    #[test]
+    fn indent_selection_skips_blank_lines() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n\ndef\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+        assert_eq!(focused_buffer_text(&mut h), "\tabc\n\n\tdef\n");
+    }
+
+    #[test]
+    fn unindent_selection_removes_one_space_indent_width() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "  a\n  b\n");
         h.open_file(&path);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnindentSelection);
-        assert_eq!(focused_buffer_text(&mut h), "  abc\n");
+        assert_eq!(focused_buffer_text(&mut h), "a\n  b\n");
     }
 
     #[test]

@@ -2111,7 +2111,9 @@ enum IndentDir {
     Out,
 }
 
-const INDENT_WIDTH: usize = 4;
+/// Visual columns a tab advances, for column-accurate unindent. Matches the
+/// editor's default render tab size.
+const TAB_WIDTH: usize = 4;
 
 fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
@@ -2122,9 +2124,15 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, mut edits) = {
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let style = ws
+        .buffers
+        .get(buffer_id)
+        .map(|buffer| buffer.read().expect("poisoned").indent_style())
+        .unwrap_or_default();
+
+    let mut edits = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
-        let buffer_id = editor.buffer_id;
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
         let rope = buffer_snapshot.rope();
@@ -2150,37 +2158,30 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
         let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(rows.len());
         for row in rows {
             let line_start = rope.point_to_offset(Point::new(row, 0));
+            let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
             match dir {
                 IndentDir::In => {
-                    edits.push((line_start, line_start, "\t".repeat(count)));
+                    // Indenting leaves all-whitespace rows untouched, like Helix.
+                    if first_nonwhitespace(rope, line_start, line_end).is_none() {
+                        continue;
+                    }
+                    edits.push((line_start, line_start, style.as_str().repeat(count)));
                 },
                 IndentDir::Out => {
-                    let head: Vec<char> = rope
-                        .chars_at(line_start)
-                        .take(count.saturating_mul(INDENT_WIDTH))
-                        .collect();
+                    // Remove leading whitespace up to `count` indent widths of
+                    // visual columns, counting a tab to its next stop.
+                    let target = count.saturating_mul(style.indent_width(TAB_WIDTH));
+                    let mut width = 0usize;
                     let mut consumed = 0usize;
-                    let mut idx = 0usize;
-                    for _ in 0..count {
-                        if idx >= head.len() {
-                            break;
-                        }
-                        match head[idx] {
-                            '\t' => {
-                                idx += 1;
-                                consumed += 1;
-                            },
-                            ' ' => {
-                                let group_start = idx;
-                                while idx < head.len()
-                                    && head[idx] == ' '
-                                    && idx - group_start < INDENT_WIDTH
-                                {
-                                    idx += 1;
-                                }
-                                consumed += idx - group_start;
-                            },
+                    for ch in rope.chars_at(line_start) {
+                        match ch {
+                            ' ' => width += 1,
+                            '\t' => width = (width / TAB_WIDTH + 1) * TAB_WIDTH,
                             _ => break,
+                        }
+                        consumed += ch.len_utf8();
+                        if width >= target {
+                            break;
                         }
                     }
                     if consumed > 0 {
@@ -2189,7 +2190,7 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
                 },
             }
         }
-        (buffer_id, edits)
+        edits
     };
 
     if edits.is_empty() {

@@ -6,20 +6,37 @@ const MAX_INDENT: usize = 16;
 /// Number of leading lines the detector scans before giving up.
 const SCAN_LINES: u32 = 1000;
 
+/// Sixteen spaces, the backing store for [`IndentStyle::as_str`].
+const SPACES: &str = "                ";
+
 /// A buffer's indentation unit: hard tabs, or a fixed run of spaces.
 ///
 /// `Spaces` holds the width in columns, valid for 1..=[`MAX_INDENT`]. The
-/// [`Default`] is four spaces, the fallback when a file carries no detectable
-/// indentation.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+/// [`Default`] is tabs, the fallback when a file carries no detectable
+/// indentation, matching the editor's tab-based default elsewhere.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
 pub enum IndentStyle {
+    #[default]
     Tabs,
     Spaces(u8),
 }
 
-impl Default for IndentStyle {
-    fn default() -> Self {
-        IndentStyle::Spaces(4)
+impl IndentStyle {
+    /// The literal text of one indent level, a tab or the run of spaces.
+    pub fn as_str(&self) -> &'static str {
+        match *self {
+            IndentStyle::Tabs => "\t",
+            IndentStyle::Spaces(width) => &SPACES[..(width as usize).clamp(1, MAX_INDENT)],
+        }
+    }
+
+    /// The visual column width of one indent level. Tabs advance by `tab_width`;
+    /// spaces by their own count.
+    pub fn indent_width(&self, tab_width: usize) -> usize {
+        match *self {
+            IndentStyle::Tabs => tab_width,
+            IndentStyle::Spaces(width) => width as usize,
+        }
     }
 }
 
@@ -163,7 +180,15 @@ mod tests {
     }
 
     #[test]
-    fn default_is_four_spaces() {
-        assert_eq!(IndentStyle::default(), IndentStyle::Spaces(4));
+    fn default_is_tabs() {
+        assert_eq!(IndentStyle::default(), IndentStyle::Tabs);
+    }
+
+    #[test]
+    fn as_str_and_width() {
+        assert_eq!(IndentStyle::Tabs.as_str(), "\t");
+        assert_eq!(IndentStyle::Spaces(3).as_str(), "   ");
+        assert_eq!(IndentStyle::Tabs.indent_width(4), 4);
+        assert_eq!(IndentStyle::Spaces(2).indent_width(4), 2);
     }
 }
