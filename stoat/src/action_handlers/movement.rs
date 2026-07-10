@@ -863,6 +863,8 @@ fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffe
             },
             None => sel.clone(),
         });
+
+    stoat.auto_indent_cursors = inserts.iter().map(|ins| ins.id).collect();
     UpdateEffect::Redraw
 }
 
@@ -1751,6 +1753,8 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
         }
         new
     });
+
+    stoat.auto_indent_cursors = inserts.iter().map(|ins| ins.id).collect();
     UpdateEffect::Redraw
 }
 

@@ -398,6 +398,12 @@ pub struct Stoat {
     /// appended-over) char rather than one cell past it. It is cleared on the
     /// insert-to-normal transition. Other insert entries never set it.
     pub(crate) restore_cursor: bool,
+    /// Selection IDs whose line was auto-indented by the insert entry
+    /// (`o`/`O`/`I`/`A` on an empty line). The insert-to-normal transition
+    /// takes it and, when the session typed nothing, strips each recorded
+    /// line's untouched indentation back to a clean empty line. Other insert
+    /// entries never set it.
+    pub(crate) auto_indent_cursors: Vec<usize>,
     /// Process-wide register store for yank, paste, and (later)
     /// macros and `insert_register`. Unnamed and named registers
     /// live in-process; system / primary clipboard variants are
@@ -988,6 +994,7 @@ impl Stoat {
             last_insert_text: None,
             current_insert_run: None,
             restore_cursor: false,
+            auto_indent_cursors: Vec::new(),
             registers: register::RegisterStore::new(),
             pending_register_select: false,
             selected_register: None,
@@ -3843,17 +3850,30 @@ impl Stoat {
     pub(crate) fn transition_mode(&mut self, next: String) {
         let was_insert = is_insert_run_mode(self.focused_mode());
         let now_insert = is_insert_run_mode(&next);
-        if was_insert
-            && !now_insert
-            && let Some(run) = self.current_insert_run.take()
-            && !run.is_empty()
-        {
-            self.last_insert_text = Some(run);
+        let leaving_insert = was_insert && !now_insert;
+
+        let typed_nothing = if leaving_insert {
+            let run = self.current_insert_run.take().unwrap_or_default();
+            if run.is_empty() {
+                true
+            } else {
+                self.last_insert_text = Some(run);
+                false
+            }
+        } else {
+            false
+        };
+
+        if leaving_insert {
+            let auto_indent_cursors = std::mem::take(&mut self.auto_indent_cursors);
+            if typed_nothing && !auto_indent_cursors.is_empty() {
+                self.strip_untouched_auto_indent(&auto_indent_cursors);
+            }
         }
-        if was_insert && !now_insert && std::mem::take(&mut self.restore_cursor) {
+        if leaving_insert && std::mem::take(&mut self.restore_cursor) {
             self.restore_cursor_after_append();
         }
-        if was_insert && !now_insert {
+        if leaving_insert {
             self.seal_insert_undo_group();
         }
         if !was_insert && now_insert {
@@ -3895,7 +3915,11 @@ impl Stoat {
 
     /// Move each block cursor in the focused editor back one grapheme, landing
     /// it 1-wide, so leaving an append-style insert lands on the last typed
-    /// char rather than one cell past it. A cursor at offset 0 stays put.
+    /// char rather than one cell past it.
+    ///
+    /// A cursor at a line start stays put, since retreating across the newline
+    /// would land it on the previous line. This covers the buffer start and an
+    /// empty line whose auto-indent was stripped on the same transition.
     fn restore_cursor_after_append(&mut self) {
         let Some(editor) = action_handlers::focused_editor_mut(self) else {
             return;
@@ -3909,16 +3933,92 @@ impl Stoat {
                 buf_snap.resolve_anchor(&sel.tail()),
                 buf_snap.resolve_anchor(&sel.head()),
             );
-            let back = rope
-                .reversed_chars_at(cursor)
-                .next()
-                .map_or(cursor, |ch| cursor - ch.len_utf8());
+            let back = match rope.reversed_chars_at(cursor).next() {
+                Some(ch) if ch != '\n' => cursor - ch.len_utf8(),
+                _ => cursor,
+            };
             action_handlers::movement::land_block_cursor(
                 sel.id,
                 back,
                 stoat_text::SelectionGoal::None,
                 rope,
                 buf_snap,
+            )
+        });
+    }
+
+    /// Strip the untouched auto-indent from each recorded cursor's line, leaving
+    /// a clean empty line.
+    ///
+    /// Called on the insert-to-normal transition when `o`/`O`/`I`/`A` entered
+    /// insert on an empty line and nothing was typed. Only a recorded cursor
+    /// whose line is entirely whitespace with the cursor at its end is stripped,
+    /// so a cursor that moved onto real content, or one that was merely
+    /// repositioned on a pre-existing whitespace line, is left alone.
+    fn strip_untouched_auto_indent(&mut self, auto_indent_cursors: &[usize]) {
+        let Some((editor_id, buffer_id)) = self.focused_editor_ids() else {
+            return;
+        };
+        let ws = self.active_workspace_mut();
+        let (Some(editor), Some(buffer)) =
+            (ws.editors.get_mut(editor_id), ws.buffers.get(buffer_id))
+        else {
+            return;
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buf_snapshot.rope();
+
+        let mut ranges: Vec<(usize, usize)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .filter(|sel| auto_indent_cursors.contains(&sel.id))
+            .filter_map(|sel| {
+                let cursor = stoat_text::cursor_offset(
+                    rope,
+                    buf_snapshot.resolve_anchor(&sel.tail()),
+                    buf_snapshot.resolve_anchor(&sel.head()),
+                );
+                let row = rope.offset_to_point(cursor).row;
+                let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+                let line_end =
+                    rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
+                // Spaces and tabs are one byte each, so an all-whitespace line's
+                // leading run spans its whole byte length.
+                let all_whitespace =
+                    language::line_leading_whitespace(rope, row).len() == line_end - line_start;
+                (cursor == line_end && line_end > line_start && all_whitespace)
+                    .then_some((line_start, line_end))
+            })
+            .collect();
+        if ranges.is_empty() {
+            return;
+        }
+        ranges.sort_unstable();
+        ranges.dedup();
+
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            for (start, end) in ranges.iter().rev() {
+                guard.edit(*start..*end, "");
+            }
+        }
+
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        editor.selections.transform(new_buf, |sel| {
+            let cursor = stoat_text::cursor_offset(
+                new_buf.rope(),
+                new_buf.resolve_anchor(&sel.tail()),
+                new_buf.resolve_anchor(&sel.head()),
+            );
+            action_handlers::movement::land_block_cursor(
+                sel.id,
+                cursor,
+                stoat_text::SelectionGoal::None,
+                new_buf.rope(),
+                new_buf,
             )
         });
     }
@@ -9365,6 +9465,57 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("x");
         assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
+    }
+
+    #[test]
+    fn open_below_then_escape_strips_untouched_auto_indent() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
+        h.type_keys("o");
+        assert_eq!(h.stoat.focused_mode(), "insert");
+        h.type_keys("escape");
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\n}\n");
+    }
+
+    #[test]
+    fn open_below_then_type_then_escape_keeps_indent() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
+        h.type_keys("o");
+        h.type_text("x");
+        h.type_keys("escape");
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
+    }
+
+    #[test]
+    fn shift_i_on_empty_line_then_escape_strips_indent() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n\n}\n");
+        h.type_keys("j");
+        h.type_keys("I");
+        h.type_keys("escape");
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\n}\n");
+    }
+
+    #[test]
+    fn shift_a_on_empty_line_then_escape_strips_indent() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n\n}\n");
+        h.type_keys("j");
+        h.type_keys("A");
+        h.type_keys("escape");
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\n}\n");
+        assert_eq!(h.selection_spans(), vec![(9, 10, false)]);
+    }
+
+    #[test]
+    fn insert_on_whitespace_line_then_escape_keeps_whitespace() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\n    \ndef\n");
+        h.type_keys("j");
+        h.type_keys("i");
+        h.type_keys("escape");
+        assert_eq!(buffer_text(&h, &path), "abc\n    \ndef\n");
     }
 
     #[test]
