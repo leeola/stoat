@@ -34,6 +34,7 @@ use super::{
 use crate::{parse, Language};
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     ops::Range,
     sync::{atomic::AtomicBool, Arc},
 };
@@ -71,32 +72,80 @@ pub fn diff_with_language_cancellable(
     rhs: &str,
     cancel: Option<&AtomicBool>,
 ) -> Option<DiffResult> {
-    let mut prepared = prepare_per_file(language, lhs, rhs, cancel)?;
+    let prepared = prepare_diff(language, lhs, rhs, cancel)?;
+    Some(finalize_single(&prepared))
+}
+
+/// A parsed-and-preprocessed file diff, retained across the two finalize
+/// passes it can feed. The single-file [`finalize_single`] and the
+/// cross-file [`diff_changeset_from_slots`] both consume it, so the
+/// expensive per-file stages run once even when a file needs both.
+///
+/// The `'a` marker ties the value to the source texts it was prepared
+/// from. The arenas inside borrow those texts through their atom content
+/// slices -- a borrow the arena type erases internally -- so the marker
+/// is what stops the retained value from outliving its sources.
+pub struct PreparedDiff<'a> {
+    prepared: PreparedFile,
+    _marker: PhantomData<&'a str>,
+}
+
+/// Run the parse / lower / preprocess / Dijkstra / slider stages for one
+/// file and retain the result. Returns `None` if either side fails to
+/// parse, mirroring the [`diff_with_language`] fallback contract.
+///
+/// The retained value can be finalized once per pass it participates in,
+/// so a file that is both streamed on its own and folded into a changeset
+/// pays the per-file stages a single time.
+pub fn prepare_diff<'a>(
+    language: &Arc<Language>,
+    lhs: &'a str,
+    rhs: &'a str,
+    cancel: Option<&AtomicBool>,
+) -> Option<PreparedDiff<'a>> {
+    prepare_per_file(language, lhs, rhs, cancel).map(|prepared| PreparedDiff {
+        prepared,
+        _marker: PhantomData,
+    })
+}
+
+/// Finalize one prepared file on its own, detecting moves within that
+/// file only.
+///
+/// The single-file move pass runs on clones of the change maps, so the
+/// prepared maps stay pristine and the same [`PreparedDiff`] can still
+/// feed a later [`diff_changeset_from_slots`] cross-file pass.
+pub fn finalize_single(prepared: &PreparedDiff<'_>) -> DiffResult {
+    let p = &prepared.prepared;
+    let mut lhs_changes = p.lhs_changes.clone();
+    let mut rhs_changes = p.rhs_changes.clone();
 
     let records = {
         let mut input = [FileMoveInput {
-            lhs_arena: &prepared.lhs_arena,
-            rhs_arena: &prepared.rhs_arena,
-            lhs_changes: &mut prepared.lhs_changes,
-            rhs_changes: &mut prepared.rhs_changes,
+            lhs_arena: &p.lhs_arena,
+            rhs_arena: &p.rhs_arena,
+            lhs_changes: &mut lhs_changes,
+            rhs_changes: &mut rhs_changes,
         }];
         find_moves_changeset(&mut input)
     };
 
     let no_buffer: [Option<&BufferRef>; 1] = [None];
-    let view_borrowed: [PreparedFileView<'_>; 1] = [PreparedFileView {
-        lhs_arena: &prepared.lhs_arena,
-        rhs_arena: &prepared.rhs_arena,
-        lhs_lines: &prepared.lhs_lines,
-        rhs_lines: &prepared.rhs_lines,
+    let views: [PreparedFileView<'_>; 1] = [PreparedFileView {
+        lhs_arena: &p.lhs_arena,
+        rhs_arena: &p.rhs_arena,
+        lhs_lines: &p.lhs_lines,
+        rhs_lines: &p.rhs_lines,
     }];
-    Some(finalize_per_file(
-        &prepared,
+    finalize_per_file(
+        p,
+        &lhs_changes,
+        &rhs_changes,
         0,
         &records,
         &no_buffer,
-        &view_borrowed,
-    ))
+        &views,
+    )
 }
 
 /// Run [`diff_with_language`]-quality diffs across a multi-file
@@ -111,38 +160,57 @@ pub fn diff_with_language_cancellable(
 /// [`super::diff_lines`] for that file and do not participate in
 /// cross-file move detection.
 pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
-    enum Slot<'a> {
-        Structural(PreparedFile),
-        LineDiff {
-            lhs_text: &'a str,
-            rhs_text: &'a str,
-        },
-    }
-
-    let mut slots: Vec<Slot<'_>> = inputs
+    let slots: Vec<ChangesetSlot<'_>> = inputs
         .into_iter()
-        .map(|input| match input.language.as_ref() {
-            Some(lang) => match prepare_per_file(lang, input.lhs_text, input.rhs_text, None) {
-                Some(prepared) => Slot::Structural(PreparedFile {
-                    buffer: input.buffer,
-                    ..prepared
-                }),
-                None => Slot::LineDiff {
-                    lhs_text: input.lhs_text,
-                    rhs_text: input.rhs_text,
+        .map(|input| {
+            let FileDiffInput {
+                buffer,
+                language,
+                lhs_text,
+                rhs_text,
+            } = input;
+            match language.as_ref() {
+                Some(lang) => match prepare_diff(lang, lhs_text, rhs_text, None) {
+                    Some(prepared) => ChangesetSlot::Prepared(buffer, prepared),
+                    None => ChangesetSlot::LineDiff {
+                        lhs: lhs_text,
+                        rhs: rhs_text,
+                    },
                 },
-            },
-            None => Slot::LineDiff {
-                lhs_text: input.lhs_text,
-                rhs_text: input.rhs_text,
-            },
+                None => ChangesetSlot::LineDiff {
+                    lhs: lhs_text,
+                    rhs: rhs_text,
+                },
+            }
         })
         .collect();
+    diff_changeset_from_slots(slots)
+}
 
+/// One entry in a [`diff_changeset_from_slots`] call. A `Prepared` slot
+/// carries a file already run through [`prepare_diff`], tagged with the
+/// [`BufferRef`] that identifies it as a possible cross-file move
+/// counterpart. A `LineDiff` slot falls back to a line diff and sits out
+/// move detection.
+pub enum ChangesetSlot<'a> {
+    Prepared(BufferRef, PreparedDiff<'a>),
+    LineDiff { lhs: &'a str, rhs: &'a str },
+}
+
+/// Finalize a changeset from already-prepared slots. Move detection runs
+/// over the union of every `Prepared` slot's arenas, so a subtree
+/// migrating between files is tagged [`super::ChangeKind::Moved`] rather
+/// than surfacing as a deletion plus an addition.
+///
+/// Returns one [`DiffResult`] per slot in slot order. The cross-file move
+/// pass mutates each prepared slot's change maps in place, so a slot must
+/// not be finalized again after this call.
+pub fn diff_changeset_from_slots(mut slots: Vec<ChangesetSlot<'_>>) -> Vec<DiffResult> {
     let cs_records = {
         let mut move_inputs: Vec<FileMoveInput<'_>> = Vec::new();
         for slot in slots.iter_mut() {
-            if let Slot::Structural(p) = slot {
+            if let ChangesetSlot::Prepared(_, pd) = slot {
+                let p = &mut pd.prepared;
                 move_inputs.push(FileMoveInput {
                     lhs_arena: &p.lhs_arena,
                     rhs_arena: &p.rhs_arena,
@@ -154,21 +222,20 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
         find_moves_changeset(&mut move_inputs)
     };
 
-    // Build per-file index map (slot index -> structural index in cs_records' tuples).
-    // cs_records refer to file indices in the move_inputs slice, which only contains
-    // Structural slots in slot-iteration order. Map each Structural slot's iteration
-    // index back so finalize_per_file can identify "this file's records".
+    // cs_records index into the Prepared-only move_inputs slice, in slot
+    // order. Map each Prepared slot back to its structural index so
+    // finalize_per_file can identify this file's records.
     let structural_idx: Vec<Option<usize>> = {
         let mut next_struct = 0usize;
         slots
             .iter()
             .map(|slot| match slot {
-                Slot::Structural(_) => {
+                ChangesetSlot::Prepared(..) => {
                     let i = next_struct;
                     next_struct += 1;
                     Some(i)
                 },
-                Slot::LineDiff { .. } => None,
+                ChangesetSlot::LineDiff { .. } => None,
             })
             .collect()
     };
@@ -176,21 +243,24 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
     let buffer_refs: Vec<Option<&BufferRef>> = slots
         .iter()
         .filter_map(|slot| match slot {
-            Slot::Structural(p) => Some(Some(&p.buffer)),
-            Slot::LineDiff { .. } => None,
+            ChangesetSlot::Prepared(buffer, _) => Some(Some(buffer)),
+            ChangesetSlot::LineDiff { .. } => None,
         })
         .collect();
 
     let views: Vec<PreparedFileView<'_>> = slots
         .iter()
         .filter_map(|slot| match slot {
-            Slot::Structural(p) => Some(PreparedFileView {
-                lhs_arena: &p.lhs_arena,
-                rhs_arena: &p.rhs_arena,
-                lhs_lines: &p.lhs_lines,
-                rhs_lines: &p.rhs_lines,
-            }),
-            Slot::LineDiff { .. } => None,
+            ChangesetSlot::Prepared(_, pd) => {
+                let p = &pd.prepared;
+                Some(PreparedFileView {
+                    lhs_arena: &p.lhs_arena,
+                    rhs_arena: &p.rhs_arena,
+                    lhs_lines: &p.lhs_lines,
+                    rhs_lines: &p.rhs_lines,
+                })
+            },
+            ChangesetSlot::LineDiff { .. } => None,
         })
         .collect();
 
@@ -198,20 +268,30 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
         .iter()
         .enumerate()
         .map(|(slot_idx, slot)| match slot {
-            Slot::Structural(p) => {
-                let my_struct_idx = structural_idx[slot_idx].expect("structural slot");
-                finalize_per_file(p, my_struct_idx, &cs_records, &buffer_refs, &views)
+            ChangesetSlot::Prepared(_, pd) => {
+                let p = &pd.prepared;
+                let my_struct_idx = structural_idx[slot_idx].expect("prepared slot");
+                finalize_per_file(
+                    p,
+                    &p.lhs_changes,
+                    &p.rhs_changes,
+                    my_struct_idx,
+                    &cs_records,
+                    &buffer_refs,
+                    &views,
+                )
             },
-            Slot::LineDiff { lhs_text, rhs_text } => line_diff::diff_lines(lhs_text, rhs_text),
+            ChangesetSlot::LineDiff { lhs, rhs } => line_diff::diff_lines(lhs, rhs),
         })
         .collect()
 }
 
-/// Per-file output of [`prepare_per_file`]: the parsed-and-preprocessed
-/// state that the move pass mutates and that
-/// [`finalize_per_file`] consumes to emit a [`DiffResult`].
+/// Per-file output of [`prepare_per_file`], holding the
+/// parsed-and-preprocessed state that the move pass mutates and that
+/// [`finalize_per_file`] consumes to emit a [`DiffResult`]. The
+/// identifying [`BufferRef`] travels alongside in [`ChangesetSlot`]
+/// rather than here, since single-file diffs have no buffer.
 struct PreparedFile {
-    buffer: BufferRef,
     lhs_arena: SyntaxArena,
     rhs_arena: SyntaxArena,
     lhs_root: SyntaxId,
@@ -236,10 +316,6 @@ struct PreparedFileView<'a> {
 /// one file. Returns `None` if either side fails to parse, mirroring
 /// the existing [`diff_with_language`] fallback contract -- the caller
 /// then routes that file through [`super::diff_lines`].
-///
-/// `buffer` is filled in by [`diff_changeset`] after this returns; the
-/// single-file [`diff_with_language_cancellable`] caller substitutes a
-/// placeholder it never observes.
 fn prepare_per_file(
     language: &Arc<Language>,
     lhs: &str,
@@ -294,10 +370,6 @@ fn prepare_per_file(
     fix_all_sliders(&rhs_arena, rhs_root, &mut preprocess.rhs_changes);
 
     Some(PreparedFile {
-        buffer: BufferRef {
-            path: std::path::PathBuf::new(),
-            fingerprint: [0u8; 32],
-        },
         lhs_arena,
         rhs_arena,
         lhs_root,
@@ -316,6 +388,8 @@ fn prepare_per_file(
 /// metadata for this file.
 fn finalize_per_file(
     prepared: &PreparedFile,
+    lhs_changes: &ChangeMap,
+    rhs_changes: &ChangeMap,
     my_idx: usize,
     cs_records: &[ChangesetMoveRecord],
     buffer_refs: &[Option<&BufferRef>],
@@ -328,7 +402,7 @@ fn finalize_per_file(
     collect_changes(
         &prepared.lhs_arena,
         prepared.lhs_root,
-        &prepared.lhs_changes,
+        lhs_changes,
         &lhs_meta,
         Side::Lhs,
         &mut changes,
@@ -336,7 +410,7 @@ fn finalize_per_file(
     collect_changes(
         &prepared.rhs_arena,
         prepared.rhs_root,
-        &prepared.rhs_changes,
+        rhs_changes,
         &rhs_meta,
         Side::Rhs,
         &mut changes,
