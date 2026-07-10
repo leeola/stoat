@@ -3118,6 +3118,7 @@ pub(super) enum PageDir {
 pub(crate) const DEFAULT_VIEWPORT_ROWS: u32 = 20;
 
 pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> UpdateEffect {
+    let extend = stoat.focused_mode() == "select";
     let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -3153,13 +3154,26 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
 
     let target_offset = rope.point_to_offset(Point::new(target_row, 0));
     editor.selections.transform(buffer_snapshot, |sel| {
-        land_block_cursor(
-            sel.id,
-            target_offset,
-            SelectionGoal::None,
-            rope,
-            buffer_snapshot,
-        )
+        if extend {
+            // In select mode the page motion grows the selection by holding the
+            // anchor and moving the head to the target row like Helix.
+            let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+            extend_head(
+                sel,
+                anchor,
+                target_offset,
+                SelectionGoal::None,
+                buffer_snapshot,
+            )
+        } else {
+            land_block_cursor(
+                sel.id,
+                target_offset,
+                SelectionGoal::None,
+                rope,
+                buffer_snapshot,
+            )
+        }
     });
 
     // Ease scroll_offset from the visible position up to the scroll_row target

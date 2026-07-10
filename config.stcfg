@@ -386,6 +386,10 @@ on key {
         j -> ExtendDown();
         k -> ExtendUp();
         l -> ExtendRight();
+        Ctrl-b -> HalfPageUp();
+        Ctrl-f -> HalfPageDown();
+        Ctrl-u -> HalfPageUp();
+        Ctrl-d -> HalfPageDown();
         w -> ExtendNextWordStart();
         e -> ExtendNextWordEnd();
         b -> ExtendPrevWordStart();

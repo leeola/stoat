@@ -2387,6 +2387,18 @@ mod tests {
     }
 
     #[test]
+    fn half_page_down_extends_the_selection_in_select_mode() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "a\nb\nc\nd\ne\nf\n");
+        set_focused_viewport_rows(&mut stoat, Some(4));
+        stoat.set_focused_mode("select".into());
+        dispatch(&mut stoat, &HalfPageDown);
+        // Half of viewport 4 is two rows, so the anchor holds at the top and
+        // the head extends down to row 2 rather than collapsing there.
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+    }
+
+    #[test]
     fn page_down_collapses_multi_cursors_to_one() {
         let mut stoat = stoat();
         let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
