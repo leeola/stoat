@@ -640,6 +640,7 @@ pub(super) fn enter_insert_mode(stoat: &mut Stoat) -> UpdateEffect {
 /// character (where a backward-widening block cursor cannot reach), keeping
 /// appended text after the selection rather than before its final cell.
 pub(super) fn append_mode(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.restore_cursor = true;
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -667,6 +668,7 @@ pub(super) fn append_mode(stoat: &mut Stoat) -> UpdateEffect {
 /// [`forward_block_cursor`] so appending at a line with no trailing newline
 /// inserts after the last character rather than before it.
 pub(super) fn insert_at_line_end(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.restore_cursor = true;
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };

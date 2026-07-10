@@ -393,6 +393,11 @@ pub struct Stoat {
     /// equivalent), `None` outside. Committed to
     /// [`Self::last_insert_text`] on insert-mode exit.
     pub(crate) current_insert_run: Option<String>,
+    /// Set by append-style insert entries (`a`/`A`) so leaving insert moves
+    /// each block cursor back one grapheme, landing on the last typed (or
+    /// appended-over) char rather than one cell past it. It is cleared on the
+    /// insert-to-normal transition. Other insert entries never set it.
+    pub(crate) restore_cursor: bool,
     /// Process-wide register store for yank, paste, and (later)
     /// macros and `insert_register`. Unnamed and named registers
     /// live in-process; system / primary clipboard variants are
@@ -982,6 +987,7 @@ impl Stoat {
             last_search: None,
             last_insert_text: None,
             current_insert_run: None,
+            restore_cursor: false,
             registers: register::RegisterStore::new(),
             pending_register_select: false,
             selected_register: None,
@@ -3844,10 +3850,43 @@ impl Stoat {
         {
             self.last_insert_text = Some(run);
         }
+        if was_insert && !now_insert && std::mem::take(&mut self.restore_cursor) {
+            self.restore_cursor_after_append();
+        }
         if !was_insert && now_insert {
             self.current_insert_run = Some(String::new());
         }
         self.set_focused_mode(next);
+    }
+
+    /// Move each block cursor in the focused editor back one grapheme, landing
+    /// it 1-wide, so leaving an append-style insert lands on the last typed
+    /// char rather than one cell past it. A cursor at offset 0 stays put.
+    fn restore_cursor_after_append(&mut self) {
+        let Some(editor) = action_handlers::focused_editor_mut(self) else {
+            return;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let rope = buf_snap.rope();
+        editor.selections.transform(buf_snap, |sel| {
+            let cursor = stoat_text::cursor_offset(
+                rope,
+                buf_snap.resolve_anchor(&sel.tail()),
+                buf_snap.resolve_anchor(&sel.head()),
+            );
+            let back = rope
+                .reversed_chars_at(cursor)
+                .next()
+                .map_or(cursor, |ch| cursor - ch.len_utf8());
+            action_handlers::movement::land_block_cursor(
+                sel.id,
+                back,
+                stoat_text::SelectionGoal::None,
+                rope,
+                buf_snap,
+            )
+        });
     }
 
     /// Apply a `SetVar(name, value)` action to [`Self::user_vars`].
@@ -9196,6 +9235,17 @@ mod tests {
         h.type_keys("i");
         h.type_keys("X");
         assert_eq!(buffer_text(&h, &path), "Xfoo\n");
+    }
+
+    #[test]
+    fn append_then_escape_lands_on_last_typed_char() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\n");
+        h.type_keys("A");
+        h.type_keys("X");
+        h.type_keys("escape");
+        assert_eq!(buffer_text(&h, &path), "abcX\n");
+        assert_eq!(h.selection_spans(), vec![(3, 4, false)]);
     }
 
     #[test]
