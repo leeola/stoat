@@ -603,6 +603,7 @@ pub(crate) fn render_arg_page(
     crate::render::picker::paint_path_rows(
         &picker.core.picklist,
         &picker.core.git_root,
+        "",
         area,
         start_row,
         theme,

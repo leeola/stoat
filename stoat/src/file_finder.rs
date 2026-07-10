@@ -9,6 +9,11 @@ use std::path::{Path, PathBuf};
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+/// Upper bound on the paths a directory-browse walk collects. A bare `/` walk
+/// could traverse the whole filesystem, so draining stops here and the walk is
+/// dropped, keeping the list and its refilter bounded.
+const BROWSE_PATH_CAP: usize = 100_000;
+
 /// Which subset of files the finder currently lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinderScope {
@@ -39,6 +44,20 @@ pub enum OpenIntent {
     VSplit,
 }
 
+/// The finder's directory-browse mode, live while the query starts with `/`
+/// or `~/`.
+///
+/// A separate [`PathPicker`] walks `root`, leaving the workspace `core` and its
+/// scope bases untouched underneath so backspacing out of the prefix restores
+/// the workspace list. Rows display under `typed_dir` (the query up to and
+/// including the last `/`), filtered by `partial` (the text after it).
+pub(crate) struct Browse {
+    pub(crate) typed_dir: String,
+    pub(crate) root: PathBuf,
+    pub(crate) partial: String,
+    pub(crate) picker: PathPicker,
+}
+
 pub struct FileFinder {
     pub(crate) input: InputView,
     /// What submit should do with the selected file.
@@ -55,6 +74,8 @@ pub struct FileFinder {
     /// [`PathPicker::invalidate`]s it to force a re-run under an unchanged
     /// query.
     pub(crate) core: PathPicker,
+    /// Active directory-browse mode, or `None` for the normal workspace list.
+    pub(crate) browse: Option<Browse>,
 }
 
 impl FileFinder {
@@ -94,6 +115,7 @@ impl FileFinder {
             modified_paths,
             buffer_paths,
             core,
+            browse: None,
         }
     }
 
@@ -105,11 +127,17 @@ impl FileFinder {
     /// query) swaps in its own directory-walk picker; every other query drives
     /// the workspace `core`.
     pub(crate) fn active_core(&mut self) -> &mut PathPicker {
-        &mut self.core
+        match &mut self.browse {
+            Some(browse) => &mut browse.picker,
+            None => &mut self.core,
+        }
     }
 
     pub(crate) fn active_core_ref(&self) -> &PathPicker {
-        &self.core
+        match &self.browse {
+            Some(browse) => &browse.picker,
+            None => &self.core,
+        }
     }
 
     /// Absolute path of the currently selected filtered row, if any.
@@ -148,6 +176,15 @@ impl FileFinder {
     /// sync hook. Drains any pending walk result first so freshly arrived
     /// paths participate in the same render tick.
     pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) {
+        if let Some(browse) = &mut self.browse {
+            browse.picker.pump_walk();
+            if browse.picker.all_paths.len() >= BROWSE_PATH_CAP {
+                browse.picker.all_paths.truncate(BROWSE_PATH_CAP);
+                browse.picker.stop_walk();
+            }
+            browse.picker.refilter(&browse.partial);
+            return;
+        }
         self.core.pump_walk();
         let text = self.input.text(ws);
         match self.scope {
@@ -170,9 +207,12 @@ impl FileFinder {
         fs_host: &dyn FsHost,
         language_registry: &stoat_language::LanguageRegistry,
     ) {
-        let policy = match self.scope {
-            FinderScope::Buffers => PreviewPolicy::LiveBufferThenFile,
-            _ => PreviewPolicy::File,
+        let policy = if self.browse.is_some() {
+            PreviewPolicy::File
+        } else if self.scope == FinderScope::Buffers {
+            PreviewPolicy::LiveBufferThenFile
+        } else {
+            PreviewPolicy::File
         };
         self.active_core()
             .sync_preview(ws, fs_host, language_registry, policy);
@@ -186,7 +226,41 @@ impl FileFinder {
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
         self.core.dispose(ws);
+        if let Some(browse) = &self.browse {
+            browse.picker.dispose(ws);
+        }
     }
+
+    /// Leave directory-browse mode, disposing the browse picker's preview so
+    /// the registry returns to its pre-browse size. No-op when not browsing.
+    pub(crate) fn leave_browse(&mut self, ws: &mut Workspace) {
+        if let Some(browse) = self.browse.take() {
+            browse.picker.dispose(ws);
+        }
+    }
+}
+
+/// Split a `/` or `~/` path query into its directory and fuzzy partial.
+///
+/// The query splits at its last `/`. The part up to and including the slash is
+/// the `typed_dir` shown before each row and, once `~` is resolved via `home`,
+/// the absolute directory to walk. The part after is the fuzzy `partial`.
+/// Returns `None` for a non-path query or a `~/` query with no `home`.
+pub(crate) fn split_path_query(
+    query: &str,
+    home: Option<&str>,
+) -> Option<(String, PathBuf, String)> {
+    let last_slash = query.rfind('/')?;
+    let typed_dir = &query[..=last_slash];
+    let partial = query[last_slash + 1..].to_string();
+    let root = if let Some(after) = typed_dir.strip_prefix("~/") {
+        PathBuf::from(home?).join(after)
+    } else if typed_dir.starts_with('/') {
+        PathBuf::from(typed_dir)
+    } else {
+        return None;
+    };
+    Some((typed_dir.to_string(), root, partial))
 }
 
 /// Query git for currently-modified files (staged + unstaged), returning
@@ -694,6 +768,167 @@ mod tests {
         assert_eq!(finder.core.picklist.filtered.len(), 1);
         let idx = finder.core.picklist.filtered[0];
         assert!(finder.core.picklist.base[idx].ends_with("alpha.rs"));
+    }
+
+    #[test]
+    fn split_path_query_parses_path_shaped_queries() {
+        let home = Some("/home/u");
+        assert_eq!(
+            split_path_query("/etc/ho", home),
+            Some(("/etc/".to_string(), p("/etc/"), "ho".to_string()))
+        );
+        assert_eq!(
+            split_path_query("~/proj/sto", home),
+            Some(("~/proj/".to_string(), p("/home/u/proj"), "sto".to_string()))
+        );
+        assert_eq!(
+            split_path_query("~/", home),
+            Some(("~/".to_string(), p("/home/u"), String::new()))
+        );
+        assert_eq!(
+            split_path_query("/", home),
+            Some(("/".to_string(), p("/"), String::new()))
+        );
+        assert_eq!(split_path_query("foo", home), None, "not path-shaped");
+        assert_eq!(
+            split_path_query("foo/bar", home),
+            None,
+            "not / or ~/ prefixed"
+        );
+        assert_eq!(split_path_query("~/x", None), None, "no HOME");
+    }
+
+    fn browse_root(h: &TestHarness) -> PathBuf {
+        h.stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .browse
+            .as_ref()
+            .expect("browse active")
+            .root
+            .clone()
+    }
+
+    #[test]
+    fn browse_activates_on_home_query_and_lists_files() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("ws.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs().insert_files([
+            (home.join("note.md"), "n".as_bytes()),
+            (home.join("todo.md"), "t".as_bytes()),
+        ]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_keys("space p");
+        h.type_text("~/");
+        let _ = h.snapshot();
+        h.settle();
+        let content = h.snapshot().content.clone();
+
+        assert!(
+            content.contains("(browse)"),
+            "browse title missing:\n{content}"
+        );
+        assert_eq!(browse_root(&h), home);
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        let browse = finder.browse.as_ref().expect("browse active");
+        let rows: Vec<String> = browse
+            .picker
+            .picklist
+            .filtered
+            .iter()
+            .map(|&i| {
+                paths::display_relative(&browse.picker.picklist.base[i], &browse.picker.git_root)
+            })
+            .collect();
+        assert_eq!(rows, vec!["note.md", "todo.md"]);
+    }
+
+    #[test]
+    fn browse_reroots_on_a_deeper_segment() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("ws.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs()
+            .insert_files([(home.join("sub/deep.md"), "d".as_bytes())]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_keys("space p");
+        h.type_text("~/");
+        let _ = h.snapshot();
+        assert_eq!(browse_root(&h), home);
+
+        h.type_text("sub/");
+        let _ = h.snapshot();
+        assert_eq!(
+            browse_root(&h),
+            home.join("sub"),
+            "re-roots to the deeper dir"
+        );
+    }
+
+    #[test]
+    fn leaving_browse_disposes_the_browse_preview() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("ws.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs()
+            .insert_files([(home.join("note.md"), "n".as_bytes())]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_keys("space p");
+        let previews_before = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .preview_buffer_ids()
+            .len();
+
+        h.type_text("~/");
+        let _ = h.snapshot();
+        let browse_preview = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .unwrap()
+            .browse
+            .as_ref()
+            .expect("browse active")
+            .picker
+            .preview
+            .buffer;
+        assert!(h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(browse_preview)
+            .is_some());
+
+        h.type_keys("backspace backspace");
+        let _ = h.snapshot();
+        assert!(
+            h.stoat.file_finder.as_ref().unwrap().browse.is_none(),
+            "browse leaves when the path prefix is deleted"
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(browse_preview)
+                .is_none(),
+            "browse preview disposed on leave"
+        );
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .preview_buffer_ids()
+                .len(),
+            previews_before,
+            "registry returns to its pre-browse preview count"
+        );
     }
 
     // ----- Snapshot tests -----

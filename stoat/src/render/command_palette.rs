@@ -203,6 +203,7 @@ fn render_palette_arg_picker(
     crate::render::picker::paint_path_rows(
         &picker.core.picklist,
         &picker.core.git_root,
+        "",
         list,
         start_row,
         theme,

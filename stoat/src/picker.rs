@@ -272,6 +272,26 @@ impl PathPicker {
         self.picklist.match_indices.clear();
     }
 
+    /// Re-root the walk. Clears the collected paths, drops the old walk task
+    /// (cancelling the in-flight walk), and streams from `rx`/`task` instead.
+    /// The filter cache is invalidated so the next refilter re-runs. Lets one
+    /// browse picker follow the typed directory without re-allocating its
+    /// preview buffers per keystroke.
+    pub(crate) fn reset_walk(&mut self, rx: UnboundedReceiver<Vec<PathBuf>>, task: Task<()>) {
+        self.all_paths.clear();
+        self.walk_rx = Some(rx);
+        self._walk_task = Some(task);
+        self.invalidate();
+    }
+
+    /// Stop the walk, dropping the receiver and task so the background walk
+    /// breaks on its next send. Bounds an otherwise unbounded walk once enough
+    /// paths are collected.
+    pub(crate) fn stop_walk(&mut self) {
+        self.walk_rx = None;
+        self._walk_task = None;
+    }
+
     /// Refilter over this picker's own walk-fed [`Self::all_paths`], skipping
     /// the work when the query is unchanged and rows are present.
     pub(crate) fn refilter(&mut self, query: &str) {

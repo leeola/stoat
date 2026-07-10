@@ -81,10 +81,14 @@ pub(crate) fn render_file_finder(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    let title = match finder.scope() {
-        FinderScope::All => " file finder (all) ",
-        FinderScope::Modified => " file finder (modified) ",
-        FinderScope::Buffers => " file finder (buffers) ",
+    let title = if finder.browse.is_some() {
+        " file finder (browse) "
+    } else {
+        match finder.scope() {
+            FinderScope::All => " file finder (all) ",
+            FinderScope::Modified => " file finder (modified) ",
+            FinderScope::Buffers => " file finder (buffers) ",
+        }
     };
     Clear.render(layout.modal, buf);
     crate::render::chrome::modal_frame(
@@ -161,9 +165,15 @@ pub(crate) fn paint_finder_rows(
     buf: &mut Buffer,
 ) {
     let core = finder.active_core_ref();
+    let prefix = finder
+        .browse
+        .as_ref()
+        .map(|browse| browse.typed_dir.as_str())
+        .unwrap_or_default();
     crate::render::picker::paint_path_rows(
         &core.picklist,
         &core.git_root,
+        prefix,
         area,
         start_row,
         theme,

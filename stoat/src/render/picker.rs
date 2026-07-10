@@ -25,6 +25,7 @@ use std::path::Path;
 pub(crate) fn paint_path_rows(
     picklist: &PickList,
     git_root: &Path,
+    prefix: &str,
     area: Rect,
     start_row: usize,
     theme: &Theme,
@@ -40,6 +41,7 @@ pub(crate) fn paint_path_rows(
 
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
+    let prefix_len = prefix.chars().count() as u32;
 
     for (row_idx, (&idx, indices)) in picklist
         .filtered
@@ -59,14 +61,17 @@ pub(crate) fn paint_path_rows(
         for col in area.x..end_x {
             buf[(col, row)].set_char(' ').set_style(style);
         }
-        let label = display_row(&picklist.base[idx], git_root);
+        let label = format!("{prefix}{}", display_row(&picklist.base[idx], git_root));
         write_str_clipped(buf, label_x, row, &label, style, end_x);
         for (label_col, _) in label.chars().enumerate() {
             let col = label_x + label_col as u16;
             if col >= end_x {
                 break;
             }
-            if indices.binary_search(&(label_col as u32)).is_ok() {
+            let label_col = label_col as u32;
+            // The literal `prefix` is never matched. The picklist's indices are
+            // offsets into the part after it, so shift them past the prefix.
+            if label_col >= prefix_len && indices.binary_search(&(label_col - prefix_len)).is_ok() {
                 buf[(col, row)].set_style(match_style);
             }
         }

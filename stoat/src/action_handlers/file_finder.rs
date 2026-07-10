@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    file_finder::{FileFinder, FinderScope, OpenIntent},
+    file_finder::{Browse, FileFinder, FinderScope, OpenIntent},
+    picker::PathPicker,
 };
 use std::{collections::HashSet, ops::ControlFlow, path::PathBuf};
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
@@ -18,6 +19,7 @@ pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
     if stoat.file_finder.is_none() {
         return;
     }
+    sync_file_finder_browse(stoat);
     let active_idx = stoat.active_workspace;
     let ws = &mut stoat.workspaces[active_idx];
     let fs_host = &*stoat.fs_host;
@@ -25,6 +27,76 @@ pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
     let finder = stoat.file_finder.as_mut().expect("file_finder present");
     finder.refilter_from_input(ws);
     finder.sync_preview(ws, fs_host, language_registry);
+}
+
+/// Enter, re-root, or leave the finder's directory-browse mode for the current
+/// query.
+///
+/// A `/` or `~/` query walks the typed directory; the walk re-roots (a fresh
+/// [`spawn_workspace_walk`]) whenever the directory part changes, so typing a
+/// deeper segment follows it. A query that stops being path-shaped drops browse
+/// and disposes its preview so the workspace list resumes. Runs before
+/// [`FileFinder::refilter_from_input`] so the picker it selects is up to date.
+fn sync_file_finder_browse(stoat: &mut Stoat) {
+    let query = {
+        let ws = stoat.active_workspace();
+        let finder = stoat.file_finder.as_ref().expect("file_finder present");
+        finder.input.text(ws)
+    };
+    let home = stoat.env_host.var("HOME");
+
+    let Some((typed_dir, root, partial)) =
+        crate::file_finder::split_path_query(&query, home.as_deref())
+    else {
+        let active_idx = stoat.active_workspace;
+        let finder = stoat.file_finder.as_mut().expect("file_finder present");
+        finder.leave_browse(&mut stoat.workspaces[active_idx]);
+        return;
+    };
+
+    let root_changed = stoat
+        .file_finder
+        .as_ref()
+        .expect("file_finder present")
+        .browse
+        .as_ref()
+        .map(|browse| &browse.root)
+        != Some(&root);
+
+    if root_changed {
+        let (walk_rx, walk_task) = spawn_workspace_walk(stoat, root.clone());
+        let executor = stoat.executor.clone();
+        let active_idx = stoat.active_workspace;
+        let ws = &mut stoat.workspaces[active_idx];
+        let finder = stoat.file_finder.as_mut().expect("file_finder present");
+        match &mut finder.browse {
+            Some(browse) => {
+                browse.root = root.clone();
+                browse.picker.git_root = root.clone();
+                browse.picker.reset_walk(walk_rx, walk_task);
+            },
+            None => {
+                let picker =
+                    PathPicker::new(ws, executor, root.clone(), Some((walk_rx, walk_task)));
+                finder.browse = Some(Browse {
+                    typed_dir: String::new(),
+                    root: root.clone(),
+                    partial: String::new(),
+                    picker,
+                });
+            },
+        }
+    }
+
+    if let Some(browse) = &mut stoat
+        .file_finder
+        .as_mut()
+        .expect("file_finder present")
+        .browse
+    {
+        browse.typed_dir = typed_dir;
+        browse.partial = partial;
+    }
 }
 
 /// Open the file finder. No-op if one is already open so that a second
