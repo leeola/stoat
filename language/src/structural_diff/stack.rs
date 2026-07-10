@@ -73,6 +73,65 @@ impl<T> Stack<T> {
         }
         n
     }
+
+    /// Whether `self` and `other` share the same head node, or are both empty.
+    ///
+    /// Pointer-equal heads share their entire tail, so the two stacks are equal
+    /// without walking either. This is the cheap identity check the equality
+    /// fast path relies on.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.head, &other.head) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    /// Iterate the values from the top of the stack to the bottom.
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter {
+            cur: self.head.as_deref(),
+        }
+    }
+}
+
+/// Top-to-bottom iterator over a [`Stack`], returned by [`Stack::iter`].
+pub struct Iter<'a, T> {
+    cur: Option<&'a Node<T>>,
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        let node = self.cur?;
+        self.cur = node.next.as_deref();
+        Some(&node.value)
+    }
+}
+
+impl<T: PartialEq> PartialEq for Stack<T> {
+    /// Compare element by element from the top, short-circuiting as soon as two
+    /// nodes are pointer-equal since a shared tail is identical the rest of the
+    /// way down.
+    fn eq(&self, other: &Self) -> bool {
+        if self.ptr_eq(other) {
+            return true;
+        }
+        let mut a = self.head.as_deref();
+        let mut b = other.head.as_deref();
+        while let (Some(na), Some(nb)) = (a, b) {
+            if std::ptr::eq(na, nb) {
+                return true;
+            }
+            if na.value != nb.value {
+                return false;
+            }
+            a = na.next.as_deref();
+            b = nb.next.as_deref();
+        }
+        a.is_none() && b.is_none()
+    }
 }
 
 impl<T> Default for Stack<T> {
@@ -134,5 +193,41 @@ mod tests {
         // Both branches share the same tail.
         assert_eq!(branch_a.pop().unwrap().1.peek(), Some(&10));
         assert_eq!(branch_b.pop().unwrap().1.peek(), Some(&10));
+    }
+
+    #[test]
+    fn ptr_eq_detects_shared_head() {
+        let base = Stack::<u32>::new().push(1);
+        assert!(base.ptr_eq(&base.clone()), "a clone shares the head");
+        assert!(
+            !base.ptr_eq(&Stack::<u32>::new().push(1)),
+            "an independent stack with equal values is not ptr-equal"
+        );
+        assert!(
+            Stack::<u32>::new().ptr_eq(&Stack::new()),
+            "two empty stacks"
+        );
+    }
+
+    #[test]
+    fn iter_yields_top_to_bottom() {
+        let s = Stack::<u32>::new().push(1).push(2).push(3);
+        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn eq_compares_values_and_short_circuits_on_shared_tail() {
+        let a = Stack::<u32>::new().push(1).push(2);
+        assert_eq!(a, Stack::<u32>::new().push(1).push(2));
+
+        let base = Stack::<u32>::new().push(9);
+        assert_eq!(
+            base.push(1),
+            base.push(1),
+            "sharing the tail compares equal"
+        );
+
+        assert_ne!(a, Stack::<u32>::new().push(1).push(3));
+        assert_ne!(a, Stack::<u32>::new().push(2));
     }
 }

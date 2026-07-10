@@ -41,12 +41,13 @@ pub enum EnteredDelimiter {
     /// Both sides entered a matching list. The two payloads are the
     /// LHS and RHS list nodes that were entered together.
     PopBoth(SyntaxId, SyntaxId),
-    /// LHS and RHS each have a stack of unmatched delimiters they
-    /// have descended into independently. Each side can pop on its
-    /// own.
+    /// LHS and RHS each have a persistent stack of unmatched delimiters
+    /// they have descended into independently. Each side can pop on its
+    /// own, and consecutive same-side descents share the tail rather than
+    /// nesting a fresh frame.
     PopEither {
-        lhs_delims: Vec<SyntaxId>,
-        rhs_delims: Vec<SyntaxId>,
+        lhs_delims: Stack<SyntaxId>,
+        rhs_delims: Stack<SyntaxId>,
     },
 }
 
@@ -69,7 +70,7 @@ impl PartialEq for EnteredDelimiter {
                     lhs_delims: a2,
                     rhs_delims: b2,
                 },
-            ) => a1.last() == a2.last() && b1.last() == b2.last(),
+            ) => a1.peek() == a2.peek() && b1.peek() == b2.peek(),
             _ => false,
         }
     }
@@ -90,8 +91,8 @@ impl std::hash::Hash for EnteredDelimiter {
                 rhs_delims,
             } => {
                 1u8.hash(state);
-                lhs_delims.last().hash(state);
-                rhs_delims.last().hash(state);
+                lhs_delims.peek().hash(state);
+                rhs_delims.peek().hash(state);
             },
         }
     }
@@ -126,10 +127,8 @@ impl Vertex {
     pub fn deep_parents_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        let mut cur = self.parents.clone();
-        while let Some((entry, rest)) = cur.pop() {
+        for entry in self.parents.iter() {
             entry.hash(&mut h);
-            cur = rest;
         }
         h.finish()
     }
@@ -319,59 +318,148 @@ pub fn pop_all_parents(
         if lhs.is_some() && rhs.is_some() {
             break;
         }
-        let Some((top, rest)) = stack.pop() else {
+        // When both sides are exhausted under a PopBoth, pop the pair together
+        // and resume at each parent's next sibling. They entered together, so
+        // they must exit together -- asymmetric exhaustion stops the chain.
+        if lhs.is_none()
+            && rhs.is_none()
+            && let Some((lhs_parent, rhs_parent, rest)) = try_pop_both(&stack)
+        {
+            lhs = lhs_arena.get(lhs_parent).next_sibling();
+            rhs = rhs_arena.get(rhs_parent).next_sibling();
+            stack = rest;
+            continue;
+        }
+        // Otherwise pop the exhausted side(s) from a PopEither, each side
+        // independently.
+        let mut popped_anything = false;
+        if lhs.is_none()
+            && let Some((lhs_parent, rest)) = try_pop_lhs(&stack)
+        {
+            lhs = lhs_arena.get(lhs_parent).next_sibling();
+            stack = rest;
+            popped_anything = true;
+        }
+        if rhs.is_none()
+            && let Some((rhs_parent, rest)) = try_pop_rhs(&stack)
+        {
+            rhs = rhs_arena.get(rhs_parent).next_sibling();
+            stack = rest;
+            popped_anything = true;
+        }
+        if !popped_anything {
             break;
-        };
-        match top {
-            EnteredDelimiter::PopBoth(lhs_parent, rhs_parent) => {
-                if lhs.is_none() && rhs.is_none() {
-                    // Both sides exhausted their children: pop the
-                    // pair and resume at each parent's next sibling.
-                    lhs = lhs_arena.get(*lhs_parent).next_sibling();
-                    rhs = rhs_arena.get(*rhs_parent).next_sibling();
-                    stack = rest.clone();
-                    continue;
-                }
-                // Asymmetric exhaustion under a `PopBoth` is an
-                // illegal state because both sides entered together;
-                // they must exit together. Stop the pop chain.
-                break;
-            },
-            EnteredDelimiter::PopEither {
-                lhs_delims,
-                rhs_delims,
-            } => {
-                let mut new_lhs_delims = lhs_delims.clone();
-                let mut new_rhs_delims = rhs_delims.clone();
-                let mut popped_anything = false;
-                if lhs.is_none()
-                    && let Some(parent) = new_lhs_delims.pop()
-                {
-                    lhs = lhs_arena.get(parent).next_sibling();
-                    popped_anything = true;
-                }
-                if rhs.is_none()
-                    && let Some(parent) = new_rhs_delims.pop()
-                {
-                    rhs = rhs_arena.get(parent).next_sibling();
-                    popped_anything = true;
-                }
-                if !popped_anything {
-                    break;
-                }
-                if new_lhs_delims.is_empty() && new_rhs_delims.is_empty() {
-                    stack = rest.clone();
-                } else {
-                    stack = rest.push(EnteredDelimiter::PopEither {
-                        lhs_delims: new_lhs_delims,
-                        rhs_delims: new_rhs_delims,
-                    });
-                }
-                continue;
-            },
         }
     }
     (lhs, rhs, stack)
+}
+
+/// If the top of `parents` is a [`EnteredDelimiter::PopBoth`], return its two
+/// delimiters and the stack with that frame popped.
+fn try_pop_both(
+    parents: &Stack<EnteredDelimiter>,
+) -> Option<(SyntaxId, SyntaxId, Stack<EnteredDelimiter>)> {
+    match parents.peek() {
+        Some(EnteredDelimiter::PopBoth(lhs, rhs)) => {
+            let (_, rest) = parents.pop().expect("peek returned Some");
+            Some((*lhs, *rhs, rest))
+        },
+        _ => None,
+    }
+}
+
+/// If the top of `parents` is a [`EnteredDelimiter::PopEither`] with a non-empty
+/// LHS delimiter stack, pop its top LHS delimiter and return it with the updated
+/// parents stack. The RHS stack rides along unchanged.
+fn try_pop_lhs(parents: &Stack<EnteredDelimiter>) -> Option<(SyntaxId, Stack<EnteredDelimiter>)> {
+    let Some(EnteredDelimiter::PopEither {
+        lhs_delims,
+        rhs_delims,
+    }) = parents.peek()
+    else {
+        return None;
+    };
+    let (lhs_delim, new_lhs_delims) = lhs_delims.pop()?;
+    let (_, mut rest) = parents.pop().expect("peek returned Some");
+    if !new_lhs_delims.is_empty() || !rhs_delims.is_empty() {
+        rest = rest.push(EnteredDelimiter::PopEither {
+            lhs_delims: new_lhs_delims,
+            rhs_delims: rhs_delims.clone(),
+        });
+    }
+    Some((*lhs_delim, rest))
+}
+
+/// The RHS counterpart of [`try_pop_lhs`].
+fn try_pop_rhs(parents: &Stack<EnteredDelimiter>) -> Option<(SyntaxId, Stack<EnteredDelimiter>)> {
+    let Some(EnteredDelimiter::PopEither {
+        lhs_delims,
+        rhs_delims,
+    }) = parents.peek()
+    else {
+        return None;
+    };
+    let (rhs_delim, new_rhs_delims) = rhs_delims.pop()?;
+    let (_, mut rest) = parents.pop().expect("peek returned Some");
+    if !lhs_delims.is_empty() || !new_rhs_delims.is_empty() {
+        rest = rest.push(EnteredDelimiter::PopEither {
+            lhs_delims: lhs_delims.clone(),
+            rhs_delims: new_rhs_delims,
+        });
+    }
+    Some((*rhs_delim, rest))
+}
+
+/// Record descending into an LHS-only novel list. Extends the top
+/// [`EnteredDelimiter::PopEither`] frame's LHS stack when present, so
+/// consecutive LHS descents share one frame. Otherwise it pushes a fresh frame.
+fn push_lhs_delimiter(
+    parents: &Stack<EnteredDelimiter>,
+    delimiter: SyntaxId,
+) -> Stack<EnteredDelimiter> {
+    match parents.peek() {
+        Some(EnteredDelimiter::PopEither {
+            lhs_delims,
+            rhs_delims,
+        }) => {
+            let lhs_delims = lhs_delims.push(delimiter);
+            let rhs_delims = rhs_delims.clone();
+            let (_, rest) = parents.pop().expect("peek returned Some");
+            rest.push(EnteredDelimiter::PopEither {
+                lhs_delims,
+                rhs_delims,
+            })
+        },
+        _ => parents.push(EnteredDelimiter::PopEither {
+            lhs_delims: Stack::new().push(delimiter),
+            rhs_delims: Stack::new(),
+        }),
+    }
+}
+
+/// The RHS counterpart of [`push_lhs_delimiter`].
+fn push_rhs_delimiter(
+    parents: &Stack<EnteredDelimiter>,
+    delimiter: SyntaxId,
+) -> Stack<EnteredDelimiter> {
+    match parents.peek() {
+        Some(EnteredDelimiter::PopEither {
+            lhs_delims,
+            rhs_delims,
+        }) => {
+            let lhs_delims = lhs_delims.clone();
+            let rhs_delims = rhs_delims.push(delimiter);
+            let (_, rest) = parents.pop().expect("peek returned Some");
+            rest.push(EnteredDelimiter::PopEither {
+                lhs_delims,
+                rhs_delims,
+            })
+        },
+        _ => parents.push(EnteredDelimiter::PopEither {
+            lhs_delims: Stack::new(),
+            rhs_delims: Stack::new().push(delimiter),
+        }),
+    }
 }
 
 /// Generate every outgoing edge from `vertex`, returning a Vec of
@@ -542,13 +630,10 @@ fn push_novel_lhs(
             )
         },
         Syntax::List(list) => {
-            // List: enter it, the search will recurse through its
-            // children; we record the entered list on the parents
-            // stack so a later pop returns to the list's next sibling.
-            let parents = vertex.parents.push(EnteredDelimiter::PopEither {
-                lhs_delims: vec![lhs_id],
-                rhs_delims: vec![],
-            });
+            // Descend into the list and record it on the parents stack so a
+            // later pop returns to its next sibling. The search then recurses
+            // through its children.
+            let parents = push_lhs_delimiter(&vertex.parents, lhs_id);
             (
                 Edge::EnterNovelDelimiterLHS,
                 list.children.first().copied(),
@@ -583,10 +668,7 @@ fn push_novel_rhs(
             vertex.parents.clone(),
         ),
         Syntax::List(list) => {
-            let parents = vertex.parents.push(EnteredDelimiter::PopEither {
-                lhs_delims: vec![],
-                rhs_delims: vec![rhs_id],
-            });
+            let parents = push_rhs_delimiter(&vertex.parents, rhs_id);
             (
                 Edge::EnterNovelDelimiterRHS,
                 list.children.first().copied(),
