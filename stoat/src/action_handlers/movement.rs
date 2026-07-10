@@ -1663,16 +1663,23 @@ pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
         View::Editor(id) => id,
         _ => return UpdateEffect::None,
     };
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let editor = ws.editors.get(editor_id).expect("editor");
+    let buffer_id = editor.buffer_id;
+    let selections = editor.selections.all_anchors().to_vec();
     let buffer = ws.buffers.get(buffer_id).expect("buffer");
     let mut guard = buffer.write().expect("poisoned");
+
+    // Seal the open insert group and reopen a fresh one, so the edits before and
+    // after the checkpoint undo as two separate steps like Helix's Ctrl-s.
+    guard.seal_group(selections.clone());
+    guard.begin_group(selections);
     guard.checkpoint(None);
     UpdateEffect::None
 }
 
 fn apply_buffer_history<F>(stoat: &mut Stoat, count: u32, op: F) -> UpdateEffect
 where
-    F: Fn(&mut crate::buffer::TextBuffer) -> bool,
+    F: Fn(&mut crate::buffer::TextBuffer) -> Option<Vec<Selection<Anchor>>>,
 {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -1683,24 +1690,29 @@ where
 
     let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
-    let any_changed = {
+    // Each step returns the selections to restore. Keep the last so a multi-step
+    // count lands on the final group's edit-time selections.
+    let restored = {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        let mut any = false;
+        let mut restored: Option<Vec<Selection<Anchor>>> = None;
         for _ in 0..count {
-            if !op(&mut guard) {
-                break;
+            match op(&mut guard) {
+                Some(selections) => restored = Some(selections),
+                None => break,
             }
-            any = true;
         }
-        any
+        restored
     };
 
-    if !any_changed {
+    let Some(selections) = restored else {
         return UpdateEffect::None;
-    }
+    };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    if !selections.is_empty() {
+        editor.selections.restore(selections);
+    }
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
     editor.selections.transform(new_buf, |sel| sel.clone());

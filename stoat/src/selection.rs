@@ -102,6 +102,20 @@ impl SelectionsCollection {
         }];
     }
 
+    /// Replace the selection set with a saved `snapshot`, e.g. the selections an
+    /// undo group captured before its edits. Bumps the id allocator past the
+    /// snapshot so later insertions never reuse a restored id. An empty snapshot
+    /// is ignored, keeping the invariant of at least one selection.
+    pub(crate) fn restore(&mut self, snapshot: Vec<Selection<Anchor>>) {
+        if snapshot.is_empty() {
+            return;
+        }
+        if let Some(max_id) = snapshot.iter().map(|s| s.id).max() {
+            self.next_selection_id = self.next_selection_id.max(max_id + 1);
+        }
+        self.disjoint = snapshot;
+    }
+
     pub(crate) fn keep_primary(&mut self) {
         let primary = self.newest_anchor().clone();
         self.disjoint = vec![primary];

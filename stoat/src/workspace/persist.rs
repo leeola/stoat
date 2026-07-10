@@ -618,9 +618,9 @@ mod tests {
 
         let restored = fresh.buffers.get(id).expect("buffer missing");
         let mut guard = restored.write().expect("buffer poisoned");
-        assert!(guard.undo(), "undo should succeed after restart");
+        assert!(guard.undo().is_some(), "undo should succeed after restart");
         assert_eq!(guard.rope().to_string(), "one two\n");
-        assert!(guard.undo(), "second undo should also succeed");
+        assert!(guard.undo().is_some(), "second undo should also succeed");
         assert_eq!(guard.rope().to_string(), "one\n");
     }
 

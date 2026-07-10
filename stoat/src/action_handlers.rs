@@ -52,9 +52,15 @@ use stoat_action::{
     Action, ActionKind, Dump, OpenBuffer, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
     OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
 };
+use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
+    let group_buffer = if manages_own_undo_group(action.kind()) {
+        None
+    } else {
+        begin_action_group(stoat)
+    };
     let effect = match action.kind() {
         ActionKind::Quit => {
             if pane::close_focused_pane(stoat) {
@@ -671,10 +677,69 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
         ActionKind::OpenLastPicker => open_last_picker(stoat),
     };
+    end_action_group(stoat, group_buffer);
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());
     }
     effect
+}
+
+/// Actions that drive the undo history themselves, so [`dispatch`] must not wrap
+/// them in an action group. `CommitUndoCheckpoint` seals and reopens the insert
+/// group directly. Undo and redo pop and replay existing groups.
+fn manages_own_undo_group(kind: ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::Undo | ActionKind::Redo | ActionKind::CommitUndoCheckpoint
+    )
+}
+
+/// Open an undo group on the focused editor's buffer so every edit the
+/// dispatched action makes collapses into one undo step, capturing the
+/// pre-action selections to restore on undo. Returns the grouped buffer, or
+/// `None` when the focused pane is not an editor. Lazy group materialization
+/// means a non-editing action leaves the undo history untouched.
+fn begin_action_group(stoat: &mut Stoat) -> Option<BufferId> {
+    let (editor_id, buffer_id) = stoat.focused_editor_ids()?;
+    let before = editor_selection_snapshot(stoat, editor_id);
+    let buffer = stoat.active_workspace().buffers.get(buffer_id)?;
+    buffer.write().expect("poisoned").begin_group(before);
+    Some(buffer_id)
+}
+
+/// Seal the group opened by [`begin_action_group`], capturing the post-action
+/// selections to restore on redo. The group self-discards when the action made
+/// no edits.
+fn end_action_group(stoat: &mut Stoat, buffer_id: Option<BufferId>) {
+    let Some(buffer_id) = buffer_id else {
+        return;
+    };
+    let after = focused_selection_snapshot(stoat, buffer_id);
+    if let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) {
+        buffer.write().expect("poisoned").seal_group(after);
+    }
+}
+
+/// Selections of `editor_id` as an owned snapshot, empty when it is gone.
+fn editor_selection_snapshot(stoat: &Stoat, editor_id: EditorId) -> Vec<Selection<Anchor>> {
+    stoat
+        .active_workspace()
+        .editors
+        .get(editor_id)
+        .map(|editor| editor.selections.all_anchors().to_vec())
+        .unwrap_or_default()
+}
+
+/// Selections of the focused editor when it still shows `buffer_id`, else empty.
+/// An action that changed focus away from the grouped buffer seals with no
+/// post-selections, so redo revalidates rather than restoring a foreign set.
+fn focused_selection_snapshot(stoat: &Stoat, buffer_id: BufferId) -> Vec<Selection<Anchor>> {
+    match stoat.focused_editor_ids() {
+        Some((editor_id, focused_buffer)) if focused_buffer == buffer_id => {
+            editor_selection_snapshot(stoat, editor_id)
+        },
+        _ => Vec::new(),
+    }
 }
 
 /// Action kinds whose handlers open a top-level picker modal.

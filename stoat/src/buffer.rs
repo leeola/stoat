@@ -5,7 +5,7 @@ pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
     Anchor, Bias, Dimensions, Fragment, InsertionFragment, InsertionFragmentKey, Locator, Point,
-    Rope, SumTree, UndoMap, UndoOperation,
+    Rope, Selection, SumTree, UndoMap, UndoOperation,
 };
 
 pub struct TextBuffer {
@@ -20,14 +20,26 @@ pub struct TextBuffer {
     pub diff_map: Option<DiffMap>,
     next_timestamp: u64,
     buffer_id: BufferId,
-    /// Stack of edit timestamps eligible to be the target of the next `undo()`.
-    /// Pushed on `edit()`, popped on `undo()`. Independent of [`Self::ops`],
-    /// which records both edits and undos for replay.
-    edit_history: Vec<u64>,
-    /// Stack of edit timestamps that have been undone and are eligible to be
-    /// the target of the next `redo()`. Pushed on `undo()`, popped on
-    /// `redo()`, cleared on any new `edit()` per standard undo/redo semantics.
-    redo_history: Vec<u64>,
+    /// Stack of edit groups eligible to be the target of the next `undo()`.
+    /// One group is one logical undo step -- a whole dispatched action or a
+    /// whole insert-mode session. Extended by `edit()`, popped by `undo()`.
+    /// Independent of [`Self::ops`], which records every edit and undo for replay.
+    edit_history: Vec<UndoGroup>,
+    /// Stack of edit groups undone and eligible for the next `redo()`. Pushed on
+    /// `undo()`, popped on `redo()`, cleared on any new `edit()`.
+    redo_history: Vec<UndoGroup>,
+    /// Whether [`Self::begin_group`] opened a group. While open, edits collapse
+    /// into one logical undo step. The group is materialized lazily on its first
+    /// edit, so a group that never edits leaves `edit_history` untouched -- which
+    /// keeps a wrapped-but-non-editing action (including `undo`/`redo` itself)
+    /// from stacking an empty step.
+    open_group: bool,
+    /// Whether the open group has taken at least one edit and been pushed onto
+    /// `edit_history`, distinguishing appending to it from starting it.
+    open_group_started: bool,
+    /// Editor selections captured at [`Self::begin_group`], moved into the group
+    /// when it materializes and restored when the group is undone.
+    open_group_before: Vec<Selection<Anchor>>,
     /// Chronological log of user-driven mutations. Replaying this on a fresh
     /// [`TextBuffer`] reconstructs an identical fragment tree, anchors, and
     /// undo map, which is how workspace save/restore preserves selections and
@@ -47,6 +59,22 @@ pub enum BufferOp {
     Edit { old: Range<usize>, text: String },
     Undo,
     Redo,
+}
+
+/// A single logical undo step covering the edits made by one dispatched action
+/// or a whole insert-mode session, plus the editor selections to restore when
+/// the group is undone or redone.
+///
+/// Grouping is an in-session overlay on the flat [`BufferOp`] log, which still
+/// records each edit and undo individually, so it is not persisted -- a
+/// restored buffer replays every edit as its own singleton group.
+struct UndoGroup {
+    /// Edit timestamps in application order. Undo toggles them in reverse.
+    edits: Vec<u64>,
+    /// Editor selections captured when the group opened, restored on undo.
+    selections_before: Vec<Selection<Anchor>>,
+    /// Editor selections captured when the group sealed, restored on redo.
+    selections_after: Vec<Selection<Anchor>>,
 }
 
 /// Serializable buffer state for persistence. Holds the op log plus the
@@ -124,6 +152,9 @@ impl TextBuffer {
             buffer_id,
             edit_history: Vec::new(),
             redo_history: Vec::new(),
+            open_group: false,
+            open_group_started: false,
+            open_group_before: Vec::new(),
             ops: Vec::new(),
             next_checkpoint_id: 0,
             checkpoints: Vec::new(),
@@ -372,39 +403,114 @@ impl TextBuffer {
         self.snapshot.insertions = all_insertions;
         self.snapshot.version = timestamp;
         self.dirty = true;
-        self.edit_history.push(timestamp);
+        self.record_edit(timestamp);
+    }
+
+    /// Record `timestamp` in the open group, or as its own singleton group when
+    /// no group is open (the from_history replay and any unwrapped edit).
+    fn record_edit(&mut self, timestamp: u64) {
+        if self.open_group {
+            if self.open_group_started
+                && let Some(group) = self.edit_history.last_mut()
+            {
+                group.edits.push(timestamp);
+                return;
+            }
+            self.edit_history.push(UndoGroup {
+                edits: vec![timestamp],
+                selections_before: std::mem::take(&mut self.open_group_before),
+                selections_after: Vec::new(),
+            });
+            self.open_group_started = true;
+        } else {
+            self.edit_history.push(UndoGroup {
+                edits: vec![timestamp],
+                selections_before: Vec::new(),
+                selections_after: Vec::new(),
+            });
+        }
+    }
+
+    /// Open an undo group so the following [`Self::edit`] calls collapse into one
+    /// logical step. `selections_before` is the editor selection set to restore
+    /// when the group is later undone.
+    ///
+    /// The group is not materialized until its first edit, so opening one around
+    /// a non-editing action costs nothing and leaves the undo history unchanged.
+    pub(crate) fn begin_group(&mut self, selections_before: Vec<Selection<Anchor>>) {
+        if self.open_group {
+            self.seal_group(Vec::new());
+        }
+        self.open_group = true;
+        self.open_group_started = false;
+        self.open_group_before = selections_before;
+    }
+
+    /// Close the open undo group, recording `selections_after` to restore on
+    /// redo. A group that took no edits was never materialized, so a non-editing
+    /// action leaves no undo step behind.
+    pub(crate) fn seal_group(&mut self, selections_after: Vec<Selection<Anchor>>) {
+        if !self.open_group {
+            return;
+        }
+        self.open_group = false;
+        self.open_group_before = Vec::new();
+        if self.open_group_started {
+            self.open_group_started = false;
+            if let Some(group) = self.edit_history.last_mut() {
+                group.selections_after = selections_after;
+            }
+        }
+    }
+
+    /// Timestamp of the most recent edit, skipping a transiently empty open
+    /// group. `None` when nothing has been edited.
+    fn frontier(&self) -> Option<u64> {
+        self.edit_history
+            .iter()
+            .rev()
+            .find_map(|group| group.edits.last())
+            .copied()
     }
 
     /// Record the current edit frontier as the clean baseline, marking the
     /// buffer unmodified. Call at every clean point (save, seeded content) so a
     /// later undo/redo back to this frontier clears [`Self::dirty`] again.
     pub(crate) fn mark_clean(&mut self) {
-        self.saved_marker = self.edit_history.last().copied();
+        self.saved_marker = self.frontier();
         self.dirty = false;
     }
 
     fn recompute_dirty(&mut self) {
-        self.dirty = self.edit_history.last().copied() != self.saved_marker;
+        self.dirty = self.frontier() != self.saved_marker;
     }
 
-    pub fn undo(&mut self) -> bool {
-        let Some(edit_timestamp) = self.edit_history.pop() else {
-            return false;
-        };
-        self.apply_undo_toggle(edit_timestamp, BufferOp::Undo);
-        self.redo_history.push(edit_timestamp);
+    /// Undo the top edit group, reverting all of its edits as one step. Returns
+    /// the editor selections captured when the group opened, to restore the
+    /// cursor to edit time, or `None` when there is nothing to undo.
+    pub fn undo(&mut self) -> Option<Vec<Selection<Anchor>>> {
+        let group = self.edit_history.pop()?;
+        for &edit_timestamp in group.edits.iter().rev() {
+            self.apply_undo_toggle(edit_timestamp, BufferOp::Undo);
+        }
+        let selections = group.selections_before.clone();
+        self.redo_history.push(group);
         self.recompute_dirty();
-        true
+        Some(selections)
     }
 
-    pub fn redo(&mut self) -> bool {
-        let Some(edit_timestamp) = self.redo_history.pop() else {
-            return false;
-        };
-        self.apply_undo_toggle(edit_timestamp, BufferOp::Redo);
-        self.edit_history.push(edit_timestamp);
+    /// Redo the top undone group, reapplying all of its edits as one step.
+    /// Returns the editor selections captured when the group sealed, or `None`
+    /// when there is nothing to redo.
+    pub fn redo(&mut self) -> Option<Vec<Selection<Anchor>>> {
+        let group = self.redo_history.pop()?;
+        for &edit_timestamp in &group.edits {
+            self.apply_undo_toggle(edit_timestamp, BufferOp::Redo);
+        }
+        let selections = group.selections_after.clone();
+        self.edit_history.push(group);
         self.recompute_dirty();
-        true
+        Some(selections)
     }
 
     /// Place a named marker at the current op-log position. The returned
@@ -779,7 +885,7 @@ pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 mod tests {
     use super::TextBuffer;
     use std::ops::Range;
-    use stoat_text::{Bias, BufferId, Point};
+    use stoat_text::{Bias, BufferId, Point, Selection, SelectionGoal};
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
@@ -1074,7 +1180,7 @@ mod tests {
     #[test]
     fn undo_empty_history() {
         let mut b = TextBuffer::new(BufferId::new(0));
-        assert!(!b.undo());
+        assert!(b.undo().is_none());
         assert_eq!(b.snapshot.visible_text.to_string(), "");
     }
 
@@ -1094,9 +1200,9 @@ mod tests {
         let mut b = buf("hello");
         b.edit(5..5, " world");
         assert_eq!(b.snapshot.visible_text.to_string(), "hello world");
-        assert!(b.undo());
+        assert!(b.undo().is_some());
         assert_eq!(b.snapshot.visible_text.to_string(), "hello");
-        assert!(b.redo());
+        assert!(b.redo().is_some());
         assert_eq!(b.snapshot.visible_text.to_string(), "hello world");
     }
 
@@ -1106,13 +1212,87 @@ mod tests {
         b.edit(1..1, "b");
         b.edit(2..2, "c");
         assert_eq!(b.snapshot.visible_text.to_string(), "abc");
-        assert!(b.undo());
-        assert!(b.undo());
+        assert!(b.undo().is_some());
+        assert!(b.undo().is_some());
         assert_eq!(b.snapshot.visible_text.to_string(), "a");
-        assert!(b.redo());
+        assert!(b.redo().is_some());
         assert_eq!(b.snapshot.visible_text.to_string(), "ab");
-        assert!(b.redo());
+        assert!(b.redo().is_some());
         assert_eq!(b.snapshot.visible_text.to_string(), "abc");
+    }
+
+    #[test]
+    fn begin_group_collapses_edits_into_one_undo_step() {
+        let mut b = buf("");
+        b.begin_group(Vec::new());
+        b.edit(0..0, "a");
+        b.edit(1..1, "b");
+        b.edit(2..2, "c");
+        b.seal_group(Vec::new());
+        assert_eq!(b.snapshot.visible_text.to_string(), "abc");
+        assert!(b.undo().is_some());
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "",
+            "one undo reverts the whole group"
+        );
+        assert!(b.redo().is_some());
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "abc",
+            "one redo restores the whole group"
+        );
+    }
+
+    #[test]
+    fn empty_group_leaves_no_undo_step() {
+        let mut b = buf("hi");
+        b.edit(2..2, "!");
+        b.begin_group(Vec::new());
+        b.seal_group(Vec::new());
+        assert!(b.undo().is_some());
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "hi",
+            "a sealed group that took no edits is not its own undo step"
+        );
+    }
+
+    #[test]
+    fn ungrouped_edits_undo_individually() {
+        let mut b = buf("");
+        b.edit(0..0, "a");
+        b.edit(1..1, "b");
+        assert!(b.undo().is_some());
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "a",
+            "an edit outside a group is its own step"
+        );
+    }
+
+    #[test]
+    fn undo_returns_the_groups_before_selections() {
+        let mut b = buf("hello");
+        let anchor = b.anchor_at(2, Bias::Right);
+        let before = vec![Selection {
+            id: 7,
+            start: anchor,
+            end: anchor,
+            reversed: false,
+            goal: SelectionGoal::None,
+        }];
+        b.begin_group(before);
+        b.edit(5..5, " world");
+        b.seal_group(Vec::new());
+        let restored = b.undo().expect("undo returns the group's selections");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, 7);
+        assert_eq!(
+            b.resolve_anchor(&restored[0].start),
+            2,
+            "the restored anchor tracks the pre-edit offset"
+        );
     }
 
     #[test]
@@ -1120,11 +1300,11 @@ mod tests {
         let mut b = buf("a");
         b.edit(1..1, "b");
         assert_eq!(b.snapshot.visible_text.to_string(), "ab");
-        assert!(b.undo());
+        assert!(b.undo().is_some());
         assert_eq!(b.snapshot.visible_text.to_string(), "a");
         b.edit(1..1, "X");
         assert_eq!(b.snapshot.visible_text.to_string(), "aX");
-        assert!(!b.redo(), "redo stack cleared by new edit");
+        assert!(b.redo().is_none(), "redo stack cleared by new edit");
         assert_eq!(b.snapshot.visible_text.to_string(), "aX");
     }
 

@@ -48,7 +48,7 @@ use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
-use stoat_text::Bias;
+use stoat_text::{Anchor, Bias, Selection};
 use stoatty_widgets::ApcScene;
 use tokio::sync::{
     mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
@@ -325,7 +325,7 @@ pub struct Stoat {
     /// [`Anchor`]. Anchors resolve to the current byte offset through
     /// the fragment tree, so edits before a mark move it with the
     /// surrounding content.
-    pub(crate) marks: std::collections::HashMap<(BufferId, char), stoat_text::Anchor>,
+    pub(crate) marks: std::collections::HashMap<(BufferId, char), Anchor>,
     /// Global marks keyed by uppercase char -> `(path, byte offset)`.
     /// Cross-buffer: `goto` opens the file in the focused pane and
     /// seeks to the stored offset. Offsets are not anchor-tracked --
@@ -3853,10 +3853,44 @@ impl Stoat {
         if was_insert && !now_insert && std::mem::take(&mut self.restore_cursor) {
             self.restore_cursor_after_append();
         }
+        if was_insert && !now_insert {
+            self.seal_insert_undo_group();
+        }
         if !was_insert && now_insert {
             self.current_insert_run = Some(String::new());
+            self.begin_insert_undo_group();
         }
         self.set_focused_mode(next);
+    }
+
+    /// Open an undo group so the whole insert session collapses into one undo
+    /// step, capturing the pre-session selections to restore on undo.
+    fn begin_insert_undo_group(&mut self) {
+        let Some((buffer_id, before)) = self.focused_undo_snapshot() else {
+            return;
+        };
+        if let Some(buffer) = self.active_workspace().buffers.get(buffer_id) {
+            buffer.write().expect("poisoned").begin_group(before);
+        }
+    }
+
+    /// Seal the insert-session group, capturing the post-session selections to
+    /// restore on redo. A session that typed nothing discards its group.
+    fn seal_insert_undo_group(&mut self) {
+        let Some((buffer_id, after)) = self.focused_undo_snapshot() else {
+            return;
+        };
+        if let Some(buffer) = self.active_workspace().buffers.get(buffer_id) {
+            buffer.write().expect("poisoned").seal_group(after);
+        }
+    }
+
+    /// The focused editor's buffer id paired with its current selections, for
+    /// opening or sealing an undo group around an insert session.
+    fn focused_undo_snapshot(&self) -> Option<(BufferId, Vec<Selection<Anchor>>)> {
+        let (editor_id, buffer_id) = self.focused_editor_ids()?;
+        let editor = self.active_workspace().editors.get(editor_id)?;
+        Some((buffer_id, editor.selections.all_anchors().to_vec()))
     }
 
     /// Move each block cursor in the focused editor back one grapheme, landing
@@ -9116,6 +9150,70 @@ mod tests {
         h.type_keys("alt-backspace");
         assert_eq!(buffer_text(&h, &path), "o\n");
         assert_eq!(h.head_offsets(), vec![0]);
+    }
+
+    #[test]
+    fn insert_session_undoes_and_redoes_as_one_step() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("hello");
+        h.type_keys("esc");
+        assert_eq!(buffer_text(&h, &path), "hello");
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "",
+            "one undo clears the whole insert session"
+        );
+        h.type_keys("U");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "hello",
+            "one redo restores the whole session"
+        );
+    }
+
+    #[test]
+    fn delete_undoes_both_cursors_and_restores_selections() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "ab\nab\n");
+        h.type_keys("l");
+        h.type_keys("C");
+        let before = h.head_offsets();
+        h.type_keys("d");
+        assert_eq!(buffer_text(&h, &path), "a\na\n");
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "ab\nab\n",
+            "one undo restores both cursors' deletions"
+        );
+        assert_eq!(h.head_offsets(), before, "undo restores both selections");
+    }
+
+    #[test]
+    fn ctrl_s_splits_the_insert_session_into_two_undo_steps() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("hello");
+        h.type_keys("ctrl-s");
+        h.type_text("world");
+        h.type_keys("esc");
+        assert_eq!(buffer_text(&h, &path), "helloworld");
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "hello",
+            "the first undo reverts only the post-checkpoint edits"
+        );
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "",
+            "the second undo reverts the pre-checkpoint edits"
+        );
     }
 
     #[test]
