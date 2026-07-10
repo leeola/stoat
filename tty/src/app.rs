@@ -1173,7 +1173,9 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
-                let paste_combo = if cfg!(target_os = "macos") {
+                // The clipboard combo is super on macOS, ctrl+shift elsewhere,
+                // shared by copy (c) and paste (v).
+                let clip_combo = if cfg!(target_os = "macos") {
                     state.modifiers.super_key()
                 } else {
                     state.modifiers.control_key() && state.modifiers.shift_key()
@@ -1182,11 +1184,15 @@ impl ApplicationHandler<PtyEvent> for App {
                     &event.logical_key,
                     Key::Character(c) if c.eq_ignore_ascii_case("v")
                 );
-                if paste_combo && is_paste_key {
+                if clip_combo && is_paste_key {
                     // Consume the combo whether or not the clipboard read
                     // succeeds, so encode_key never sends a stray "v".
                     if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                        let bracketed = state.terminal.lock().bracketed_paste();
+                        let bracketed = {
+                            let mut terminal = state.terminal.lock();
+                            terminal.clear_selection();
+                            terminal.bracketed_paste()
+                        };
                         let _ = state.pty.write(&paste_bytes(&text, bracketed));
                         // Pasting jumps the view back to the live prompt, like typing.
                         state.terminal.lock().scroll_to_bottom();
@@ -1194,11 +1200,27 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
+                let is_copy_key = matches!(
+                    &event.logical_key,
+                    Key::Character(c) if c.eq_ignore_ascii_case("c")
+                );
+                if clip_combo && is_copy_key {
+                    // Re-copy the live selection, keeping it highlighted. An empty
+                    // selection falls through so a bare Ctrl-C still SIGINTs.
+                    if let Some(text) = selection_copy_text(&state.terminal) {
+                        copy_to_clipboard(&text);
+                        return;
+                    }
+                }
+
                 if let Some(bytes) = encode_key(
                     &event.logical_key,
                     state.modifiers.control_key(),
                     state.modifiers.shift_key(),
                 ) {
+                    // Typing supersedes a live selection, so drop the highlight
+                    // before it sits over fresh output.
+                    state.terminal.lock().clear_selection();
                     let _ = state.pty.write(&bytes);
                     // Typing jumps the view back to the live prompt, the way a
                     // terminal resets scrollback on input.
@@ -1323,13 +1345,11 @@ impl ApplicationHandler<PtyEvent> for App {
                         state.native_drag = true;
                     } else if state.native_drag {
                         state.native_drag = false;
-                        let text = {
-                            let mut terminal = state.terminal.lock();
-                            let text = terminal.selection_text();
-                            terminal.clear_selection();
-                            text
-                        };
-                        if let Some(text) = text.filter(|t| !t.is_empty()) {
+                        // Copy on release but keep the selection highlighted, so
+                        // Cmd-C can re-copy and the highlight does not flash away.
+                        // It is cleared on supersession by a new drag, typing, or
+                        // a paste.
+                        if let Some(text) = selection_copy_text(&state.terminal) {
                             copy_to_clipboard(&text);
                         }
                     }
@@ -1724,6 +1744,13 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+/// The current selection's text for a copy, or `None` when nothing non-empty is
+/// selected. Reads the selection without clearing it, so the highlight persists
+/// for a later re-copy.
+fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
+    terminal.lock().selection_text().filter(|t| !t.is_empty())
+}
+
 /// The grid cell `(col, row)` under physical pixel (`x`, `y`), clamped to the
 /// `rows` x `cols` grid, for a `cell_size` of `[width, height]` physical pixels.
 fn cell_at(x: f64, y: f64, cell_size: [f32; 2], rows: usize, cols: usize) -> (usize, usize) {
@@ -1967,16 +1994,18 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
 mod tests {
     use super::{
         alternate_scroll_bytes, bell_should_ring, cell_at, copy_pool_region, cursor_in_region,
-        ease, ease_corners, encode_key, font_step, paste_bytes, popover_overflow, sgr_button_bytes,
-        sgr_motion_bytes, sgr_wheel_bytes, step_document_scroll, step_grid_scroll,
-        step_popover_scroll, step_region_scroll, step_scrollback_scroll, sweep_launch_shift,
-        wheel_lines, SCROLLBACK_MIN_STEP,
+        ease, ease_corners, encode_key, font_step, paste_bytes, popover_overflow,
+        selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes,
+        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
+        step_scrollback_scroll, sweep_launch_shift, wheel_lines, SCROLLBACK_MIN_STEP,
     };
+    use alacritty_terminal::sync::FairMutex;
     use std::time::{Duration, Instant};
     use stoatty_protocol::command::PoolRegionCommand;
     use stoatty_term::{
         grid::{Bar, Grid, Overlay, Rgb, TextRun},
-        term::{Cursor, CursorShape},
+        term::{Cursor, CursorShape, Terminal},
+        theme::Theme,
     };
     use winit::{
         dpi::PhysicalPosition,
@@ -2475,6 +2504,38 @@ mod tests {
     #[test]
     fn paste_bytes_normalizes_newlines_when_unbracketed() {
         assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc".to_vec());
+    }
+
+    #[test]
+    fn selection_copy_text_reads_without_clearing() {
+        let terminal = FairMutex::new(Terminal::new(4, 8, Theme::default()));
+
+        assert_eq!(
+            selection_copy_text(&terminal),
+            None,
+            "no selection yields nothing to copy"
+        );
+
+        {
+            let mut t = terminal.lock();
+            t.advance(b"hello");
+            t.start_selection(0, 0, false);
+            t.update_selection(0, 4, true);
+        }
+
+        assert_eq!(selection_copy_text(&terminal).as_deref(), Some("hello"));
+        assert_eq!(
+            selection_copy_text(&terminal).as_deref(),
+            Some("hello"),
+            "reading the selection for a copy leaves it intact for a re-copy"
+        );
+
+        terminal.lock().clear_selection();
+        assert_eq!(
+            selection_copy_text(&terminal),
+            None,
+            "the supersession path clears the highlight"
+        );
     }
 
     #[test]
