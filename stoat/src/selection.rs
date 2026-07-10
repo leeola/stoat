@@ -2049,6 +2049,27 @@ mod tests {
     }
 
     #[test]
+    fn till_skips_an_adjacent_target() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "axbxc\n");
+        h.open_file(&path);
+        h.type_keys("t x");
+        // The adjacent 'x' at 1 is skipped; till the second 'x' (at 3) selects
+        // through 'b', ending before that 'x'.
+        assert_eq!(h.selection_spans()[0], (0, 3, false));
+    }
+
+    #[test]
+    fn find_lands_on_the_adjacent_target() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "axbxc\n");
+        h.open_file(&path);
+        h.type_keys("f x");
+        // `f` is never skipped, so it lands on the first, adjacent 'x'.
+        assert_eq!(h.selection_spans()[0], (0, 2, false));
+    }
+
+    #[test]
     fn select_mode_alt_n_extends_to_next_sibling() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.rs", "fn a() {} fn b() {}\n");

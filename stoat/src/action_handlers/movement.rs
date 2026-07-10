@@ -2558,6 +2558,28 @@ pub(crate) fn execute_find(
     };
 
     let count = count.max(1);
+    // A till motion whose target sits immediately next to the cursor would land
+    // where the cursor already is, so bump the count to skip that adjacent
+    // grapheme like Helix. Find motions land on the target and are unaffected.
+    let count = match kind {
+        FindKind::TillNextChar => {
+            let adjacent =
+                cursor.saturating_add(rope.chars_at(cursor).next().map_or(0, |c| c.len_utf8()));
+            if rope.chars_at(adjacent).next() == Some(ch) {
+                count + 1
+            } else {
+                count
+            }
+        },
+        FindKind::TillPrevChar => {
+            if rope.reversed_chars_at(cursor).next() == Some(ch) {
+                count + 1
+            } else {
+                count
+            }
+        },
+        FindKind::NextChar | FindKind::PrevChar => count,
+    };
     let target = match kind {
         FindKind::NextChar | FindKind::TillNextChar => {
             let scan_start =
