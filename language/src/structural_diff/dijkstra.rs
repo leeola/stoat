@@ -36,10 +36,15 @@ use std::{
 /// even on the biggest graphs we'd run.
 const CANCEL_POLL_INTERVAL: usize = 4096;
 
-/// Default graph cap. Difftastic uses 3,000,000. We use 250,000 for a
-/// minimum-viable port that handles small inputs and bails fast on large
-/// ones. The fallback path is always available.
-pub const DEFAULT_GRAPH_LIMIT: usize = 250_000;
+/// Default graph cap, matching difftastic's default. It bounds the vertex
+/// arena so that a pathological single-section rewrite -- one changed
+/// region too large to diff structurally -- degrades to
+/// preprocessing-only instead of searching an unbounded graph.
+///
+/// Per-section search keeps ordinary edits orders of magnitude below this,
+/// so only a worst case ever reaches the cap. The fallback path is always
+/// available when it does.
+pub const DEFAULT_GRAPH_LIMIT: usize = 3_000_000;
 
 /// Distinct full-parents-stack variants explored per shallow key.
 /// Difftastic caps at 2 so the search can tell popping both delimiters
