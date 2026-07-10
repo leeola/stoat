@@ -4230,8 +4230,12 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 let replies = agent.term.feed(&data);
+                let clipboard_writes = agent.term.take_clipboard_writes();
                 if !replies.is_empty() {
                     self.write_to_term(agent_id, &replies);
+                }
+                for text in clipboard_writes {
+                    crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
                 }
                 UpdateEffect::Redraw
             },
@@ -5758,6 +5762,34 @@ mod tests {
         let term = &stoat.active_workspace().terms[agent_id].term;
         let row: String = term.row(0).iter().map(|cell| cell.ch).collect();
         assert!(row.starts_with("hello"), "row: {row:?}");
+    }
+
+    #[test]
+    fn term_pane_osc52_forwards_to_clipboard() {
+        let mut h = Stoat::test();
+        let session: Arc<dyn crate::host::TerminalSession> =
+            Arc::new(crate::host::FakeTerminalSession::new());
+        let agent_id =
+            h.stoat
+                .active_workspace_mut()
+                .terms
+                .insert(crate::term_session::TermSession::new(
+                    crate::term_screen::TermScreen::new(24, 80),
+                    session,
+                ));
+
+        // OSC 52 set-clipboard with the base64 of "hi", BEL-terminated.
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermOutput {
+                agent_id,
+                data: b"\x1b]52;c;aGk=\x07".to_vec(),
+            });
+
+        assert_eq!(
+            h.fake_clipboard().writes(),
+            vec!["hi".to_string()],
+            "an OSC 52 write from a term pane reaches the system clipboard"
+        );
     }
 
     #[test]

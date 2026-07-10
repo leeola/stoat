@@ -58,26 +58,38 @@ pub struct CursorPos {
     pub col: usize,
 }
 
-/// Collects the terminal's replies to host queries into a shared buffer.
+/// Collects the terminal's replies to host queries and its OSC 52 clipboard
+/// writes into shared buffers.
 ///
 /// `alacritty_terminal` reports replies (device attributes, cursor-position
-/// reports) by handing the owning [`Term`] an [`EventListener`] and calling
-/// [`Event::PtyWrite`]. This proxy appends those payloads to a buffer the
+/// reports) and clipboard-store requests by handing the owning [`Term`] an
+/// [`EventListener`] and calling [`Event::PtyWrite`] or [`Event::ClipboardStore`].
+/// This proxy appends reply payloads and decoded clipboard text to buffers the
 /// owning [`TermScreen`] drains and hands back to the caller. A [`Mutex`] (not
 /// `RefCell`) keeps the proxy `Send`, since a [`TermSession`](crate::term_session::TermSession)
-/// crosses threads. Non-`PtyWrite` events (title, bell, clipboard) are ignored.
+/// crosses threads. The remaining events (title, bell) are ignored.
 #[derive(Clone)]
 struct EventProxy {
     replies: Arc<Mutex<Vec<u8>>>,
+    clipboard_writes: Arc<Mutex<Vec<String>>>,
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            self.replies
-                .lock()
-                .expect("term reply buffer poisoned")
-                .extend_from_slice(text.as_bytes());
+        match event {
+            Event::PtyWrite(text) => {
+                self.replies
+                    .lock()
+                    .expect("term reply buffer poisoned")
+                    .extend_from_slice(text.as_bytes());
+            },
+            Event::ClipboardStore(_, text) => {
+                self.clipboard_writes
+                    .lock()
+                    .expect("term clipboard buffer poisoned")
+                    .push(text);
+            },
+            _ => {},
         }
     }
 }
@@ -95,6 +107,7 @@ pub struct TermScreen {
     term: Term<EventProxy>,
     parser: Processor,
     replies: Arc<Mutex<Vec<u8>>>,
+    clipboard_writes: Arc<Mutex<Vec<String>>>,
 }
 
 impl TermScreen {
@@ -109,14 +122,17 @@ impl TermScreen {
         };
 
         let replies = Arc::new(Mutex::new(Vec::new()));
+        let clipboard_writes = Arc::new(Mutex::new(Vec::new()));
         let listener = EventProxy {
             replies: replies.clone(),
+            clipboard_writes: clipboard_writes.clone(),
         };
 
         TermScreen {
             term: Term::new(Config::default(), &dimensions, listener),
             parser: Processor::new(),
             replies,
+            clipboard_writes,
         }
     }
 
@@ -159,6 +175,21 @@ impl TermScreen {
     /// drain, leaving the buffer empty.
     fn drain_replies(&self) -> Vec<u8> {
         std::mem::take(&mut *self.replies.lock().expect("term reply buffer poisoned"))
+    }
+
+    /// Take the decoded OSC 52 clipboard payloads the child wrote since the last
+    /// call, leaving the buffer empty.
+    ///
+    /// Each entry is one clipboard-store request, already base64-decoded by the
+    /// terminal parser. The caller forwards them to the system clipboard so an
+    /// app inside the pane can copy to the host.
+    pub fn take_clipboard_writes(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .clipboard_writes
+                .lock()
+                .expect("term clipboard buffer poisoned"),
+        )
     }
 
     /// The viewport height in rows.
@@ -427,5 +458,17 @@ mod tests {
     fn plain_output_produces_no_reply() {
         let mut term = TermScreen::new(24, 80);
         assert!(term.feed(b"hello").is_empty());
+    }
+
+    #[test]
+    fn osc52_clipboard_store_is_captured_and_drained() {
+        let mut term = TermScreen::new(24, 80);
+        // OSC 52 set-clipboard with the base64 of "hi", BEL-terminated.
+        term.feed(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(term.take_clipboard_writes(), vec!["hi".to_string()]);
+        assert!(
+            term.take_clipboard_writes().is_empty(),
+            "a second take drains to empty"
+        );
     }
 }
