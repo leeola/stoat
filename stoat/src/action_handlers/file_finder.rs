@@ -180,7 +180,7 @@ pub(super) fn file_finder_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     let Some(finder) = stoat.file_finder.as_mut() else {
         return UpdateEffect::None;
     };
-    finder.core.page(dir);
+    finder.active_core().page(dir);
     UpdateEffect::Redraw
 }
 

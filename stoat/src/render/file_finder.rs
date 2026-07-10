@@ -135,14 +135,14 @@ pub(crate) fn render_file_finder(
         render_preview(finder, preview_rect, theme, ws, buf);
     }
 
-    finder.core.picklist.viewport_rows = Some(layout.list.height as usize);
+    finder.active_core().picklist.viewport_rows = Some(layout.list.height as usize);
     render_list(finder, layout.list, theme, buf);
 }
 
 fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
     let rows = area.height as usize;
     let start_row = finder
-        .core
+        .active_core_ref()
         .picklist
         .selected
         .saturating_sub(rows.saturating_sub(1));
@@ -160,9 +160,10 @@ pub(crate) fn paint_finder_rows(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
+    let core = finder.active_core_ref();
     crate::render::picker::paint_path_rows(
-        &finder.core.picklist,
-        &finder.core.git_root,
+        &core.picklist,
+        &core.git_root,
         area,
         start_row,
         theme,
@@ -177,5 +178,11 @@ fn render_preview(
     ws: &mut Workspace,
     buf: &mut Buffer,
 ) {
-    crate::render::picker::render_picker_preview(&finder.core.preview, area, theme, ws, buf);
+    crate::render::picker::render_picker_preview(
+        &finder.active_core_ref().preview,
+        area,
+        theme,
+        ws,
+        buf,
+    );
 }

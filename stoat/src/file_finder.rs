@@ -101,14 +101,25 @@ impl FileFinder {
         self.scope
     }
 
+    /// The picker currently driving the list. Browse mode (a `/` or `~/`
+    /// query) swaps in its own directory-walk picker; every other query drives
+    /// the workspace `core`.
+    pub(crate) fn active_core(&mut self) -> &mut PathPicker {
+        &mut self.core
+    }
+
+    pub(crate) fn active_core_ref(&self) -> &PathPicker {
+        &self.core
+    }
+
     /// Absolute path of the currently selected filtered row, if any.
     pub(crate) fn selected_path(&self) -> Option<&Path> {
-        self.core.selected_path()
+        self.active_core_ref().selected_path()
     }
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        self.core.move_selection(delta);
+        self.active_core().move_selection(delta);
     }
 
     /// Flip the scope, optionally refreshing the Modified list before
@@ -163,7 +174,7 @@ impl FileFinder {
             FinderScope::Buffers => PreviewPolicy::LiveBufferThenFile,
             _ => PreviewPolicy::File,
         };
-        self.core
+        self.active_core()
             .sync_preview(ws, fs_host, language_registry, policy);
     }
 
