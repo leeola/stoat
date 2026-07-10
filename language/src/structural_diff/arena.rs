@@ -152,6 +152,24 @@ impl SyntaxArena {
             }
         }
     }
+
+    /// Rewrite `ids` into a standalone sibling chain. Each id points at the
+    /// next via `next_sibling`, and the last terminates with `None`.
+    ///
+    /// A per-section diff search walks a run of changed siblings via
+    /// `next_sibling`, so relinking isolates the run and the search stops at
+    /// its end instead of continuing into the rest of the file. This
+    /// overwrites whatever [`Self::link_siblings`] set for these nodes. Their
+    /// subtrees keep their links, so the search descends into each normally.
+    pub fn relink_run(&mut self, ids: &[SyntaxId]) {
+        for (idx, id) in ids.iter().enumerate() {
+            let next = ids.get(idx + 1).copied();
+            match &mut self.nodes[id.0] {
+                Syntax::List(l) => l.next_sibling = next,
+                Syntax::Atom(a) => a.next_sibling = next,
+            }
+        }
+    }
 }
 
 impl<'a> Syntax<'a> {

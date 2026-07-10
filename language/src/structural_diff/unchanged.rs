@@ -7,25 +7,25 @@
 //! the savings are substantial because the Dijkstra walk only sees the
 //! novel regions.
 //!
-//! Three steps, in order:
+//! Over each list of children, three steps:
 //!
-//! 1. **Shrink at endpoints** (cheap): walk both sides from the front, pairing children with
-//!    matching `ContentId`. Stop on the first mismatch. Repeat from the back. The matched ranges
-//!    are tagged [`ChangeKind::Unchanged`] recursively.
+//! 1. **Shrink at endpoints.** Walk both sides from the front, pairing children with matching
+//!    `ContentId`, and stop on the first mismatch. Repeat from the back. The matched ranges are
+//!    tagged [`ChangeKind::Unchanged`] recursively.
 //!
-//! 2. **LCS over top-level children**: for the remaining middle of each list, run an LCS over child
-//!    `ContentId`s. Each match in the LCS recursively marks its subtree unchanged.
+//! 2. **LCS anchors.** Over the remaining middle, run an LCS over child `ContentId`s. Each match is
+//!    an anchor, marked unchanged along with its subtree.
 //!
-//! 3. **Recursive deep-mark**: when both sides agree the same subtree is unchanged, walk into it
-//!    and tag every descendant the same way. The Dijkstra search can then skip these subtrees
-//!    entirely.
+//! 3. **Emit sections.** The unmatched run between two consecutive anchors is a changed section. A
+//!    lone same-kind list on each side recurses into its children instead, so a small edit inside a
+//!    container drills down to its changed statement. Every other non-empty run is a section.
 //!
-//! After this pass, every node carries a [`ChangeKind`] in a side
-//! [`ChangeMap`]; the diff search only enumerates `Pending` nodes.
+//! After this pass, every node carries a [`ChangeKind`] in a side [`ChangeMap`], and the changed
+//! sections are collected in [`PreprocessResult::sections`]. The Dijkstra search then runs over one
+//! section at a time rather than the whole file.
 //!
-//! Reference: `references/difftastic/src/diff/unchanged.rs`. The
-//! algorithm is the same; we use a vendored LCS instead of `wu_diff`
-//! to avoid an external crate.
+//! Reference: `references/difftastic/src/diff/unchanged.rs` (`split_unchanged`). The algorithm is
+//! the same, but we use a vendored LCS instead of `wu_diff` to avoid an external crate.
 
 use super::arena::{Syntax, SyntaxArena, SyntaxId};
 
@@ -85,12 +85,19 @@ impl ChangeMap {
     }
 }
 
-/// Result of [`mark_unchanged`]. Holds one [`ChangeMap`] per side; the
-/// caller threads them through to the structural-diff search.
+/// Result of [`mark_unchanged`]. Holds one [`ChangeMap`] per side plus the
+/// changed sections the caller runs the Dijkstra search over.
+///
+/// A section is a `(lhs_run, rhs_run)` pair of consecutive unmatched children
+/// between two unchanged anchors. The search runs per section rather than over
+/// the whole file, so a small edit only explores its own region. A section
+/// empty on one side is a pure insertion or deletion the caller leaves for the
+/// change collector.
 #[derive(Clone, Debug, Default)]
 pub struct PreprocessResult {
     pub lhs_changes: ChangeMap,
     pub rhs_changes: ChangeMap,
+    pub sections: Vec<(Vec<SyntaxId>, Vec<SyntaxId>)>,
 }
 
 /// Run the three-phase preprocessing pass on `(lhs_root, rhs_root)`,
@@ -105,6 +112,7 @@ pub fn mark_unchanged(
     let mut result = PreprocessResult {
         lhs_changes: ChangeMap::with_len(lhs_arena.len()),
         rhs_changes: ChangeMap::with_len(rhs_arena.len()),
+        sections: Vec::new(),
     };
 
     // Top-level: roots are always lists in practice (they wrap the
@@ -136,15 +144,21 @@ pub fn mark_unchanged(
         &rhs_children,
         &mut result.lhs_changes,
         &mut result.rhs_changes,
+        &mut result.sections,
     );
 
     result
 }
 
 /// Pair two child lists via shrink-then-LCS, marking matched subtrees
-/// recursively. Unmatched [`Syntax::List`] pairs at the same position
-/// (kind matches, content differs) recurse into their grandchildren so
-/// nested unchanged regions are also tagged.
+/// [`ChangeKind::Unchanged`] and collecting the changed runs between anchors
+/// into `sections`.
+///
+/// The unmatched run between two consecutive anchors is a changed section. A
+/// run of exactly one same-kind [`Syntax::List`] on each side recurses into
+/// its children instead, so a small edit inside a container drills down to the
+/// changed statement rather than emitting the whole container. Every other
+/// non-empty run is pushed to `sections` for the per-section Dijkstra search.
 fn pair_children(
     lhs_arena: &SyntaxArena,
     rhs_arena: &SyntaxArena,
@@ -152,6 +166,7 @@ fn pair_children(
     rhs: &[SyntaxId],
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
+    sections: &mut Vec<(Vec<SyntaxId>, Vec<SyntaxId>)>,
 ) {
     // Phase 1a: shrink common prefix.
     let mut prefix = 0usize;
@@ -178,63 +193,98 @@ fn pair_children(
         suffix += 1;
     }
 
-    // Middle ranges to consider via LCS.
     let lhs_mid = &lhs[prefix..lhs.len() - suffix];
     let rhs_mid = &rhs[prefix..rhs.len() - suffix];
 
-    // Phase 2: LCS over content_ids. Matched pairs are byte-for-byte
-    // equal, so we mark them and their descendants Unchanged.
-    let mut lhs_matched = vec![false; lhs_mid.len()];
-    let mut rhs_matched = vec![false; rhs_mid.len()];
-    if !lhs_mid.is_empty() && !rhs_mid.is_empty() {
-        let lcs = lcs_pairs(lhs_arena, rhs_arena, lhs_mid, rhs_mid);
-        for (lhs_idx, rhs_idx) in lcs {
-            mark_subtree(
-                lhs_arena,
-                lhs_mid[lhs_idx],
-                lhs_changes,
-                ChangeKind::Unchanged,
-            );
-            mark_subtree(
-                rhs_arena,
-                rhs_mid[rhs_idx],
-                rhs_changes,
-                ChangeKind::Unchanged,
-            );
-            lhs_matched[lhs_idx] = true;
-            rhs_matched[rhs_idx] = true;
-        }
+    // Phase 2: LCS anchors over the middle. Matched pairs are byte-for-byte
+    // equal, so mark them and their descendants Unchanged.
+    let anchors = if !lhs_mid.is_empty() && !rhs_mid.is_empty() {
+        lcs_pairs(lhs_arena, rhs_arena, lhs_mid, rhs_mid)
+    } else {
+        Vec::new()
+    };
+    for &(lhs_idx, rhs_idx) in &anchors {
+        mark_subtree(
+            lhs_arena,
+            lhs_mid[lhs_idx],
+            lhs_changes,
+            ChangeKind::Unchanged,
+        );
+        mark_subtree(
+            rhs_arena,
+            rhs_mid[rhs_idx],
+            rhs_changes,
+            ChangeKind::Unchanged,
+        );
     }
 
-    // Phase 3: same-kind List pairs that the LCS could not match
-    // (because their content_ids differ) get a recursive descent. This
-    // catches nested unchanged regions inside otherwise-novel
-    // containers, e.g. an unchanged statement inside a modified
-    // function body.
-    let lhs_unmatched: Vec<usize> = (0..lhs_mid.len()).filter(|i| !lhs_matched[*i]).collect();
-    let rhs_unmatched: Vec<usize> = (0..rhs_mid.len()).filter(|i| !rhs_matched[*i]).collect();
-    let pair_count = lhs_unmatched.len().min(rhs_unmatched.len());
-    for k in 0..pair_count {
-        let lhs_id = lhs_mid[lhs_unmatched[k]];
-        let rhs_id = rhs_mid[rhs_unmatched[k]];
-        // Only recurse when both sides are lists of the same kind. Mixing
-        // an Atom with a List, or two lists of different kinds, is left
-        // for the structural-diff search to resolve.
-        if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) =
-            (lhs_arena.get(lhs_id), rhs_arena.get(rhs_id))
-            && lhs_list.kind == rhs_list.kind
-        {
-            let lhs_grand = lhs_list.children.clone();
-            let rhs_grand = rhs_list.children.clone();
-            pair_children(
-                lhs_arena,
-                rhs_arena,
-                &lhs_grand,
-                &rhs_grand,
-                lhs_changes,
-                rhs_changes,
-            );
+    // Phase 3: the unmatched run between each consecutive pair of anchors
+    // (and before the first / after the last) is a changed section. A
+    // sentinel anchor past the end of both middles closes the final run.
+    let mut lhs_cursor = 0usize;
+    let mut rhs_cursor = 0usize;
+    let boundaries = anchors
+        .iter()
+        .copied()
+        .chain(std::iter::once((lhs_mid.len(), rhs_mid.len())));
+    for (lhs_anchor, rhs_anchor) in boundaries {
+        let lhs_run = &lhs_mid[lhs_cursor..lhs_anchor];
+        let rhs_run = &rhs_mid[rhs_cursor..rhs_anchor];
+        if !lhs_run.is_empty() || !rhs_run.is_empty() {
+            let recursed = lhs_run.len() == 1
+                && rhs_run.len() == 1
+                && recurse_singleton_lists(
+                    lhs_arena,
+                    rhs_arena,
+                    lhs_run[0],
+                    rhs_run[0],
+                    lhs_changes,
+                    rhs_changes,
+                    sections,
+                );
+            if !recursed {
+                sections.push((lhs_run.to_vec(), rhs_run.to_vec()));
+            }
         }
+        lhs_cursor = lhs_anchor + 1;
+        rhs_cursor = rhs_anchor + 1;
+    }
+}
+
+/// Recurse into a one-node-each run when both nodes are lists of the same
+/// kind, splitting their children into sub-sections. Returns `true` when it
+/// recursed, `false` when the caller should emit the pair as one section.
+///
+/// This is difftastic's singleton-list rule. A lone modified container -- a
+/// function whose body changed, say -- descends so only its changed statements
+/// become sections rather than the whole body.
+fn recurse_singleton_lists(
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+    lhs_id: SyntaxId,
+    rhs_id: SyntaxId,
+    lhs_changes: &mut ChangeMap,
+    rhs_changes: &mut ChangeMap,
+    sections: &mut Vec<(Vec<SyntaxId>, Vec<SyntaxId>)>,
+) -> bool {
+    if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) =
+        (lhs_arena.get(lhs_id), rhs_arena.get(rhs_id))
+        && lhs_list.kind == rhs_list.kind
+    {
+        let lhs_grand = lhs_list.children.clone();
+        let rhs_grand = rhs_list.children.clone();
+        pair_children(
+            lhs_arena,
+            rhs_arena,
+            &lhs_grand,
+            &rhs_grand,
+            lhs_changes,
+            rhs_changes,
+            sections,
+        );
+        true
+    } else {
+        false
     }
 }
 

@@ -43,18 +43,18 @@ use std::{
 /// Two-stage algorithm:
 ///
 /// 1. **Unchanged preprocessing** ([`mark_unchanged`]) tags every trivially-unchanged node via
-///    shrink-from-endpoints + LCS over sibling content_ids. This collapses the search space so the
-///    expensive Dijkstra search only sees the parts that actually differ.
+///    shrink-from-endpoints + LCS over sibling content_ids, and carves the residual into changed
+///    sections -- runs of unmatched siblings between unchanged anchors.
 ///
-/// 2. **Dijkstra search** ([`shortest_path`]) finds the minimum-cost edit path through the residual
-///    graph and marks every node it visits via an `UnchangedNode` / `EnterUnchangedDelimiter` edge
-///    as Unchanged. The remaining `Pending` nodes become the diff's novel/replaced byte ranges.
+/// 2. **Per-section Dijkstra search** ([`shortest_path`]) runs over each changed section rather
+///    than the whole file, so a small edit only explores its own region and only that section can
+///    hit the graph cap. Each `UnchangedNode` / `EnterUnchangedDelimiter` edge marks its node
+///    Unchanged, and the remaining `Pending` nodes become the diff's novel/replaced byte ranges.
 ///
-/// On `ExceededGraphLimit` the function falls back to the
-/// preprocessing-only output (which is still a valid diff, just
-/// missing the per-edit cost-optimal pairing). On parse failure
-/// the function returns `None` and the caller falls through to
-/// [`super::diff_lines`].
+/// On `ExceededGraphLimit` a section falls back to preprocessing-only
+/// output for that region (still a valid diff, just missing the
+/// per-edit cost-optimal pairing). On parse failure the function
+/// returns `None` and the caller falls through to [`super::diff_lines`].
 pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Option<DiffResult> {
     diff_with_language_cancellable(language, lhs, rhs, None)
 }
@@ -248,29 +248,46 @@ fn prepare_per_file(
 ) -> Option<PreparedFile> {
     let lhs_tree = parse(language, lhs, None)?;
     let rhs_tree = parse(language, rhs, None)?;
-    let (lhs_arena, lhs_root) = lower_tree(&lhs_tree, lhs);
-    let (rhs_arena, rhs_root) = lower_tree(&rhs_tree, rhs);
+    let (mut lhs_arena, lhs_root) = lower_tree(&lhs_tree, lhs);
+    let (mut rhs_arena, rhs_root) = lower_tree(&rhs_tree, rhs);
 
     let mut preprocess = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
-    match shortest_path(
-        &lhs_arena,
-        &rhs_arena,
-        Some(lhs_root),
-        Some(rhs_root),
-        DEFAULT_GRAPH_LIMIT,
-        cancel,
-    ) {
-        SearchOutcome::Found(path) => {
-            populate_change_map(
-                &lhs_arena,
-                &rhs_arena,
-                &path,
-                &mut preprocess.lhs_changes,
-                &mut preprocess.rhs_changes,
-            );
-        },
-        SearchOutcome::ExceededGraphLimit => {},
+    // Run the Dijkstra search per changed section rather than over the whole
+    // file, so a small edit only explores its own region and only that section
+    // can hit the graph cap. Take the sections out so the loop is free to
+    // mutate the change maps in place.
+    let sections = std::mem::take(&mut preprocess.sections);
+    for (lhs_run, rhs_run) in &sections {
+        // A section empty on one side is a pure insertion or deletion. Its
+        // nodes stay Pending, and collect_changes emits them as Novel, so there
+        // is nothing to search.
+        if lhs_run.is_empty() || rhs_run.is_empty() {
+            continue;
+        }
+        // Isolate each run into its own sibling chain so the search stops at the
+        // section boundary instead of walking into the rest of the file.
+        lhs_arena.relink_run(lhs_run);
+        rhs_arena.relink_run(rhs_run);
+        match shortest_path(
+            &lhs_arena,
+            &rhs_arena,
+            lhs_run.first().copied(),
+            rhs_run.first().copied(),
+            DEFAULT_GRAPH_LIMIT,
+            cancel,
+        ) {
+            SearchOutcome::Found(path) => {
+                populate_change_map(
+                    &lhs_arena,
+                    &rhs_arena,
+                    &path,
+                    &mut preprocess.lhs_changes,
+                    &mut preprocess.rhs_changes,
+                );
+            },
+            SearchOutcome::ExceededGraphLimit => {},
+        }
     }
 
     fix_all_sliders(&lhs_arena, lhs_root, &mut preprocess.lhs_changes);
@@ -863,25 +880,33 @@ mod tests {
 
     #[test]
     fn graph_limit_bailout_still_finds_moves() {
-        // Force the Dijkstra graph cap by diffing a huge pair of
-        // inputs. Even when the search bails to preprocessing-only,
-        // the move pass still runs on whatever Pending nodes remain
-        // and finds the one unambiguous function-level move.
+        // The per-section search matches the identical anchor functions in
+        // preprocessing, so the graph cap is now forced by one giant function
+        // whose body is fully rewritten -- a single changed section large
+        // enough to exceed the cap. Even when that section bails to
+        // preprocessing-only, the move pass still finds the relocated function
+        // among the residual Pending nodes.
         let lang = rust_lang();
 
         let mut lhs = String::new();
         let mut rhs = String::new();
-        // Many unique functions to force the graph cap.
-        for i in 0..400 {
-            lhs.push_str(&format!(
-                "fn f_{i}(x: u32, y: u32, z: u32) -> u32 {{ x + y + z }}\n"
-            ));
-            rhs.push_str(&format!(
-                "fn f_{i}(x: u32, y: u32, z: u32) -> u32 {{ x + y + z }}\n"
-            ));
+        // A few identical anchor functions give the top-level LCS a stable
+        // in-order chain that excludes the relocated function.
+        for i in 0..3 {
+            let f = format!("fn anchor_{i}() -> u32 {{ {i} }}\n");
+            lhs.push_str(&f);
+            rhs.push_str(&f);
         }
-        // One clean move: the moved function only appears on one side
-        // at one position.
+        // One giant function, fully rewritten between sides, is a single
+        // section whose Dijkstra search exceeds the graph cap.
+        let body_a: String = (0..500).map(|i| format!("    let a{i} = {i};\n")).collect();
+        let body_b: String = (0..500)
+            .map(|i| format!("    let z{i} = {};\n", i * 7 + 1))
+            .collect();
+        lhs.push_str(&format!("fn giant() {{\n{body_a}}}\n"));
+        rhs.push_str(&format!("fn giant() {{\n{body_b}}}\n"));
+        // The relocated function is appended on lhs and prepended on rhs, so
+        // the in-order LCS cannot pair it and the move pass must.
         lhs.push_str("fn moved_payload(a: u32) -> u32 { a * 2 + a * 3 + a * 5 }\n");
         rhs.insert_str(
             0,
@@ -889,8 +914,6 @@ mod tests {
         );
 
         let result = diff_with_language(&lang, &lhs, &rhs).unwrap();
-        // Even if the Dijkstra search bailed, the preprocessing pass
-        // plus the move pass should have tagged the relocated function.
         let moved_change = result.changes.iter().find(|c| {
             c.kind == DiffChangeKind::Moved
                 && (lhs[c.byte_range.clone()].contains("moved_payload")
