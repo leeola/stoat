@@ -3,9 +3,9 @@
 //! Difftastic's diff is Dijkstra over an edit graph; the search space is
 //! enormous on real files, so before running the search a preprocessing
 //! pass tags every node that is *trivially* unchanged. The preprocessing
-//! cost is `O(n)` (plus an `O(n*m)` LCS over top-level [`ContentId`]s);
-//! the savings are substantial because the Dijkstra walk only sees the
-//! novel regions.
+//! cost is `O(n)` (plus a histogram diff over top-level [`ContentId`]s
+//! that runs in `O(n+m)` memory); the savings are substantial because
+//! the Dijkstra walk only sees the novel regions.
 //!
 //! Over each list of children, three steps:
 //!
@@ -13,8 +13,8 @@
 //!    `ContentId`, and stop on the first mismatch. Repeat from the back. The matched ranges are
 //!    tagged [`ChangeKind::Unchanged`] recursively.
 //!
-//! 2. **LCS anchors.** Over the remaining middle, run an LCS over child `ContentId`s. Each match is
-//!    an anchor, marked unchanged along with its subtree.
+//! 2. **LCS anchors.** Over the remaining middle, diff child `ContentId`s to recover the matched
+//!    subsequence. Each match is an anchor, marked unchanged along with its subtree.
 //!
 //! 3. **Emit sections.** The unmatched run between two consecutive anchors is a changed section. A
 //!    lone same-kind list on each side recurses into its children instead, so a small edit inside a
@@ -25,9 +25,18 @@
 //! section at a time rather than the whole file.
 //!
 //! Reference: `references/difftastic/src/diff/unchanged.rs` (`split_unchanged`). The algorithm is
-//! the same, but we use a vendored LCS instead of `wu_diff` to avoid an external crate.
+//! the same, but sibling matching runs imara-diff's histogram over child [`ContentId`]s rather
+//! than `wu_diff`.
 
-use super::arena::{Syntax, SyntaxArena, SyntaxId};
+use super::{
+    arena::{Syntax, SyntaxArena, SyntaxId},
+    content_id::ContentId,
+};
+use imara_diff::{
+    intern::{InternedInput, Interner},
+    Algorithm, Sink,
+};
+use std::ops::Range;
 
 /// What the preprocessing pass concluded about a node. The diff search
 /// only walks `Pending` nodes; `Unchanged` and `Moved` are terminal tags
@@ -306,46 +315,85 @@ fn list_children(arena: &SyntaxArena, id: SyntaxId) -> Vec<SyntaxId> {
     }
 }
 
-/// O(n*m) LCS over [`super::ContentId`]s, returning matching index
-/// pairs `(lhs_idx, rhs_idx)` in source order. The algorithm is the
-/// classic DP table walk; we accept the quadratic memory cost because
-/// the input is bounded by the children of one node, which is small in
-/// practice.
+/// Matched index pairs `(lhs_idx, rhs_idx)` in source order over the
+/// children's [`ContentId`]s: the anchors that pin the changed sections.
+///
+/// Interns each side's `ContentId` sequence and runs imara-diff's histogram
+/// algorithm in `O(n+m)` memory. The matched anchors are the equal regions
+/// between the change hunks, which advance in lockstep on both sides, so
+/// [`LcsPairSink`] reconstructs the in-order pairs from them.
+///
+/// Histogram may under-match the true longest common subsequence on
+/// degenerate repeats. The per-section Dijkstra search recovers those, so
+/// the diff output is unchanged.
 fn lcs_pairs(
     lhs_arena: &SyntaxArena,
     rhs_arena: &SyntaxArena,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
 ) -> Vec<(usize, usize)> {
-    let l = lhs.len();
-    let r = rhs.len();
-    let mut table = vec![vec![0u32; r + 1]; l + 1];
-    for i in 0..l {
-        for j in 0..r {
-            if lhs_arena.get(lhs[i]).content_id() == rhs_arena.get(rhs[j]).content_id() {
-                table[i + 1][j + 1] = table[i][j] + 1;
-            } else {
-                table[i + 1][j + 1] = table[i + 1][j].max(table[i][j + 1]);
-            }
+    let mut input: InternedInput<ContentId> = InternedInput {
+        before: Vec::new(),
+        after: Vec::new(),
+        interner: Interner::new(lhs.len() + rhs.len()),
+    };
+    input.update_before(lhs.iter().map(|&id| lhs_arena.get(id).content_id()));
+    input.update_after(rhs.iter().map(|&id| rhs_arena.get(id).content_id()));
+
+    imara_diff::diff(
+        Algorithm::Histogram,
+        &input,
+        LcsPairSink {
+            lhs_cursor: 0,
+            rhs_cursor: 0,
+            lhs_len: lhs.len() as u32,
+            rhs_len: rhs.len() as u32,
+            pairs: Vec::new(),
+        },
+    )
+}
+
+/// Reconstructs [`lcs_pairs`]' matched anchors from imara-diff's change
+/// hunks. imara-diff reports the differing runs. The equal runs between them
+/// are the matches, and they advance in lockstep on both sides, so each
+/// equal token yields one `(lhs_idx, rhs_idx)` pair.
+struct LcsPairSink {
+    lhs_cursor: u32,
+    rhs_cursor: u32,
+    lhs_len: u32,
+    rhs_len: u32,
+    pairs: Vec<(usize, usize)>,
+}
+
+impl LcsPairSink {
+    /// Emit one pair per token in the equal run from the current cursors up
+    /// to `lhs_end`/`rhs_end`. The two run lengths are equal by construction.
+    /// Taking `min` pairs only as far as the shorter run, so a broken
+    /// invariant truncates the pairing rather than misaligning it.
+    fn emit_equal(&mut self, lhs_end: u32, rhs_end: u32) {
+        let len = (lhs_end - self.lhs_cursor).min(rhs_end - self.rhs_cursor);
+        for k in 0..len {
+            self.pairs.push((
+                (self.lhs_cursor + k) as usize,
+                (self.rhs_cursor + k) as usize,
+            ));
         }
+    }
+}
+
+impl Sink for LcsPairSink {
+    type Out = Vec<(usize, usize)>;
+
+    fn process_change(&mut self, before: Range<u32>, after: Range<u32>) {
+        self.emit_equal(before.start, after.start);
+        self.lhs_cursor = before.end;
+        self.rhs_cursor = after.end;
     }
 
-    let mut pairs = Vec::new();
-    let mut i = l;
-    let mut j = r;
-    while i > 0 && j > 0 {
-        if lhs_arena.get(lhs[i - 1]).content_id() == rhs_arena.get(rhs[j - 1]).content_id() {
-            pairs.push((i - 1, j - 1));
-            i -= 1;
-            j -= 1;
-        } else if table[i][j - 1] >= table[i - 1][j] {
-            j -= 1;
-        } else {
-            i -= 1;
-        }
+    fn finish(mut self) -> Self::Out {
+        self.emit_equal(self.lhs_len, self.rhs_len);
+        self.pairs
     }
-    pairs.reverse();
-    pairs
 }
 
 #[cfg(test)]
@@ -483,5 +531,42 @@ mod tests {
             &[rhs_a, rhs_x, rhs_b],
         );
         assert_eq!(pairs, vec![(0, 0), (1, 2)]);
+    }
+
+    #[test]
+    fn large_input_pairs_all_but_the_perturbation() {
+        // Two 5000-element sequences differing at a single index. The DP
+        // table this replaced would allocate a 25M-cell matrix. Histogram
+        // stays linear in memory and pairs everything but the changed node.
+        use crate::structural_diff::{
+            arena::{Atom, Syntax},
+            ContentId,
+        };
+        let mut arena = SyntaxArena::new();
+        let mk = |arena: &mut SyntaxArena, name: &str| {
+            arena.alloc(Syntax::Atom(Atom {
+                kind: "ident",
+                byte_range: 0..0,
+                content: "",
+                content_id: ContentId::for_atom("ident", name),
+                next_sibling: None,
+            }))
+        };
+        let n = 5000usize;
+        let mut lhs = Vec::with_capacity(n);
+        let mut rhs = Vec::with_capacity(n);
+        for i in 0..n {
+            lhs.push(mk(&mut arena, &i.to_string()));
+            let rhs_name = if i == 2500 {
+                "novel".to_string()
+            } else {
+                i.to_string()
+            };
+            rhs.push(mk(&mut arena, &rhs_name));
+        }
+        let pairs = lcs_pairs(&arena, &arena, &lhs, &rhs);
+        assert_eq!(pairs.len(), n - 1);
+        assert_eq!(pairs.first(), Some(&(0, 0)));
+        assert_eq!(pairs.last(), Some(&(n - 1, n - 1)));
     }
 }
