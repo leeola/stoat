@@ -6,6 +6,7 @@ pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;
 mod help;
+pub(crate) mod jump;
 pub(crate) mod lsp;
 pub(crate) mod macro_recording;
 pub(crate) mod marks;
@@ -34,6 +35,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     help::Help,
     host::FsHost,
+    jumplist::JumpList,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace_picker::WorkspacePicker,
 };
@@ -309,9 +311,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendMoveParentNodeEnd => {
             movement::move_to_parent_bound(stoat, movement::NodeBound::End, true)
         },
-        ActionKind::SaveSelection => movement::save_selection(stoat),
-        ActionKind::JumpBackward => movement::jump_backward(stoat),
-        ActionKind::JumpForward => movement::jump_forward(stoat),
+        ActionKind::SaveSelection => jump::save_selection(stoat),
+        ActionKind::JumpBackward => jump::jump_backward(stoat),
+        ActionKind::JumpForward => jump::jump_forward(stoat),
         ActionKind::OpenJumplistPicker => open_jumplist_picker(stoat),
         ActionKind::OpenDiagnosticsPicker => open_diagnostics_picker(stoat),
         ActionKind::OpenWorkspaceDiagnosticsPicker => open_workspace_diagnostics_picker(stoat),
@@ -754,6 +756,24 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     }
 }
 
+/// Return a mutable reference to the focused pane's jumplist, or `None` when
+/// focus is on a dock rather than a split pane.
+///
+/// The jumplist lives on the pane rather than the editor so it survives the
+/// `EditorState` swap a cross-file open performs. Resolves the same pane
+/// [`focused_editor_mut`] reads, so a recorded jump matches the editor it was
+/// taken from.
+pub(crate) fn focused_pane_jumplist(stoat: &mut Stoat) -> Option<&mut JumpList> {
+    let ws = stoat.active_workspace_mut();
+    match ws.focus {
+        FocusTarget::SplitPane(_) => {
+            let focused = ws.panes.focus();
+            Some(&mut ws.panes.pane_mut(focused).jumplist)
+        },
+        FocusTarget::Dock(_) => None,
+    }
+}
+
 /// Remove `editor_id` from the workspace's editor store unless it is still
 /// live. An editor stays alive while a split pane shows it, or while it is
 /// the review editor parked off-screen by a toggled-off diff session (see
@@ -843,35 +863,19 @@ pub(crate) fn global_search_cancel(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// Drive [`ActionKind::OpenJumplistPicker`]. Builds a snapshot of the
-/// focused editor's jumplist and stores it in
-/// [`Stoat::jumplist_picker`]. No-op when the jumplist is empty.
+/// Drive [`ActionKind::OpenJumplistPicker`]. Builds a snapshot of the focused
+/// pane's jumplist and stores it in [`Stoat::jumplist_picker`]. No-op when the
+/// jumplist is empty or focus is on a dock.
 fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let ws = stoat.active_workspace_mut();
-    let editor_id = match ws.focus {
-        FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
-            View::Editor(id) => id,
-            _ => return UpdateEffect::None,
-        },
-        FocusTarget::Dock(_) => return UpdateEffect::None,
+    let Some(jumplist) = focused_pane_jumplist(stoat) else {
+        return UpdateEffect::None;
     };
-    let editor = match ws.editors.get(editor_id) {
-        Some(e) => e,
-        None => return UpdateEffect::None,
-    };
-    if editor.jumplist.entries().is_empty() {
+    if jumplist.entries().is_empty() {
         return UpdateEffect::None;
     }
-    let buffer_id = editor.buffer_id;
-    let jumplist = editor.jumplist.clone();
-    let buffer = match ws.buffers.get(buffer_id) {
-        Some(b) => b,
-        None => return UpdateEffect::None,
-    };
-    let picker = {
-        let guard = buffer.read().expect("buffer poisoned");
-        crate::jumplist_picker::JumplistPicker::new(&jumplist, &guard)
-    };
+    let jumplist = jumplist.clone();
+    let picker =
+        crate::jumplist_picker::JumplistPicker::new(&jumplist, &stoat.active_workspace().buffers);
     stoat.jumplist_picker = Some(picker);
     UpdateEffect::Redraw
 }

@@ -1,4 +1,4 @@
-use crate::{editor_state::EditorId, run::RunId, term_session::TermId};
+use crate::{editor_state::EditorId, jumplist::JumpList, run::RunId, term_session::TermId};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
@@ -132,6 +132,13 @@ pub struct Pane {
     #[serde(skip)]
     pub area: Rect,
     pub index: u32,
+    /// Cross-buffer jump history for this pane, surviving the `EditorState`
+    /// swaps a cross-file open performs.
+    ///
+    /// `serde(skip)`: navigation scratch rather than persisted layout, so a
+    /// restored session starts with an empty history.
+    #[serde(skip)]
+    pub(crate) jumplist: JumpList,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -184,6 +191,7 @@ impl PaneTree {
             placement: Placement::Split,
             area,
             index: 0,
+            jumplist: JumpList::default(),
         });
 
         let root_id = nodes.insert(Node {
@@ -240,6 +248,7 @@ impl PaneTree {
             placement: Placement::Split,
             area: Rect::default(),
             index: self.next_index,
+            jumplist: JumpList::default(),
         });
         self.next_index += 1;
 

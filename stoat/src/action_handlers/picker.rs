@@ -20,19 +20,23 @@ pub(super) fn jumplist_picker_close(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Jump the focused editor to the location under the jumplist picker's
-/// selection, recording the picker's cursor index so the jumplist walk
-/// resumes from the chosen entry. An empty picker just closes.
+/// Jump to the location under the jumplist picker's selection, positioning the
+/// walk cursor at the chosen entry so a later backward/forward resumes from it.
+/// An empty picker just closes.
 pub(super) fn jumplist_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.jumplist_picker.take() else {
         return UpdateEffect::None;
     };
     let idx = picker.selected();
-    let Some(entry) = picker.entries().get(idx) else {
+    let Some(entry) = super::focused_pane_jumplist(stoat)
+        .and_then(|jumplist| jumplist.entries().get(idx).cloned())
+    else {
         return UpdateEffect::Redraw;
     };
-    let offset = entry.offset;
-    stoat.jump_focused_to_offset(offset, idx);
+    super::jump::apply_jump_entry(stoat, entry);
+    if let Some(jumplist) = super::focused_pane_jumplist(stoat) {
+        jumplist.set_cursor(idx);
+    }
     UpdateEffect::Redraw
 }
 

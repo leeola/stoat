@@ -1,0 +1,208 @@
+//! Handlers for the pane-owned jumplist. Records the focused editor's position
+//! and walks backward and forward, restoring the full selection set across
+//! buffers.
+//!
+//! The list lives on the pane, so recording and walking resolve the pane the
+//! focused editor sits in and reach its jumplist there. Applying an entry
+//! re-shows the entry's buffer when the pane drifted to another, then restores
+//! the recorded selections against the current snapshot (anchors ride the
+//! fragment tree, so no edit-time remap is needed).
+
+use crate::{
+    app::{Stoat, UpdateEffect},
+    jumplist::JumpEntry,
+    pane::{FocusTarget, View},
+};
+
+/// The focused editor's current position as a [`JumpEntry`], or `None` when no
+/// editor is focused.
+pub(crate) fn live_entry(stoat: &mut Stoat) -> Option<JumpEntry> {
+    let editor = super::focused_editor_mut(stoat)?;
+    Some(JumpEntry {
+        buffer_id: editor.buffer_id,
+        selections: editor.selections.all_anchors().to_vec(),
+    })
+}
+
+/// Record the focused editor's position on the focused pane's jumplist.
+///
+/// A no-op when focus is on a dock. Every jump-shaped motion routes its origin
+/// through here, and the jumplist's resolved-shape dedup absorbs doubled pushes.
+pub(crate) fn push_jump(stoat: &mut Stoat) {
+    let Some(entry) = live_entry(stoat) else {
+        return;
+    };
+    let ws = stoat.active_workspace_mut();
+    let pane_id = match ws.focus {
+        FocusTarget::SplitPane(_) => ws.panes.focus(),
+        FocusTarget::Dock(_) => return,
+    };
+    let buffers = &ws.buffers;
+    ws.panes.pane_mut(pane_id).jumplist.push(entry, buffers);
+}
+
+/// Jump the focused pane to `entry`, re-showing its buffer when the pane is not
+/// already on it, then restoring the recorded selection set.
+///
+/// A no-op when the entry's buffer has been closed. Cross-buffer jumps reuse
+/// [`show_buffer_in_pane`](super::file::show_buffer_in_pane), so an open buffer
+/// is re-shown without a disk read.
+pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
+    let resolved = {
+        let ws = stoat.active_workspace();
+        let pane_id = match ws.focus {
+            FocusTarget::SplitPane(_) => ws.panes.focus(),
+            FocusTarget::Dock(_) => return,
+        };
+        let current_buffer = match ws.panes.pane(pane_id).view {
+            View::Editor(eid) => ws.editors.get(eid).map(|e| e.buffer_id),
+            _ => None,
+        };
+        if current_buffer == Some(entry.buffer_id) {
+            None
+        } else {
+            match ws.buffers.get(entry.buffer_id) {
+                Some(buffer) => Some((pane_id, buffer)),
+                None => return,
+            }
+        }
+    };
+
+    if let Some((pane_id, buffer)) = resolved {
+        let executor = stoat.executor.clone();
+        super::file::show_buffer_in_pane(stoat, pane_id, entry.buffer_id, buffer, executor);
+    }
+
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return;
+    };
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    editor
+        .selections
+        .replace_with(entry.selections.clone(), buf_snap);
+}
+
+pub(super) fn save_selection(stoat: &mut Stoat) -> UpdateEffect {
+    push_jump(stoat);
+    UpdateEffect::None
+}
+
+pub(super) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1) as usize;
+    let Some(live) = live_entry(stoat) else {
+        return UpdateEffect::None;
+    };
+    let target = {
+        let ws = stoat.active_workspace_mut();
+        let pane_id = match ws.focus {
+            FocusTarget::SplitPane(_) => ws.panes.focus(),
+            FocusTarget::Dock(_) => return UpdateEffect::None,
+        };
+        let buffers = &ws.buffers;
+        ws.panes
+            .pane_mut(pane_id)
+            .jumplist
+            .backward(live, buffers, count)
+            .cloned()
+    };
+    let Some(target) = target else {
+        return UpdateEffect::None;
+    };
+    apply_jump_entry(stoat, target);
+    UpdateEffect::Redraw
+}
+
+pub(super) fn jump_forward(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1) as usize;
+    let target = {
+        let ws = stoat.active_workspace_mut();
+        let pane_id = match ws.focus {
+            FocusTarget::SplitPane(_) => ws.panes.focus(),
+            FocusTarget::Dock(_) => return UpdateEffect::None,
+        };
+        ws.panes.pane_mut(pane_id).jumplist.forward(count).cloned()
+    };
+    let Some(target) = target else {
+        return UpdateEffect::None;
+    };
+    apply_jump_entry(stoat, target);
+    UpdateEffect::Redraw
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{action_handlers, test_harness::TestHarness};
+    use stoat_text::BufferId;
+
+    fn focused_buffer(h: &mut TestHarness) -> BufferId {
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .buffer_id
+    }
+
+    fn selection_count(h: &mut TestHarness) -> usize {
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .selections
+            .all_anchors()
+            .len()
+    }
+
+    #[test]
+    fn jump_backward_and_forward_cross_buffers() {
+        let mut h = TestHarness::with_size(40, 6);
+        let a = h.write_file("a.rs", "aaaa\nbbbb\n");
+        let b = h.write_file("b.rs", "xxxx\nyyyy\n");
+
+        h.open_file(&a);
+        h.type_keys("l");
+        let a_buffer = focused_buffer(&mut h);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+
+        h.open_file(&b);
+        let b_buffer = focused_buffer(&mut h);
+        h.type_keys("l");
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(focused_buffer(&mut h), a_buffer, "backward re-shows a.rs");
+        assert_eq!(
+            h.primary_head_offset(),
+            1,
+            "restores the saved offset in a.rs"
+        );
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpForward);
+        assert_eq!(focused_buffer(&mut h), b_buffer, "forward returns to b.rs");
+        assert_eq!(
+            h.primary_head_offset(),
+            1,
+            "returns to the recorded b.rs tip"
+        );
+    }
+
+    #[test]
+    fn jump_restores_the_full_selection_set() {
+        let mut h = TestHarness::with_size(40, 6);
+        let path = h.write_file("s.rs", "aaaa\nbbbb\ncccc\n");
+        h.open_file(&path);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::AddSelectionBelow);
+        assert_eq!(selection_count(&mut h), 2, "precondition: two selections");
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            selection_count(&mut h),
+            1,
+            "backward restored the one-selection entry"
+        );
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpForward);
+        assert_eq!(
+            selection_count(&mut h),
+            2,
+            "forward restored the two-selection set"
+        );
+    }
+}

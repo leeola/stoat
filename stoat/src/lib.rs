@@ -37,6 +37,7 @@ pub(crate) mod location_picker;
 pub mod lsp;
 pub(crate) mod markdown;
 pub mod multi_buffer;
+mod nav_list;
 pub mod pane;
 mod paths;
 #[cfg(feature = "perf")]

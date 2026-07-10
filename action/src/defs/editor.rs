@@ -516,7 +516,7 @@ define_action!(
     "SaveSelection",
     ActionKind::SaveSelection,
     "save current position to jumplist",
-    "Push the primary selection's start byte offset onto the focused editor's jumplist. Truncates any forward history (anything reachable via JumpForward) before pushing.",
+    "Record the focused editor's position (its buffer and full selection set) on the focused pane's cross-buffer jumplist. Truncates any forward history (anything reachable via JumpForward) and skips a duplicate of the last entry before recording.",
     ActionPriority::Rare
 );
 
@@ -526,7 +526,7 @@ define_action!(
     "JumpBackward",
     ActionKind::JumpBackward,
     "jump backward in jumplist",
-    "Walk one entry backward through the focused editor's jumplist and collapse the primary selection to a cursor at that byte offset. No-op when at the start of the list.",
+    "Walk one entry backward through the focused pane's jumplist, re-showing that entry's buffer if needed and restoring its selection set. Records the current position first so JumpForward can return to it. No-op when already at the oldest entry.",
     ActionPriority::Rare
 );
 
@@ -536,7 +536,7 @@ define_action!(
     "JumpForward",
     ActionKind::JumpForward,
     "jump forward in jumplist",
-    "Walk one entry forward through the focused editor's jumplist and collapse the primary selection to a cursor at that byte offset. No-op when at the end of the list.",
+    "Walk one entry forward through the focused pane's jumplist toward newer positions, re-showing that entry's buffer if needed and restoring its selection set. No-op when already at the newest entry.",
     ActionPriority::Rare
 );
 
@@ -546,7 +546,7 @@ define_action!(
     "OpenJumplistPicker",
     ActionKind::OpenJumplistPicker,
     "open jumplist picker",
-    "Open a modal listing every entry in the focused editor's jumplist with line:column and a snippet of the line content. Enter jumps to the selected entry; Esc cancels. No-op when the jumplist is empty.",
+    "Open a modal listing every entry in the focused pane's jumplist with its file name, line:column, and a snippet of the line content. Enter jumps to the selected entry and resumes the walk from it. Esc cancels. No-op when the jumplist is empty.",
     ActionPriority::Common
 );
 

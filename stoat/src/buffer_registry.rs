@@ -199,7 +199,6 @@ impl BufferRegistry {
         true
     }
 
-    #[allow(dead_code)]
     pub(crate) fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
     }

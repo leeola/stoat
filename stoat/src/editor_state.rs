@@ -1,7 +1,6 @@
 use crate::{
     buffer::{BufferId, SharedBuffer},
     display_map::{CachedHighlightEndpoints, DisplayMap},
-    jumplist::JumpList,
     multi_buffer::MultiBuffer,
     review_session::ReviewViewState,
     selection::SelectionsCollection,
@@ -88,11 +87,6 @@ pub(crate) struct EditorState {
     /// `expand` compares the current selection against this to detect
     /// chain breakage and clear the history. Transient; not persisted.
     pub(crate) expansion_tip: Option<std::ops::Range<usize>>,
-    /// Per-editor jumplist tracked by `SaveSelection`,
-    /// `JumpBackward`, and `JumpForward`. Byte-offset based and
-    /// scoped to this editor's single buffer; cross-buffer jumps
-    /// would need a workspace-level structure. Transient.
-    pub(crate) jumplist: JumpList,
     /// Cached search-match byte ranges for the current `(version, query)`.
     /// See [`SearchMatchCache`]. Transient render state, not persisted.
     pub(crate) search_match_cache: Option<SearchMatchCache>,
@@ -154,7 +148,6 @@ impl EditorState {
             move_source_cursor: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
-            jumplist: JumpList::new(),
             search_match_cache: None,
             highlight_endpoint_cache: None,
             hint_inlay_ids: Vec::new(),
@@ -185,7 +178,6 @@ impl EditorState {
             move_source_cursor: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
-            jumplist: JumpList::new(),
             search_match_cache: None,
             highlight_endpoint_cache: None,
             hint_inlay_ids: Vec::new(),

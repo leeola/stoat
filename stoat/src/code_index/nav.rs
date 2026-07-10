@@ -294,10 +294,7 @@ pub(crate) fn jump_to_symbol(stoat: &mut Stoat, key: SymbolKey) -> UpdateEffect 
         (symbol.def_range.start, path)
     };
 
-    if let Some(editor) = action_handlers::focused_editor_mut(stoat) {
-        let offset = focused_offset(editor);
-        editor.jumplist.save(offset);
-    }
+    action_handlers::jump::push_jump(stoat);
     let target = stoat.active_workspace().panes.focus();
     action_handlers::file::open_file_in_pane(stoat, target, &path);
     action_handlers::movement::jump_to_offset(stoat, def_start)

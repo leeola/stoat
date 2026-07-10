@@ -5206,30 +5206,6 @@ impl Stoat {
             new
         });
     }
-
-    pub(crate) fn jump_focused_to_offset(&mut self, offset: usize, jumplist_idx: usize) {
-        let ws = self.active_workspace_mut();
-        let editor_id = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
-                View::Editor(id) => id,
-                _ => return,
-            },
-            FocusTarget::Dock(_) => return,
-        };
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let anchor = buf_snap.anchor_at(offset, Bias::Right);
-        editor.selections.transform(buf_snap, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
-        });
-        editor.jumplist.set_cursor(jumplist_idx);
-    }
 }
 
 /// Convert an LSP `file:` URI to a [`PathBuf`]. Returns `None` for any

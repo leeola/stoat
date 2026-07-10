@@ -286,6 +286,14 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let path = stoat.active_workspace_mut().buffers.remove(buffer_id);
+
+    // Purge the closed buffer from every pane's jumplist so a later walk can
+    // never resolve a stale entry into it.
+    let ws = stoat.active_workspace_mut();
+    for pane_id in ws.panes.split_pane_ids() {
+        ws.panes.pane_mut(pane_id).jumplist.remove_buffer(buffer_id);
+    }
+
     if let Some(done) = stoat
         .active_workspace_mut()
         .editor_bridge_waiters

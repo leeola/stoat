@@ -3212,22 +3212,22 @@ mod tests {
     }
 
     #[test]
-    fn count_prefix_jump_backward_clamps_at_history_start() {
+    fn count_prefix_jump_backward_past_history_is_noop() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.txt", "abcdefghij\n");
         h.open_file(&path);
         h.type_keys("l");
-        let a = h.primary_head_offset();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
         h.type_keys("l l");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
         h.type_keys("l l");
+        let before = h.primary_head_offset();
         h.stoat.pending_count = Some(99);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
         assert_eq!(
             h.primary_head_offset(),
-            a,
-            "huge count should clamp at the oldest jumplist entry"
+            before,
+            "a count past the history start is all-or-nothing, so nothing moves"
         );
     }
 

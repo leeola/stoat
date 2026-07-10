@@ -49,9 +49,11 @@ pub(crate) fn render_jumplist_picker(
     let cursor_idx = picker.cursor_idx();
     let selected = picker.selected();
 
-    let position_w = 12u16;
+    let filename_w = 18u16;
+    let position_w = 9u16;
     let marker_x = inner.x;
-    let pos_x = marker_x + 2;
+    let name_x = marker_x + 2;
+    let pos_x = name_x + filename_w + 1;
     let snippet_x = pos_x + position_w + 1;
     let snippet_w = inner.width.saturating_sub(snippet_x - inner.x);
 
@@ -73,6 +75,8 @@ pub(crate) fn render_jumplist_picker(
 
         let marker = if is_current { ">" } else { " " };
         write_str(buf, marker_x, row, marker, base_style);
+        let name: String = entry.filename.chars().take(filename_w as usize).collect();
+        write_str(buf, name_x, row, &name, base_style);
         let pos = format!("{:>4}:{:<3}", entry.line, entry.column);
         let pos: String = pos.chars().take(position_w as usize).collect();
         write_str(buf, pos_x, row, &pos, base_style);

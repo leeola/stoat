@@ -2396,56 +2396,6 @@ pub(crate) fn execute_find(
     UpdateEffect::Redraw
 }
 
-pub(super) fn save_selection(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
-    let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let head = editor.selections.newest_anchor().head();
-    let offset = buffer_snapshot.resolve_anchor(&head);
-    editor.jumplist.save(offset);
-    UpdateEffect::None
-}
-
-pub(super) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1);
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
-    let mut target = None;
-    for _ in 0..count {
-        match editor.jumplist.backward() {
-            Some(pos) => target = Some(pos),
-            None => break,
-        }
-    }
-    let Some(target) = target else {
-        return UpdateEffect::None;
-    };
-    apply_primary_range(editor, target..target);
-    UpdateEffect::Redraw
-}
-
-pub(super) fn jump_forward(stoat: &mut Stoat) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1);
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
-    let mut target = None;
-    for _ in 0..count {
-        match editor.jumplist.forward() {
-            Some(pos) => target = Some(pos),
-            None => break,
-        }
-    }
-    let Some(target) = target else {
-        return UpdateEffect::None;
-    };
-    apply_primary_range(editor, target..target);
-    UpdateEffect::Redraw
-}
-
 fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>) {
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
