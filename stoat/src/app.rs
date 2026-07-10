@@ -3701,11 +3701,11 @@ impl Stoat {
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let indent = match self.newest_cursor_offset(editor_id) {
-                    Some(offset) => self.newline_indent_string(buffer_id, offset),
-                    None => String::new(),
+                let insertion = match self.newest_cursor_offset(editor_id) {
+                    Some(offset) => self.newline_continuation(buffer_id, offset),
+                    None => "\n".to_string(),
                 };
-                self.editor_insert(editor_id, buffer_id, &format!("\n{indent}"));
+                self.editor_insert(editor_id, buffer_id, &insertion);
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Left => {
@@ -4166,6 +4166,46 @@ impl Stoat {
                 cursor_offset,
             ),
             None => language::line_leading_whitespace(rope, row),
+        }
+    }
+
+    /// The text to insert for a newline at `cursor_offset`, being a line ending
+    /// plus the continued indentation.
+    ///
+    /// On a line whose first non-whitespace run is the language's line-comment
+    /// token, the new line carries the token forward (indented to the line's own
+    /// leading whitespace) so a comment block continues. Otherwise the indent is
+    /// the syntax-derived one from [`Self::newline_indent_string`].
+    pub(crate) fn newline_continuation(&self, buffer_id: BufferId, cursor_offset: usize) -> String {
+        let continued_comment = {
+            let buffers = &self.active_workspace().buffers;
+            let token = buffers
+                .language_for(buffer_id)
+                .and_then(|lang| lang.line_comment);
+            match buffers.get(buffer_id) {
+                Some(buffer) => {
+                    let guard = buffer.read().expect("buffer poisoned");
+                    let rope = guard.rope();
+                    let row = rope.offset_to_point(cursor_offset).row;
+                    let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+                    let line_end =
+                        rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
+                    token
+                        .filter(|&token| {
+                            action_handlers::movement::line_comment_continues(
+                                rope, line_start, line_end, token,
+                            )
+                        })
+                        .map(|token| {
+                            format!("{}{token} ", language::line_leading_whitespace(rope, row))
+                        })
+                },
+                None => None,
+            }
+        };
+        match continued_comment {
+            Some(prefix) => format!("\n{prefix}"),
+            None => format!("\n{}", self.newline_indent_string(buffer_id, cursor_offset)),
         }
     }
 
@@ -9516,6 +9556,54 @@ mod tests {
         h.type_keys("i");
         h.type_keys("escape");
         assert_eq!(buffer_text(&h, &path), "abc\n    \ndef\n");
+    }
+
+    #[test]
+    fn count_open_below_opens_that_many_lines() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
+        h.type_keys("3 o");
+        h.type_text("x");
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n\tx\n\tx\n}\n");
+    }
+
+    #[test]
+    fn open_below_opens_per_selection_without_row_dedup() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef\n");
+        insert_cursor_at(&mut h, 3);
+        h.type_keys("o");
+        assert_eq!(h.selection_spans().len(), 2);
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "abcdef\nX\nX\n");
+    }
+
+    #[test]
+    fn open_below_continues_line_comment() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"// foo\n");
+        h.type_keys("o");
+        h.type_text("bar");
+        assert_eq!(focused_buffer_string(&h), "// foo\n// bar\n");
+    }
+
+    #[test]
+    fn open_above_continues_line_comment() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"// foo\n");
+        h.type_keys("O");
+        h.type_text("bar");
+        assert_eq!(focused_buffer_string(&h), "// bar\n// foo\n");
+    }
+
+    #[test]
+    fn insert_enter_continues_line_comment() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"// foo\n");
+        h.type_keys("A");
+        h.type_keys("enter");
+        h.type_text("bar");
+        assert_eq!(focused_buffer_string(&h), "// foo\n// bar\n");
     }
 
     #[test]
