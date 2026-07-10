@@ -149,65 +149,109 @@ fn stream_review_inputs(
         return;
     }
 
-    let mut all_cached_move_aware = true;
+    // Look up every file's cache entry up front so the all-hit fast path can
+    // skip diffing entirely.
+    let cached: Vec<Option<(Arc<Vec<ReviewHunk>>, bool)>> = inputs
+        .iter()
+        .map(|input| {
+            let key = diff_cache_key(
+                &input.base_text,
+                &input.buffer_text,
+                input.language.as_ref(),
+            );
+            cache.lock().expect("diff_cache poisoned").lookup(&key)
+        })
+        .collect();
+    let all_cached_move_aware = cached.iter().all(|entry| matches!(entry, Some((_, true))));
+
+    if all_cached_move_aware {
+        // Every file hit with move-aware hunks, so no Complete pass is needed.
+        // Stream the cached hunks and return without diffing anything.
+        for (index, (input, entry)) in inputs.iter().zip(&cached).enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let (hunks_arc, _) = entry.as_ref().expect("every entry present on this path");
+            if !send_streamed_file(
+                tx,
+                redraw,
+                &source,
+                total,
+                index,
+                input,
+                (**hunks_arc).clone(),
+            ) {
+                return;
+            }
+        }
+        return;
+    }
+
+    // Prepare each file once and stream from that prepare, keeping the slots so
+    // the cross-file move pass reuses the same state. Cache hits are prepared
+    // too -- the move pass needs their arenas -- but they stream their cached
+    // hunks rather than a fresh finalize.
+    let mut slots = Vec::with_capacity(total);
     for (index, input) in inputs.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-
-        let key = diff_cache_key(
-            &input.base_text,
-            &input.buffer_text,
-            input.language.as_ref(),
-        );
-        let cached = cache.lock().expect("diff_cache poisoned").lookup(&key);
-        let hunks = match cached {
-            Some((hunks, move_aware)) => {
-                if !move_aware {
-                    all_cached_move_aware = false;
-                }
-                (*hunks).clone()
-            },
-            None => {
-                all_cached_move_aware = false;
-                review::extract_review_hunks_single(input, 3, Some(cancel))
-            },
+        let slot = review::prepare_changeset_slot(input, Some(cancel));
+        let hunks = match &cached[index] {
+            Some((hunks_arc, _)) => (**hunks_arc).clone(),
+            None => review::extract_review_hunks_from_slot(input, &slot, 3),
         };
-
-        let msg = if index == 0 {
-            ReviewScanMsg::First {
-                source: source.clone(),
-                total,
-                file: input.clone(),
-                hunks,
-            }
-        } else {
-            ReviewScanMsg::File {
-                file: input.clone(),
-                hunks,
-            }
-        };
-        if tx.send(msg).is_err() {
+        if !send_streamed_file(tx, redraw, &source, total, index, input, hunks) {
             return;
         }
-        redraw.notify_one();
+        slots.push(slot);
     }
 
-    // Re-run the whole-changeset move pass unless every file hit the cache with
-    // move-aware hunks. A miss, or a single-file warm's move-unaware hit,
-    // streams instantly but still forces the pass so cross-file move chips land.
     if cancel.load(Ordering::Relaxed) {
         return;
     }
-    if !all_cached_move_aware {
-        let mut session = ReviewSession::new(source);
-        session.add_files(inputs);
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let _ = tx.send(ReviewScanMsg::Complete(session));
-        redraw.notify_one();
+    // The Complete pass rebuilds cross-file move-aware hunks from the retained
+    // prepares, so no file is diffed a second time.
+    let hunks_per_file = review::extract_review_hunks_changeset_prepared(&inputs, slots, 3);
+    let mut session = ReviewSession::new(source);
+    session.add_files_with_hunks(inputs, hunks_per_file);
+    if cancel.load(Ordering::Relaxed) {
+        return;
     }
+    let _ = tx.send(ReviewScanMsg::Complete(session));
+    redraw.notify_one();
+}
+
+/// Send one streamed file to the review UI, tagging the leading file `First`
+/// so the receiver installs the session. Returns `false` if the channel
+/// closed, so the caller can stop the scan.
+fn send_streamed_file(
+    tx: &mpsc::Sender<ReviewScanMsg>,
+    redraw: &Arc<tokio::sync::Notify>,
+    source: &ReviewSource,
+    total: usize,
+    index: usize,
+    input: &ReviewFileInput,
+    hunks: Vec<ReviewHunk>,
+) -> bool {
+    let msg = if index == 0 {
+        ReviewScanMsg::First {
+            source: source.clone(),
+            total,
+            file: input.clone(),
+            hunks,
+        }
+    } else {
+        ReviewScanMsg::File {
+            file: input.clone(),
+            hunks,
+        }
+    };
+    if tx.send(msg).is_err() {
+        return false;
+    }
+    redraw.notify_one();
+    true
 }
 
 /// Cache key matching what [`populate_diff_cache`] writes, so a scan reads back

@@ -200,6 +200,117 @@ pub fn extract_review_hunks_single(
     )
 }
 
+/// Build the changeset slot for one file. Runs the retained per-file diff
+/// stages, or falls back to a line-diff slot when the file has no language
+/// or fails to parse.
+///
+/// The returned slot borrows `file`'s texts, so it must be dropped (via
+/// [`extract_review_hunks_changeset_prepared`]) before `file` is moved.
+pub fn prepare_changeset_slot<'a>(
+    file: &'a ReviewFileInput,
+    cancel: Option<&AtomicBool>,
+) -> structural_diff::ChangesetSlot<'a> {
+    let buffer = BufferRef {
+        path: file.path.clone(),
+        fingerprint: fingerprint_bytes(&file.buffer_text),
+    };
+    match &file.language {
+        Some(language) => match structural_diff::prepare_diff(
+            language,
+            file.base_text.as_str(),
+            file.buffer_text.as_str(),
+            cancel,
+        ) {
+            Some(prepared) => structural_diff::ChangesetSlot::Prepared(buffer, prepared),
+            None => structural_diff::ChangesetSlot::LineDiff {
+                lhs: file.base_text.as_str(),
+                rhs: file.buffer_text.as_str(),
+            },
+        },
+        None => structural_diff::ChangesetSlot::LineDiff {
+            lhs: file.base_text.as_str(),
+            rhs: file.buffer_text.as_str(),
+        },
+    }
+}
+
+/// Extract one file's hunks from its already-prepared diff, detecting
+/// moves within that file only. Reuses the prepared state so the per-file
+/// diff stages do not run again.
+pub fn extract_review_hunks_prepared(
+    file: &ReviewFileInput,
+    prepared: &structural_diff::PreparedDiff<'_>,
+    context: u32,
+) -> Vec<ReviewHunk> {
+    let diff = structural_diff::finalize_single(prepared);
+    let rel_path_for = |path: &Path| (path == file.path.as_path()).then(|| file.rel_path.clone());
+    extract_review_hunks_from_diff(
+        &diff,
+        &file.base_text,
+        &file.buffer_text,
+        context,
+        &rel_path_for,
+    )
+}
+
+/// Extract one file's hunks from a changeset slot, dispatching to the
+/// prepared or line-diff path. Used to stream a file from the same slot
+/// that later feeds the changeset pass, so nothing is diffed twice.
+pub fn extract_review_hunks_from_slot(
+    file: &ReviewFileInput,
+    slot: &structural_diff::ChangesetSlot<'_>,
+    context: u32,
+) -> Vec<ReviewHunk> {
+    match slot {
+        structural_diff::ChangesetSlot::Prepared(_, prepared) => {
+            extract_review_hunks_prepared(file, prepared, context)
+        },
+        structural_diff::ChangesetSlot::LineDiff { lhs, rhs } => {
+            let diff = structural_diff::diff_lines(lhs, rhs);
+            let rel_path_for =
+                |path: &Path| (path == file.path.as_path()).then(|| file.rel_path.clone());
+            extract_review_hunks_from_diff(
+                &diff,
+                &file.base_text,
+                &file.buffer_text,
+                context,
+                &rel_path_for,
+            )
+        },
+    }
+}
+
+/// Extract per-file hunks from already-prepared changeset slots, running
+/// the cross-file move pass once. Mirrors [`extract_review_hunks_changeset`]
+/// but reuses prepared state instead of re-diffing.
+pub fn extract_review_hunks_changeset_prepared(
+    files: &[ReviewFileInput],
+    slots: Vec<structural_diff::ChangesetSlot<'_>>,
+    context: u32,
+) -> Vec<Vec<ReviewHunk>> {
+    let diff_results = structural_diff::diff_changeset_from_slots(slots);
+
+    files
+        .iter()
+        .zip(diff_results)
+        .map(|(f, diff)| {
+            let rel_path_for = |path: &Path| -> Option<String> {
+                files
+                    .iter()
+                    .find(|other| other.path == path)
+                    .map(|other| other.rel_path.clone())
+            };
+            extract_review_hunks_from_diff(
+                &diff,
+                &f.base_text,
+                &f.buffer_text,
+                context,
+                &rel_path_for,
+            )
+        })
+        .collect()
+}
+
 fn extract_review_hunks_from_diff(
     diff_result: &DiffResult,
     base_text: &str,
@@ -708,6 +819,46 @@ mod tests {
             .into_iter()
             .next()
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn prepared_hunks_match_single_hunks() {
+        use stoat_language::LanguageRegistry;
+        let cases = [
+            (
+                "x.rs",
+                "fn main() {\n    let x = 1;\n    draw(a, b);\n}\n",
+                "fn main() {\n    let x = 1;\n    draw(a, b, None);\n}\n",
+            ),
+            (
+                "y.rs",
+                "fn helper(n: u32) -> u32 {\n    n + 1\n}\n",
+                "fn helper(n: u32) -> u32 {\n    n * 2\n}\n",
+            ),
+        ];
+        for (name, base, buffer) in cases {
+            let file = ReviewFileInput {
+                path: PathBuf::from(name),
+                rel_path: name.to_string(),
+                language: LanguageRegistry::standard().for_path(Path::new(name)),
+                base_text: Arc::new(base.to_string()),
+                buffer_text: Arc::new(buffer.to_string()),
+            };
+            let single = extract_review_hunks_single(&file, 3, None);
+            let prepared = structural_diff::prepare_diff(
+                file.language.as_ref().expect("rust language"),
+                file.base_text.as_str(),
+                file.buffer_text.as_str(),
+                None,
+            )
+            .expect("rust parses");
+            let from_prepared = extract_review_hunks_prepared(&file, &prepared, 3);
+            assert_eq!(
+                format!("{single:?}"),
+                format!("{from_prepared:?}"),
+                "prepared finalize matches the single-file diff for {name}"
+            );
+        }
     }
 
     #[test]

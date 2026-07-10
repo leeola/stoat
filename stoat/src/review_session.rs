@@ -331,6 +331,18 @@ impl ReviewSession {
     /// stay stable.
     pub(crate) fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
         let hunks_per_file = extract_review_hunks_changeset(&files, 3);
+        self.add_files_with_hunks(files, hunks_per_file)
+    }
+
+    /// Add files that already have their hunks computed, skipping the
+    /// changeset diff [`add_files`] runs. The streaming review scan uses
+    /// this to reuse hunks it produced from prepared diffs, so a scanned
+    /// file is never diffed a second time.
+    pub(crate) fn add_files_with_hunks(
+        &mut self,
+        files: Vec<ReviewFileInput>,
+        hunks_per_file: Vec<Vec<ReviewHunk>>,
+    ) -> Vec<Vec<ReviewChunkId>> {
         let all_chunk_ids: Vec<Vec<ReviewChunkId>> = files
             .into_iter()
             .zip(hunks_per_file)
@@ -661,6 +673,42 @@ mod tests {
         assert_eq!(s.order, ids);
         assert_eq!(s.files.len(), 1);
         assert_eq!(s.files[0].chunks, ids);
+    }
+
+    #[test]
+    fn add_files_with_hunks_matches_add_files() {
+        let files = || {
+            vec![
+                ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("a\nb\nc\n".to_string()),
+                    buffer_text: Arc::new("a\nB\nc\n".to_string()),
+                },
+                ReviewFileInput {
+                    path: PathBuf::from("b.txt"),
+                    rel_path: "b.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("x\ny\n".to_string()),
+                    buffer_text: Arc::new("x\nY\n".to_string()),
+                },
+            ]
+        };
+
+        let mut via_add = in_memory_session();
+        let ids_add = via_add.add_files(files());
+
+        let mut via_hunks = in_memory_session();
+        let file_set = files();
+        let precomputed = extract_review_hunks_changeset(&file_set, 3);
+        let ids_hunks = via_hunks.add_files_with_hunks(file_set, precomputed);
+
+        assert_eq!(
+            ids_add, ids_hunks,
+            "prebuilt hunks yield the same chunk ids"
+        );
+        assert_eq!(via_add.order, via_hunks.order);
     }
 
     #[test]
