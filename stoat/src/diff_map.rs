@@ -308,6 +308,9 @@ fn changes_to_hunks(
     use std::collections::HashMap;
     use stoat_language::structural_diff::{ChangeKind as LangChangeKind, Side};
 
+    let lhs_starts = line_starts(lhs_text);
+    let rhs_starts = line_starts(rhs_text);
+
     // Group Moved changes by their shared MoveMetadata Arc. Each group
     // becomes one DiffHunk (one per side, since a move has both an
     // LHS source subtree and an RHS target subtree).
@@ -350,7 +353,7 @@ fn changes_to_hunks(
                 .last()
                 .expect("rhs_indices non-empty per enclosing guard")];
             let full_range = first.byte_range.start..last.byte_range.end;
-            let line_range = byte_range_to_line_range(rhs_text, &full_range);
+            let line_range = byte_range_to_line_range(&rhs_starts, rhs_text.len(), &full_range);
             let base_range = if let (Some(&lhs_first), Some(&lhs_last)) =
                 (lhs_indices.first(), lhs_indices.last())
             {
@@ -410,10 +413,7 @@ fn changes_to_hunks(
                 .last()
                 .expect("lhs_indices non-empty per enclosing else-if guard")];
             let full_range = first.byte_range.start..last.byte_range.end;
-            let lhs_line = lhs_text[..first.byte_range.start.min(lhs_text.len())]
-                .chars()
-                .filter(|c| *c == '\n')
-                .count() as u32;
+            let lhs_line = line_of(&lhs_starts, first.byte_range.start);
             let base_spans = lhs_indices
                 .iter()
                 .map(|i| ChangeSpan {
@@ -461,7 +461,8 @@ fn changes_to_hunks(
     for (lhs_idx, rhs_idx) in by_pair.values().filter_map(|p| Some((p.0?, p.1?))) {
         let lhs_change = &changes[lhs_idx];
         let rhs_change = &changes[rhs_idx];
-        let line_range = byte_range_to_line_range(rhs_text, &rhs_change.byte_range);
+        let line_range =
+            byte_range_to_line_range(&rhs_starts, rhs_text.len(), &rhs_change.byte_range);
         hunks.push(DiffHunk {
             status: DiffHunkStatus::Modified,
             buffer_start_line: line_range.start,
@@ -480,7 +481,8 @@ fn changes_to_hunks(
         }
         match cur.side {
             Side::Rhs => {
-                let line_range = byte_range_to_line_range(rhs_text, &cur.byte_range);
+                let line_range =
+                    byte_range_to_line_range(&rhs_starts, rhs_text.len(), &cur.byte_range);
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Added,
                     buffer_start_line: line_range.start,
@@ -495,12 +497,9 @@ fn changes_to_hunks(
                 // so deletions display between their surrounding rhs lines.
                 // Fall back to the lhs-line index when the diff producer did
                 // not supply one (e.g. tree-diff path for now).
-                let buffer_line = cur.deletion_rhs_anchor.unwrap_or_else(|| {
-                    lhs_text[..cur.byte_range.start.min(lhs_text.len())]
-                        .chars()
-                        .filter(|c| *c == '\n')
-                        .count() as u32
-                });
+                let buffer_line = cur
+                    .deletion_rhs_anchor
+                    .unwrap_or_else(|| line_of(&lhs_starts, cur.byte_range.start));
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Deleted,
                     buffer_start_line: buffer_line,
@@ -516,16 +515,41 @@ fn changes_to_hunks(
     hunks
 }
 
-fn byte_range_to_line_range(text: &str, byte_range: &Range<usize>) -> Range<u32> {
-    let start_byte = byte_range.start.min(text.len());
-    let end_byte = byte_range.end.min(text.len());
-    let start_line = text[..start_byte].chars().filter(|c| *c == '\n').count() as u32;
-    let end_line_inclusive = text[..end_byte].chars().filter(|c| *c == '\n').count() as u32;
+fn byte_range_to_line_range(
+    line_starts: &[usize],
+    text_len: usize,
+    byte_range: &Range<usize>,
+) -> Range<u32> {
+    let start_byte = byte_range.start.min(text_len);
+    let end_byte = byte_range.end.min(text_len);
+    let start_line = line_of(line_starts, start_byte);
     // For an empty range, return start..start so callers can detect it.
     if start_byte == end_byte {
         return start_line..start_line;
     }
-    start_line..(end_line_inclusive + 1)
+    start_line..(line_of(line_starts, end_byte) + 1)
+}
+
+/// Byte offset at the start of each line, line 0 at offset 0. Precomputed once
+/// per side so each byte-to-line conversion is a binary search rather than a
+/// prefix rescan.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (idx, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(idx + 1);
+        }
+    }
+    starts
+}
+
+/// The 0-based line containing `byte`, resolved against a [`line_starts`] table.
+///
+/// Equals the number of newlines before `byte`, matching a prefix newline
+/// count. The table is seeded with 0, so the count is at least one and the
+/// subtraction never underflows.
+fn line_of(line_starts: &[usize], byte: usize) -> u32 {
+    (line_starts.partition_point(|&start| start <= byte) - 1) as u32
 }
 
 #[cfg(test)]
@@ -533,6 +557,45 @@ mod tests {
     use super::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
     use crate::host::DiffStatus;
     use std::sync::Arc;
+
+    #[test]
+    fn line_mapping_matches_prefix_newline_count() {
+        // The two newlines at bytes 2 and 5 put line starts at 0, 3, and 6.
+        let text = "ab\ncd\nef";
+        let starts = super::line_starts(text);
+        assert_eq!(starts, vec![0, 3, 6]);
+
+        assert_eq!(super::line_of(&starts, 0), 0, "first byte is line 0");
+        assert_eq!(
+            super::line_of(&starts, 2),
+            0,
+            "the newline byte stays on line 0"
+        );
+        assert_eq!(
+            super::line_of(&starts, 3),
+            1,
+            "first byte past a newline is line 1"
+        );
+        assert_eq!(super::line_of(&starts, 7), 2, "last byte is line 2");
+        assert_eq!(
+            super::line_of(&starts, 99),
+            2,
+            "a byte past EOF clamps to the last line"
+        );
+
+        let lines = |range| super::byte_range_to_line_range(&starts, text.len(), &range);
+        assert_eq!(lines(3..5), 1..2, "a single-line range spans one line");
+        assert_eq!(
+            lines(6..6),
+            2..2,
+            "an empty range collapses to start..start"
+        );
+        assert_eq!(
+            lines(0..7),
+            0..3,
+            "a multi-line range covers start through end inclusive"
+        );
+    }
 
     fn added_hunk(line_range: std::ops::Range<u32>) -> DiffHunk {
         DiffHunk {
