@@ -77,29 +77,39 @@ impl PickList {
     /// ties alphabetical. Empty or whitespace-only input lists every candidate
     /// alphabetically.
     ///
+    /// A leading `./` token anchors to the workspace root. Candidates are first
+    /// restricted to those whose display path starts with the token's prefix,
+    /// and the rest of the query fuzzy-matches within them. The anchored prefix
+    /// is highlighted on every surviving row. See [`split_root_anchor`].
+    ///
     /// `match_indices` is rebuilt in parallel to `filtered`. Each element is the
     /// sorted, deduplicated set of matched character offsets in that row's
-    /// display string, or empty when no pattern is active.
+    /// display string, or empty when no pattern or anchor is active.
     pub(crate) fn refilter(&mut self, query: &str, git_root: &Path) {
         self.filtered.clear();
         self.match_indices.clear();
+
+        let (anchor, pattern) = split_root_anchor(query);
+        let anchor_len = anchor.map_or(0, |a| a.chars().count()) as u32;
 
         let items = self
             .base
             .iter()
             .enumerate()
-            .map(|(idx, path)| (idx, paths::display_relative(path, git_root)));
-        let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
+            .map(|(idx, path)| (idx, paths::display_relative(path, git_root)))
+            .filter(|(_, display)| anchor.is_none_or(|a| display.starts_with(a)));
+        let Some(mut matches) = fuzzy::match_and_rank(pattern, items) else {
             let mut rows: Vec<(usize, String)> = self
                 .base
                 .iter()
                 .enumerate()
                 .map(|(idx, path)| (idx, paths::display_relative(path, git_root)))
+                .filter(|(_, display)| anchor.is_none_or(|a| display.starts_with(a)))
                 .collect();
             rows.sort_by(|a, b| a.1.cmp(&b.1));
             for (idx, _) in &rows {
                 self.filtered.push(*idx);
-                self.match_indices.push(Vec::new());
+                self.match_indices.push((0..anchor_len).collect());
             }
             self.clamp_selected();
             return;
@@ -112,7 +122,8 @@ impl PickList {
         });
         for m in matches {
             self.filtered.push(m.item);
-            self.match_indices.push(m.matched_indices);
+            self.match_indices
+                .push(prepend_anchor(anchor_len, m.matched_indices));
         }
         self.clamp_selected();
     }
@@ -124,6 +135,36 @@ impl PickList {
             self.selected = self.filtered.len() - 1;
         }
     }
+}
+
+/// Split a leading `./` workspace-root anchor off `query`.
+///
+/// When the first whitespace-delimited token starts with `./`, returns that
+/// token minus the `./` as a root-relative path prefix, plus the rest of the
+/// query as the fuzzy pattern. A bare `./` yields an empty prefix, which every
+/// path matches, so the finder lists all. A `./` in any but the first token is
+/// ordinary fuzzy text and yields `(None, query)`.
+fn split_root_anchor(query: &str) -> (Option<&str>, &str) {
+    let after_ws = query.trim_start();
+    let leading = query.len() - after_ws.len();
+    let first_len = after_ws.find(char::is_whitespace).unwrap_or(after_ws.len());
+    let Some(anchor) = after_ws[..first_len].strip_prefix("./") else {
+        return (None, query);
+    };
+    (Some(anchor), query[leading + first_len..].trim_start())
+}
+
+/// Merge the `0..anchor_len` anchored-prefix character offsets into `matched`,
+/// returning the sorted, deduplicated union so the renderer highlights the
+/// pinned prefix alongside the fuzzy matches.
+fn prepend_anchor(anchor_len: u32, matched: Vec<u32>) -> Vec<u32> {
+    if anchor_len == 0 {
+        return matched;
+    }
+    let mut indices: Vec<u32> = (0..anchor_len).chain(matched).collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
 }
 
 /// How a [`PathPicker`] previews its current selection.
@@ -527,6 +568,61 @@ mod tests {
         let git_root = p("/r");
         let base = vec![p("/r/Foo.rs"), p("/r/bar.rs")];
         assert_eq!(names("foo", base, &git_root), vec!["Foo.rs"]);
+    }
+
+    #[test]
+    fn root_anchor_lists_only_prefixed_paths() {
+        let git_root = p("/r");
+        let base = vec![p("/r/docs/a.md"), p("/r/src/b.rs")];
+        assert_eq!(names("./docs", base, &git_root), vec!["docs/a.md"]);
+    }
+
+    #[test]
+    fn root_anchor_matches_a_partial_prefix() {
+        let git_root = p("/r");
+        let base = vec![p("/r/docs/a.md"), p("/r/docs/b.md"), p("/r/src/c.rs")];
+        assert_eq!(
+            names("./do", base, &git_root),
+            vec!["docs/a.md", "docs/b.md"]
+        );
+    }
+
+    #[test]
+    fn root_anchor_narrows_with_a_trailing_pattern() {
+        let git_root = p("/r");
+        let base = vec![
+            p("/r/docs/readme.md"),
+            p("/r/docs/other.md"),
+            p("/r/src/x.rs"),
+        ];
+        assert_eq!(names("./docs rea", base, &git_root), vec!["docs/readme.md"]);
+    }
+
+    #[test]
+    fn bare_root_anchor_lists_all_sorted() {
+        let git_root = p("/r");
+        let base = vec![p("/r/b.rs"), p("/r/a.rs")];
+        assert_eq!(names("./", base, &git_root), vec!["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn root_anchor_highlights_the_prefix() {
+        let git_root = p("/r");
+        let mut list = PickList {
+            base: vec![p("/r/docs/readme.md")],
+            ..PickList::default()
+        };
+        list.refilter("./docs", &git_root);
+        assert_eq!(list.match_indices, vec![vec![0, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn split_root_anchor_only_anchors_the_first_token() {
+        assert_eq!(split_root_anchor("./docs"), (Some("docs"), ""));
+        assert_eq!(split_root_anchor("./docs rea"), (Some("docs"), "rea"));
+        assert_eq!(split_root_anchor("./"), (Some(""), ""));
+        assert_eq!(split_root_anchor("foo ./docs"), (None, "foo ./docs"));
+        assert_eq!(split_root_anchor("foo"), (None, "foo"));
     }
 
     #[test]
