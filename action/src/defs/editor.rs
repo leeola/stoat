@@ -1142,6 +1142,16 @@ define_action!(
 );
 
 define_action!(
+    InsertAtLineStartDef,
+    InsertAtLineStart,
+    "InsertAtLineStart",
+    ActionKind::InsertAtLineStart,
+    "insert at line start",
+    "Position each cursor at its line's first non-whitespace character. On an empty line the computed indentation is inserted and the cursor lands after it; on an all-whitespace line the cursor falls back to the line start. Typically chained with `SetMode(insert)` for the `I` key.",
+    ActionPriority::Rare
+);
+
+define_action!(
     OpenBelowDef,
     OpenBelow,
     "OpenBelow",

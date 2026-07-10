@@ -151,6 +151,7 @@ pub enum ActionKind {
     EnterInsertMode,
     AppendMode,
     InsertAtLineEnd,
+    InsertAtLineStart,
     OpenBelow,
     OpenAbove,
     ReplaceChar,

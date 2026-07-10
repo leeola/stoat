@@ -237,7 +237,7 @@ on key {
         : -> OpenCommandPalette();
         i -> [EnterInsertMode(), SetMode(insert)];
         a -> [AppendMode(), SetMode(insert)];
-        I -> [GotoFirstNonwhitespace(), SetMode(insert)];
+        I -> [InsertAtLineStart(), SetMode(insert)];
         A -> [InsertAtLineEnd(), SetMode(insert)];
         o -> [OpenBelow(), SetMode(insert)];
         O -> [OpenAbove(), SetMode(insert)];

@@ -685,28 +685,184 @@ pub(super) fn append_mode(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Position each cursor to append at the end of its line, at an insert point
-/// after the last character (before the trailing newline, or at the buffer end).
+/// Position each cursor to append at the end of its line, auto-indenting empty
+/// lines.
 ///
-/// The min-width-1 counterpart to Helix's `A`. Like [`append_mode`] it lands via
-/// [`forward_block_cursor`] so appending at a line with no trailing newline
-/// inserts after the last character rather than before it.
+/// The min-width-1 counterpart to Helix's `A`. A non-empty line lands via
+/// [`forward_block_cursor`] at the insert point after the last character. An
+/// empty line is auto-indented per [`insert_with_indent`].
 pub(super) fn insert_at_line_end(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.restore_cursor = true;
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
+    insert_with_indent(stoat, IndentFallback::LineEnd)
+}
+
+/// Position each cursor to insert at its line's first non-whitespace character,
+/// auto-indenting empty lines.
+///
+/// The min-width-1 counterpart to Helix's `I`. A non-empty line lands on its
+/// first non-whitespace character, falling back to the line start when the line
+/// is all whitespace. An empty line is auto-indented per [`insert_with_indent`].
+pub(super) fn insert_at_line_start(stoat: &mut Stoat) -> UpdateEffect {
+    insert_with_indent(stoat, IndentFallback::LineStart)
+}
+
+/// Fallback cursor landing on a non-empty line for [`insert_with_indent`].
+#[derive(Copy, Clone)]
+enum IndentFallback {
+    /// The first non-whitespace character, or the line start when the line is
+    /// all whitespace. Backs `I`.
+    LineStart,
+    /// The insert point after the line's last character. Backs `A`.
+    LineEnd,
+}
+
+/// One cursor's landing plan for [`insert_with_indent`], captured before the
+/// edit is applied.
+struct IndentPlan {
+    id: usize,
+    /// `Some((line_start, row))` when the cursor sits on an empty line, marking
+    /// where the computed indentation is inserted and the row it re-indents.
+    /// `None` on a non-empty line.
+    blank: Option<(usize, u32)>,
+    /// Fallback landing offset for a non-empty line. Ignored when `blank` is set.
+    target: usize,
+}
+
+/// The indentation inserted at one empty line by [`insert_with_indent`].
+struct IndentInsert {
+    id: usize,
+    at: usize,
+    indent: String,
+}
+
+/// Position each cursor to insert at its line, auto-indenting empty lines.
+///
+/// Backs `I` ([`IndentFallback::LineStart`]) and `A`
+/// ([`IndentFallback::LineEnd`]). On an empty line the indentation computed from
+/// the surrounding syntax is inserted and the cursor lands after it, so entering
+/// insert on a blank line inside a block starts at the block's indent. A
+/// non-empty line inserts nothing and moves the cursor to the fallback position.
+fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffect {
+    // Appending past a line's last character (LineEnd) leaves the block cursor
+    // one cell beyond the content, so leaving insert must step it back. LineStart
+    // inserts before its target and needs no restore.
+    if matches!(fallback, IndentFallback::LineEnd) {
+        stoat.restore_cursor = true;
+    }
+
+    let editor_id = {
+        let ws = stoat.active_workspace();
+        match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => return UpdateEffect::None,
+        }
     };
-    let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    editor.selections.transform(buffer_snapshot, |sel| {
-        let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
-        let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
-        let cursor = cursor_offset(rope, tail_offset, head_offset);
-        let row = rope.offset_to_point(cursor).row;
-        let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
-        forward_block_cursor(sel.id, line_end, SelectionGoal::None, rope, buffer_snapshot)
-    });
+
+    let (buffer_id, plans) = {
+        let ws = stoat.active_workspace_mut();
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+        let plans: Vec<IndentPlan> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let cursor = cursor_offset(
+                    rope,
+                    buffer_snapshot.resolve_anchor(&sel.tail()),
+                    buffer_snapshot.resolve_anchor(&sel.head()),
+                );
+                let row = rope.offset_to_point(cursor).row;
+                let line_start = rope.point_to_offset(Point::new(row, 0));
+                let line_len = rope.line_len(row);
+                if line_len == 0 {
+                    return IndentPlan {
+                        id: sel.id,
+                        blank: Some((line_start, row)),
+                        target: line_start,
+                    };
+                }
+                let line_end = rope.point_to_offset(Point::new(row, line_len));
+                let target = match fallback {
+                    IndentFallback::LineEnd => line_end,
+                    IndentFallback::LineStart => {
+                        first_nonwhitespace(rope, line_start, line_end).unwrap_or(line_start)
+                    },
+                };
+                IndentPlan {
+                    id: sel.id,
+                    blank: None,
+                    target,
+                }
+            })
+            .collect();
+        (buffer_id, plans)
+    };
+
+    let mut inserts: Vec<IndentInsert> = plans
+        .iter()
+        .filter_map(|plan| {
+            plan.blank.map(|(at, row)| IndentInsert {
+                id: plan.id,
+                at,
+                indent: stoat.suggested_indent_string(buffer_id, row),
+            })
+        })
+        .collect();
+    inserts.sort_by_key(|ins| ins.at);
+
+    {
+        let ws = stoat.active_workspace_mut();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for ins in inserts.iter().rev() {
+            if !ins.indent.is_empty() {
+                guard.edit(ins.at..ins.at, &ins.indent);
+            }
+        }
+    }
+
+    // Every inserted indent before an offset pushes it further right in the
+    // edited buffer.
+    let shift_before = |off: usize| -> usize {
+        inserts
+            .iter()
+            .filter(|ins| ins.at < off)
+            .map(|ins| ins.indent.len())
+            .sum()
+    };
+
+    let mut landings: std::collections::HashMap<usize, (usize, bool)> =
+        std::collections::HashMap::new();
+    for ins in &inserts {
+        let landed = ins.at + shift_before(ins.at) + ins.indent.len();
+        landings.insert(ins.id, (landed, true));
+    }
+    for plan in &plans {
+        if plan.blank.is_none() {
+            let landed = plan.target + shift_before(plan.target);
+            let forward = matches!(fallback, IndentFallback::LineEnd);
+            landings.insert(plan.id, (landed, forward));
+        }
+    }
+
+    let ws = stoat.active_workspace_mut();
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor
+        .selections
+        .transform(new_buf, |sel| match landings.get(&sel.id) {
+            Some(&(off, true)) => {
+                forward_block_cursor(sel.id, off, SelectionGoal::None, new_buf.rope(), new_buf)
+            },
+            Some(&(off, false)) => {
+                land_block_cursor(sel.id, off, SelectionGoal::None, new_buf.rope(), new_buf)
+            },
+            None => sel.clone(),
+        });
     UpdateEffect::Redraw
 }
 
@@ -796,19 +952,7 @@ pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> Updat
         let line_start = rope.point_to_offset(Point::new(row, 0));
         let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
 
-        let mut found = None;
-        let mut cursor = line_start;
-        for ch in rope.chars_at(line_start) {
-            if cursor >= line_end {
-                break;
-            }
-            if !ch.is_whitespace() {
-                found = Some(cursor);
-                break;
-            }
-            cursor += ch.len_utf8();
-        }
-        let Some(target_offset) = found else {
+        let Some(target_offset) = first_nonwhitespace(rope, line_start, line_end) else {
             return sel.clone();
         };
 
@@ -831,6 +975,22 @@ pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> Updat
         }
     });
     UpdateEffect::Redraw
+}
+
+/// Offset of the first non-whitespace character in `[line_start, line_end)`, or
+/// `None` when the range is empty or all whitespace.
+fn first_nonwhitespace(rope: &Rope, line_start: usize, line_end: usize) -> Option<usize> {
+    let mut cursor = line_start;
+    for ch in rope.chars_at(line_start) {
+        if cursor >= line_end {
+            break;
+        }
+        if !ch.is_whitespace() {
+            return Some(cursor);
+        }
+        cursor += ch.len_utf8();
+    }
+    None
 }
 
 pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {

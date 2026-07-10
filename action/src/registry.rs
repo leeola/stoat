@@ -25,24 +25,25 @@ use crate::{
             GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
             GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
-            IndentSelection, InsertAtLineEnd, InsertRegister, JumpBackward, JumpForward,
-            KeepPrimarySelection, KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets,
-            MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
-            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
-            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
-            OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker,
-            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
-            PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection,
-            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
-            RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
-            SearchPrev, SelectAll, SelectAllChildren, SelectAllSiblings, SelectLineBelow,
-            SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
-            SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
-            ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection,
-            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
-            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            ToggleInlayHints, ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion,
-            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, JumpBackward,
+            JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd, MarkTrailStart,
+            MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
+            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
+            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
+            MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker,
+            OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter,
+            PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo,
+            RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
+            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectAllChildren,
+            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
+            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
+            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
+            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints, ToggleSyntaxHighlight,
+            TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank,
+            YankMainToClipboard, YankToClipboard,
         },
         file::{ForceSaveBuffer, OpenBuffer, OpenFile},
         file_finder::{
@@ -466,6 +467,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(EnterInsertMode::DEF, |_| Ok(Box::new(EnterInsertMode)));
     add(AppendMode::DEF, |_| Ok(Box::new(AppendMode)));
     add(InsertAtLineEnd::DEF, |_| Ok(Box::new(InsertAtLineEnd)));
+    add(InsertAtLineStart::DEF, |_| Ok(Box::new(InsertAtLineStart)));
     add(OpenBelow::DEF, |_| Ok(Box::new(OpenBelow)));
     add(OpenAbove::DEF, |_| Ok(Box::new(OpenAbove)));
     add(ReplaceChar::DEF, |_| Ok(Box::new(ReplaceChar)));
@@ -1185,7 +1187,8 @@ mod tests {
         // + 1 ReloadEnv.
         // + 2 AppendMode / InsertAtLineEnd.
         // + 1 EnterInsertMode.
-        assert_eq!(all().count(), 322);
+        // + 1 InsertAtLineStart.
+        assert_eq!(all().count(), 323);
     }
 
     #[test]

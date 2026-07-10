@@ -273,6 +273,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::EnterInsertMode => movement::enter_insert_mode(stoat),
         ActionKind::AppendMode => movement::append_mode(stoat),
         ActionKind::InsertAtLineEnd => movement::insert_at_line_end(stoat),
+        ActionKind::InsertAtLineStart => movement::insert_at_line_start(stoat),
         ActionKind::OpenBelow => movement::open_line(stoat, movement::OpenDir::Below),
         ActionKind::OpenAbove => movement::open_line(stoat, movement::OpenDir::Above),
         ActionKind::ReplaceChar => movement::set_pending_replace(stoat),

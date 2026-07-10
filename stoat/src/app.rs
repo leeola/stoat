@@ -4080,6 +4080,40 @@ impl Stoat {
         language::line_leading_whitespace(guard.rope(), row)
     }
 
+    /// The leading whitespace `row` in `buffer_id` should carry given its
+    /// enclosing syntax, for re-indenting a blank line to its block depth.
+    ///
+    /// Unlike [`Self::newline_indent_string`], which derives the indent of a new
+    /// line from the row it is opened after, this resolves the indent the row
+    /// itself belongs at via the buffer's `indents.scm` query. Falls back to the
+    /// row's own leading whitespace when the tree is stale, the language has no
+    /// indent query, or the query offers no suggestion.
+    pub(crate) fn suggested_indent_string(&self, buffer_id: BufferId, row: u32) -> String {
+        let buffers = &self.active_workspace().buffers;
+        let Some(buffer) = buffers.get(buffer_id) else {
+            return String::new();
+        };
+        let guard = buffer.read().expect("buffer poisoned");
+        let rope = guard.rope();
+
+        let fresh_tree = buffers
+            .language_for(buffer_id)
+            .and_then(|lang| lang.indent_query.is_some().then_some(lang))
+            .zip(buffers.syntax(buffer_id))
+            .filter(|(_, syntax)| syntax.version == guard.version());
+
+        match fresh_tree {
+            Some((lang, syntax)) => language::suggested_indent(
+                lang.indent_query.as_ref().expect("indent query present"),
+                syntax.tree.root_node(),
+                &syntax.rope_snapshot,
+                row,
+            )
+            .unwrap_or_else(|| language::line_leading_whitespace(rope, row)),
+            None => language::line_leading_whitespace(rope, row),
+        }
+    }
+
     fn editor_backspace(&mut self, editor_id: EditorId, buffer_id: BufferId) {
         self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
             let prev_len = rope
@@ -9297,6 +9331,40 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_text("Z");
         assert_eq!(buffer_text(&h, &path), "abcZ\nxyz\n");
+    }
+
+    #[test]
+    fn shift_i_on_empty_line_auto_indents() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n\n}\n");
+        h.type_keys("j");
+        h.type_keys("I");
+        assert_eq!(h.stoat.focused_mode(), "insert");
+        h.type_text("x");
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
+    }
+
+    #[test]
+    fn shift_i_on_whitespace_line_falls_back_to_line_start() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\n    \ndef\n");
+        h.type_keys("j");
+        h.type_keys("l");
+        h.type_keys("I");
+        assert_eq!(h.stoat.focused_mode(), "insert");
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "abc\nX    \ndef\n");
+    }
+
+    #[test]
+    fn shift_a_on_empty_line_auto_indents() {
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.rs", b"fn a() {\n\n}\n");
+        h.type_keys("j");
+        h.type_keys("A");
+        assert_eq!(h.stoat.focused_mode(), "insert");
+        h.type_text("x");
+        assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
     }
 
     #[test]
