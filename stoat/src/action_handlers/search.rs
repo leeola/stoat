@@ -74,7 +74,12 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         return true;
     }
 
-    jump_to_match(stoat, &query, direction);
+    let origin = super::jump::live_entry(stoat);
+    if jump_to_match(stoat, &query, direction)
+        && let Some(entry) = origin
+    {
+        super::jump::push_entry(stoat, entry);
+    }
     stoat.last_search = Some(LastSearch { query, direction });
     true
 }

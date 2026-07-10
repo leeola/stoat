@@ -3648,6 +3648,8 @@ pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
     if from_review {
         super::review::park_review_session(stoat);
         stoat.set_focused_mode("normal".to_string());
+    } else {
+        super::jump::push_jump(stoat);
     }
 
     let focused = stoat.active_workspace().panes.focus();

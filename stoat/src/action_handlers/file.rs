@@ -385,6 +385,7 @@ pub(crate) fn open_file_in_pane(
 
     super::lsp::notify_buffer_opened(stoat, buffer_id, &absolute, &content);
 
+    super::jump::record_pane_switch(stoat, target, buffer_id);
     show_buffer_in_pane(stoat, target, buffer_id, buffer, executor)
 }
 

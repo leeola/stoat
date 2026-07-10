@@ -638,6 +638,7 @@ pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> Updat
 }
 
 pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    super::jump::push_jump(stoat);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -2413,6 +2414,7 @@ fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>)
 
 pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
+    let origin = super::jump::live_entry(stoat);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -2467,6 +2469,9 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
         new.collapse_to(anchor, SelectionGoal::None);
         new
     });
+    if let Some(entry) = origin {
+        super::jump::push_entry(stoat, entry);
+    }
     UpdateEffect::Redraw
 }
 
@@ -2721,6 +2726,7 @@ pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {
     let Some(count) = stoat.take_pending_count() else {
         return goto_last_line(stoat, false);
     };
+    super::jump::push_jump(stoat);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -2778,6 +2784,7 @@ pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
 }
 
 pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    super::jump::push_jump(stoat);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };

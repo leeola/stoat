@@ -10,8 +10,9 @@
 
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer::BufferId,
     jumplist::JumpEntry,
-    pane::{FocusTarget, View},
+    pane::{FocusTarget, PaneId, View},
 };
 
 /// The focused editor's current position as a [`JumpEntry`], or `None` when no
@@ -29,9 +30,18 @@ pub(crate) fn live_entry(stoat: &mut Stoat) -> Option<JumpEntry> {
 /// A no-op when focus is on a dock. Every jump-shaped motion routes its origin
 /// through here, and the jumplist's resolved-shape dedup absorbs doubled pushes.
 pub(crate) fn push_jump(stoat: &mut Stoat) {
-    let Some(entry) = live_entry(stoat) else {
-        return;
-    };
+    if let Some(entry) = live_entry(stoat) {
+        push_entry(stoat, entry);
+    }
+}
+
+/// Record a pre-captured `entry` on the focused pane's jumplist. A no-op when
+/// focus is on a dock.
+///
+/// For sites that must capture the origin before a motion moves the cursor
+/// (a search submit, a conditional goto) and record it only once the motion
+/// lands.
+pub(crate) fn push_entry(stoat: &mut Stoat, entry: JumpEntry) {
     let ws = stoat.active_workspace_mut();
     let pane_id = match ws.focus {
         FocusTarget::SplitPane(_) => ws.panes.focus(),
@@ -39,6 +49,34 @@ pub(crate) fn push_jump(stoat: &mut Stoat) {
     };
     let buffers = &ws.buffers;
     ws.panes.pane_mut(pane_id).jumplist.push(entry, buffers);
+}
+
+/// Record `target` pane's outgoing editor position on its own jumplist before
+/// a file open swaps its editor, so the open reverses with a backward jump.
+///
+/// A no-op when the pane already shows `incoming` (a same-buffer reopen) or
+/// shows no editor. Kept out of [`show_buffer_in_pane`](super::file::show_buffer_in_pane)
+/// so a jumplist walk re-showing a buffer records nothing.
+pub(crate) fn record_pane_switch(stoat: &mut Stoat, target: PaneId, incoming: BufferId) {
+    let ws = stoat.active_workspace_mut();
+    let entry = {
+        let eid = match ws.panes.pane(target).view {
+            View::Editor(eid) => eid,
+            _ => return,
+        };
+        let Some(editor) = ws.editors.get(eid) else {
+            return;
+        };
+        if editor.buffer_id == incoming {
+            return;
+        }
+        JumpEntry {
+            buffer_id: editor.buffer_id,
+            selections: editor.selections.all_anchors().to_vec(),
+        }
+    };
+    let buffers = &ws.buffers;
+    ws.panes.pane_mut(target).jumplist.push(entry, buffers);
 }
 
 /// Jump the focused pane to `entry`, re-showing its buffer when the pane is not
@@ -203,6 +241,67 @@ mod tests {
             selection_count(&mut h),
             2,
             "forward restored the two-selection set"
+        );
+    }
+
+    fn jumplist_len(h: &mut TestHarness) -> usize {
+        action_handlers::focused_pane_jumplist(&mut h.stoat)
+            .map(|jumplist| jumplist.entries().len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn opening_a_file_records_the_origin() {
+        let mut h = TestHarness::with_size(40, 6);
+        let a = h.write_file("a.rs", "aaaa\nbbbb\n");
+        let b = h.write_file("b.rs", "xxxx\nyyyy\n");
+        h.open_file(&a);
+        h.type_keys("l");
+        let a_buffer = focused_buffer(&mut h);
+
+        // Opening b.rs records the a.rs origin with no explicit save.
+        h.open_file(&b);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(focused_buffer(&mut h), a_buffer, "backward returns to a.rs");
+        assert_eq!(h.primary_head_offset(), 1, "at the recorded a.rs offset");
+    }
+
+    #[test]
+    fn goto_last_line_records_the_origin() {
+        let mut h = TestHarness::with_size(40, 8);
+        let path = h.write_file("s.rs", "line0\nline1\nline2\nline3\n");
+        h.open_file(&path);
+        assert_eq!(h.primary_head_offset(), 0);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoLastLine);
+        assert_ne!(h.primary_head_offset(), 0, "moved off the origin line");
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(h.primary_head_offset(), 0, "backward restores the origin");
+    }
+
+    #[test]
+    fn search_submit_records_once_and_repeats_stay_quiet() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = h.write_file("s.rs", "abc def abc xyz abc\n");
+        h.open_file(&path);
+        let before = jumplist_len(&mut h);
+
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        assert_eq!(
+            jumplist_len(&mut h),
+            before + 1,
+            "search submit records the origin once"
+        );
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SearchNext);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SearchNext);
+        assert_eq!(
+            jumplist_len(&mut h),
+            before + 1,
+            "n and N repeats record nothing"
         );
     }
 }

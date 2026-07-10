@@ -76,6 +76,7 @@ pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let column = entry.column.saturating_sub(1);
     let local_offset = entry.offset;
 
+    super::jump::push_jump(stoat);
     let offset = match path {
         Some(path) => {
             super::file::open_file(stoat, &path);
@@ -151,6 +152,7 @@ pub(super) fn global_search_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let path = m.path.clone();
     let offset = m.offset;
 
+    super::jump::push_jump(stoat);
     super::dispatch(stoat, &OpenFile { path });
     stoat.jump_focused_to_match_offset(offset);
     UpdateEffect::Redraw

@@ -85,6 +85,7 @@ fn goto_stored_mark(stoat: &mut Stoat, request: MarkRequest, ch: char) -> Update
     let rope = buf_snap.rope();
     let stored_offset = buf_snap.resolve_anchor(&stored_anchor);
     let target = resolve_target(rope, stored_offset, request);
+    super::jump::push_jump(stoat);
     movement::jump_to_offset(stoat, target)
 }
 
@@ -94,6 +95,7 @@ fn goto_global(
     path: PathBuf,
     stored_offset: usize,
 ) -> UpdateEffect {
+    super::jump::push_jump(stoat);
     let already_focused = focused_editor_mut(stoat)
         .map(|e| e.buffer_id)
         .and_then(|id| {
