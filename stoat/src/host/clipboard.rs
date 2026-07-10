@@ -42,6 +42,36 @@ pub fn osc52_should_emit(env: &dyn EnvHost) -> bool {
     in_ssh && !in_mux
 }
 
+/// Write `text` to the system clipboard, also forwarding it via OSC 52 when the
+/// session warrants it.
+///
+/// Runs [`ClipboardHost::set`] unconditionally, then [`ClipboardHost::osc52_emit`]
+/// when [`osc52_should_emit`] holds, so a keyboard yank reaches the user's local
+/// clipboard over SSH exactly as a mouse-selection copy does. Both writes are
+/// best-effort, so a failure is warn-logged and swallowed rather than surfaced.
+///
+/// Every clipboard write goes through here so the local set and the OSC 52
+/// forwarding never drift apart.
+pub fn clipboard_copy(clipboard: &dyn ClipboardHost, env: &dyn EnvHost, text: &str) {
+    if let Err(err) = clipboard.set(text) {
+        tracing::warn!(
+            target: "stoat::host::clipboard",
+            error = %err,
+            "clipboard write failed"
+        );
+    }
+
+    if osc52_should_emit(env)
+        && let Err(err) = clipboard.osc52_emit(text)
+    {
+        tracing::warn!(
+            target: "stoat::host::clipboard",
+            error = %err,
+            "OSC 52 emit failed"
+        );
+    }
+}
+
 /// No-op [`ClipboardHost`] used when no real clipboard is needed (or
 /// available). Logs the would-be write at trace level and returns
 /// success so call sites can ignore the absence of a real clipboard.

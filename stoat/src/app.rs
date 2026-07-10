@@ -2575,22 +2575,7 @@ impl Stoat {
                 if text.is_empty() {
                     return false;
                 }
-                if let Err(err) = clipboard_host.set(&text) {
-                    tracing::warn!(
-                        target: "stoat::app",
-                        error = %err,
-                        "clipboard write failed"
-                    );
-                }
-                if crate::host::osc52_should_emit(env_host.as_ref())
-                    && let Err(err) = clipboard_host.osc52_emit(&text)
-                {
-                    tracing::warn!(
-                        target: "stoat::app",
-                        error = %err,
-                        "OSC 52 emit failed"
-                    );
-                }
+                crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
                 false
             },
             _ => false,
@@ -2747,22 +2732,7 @@ impl Stoat {
                 if text.is_empty() {
                     return false;
                 }
-                if let Err(err) = clipboard_host.set(&text) {
-                    tracing::warn!(
-                        target: "stoat::app",
-                        error = %err,
-                        "clipboard write failed"
-                    );
-                }
-                if crate::host::osc52_should_emit(env_host.as_ref())
-                    && let Err(err) = clipboard_host.osc52_emit(&text)
-                {
-                    tracing::warn!(
-                        target: "stoat::app",
-                        error = %err,
-                        "OSC 52 emit failed"
-                    );
-                }
+                crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
                 false
             },
             _ => false,
@@ -4197,6 +4167,7 @@ impl Stoat {
 
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
         let clipboard_host = self.clipboard_host.clone();
+        let env_host = self.env_host.clone();
         let ws = self.active_workspace_mut();
         match notif {
             PtyNotification::Output { run_id, data } => {
@@ -4219,13 +4190,7 @@ impl Stoat {
                     }
                 }
                 for text in block.grid.clipboard_writes.drain(..) {
-                    if let Err(err) = clipboard_host.set(&text) {
-                        tracing::warn!(
-                            target: "stoat::app",
-                            error = %err,
-                            "clipboard write failed"
-                        );
-                    }
+                    crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
                 }
                 // Adopt the latest OSC 7 cwd report. Captured before the
                 // alt-screen branch reborrows run_state below.

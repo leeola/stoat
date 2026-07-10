@@ -49,9 +49,11 @@ pub(super) fn write_fragments_to_register(
 ) {
     match target {
         Register::Clipboard => {
-            if let Err(err) = stoat.clipboard_host().set(&fragments.join("\n")) {
-                tracing::warn!(target: "stoat::yank", ?err, "clipboard set failed");
-            }
+            crate::host::clipboard_copy(
+                stoat.clipboard_host().as_ref(),
+                stoat.env_host().as_ref(),
+                &fragments.join("\n"),
+            );
         },
         Register::Blackhole => {},
         Register::Unnamed | Register::Named(_) => {
@@ -119,9 +121,11 @@ pub(super) fn yank_to_clipboard(stoat: &mut Stoat) -> UpdateEffect {
     if fragments.is_empty() {
         return UpdateEffect::None;
     }
-    if let Err(err) = stoat.clipboard_host().set(&fragments.join("\n")) {
-        tracing::warn!(target: "stoat::yank", ?err, "clipboard set failed");
-    }
+    crate::host::clipboard_copy(
+        stoat.clipboard_host().as_ref(),
+        stoat.env_host().as_ref(),
+        &fragments.join("\n"),
+    );
     UpdateEffect::None
 }
 
@@ -134,9 +138,11 @@ pub(super) fn yank_main_to_clipboard(stoat: &mut Stoat) -> UpdateEffect {
     if content.is_empty() {
         return UpdateEffect::None;
     }
-    if let Err(err) = stoat.clipboard_host().set(&content) {
-        tracing::warn!(target: "stoat::yank", ?err, "clipboard set failed");
-    }
+    crate::host::clipboard_copy(
+        stoat.clipboard_host().as_ref(),
+        stoat.env_host().as_ref(),
+        &content,
+    );
     UpdateEffect::None
 }
 
@@ -828,6 +834,50 @@ mod tests {
         seed(&mut h, "abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::YankToClipboard);
         assert_eq!(h.fake_clipboard().writes(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn yank_to_clipboard_emits_osc52_over_ssh() {
+        let mut h = TestHarness::with_size(40, 10);
+        h.fake_env().set("SSH_TTY", "/dev/pts/0");
+        seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::YankToClipboard);
+        assert_eq!(h.fake_clipboard().writes(), vec!["abc\ndef".to_string()]);
+        assert_eq!(
+            h.fake_clipboard().osc52_emits(),
+            vec!["abc\ndef".to_string()],
+            "a keyboard yank forwards to the local clipboard over SSH"
+        );
+    }
+
+    #[test]
+    fn yank_to_clipboard_skips_osc52_locally() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::YankToClipboard);
+        assert_eq!(h.fake_clipboard().writes(), vec!["abc\ndef".to_string()]);
+        assert!(
+            h.fake_clipboard().osc52_emits().is_empty(),
+            "no OSC 52 forwarding outside an SSH session"
+        );
+    }
+
+    #[test]
+    fn clipboard_register_yank_emits_osc52_over_ssh() {
+        let mut h = TestHarness::with_size(40, 10);
+        h.fake_env().set("SSH_TTY", "/dev/pts/0");
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        super::execute_select_register(&mut h.stoat, '+');
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
+        assert_eq!(
+            h.fake_clipboard().osc52_emits(),
+            vec!["abc".to_string()],
+            "the `\"+y` clipboard-register yank forwards over SSH too"
+        );
     }
 
     #[test]
