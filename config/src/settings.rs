@@ -68,6 +68,13 @@ pub struct Settings {
     /// environment. `None` falls back to enabled, and has no effect when
     /// `direnv.load` is off. Set `direnv.reload_on_cd = false;` in stcfg.
     pub direnv_reload_on_cd: Option<bool>,
+    /// Whether a direnv diff that only reverts the inherited environment is
+    /// applied. `None` falls back to disabled, so launching stoat inside a
+    /// shell and opening a directory with no governing `.envrc` keeps the
+    /// inherited env instead of unsetting it. Set `direnv.unset_on_exit = true;`
+    /// in stcfg to restore the unset. A diff that loads an `.envrc` always
+    /// applies regardless.
+    pub direnv_unset_on_exit: Option<bool>,
     /// Per-mode status-line badge label overrides, keyed by mode name.
     /// Set via `ui.mode_badge.<name> = "ABC";` in stcfg. Renderer
     /// consults this map before falling back to its hardcoded badge
@@ -133,6 +140,7 @@ impl Settings {
             terminal_args: other.terminal_args.or(self.terminal_args),
             direnv_load: other.direnv_load.or(self.direnv_load),
             direnv_reload_on_cd: other.direnv_reload_on_cd.or(self.direnv_reload_on_cd),
+            direnv_unset_on_exit: other.direnv_unset_on_exit.or(self.direnv_unset_on_exit),
             mode_badges,
             lsp_servers,
             finder_scopes,
@@ -255,6 +263,11 @@ impl Settings {
                     self.direnv_reload_on_cd = Some(b);
                 }
             },
+            ["direnv", "unset_on_exit"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.direnv_unset_on_exit = Some(b);
+                }
+            },
             _ => {},
         }
     }
@@ -289,6 +302,7 @@ mod tests {
                 terminal_args: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
+                direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
@@ -395,6 +409,7 @@ mod tests {
                 terminal_args: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
+                direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
@@ -421,6 +436,7 @@ mod tests {
                 terminal_args: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
+                direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
@@ -456,6 +472,7 @@ mod tests {
             terminal_args: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
+            direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
@@ -474,6 +491,7 @@ mod tests {
             terminal_args: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
+            direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
@@ -494,6 +512,7 @@ mod tests {
                 terminal_args: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
+                direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
@@ -517,6 +536,7 @@ mod tests {
             terminal_args: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
+            direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
@@ -538,6 +558,7 @@ mod tests {
                 terminal_args: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
+                direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
@@ -572,6 +593,7 @@ mod tests {
                 terminal_args: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
+                direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
@@ -598,6 +620,7 @@ mod tests {
                 terminal_args: None,
                 direnv_load: None,
                 direnv_reload_on_cd: None,
+                direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
@@ -621,6 +644,7 @@ mod tests {
             terminal_args: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
+            direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
@@ -639,6 +663,7 @@ mod tests {
             terminal_args: None,
             direnv_load: None,
             direnv_reload_on_cd: None,
+            direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
@@ -709,6 +734,28 @@ mod tests {
             Settings::from_config(&config).direnv_reload_on_cd,
             Some(false)
         );
+    }
+
+    #[test]
+    fn from_config_extracts_direnv_unset_on_exit() {
+        let config = parse_ok("on init { direnv.unset_on_exit = true; }");
+        assert_eq!(
+            Settings::from_config(&config).direnv_unset_on_exit,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn merge_right_overrides_direnv_unset_on_exit() {
+        let left = Settings {
+            direnv_unset_on_exit: Some(false),
+            ..Settings::default()
+        };
+        let right = Settings {
+            direnv_unset_on_exit: Some(true),
+            ..Settings::default()
+        };
+        assert_eq!(left.merge(right).direnv_unset_on_exit, Some(true));
     }
 
     #[test]

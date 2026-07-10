@@ -215,6 +215,7 @@ fn run_tui(
         terminal_args: None,
         direnv_load: None,
         direnv_reload_on_cd: None,
+        direnv_unset_on_exit: None,
         review_follow: None,
         review_precompute: None,
         mode_badges: std::collections::BTreeMap::new(),

@@ -176,13 +176,15 @@ pub(crate) fn install_pending(stoat: &mut Stoat) {
         return;
     };
 
+    let unset_on_exit = stoat.settings.direnv_unset_on_exit.unwrap_or(false);
+
     let message = {
         let Some(ws) = stoat.workspaces.get_mut(workspace) else {
             return;
         };
         match outcome {
             Ok(diff) => {
-                let message = ok_message(&diff, &ws.git_root, manual);
+                let (diff, message) = resolve_ok_diff(diff, &ws.git_root, manual, unset_on_exit);
                 ws.env.diff = diff;
                 ws.env.state = EnvLoadState::Loaded;
                 message
@@ -232,6 +234,37 @@ fn last_stderr_line(stderr: &[u8]) -> String {
         .rfind(|line| !line.is_empty())
         .unwrap_or("direnv failed")
         .to_string()
+}
+
+/// Resolve a successful direnv diff into the env diff to install and the
+/// transient message to show.
+///
+/// A non-empty diff whose entries are all unsets is a pure revert of the
+/// inherited environment. direnv found no `.envrc` governing the root and wants
+/// to strip the vars stoat inherited. A real load always sets `DIRENV_FILE` to a
+/// value, so an all-unset diff never comes from one. Unless `unset_on_exit` opts
+/// in, that revert is skipped, installing an empty diff so child spawns keep
+/// inheriting stoat's process env and reporting a keeping-inherited message so
+/// the user sees why. Every other diff installs unchanged with the normal
+/// [`ok_message`].
+fn resolve_ok_diff(
+    diff: Vec<(String, Option<String>)>,
+    git_root: &Path,
+    manual: bool,
+    unset_on_exit: bool,
+) -> (Vec<(String, Option<String>)>, Option<String>) {
+    let is_revert = !diff.is_empty() && diff.iter().all(|(_, value)| value.is_none());
+
+    if is_revert && !unset_on_exit {
+        let message = format!(
+            "direnv: keeping inherited env (no .envrc at {})",
+            git_root.display()
+        );
+        return (Vec::new(), Some(message));
+    }
+
+    let message = ok_message(&diff, git_root, manual);
+    (diff, message)
 }
 
 /// The transient message for a successful load, or `None` to stay quiet.
@@ -321,6 +354,46 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("direnv: 3 vars (1 unset) from /proj/.envrc")
+        );
+    }
+
+    #[test]
+    fn revert_diff_keeps_inherited_env_by_default() {
+        let mut h = TestHarness::with_size(80, 24);
+        setup(&mut h, out(br#"{"FOO":null,"DIRENV_FILE":null}"#, b"", 0));
+        ensure_loaded(&mut h.stoat);
+        h.settle();
+        install_pending(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(ws.env.state, EnvLoadState::Loaded);
+        assert!(
+            ws.env.diff.is_empty(),
+            "a pure-revert diff is skipped so children keep the inherited env"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("direnv: keeping inherited env (no .envrc at /proj)")
+        );
+    }
+
+    #[test]
+    fn revert_diff_applies_when_unset_on_exit_opts_in() {
+        let mut h = TestHarness::with_size(80, 24);
+        setup(&mut h, out(br#"{"FOO":null,"DIRENV_FILE":null}"#, b"", 0));
+        h.stoat.settings.direnv_unset_on_exit = Some(true);
+        ensure_loaded(&mut h.stoat);
+        h.settle();
+        install_pending(&mut h.stoat);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            ws.env.diff,
+            vec![("DIRENV_FILE".to_string(), None), ("FOO".to_string(), None),]
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("direnv: 2 vars (2 unset) from /proj")
         );
     }
 
