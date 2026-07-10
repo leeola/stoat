@@ -584,7 +584,7 @@ mod tests {
     fn surround_add_wraps_selection_with_paren() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
         assert_eq!(buffer_text(&h, &path), "(abc)\n");
@@ -595,7 +595,7 @@ mod tests {
     fn surround_add_close_char_wraps_with_canonical_pair() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys(">");
         assert_eq!(buffer_text(&h, &path), "<abc>\n");
@@ -605,7 +605,7 @@ mod tests {
     fn surround_add_quote_wraps_with_same_char() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("\"");
         assert_eq!(buffer_text(&h, &path), "\"abc\"\n");
@@ -615,7 +615,7 @@ mod tests {
     fn surround_add_arbitrary_char_doubles() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("*");
         assert_eq!(buffer_text(&h, &path), "*abc*\n");
@@ -636,7 +636,7 @@ mod tests {
     fn surround_add_pending_clears_on_non_char() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         assert!(h.stoat.pending_surround_add);
         h.type_keys("escape");
@@ -648,7 +648,7 @@ mod tests {
     fn surround_add_via_match_mode_binding() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("m s [");
         assert_eq!(buffer_text(&h, &path), "[abc]\n");
@@ -892,7 +892,7 @@ mod tests {
     fn cursor_offset_after_surround_add_collapsed_into_selection() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
         assert_eq!(buffer_text(&h, &path), "(abc)\n");

@@ -473,7 +473,7 @@ mod tests {
     fn yank_stores_primary_selection_in_unnamed() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         let stored = h
             .stoat
@@ -500,7 +500,7 @@ mod tests {
     fn paste_after_inserts_at_selection_end() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
@@ -512,7 +512,7 @@ mod tests {
     fn paste_before_inserts_at_selection_start() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteBefore);
@@ -532,7 +532,7 @@ mod tests {
     fn paste_after_with_collapsed_cursor_inserts_at_cursor() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         h.type_keys("escape");
         h.type_keys("h");
@@ -544,7 +544,7 @@ mod tests {
     fn paste_after_selects_inserted_text() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
@@ -556,7 +556,7 @@ mod tests {
     fn paste_after_honors_count() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         h.type_keys("escape");
         h.stoat.pending_count = Some(3);
@@ -569,7 +569,7 @@ mod tests {
     fn yank_via_y_binding() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("y");
         let stored = h
@@ -584,7 +584,7 @@ mod tests {
     fn paste_after_via_p_binding() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("y");
         h.type_keys("escape");
         h.type_keys("p");
@@ -595,7 +595,7 @@ mod tests {
     fn paste_before_via_capital_p_binding() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("y");
         h.type_keys("escape");
         h.type_keys("P");
@@ -605,7 +605,6 @@ mod tests {
     fn make_two_selections(h: &mut TestHarness) {
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         h.stoat.set_focused_mode("select".into());
-        crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
         h.stoat.set_focused_mode("normal".into());
@@ -648,7 +647,7 @@ mod tests {
     fn delete_yanks_the_removed_text_and_paste_restores_it() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelection);
         assert_eq!(buffer_text(&h, &path), "\n");
         let stored = h
@@ -669,7 +668,7 @@ mod tests {
         h.stoat
             .registers
             .write(crate::register::Register::Unnamed, vec!["keep".to_string()]);
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("\" _");
         crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelection);
@@ -689,7 +688,7 @@ mod tests {
         h.stoat
             .registers
             .write(crate::register::Register::Unnamed, vec!["keep".to_string()]);
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelectionNoYank);
         assert_eq!(buffer_text(&h, &path), "\n");
         let stored = h
@@ -768,7 +767,7 @@ mod tests {
     fn paste_after_with_line_count_mismatch_pastes_full_at_each() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "ab\ncd\nef\n");
-        h.type_keys("v l l");
+        h.type_keys("v l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
@@ -873,7 +872,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         h.fake_env().set("SSH_TTY", "/dev/pts/0");
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         super::execute_select_register(&mut h.stoat, '+');
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
@@ -889,7 +888,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
         h.fake_clipboard().set("xyz").unwrap();
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
         assert_eq!(buffer_text(&h, &path), "abcxyz\n");
     }
@@ -899,7 +898,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
         h.fake_clipboard().set("xyz").unwrap();
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardBefore);
         assert_eq!(buffer_text(&h, &path), "xyzabc\n");
     }
@@ -916,7 +915,7 @@ mod tests {
     fn yank_to_clipboard_via_space_dquote_y_binding() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("space \" y");
         assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
@@ -927,7 +926,7 @@ mod tests {
     fn select_register_then_yank_writes_to_named() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("\" a y");
         let stored = h
@@ -948,7 +947,7 @@ mod tests {
     fn select_register_consumed_by_one_op() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("\" a y");
         assert!(h.stoat.selected_register.is_none());
@@ -975,7 +974,7 @@ mod tests {
             crate::register::Register::Named('a'),
             vec!["xyz".to_string()],
         );
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("\" a p");
         assert_eq!(buffer_text(&h, &path), "abcxyz\n");
@@ -985,7 +984,7 @@ mod tests {
     fn select_register_dquote_selects_unnamed() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("\" \" y");
         let stored = h
@@ -1053,7 +1052,7 @@ mod tests {
     fn yank_clipboard_register_writes_to_clipboard_host() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("\" * y");
         assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
@@ -1080,7 +1079,7 @@ mod tests {
     fn yank_blackhole_register_swallows_content() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        h.type_keys("v l l l");
+        h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("\" _ y");
         let unnamed = h

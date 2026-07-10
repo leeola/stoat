@@ -270,19 +270,14 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
         let cursor = cursor_offset(rope, tail_offset, head_offset);
         // Step the block-cursor cell, not the raw head: a forward 1-wide
-        // selection stores its head one cell past the cursor. Forward extend
-        // clamps at the line's last character (a separate item crosses the
-        // newline); every other case steps whole characters, crossing lines.
+        // selection stores its head one cell past the cursor. Both move and
+        // extend step whole characters, crossing line boundaries like Helix.
         let target = if delta > 0 {
-            if extend {
-                step_cursor_right(rope, cursor, count)
-            } else {
-                let mut t = cursor;
-                for ch in rope.chars_at(cursor).take(count) {
-                    t += ch.len_utf8();
-                }
-                t
+            let mut t = cursor;
+            for ch in rope.chars_at(cursor).take(count) {
+                t += ch.len_utf8();
             }
+            t
         } else {
             let mut t = cursor;
             for ch in rope.reversed_chars_at(cursor).take(count) {
@@ -542,27 +537,6 @@ fn extend_head(
         new.reversed = false;
     }
     new
-}
-
-/// Step a cursor offset right by `count` cells, clamping at the line's last
-/// character.
-///
-/// The cursor never lands on the trailing newline or past the buffer end, so a
-/// select-mode forward motion stops at the last character of the line rather
-/// than crossing onto the next.
-fn step_cursor_right(rope: &Rope, cursor: usize, count: usize) -> usize {
-    let mut target = cursor;
-    for _ in 0..count {
-        let Some(ch) = rope.chars_at(target).next() else {
-            break;
-        };
-        let next = target + ch.len_utf8();
-        if rope.chars_at(next).next().is_none_or(|c| c == '\n') {
-            break;
-        }
-        target = next;
-    }
-    target
 }
 
 /// Extend `sel` so its block cursor lands on the cell at `target_cursor`.

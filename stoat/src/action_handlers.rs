@@ -1471,6 +1471,19 @@ mod tests {
     }
 
     #[test]
+    fn extend_right_crosses_the_newline() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "ab\ncd");
+        stoat.set_focused_mode("select".into());
+        // From 'a', three extend-rights walk over the line's last char, across
+        // the newline, and onto 'c' on the next line rather than clamping.
+        dispatch(&mut stoat, &ExtendRight);
+        dispatch(&mut stoat, &ExtendRight);
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
+    }
+
+    #[test]
     fn move_next_word_start_repeated_snaps_tail() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar baz");
