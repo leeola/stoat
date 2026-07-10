@@ -6,13 +6,14 @@ use crate::{
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
     badge::BadgeTray,
     buffer::BufferId,
-    buffer_registry::BufferRegistry,
+    buffer_registry::{self, BufferRegistry},
     code_index::{
         build::{file_id, reindex_buffer, IndexUpdate, ReindexTarget},
         nav::TrailState,
     },
     commit_list::CommitListState,
     diff,
+    diff_cache::ContentHash,
     diff_map::DiffMap,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
@@ -139,6 +140,18 @@ pub struct Workspace {
     /// [`Self::refresh_changed_ranges`] so diff-filtered navigation can ask
     /// whether a symbol's definition overlaps a change.
     pub(crate) changed_ranges: HashMap<FileId, Vec<Range<usize>>>,
+    /// Per-file diff memo keyed by [`FileId`], holding the base and buffer
+    /// content hashes the ranges were computed from alongside the ranges
+    /// themselves. [`Self::refresh_changed_ranges`] reuses an entry whenever
+    /// both hashes still match, so repeated diff-filtered navigation over an
+    /// unchanged tree recomputes nothing. The memo persists across refreshes,
+    /// while [`Self::changed_ranges`] is cleared and rebuilt each call.
+    changed_ranges_memo: HashMap<FileId, (ContentHash, ContentHash, Vec<Range<usize>>)>,
+    /// Count of memo misses (actual diffs run) in
+    /// [`Self::refresh_changed_ranges`], so a test can prove the memo spares
+    /// the recompute on an unchanged tree.
+    #[cfg(test)]
+    changed_ranges_recomputes: u64,
     /// The active call-graph trail, if the user has marked a start. Holds
     /// the marked anchors and, once both ends are set, the cached path that
     /// [`crate::code_index::nav`]'s trail actions step along.
@@ -217,6 +230,9 @@ impl Workspace {
             index_generation: 0,
             file_paths: HashMap::new(),
             changed_ranges: HashMap::new(),
+            changed_ranges_memo: HashMap::new(),
+            #[cfg(test)]
+            changed_ranges_recomputes: 0,
             trail: None,
             review: None,
             commits: None,
@@ -491,9 +507,30 @@ impl Workspace {
             return;
         };
         for input in &inputs {
-            let ranges = changed_byte_ranges(input);
+            let fid = file_id(&input.rel_path);
+            let base_hash = buffer_registry::fingerprint_bytes(input.base_text.as_str());
+            let buffer_hash = buffer_registry::fingerprint_bytes(input.buffer_text.as_str());
+
+            let ranges = match self.changed_ranges_memo.get(&fid) {
+                Some((cached_base, cached_buffer, cached))
+                    if *cached_base == base_hash && *cached_buffer == buffer_hash =>
+                {
+                    cached.clone()
+                },
+                _ => {
+                    let computed = changed_byte_ranges(input);
+                    #[cfg(test)]
+                    {
+                        self.changed_ranges_recomputes += 1;
+                    }
+                    self.changed_ranges_memo
+                        .insert(fid, (base_hash, buffer_hash, computed.clone()));
+                    computed
+                },
+            };
+
             if !ranges.is_empty() {
-                self.changed_ranges.insert(file_id(&input.rel_path), ranges);
+                self.changed_ranges.insert(fid, ranges);
             }
         }
     }
@@ -559,15 +596,13 @@ impl Workspace {
 ///
 /// Hunk line ranges are converted to byte ranges in the working-tree text
 /// so a symbol's byte def-range can be tested for overlap directly.
+///
+/// Uses the line diff rather than the language-aware structural diff. The only
+/// consumer tests whole-line overlap, and treating moved code as a delete plus
+/// an add yields the same or a strictly larger changed set for that test, at a
+/// fraction of the cost.
 fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
-    let result = match &input.language {
-        Some(language) => structural_diff::diff_with_language_or_lines(
-            language,
-            &input.base_text,
-            &input.buffer_text,
-        ),
-        None => structural_diff::diff(&input.base_text, &input.buffer_text),
-    };
+    let result = structural_diff::diff(&input.base_text, &input.buffer_text);
     let diff_map = DiffMap::from_structural_changes(result, &input.base_text, &input.buffer_text);
     let rope = Rope::from(input.buffer_text.as_str());
     diff_map
@@ -591,7 +626,7 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{changed_byte_ranges, ParseJob, Workspace};
-    use crate::review::ReviewFileInput;
+    use crate::{review::ReviewFileInput, test_harness::TestHarness};
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
@@ -621,6 +656,40 @@ mod tests {
     #[test]
     fn changed_byte_ranges_empty_when_identical() {
         assert!(changed_byte_ranges(&input("fn foo() {}\n", "fn foo() {}\n")).is_empty());
+    }
+
+    #[test]
+    fn refresh_changed_ranges_memoizes_across_unchanged_refreshes() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.rs", "fn foo() {}\n", "fn foo() {}\nfn bar() {}\n")],
+        );
+
+        let git = h.stoat.git_host.clone();
+        let fs = h.stoat.fs_host.clone();
+        let langs = h.stoat.language_registry.clone();
+        let ws = h.stoat.active_workspace_mut();
+
+        ws.refresh_changed_ranges(git.as_ref(), fs.as_ref(), &langs);
+        assert_eq!(
+            ws.changed_ranges_recomputes, 1,
+            "the first refresh diffs the changed file once"
+        );
+        assert!(
+            !ws.changed_ranges.is_empty(),
+            "the working-tree change is recorded"
+        );
+
+        ws.refresh_changed_ranges(git.as_ref(), fs.as_ref(), &langs);
+        assert_eq!(
+            ws.changed_ranges_recomputes, 1,
+            "a second refresh over the unchanged tree reuses the memo, no re-diff"
+        );
+        assert!(
+            !ws.changed_ranges.is_empty(),
+            "the recorded change survives the memo hit"
+        );
     }
 
     #[test]
