@@ -1194,7 +1194,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
-                if let Some(bytes) = encode_key(&event.logical_key, state.modifiers.control_key()) {
+                if let Some(bytes) = encode_key(
+                    &event.logical_key,
+                    state.modifiers.control_key(),
+                    state.modifiers.shift_key(),
+                ) {
                     let _ = state.pty.write(&bytes);
                     // Typing jumps the view back to the live prompt, the way a
                     // terminal resets scrollback on input.
@@ -1514,10 +1518,11 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 /// control byte (Ctrl-C is `0x03`). Cursor keys use the normal-mode `CSI` forms
 /// (`\x1b[A` through `\x1b[D`); printable keys pass through as their own UTF-8
 /// bytes.
-fn encode_key(key: &Key, ctrl: bool) -> Option<Vec<u8>> {
+fn encode_key(key: &Key, ctrl: bool, shift: bool) -> Option<Vec<u8>> {
     match key {
         Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
         Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
+        Key::Named(NamedKey::Tab) if shift => Some(b"\x1b[Z".to_vec()),
         Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
         Key::Named(NamedKey::Space) => Some(vec![b' ']),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
@@ -2488,8 +2493,8 @@ mod tests {
 
     #[test]
     fn encode_key_maps_keys_to_terminal_bytes() {
-        let named = |key| encode_key(&Key::Named(key), false);
-        let printable = |s: &str| encode_key(&Key::Character(s.into()), false);
+        let named = |key| encode_key(&Key::Named(key), false, false);
+        let printable = |s: &str| encode_key(&Key::Character(s.into()), false, false);
 
         assert_eq!(
             printable("a"),
@@ -2518,7 +2523,7 @@ mod tests {
 
     #[test]
     fn encode_key_maps_ctrl_letters_to_control_bytes() {
-        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), true);
+        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), true, false);
 
         assert_eq!(ctrl("c"), Some(vec![0x03]), "Ctrl-C");
         assert_eq!(ctrl("a"), Some(vec![0x01]), "Ctrl-A");
@@ -2527,6 +2532,20 @@ mod tests {
             ctrl("1"),
             None,
             "Ctrl with a non-letter has no control byte"
+        );
+    }
+
+    #[test]
+    fn encode_key_shift_tab_sends_csi_z() {
+        assert_eq!(
+            encode_key(&Key::Named(NamedKey::Tab), false, true),
+            Some(b"\x1b[Z".to_vec()),
+            "Shift-Tab sends CSI Z so stoat decodes BackTab"
+        );
+        assert_eq!(
+            encode_key(&Key::Named(NamedKey::Tab), false, false),
+            Some(vec![b'\t']),
+            "plain Tab still sends a tab"
         );
     }
 
