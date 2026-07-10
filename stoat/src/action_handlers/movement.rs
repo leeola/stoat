@@ -2630,7 +2630,27 @@ pub(crate) fn execute_find(
             extend_head_to_cursor(sel, target, sel.goal, new_rope, new_buf)
         });
     } else {
-        apply_primary_range(editor, target..target);
+        // Select from the block cursor to the target rather than collapsing
+        // there, so `dfx`/`yfx` operate on the whole span like Helix.
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let landed = Selection {
+            id: 0,
+            start: cursor,
+            end: cursor,
+            reversed: false,
+            goal: SelectionGoal::None,
+        }
+        .put_cursor(new_buf.rope(), target, true);
+        let new_start = new_buf.anchor_at(landed.start, Bias::Right);
+        let new_end = new_buf.anchor_at(landed.end, Bias::Left);
+        editor.selections.transform(new_buf, |sel| Selection {
+            id: sel.id,
+            start: new_start,
+            end: new_end,
+            reversed: landed.reversed,
+            goal: SelectionGoal::None,
+        });
     }
     UpdateEffect::Redraw
 }

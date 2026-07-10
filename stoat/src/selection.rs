@@ -2015,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_mode_f_still_collapses_selection() {
+    fn normal_mode_f_selects_to_target() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abcdef\n");
         h.open_file(&path);
@@ -2023,9 +2023,29 @@ mod tests {
         let (start, end, _) = h.selection_spans()[0];
         assert_eq!(
             (start, end),
-            (4, 5),
-            "normal-mode find lands a 1-wide cursor on the 'e'"
+            (0, 5),
+            "normal-mode find selects from the cursor to the target inclusive"
         );
+    }
+
+    #[test]
+    fn dfx_deletes_from_cursor_through_target() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "hello world\n");
+        h.open_file(&path);
+        h.type_keys("f o");
+        h.type_keys("d");
+        assert_eq!(focused_buffer_text(&mut h), " world\n");
+    }
+
+    #[test]
+    fn dt_deletes_up_to_but_not_the_target() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "hello world\n");
+        h.open_file(&path);
+        h.type_keys("t o");
+        h.type_keys("d");
+        assert_eq!(focused_buffer_text(&mut h), "o world\n");
     }
 
     #[test]
