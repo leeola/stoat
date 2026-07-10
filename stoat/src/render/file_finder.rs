@@ -81,20 +81,21 @@ pub(crate) fn render_file_finder(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    let title = if finder.browse.is_some() {
-        " file finder (browse) "
+    let title: String = if finder.browse.is_some() {
+        " file finder (browse) ".to_string()
     } else {
         match finder.scope() {
-            FinderScope::All => " file finder (all) ",
-            FinderScope::Modified => " file finder (modified) ",
-            FinderScope::Buffers => " file finder (buffers) ",
+            FinderScope::All => " file finder (all) ".to_string(),
+            FinderScope::Modified => " file finder (modified) ".to_string(),
+            FinderScope::Buffers => " file finder (buffers) ".to_string(),
+            FinderScope::Named(name) => format!(" file finder ({name}) "),
         }
     };
     Clear.render(layout.modal, buf);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,
-        Some(title),
+        Some(&title),
         modal_style,
         theme,
         scene.as_deref_mut(),

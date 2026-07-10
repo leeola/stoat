@@ -5,7 +5,11 @@ use crate::{
     picker::{PathPicker, PreviewPolicy},
     workspace::Workspace,
 };
-use std::path::{Path, PathBuf};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -15,7 +19,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 const BROWSE_PATH_CAP: usize = 100_000;
 
 /// Which subset of files the finder currently lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinderScope {
     /// Every file under `git_root` that is not gitignored. Snapshotted at
     /// open time.
@@ -28,6 +32,10 @@ pub enum FinderScope {
     /// the dedicated `OpenBufferPicker` action; Shift-Tab from this scope
     /// flips back to [`FinderScope::All`].
     Buffers,
+    /// A config-defined named glob scope (`finder.scope.<name>`). Shift-Tab
+    /// cycles through these alphabetically after Modified, and the list shows
+    /// only files matching the scope's globs.
+    Named(String),
 }
 
 /// What the finder should do with the selected file when the user submits.
@@ -76,6 +84,13 @@ pub struct FileFinder {
     pub(crate) core: PathPicker,
     /// Active directory-browse mode, or `None` for the normal workspace list.
     pub(crate) browse: Option<Browse>,
+    /// Config-defined named scopes, compiled at open time in alphabetical
+    /// (BTreeMap) order. Shift-Tab cycles through them after Modified.
+    pub(crate) named_scopes: Vec<(String, GlobSet)>,
+    /// Cached glob-filtered base for the active [`FinderScope::Named`] scope,
+    /// keyed by scope name. Rebuilt when the walk grows or the scope changes,
+    /// so a stable Named query does not re-run the globset over `all_paths`.
+    pub(crate) named_cache: Option<(String, Vec<PathBuf>)>,
 }
 
 impl FileFinder {
@@ -90,6 +105,7 @@ impl FileFinder {
         walk_task: Task<()>,
         modified_paths: Vec<PathBuf>,
         buffer_paths: Vec<PathBuf>,
+        finder_scopes: &BTreeMap<String, Vec<String>>,
     ) -> Self {
         let input = InputView::create(
             ws,
@@ -99,28 +115,27 @@ impl FileFinder {
             "insert",
             1,
         );
-        let mut core = PathPicker::new(ws, executor, git_root, Some((walk_rx, walk_task)));
+        let core = PathPicker::new(ws, executor, git_root, Some((walk_rx, walk_task)));
 
-        let scope = initial_scope;
-        match scope {
-            FinderScope::All => core.refilter(""),
-            FinderScope::Modified => core.refilter_with_base("", &modified_paths),
-            FinderScope::Buffers => core.refilter_with_base("", &buffer_paths),
-        }
-
-        Self {
+        let mut finder = Self {
             input,
             open_intent,
-            scope,
+            scope: initial_scope,
             modified_paths,
             buffer_paths,
             core,
             browse: None,
-        }
+            named_scopes: compile_named_scopes(finder_scopes),
+            named_cache: None,
+        };
+        // Uniformly seed the initial (empty-query) list for whatever scope
+        // opened, including a named scope's glob filter.
+        finder.refilter_from_input(ws);
+        finder
     }
 
-    pub(crate) fn scope(&self) -> FinderScope {
-        self.scope
+    pub(crate) fn scope(&self) -> &FinderScope {
+        &self.scope
     }
 
     /// The picker currently driving the list. Browse mode (a `/` or `~/`
@@ -158,17 +173,37 @@ impl FileFinder {
     /// reachable only through the dedicated `OpenBufferPicker` action,
     /// not through this toggle.
     pub(crate) fn toggle_scope(&mut self, git_host: &dyn GitHost) {
-        self.scope = match self.scope {
-            FinderScope::All => {
-                self.modified_paths = query_modified(git_host, &self.core.git_root);
-                FinderScope::Modified
-            },
-            FinderScope::Modified => FinderScope::All,
-            FinderScope::Buffers => FinderScope::All,
-        };
+        let next = self.next_scope();
+        // Refresh the Modified list only when landing on it, so switching away
+        // skips the git discover call.
+        if next == FinderScope::Modified {
+            self.modified_paths = query_modified(git_host, &self.core.git_root);
+        }
+        self.scope = next;
         self.core.picklist.selected = 0;
         // Force refilter + preview resync on next render against the new base.
         self.core.invalidate();
+    }
+
+    /// The scope Shift-Tab lands on next: All -> Modified -> each named scope
+    /// (alphabetical) -> All, with Buffers exiting straight to All.
+    fn next_scope(&self) -> FinderScope {
+        match &self.scope {
+            FinderScope::All => FinderScope::Modified,
+            FinderScope::Modified => self
+                .named_scopes
+                .first()
+                .map(|(name, _)| FinderScope::Named(name.clone()))
+                .unwrap_or(FinderScope::All),
+            FinderScope::Named(current) => self
+                .named_scopes
+                .iter()
+                .position(|(name, _)| name == current)
+                .and_then(|idx| self.named_scopes.get(idx + 1))
+                .map(|(name, _)| FinderScope::Named(name.clone()))
+                .unwrap_or(FinderScope::All),
+            FinderScope::Buffers => FinderScope::All,
+        }
     }
 
     /// Re-run the matcher if the input text or scope has changed since last
@@ -185,13 +220,45 @@ impl FileFinder {
             browse.picker.refilter(&browse.partial);
             return;
         }
-        self.core.pump_walk();
+        let pumped = self.core.pump_walk();
         let text = self.input.text(ws);
-        match self.scope {
+        match self.scope.clone() {
             FinderScope::All => self.core.refilter(&text),
             FinderScope::Modified => self.core.refilter_with_base(&text, &self.modified_paths),
             FinderScope::Buffers => self.core.refilter_with_base(&text, &self.buffer_paths),
+            FinderScope::Named(name) => {
+                let stale = pumped
+                    || self
+                        .named_cache
+                        .as_ref()
+                        .map(|(n, _)| *n != name)
+                        .unwrap_or(true);
+                if stale {
+                    let filtered = self.filter_by_named_scope(&name);
+                    self.named_cache = Some((name.clone(), filtered));
+                }
+                let base = self
+                    .named_cache
+                    .as_ref()
+                    .map(|(_, base)| base.clone())
+                    .unwrap_or_default();
+                self.core.refilter_with_base(&text, &base);
+            },
         }
+    }
+
+    /// The subset of the walked `all_paths` whose repo-relative display matches
+    /// the named scope's globset. Empty for a scope name with no compiled set.
+    fn filter_by_named_scope(&self, name: &str) -> Vec<PathBuf> {
+        let Some((_, globset)) = self.named_scopes.iter().find(|(n, _)| n == name) else {
+            return Vec::new();
+        };
+        self.core
+            .all_paths
+            .iter()
+            .filter(|path| globset.is_match(paths::display_relative(path, &self.core.git_root)))
+            .cloned()
+            .collect()
     }
 
     /// Sync the preview pane to the current selection. Clears the pane when
@@ -261,6 +328,46 @@ pub(crate) fn split_path_query(
         return None;
     };
     Some((typed_dir.to_string(), root, partial))
+}
+
+/// Compile the config's named finder scopes into globsets, in BTreeMap
+/// (alphabetical) order so Shift-Tab cycles them predictably.
+///
+/// Invalid globs and unbuildable sets are warn-logged and skipped, so one bad
+/// pattern never breaks the finder.
+fn compile_named_scopes(finder_scopes: &BTreeMap<String, Vec<String>>) -> Vec<(String, GlobSet)> {
+    finder_scopes
+        .iter()
+        .filter_map(|(name, globs)| {
+            let mut builder = GlobSetBuilder::new();
+            for pattern in globs {
+                match Glob::new(pattern) {
+                    Ok(glob) => {
+                        builder.add(glob);
+                    },
+                    Err(err) => tracing::warn!(
+                        target: "stoat::finder",
+                        scope = %name,
+                        glob = %pattern,
+                        %err,
+                        "invalid finder scope glob, skipping"
+                    ),
+                }
+            }
+            match builder.build() {
+                Ok(globset) => Some((name.clone(), globset)),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat::finder",
+                        scope = %name,
+                        %err,
+                        "invalid finder scope globset, skipping"
+                    );
+                    None
+                },
+            }
+        })
+        .collect()
 }
 
 /// Query git for currently-modified files (staged + unstaged), returning
@@ -555,7 +662,7 @@ mod tests {
 
         h.type_keys("space g");
         let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
-        assert_eq!(finder.scope(), FinderScope::Modified);
+        assert_eq!(finder.scope(), &FinderScope::Modified);
         let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
         assert_eq!(base.len(), 1, "Modified scope should list only b.rs");
         assert!(base[0].ends_with("b.rs"));
@@ -588,7 +695,7 @@ mod tests {
 
         h.type_keys("space b b");
         let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
-        assert_eq!(finder.scope(), FinderScope::Buffers);
+        assert_eq!(finder.scope(), &FinderScope::Buffers);
         let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
         assert_eq!(base.len(), 2, "Buffers scope should list only open buffers");
         assert!(base.iter().any(|p| p.ends_with("a.rs")));
@@ -669,7 +776,7 @@ mod tests {
         h.type_keys("space b b");
         h.type_keys("backtab");
         let finder = h.stoat.file_finder.as_ref().unwrap();
-        assert_eq!(finder.scope(), FinderScope::All);
+        assert_eq!(finder.scope(), &FinderScope::All);
         assert_eq!(finder.core.picklist.base.len(), 3);
     }
 
@@ -690,7 +797,7 @@ mod tests {
         h.type_keys("space g");
         h.type_keys("backtab");
         let finder = h.stoat.file_finder.as_ref().unwrap();
-        assert_eq!(finder.scope(), FinderScope::All);
+        assert_eq!(finder.scope(), &FinderScope::All);
         assert_eq!(finder.core.picklist.base.len(), 3);
     }
 
@@ -712,18 +819,81 @@ mod tests {
         h.type_keys("space p");
         {
             let finder = h.stoat.file_finder.as_ref().unwrap();
-            assert_eq!(finder.scope(), FinderScope::All);
+            assert_eq!(finder.scope(), &FinderScope::All);
             let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
             assert_eq!(base.len(), 3, "All scope should list all 3 files");
         }
         h.type_keys("backtab");
         {
             let finder = h.stoat.file_finder.as_ref().unwrap();
-            assert_eq!(finder.scope(), FinderScope::Modified);
+            assert_eq!(finder.scope(), &FinderScope::Modified);
             let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
             assert_eq!(base.len(), 1);
             assert!(base[0].ends_with("b.rs"));
         }
+    }
+
+    #[test]
+    fn backtab_cycles_through_named_scopes() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/a.rs", ""), ("docs/b.md", "")]);
+        h.stoat.settings.finder_scopes = BTreeMap::from([
+            ("code".to_string(), vec!["src/**".to_string()]),
+            ("prose".to_string(), vec!["docs/**".to_string()]),
+        ]);
+
+        h.type_keys("space p");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::All
+        );
+
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::Modified
+        );
+
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::Named("code".to_string()),
+            "first backtab past Modified lands on the alphabetically-first scope"
+        );
+
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::Named("prose".to_string())
+        );
+
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::All,
+            "backtab past the last named scope wraps to All"
+        );
+    }
+
+    #[test]
+    fn named_scope_lists_only_glob_matching_files() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(
+            &mut h,
+            &[("src/a.rs", ""), ("docs/b.md", ""), ("README.md", "")],
+        );
+        h.stoat.settings.finder_scopes =
+            BTreeMap::from([("code".to_string(), vec!["src/**".to_string()])]);
+
+        h.type_keys("space p");
+        h.type_keys("backtab");
+        h.type_keys("backtab");
+
+        let finder = h.stoat.file_finder.as_ref().unwrap();
+        assert_eq!(finder.scope(), &FinderScope::Named("code".to_string()));
+        let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
+        assert_eq!(base.len(), 1, "code scope should list only src/a.rs");
+        assert!(base[0].ends_with("src/a.rs"));
     }
 
     #[test]

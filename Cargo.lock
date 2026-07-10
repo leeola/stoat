@@ -3939,6 +3939,7 @@ dependencies = [
  "etcetera",
  "futures",
  "git2",
+ "globset",
  "ignore",
  "insta",
  "libc",

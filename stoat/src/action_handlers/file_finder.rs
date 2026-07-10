@@ -124,6 +124,7 @@ pub(super) fn open_file_finder(
     let (walk_rx, walk_task) = spawn_workspace_walk(stoat, git_root.clone());
     let modified_paths = crate::file_finder::query_modified(&*stoat.git_host, &git_root);
     let buffer_paths = stoat.active_workspace().buffers.open_paths();
+    let finder_scopes = stoat.settings.finder_scopes.clone();
 
     let ws = stoat.active_workspace_mut();
     stoat.file_finder = Some(FileFinder::new(
@@ -136,6 +137,7 @@ pub(super) fn open_file_finder(
         walk_task,
         modified_paths,
         buffer_paths,
+        &finder_scopes,
     ));
     UpdateEffect::Redraw
 }
