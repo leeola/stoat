@@ -1112,6 +1112,16 @@ define_action!(
 );
 
 define_action!(
+    EnterInsertModeDef,
+    EnterInsertMode,
+    "EnterInsertMode",
+    ActionKind::EnterInsertMode,
+    "insert before selection",
+    "Reorient each selection so its head sits at its start, keeping the span, so entering insert mode places the insert point before the selection instead of near its end. A bare cursor is unchanged. Typically chained with `SetMode(insert)` for the `i` key.",
+    ActionPriority::Rare
+);
+
+define_action!(
     AppendModeDef,
     AppendMode,
     "AppendMode",

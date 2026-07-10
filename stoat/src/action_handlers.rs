@@ -264,6 +264,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoLineStart => movement::goto_line_start(stoat, false),
         ActionKind::GotoLineEnd => movement::goto_line_end(stoat, false),
         ActionKind::GotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, false),
+        ActionKind::EnterInsertMode => movement::enter_insert_mode(stoat),
         ActionKind::AppendMode => movement::append_mode(stoat),
         ActionKind::InsertAtLineEnd => movement::insert_at_line_end(stoat),
         ActionKind::OpenBelow => movement::open_line(stoat, movement::OpenDir::Below),

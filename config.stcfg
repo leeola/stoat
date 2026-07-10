@@ -235,7 +235,7 @@ on key {
         q -> ReplayMacro();
         Space -> SetMode(space);
         : -> OpenCommandPalette();
-        i -> SetMode(insert);
+        i -> [EnterInsertMode(), SetMode(insert)];
         a -> [AppendMode(), SetMode(insert)];
         I -> [GotoFirstNonwhitespace(), SetMode(insert)];
         A -> [InsertAtLineEnd(), SetMode(insert)];

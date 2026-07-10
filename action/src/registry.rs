@@ -11,8 +11,8 @@ use crate::{
             AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
             AlignViewBottom, AlignViewCenter, AlignViewTop, AppendMode, ChangeSelection,
             CloseBuffer, CollapseSelection, CommitUndoCheckpoint, Decrement, DeleteSelection,
-            DeleteSelectionNoYank, ExpandSelection, ExtendDown, ExtendFindNextChar,
-            ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
+            DeleteSelectionNoYank, EnterInsertMode, ExpandSelection, ExtendDown,
+            ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
             ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoWindowBottom,
             ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd,
             ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
@@ -463,6 +463,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoFirstNonwhitespace::DEF, |_| {
         Ok(Box::new(GotoFirstNonwhitespace))
     });
+    add(EnterInsertMode::DEF, |_| Ok(Box::new(EnterInsertMode)));
     add(AppendMode::DEF, |_| Ok(Box::new(AppendMode)));
     add(InsertAtLineEnd::DEF, |_| Ok(Box::new(InsertAtLineEnd)));
     add(OpenBelow::DEF, |_| Ok(Box::new(OpenBelow)));
@@ -1183,7 +1184,8 @@ mod tests {
         // + 1 SetCwd.
         // + 1 ReloadEnv.
         // + 2 AppendMode / InsertAtLineEnd.
-        assert_eq!(all().count(), 321);
+        // + 1 EnterInsertMode.
+        assert_eq!(all().count(), 322);
     }
 
     #[test]

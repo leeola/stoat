@@ -9189,6 +9189,16 @@ mod tests {
     }
 
     #[test]
+    fn i_on_selection_inserts_before_it() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "foo\n");
+        h.type_keys("%");
+        h.type_keys("i");
+        h.type_keys("X");
+        assert_eq!(buffer_text(&h, &path), "Xfoo\n");
+    }
+
+    #[test]
     fn tab_after_whitespace_inserts_tab() {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "  abc\n");

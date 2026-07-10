@@ -611,6 +611,27 @@ pub(crate) fn forward_block_cursor(
     }
 }
 
+/// Reorient each selection so its head sits at its start, keeping the span,
+/// so entering insert lands the insert point before the selection.
+///
+/// The min-width-1 counterpart to Helix's `i`. Swapping to head-at-start makes
+/// [`cursor_offset`] resolve to the selection start, so typing inserts before a
+/// multi-char selection rather than near its end. A bare cursor's span is
+/// unchanged and its cursor cell stays put, so this is a no-op there.
+pub(super) fn enter_insert_mode(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let mut new = sel.clone();
+        new.reversed = true;
+        new
+    });
+    UpdateEffect::Redraw
+}
+
 /// Position each cursor to append after its selection, at an insert point past
 /// the selection's last character.
 ///
