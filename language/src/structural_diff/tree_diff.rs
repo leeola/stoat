@@ -256,8 +256,8 @@ fn prepare_per_file(
     match shortest_path(
         &lhs_arena,
         &rhs_arena,
-        lhs_root,
-        rhs_root,
+        Some(lhs_root),
+        Some(rhs_root),
         DEFAULT_GRAPH_LIMIT,
         cancel,
     ) {

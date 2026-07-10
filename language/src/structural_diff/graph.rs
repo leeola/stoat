@@ -285,10 +285,10 @@ pub fn levenshtein_pct(a: &str, b: &str) -> u8 {
 /// node). The start vertex sits at the root pair; the search will
 /// match them via [`Edge::UnchangedNode`] or [`Edge::EnterUnchangedDelimiter`]
 /// or descend independently via the novel-delimiter edges.
-pub fn start_vertex(lhs_root: SyntaxId, rhs_root: SyntaxId) -> Vertex {
+pub fn start_vertex(lhs_root: Option<SyntaxId>, rhs_root: Option<SyntaxId>) -> Vertex {
     Vertex {
-        lhs_syntax: Some(lhs_root),
-        rhs_syntax: Some(rhs_root),
+        lhs_syntax: lhs_root,
+        rhs_syntax: rhs_root,
         parents: Stack::new(),
     }
 }

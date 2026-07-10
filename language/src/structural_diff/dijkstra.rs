@@ -70,8 +70,8 @@ const MAX_VARIANTS_PER_KEY: usize = 2;
 pub fn shortest_path(
     lhs_arena: &SyntaxArena,
     rhs_arena: &SyntaxArena,
-    lhs_root: SyntaxId,
-    rhs_root: SyntaxId,
+    lhs_root: Option<SyntaxId>,
+    rhs_root: Option<SyntaxId>,
     graph_limit: usize,
     cancel: Option<&AtomicBool>,
 ) -> SearchOutcome {
@@ -326,8 +326,8 @@ mod tests {
         let outcome = shortest_path(
             &lhs_arena,
             &rhs_arena,
-            lhs_root,
-            rhs_root,
+            Some(lhs_root),
+            Some(rhs_root),
             DEFAULT_GRAPH_LIMIT,
             None,
         );
@@ -353,8 +353,8 @@ mod tests {
         let outcome = shortest_path(
             &lhs_arena,
             &rhs_arena,
-            lhs_root,
-            rhs_root,
+            Some(lhs_root),
+            Some(rhs_root),
             DEFAULT_GRAPH_LIMIT,
             None,
         );
@@ -380,8 +380,8 @@ mod tests {
         let outcome = shortest_path(
             &lhs_arena,
             &rhs_arena,
-            lhs_root,
-            rhs_root,
+            Some(lhs_root),
+            Some(rhs_root),
             DEFAULT_GRAPH_LIMIT,
             None,
         );
