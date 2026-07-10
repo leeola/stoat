@@ -2,7 +2,7 @@ use crate::{
     buffer_registry::BufferRegistry,
     jumplist::{JumpEntry, JumpList},
 };
-use stoat_text::Anchor;
+use stoat_text::{Anchor, Selection};
 
 /// Modal listing every entry in the focused pane's [`JumpList`].
 ///
@@ -112,26 +112,24 @@ fn entry_row(entry: &JumpEntry, buffers: &BufferRegistry) -> JumplistEntry {
     }
 }
 
-/// The `(line, column, snippet)` of an entry's newest selection head, or `None`
-/// when the buffer is gone or carries no selection.
+/// The `(line, column, snippet)` of an entry's newest block-cursor cell, or
+/// `None` when the buffer is gone or carries no selection.
 fn resolve_location(entry: &JumpEntry, buffers: &BufferRegistry) -> Option<(u32, u32, String)> {
-    let head = newest_head(entry)?;
+    let selection = newest_selection(entry)?;
     let buffer = buffers.get(entry.buffer_id)?;
     let guard = buffer.read().ok()?;
     let rope = guard.rope();
-    let offset = guard.resolve_anchor(&head).min(rope.len());
+    let tail = guard.resolve_anchor(&selection.tail()).min(rope.len());
+    let head = guard.resolve_anchor(&selection.head()).min(rope.len());
+    let offset = stoat_text::cursor_offset(rope, tail, head);
     let point = rope.offset_to_point(offset);
     let raw = rope.line_at_row(point.row);
     let snippet: String = raw.trim_start().chars().take(SNIPPET_MAX_CHARS).collect();
     Some((point.row + 1, point.column + 1, snippet))
 }
 
-fn newest_head(entry: &JumpEntry) -> Option<Anchor> {
-    entry
-        .selections
-        .iter()
-        .max_by_key(|selection| selection.id)
-        .map(|selection| selection.head())
+fn newest_selection(entry: &JumpEntry) -> Option<&Selection<Anchor>> {
+    entry.selections.iter().max_by_key(|selection| selection.id)
 }
 
 #[cfg(test)]

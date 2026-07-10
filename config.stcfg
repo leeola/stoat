@@ -236,9 +236,9 @@ on key {
         Space -> SetMode(space);
         : -> OpenCommandPalette();
         i -> SetMode(insert);
-        a -> [MoveRight(), SetMode(insert)];
+        a -> [AppendMode(), SetMode(insert)];
         I -> [GotoFirstNonwhitespace(), SetMode(insert)];
-        A -> [GotoLineEnd(), SetMode(insert)];
+        A -> [InsertAtLineEnd(), SetMode(insert)];
         o -> [OpenBelow(), SetMode(insert)];
         O -> [OpenAbove(), SetMode(insert)];
         c -> [ChangeSelection(), SetMode(insert)];

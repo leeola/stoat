@@ -25,7 +25,6 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use stoat_text::Bias;
 
 /// The `additionalTextEdits` a `completionItem/resolve` returned for an
 /// accepted completion, plus the buffer they apply to. Carried from the
@@ -100,11 +99,14 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         active
     } else {
         let new_offset = edit_range.start + inserted_text.len();
-        let anchor = new_buf.anchor_at(new_offset, Bias::Right);
         editor.selections.transform(new_buf, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
+            crate::action_handlers::movement::forward_block_cursor(
+                s.id,
+                new_offset,
+                stoat_text::SelectionGoal::None,
+                new_buf.rope(),
+                new_buf,
+            )
         });
         None
     };

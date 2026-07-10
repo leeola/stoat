@@ -211,7 +211,11 @@ fn collect_surround_pairs(
             .selections
             .all_anchors()
             .iter()
-            .map(|sel| buffer_snapshot.resolve_anchor(&sel.head()))
+            .map(|sel| {
+                let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+                let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+                stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off)
+            })
             .collect();
         (buffer_id, cursors)
     };
@@ -543,8 +547,12 @@ mod tests {
         let editor = focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        buf_snap.resolve_anchor(&head)
+        let sel = editor.selections.newest_anchor();
+        stoat_text::cursor_offset(
+            buf_snap.rope(),
+            buf_snap.resolve_anchor(&sel.tail()),
+            buf_snap.resolve_anchor(&sel.head()),
+        )
     }
 
     #[test]
@@ -614,14 +622,13 @@ mod tests {
     }
 
     #[test]
-    fn surround_add_collapsed_selection_is_noop() {
+    fn surround_add_bare_cursor_wraps_char() {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
-        let before = cursor_offset(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(buffer_text(&h, &path), "(a)bc\n");
+        assert_eq!(cursor_offset(&mut h), 1);
         assert!(!h.stoat.pending_surround_add);
     }
 

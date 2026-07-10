@@ -264,6 +264,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoLineStart => movement::goto_line_start(stoat, false),
         ActionKind::GotoLineEnd => movement::goto_line_end(stoat, false),
         ActionKind::GotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, false),
+        ActionKind::AppendMode => movement::append_mode(stoat),
+        ActionKind::InsertAtLineEnd => movement::insert_at_line_end(stoat),
         ActionKind::OpenBelow => movement::open_line(stoat, movement::OpenDir::Below),
         ActionKind::OpenAbove => movement::open_line(stoat, movement::OpenDir::Above),
         ActionKind::ReplaceChar => movement::set_pending_replace(stoat),
@@ -1330,9 +1332,9 @@ mod tests {
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
     }
 
     #[test]
@@ -1399,7 +1401,7 @@ mod tests {
         editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MoveNextWordStart);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, false)]);
-        assert_eq!(editor::head_offsets(&mut stoat), vec![4]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
     }
 
     #[test]
@@ -1427,9 +1429,9 @@ mod tests {
         for _ in 0..3 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
         dispatch(&mut stoat, &MoveNextWordEnd);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
     }
 
     #[test]
@@ -1476,7 +1478,7 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MovePrevWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
     }
 
     #[test]
@@ -1497,7 +1499,7 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MovePrevWordEnd);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
     }
 
     #[test]
@@ -1618,9 +1620,9 @@ mod tests {
         editor::seed_focused_buffer(&mut stoat, "ab");
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, false)]);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, false)]);
     }
 
     #[test]
@@ -1636,10 +1638,12 @@ mod tests {
         assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 4, false)]);
         dispatch(&mut stoat, &ExtendLeft);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
+        // Crossing the 1-wide tail flips the range and steps the tail forward
+        // so the anchor's cell stays covered (Helix shrink-then-flip).
         dispatch(&mut stoat, &ExtendLeft);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 3, true)]);
         dispatch(&mut stoat, &ExtendLeft);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
     }
 
     #[test]
@@ -1661,7 +1665,7 @@ mod tests {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
     }
 
     #[test]
@@ -1670,7 +1674,7 @@ mod tests {
         editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
         dispatch(&mut stoat, &MoveDown);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(5, 5, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(5, 6, false)]);
         dispatch(&mut stoat, &ExtendUp);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 5, true)]);
     }
@@ -1708,7 +1712,7 @@ mod tests {
         for _ in 0..6 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 6, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 7, false)]);
         dispatch(&mut stoat, &ExtendPrevWordStart);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 6, true)]);
     }
@@ -1720,7 +1724,7 @@ mod tests {
         for _ in 0..6 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 6, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 7, false)]);
         dispatch(&mut stoat, &ExtendPrevWordEnd);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 6, true)]);
     }
@@ -1784,7 +1788,7 @@ mod tests {
         dispatch(&mut stoat, &ExtendRight);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
         dispatch(&mut stoat, &CollapseSelection);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
     }
 
     #[test]
@@ -1797,7 +1801,7 @@ mod tests {
         dispatch(&mut stoat, &MovePrevWordStart);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 7, true)]);
         dispatch(&mut stoat, &CollapseSelection);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 4, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 5, false)]);
     }
 
     #[test]
@@ -1813,7 +1817,7 @@ mod tests {
         dispatch(&mut stoat, &CollapseSelection);
         assert_eq!(
             editor::selection_spans(&mut stoat),
-            vec![(2, 2, false), (6, 6, false)]
+            vec![(1, 2, false), (5, 6, false)]
         );
     }
 
@@ -1831,13 +1835,13 @@ mod tests {
     }
 
     #[test]
-    fn flip_selections_empty_is_noop() {
+    fn flip_selections_on_bare_cursor_toggles_reversed() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 1, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, false)]);
         dispatch(&mut stoat, &FlipSelections);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 1, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, true)]);
     }
 
     #[test]
@@ -2370,8 +2374,8 @@ mod tests {
         dispatch(&mut stoat, &PageDown);
         assert_eq!(
             editor::cursor_display_positions(&mut stoat),
-            vec![(30, 0)],
-            "huge count should clamp at last content row"
+            vec![(29, 6)],
+            "huge count clamps the 1-wide cursor onto the last real cell, not the empty final row"
         );
     }
 

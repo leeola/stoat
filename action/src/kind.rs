@@ -148,6 +148,8 @@ pub enum ActionKind {
     GotoLineStart,
     GotoLineEnd,
     GotoFirstNonwhitespace,
+    AppendMode,
+    InsertAtLineEnd,
     OpenBelow,
     OpenAbove,
     ReplaceChar,

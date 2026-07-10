@@ -133,6 +133,8 @@ pub(crate) struct EditorStateSnapshot {
 impl EditorState {
     pub(crate) fn new(buffer_id: BufferId, buffer: SharedBuffer, executor: Executor) -> Self {
         let multi_buffer = MultiBuffer::singleton(buffer_id, buffer);
+        let mut selections = SelectionsCollection::new();
+        selections.seed_cursor(&multi_buffer.snapshot());
         Self {
             buffer_id,
             mode: "normal".into(),
@@ -144,7 +146,7 @@ impl EditorState {
             scroll_glide: false,
             viewport_rows: None,
             review_view: None,
-            selections: SelectionsCollection::new(),
+            selections,
             move_source_cursor: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
@@ -163,6 +165,8 @@ impl EditorState {
         multi_buffer: MultiBuffer,
         executor: Executor,
     ) -> Self {
+        let mut selections = SelectionsCollection::new();
+        selections.seed_cursor(&multi_buffer.snapshot());
         Self {
             buffer_id,
             mode: "normal".into(),
@@ -174,7 +178,7 @@ impl EditorState {
             scroll_glide: false,
             viewport_rows: None,
             review_view: None,
-            selections: SelectionsCollection::new(),
+            selections,
             move_source_cursor: None,
             expansion_history: Vec::new(),
             expansion_tip: None,

@@ -302,7 +302,12 @@ mod tests {
                 .expect("editor should be focused");
             let snapshot = editor.display_map.snapshot();
             let buffer_snapshot = snapshot.buffer_snapshot();
-            buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head())
+            let sel = editor.selections.newest_anchor();
+            stoat_text::cursor_offset(
+                buffer_snapshot.rope(),
+                buffer_snapshot.resolve_anchor(&sel.tail()),
+                buffer_snapshot.resolve_anchor(&sel.head()),
+            )
         };
         assert_eq!(cursor_offset, 11, "cursor should jump to gamma's start");
     }

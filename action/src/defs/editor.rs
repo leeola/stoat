@@ -1112,6 +1112,26 @@ define_action!(
 );
 
 define_action!(
+    AppendModeDef,
+    AppendMode,
+    "AppendMode",
+    ActionKind::AppendMode,
+    "append after selection",
+    "Position each cursor at an insert point just past its selection's last character, so text typed next lands after the selection. Under the min-width-1 model this reaches the position after the buffer's final character, which a block cursor cannot occupy. Typically chained with `SetMode(insert)` for the `a` key.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    InsertAtLineEndDef,
+    InsertAtLineEnd,
+    "InsertAtLineEnd",
+    ActionKind::InsertAtLineEnd,
+    "append at line end",
+    "Position each cursor at an insert point after the last character of its line (before the trailing newline, or at the buffer end). Typically chained with `SetMode(insert)` for the `A` key.",
+    ActionPriority::Rare
+);
+
+define_action!(
     OpenBelowDef,
     OpenBelow,
     "OpenBelow",

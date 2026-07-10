@@ -302,11 +302,13 @@ fn focused_editor_snapshot(stoat: &Stoat) -> Option<EditorSnapshot> {
         return None;
     };
     let editor = ws.editors.get(editor_id)?;
-    let head = editor.selections.newest_anchor().head();
+    let sel = editor.selections.newest_anchor();
     let buffer_id = editor.buffer_id;
     let buffer = ws.buffers.get(buffer_id)?;
     let guard = buffer.read().expect("buffer lock");
-    let cursor_offset = guard.resolve_anchor(&head);
+    let tail_off = guard.resolve_anchor(&sel.tail());
+    let head_off = guard.resolve_anchor(&sel.head());
+    let cursor_offset = stoat_text::cursor_offset(guard.rope(), tail_off, head_off);
     let rope = guard.rope().clone();
     let buffer_version = guard.version();
     drop(guard);

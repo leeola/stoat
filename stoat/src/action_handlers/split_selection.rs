@@ -171,14 +171,14 @@ mod tests {
     }
 
     #[test]
-    fn submit_with_zero_width_selection_passes_through() {
+    fn submit_with_no_match_passes_through() {
         let mut h = Stoat::test();
         h.seed_focused_buffer("abc");
         dispatch(&mut h.stoat, &action::SplitSelection);
         h.type_text("\\d+");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
-        assert_eq!(spans, vec![(0, 0, false)]);
+        assert_eq!(spans, vec![(0, 1, false)]);
     }
 
     #[test]

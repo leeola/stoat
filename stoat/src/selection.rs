@@ -1,6 +1,6 @@
 use crate::multi_buffer::MultiBufferSnapshot;
 use serde::{Deserialize, Serialize};
-use stoat_text::{Anchor, Selection, SelectionGoal};
+use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SelectionsCollection {
@@ -42,14 +42,27 @@ impl SelectionsCollection {
     ) {
         let new_offset = snapshot.resolve_anchor(&head);
 
+        // Widen to the 1-wide block before deduping. At the rope end the block
+        // widens backward, so its start is not `new_offset`. Deduping on the
+        // widened span keeps a clamped multi-cursor from stacking identical
+        // cursors on the last cell.
+        let widened = Selection {
+            id: 0usize,
+            start: new_offset,
+            end: new_offset,
+            reversed: false,
+            goal,
+        }
+        .min_width_1(snapshot.rope());
+
         let pos = self
             .disjoint
-            .binary_search_by(|s| snapshot.resolve_anchor(&s.start).cmp(&new_offset))
+            .binary_search_by(|s| snapshot.resolve_anchor(&s.start).cmp(&widened.start))
             .unwrap_or_else(|p| p);
 
         if let Some(existing) = self.disjoint.get(pos)
-            && existing.is_empty()
-            && snapshot.resolve_anchor(&existing.start) == new_offset
+            && snapshot.resolve_anchor(&existing.start) == widened.start
+            && snapshot.resolve_anchor(&existing.end) == widened.end
         {
             return;
         }
@@ -58,12 +71,23 @@ impl SelectionsCollection {
         self.next_selection_id += 1;
         let selection = Selection {
             id,
-            start: head,
-            end: head,
+            start: snapshot.anchor_at(widened.start, Bias::Right),
+            end: snapshot.anchor_at(widened.end, Bias::Right),
             reversed: false,
             goal,
         };
         self.disjoint.insert(pos, selection);
+    }
+
+    /// Replace the collection with a single 1-wide block cursor over the first
+    /// character, widened against `snapshot`.
+    ///
+    /// Seeds a freshly opened editor so its initial cursor covers a character
+    /// like Helix, rather than the zero-width placeholder [`Self::new`] holds
+    /// before a rope is available. An empty buffer leaves a zero-width cursor.
+    pub(crate) fn seed_cursor(&mut self, snapshot: &MultiBufferSnapshot) {
+        self.disjoint = vec![block_cursor_at(0, SelectionGoal::None, 0, snapshot)];
+        self.next_selection_id = 1;
     }
 
     pub(crate) fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
@@ -166,24 +190,51 @@ impl SelectionsCollection {
             .collect();
         indexed.sort_by_key(|(offset, sel)| (*offset, sel.id));
 
+        // Merge selections that resolve to the same span, keeping the
+        // highest-id survivor. Under the min-width-1 model duplicate cursors
+        // are identical 1-wide ranges rather than empty points (e.g. a
+        // multi-cursor page motion landing every cursor on one row), so the
+        // dedupe keys on the whole span, not just an empty offset. Sorted by
+        // start offset, any duplicate is adjacent to its twin.
         let mut deduped: Vec<Selection<Anchor>> = Vec::with_capacity(indexed.len());
-        let mut last_empty_offset: Option<usize> = None;
         for (offset, sel) in indexed {
-            if sel.is_empty() {
-                if last_empty_offset == Some(offset) {
-                    let prev = deduped.last_mut().expect("empty collision without prior");
-                    if sel.id > prev.id {
-                        *prev = sel;
-                    }
-                    continue;
+            if let Some(prev) = deduped.last_mut()
+                && snapshot.resolve_anchor(&prev.start) == offset
+                && snapshot.resolve_anchor(&prev.end) == snapshot.resolve_anchor(&sel.end)
+            {
+                if sel.id > prev.id {
+                    *prev = sel;
                 }
-                last_empty_offset = Some(offset);
-            } else {
-                last_empty_offset = None;
+                continue;
             }
             deduped.push(sel);
         }
         self.disjoint = deduped;
+    }
+}
+
+/// Build a forward 1-wide block cursor covering the character at `offset`,
+/// widening backward at the rope end where there is no next character.
+fn block_cursor_at(
+    offset: usize,
+    goal: SelectionGoal,
+    id: usize,
+    snapshot: &MultiBufferSnapshot,
+) -> Selection<Anchor> {
+    let widened = Selection {
+        id,
+        start: offset,
+        end: offset,
+        reversed: false,
+        goal,
+    }
+    .min_width_1(snapshot.rope());
+    Selection {
+        id,
+        start: snapshot.anchor_at(widened.start, Bias::Right),
+        end: snapshot.anchor_at(widened.end, Bias::Right),
+        reversed: false,
+        goal,
     }
 }
 
@@ -439,12 +490,15 @@ mod tests {
             new
         });
 
+        // insert_cursor now seeds 1-wide forward cursors, so the two inserted
+        // heads sit one cell past their seed (offsets 3 and 5). The untouched
+        // zero-width default at 0 advances to 1.
         let offsets: Vec<usize> = collection
             .all_anchors()
             .iter()
             .map(|s| snapshot.resolve_anchor(&s.start))
             .collect();
-        assert_eq!(offsets, vec![1, 3, 5]);
+        assert_eq!(offsets, vec![1, 4, 6]);
     }
 
     #[test]
@@ -506,12 +560,14 @@ mod tests {
             new
         });
 
+        // 1-wide insert_cursor puts the two heads at 3 and 8. The swap maps
+        // them to 6 and 1, and the zero-width default stays at 0.
         let offsets: Vec<usize> = collection
             .all_anchors()
             .iter()
             .map(|s| snapshot.resolve_anchor(&s.start))
             .collect();
-        assert_eq!(offsets, vec![0, 2, 7]);
+        assert_eq!(offsets, vec![0, 1, 6]);
     }
 
     #[test]
@@ -883,11 +939,7 @@ mod tests {
         h.open_file(&path);
         h.type_keys("l l l l l l");
         h.type_keys("g h");
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let head = buf_snap.resolve_anchor(&editor.selections.newest_anchor().head());
-        assert_eq!(head, 0);
+        assert_eq!(h.primary_head_offset(), 0);
     }
 
     #[test]
@@ -896,11 +948,7 @@ mod tests {
         let path = h.write_file("s.txt", "abc def\n");
         h.open_file(&path);
         h.type_keys("g l");
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let head = buf_snap.resolve_anchor(&editor.selections.newest_anchor().head());
-        assert_eq!(head, 7);
+        assert_eq!(h.primary_head_offset(), 7);
     }
 
     #[test]
@@ -1630,8 +1678,14 @@ mod tests {
         h.type_keys("h h");
         let after = h.selection_spans();
         assert_ne!(after, before, "selection should have extended");
+        // Extending left past the 1-wide anchor flips the range and steps the
+        // tail one cell forward (Helix shrink-then-flip), so `d`'s cell stays
+        // covered. `bcd` is selected (1..4) with the cursor on `b`.
         assert_eq!(after[0].0, 1, "tail of extended selection at byte 1");
-        assert_eq!(after[0].1, 3, "head of extended selection back at byte 3");
+        assert_eq!(
+            after[0].1, 4,
+            "end covers `d`, cursor (reversed head) on `b`"
+        );
     }
 
     #[test]
@@ -1775,7 +1829,11 @@ mod tests {
         assert!(before.1 > before.0, "selection should be non-empty");
         h.type_keys(";");
         let after = h.selection_spans()[0];
-        assert_eq!(after.0, after.1, "; should collapse to a cursor");
+        assert_eq!(
+            (after.0, after.1),
+            (3, 4),
+            "; collapses to a 1-wide cursor on the last selected cell"
+        );
     }
 
     #[test]
@@ -1951,8 +2009,8 @@ mod tests {
         let (start, end, _) = h.selection_spans()[0];
         assert_eq!(
             (start, end),
-            (4, 4),
-            "normal-mode find collapses to cursor at the 'e'"
+            (4, 5),
+            "normal-mode find lands a 1-wide cursor on the 'e'"
         );
     }
 
@@ -2045,7 +2103,11 @@ mod tests {
         h.type_keys("l l l l l l l l l l l l l l l l");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveParentNodeStart);
         let (start, end, _) = h.selection_spans()[0];
-        assert_eq!(start, end, "normal-mode parent jump collapses to cursor");
+        assert_eq!(
+            end,
+            start + 1,
+            "normal-mode parent jump collapses to a 1-wide cursor"
+        );
     }
 
     #[test]
@@ -2096,10 +2158,10 @@ mod tests {
         h.open_file(&path);
         h.type_keys("v");
         h.type_keys("g j");
-        let head = h.primary_head_offset();
         assert_eq!(
-            head, 7,
-            "cursor on start of last content line, head one past"
+            h.primary_head_offset(),
+            6,
+            "block cursor lands on the last content line's char (`d`)"
         );
         assert_eq!(h.stoat.focused_mode(), "select");
     }
@@ -2140,7 +2202,7 @@ mod tests {
         h.type_keys("8 l");
         h.type_keys("g i");
         let (start, end, _) = h.selection_spans()[0];
-        assert_eq!((start, end), (4, 4));
+        assert_eq!((start, end), (4, 5));
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
@@ -2173,13 +2235,12 @@ mod tests {
     }
 
     #[test]
-    fn switch_case_empty_selection_is_noop() {
+    fn switch_case_on_bare_cursor_toggles_char() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");
         h.open_file(&path);
-        let before = focused_buffer_text(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-        assert_eq!(focused_buffer_text(&mut h), before);
+        assert_eq!(focused_buffer_text(&mut h), "Abc\n");
     }
 
     #[test]
@@ -2253,13 +2314,12 @@ mod tests {
     }
 
     #[test]
-    fn delete_selection_empty_is_noop() {
+    fn delete_selection_on_bare_cursor_deletes_char() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "hello\n");
         h.open_file(&path);
-        let before = focused_buffer_text(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
-        assert_eq!(focused_buffer_text(&mut h), before);
+        assert_eq!(focused_buffer_text(&mut h), "ello\n");
     }
 
     #[test]
@@ -2923,7 +2983,8 @@ mod tests {
         let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
         h.open_file(&path);
         h.type_keys("l l l");
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        // A 1-wide cursor already sits on the `a` identifier node, so a single
+        // expand reaches the enclosing function_item.
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
         let on_first_fn = h.selection_spans();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
@@ -2941,7 +3002,8 @@ mod tests {
         let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
         h.open_file(&path);
         h.type_keys("l l l");
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        // A 1-wide cursor already sits on the `a` identifier node, so a single
+        // expand reaches the enclosing function_item.
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
         let on_first_fn = h.selection_spans();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
@@ -2955,7 +3017,9 @@ mod tests {
         let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
         h.open_file(&path);
         h.type_keys("l l l");
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        // A 1-wide cursor already sits on the `a` identifier node, so a single
+        // expand reaches the enclosing function_item (a zero-width cursor
+        // needed two).
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectAllSiblings);
         let spans = h.selection_spans();
@@ -3096,7 +3160,11 @@ mod tests {
         );
         let spans = h.selection_spans();
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].0, spans[0].1, "selection collapsed to cursor");
+        assert_eq!(
+            spans[0].1,
+            spans[0].0 + 1,
+            "parent jump collapses to a 1-wide cursor"
+        );
     }
 
     #[test]
@@ -3114,7 +3182,11 @@ mod tests {
         );
         let spans = h.selection_spans();
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].0, spans[0].1, "selection collapsed to cursor");
+        assert_eq!(
+            spans[0].1,
+            spans[0].0 + 1,
+            "parent jump collapses to a 1-wide cursor"
+        );
     }
 
     #[test]
@@ -3505,9 +3577,10 @@ mod tests {
         );
         assert_eq!(
             h.primary_head_offset(),
-            16,
+            15,
             "long-word treats `foo.bar` as one word, so 3W from offset 0 \
-             advances past `baz qux ` to the start of `quux`"
+             selects up to `quux` (head at 16); the block cursor sits one \
+             cell back, on the space at 15"
         );
     }
 

@@ -3472,8 +3472,12 @@ impl Stoat {
         let editor = action_handlers::focused_editor_mut(self)?;
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buffer_snapshot.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let offset = stoat_text::cursor_offset(
+            buffer_snapshot.rope(),
+            buffer_snapshot.resolve_anchor(&sel.tail()),
+            buffer_snapshot.resolve_anchor(&sel.head()),
+        );
         Some((editor.buffer_id, offset))
     }
 
@@ -3494,8 +3498,12 @@ impl Stoat {
             }
             let snapshot = editor.display_map.snapshot();
             let buffer_snapshot = snapshot.buffer_snapshot();
-            let head = editor.selections.newest_anchor().head();
-            let offset = buffer_snapshot.resolve_anchor(&head);
+            let sel = editor.selections.newest_anchor();
+            let offset = stoat_text::cursor_offset(
+                buffer_snapshot.rope(),
+                buffer_snapshot.resolve_anchor(&sel.tail()),
+                buffer_snapshot.resolve_anchor(&sel.head()),
+            );
             buffer_snapshot.rope().offset_to_point(offset).row
         };
 
@@ -3737,8 +3745,12 @@ impl Stoat {
         let display_snapshot = editor.display_map.snapshot();
         let buf_snapshot = display_snapshot.buffer_snapshot();
         let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
         let rope = buf_snapshot.rope();
+        let offset = stoat_text::cursor_offset(
+            rope,
+            buf_snapshot.resolve_anchor(&sel.tail()),
+            buf_snapshot.resolve_anchor(&sel.head()),
+        );
         for ch in rope.reversed_chars_at(offset) {
             if ch == '\n' {
                 return true;
@@ -3923,12 +3935,17 @@ impl Stoat {
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
         editor.selections.transform(new_buf, |s| {
-            let mut new = s.clone();
             if let Some(&new_offset) = new_offsets.get(&s.id) {
-                let anchor = new_buf.anchor_at(new_offset, Bias::Right);
-                new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+                action_handlers::movement::forward_block_cursor(
+                    s.id,
+                    new_offset,
+                    stoat_text::SelectionGoal::None,
+                    new_buf.rope(),
+                    new_buf,
+                )
+            } else {
+                s.clone()
             }
-            new
         });
     }
 
@@ -3938,7 +3955,10 @@ impl Stoat {
         let editor = ws.editors.get_mut(editor_id)?;
         let snapshot = editor.display_map.snapshot();
         let buf = snapshot.buffer_snapshot();
-        Some(buf.resolve_anchor(&editor.selections.newest_anchor().head()))
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buf.resolve_anchor(&sel.tail());
+        let head_off = buf.resolve_anchor(&sel.head());
+        Some(stoat_text::cursor_offset(buf.rope(), tail_off, head_off))
     }
 
     /// Leading whitespace to give a new line inserted at `cursor_offset`.
@@ -4019,11 +4039,14 @@ impl Stoat {
         }
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        let anchor = new_buf.anchor_at(start, Bias::Right);
         editor.selections.transform(new_buf, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
+            action_handlers::movement::forward_block_cursor(
+                s.id,
+                start,
+                stoat_text::SelectionGoal::None,
+                new_buf.rope(),
+                new_buf,
+            )
         });
     }
 
@@ -4054,11 +4077,14 @@ impl Stoat {
         }
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        let anchor = new_buf.anchor_at(start, Bias::Right);
         editor.selections.transform(new_buf, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
+            action_handlers::movement::forward_block_cursor(
+                s.id,
+                start,
+                stoat_text::SelectionGoal::None,
+                new_buf.rope(),
+                new_buf,
+            )
         });
     }
 
@@ -5157,11 +5183,14 @@ impl Stoat {
         };
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let anchor = buf_snap.anchor_at(offset, Bias::Right);
         editor.selections.transform(buf_snap, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
+            action_handlers::movement::land_block_cursor(
+                s.id,
+                offset,
+                stoat_text::SelectionGoal::None,
+                buf_snap.rope(),
+                buf_snap,
+            )
         });
     }
 
@@ -5180,11 +5209,14 @@ impl Stoat {
         };
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let anchor = buf_snap.anchor_at(offset, Bias::Right);
         editor.selections.transform(buf_snap, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
+            action_handlers::movement::land_block_cursor(
+                s.id,
+                offset,
+                stoat_text::SelectionGoal::None,
+                buf_snap.rope(),
+                buf_snap,
+            )
         });
     }
 }
@@ -9127,12 +9159,12 @@ mod tests {
     }
 
     #[test]
-    fn replace_char_on_collapsed_selection_is_noop() {
+    fn replace_char_on_bare_cursor_replaces_char() {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "abc");
         h.type_keys("r");
         h.type_keys("X");
-        assert_eq!(buffer_text(&h, &path), "abc");
+        assert_eq!(buffer_text(&h, &path), "Xbc");
         assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(!h.stoat.pending_replace);
     }

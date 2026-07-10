@@ -351,12 +351,14 @@ fn open_symbol_pick(stoat: &mut Stoat, candidates: Vec<SymbolKey>) -> UpdateEffe
     UpdateEffect::Redraw
 }
 
-/// The primary selection head resolved to a buffer offset.
+/// The primary selection's block-cursor cell resolved to a buffer offset.
 fn focused_offset(editor: &mut EditorState) -> usize {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let head = editor.selections.newest_anchor().head();
-    buffer_snapshot.resolve_anchor(&head)
+    let sel = editor.selections.newest_anchor();
+    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+    stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off)
 }
 
 #[cfg(test)]

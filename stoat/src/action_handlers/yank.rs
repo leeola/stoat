@@ -461,8 +461,12 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        buf_snap.resolve_anchor(&head)
+        let sel = editor.selections.newest_anchor();
+        stoat_text::cursor_offset(
+            buf_snap.rope(),
+            buf_snap.resolve_anchor(&sel.tail()),
+            buf_snap.resolve_anchor(&sel.head()),
+        )
     }
 
     #[test]
@@ -480,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn yank_collapsed_selection_is_noop() {
+    fn yank_bare_cursor_yanks_char() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
@@ -489,7 +493,7 @@ mod tests {
             .registers
             .read(crate::register::Register::Unnamed)
             .map(|f| f.join("\n"));
-        assert_eq!(stored, None);
+        assert_eq!(stored, Some("a".to_string()));
     }
 
     #[test]
@@ -501,7 +505,7 @@ mod tests {
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(buffer_text(&h, &path), "abcabc\n");
-        assert_eq!(cursor_offset(&mut h), 6);
+        assert_eq!(cursor_offset(&mut h), 5);
     }
 
     #[test]
@@ -513,7 +517,7 @@ mod tests {
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteBefore);
         assert_eq!(buffer_text(&h, &path), "abcabc\n");
-        assert_eq!(cursor_offset(&mut h), 3);
+        assert_eq!(cursor_offset(&mut h), 2);
     }
 
     #[test]
@@ -533,7 +537,7 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("h");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abcabc\n");
+        assert_eq!(buffer_text(&h, &path), "ababcc\n");
     }
 
     #[test]
@@ -769,7 +773,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abab\ncd\nabef\nab");
+        assert_eq!(buffer_text(&h, &path), "abab\ncdab\nefab\n");
     }
 
     #[test]
@@ -829,11 +833,11 @@ mod tests {
     }
 
     #[test]
-    fn yank_to_clipboard_with_collapsed_selection_is_noop() {
+    fn yank_to_clipboard_bare_cursor_yanks_char() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::YankToClipboard);
-        assert_eq!(h.fake_clipboard().writes(), Vec::<String>::new());
+        assert_eq!(h.fake_clipboard().writes(), vec!["a".to_string()]);
     }
 
     #[test]

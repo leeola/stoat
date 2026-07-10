@@ -1142,8 +1142,12 @@ fn review_cursor_file_target(stoat: &mut Stoat) -> Option<(std::path::PathBuf, u
         editor.review_view.as_ref()?;
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buffer_snapshot.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let offset = stoat_text::cursor_offset(
+            buffer_snapshot.rope(),
+            buffer_snapshot.resolve_anchor(&sel.tail()),
+            buffer_snapshot.resolve_anchor(&sel.head()),
+        );
         buffer_snapshot.rope().offset_to_point(offset).row
     };
 
@@ -1194,10 +1198,13 @@ pub(super) fn review_cursor_file_position(
         editor.review_view.as_ref()?;
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let point = buffer_snapshot
-            .rope()
-            .offset_to_point(buffer_snapshot.resolve_anchor(&head));
+        let sel = editor.selections.newest_anchor();
+        let offset = stoat_text::cursor_offset(
+            buffer_snapshot.rope(),
+            buffer_snapshot.resolve_anchor(&sel.tail()),
+            buffer_snapshot.resolve_anchor(&sel.head()),
+        );
+        let point = buffer_snapshot.rope().offset_to_point(offset);
         (point.row, point.column)
     };
 
@@ -1289,8 +1296,12 @@ fn cursor_move_provenance(stoat: &mut Stoat, dir: MoveJumpDir) -> Option<MovePro
         editor.review_view.as_ref()?;
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buffer_snapshot.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let offset = stoat_text::cursor_offset(
+            buffer_snapshot.rope(),
+            buffer_snapshot.resolve_anchor(&sel.tail()),
+            buffer_snapshot.resolve_anchor(&sel.head()),
+        );
         buffer_snapshot.rope().offset_to_point(offset).row
     };
 
@@ -1363,8 +1374,15 @@ fn toggle_diff_on(stoat: &mut Stoat) -> UpdateEffect {
         };
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        (editor.buffer_id, buffer_snapshot.resolve_anchor(&head))
+        let sel = editor.selections.newest_anchor();
+        (
+            editor.buffer_id,
+            stoat_text::cursor_offset(
+                buffer_snapshot.rope(),
+                buffer_snapshot.resolve_anchor(&sel.tail()),
+                buffer_snapshot.resolve_anchor(&sel.head()),
+            ),
+        )
     };
 
     let target_chunk = {

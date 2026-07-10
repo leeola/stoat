@@ -83,7 +83,12 @@ mod tests {
         let editor = focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        buf_snap.resolve_anchor(&editor.selections.newest_anchor().head())
+        let sel = editor.selections.newest_anchor();
+        stoat_text::cursor_offset(
+            buf_snap.rope(),
+            buf_snap.resolve_anchor(&sel.tail()),
+            buf_snap.resolve_anchor(&sel.head()),
+        )
     }
 
     #[test]

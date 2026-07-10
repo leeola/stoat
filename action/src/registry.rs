@@ -9,8 +9,8 @@ use crate::{
         dump::Dump,
         editor::{
             AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
-            AlignViewBottom, AlignViewCenter, AlignViewTop, ChangeSelection, CloseBuffer,
-            CollapseSelection, CommitUndoCheckpoint, Decrement, DeleteSelection,
+            AlignViewBottom, AlignViewCenter, AlignViewTop, AppendMode, ChangeSelection,
+            CloseBuffer, CollapseSelection, CommitUndoCheckpoint, Decrement, DeleteSelection,
             DeleteSelectionNoYank, ExpandSelection, ExtendDown, ExtendFindNextChar,
             ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
             ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoWindowBottom,
@@ -25,15 +25,15 @@ use crate::{
             GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
             GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
-            IndentSelection, InsertRegister, JumpBackward, JumpForward, KeepPrimarySelection,
-            KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets, MoveDown, MoveLeft,
-            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
-            MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
-            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
-            OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput,
-            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
-            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
-            RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
+            IndentSelection, InsertAtLineEnd, InsertRegister, JumpBackward, JumpForward,
+            KeepPrimarySelection, KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets,
+            MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
+            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
+            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
+            OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker,
+            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
+            PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection,
+            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
             RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
             SearchPrev, SelectAll, SelectAllChildren, SelectAllSiblings, SelectLineBelow,
             SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
@@ -463,6 +463,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoFirstNonwhitespace::DEF, |_| {
         Ok(Box::new(GotoFirstNonwhitespace))
     });
+    add(AppendMode::DEF, |_| Ok(Box::new(AppendMode)));
+    add(InsertAtLineEnd::DEF, |_| Ok(Box::new(InsertAtLineEnd)));
     add(OpenBelow::DEF, |_| Ok(Box::new(OpenBelow)));
     add(OpenAbove::DEF, |_| Ok(Box::new(OpenAbove)));
     add(ReplaceChar::DEF, |_| Ok(Box::new(ReplaceChar)));
@@ -1180,7 +1182,8 @@ mod tests {
         // + 4 GlobalSearchPicker Next/Prev/Select/Close.
         // + 1 SetCwd.
         // + 1 ReloadEnv.
-        assert_eq!(all().count(), 319);
+        // + 2 AppendMode / InsertAtLineEnd.
+        assert_eq!(all().count(), 321);
     }
 
     #[test]

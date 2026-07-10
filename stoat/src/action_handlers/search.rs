@@ -124,7 +124,7 @@ pub(super) fn search_prev(stoat: &mut Stoat) -> UpdateEffect {
 /// and the cursor moved. Invalid regex is treated as no match.
 fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> bool {
     use crate::pane::View;
-    use stoat_text::{Bias, SelectionGoal};
+    use stoat_text::SelectionGoal;
 
     let Ok(regex) = compile_search_regex(query) else {
         return false;
@@ -140,21 +140,23 @@ fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> 
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
     let text = rope.to_string();
-    let head = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
+    let sel = editor.selections.newest_anchor();
+    let cursor = stoat_text::cursor_offset(
+        rope,
+        buffer_snapshot.resolve_anchor(&sel.tail()),
+        buffer_snapshot.resolve_anchor(&sel.head()),
+    );
     let len = text.len();
 
     let target = match direction {
-        SearchDirection::Forward => find_forward(&regex, &text, head, len),
-        SearchDirection::Reverse => find_reverse(&regex, &text, head),
+        SearchDirection::Forward => find_forward(&regex, &text, cursor, len),
+        SearchDirection::Reverse => find_reverse(&regex, &text, cursor),
     };
     let Some(target) = target else { return false };
 
     let new_buf = buffer_snapshot;
-    let anchor = new_buf.anchor_at(target, Bias::Left);
     editor.selections.transform(new_buf, |sel| {
-        let mut new = sel.clone();
-        new.collapse_to(anchor, SelectionGoal::None);
-        new
+        super::movement::land_block_cursor(sel.id, target, SelectionGoal::None, rope, new_buf)
     });
     true
 }
@@ -222,8 +224,12 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        buf_snap.resolve_anchor(&head)
+        let sel = editor.selections.newest_anchor();
+        stoat_text::cursor_offset(
+            buf_snap.rope(),
+            buf_snap.resolve_anchor(&sel.tail()),
+            buf_snap.resolve_anchor(&sel.head()),
+        )
     }
 
     fn cached_match_count(h: &mut TestHarness) -> usize {

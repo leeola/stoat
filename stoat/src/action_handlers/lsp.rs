@@ -83,8 +83,10 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
         };
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buffer_snapshot.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off);
         (offset, editor.buffer_id, buffer_snapshot.rope().clone())
     };
 
@@ -712,8 +714,10 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
         let editor = crate::action_handlers::focused_editor_mut(stoat)?;
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buf_snap.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buf_snap.resolve_anchor(&sel.tail());
+        let head_off = buf_snap.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
         (
             offset,
             editor.buffer_id,
@@ -958,8 +962,10 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         };
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buf_snap.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buf_snap.resolve_anchor(&sel.tail());
+        let head_off = buf_snap.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
         (
             offset,
             editor.buffer_id,
@@ -1258,8 +1264,10 @@ fn focused_edit_snapshot(stoat: &mut Stoat) -> Option<(BufferId, u64, Rope, usiz
     let editor = crate::action_handlers::focused_editor_mut(stoat)?;
     let snapshot = editor.display_map.snapshot();
     let buf_snap = snapshot.buffer_snapshot();
-    let head = editor.selections.newest_anchor().head();
-    let offset = buf_snap.resolve_anchor(&head);
+    let sel = editor.selections.newest_anchor();
+    let tail_off = buf_snap.resolve_anchor(&sel.tail());
+    let head_off = buf_snap.resolve_anchor(&sel.head());
+    let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
     Some((
         editor.buffer_id,
         buf_snap.version(),
@@ -1288,8 +1296,10 @@ pub(crate) fn request_signature_help(stoat: &mut Stoat) {
         };
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buf_snap.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buf_snap.resolve_anchor(&sel.tail());
+        let head_off = buf_snap.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
         (
             offset,
             editor.buffer_id,
@@ -1720,8 +1730,10 @@ fn build_document_highlight_request(
         }
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buf_snap.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buf_snap.resolve_anchor(&sel.tail());
+        let head_off = buf_snap.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
         (
             editor.buffer_id,
             buf_snap.version(),
@@ -2519,7 +2531,9 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         let sel = editor.selections.newest_anchor();
         let start = buf_snap.resolve_anchor(&sel.start);
         let end = buf_snap.resolve_anchor(&sel.end);
-        let head = buf_snap.resolve_anchor(&sel.head());
+        let tail_off = buf_snap.resolve_anchor(&sel.tail());
+        let head_off = buf_snap.resolve_anchor(&sel.head());
+        let head = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
         let (lo, hi) = if start <= end {
             (start, end)
         } else {
@@ -2797,8 +2811,10 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
         };
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let offset = buf_snap.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buf_snap.resolve_anchor(&sel.tail());
+        let head_off = buf_snap.resolve_anchor(&sel.head());
+        let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
         (offset, editor.buffer_id, buf_snap.rope().clone())
     };
 
@@ -2872,8 +2888,10 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 };
                 let snapshot = editor.display_map.snapshot();
                 let buf_snap = snapshot.buffer_snapshot();
-                let head = editor.selections.newest_anchor().head();
-                buf_snap.resolve_anchor(&head)
+                let sel = editor.selections.newest_anchor();
+                let tail_off = buf_snap.resolve_anchor(&sel.tail());
+                let head_off = buf_snap.resolve_anchor(&sel.head());
+                stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off)
             };
             let executor = stoat.executor.clone();
             let ws = stoat.active_workspace_mut();
@@ -3028,8 +3046,13 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         };
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        (buf_snap.resolve_anchor(&head), editor.buffer_id)
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buf_snap.resolve_anchor(&sel.tail());
+        let head_off = buf_snap.resolve_anchor(&sel.head());
+        (
+            stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off),
+            editor.buffer_id,
+        )
     };
 
     let Some(source_path) = stoat
@@ -3248,8 +3271,10 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         };
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        buf_snap.resolve_anchor(&head)
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buf_snap.resolve_anchor(&sel.tail());
+        let head_off = buf_snap.resolve_anchor(&sel.head());
+        stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off)
     };
 
     let executor = stoat.executor.clone();
@@ -4077,8 +4102,12 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        buffer_snapshot.resolve_anchor(&head)
+        let sel = editor.selections.newest_anchor();
+        stoat_text::cursor_offset(
+            buffer_snapshot.rope(),
+            buffer_snapshot.resolve_anchor(&sel.tail()),
+            buffer_snapshot.resolve_anchor(&sel.head()),
+        )
     }
 
     #[test]

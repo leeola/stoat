@@ -362,7 +362,10 @@ pub(crate) fn render_editor_with_overlay(
     editor.cursor_screen_cell = primary_cell;
 
     if let Some((path, set)) = diagnostic_info {
-        let cursor = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+        let cursor = cursor_offset(rope, tail_off, head_off);
         let cursor_diag = diagnostic_at_offset(set, path, rope, cursor);
         let hover_diag = hover_cell.and_then(|(hx, hy)| {
             let col = hx.checked_sub(content_area.x)?;

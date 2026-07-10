@@ -3,7 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
 };
 use std::path::PathBuf;
-use stoat_text::Point;
+use stoat_text::{cursor_offset, Bias, Point};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MarkRequest {
@@ -39,30 +39,38 @@ pub(crate) fn execute_mark(stoat: &mut Stoat, request: MarkRequest, ch: char) ->
 }
 
 fn set_mark_at_cursor(stoat: &mut Stoat, ch: char) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
-    let head = editor.selections.newest_anchor().head();
-    let buffer_id = editor.buffer_id;
-
-    if ch.is_uppercase() {
+    let (buffer_id, cursor, cursor_anchor) = {
+        let Some(editor) = focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let buffer_id = editor.buffer_id;
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let offset = buf_snap.resolve_anchor(&head);
+        let rope = buf_snap.rope();
+        let sel = editor.selections.newest_anchor();
+        let cursor = cursor_offset(
+            rope,
+            buf_snap.resolve_anchor(&sel.tail()),
+            buf_snap.resolve_anchor(&sel.head()),
+        );
+        (buffer_id, cursor, buf_snap.anchor_at(cursor, Bias::Right))
+    };
+
+    if ch.is_uppercase() {
         let path = stoat
             .active_workspace()
             .buffers
             .path_for(buffer_id)
             .map(|p| p.to_path_buf());
         if let Some(path) = path {
-            stoat.global_marks.insert(ch, (path, offset));
+            stoat.global_marks.insert(ch, (path, cursor));
             return UpdateEffect::Redraw;
         }
         // Scratch buffer (no path): fall through to buffer-local
         // storage so the mark still works in-session.
     }
 
-    stoat.marks.insert((buffer_id, ch), head);
+    stoat.marks.insert((buffer_id, ch), cursor_anchor);
     UpdateEffect::Redraw
 }
 
@@ -158,8 +166,12 @@ mod tests {
         let editor = focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        buf_snap.resolve_anchor(&head)
+        let sel = editor.selections.newest_anchor();
+        stoat_text::cursor_offset(
+            buf_snap.rope(),
+            buf_snap.resolve_anchor(&sel.tail()),
+            buf_snap.resolve_anchor(&sel.head()),
+        )
     }
 
     fn focused_path(h: &TestHarness) -> PathBuf {

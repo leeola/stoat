@@ -66,8 +66,10 @@ pub(crate) fn execute_select_textobject(
         let buffer_id = editor.buffer_id;
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let head = editor.selections.newest_anchor().head();
-        let cursor = buffer_snapshot.resolve_anchor(&head);
+        let sel = editor.selections.newest_anchor();
+        let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+        let cursor = stoat_text::cursor_offset(buffer_snapshot.rope(), tail_off, head_off);
         (buffer_id, cursor)
     };
 
