@@ -1745,6 +1745,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "imara-diff"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17d34b7d42178945f775e84bc4c36dde7c1c6cdfea656d3354d009056f2bb3d2"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "indenter"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4027,6 +4036,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "divan",
+ "imara-diff",
  "serde",
  "smallvec",
  "stoat_scheduler",

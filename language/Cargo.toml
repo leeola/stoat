@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
+imara-diff = { workspace = true }
 serde = { workspace = true }
 smallvec = { workspace = true }
 tree-sitter = "0.26"
