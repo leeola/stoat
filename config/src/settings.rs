@@ -81,6 +81,15 @@ pub struct Settings {
     /// over the builtin table. An empty argv disables the server for that
     /// language. A language with no entry falls back to the builtin.
     pub lsp_servers: BTreeMap<String, Vec<String>>,
+    /// Named finder scopes, each a list of globs (relative to the workspace
+    /// root) that scope lists. Set via `finder.scope.<name> = ["src/**"];` in
+    /// stcfg. Shift-Tab in the finder cycles through these after All/Modified.
+    /// Empty (the default) means only the builtin scopes exist.
+    pub finder_scopes: BTreeMap<String, Vec<String>>,
+    /// Name of the finder scope a fresh workspace opens in. `None` falls back
+    /// to All. Names a builtin (`all`/`modified`) or a `finder.scope.<name>`
+    /// entry. Set via `finder.default_scope = "src";` in stcfg.
+    pub finder_default_scope: Option<String>,
 }
 
 impl Settings {
@@ -109,6 +118,8 @@ impl Settings {
         mode_badges.extend(other.mode_badges);
         let mut lsp_servers = self.lsp_servers;
         lsp_servers.extend(other.lsp_servers);
+        let mut finder_scopes = self.finder_scopes;
+        finder_scopes.extend(other.finder_scopes);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             format_on_save: other.format_on_save.or(self.format_on_save),
@@ -124,6 +135,8 @@ impl Settings {
             direnv_reload_on_cd: other.direnv_reload_on_cd.or(self.direnv_reload_on_cd),
             mode_badges,
             lsp_servers,
+            finder_scopes,
+            finder_default_scope: other.finder_default_scope.or(self.finder_default_scope),
         }
     }
 
@@ -215,6 +228,23 @@ impl Settings {
                     self.lsp_servers.insert((*language).to_string(), argv);
                 }
             },
+            ["finder", "scope", name] => {
+                if let Value::Array(items) = &setting.value.node {
+                    let globs: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| match &item.node {
+                            Value::String(s) | Value::Ident(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    self.finder_scopes.insert((*name).to_string(), globs);
+                }
+            },
+            ["finder", "default_scope"] => {
+                if let Value::Ident(s) | Value::String(s) = &setting.value.node {
+                    self.finder_default_scope = Some(s.clone());
+                }
+            },
             ["direnv", "load"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.direnv_load = Some(b);
@@ -261,6 +291,8 @@ mod tests {
                 direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                finder_scopes: BTreeMap::new(),
+                finder_default_scope: None,
             }
         );
     }
@@ -302,6 +334,50 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_finder_scope() {
+        let config = parse_ok(r#"on init { finder.scope.src = ["src/**", "language/**"]; }"#);
+        assert_eq!(
+            Settings::from_config(&config).finder_scopes,
+            BTreeMap::from([(
+                "src".to_string(),
+                vec!["src/**".to_string(), "language/**".to_string()],
+            )]),
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_finder_default_scope() {
+        let config = parse_ok(r#"on init { finder.default_scope = "src"; }"#);
+        assert_eq!(
+            Settings::from_config(&config).finder_default_scope,
+            Some("src".to_string()),
+        );
+    }
+
+    #[test]
+    fn merge_finder_scopes_extend_and_default_right_wins() {
+        let left = Settings {
+            finder_scopes: BTreeMap::from([("a".to_string(), vec!["a/**".to_string()])]),
+            finder_default_scope: Some("a".to_string()),
+            ..Settings::default()
+        };
+        let right = Settings {
+            finder_scopes: BTreeMap::from([("b".to_string(), vec!["b/**".to_string()])]),
+            finder_default_scope: Some("b".to_string()),
+            ..Settings::default()
+        };
+        let merged = left.merge(right);
+        assert_eq!(
+            merged.finder_scopes,
+            BTreeMap::from([
+                ("a".to_string(), vec!["a/**".to_string()]),
+                ("b".to_string(), vec!["b/**".to_string()]),
+            ]),
+        );
+        assert_eq!(merged.finder_default_scope, Some("b".to_string()));
+    }
+
+    #[test]
     fn from_config_false_value() {
         let config = parse_ok("on init { text_proto_log = false; }");
         assert_eq!(
@@ -321,6 +397,8 @@ mod tests {
                 direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                finder_scopes: BTreeMap::new(),
+                finder_default_scope: None,
             }
         );
     }
@@ -345,6 +423,8 @@ mod tests {
                 direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                finder_scopes: BTreeMap::new(),
+                finder_default_scope: None,
             }
         );
     }
@@ -378,6 +458,8 @@ mod tests {
             direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            finder_scopes: BTreeMap::new(),
+            finder_default_scope: None,
         };
         let right = Settings {
             text_proto_log: Some(true),
@@ -394,6 +476,8 @@ mod tests {
             direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            finder_scopes: BTreeMap::new(),
+            finder_default_scope: None,
         };
         assert_eq!(
             left.merge(right),
@@ -412,6 +496,8 @@ mod tests {
                 direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                finder_scopes: BTreeMap::new(),
+                finder_default_scope: None,
             }
         );
     }
@@ -433,6 +519,8 @@ mod tests {
             direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            finder_scopes: BTreeMap::new(),
+            finder_default_scope: None,
         };
         let right = Settings::default();
         assert_eq!(
@@ -452,6 +540,8 @@ mod tests {
                 direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                finder_scopes: BTreeMap::new(),
+                finder_default_scope: None,
             }
         );
     }
@@ -484,6 +574,8 @@ mod tests {
                 direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                finder_scopes: BTreeMap::new(),
+                finder_default_scope: None,
             }
         );
     }
@@ -508,6 +600,8 @@ mod tests {
                 direnv_reload_on_cd: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                finder_scopes: BTreeMap::new(),
+                finder_default_scope: None,
             }
         );
     }
@@ -529,6 +623,8 @@ mod tests {
             direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            finder_scopes: BTreeMap::new(),
+            finder_default_scope: None,
         };
         let right = Settings {
             text_proto_log: None,
@@ -545,6 +641,8 @@ mod tests {
             direnv_reload_on_cd: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            finder_scopes: BTreeMap::new(),
+            finder_default_scope: None,
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
     }

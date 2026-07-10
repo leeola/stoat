@@ -219,6 +219,8 @@ fn run_tui(
         review_precompute: None,
         mode_badges: std::collections::BTreeMap::new(),
         lsp_servers: std::collections::BTreeMap::new(),
+        finder_scopes: std::collections::BTreeMap::new(),
+        finder_default_scope: None,
     };
 
     // Materialize a requested fixture and switch into it before resolving the
