@@ -909,6 +909,27 @@ mod tests {
     }
 
     #[test]
+    fn goto_line_end_lands_on_last_visible_char() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("end");
+        // The block cursor rests on the last visible char, not the newline.
+        assert_eq!(h.selection_spans()[0], (2, 3, false));
+    }
+
+    #[test]
+    fn goto_line_end_on_empty_line_stays_at_column_zero() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "x\n\ny\n");
+        h.open_file(&path);
+        h.type_keys("j");
+        h.type_keys("end");
+        // An empty line has no visible char, so it stays at the line start.
+        assert_eq!(h.head_offsets(), vec![2]);
+    }
+
+    #[test]
     fn snapshot_goto_file_start() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
         let path = h.write_file("s.txt", "abc\ndef\nghi\n");
@@ -962,7 +983,8 @@ mod tests {
         let path = h.write_file("s.txt", "abc def\n");
         h.open_file(&path);
         h.type_keys("g l");
-        assert_eq!(h.primary_head_offset(), 7);
+        // `gl` lands on the last visible char 'f', not the newline past it.
+        assert_eq!(h.primary_head_offset(), 6);
     }
 
     #[test]

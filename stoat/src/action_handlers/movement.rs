@@ -766,24 +766,38 @@ fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -
         let cursor_row = rope
             .offset_to_point(cursor_offset(rope, tail_offset, head_offset))
             .row;
-        let col = match boundary {
-            LineBoundary::Start => 0,
-            LineBoundary::End => rope.line_len(cursor_row),
+        let line_start = rope.point_to_offset(Point::new(cursor_row, 0));
+        let boundary_offset = match boundary {
+            LineBoundary::Start => line_start,
+            LineBoundary::End => {
+                rope.point_to_offset(Point::new(cursor_row, rope.line_len(cursor_row)))
+            },
         };
-        let target_offset = rope.point_to_offset(Point::new(cursor_row, col));
-        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
         if extend {
+            // Extend to the boundary. A forward selection's block cursor already
+            // rests on the last visible char via cursor_offset, so no step-back.
+            let anchor = buffer_snapshot.anchor_at(boundary_offset, Bias::Right);
             extend_head(
                 sel,
                 anchor,
-                target_offset,
+                boundary_offset,
                 SelectionGoal::None,
                 buffer_snapshot,
             )
         } else {
+            // The block cursor rests on the last visible char, one grapheme
+            // before a non-empty line's end, rather than on the newline. An
+            // empty line has no char, so it stays at the line start.
+            let land_offset = match boundary {
+                LineBoundary::End if boundary_offset > line_start => rope
+                    .reversed_chars_at(boundary_offset)
+                    .next()
+                    .map_or(boundary_offset, |c| boundary_offset - c.len_utf8()),
+                _ => boundary_offset,
+            };
             land_block_cursor(
                 sel.id,
-                target_offset,
+                land_offset,
                 SelectionGoal::None,
                 rope,
                 buffer_snapshot,
