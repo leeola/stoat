@@ -10,6 +10,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     code_index::build,
     editor_state::EditorState,
+    nav_list::NavList,
     workspace::Workspace,
 };
 use codegraph::{Dir, EdgeKind, SymbolKey};
@@ -23,12 +24,11 @@ const MAX_DIFF_HOPS: usize = 64;
 ///
 /// Holds the start anchor (read back by [`mark_trail_end`] to resolve the
 /// start symbol) and, once the end is marked, the cached path between the
-/// enclosing symbols plus the current position along it. While only the
-/// start is marked, `path` is empty.
+/// enclosing symbols as a [`NavList`] whose cursor tracks the current position
+/// along it. While only the start is marked, `path` is empty.
 pub(crate) struct TrailState {
     start: (BufferId, Anchor),
-    path: Vec<SymbolKey>,
-    idx: usize,
+    path: NavList<SymbolKey>,
 }
 
 /// Navigate from the symbol under the cursor to one of its callers.
@@ -159,8 +159,7 @@ pub(crate) fn mark_trail_start(stoat: &mut Stoat) -> UpdateEffect {
     };
     stoat.active_workspace_mut().trail = Some(TrailState {
         start,
-        path: Vec::new(),
-        idx: 0,
+        path: NavList::default(),
     });
     UpdateEffect::None
 }
@@ -198,10 +197,14 @@ pub(crate) fn mark_trail_end(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let first = path.first().copied();
+    let mut trail_path = NavList::default();
+    for &key in &path {
+        trail_path.push_tip(key);
+    }
+    trail_path.set_cursor(0);
     stoat.active_workspace_mut().trail = Some(TrailState {
         start,
-        path,
-        idx: 0,
+        path: trail_path,
     });
     match first {
         Some(key) => jump_to_symbol(stoat, key),
@@ -225,12 +228,10 @@ fn trail_step(stoat: &mut Stoat, delta: isize) -> UpdateEffect {
         let Some(trail) = stoat.active_workspace_mut().trail.as_mut() else {
             return UpdateEffect::None;
         };
-        if trail.path.is_empty() {
+        let Some(target) = trail.path.step_clamp(delta).copied() else {
             return UpdateEffect::None;
-        }
-        let last = (trail.path.len() - 1) as isize;
-        trail.idx = (trail.idx as isize + delta).clamp(0, last) as usize;
-        trail.path[trail.idx]
+        };
+        target
     };
     jump_to_symbol(stoat, target)
 }

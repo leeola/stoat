@@ -89,6 +89,20 @@ impl<E> NavList<E> {
         self.entries.get(target)
     }
 
+    /// Step the cursor by `delta`, clamped to the entry range, and return the
+    /// entry it lands on. Unlike [`Self::step_stop`], a step past either end
+    /// lands on the nearest entry rather than refusing to move. `None` only
+    /// when the list is empty.
+    pub(crate) fn step_clamp(&mut self, delta: isize) -> Option<&E> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let max = self.entries.len() as isize - 1;
+        let target = (self.cursor as isize + delta).clamp(0, max);
+        self.cursor = target as usize;
+        self.entries.get(self.cursor)
+    }
+
     /// Retain entries for which `keep` returns true, shifting the cursor down
     /// by the number of removed entries that lay strictly before it so it
     /// stays over the same surviving boundary.
@@ -168,6 +182,22 @@ mod tests {
             "an out-of-range step leaves the cursor put"
         );
         assert_eq!(list.step_stop(-2), Some(&2));
+    }
+
+    #[test]
+    fn step_clamp_walks_and_clamps_at_both_edges() {
+        let mut list = from_tip(&[1, 2, 3]);
+        list.set_cursor(0);
+        assert_eq!(list.step_clamp(-5), Some(&1), "clamps at the start");
+        assert_eq!(list.step_clamp(1), Some(&2));
+        assert_eq!(list.step_clamp(9), Some(&3), "clamps at the end");
+        assert_eq!(list.cursor(), 2);
+    }
+
+    #[test]
+    fn step_clamp_on_empty_is_none() {
+        let mut list: NavList<u32> = NavList::default();
+        assert_eq!(list.step_clamp(1), None);
     }
 
     #[test]
