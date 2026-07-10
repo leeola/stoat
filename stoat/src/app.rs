@@ -4047,49 +4047,47 @@ impl Stoat {
     }
 
     fn editor_backspace(&mut self, editor_id: EditorId, buffer_id: BufferId) {
-        let ws = self.active_workspace_mut();
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let buffer = match ws.buffers.get(buffer_id) {
-            Some(b) => b,
-            None => return,
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let rope = buf_snapshot.rope();
-        let tail = buf_snapshot.resolve_anchor(&sel.tail());
-        let head = buf_snapshot.resolve_anchor(&sel.head());
-        let offset = stoat_text::cursor_offset(rope, tail, head);
-        if offset == 0 {
-            return;
-        }
-        let prev_len = rope
-            .reversed_chars_at(offset)
-            .next()
-            .map(|ch| ch.len_utf8())
-            .unwrap_or(0);
-        let start = offset - prev_len;
-        {
-            let mut guard = buffer.write().expect("poisoned");
-            guard.edit(start..offset, "");
-        }
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        editor.selections.transform(new_buf, |s| {
-            action_handlers::movement::forward_block_cursor(
-                s.id,
-                start,
-                stoat_text::SelectionGoal::None,
-                new_buf.rope(),
-                new_buf,
-            )
+        self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
+            let prev_len = rope
+                .reversed_chars_at(cursor)
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(0);
+            (cursor - prev_len, cursor)
         });
     }
 
     fn editor_delete_word_backward(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
+            (stoat_text::prev_word_start(rope, cursor), cursor)
+        });
+    }
+
+    fn editor_delete(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
+            let next_len = rope
+                .chars_at(cursor)
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(0);
+            (cursor, cursor + next_len)
+        });
+    }
+
+    /// Delete a per-selection range at every cursor in one multi-edit, mirroring
+    /// [`Self::editor_insert`]. `range_for` maps each cursor offset to its
+    /// `[start, end)` deletion span. An empty span means the cursor sits at a
+    /// no-op boundary (buffer start, buffer end, or word start), so it deletes
+    /// nothing and only follows the leftward shift.
+    ///
+    /// Overlapping spans merge before the edit, so two cursors inside one word
+    /// remove the shared span once rather than double-deleting it. Each cursor
+    /// then lands at its deletion start. Cursors that collapse to the same
+    /// offset dedupe when the selections are rebuilt.
+    fn editor_delete_ranges<F>(&mut self, editor_id: EditorId, buffer_id: BufferId, range_for: F)
+    where
+        F: Fn(&stoat_text::Rope, usize) -> (usize, usize),
+    {
         let ws = self.active_workspace_mut();
         let editor = match ws.editors.get_mut(editor_id) {
             Some(e) => e,
@@ -4101,25 +4099,58 @@ impl Stoat {
         };
         let display_snapshot = editor.display_map.snapshot();
         let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
         let rope = buf_snapshot.rope();
-        let tail = buf_snapshot.resolve_anchor(&sel.tail());
-        let head = buf_snapshot.resolve_anchor(&sel.head());
-        let offset = stoat_text::cursor_offset(rope, tail, head);
-        let start = stoat_text::prev_word_start(rope, offset);
-        if start == offset {
+
+        let per_sel: Vec<(usize, usize, usize)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let tail = buf_snapshot.resolve_anchor(&sel.tail());
+                let head = buf_snapshot.resolve_anchor(&sel.head());
+                let cursor = stoat_text::cursor_offset(rope, tail, head);
+                let (start, end) = range_for(rope, cursor);
+                (sel.id, start, end)
+            })
+            .collect();
+
+        let mut ranges: Vec<(usize, usize)> = per_sel
+            .iter()
+            .filter(|(_, start, end)| start < end)
+            .map(|&(_, start, end)| (start, end))
+            .collect();
+        if ranges.is_empty() {
             return;
         }
+        ranges.sort_unstable();
+
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            match merged.last_mut() {
+                Some(last) if start < last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+
         {
             let mut guard = buffer.write().expect("poisoned");
-            guard.edit(start..offset, "");
+            for (start, end) in merged.iter().rev() {
+                guard.edit(*start..*end, "");
+            }
         }
+
+        let new_offsets: std::collections::HashMap<usize, usize> = per_sel
+            .iter()
+            .map(|&(id, start, _)| (id, Self::offset_after_deletions(start, &merged)))
+            .collect();
+
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
         editor.selections.transform(new_buf, |s| {
+            let offset = new_offsets[&s.id];
             action_handlers::movement::forward_block_cursor(
                 s.id,
-                start,
+                offset,
                 stoat_text::SelectionGoal::None,
                 new_buf.rope(),
                 new_buf,
@@ -4127,34 +4158,20 @@ impl Stoat {
         });
     }
 
-    fn editor_delete(&mut self, editor_id: EditorId, buffer_id: BufferId) {
-        let ws = self.active_workspace_mut();
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let buffer = match ws.buffers.get(buffer_id) {
-            Some(b) => b,
-            None => return,
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let rope = buf_snapshot.rope();
-        let tail = buf_snapshot.resolve_anchor(&sel.tail());
-        let head = buf_snapshot.resolve_anchor(&sel.head());
-        let offset = stoat_text::cursor_offset(rope, tail, head);
-        let next_len = rope
-            .chars_at(offset)
-            .next()
-            .map(|ch| ch.len_utf8())
-            .unwrap_or(0);
-        if next_len == 0 {
-            return;
+    /// New offset of `target` after deleting the ascending, disjoint `ranges`.
+    /// A target inside a deleted range collapses to that range's start.
+    fn offset_after_deletions(target: usize, ranges: &[(usize, usize)]) -> usize {
+        let mut deleted_before = 0;
+        for &(start, end) in ranges {
+            if end <= target {
+                deleted_before += end - start;
+            } else if start < target {
+                return start - deleted_before;
+            } else {
+                break;
+            }
         }
-        let end = offset + next_len;
-        let mut guard = buffer.write().expect("poisoned");
-        guard.edit(offset..end, "");
+        target - deleted_before
     }
 
     /// Apply one agent hook event to the workspace whose session matches
@@ -8824,6 +8841,18 @@ mod tests {
             .set_single_range(start, end, stoat_text::SelectionGoal::None);
     }
 
+    /// Add a second 1-wide block cursor at `offset` in the focused editor,
+    /// for building same-line multi-cursor states no keybinding produces.
+    fn insert_cursor_at(h: &mut crate::test_harness::TestHarness, offset: usize) {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        let head = buf.anchor_at(offset, Bias::Right);
+        editor
+            .selections
+            .insert_cursor(head, stoat_text::SelectionGoal::None, buf);
+    }
+
     #[test]
     fn driven_input_sequence_types_text_into_the_buffer() {
         let mut h = Stoat::test();
@@ -9040,6 +9069,53 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "insert");
         h.type_keys("delete");
         assert_eq!(buffer_text(&h, &path), "abc");
+    }
+
+    #[test]
+    fn backspace_applies_at_every_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "xa\nxb\n");
+        h.type_keys("l");
+        h.type_keys("C");
+        h.type_keys("i");
+        h.type_keys("backspace");
+        assert_eq!(buffer_text(&h, &path), "a\nb\n");
+        assert_eq!(h.head_offsets(), vec![0, 2]);
+    }
+
+    #[test]
+    fn delete_applies_at_every_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "ax\nbx\n");
+        h.type_keys("C");
+        h.type_keys("i");
+        h.type_keys("delete");
+        assert_eq!(buffer_text(&h, &path), "x\nx\n");
+        assert_eq!(h.head_offsets(), vec![0, 2]);
+    }
+
+    #[test]
+    fn alt_backspace_applies_at_every_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "foo\nbar\n");
+        h.type_keys("l l");
+        h.type_keys("C");
+        h.type_keys("a");
+        h.type_keys("alt-backspace");
+        assert_eq!(buffer_text(&h, &path), "\n\n");
+        assert_eq!(h.head_offsets(), vec![0, 1]);
+    }
+
+    #[test]
+    fn alt_backspace_merges_overlapping_word_deletes() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "hello\n");
+        h.type_keys("l l");
+        insert_cursor_at(&mut h, 4);
+        h.type_keys("i");
+        h.type_keys("alt-backspace");
+        assert_eq!(buffer_text(&h, &path), "o\n");
+        assert_eq!(h.head_offsets(), vec![0]);
     }
 
     #[test]
