@@ -418,6 +418,7 @@ on key {
         > -> IndentSelection();
         < -> UnindentSelection();
         = -> FormatSelections();
+        & -> [AlignSelections(), SetMode(normal)];
         d -> [DeleteSelection(), SetMode(normal)];
         Alt-d -> [DeleteSelectionNoYank(), SetMode(normal)];
         c -> [ChangeSelection(), SetMode(insert)];

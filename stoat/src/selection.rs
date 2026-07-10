@@ -2608,6 +2608,23 @@ mod tests {
     }
 
     #[test]
+    fn align_from_select_mode_returns_to_normal() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndefgh\nij\n");
+        h.open_file(&path);
+        h.type_keys("% alt-s");
+        h.stoat.set_focused_mode("select".into());
+        assert_eq!(h.stoat.focused_mode(), "select");
+        h.type_keys("&");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "align exits select mode like Helix"
+        );
+        assert_eq!(focused_buffer_text(&mut h), "  abc\ndefgh\n   ij\n");
+    }
+
+    #[test]
     fn align_selections_already_aligned_is_noop() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\ndef\nghi\n");
