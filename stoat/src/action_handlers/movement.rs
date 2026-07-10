@@ -11,8 +11,9 @@ use stoat_text::{
     cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end,
     next_long_word_end_range, next_long_word_start, next_long_word_start_range, next_word_end,
     next_word_end_range, next_word_start, next_word_start_range, prev_long_word_end,
-    prev_long_word_start, prev_word_end, prev_word_start, Anchor, Bias, NumberKind, Point, Rope,
-    Selection, SelectionGoal,
+    prev_long_word_end_range, prev_long_word_start, prev_long_word_start_range, prev_word_end,
+    prev_word_end_range, prev_word_start, prev_word_start_range, Anchor, Bias, NumberKind, Point,
+    Rope, Selection, SelectionGoal,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -462,7 +463,9 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
                 target_offset
             };
             let head_anchor = buffer_snapshot.anchor_at(resolved_head_offset, Bias::Right);
-            let tail_offset = next_char_boundary(rope, seed);
+            // Retreat the tail past a trailing whitespace or newline run like
+            // Helix range_to_target, mirroring the forward arm.
+            let tail_offset = backward_word_anchor(rope, target, seed, count);
             let tail_anchor = buffer_snapshot.anchor_at(tail_offset, Bias::Right);
             Selection {
                 id: sel.id,
@@ -487,6 +490,27 @@ fn forward_word_anchor(rope: &Rope, target: WordTarget, seed: usize, count: u32)
             WordTarget::NextEnd => next_word_end_range(rope, anchor, head),
             WordTarget::NextLongStart => next_long_word_start_range(rope, anchor, head),
             WordTarget::NextLongEnd => next_long_word_end_range(rope, anchor, head),
+            _ => return anchor,
+        };
+        if next == (anchor, head) {
+            break;
+        }
+        (anchor, head) = next;
+    }
+    anchor
+}
+
+/// The retreated tail for a backward word motion, threading Helix's
+/// `range_to_target` anchor rule across `count`. The origin anchor is the block
+/// edge past the seed. Returns that edge unchanged for a forward target.
+fn backward_word_anchor(rope: &Rope, target: WordTarget, seed: usize, count: u32) -> usize {
+    let (mut anchor, mut head) = (next_char_boundary(rope, seed), seed);
+    for _ in 0..count {
+        let next = match target {
+            WordTarget::PrevStart => prev_word_start_range(rope, anchor, head),
+            WordTarget::PrevEnd => prev_word_end_range(rope, anchor, head),
+            WordTarget::PrevLongStart => prev_long_word_start_range(rope, anchor, head),
+            WordTarget::PrevLongEnd => prev_long_word_end_range(rope, anchor, head),
             _ => return anchor,
         };
         if next == (anchor, head) {

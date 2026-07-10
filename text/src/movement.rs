@@ -155,65 +155,92 @@ where
 }
 
 pub fn prev_word_start(rope: &Rope, from: usize) -> usize {
-    prev_word_start_with(rope, from, categorize_char)
+    prev_word_start_with(rope, from, from, categorize_char).1
 }
 
 pub fn prev_long_word_start(rope: &Rope, from: usize) -> usize {
-    prev_word_start_with(rope, from, long_word_category)
+    prev_word_start_with(rope, from, from, long_word_category).1
+}
+
+/// [`prev_word_start`] as a range_to_target step: given the origin
+/// `(anchor, head)`, returns the new `(anchor, head)`. The anchor retreats past
+/// a trailing newline run and past a single trailing boundary char, so a
+/// backward word motion from whitespace or after a boundary does not keep the
+/// gap in the selection.
+pub fn prev_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
+    prev_word_start_with(rope, anchor, head, categorize_char)
+}
+
+pub fn prev_long_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
+    prev_word_start_with(rope, anchor, head, long_word_category)
 }
 
 fn prev_word_start_with<F: Fn(char) -> CharCategory>(
     rope: &Rope,
+    anchor_in: usize,
     from: usize,
     category: F,
-) -> usize {
-    if from == 0 {
-        return 0;
-    }
-    let Some(first_char) = rope.chars_at(from).next() else {
-        return prev_word_start_from_end(rope, from, &category);
-    };
-    let head_start = from;
-    let mut head = head_start;
-    let mut prev_ch = first_char;
-    let mut iter = rope.reversed_chars_at(from);
-
-    loop {
-        let Some(ch) = iter.next() else {
-            return head;
-        };
-        let boundary = category(prev_ch) != category(ch);
-        let target = boundary && (!prev_ch.is_whitespace() || char_is_line_ending(ch));
-        if target && head != head_start {
-            return head;
-        }
-        prev_ch = ch;
-        head -= ch.len_utf8();
-    }
+) -> (usize, usize) {
+    backward_word_range(rope, anchor_in, from, &category, |prev, ch, boundary| {
+        boundary && (!prev.is_whitespace() || char_is_line_ending(ch))
+    })
 }
 
-fn prev_word_start_from_end<F: Fn(char) -> CharCategory>(
+/// Shared backward word-motion scan, the reverse mirror of
+/// [`forward_word_range`]. Scans from `from` toward the buffer start, returning
+/// the target `head` and an `anchor` that starts at `anchor_in` and retreats
+/// past a trailing newline run (so the head runs back through a blank line) and
+/// past a single trailing boundary char (so the first target boundary at
+/// `head_start` moves the anchor onto the span end).
+fn backward_word_range<C, T>(
     rope: &Rope,
+    anchor_in: usize,
     from: usize,
-    category: &F,
-) -> usize {
-    let head_start = from;
-    let mut head = head_start;
-    let mut iter = rope.reversed_chars_at(from);
-    let Some(seed) = iter.next() else {
-        return head;
-    };
-    head -= seed.len_utf8();
-    let mut prev_ch = seed;
+    category: C,
+    is_target: T,
+) -> (usize, usize)
+where
+    C: Fn(char) -> CharCategory,
+    T: Fn(char, char, bool) -> bool,
+{
+    if from == 0 {
+        return (anchor_in, 0);
+    }
 
+    let mut iter = rope.reversed_chars_at(from).peekable();
+    let (mut head, mut prev_ch) = match rope.chars_at(from).next() {
+        Some(seed) => (from, seed),
+        None => match iter.next() {
+            Some(seed) => (from - seed.len_utf8(), seed),
+            None => return (anchor_in, from),
+        },
+    };
+    let mut anchor = anchor_in;
+
+    if iter.peek().is_some_and(|&ch| char_is_line_ending(ch)) {
+        while let Some(&ch) = iter.peek() {
+            if !char_is_line_ending(ch) {
+                break;
+            }
+            iter.next();
+            head -= ch.len_utf8();
+            prev_ch = ch;
+        }
+        anchor = head;
+    }
+
+    let head_start = head;
     loop {
         let Some(ch) = iter.next() else {
-            return head;
+            return (anchor, head);
         };
         let boundary = category(prev_ch) != category(ch);
-        let target = boundary && (!prev_ch.is_whitespace() || char_is_line_ending(ch));
-        if target && head != head_start - seed.len_utf8() {
-            return head;
+        if is_target(prev_ch, ch, boundary) {
+            if head == head_start {
+                anchor = head;
+            } else {
+                return (anchor, head);
+            }
         }
         prev_ch = ch;
         head -= ch.len_utf8();
@@ -221,37 +248,30 @@ fn prev_word_start_from_end<F: Fn(char) -> CharCategory>(
 }
 
 pub fn prev_word_end(rope: &Rope, from: usize) -> usize {
-    prev_word_end_with(rope, from, categorize_char)
+    prev_word_end_with(rope, from, from, categorize_char).1
 }
 
 pub fn prev_long_word_end(rope: &Rope, from: usize) -> usize {
-    prev_word_end_with(rope, from, long_word_category)
+    prev_word_end_with(rope, from, from, long_word_category).1
 }
 
-fn prev_word_end_with<F: Fn(char) -> CharCategory>(rope: &Rope, from: usize, category: F) -> usize {
-    if from == 0 {
-        return 0;
-    }
-    let Some(first_char) = rope.chars_at(from).next() else {
-        return prev_word_end_from_end(rope, from, &category);
-    };
-    let head_start = from;
-    let mut head = head_start;
-    let mut prev_ch = first_char;
-    let mut iter = rope.reversed_chars_at(from);
+pub fn prev_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
+    prev_word_end_with(rope, anchor, head, categorize_char)
+}
 
-    loop {
-        let Some(ch) = iter.next() else {
-            return head;
-        };
-        let boundary = category(prev_ch) != category(ch);
-        let target = boundary && (!ch.is_whitespace() || char_is_line_ending(ch));
-        if target && head != head_start {
-            return head;
-        }
-        prev_ch = ch;
-        head -= ch.len_utf8();
-    }
+pub fn prev_long_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
+    prev_word_end_with(rope, anchor, head, long_word_category)
+}
+
+fn prev_word_end_with<F: Fn(char) -> CharCategory>(
+    rope: &Rope,
+    anchor_in: usize,
+    from: usize,
+    category: F,
+) -> (usize, usize) {
+    backward_word_range(rope, anchor_in, from, &category, |_prev, ch, boundary| {
+        boundary && (!ch.is_whitespace() || char_is_line_ending(ch))
+    })
 }
 
 /// Like [`find_decimal_number_at`], but when the byte at `offset` is not a
@@ -474,34 +494,6 @@ pub fn find_decimal_number_at(rope: &Rope, offset: usize) -> Option<std::ops::Ra
     Some(start..end)
 }
 
-fn prev_word_end_from_end<F: Fn(char) -> CharCategory>(
-    rope: &Rope,
-    from: usize,
-    category: &F,
-) -> usize {
-    let head_start = from;
-    let mut head = head_start;
-    let mut iter = rope.reversed_chars_at(from);
-    let Some(seed) = iter.next() else {
-        return head;
-    };
-    head -= seed.len_utf8();
-    let mut prev_ch = seed;
-
-    loop {
-        let Some(ch) = iter.next() else {
-            return head;
-        };
-        let boundary = category(prev_ch) != category(ch);
-        let target = boundary && (!ch.is_whitespace() || char_is_line_ending(ch));
-        if target && head != head_start - seed.len_utf8() {
-            return head;
-        }
-        prev_ch = ch;
-        head -= ch.len_utf8();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +527,28 @@ mod tests {
                 next_word_start_range(&rope(text), *seed, *seed),
                 *expected,
                 "next_word_start on {text:?} from {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn prev_word_start_range_retreats_anchor_like_helix() {
+        // Mirror of the forward table for backward `b`, called as the handler
+        // does with the origin anchor at the block edge (seed + 1) and the head
+        // at the seed. `(text, anchor_in, seed, expected)`.
+        let cases: &[(&str, usize, usize, (usize, usize))] = &[
+            // On a mid-word char, the anchor stays at the block edge.
+            ("ab cd", 5, 4, (5, 3)),
+            // On a word start, the anchor retreats onto the seed, excluding it.
+            ("ab cd", 4, 3, (3, 0)),
+            // A trailing newline run retreats the anchor past it.
+            ("ab\n\ncd", 5, 4, (2, 0)),
+        ];
+        for (text, anchor_in, seed, expected) in cases {
+            assert_eq!(
+                prev_word_start_range(&rope(text), *anchor_in, *seed),
+                *expected,
+                "prev_word_start on {text:?} from anchor {anchor_in} head {seed}"
             );
         }
     }

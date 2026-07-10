@@ -1534,6 +1534,20 @@ mod tests {
     }
 
     #[test]
+    fn move_prev_word_start_from_word_boundary_retreats_anchor() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
+        for _ in 0..4 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        assert_eq!(editor::head_offsets(&mut stoat), vec![4]);
+        dispatch(&mut stoat, &MovePrevWordStart);
+        // On the word start 'b', the tail retreats past it, so the selection
+        // ends at the word start rather than one cell past it.
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 4, true)]);
+    }
+
+    #[test]
     fn move_prev_word_start_over_forward_selection_keeps_trailing_char() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "foo bar");
