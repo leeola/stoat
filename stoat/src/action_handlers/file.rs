@@ -1,7 +1,7 @@
 use crate::{
     action_handlers::read_string_via_host,
     app::{Stoat, UpdateEffect},
-    buffer::BufferId,
+    buffer::{BufferId, SharedBuffer},
     editor_state::EditorState,
     host::LanguageServerFeature,
     pane::{PaneId, View},
@@ -20,6 +20,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+use stoat_scheduler::Executor;
 
 /// Write the focused buffer to its backing file via
 /// [`crate::host::FsHost::write_atomic`], clear the dirty flag, and notify the
@@ -376,6 +377,23 @@ pub(crate) fn open_file_in_pane(
 
     super::lsp::notify_buffer_opened(stoat, buffer_id, &absolute, &content);
 
+    show_buffer_in_pane(stoat, target, buffer_id, buffer, executor)
+}
+
+/// Show `buffer_id` in `target` by swapping the pane's editor to a fresh
+/// [`EditorState`] over the buffer, garbage-collecting the outgoing one.
+///
+/// Returns early with the pane untouched when it already shows this buffer,
+/// so re-showing an open buffer skips the editor swap. The buffer must
+/// already be registered in the workspace. Callers that read from disk go
+/// through [`open_file_in_pane`].
+pub(crate) fn show_buffer_in_pane(
+    stoat: &mut Stoat,
+    target: PaneId,
+    buffer_id: BufferId,
+    buffer: SharedBuffer,
+    executor: Executor,
+) -> Option<BufferId> {
     let ws = stoat.active_workspace_mut();
     if let View::Editor(eid) = ws.panes.pane(target).view
         && ws
