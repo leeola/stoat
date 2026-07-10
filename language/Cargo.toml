@@ -11,6 +11,7 @@ workspace = true
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
 serde = { workspace = true }
+smallvec = { workspace = true }
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
 

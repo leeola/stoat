@@ -1,24 +1,31 @@
 //! Dijkstra shortest-path search over the structural-diff edit graph.
 //!
-//! Reference: `references/difftastic/src/diff/dijkstra.rs`. The
-//! algorithm is identical (priority queue + visited map + path
-//! reconstruction); we use [`std::collections::BinaryHeap`] instead
-//! of `radix_heap::RadixHeapMap` to avoid an external dependency.
-//! BinaryHeap's `O(log n)` ops are fast enough for the bounded graph
-//! sizes the structural-diff fallback handles.
+//! Reference: `references/difftastic/src/diff/dijkstra.rs` and
+//! `graph.rs`. Every vertex's position, tentative distance, predecessor,
+//! and cached successor edges live together in an index-based
+//! [`VertexArena`]. The search dedups vertices through a shallow-key seen
+//! map. This mirrors difftastic's intrusive-arena design, with arena
+//! indices standing in for its `bumpalo` back-references.
+//!
+//! [`std::collections::BinaryHeap`] replaces `radix_heap::RadixHeapMap`;
+//! its `O(log n)` ops are fast enough for the bounded graph sizes the
+//! fallback handles.
 
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
-    graph::{neighbours, start_vertex, Edge, Vertex},
+    fx::FxBuildHasher,
+    graph::{
+        is_comment_atom, is_string_atom, levenshtein_pct, pop_all_parents, probably_punctuation,
+        push_lhs_delimiter, push_rhs_delimiter, Edge, EnteredDelimiter,
+    },
+    stack::Stack,
     unchanged::{ChangeKind, ChangeMap},
 };
+use smallvec::SmallVec;
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 /// Interval at which [`shortest_path`] polls the cancellation flag. A
@@ -29,43 +36,134 @@ use std::{
 /// even on the biggest graphs we'd run.
 const CANCEL_POLL_INTERVAL: usize = 4096;
 
+/// Default graph cap. Difftastic uses 3,000,000. We use 250,000 for a
+/// minimum-viable port that handles small inputs and bails fast on large
+/// ones. The fallback path is always available.
+pub const DEFAULT_GRAPH_LIMIT: usize = 250_000;
+
+/// Distinct full-parents-stack variants explored per shallow key.
+/// Difftastic caps at 2 so the search can tell popping both delimiters
+/// together apart from popping each independently, without the
+/// exponential blow-up of tracking every deeper nesting.
+const MAX_VARIANTS_PER_KEY: usize = 2;
+
 /// Outcome of a structural-diff search. `ExceededGraphLimit` covers
 /// both the honest budget-exceeded case and caller-driven cancellation
-/// via the `cancel` parameter; downstream callers handle both by
-/// falling back to a coarser diff (e.g. line diff).
+/// via the `cancel` parameter. Downstream callers handle both by falling
+/// back to a coarser diff (e.g. line diff).
 pub enum SearchOutcome {
-    Found(Vec<(Edge, Arc<Vertex>)>),
+    Found(Vec<PathStep>),
     ExceededGraphLimit,
 }
 
-/// Default graph cap. Difftastic uses 3,000,000; we use 250,000 for a
-/// minimum-viable port that handles small inputs and bails fast on
-/// large ones. The fallback path is always available.
-pub const DEFAULT_GRAPH_LIMIT: usize = 250_000;
-
-/// One variant entry within a shallow-key bucket. Difftastic allows
-/// up to 2 variants per shallow `(lhs, rhs, top_parent)` key so the
-/// search can explore distinct deep nesting stacks without the full
-/// exponential blow-up.
-struct VariantState {
-    /// Hash of the FULL parents stack via [`Vertex::deep_parents_hash`].
-    /// Distinguishes variants that share the shallow key.
-    parents_signature: u64,
-    distance: u32,
-    predecessor: Option<(Edge, Arc<Vertex>)>,
+/// One edge on the resolved shortest path, tagged with the syntax
+/// positions of the vertex it left from.
+///
+/// [`populate_change_map`] reads `lhs`/`rhs` to learn which nodes the
+/// edge acted on. These are the predecessor vertex's positions, not the
+/// successor's, because an edge describes the step taken *from* a node.
+pub struct PathStep {
+    pub edge: Edge,
+    pub lhs: Option<SyntaxId>,
+    pub rhs: Option<SyntaxId>,
 }
 
-const MAX_VARIANTS_PER_KEY: usize = 2;
+/// Shallow dedup key formed from the syntax-position pair plus the top of
+/// the parents stack. Vertices sharing a key are the "same" graph position
+/// up to deeper nesting. The seen map keeps up to [`MAX_VARIANTS_PER_KEY`]
+/// of them, told apart by full stack equality.
+type SeenKey = (Option<SyntaxId>, Option<SyntaxId>, TopKey);
 
-/// Run Dijkstra from the start vertex (the root pair) to the end
-/// vertex (both sides exhausted, empty parents stack). Returns the
-/// edge sequence in start-to-end order, or `ExceededGraphLimit` if
-/// the visited set grew past `graph_limit`.
+type SeenMap = HashMap<SeenKey, SmallVec<[u32; MAX_VARIANTS_PER_KEY]>, FxBuildHasher>;
+
+/// The top of a parents stack reduced to what the shallow key needs. It
+/// carries the delimiter kind and its immediate ids, never the deeper
+/// frames.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum TopKey {
+    None,
+    Both(SyntaxId, SyntaxId),
+    Either(Option<SyntaxId>, Option<SyntaxId>),
+}
+
+impl TopKey {
+    fn from_parents(parents: &Stack<EnteredDelimiter>) -> Self {
+        match parents.peek() {
+            None => TopKey::None,
+            Some(EnteredDelimiter::PopBoth(lhs, rhs)) => TopKey::Both(*lhs, *rhs),
+            Some(EnteredDelimiter::PopEither {
+                lhs_delims,
+                rhs_delims,
+            }) => TopKey::Either(lhs_delims.peek().copied(), rhs_delims.peek().copied()),
+        }
+    }
+}
+
+/// One position in the diff state space plus its live Dijkstra state.
 ///
-/// Vertex deduplication: the seen-set is keyed by [`Vertex`]'s
-/// shallow eq/hash (lhs, rhs, top of parents stack), but each bucket
-/// holds up to 2 distinct full-parents-stack variants. Mirrors
-/// `references/difftastic/src/diff/graph.rs:363-410`
+/// `distance` starts at [`u32::MAX`] (unreached). `predecessor` records
+/// the edge and vertex the shortest known route arrived by. `neighbours`
+/// caches the half-open range of [`VertexArena::edges`] generated for
+/// this vertex, so re-popping it never regenerates them.
+struct VertexState {
+    lhs_syntax: Option<SyntaxId>,
+    rhs_syntax: Option<SyntaxId>,
+    parents: Stack<EnteredDelimiter>,
+    distance: u32,
+    predecessor: Option<(Edge, u32)>,
+    neighbours: Option<(u32, u32)>,
+}
+
+/// Index-based store of every vertex reached and every successor edge
+/// generated. Vertices reference each other by their `u32` index into
+/// `vertices`; `edges` is a flat pool sliced by each vertex's cached
+/// `neighbours` range.
+struct VertexArena {
+    vertices: Vec<VertexState>,
+    edges: Vec<(Edge, u32)>,
+}
+
+impl VertexArena {
+    fn new() -> Self {
+        VertexArena {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    fn alloc(
+        &mut self,
+        lhs_syntax: Option<SyntaxId>,
+        rhs_syntax: Option<SyntaxId>,
+        parents: Stack<EnteredDelimiter>,
+    ) -> u32 {
+        let id = self.vertices.len() as u32;
+        self.vertices.push(VertexState {
+            lhs_syntax,
+            rhs_syntax,
+            parents,
+            distance: u32::MAX,
+            predecessor: None,
+            neighbours: None,
+        });
+        id
+    }
+
+    fn is_end(&self, id: u32) -> bool {
+        let v = &self.vertices[id as usize];
+        v.lhs_syntax.is_none() && v.rhs_syntax.is_none() && v.parents.is_empty()
+    }
+}
+
+/// Run Dijkstra from the start vertex (the root pair) to the end vertex
+/// (both sides exhausted, empty parents stack). Returns the edge
+/// sequence in start-to-end order, or `ExceededGraphLimit` if the vertex
+/// arena grew past `graph_limit`.
+///
+/// Vertices are deduplicated by a shallow `(lhs, rhs, top_parent)`
+/// [`SeenKey`], but each entry holds up to [`MAX_VARIANTS_PER_KEY`]
+/// distinct full-parents-stack variants.
+/// Mirrors `references/difftastic/src/diff/graph.rs:363-410`
 /// `allocate_if_new`.
 pub fn shortest_path(
     lhs_arena: &SyntaxArena,
@@ -75,34 +173,26 @@ pub fn shortest_path(
     graph_limit: usize,
     cancel: Option<&AtomicBool>,
 ) -> SearchOutcome {
-    let start = Arc::new(start_vertex(lhs_root, rhs_root));
+    let mut va = VertexArena::new();
+    let mut seen: SeenMap = HashMap::default();
 
-    // Bucketed state. The key uses Vertex's shallow eq+hash; the
-    // value holds up to MAX_VARIANTS_PER_KEY variants with the same
-    // shallow key but distinct deep parents stacks.
-    let mut state: HashMap<Vertex, Vec<VariantState>> = HashMap::new();
-    state.insert(
-        (*start).clone(),
-        vec![VariantState {
-            parents_signature: start.deep_parents_hash(),
-            distance: 0,
-            predecessor: None,
-        }],
-    );
+    let start = va.alloc(lhs_root, rhs_root, Stack::new());
+    va.vertices[start as usize].distance = 0;
 
-    let mut heap: BinaryHeap<Reverse<HeapEntry>> = BinaryHeap::new();
-    heap.push(Reverse(HeapEntry {
-        distance: 0,
-        vertex: start.clone(),
-    }));
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    heap.push(Reverse((0, start)));
 
-    let mut total_variants: usize = 1;
     let mut expansions: usize = 0;
 
-    while let Some(Reverse(HeapEntry { distance, vertex })) = heap.pop() {
-        if vertex.is_end() {
-            return SearchOutcome::Found(reconstruct_path(&state, &vertex));
+    while let Some(Reverse((distance, vid))) = heap.pop() {
+        if va.is_end(vid) {
+            return SearchOutcome::Found(reconstruct_path(&va, vid));
         }
+        // A later, shorter route to vid already won, making this stale.
+        if distance > va.vertices[vid as usize].distance {
+            continue;
+        }
+
         expansions += 1;
         if expansions & (CANCEL_POLL_INTERVAL - 1) == 0
             && let Some(flag) = cancel
@@ -110,117 +200,262 @@ pub fn shortest_path(
         {
             return SearchOutcome::ExceededGraphLimit;
         }
-        // Stale heap entry from a later, better-distance push? Skip.
-        let vertex_signature = vertex.deep_parents_hash();
-        if let Some(bucket) = state.get(vertex.as_ref())
-            && let Some(variant) = bucket
-                .iter()
-                .find(|v| v.parents_signature == vertex_signature)
-            && variant.distance < distance
-        {
-            continue;
-        }
 
-        for (edge, next) in neighbours(lhs_arena, rhs_arena, vertex.as_ref()) {
+        expand(lhs_arena, rhs_arena, &mut va, &mut seen, vid);
+
+        let (edge_start, edge_end) = va.vertices[vid as usize]
+            .neighbours
+            .expect("expand sets the neighbours range");
+        for edge_idx in edge_start..edge_end {
+            let (edge, succ) = va.edges[edge_idx as usize];
             let next_distance = distance.saturating_add(edge.cost());
-            let next_arc = Arc::new(next);
-            let next_signature = next_arc.deep_parents_hash();
-            let bucket = state.entry((*next_arc).clone()).or_default();
-
-            // Try to find an existing variant with the same deep
-            // parents signature.
-            if let Some(variant) = bucket
-                .iter_mut()
-                .find(|v| v.parents_signature == next_signature)
-            {
-                if next_distance < variant.distance {
-                    variant.distance = next_distance;
-                    variant.predecessor = Some((edge, vertex.clone()));
-                    heap.push(Reverse(HeapEntry {
-                        distance: next_distance,
-                        vertex: next_arc,
-                    }));
-                }
-                continue;
+            if next_distance < va.vertices[succ as usize].distance {
+                va.vertices[succ as usize].distance = next_distance;
+                va.vertices[succ as usize].predecessor = Some((edge, vid));
+                heap.push(Reverse((next_distance, succ)));
             }
-
-            // No matching variant: append if we have room. The cap
-            // of MAX_VARIANTS_PER_KEY bounds the worst-case branching
-            // for deeply-nested adversarial inputs.
-            if bucket.len() < MAX_VARIANTS_PER_KEY {
-                bucket.push(VariantState {
-                    parents_signature: next_signature,
-                    distance: next_distance,
-                    predecessor: Some((edge, vertex.clone())),
-                });
-                total_variants += 1;
-                heap.push(Reverse(HeapEntry {
-                    distance: next_distance,
-                    vertex: next_arc,
-                }));
-            }
-            // Bucket full and the new vertex didn't match either
-            // existing variant: drop it. The search continues with
-            // the variants it has.
         }
 
-        if total_variants > graph_limit {
+        if va.vertices.len() > graph_limit {
             return SearchOutcome::ExceededGraphLimit;
         }
     }
 
-    // Heap exhausted without finding the end. Should not happen for
-    // well-formed inputs because there's always at least one outgoing
-    // edge until we reach the end vertex; but defensively return as
-    // exceeded so the caller falls back.
+    // Heap exhausted without reaching the end. A well-formed input always
+    // has an outgoing edge until the end vertex, so treat this defensively
+    // as exceeded and let the caller fall back.
     SearchOutcome::ExceededGraphLimit
 }
 
-#[derive(Clone)]
-struct HeapEntry {
-    distance: u32,
-    vertex: Arc<Vertex>,
-}
-
-impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.distance == other.distance
+/// Generate and intern every outgoing edge from vertex `vid`, caching the
+/// resulting [`VertexArena::edges`] range on the vertex so a re-pop
+/// returns immediately.
+///
+/// Mirrors `references/difftastic/src/diff/graph.rs:493-794`
+/// `set_neighbours`.
+fn expand(
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+    va: &mut VertexArena,
+    seen: &mut SeenMap,
+    vid: u32,
+) {
+    if va.vertices[vid as usize].neighbours.is_some() {
+        return;
     }
-}
 
-impl Eq for HeapEntry {}
+    let lhs_syntax = va.vertices[vid as usize].lhs_syntax;
+    let rhs_syntax = va.vertices[vid as usize].rhs_syntax;
+    let parents = va.vertices[vid as usize].parents.clone();
 
-impl Ord for HeapEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.distance.cmp(&other.distance)
+    let edge_start = va.edges.len() as u32;
+
+    match (lhs_syntax, rhs_syntax) {
+        (Some(lhs_id), Some(rhs_id)) => {
+            let lhs_node = lhs_arena.get(lhs_id);
+            let rhs_node = rhs_arena.get(rhs_id);
+
+            if lhs_node.content_id() == rhs_node.content_id() {
+                // Identical nodes match and advance both sides. No other
+                // edge can beat a same-content match, so stop here.
+                let edge = Edge::UnchangedNode {
+                    depth_difference: 0,
+                    probably_punctuation: probably_punctuation(lhs_node),
+                };
+                let (lhs_after, rhs_after, parents_after) = pop_all_parents(
+                    lhs_arena,
+                    rhs_arena,
+                    lhs_node.next_sibling(),
+                    rhs_node.next_sibling(),
+                    parents,
+                );
+                push_edge(va, seen, edge, lhs_after, rhs_after, parents_after);
+            } else {
+                // Case 2: both sides are lists of the same kind. Enter
+                // their children together via PopBoth.
+                if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) = (lhs_node, rhs_node)
+                    && lhs_list.kind == rhs_list.kind
+                {
+                    let edge = Edge::EnterUnchangedDelimiter {
+                        depth_difference: 0,
+                    };
+                    let entered = parents.push(EnteredDelimiter::PopBoth(lhs_id, rhs_id));
+                    let (lhs_after, rhs_after, parents_after) = pop_all_parents(
+                        lhs_arena,
+                        rhs_arena,
+                        lhs_list.children.first().copied(),
+                        rhs_list.children.first().copied(),
+                        entered,
+                    );
+                    push_edge(va, seen, edge, lhs_after, rhs_after, parents_after);
+                }
+
+                // Case 2b: comment- or string-kind atoms with similar
+                // content pair via a Replaced* edge, so a tweaked
+                // comment/string does not show as two unrelated Novel runs.
+                if let (Syntax::Atom(lhs_atom), Syntax::Atom(rhs_atom)) = (lhs_node, rhs_node) {
+                    // The kind check is a cheap enum compare, while
+                    // Levenshtein is an O(n*m) DP. Gate on the kind first so
+                    // only same-kind comment/string pairs pay the similarity
+                    // cost -- code atoms, the common case, never match here.
+                    let kind_match_comment = is_comment_atom(lhs_node) && is_comment_atom(rhs_node);
+                    let kind_match_string = is_string_atom(lhs_node) && is_string_atom(rhs_node);
+                    if kind_match_comment || kind_match_string {
+                        let levenshtein = levenshtein_pct(lhs_atom.content, rhs_atom.content);
+                        if levenshtein > 20 {
+                            let edge = if kind_match_comment {
+                                Edge::ReplacedComment {
+                                    levenshtein_pct: levenshtein,
+                                }
+                            } else {
+                                Edge::ReplacedString {
+                                    levenshtein_pct: levenshtein,
+                                }
+                            };
+                            let (lhs_after, rhs_after, parents_after) = pop_all_parents(
+                                lhs_arena,
+                                rhs_arena,
+                                lhs_atom.next_sibling,
+                                rhs_atom.next_sibling,
+                                parents.clone(),
+                            );
+                            push_edge(va, seen, edge, lhs_after, rhs_after, parents_after);
+                        }
+                    }
+                }
+
+                // Cases 3 & 4: treat the node on one side as novel.
+                expand_novel_lhs(lhs_arena, rhs_arena, va, seen, lhs_id, rhs_syntax, &parents);
+                expand_novel_rhs(lhs_arena, rhs_arena, va, seen, rhs_id, lhs_syntax, &parents);
+            }
+        },
+        (Some(lhs_id), None) => {
+            expand_novel_lhs(lhs_arena, rhs_arena, va, seen, lhs_id, None, &parents);
+        },
+        (None, Some(rhs_id)) => {
+            expand_novel_rhs(lhs_arena, rhs_arena, va, seen, rhs_id, None, &parents);
+        },
+        (None, None) => {
+            // Both sides exhausted at this level. pop_all_parents unwinds
+            // any remaining frames. Emit the step only if it makes progress.
+            let (lhs_next, rhs_next, parents_after) =
+                pop_all_parents(lhs_arena, rhs_arena, None, None, parents.clone());
+            if lhs_next.is_some() || rhs_next.is_some() || parents_after.len() < parents.len() {
+                let edge = Edge::UnchangedNode {
+                    depth_difference: 0,
+                    probably_punctuation: false,
+                };
+                push_edge(va, seen, edge, lhs_next, rhs_next, parents_after);
+            }
+        },
     }
+
+    let edge_end = va.edges.len() as u32;
+    va.vertices[vid as usize].neighbours = Some((edge_start, edge_end));
 }
 
-impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+/// Emit the "novel on lhs" step: skip the lhs node (descending into it if
+/// it is a list) while the rhs position stays put.
+fn expand_novel_lhs(
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+    va: &mut VertexArena,
+    seen: &mut SeenMap,
+    lhs_id: SyntaxId,
+    rhs_syntax: Option<SyntaxId>,
+    parents: &Stack<EnteredDelimiter>,
+) {
+    let (edge, lhs_next, entered) = match lhs_arena.get(lhs_id) {
+        Syntax::Atom(atom) => (Edge::NovelAtomLHS, atom.next_sibling, parents.clone()),
+        Syntax::List(list) => (
+            Edge::EnterNovelDelimiterLHS,
+            list.children.first().copied(),
+            push_lhs_delimiter(parents, lhs_id),
+        ),
+    };
+    let (lhs_after, rhs_after, parents_after) =
+        pop_all_parents(lhs_arena, rhs_arena, lhs_next, rhs_syntax, entered);
+    push_edge(va, seen, edge, lhs_after, rhs_after, parents_after);
+}
+
+/// The rhs counterpart of [`expand_novel_lhs`].
+fn expand_novel_rhs(
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+    va: &mut VertexArena,
+    seen: &mut SeenMap,
+    rhs_id: SyntaxId,
+    lhs_syntax: Option<SyntaxId>,
+    parents: &Stack<EnteredDelimiter>,
+) {
+    let (edge, rhs_next, entered) = match rhs_arena.get(rhs_id) {
+        Syntax::Atom(atom) => (Edge::NovelAtomRHS, atom.next_sibling, parents.clone()),
+        Syntax::List(list) => (
+            Edge::EnterNovelDelimiterRHS,
+            list.children.first().copied(),
+            push_rhs_delimiter(parents, rhs_id),
+        ),
+    };
+    let (lhs_after, rhs_after, parents_after) =
+        pop_all_parents(lhs_arena, rhs_arena, lhs_syntax, rhs_next, entered);
+    push_edge(va, seen, edge, lhs_after, rhs_after, parents_after);
+}
+
+/// Intern a successor and record the edge into `va.edges`.
+fn push_edge(
+    va: &mut VertexArena,
+    seen: &mut SeenMap,
+    edge: Edge,
+    lhs: Option<SyntaxId>,
+    rhs: Option<SyntaxId>,
+    parents: Stack<EnteredDelimiter>,
+) {
+    let succ = intern(va, seen, lhs, rhs, parents);
+    va.edges.push((edge, succ));
+}
+
+/// Return the vertex index a successor edge should point at. An existing
+/// variant whose full parents stack is equal is reused. A new one is
+/// allocated while the shallow key has room. Once [`MAX_VARIANTS_PER_KEY`]
+/// variants exist, the last is reused so the search always has a
+/// successor. Mirrors difftastic `allocate_if_new`.
+fn intern(
+    va: &mut VertexArena,
+    seen: &mut SeenMap,
+    lhs: Option<SyntaxId>,
+    rhs: Option<SyntaxId>,
+    parents: Stack<EnteredDelimiter>,
+) -> u32 {
+    let key = (lhs, rhs, TopKey::from_parents(&parents));
+    let bucket = seen.entry(key).or_default();
+
+    if bucket.len() >= MAX_VARIANTS_PER_KEY {
+        return *bucket.last().expect("a full bucket is non-empty");
     }
+    for &existing in bucket.iter() {
+        if va.vertices[existing as usize].parents == parents {
+            return existing;
+        }
+    }
+
+    let vid = va.alloc(lhs, rhs, parents);
+    bucket.push(vid);
+    vid
 }
 
-fn reconstruct_path(
-    state: &HashMap<Vertex, Vec<VariantState>>,
-    end: &Arc<Vertex>,
-) -> Vec<(Edge, Arc<Vertex>)> {
-    let mut out: Vec<(Edge, Arc<Vertex>)> = Vec::new();
-    let mut current: Arc<Vertex> = end.clone();
-    loop {
-        let signature = current.deep_parents_hash();
-        let Some(bucket) = state.get(current.as_ref()) else {
-            break;
-        };
-        let Some(variant) = bucket.iter().find(|v| v.parents_signature == signature) else {
-            break;
-        };
-        let Some((edge, prev)) = &variant.predecessor else {
-            break;
-        };
-        out.push((*edge, prev.clone()));
-        current = prev.clone();
+/// Walk `predecessor` back-pointers from the end vertex to the start,
+/// producing the edge sequence in start-to-end order. Each step carries
+/// the syntax positions of the vertex the edge left from.
+fn reconstruct_path(va: &VertexArena, end: u32) -> Vec<PathStep> {
+    let mut out: Vec<PathStep> = Vec::new();
+    let mut current = end;
+    while let Some((edge, prev)) = va.vertices[current as usize].predecessor {
+        out.push(PathStep {
+            edge,
+            lhs: va.vertices[prev as usize].lhs_syntax,
+            rhs: va.vertices[prev as usize].rhs_syntax,
+        });
+        current = prev;
     }
     out.reverse();
     out
@@ -229,7 +464,7 @@ fn reconstruct_path(
 /// Walk the resolved path and tag every node visited by an
 /// `UnchangedNode` or `EnterUnchangedDelimiter` edge as
 /// [`ChangeKind::Unchanged`] in the corresponding side's [`ChangeMap`].
-/// Nodes touched by Novel edges are left as `Pending`; the caller's
+/// Nodes touched by Novel edges are left as `Pending`. The caller's
 /// downstream pass converts them into `DiffChange` byte ranges.
 ///
 /// Mirrors `references/difftastic/src/diff/graph.rs:796-847`
@@ -237,52 +472,44 @@ fn reconstruct_path(
 pub fn populate_change_map(
     lhs_arena: &SyntaxArena,
     rhs_arena: &SyntaxArena,
-    path: &[(Edge, Arc<Vertex>)],
+    path: &[PathStep],
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
 ) {
-    for (edge, predecessor) in path {
-        match edge {
+    for step in path {
+        match step.edge {
             Edge::UnchangedNode { .. } => {
-                if let Some(lhs_id) = predecessor.lhs_syntax {
+                if let Some(lhs_id) = step.lhs {
                     mark_subtree(lhs_arena, lhs_id, lhs_changes, ChangeKind::Unchanged);
                 }
-                if let Some(rhs_id) = predecessor.rhs_syntax {
+                if let Some(rhs_id) = step.rhs {
                     mark_subtree(rhs_arena, rhs_id, rhs_changes, ChangeKind::Unchanged);
                 }
             },
             Edge::EnterUnchangedDelimiter { .. } => {
-                if let Some(lhs_id) = predecessor.lhs_syntax {
+                if let Some(lhs_id) = step.lhs {
                     lhs_changes.mark(lhs_id, ChangeKind::Unchanged);
                 }
-                if let Some(rhs_id) = predecessor.rhs_syntax {
+                if let Some(rhs_id) = step.rhs {
                     rhs_changes.mark(rhs_id, ChangeKind::Unchanged);
                 }
             },
             Edge::ReplacedComment { .. } | Edge::ReplacedString { .. } => {
-                // The replacement edge says "treat these two atoms as
-                // a structural pair, not as two separate Novel runs."
-                // We mark both sides Unchanged so collect_changes
-                // skips them; the diff renderer will surface the
-                // similarity via a separate channel in a follow-up.
-                // The current minimum-viable consumer just sees them
-                // as unchanged (which is still better than two
-                // mis-aligned Novel runs).
-                if let Some(lhs_id) = predecessor.lhs_syntax {
+                // The replacement edge pairs two atoms structurally rather
+                // than emitting two Novel runs. Both sides are marked
+                // Unchanged so collect_changes skips them. Surfacing the
+                // similarity itself is a follow-up concern.
+                if let Some(lhs_id) = step.lhs {
                     lhs_changes.mark(lhs_id, ChangeKind::Unchanged);
                 }
-                if let Some(rhs_id) = predecessor.rhs_syntax {
+                if let Some(rhs_id) = step.rhs {
                     rhs_changes.mark(rhs_id, ChangeKind::Unchanged);
                 }
             },
-            Edge::NovelAtomLHS | Edge::EnterNovelDelimiterLHS => {
-                // Leave LHS as Pending; the downstream collector will
-                // emit a Novel DiffChange.
-                let _ = predecessor.lhs_syntax;
-            },
-            Edge::NovelAtomRHS | Edge::EnterNovelDelimiterRHS => {
-                let _ = predecessor.rhs_syntax;
-            },
+            // Novel edges leave the node Pending. The downstream collector
+            // emits it as a Novel DiffChange.
+            Edge::NovelAtomLHS | Edge::EnterNovelDelimiterLHS => {},
+            Edge::NovelAtomRHS | Edge::EnterNovelDelimiterRHS => {},
         }
     }
 }
@@ -302,9 +529,10 @@ mod tests {
     use super::*;
     use crate::{
         parse,
-        structural_diff::{lower_tree, ChangeMap},
+        structural_diff::{arena::Atom, lower_tree, ChangeMap, ContentId},
         LanguageRegistry,
     };
+    use std::sync::Arc;
 
     fn rust_lang() -> Arc<crate::Language> {
         LanguageRegistry::standard()
@@ -316,6 +544,83 @@ mod tests {
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
         lower_tree(&tree, source)
+    }
+
+    fn mk_atom(arena: &mut SyntaxArena, kind: &'static str, content: &'static str) -> SyntaxId {
+        arena.alloc(Syntax::Atom(Atom {
+            kind,
+            byte_range: 0..content.len(),
+            content,
+            content_id: ContentId::for_atom(kind, content),
+            next_sibling: None,
+        }))
+    }
+
+    /// Expand a fresh single-vertex arena and return the kinds of edge it
+    /// generates, exercising [`expand`] the way the search loop does.
+    fn expanded_edges(
+        lhs_arena: &SyntaxArena,
+        rhs_arena: &SyntaxArena,
+        lhs: Option<SyntaxId>,
+        rhs: Option<SyntaxId>,
+    ) -> Vec<Edge> {
+        let mut va = VertexArena::new();
+        let mut seen: SeenMap = HashMap::default();
+        let vid = va.alloc(lhs, rhs, Stack::new());
+        expand(lhs_arena, rhs_arena, &mut va, &mut seen, vid);
+        let (start, end) = va.vertices[vid as usize].neighbours.unwrap();
+        (start..end).map(|i| va.edges[i as usize].0).collect()
+    }
+
+    #[test]
+    fn expand_matching_atoms_yields_unchanged() {
+        let mut arena = SyntaxArena::new();
+        let lhs = mk_atom(&mut arena, "ident", "x");
+        let rhs = mk_atom(&mut arena, "ident", "x");
+        let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
+        assert!(edges
+            .iter()
+            .any(|e| matches!(e, Edge::UnchangedNode { .. })));
+    }
+
+    #[test]
+    fn expand_distinct_atoms_yields_only_novel() {
+        let mut arena = SyntaxArena::new();
+        let lhs = mk_atom(&mut arena, "ident", "alpha");
+        let rhs = mk_atom(&mut arena, "ident", "beta");
+        let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
+        assert!(!edges.is_empty());
+        assert!(edges
+            .iter()
+            .all(|e| matches!(e, Edge::NovelAtomLHS | Edge::NovelAtomRHS)));
+    }
+
+    #[test]
+    fn expand_similar_comments_yields_replaced() {
+        let mut arena = SyntaxArena::new();
+        let lhs = mk_atom(&mut arena, "line_comment", "// alpha beta gamma");
+        let rhs = mk_atom(&mut arena, "line_comment", "// alpha beta delta");
+        let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
+        assert!(edges
+            .iter()
+            .any(|e| matches!(e, Edge::ReplacedComment { .. })));
+    }
+
+    #[test]
+    fn end_vertex_is_recognized() {
+        let mut va = VertexArena::new();
+        let vid = va.alloc(None, None, Stack::new());
+        assert!(va.is_end(vid));
+    }
+
+    #[test]
+    fn shallow_key_ignores_deeper_parents() {
+        let empty = TopKey::from_parents(&Stack::new());
+        let both = TopKey::from_parents(
+            &Stack::new().push(EnteredDelimiter::PopBoth(SyntaxId(1), SyntaxId(2))),
+        );
+        assert_eq!(empty, TopKey::from_parents(&Stack::new()));
+        assert_ne!(empty, both);
     }
 
     #[test]
@@ -335,13 +640,10 @@ mod tests {
             SearchOutcome::Found(p) => p,
             SearchOutcome::ExceededGraphLimit => panic!("graph limit hit on trivial input"),
         };
-        // The path should consist entirely of UnchangedNode edges
-        // (the start vertex matches the root pair via content_id and
-        // pop_all_parents takes both to the end).
         assert!(!path.is_empty());
         assert!(path
             .iter()
-            .all(|(e, _)| matches!(e, Edge::UnchangedNode { .. })));
+            .all(|s| matches!(s.edge, Edge::UnchangedNode { .. })));
     }
 
     #[test]
@@ -362,9 +664,8 @@ mod tests {
             SearchOutcome::Found(p) => p,
             SearchOutcome::ExceededGraphLimit => panic!("graph limit hit on trivial input"),
         };
-        // The path must include at least one Novel edge.
-        assert!(path.iter().any(|(e, _)| matches!(
-            e,
+        assert!(path.iter().any(|s| matches!(
+            s.edge,
             Edge::NovelAtomLHS
                 | Edge::NovelAtomRHS
                 | Edge::EnterNovelDelimiterLHS
@@ -398,7 +699,6 @@ mod tests {
             &mut lhs_changes,
             &mut rhs_changes,
         );
-        // The root pair should be marked Unchanged on both sides.
         assert_eq!(lhs_changes.get(lhs_root), ChangeKind::Unchanged);
         assert_eq!(rhs_changes.get(rhs_root), ChangeKind::Unchanged);
     }

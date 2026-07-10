@@ -1,30 +1,20 @@
-//! Edit graph for the structural-diff Dijkstra search.
+//! Edit-graph primitives for the structural-diff Dijkstra search.
 //!
-//! Each [`Vertex`] is a position in the diff state space: a pair of
-//! syntax pointers (one per side, possibly `None` for "exhausted")
-//! plus a stack of [`EnteredDelimiter`]s tracking which lists we
-//! have descended into. Edges between vertices have a cost; the
-//! Dijkstra search finds the minimum-cost path from start to end,
-//! and the resulting edge sequence describes the diff.
+//! The search itself lives in [`super::dijkstra`]. This module owns the
+//! pieces the search builds on. Those are the [`Edge`] type and its cost
+//! model, the [`EnteredDelimiter`] stack that tracks which lists each side
+//! has descended into, the parent-stack helpers ([`pop_all_parents`],
+//! [`push_lhs_delimiter`], [`push_rhs_delimiter`]), and the atom
+//! predicates that classify punctuation, comments, and strings.
 //!
-//! Reference: `references/difftastic/src/diff/graph.rs`. The cost
-//! values and edge generation cases are ported verbatim from there;
-//! see in-code citations.
+//! Reference: `references/difftastic/src/diff/graph.rs`. The cost values
+//! and delimiter bookkeeping are ported from there. See the in-code
+//! citations.
 //!
-//! Differences from Difftastic for this minimum-viable port:
-//! - No `ReplacedComment`/`ReplacedString` (Levenshtein matching). Falls back to two `Novel` edges
-//!   (one per side).
-//! - No punctuation penalty. `probably_punctuation` is always `false`, so the +200 cost doesn't
-//!   apply.
-//! - No 2-variant vertex deduplication; the seen-set picks the first variant.
-//! - No slider correction (separate post-pass, deferred to a follow-up).
-//!
-//! Required for correctness:
-//! - The `EnteredDelimiter::PopBoth` vs `PopEither` distinction. Without `PopBoth`, structural
-//!   changes like `(a b c)` vs `(a b) c` are missed.
-//! - Vertex equality on the *top of the parents stack only* (shallow). This is intentional and
-//!   load-bearing per the Difftastic comments.
-//! - `pop_all_parents` semantics for handling list endings.
+//! The [`EnteredDelimiter::PopBoth`] vs [`EnteredDelimiter::PopEither`]
+//! distinction is load-bearing. Without `PopBoth`, structural changes
+//! like `(a b c)` vs `(a b) c` are missed, and [`pop_all_parents`]
+//! encodes the matching list-ending semantics.
 
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
@@ -53,10 +43,10 @@ pub enum EnteredDelimiter {
 
 impl PartialEq for EnteredDelimiter {
     fn eq(&self, other: &Self) -> bool {
-        // Equality only compares the *kind* and the lhs/rhs delim ids
-        // at the top of each stack. The full vector contents are not
-        // compared because vertex equality is intentionally shallow
-        // (see `Vertex` below).
+        // Equality compares only the kind and the top lhs/rhs delim ids
+        // of each substack, never the deeper frames. This keeps it in
+        // step with the shallow key the search dedups vertices by (see
+        // `TopKey` in `super::dijkstra`).
         match (self, other) {
             (EnteredDelimiter::PopBoth(a1, b1), EnteredDelimiter::PopBoth(a2, b2)) => {
                 a1 == a2 && b1 == b2
@@ -78,81 +68,7 @@ impl PartialEq for EnteredDelimiter {
 
 impl Eq for EnteredDelimiter {}
 
-impl std::hash::Hash for EnteredDelimiter {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self {
-            EnteredDelimiter::PopBoth(a, b) => {
-                0u8.hash(state);
-                a.hash(state);
-                b.hash(state);
-            },
-            EnteredDelimiter::PopEither {
-                lhs_delims,
-                rhs_delims,
-            } => {
-                1u8.hash(state);
-                lhs_delims.peek().hash(state);
-                rhs_delims.peek().hash(state);
-            },
-        }
-    }
-}
-
-/// One position in the diff state space.
-///
-/// Equality and hashing are intentionally **shallow** on the
-/// `parents` stack: only the top entry participates. The first
-/// vertex to reach a `(lhs_id, rhs_id, top_parent)` tuple "wins"
-/// the seen-set entry; since Dijkstra explores in cost order, this
-/// is also the lowest-cost path to that position.
-#[derive(Clone, Debug)]
-pub struct Vertex {
-    pub lhs_syntax: Option<SyntaxId>,
-    pub rhs_syntax: Option<SyntaxId>,
-    pub parents: Stack<EnteredDelimiter>,
-}
-
-impl Vertex {
-    pub fn is_end(&self) -> bool {
-        self.lhs_syntax.is_none() && self.rhs_syntax.is_none() && self.parents.is_empty()
-    }
-
-    /// Hash the FULL parents stack (not just the shallow top entry
-    /// that [`PartialEq`] / [`Hash`] use). Returned value distinguishes
-    /// vertices that share the same `(lhs_syntax, rhs_syntax, top_parent)`
-    /// shallow key but have different deeper stack contents. Used by
-    /// the 2-variant dedup in
-    /// [`super::dijkstra::shortest_path`] to allow up to two distinct
-    /// nesting variants per shallow key.
-    pub fn deep_parents_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for entry in self.parents.iter() {
-            entry.hash(&mut h);
-        }
-        h.finish()
-    }
-}
-
-impl PartialEq for Vertex {
-    fn eq(&self, other: &Self) -> bool {
-        self.lhs_syntax == other.lhs_syntax
-            && self.rhs_syntax == other.rhs_syntax
-            && self.parents.peek() == other.parents.peek()
-    }
-}
-
-impl Eq for Vertex {}
-
-impl std::hash::Hash for Vertex {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.lhs_syntax.hash(state);
-        self.rhs_syntax.hash(state);
-        self.parents.peek().hash(state);
-    }
-}
-
-/// One outgoing edge from a [`Vertex`].
+/// One outgoing edge from a diff-graph vertex.
 #[derive(Clone, Copy, Debug)]
 pub enum Edge {
     /// Both sides have a node with the same `ContentId`. Lowest cost.
@@ -279,19 +195,6 @@ pub fn levenshtein_pct(a: &str, b: &str) -> u8 {
     similarity.min(100) as u8
 }
 
-/// Build the start vertex for diffing two roots. Both roots are
-/// expected to be `Syntax::List` (e.g., the top-level `source_file`
-/// node). The start vertex sits at the root pair; the search will
-/// match them via [`Edge::UnchangedNode`] or [`Edge::EnterUnchangedDelimiter`]
-/// or descend independently via the novel-delimiter edges.
-pub fn start_vertex(lhs_root: Option<SyntaxId>, rhs_root: Option<SyntaxId>) -> Vertex {
-    Vertex {
-        lhs_syntax: lhs_root,
-        rhs_syntax: rhs_root,
-        parents: Stack::new(),
-    }
-}
-
 /// Pop empty list parents. After matching or skipping a node, both
 /// pointers may have moved past the end of their current sibling
 /// list; this routine pops back up through the parents stack until
@@ -413,7 +316,7 @@ fn try_pop_rhs(parents: &Stack<EnteredDelimiter>) -> Option<(SyntaxId, Stack<Ent
 /// Record descending into an LHS-only novel list. Extends the top
 /// [`EnteredDelimiter::PopEither`] frame's LHS stack when present, so
 /// consecutive LHS descents share one frame. Otherwise it pushes a fresh frame.
-fn push_lhs_delimiter(
+pub(crate) fn push_lhs_delimiter(
     parents: &Stack<EnteredDelimiter>,
     delimiter: SyntaxId,
 ) -> Stack<EnteredDelimiter> {
@@ -438,7 +341,7 @@ fn push_lhs_delimiter(
 }
 
 /// The RHS counterpart of [`push_lhs_delimiter`].
-fn push_rhs_delimiter(
+pub(crate) fn push_rhs_delimiter(
     parents: &Stack<EnteredDelimiter>,
     delimiter: SyntaxId,
 ) -> Stack<EnteredDelimiter> {
@@ -462,237 +365,11 @@ fn push_rhs_delimiter(
     }
 }
 
-/// Generate every outgoing edge from `vertex`, returning a Vec of
-/// `(edge, next_vertex)` pairs.
-///
-/// Mirrors `references/difftastic/src/diff/graph.rs:493-794`
-/// `set_neighbours`, simplified to skip `ReplacedComment` and
-/// `ReplacedString` edges.
-pub fn neighbours(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
-    vertex: &Vertex,
-) -> Vec<(Edge, Vertex)> {
-    let mut out: Vec<(Edge, Vertex)> = Vec::new();
-
-    match (vertex.lhs_syntax, vertex.rhs_syntax) {
-        (Some(lhs_id), Some(rhs_id)) => {
-            let lhs_node = lhs_arena.get(lhs_id);
-            let rhs_node = rhs_arena.get(rhs_id);
-
-            // Case 1: nodes have identical content_ids. Match them
-            // and advance to next siblings on both sides.
-            if lhs_node.content_id() == rhs_node.content_id() {
-                let edge = Edge::UnchangedNode {
-                    depth_difference: 0,
-                    probably_punctuation: probably_punctuation(lhs_node),
-                };
-                let lhs_next = lhs_node.next_sibling();
-                let rhs_next = rhs_node.next_sibling();
-                let (lhs_after, rhs_after, parents_after) = pop_all_parents(
-                    lhs_arena,
-                    rhs_arena,
-                    lhs_next,
-                    rhs_next,
-                    vertex.parents.clone(),
-                );
-                out.push((
-                    edge,
-                    Vertex {
-                        lhs_syntax: lhs_after,
-                        rhs_syntax: rhs_after,
-                        parents: parents_after,
-                    },
-                ));
-                return out;
-            }
-
-            // Case 2: both sides are lists of the same kind. Enter
-            // their children together via PopBoth.
-            if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) = (lhs_node, rhs_node)
-                && lhs_list.kind == rhs_list.kind
-            {
-                let edge = Edge::EnterUnchangedDelimiter {
-                    depth_difference: 0,
-                };
-                let parents = vertex
-                    .parents
-                    .push(EnteredDelimiter::PopBoth(lhs_id, rhs_id));
-                let lhs_first = lhs_list.children.first().copied();
-                let rhs_first = rhs_list.children.first().copied();
-                let (lhs_after, rhs_after, parents_after) =
-                    pop_all_parents(lhs_arena, rhs_arena, lhs_first, rhs_first, parents);
-                out.push((
-                    edge,
-                    Vertex {
-                        lhs_syntax: lhs_after,
-                        rhs_syntax: rhs_after,
-                        parents: parents_after,
-                    },
-                ));
-                // Fall through so the search can also try the
-                // novel-delimiter alternatives.
-            }
-
-            // Case 2b: comment- or string-kind atoms with similar
-            // content can be paired via the Replaced* edges so the
-            // diff doesn't show two unrelated Novel runs for a
-            // tweaked comment/string.
-            if let (Syntax::Atom(lhs_atom), Syntax::Atom(rhs_atom)) = (lhs_node, rhs_node) {
-                // The kind check is a cheap enum compare, while Levenshtein is
-                // an O(n*m) DP. Gate on the kind first so only same-kind
-                // comment/string pairs pay the similarity cost -- code atoms,
-                // the common case, never match here and would discard it.
-                let kind_match_comment = is_comment_atom(lhs_node) && is_comment_atom(rhs_node);
-                let kind_match_string = is_string_atom(lhs_node) && is_string_atom(rhs_node);
-                if kind_match_comment || kind_match_string {
-                    let levenshtein = levenshtein_pct(lhs_atom.content, rhs_atom.content);
-                    if levenshtein > 20 {
-                        let edge = if kind_match_comment {
-                            Edge::ReplacedComment {
-                                levenshtein_pct: levenshtein,
-                            }
-                        } else {
-                            Edge::ReplacedString {
-                                levenshtein_pct: levenshtein,
-                            }
-                        };
-                        let lhs_next = lhs_atom.next_sibling;
-                        let rhs_next = rhs_atom.next_sibling;
-                        let (lhs_after, rhs_after, parents_after) = pop_all_parents(
-                            lhs_arena,
-                            rhs_arena,
-                            lhs_next,
-                            rhs_next,
-                            vertex.parents.clone(),
-                        );
-                        out.push((
-                            edge,
-                            Vertex {
-                                lhs_syntax: lhs_after,
-                                rhs_syntax: rhs_after,
-                                parents: parents_after,
-                            },
-                        ));
-                    }
-                }
-            }
-
-            // Case 3: emit "novel on lhs": skip lhs and stay on rhs.
-            push_novel_lhs(&mut out, lhs_arena, rhs_arena, lhs_id, vertex);
-            // Case 4: emit "novel on rhs": skip rhs and stay on lhs.
-            push_novel_rhs(&mut out, lhs_arena, rhs_arena, rhs_id, vertex);
-        },
-        (Some(lhs_id), None) => {
-            push_novel_lhs(&mut out, lhs_arena, rhs_arena, lhs_id, vertex);
-        },
-        (None, Some(rhs_id)) => {
-            push_novel_rhs(&mut out, lhs_arena, rhs_arena, rhs_id, vertex);
-        },
-        (None, None) => {
-            // Both exhausted; the search loop checks `is_end` first.
-            // pop_all_parents resolves any remaining stack frames.
-            let (lhs_next, rhs_next, parents) =
-                pop_all_parents(lhs_arena, rhs_arena, None, None, vertex.parents.clone());
-            if lhs_next.is_some() || rhs_next.is_some() || parents.len() < vertex.parents.len() {
-                out.push((
-                    Edge::UnchangedNode {
-                        depth_difference: 0,
-                        probably_punctuation: false,
-                    },
-                    Vertex {
-                        lhs_syntax: lhs_next,
-                        rhs_syntax: rhs_next,
-                        parents,
-                    },
-                ));
-            }
-        },
-    }
-    out
-}
-
-fn push_novel_lhs(
-    out: &mut Vec<(Edge, Vertex)>,
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
-    lhs_id: SyntaxId,
-    vertex: &Vertex,
-) {
-    let lhs_node = lhs_arena.get(lhs_id);
-    let (edge, lhs_next, parents) = match lhs_node {
-        Syntax::Atom(atom) => {
-            // Atom: skip it; advance to its next sibling.
-            (
-                Edge::NovelAtomLHS,
-                atom.next_sibling,
-                vertex.parents.clone(),
-            )
-        },
-        Syntax::List(list) => {
-            // Descend into the list and record it on the parents stack so a
-            // later pop returns to its next sibling. The search then recurses
-            // through its children.
-            let parents = push_lhs_delimiter(&vertex.parents, lhs_id);
-            (
-                Edge::EnterNovelDelimiterLHS,
-                list.children.first().copied(),
-                parents,
-            )
-        },
-    };
-    let (lhs_after, rhs_after, parents_after) =
-        pop_all_parents(lhs_arena, rhs_arena, lhs_next, vertex.rhs_syntax, parents);
-    out.push((
-        edge,
-        Vertex {
-            lhs_syntax: lhs_after,
-            rhs_syntax: rhs_after,
-            parents: parents_after,
-        },
-    ));
-}
-
-fn push_novel_rhs(
-    out: &mut Vec<(Edge, Vertex)>,
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
-    rhs_id: SyntaxId,
-    vertex: &Vertex,
-) {
-    let rhs_node = rhs_arena.get(rhs_id);
-    let (edge, rhs_next, parents) = match rhs_node {
-        Syntax::Atom(atom) => (
-            Edge::NovelAtomRHS,
-            atom.next_sibling,
-            vertex.parents.clone(),
-        ),
-        Syntax::List(list) => {
-            let parents = push_rhs_delimiter(&vertex.parents, rhs_id);
-            (
-                Edge::EnterNovelDelimiterRHS,
-                list.children.first().copied(),
-                parents,
-            )
-        },
-    };
-    let (lhs_after, rhs_after, parents_after) =
-        pop_all_parents(lhs_arena, rhs_arena, vertex.lhs_syntax, rhs_next, parents);
-    out.push((
-        edge,
-        Vertex {
-            lhs_syntax: lhs_after,
-            rhs_syntax: rhs_after,
-            parents: parents_after,
-        },
-    ));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::structural_diff::{
-        arena::{Atom, List, Syntax, SyntaxArena, SyntaxId},
+        arena::{Atom, Syntax, SyntaxArena, SyntaxId},
         ContentId,
     };
 
@@ -704,48 +381,6 @@ mod tests {
             content_id: ContentId::for_atom(kind, content),
             next_sibling: None,
         }))
-    }
-
-    #[allow(dead_code)]
-    fn mk_list(
-        arena: &mut SyntaxArena,
-        kind: &'static str,
-        children: Vec<SyntaxId>,
-        children_ids: &[ContentId],
-    ) -> SyntaxId {
-        let id = arena.alloc(Syntax::List(List {
-            kind,
-            open_byte_range: 0..0,
-            close_byte_range: 0..0,
-            children,
-            content_id: ContentId::for_list(kind, children_ids),
-            next_sibling: None,
-            _marker: std::marker::PhantomData,
-        }));
-        arena.link_siblings();
-        id
-    }
-
-    #[test]
-    fn vertex_equality_is_shallow_on_parents() {
-        let v1 = Vertex {
-            lhs_syntax: Some(SyntaxId(0)),
-            rhs_syntax: Some(SyntaxId(0)),
-            parents: Stack::new(),
-        };
-        let v2 = Vertex {
-            lhs_syntax: Some(SyntaxId(0)),
-            rhs_syntax: Some(SyntaxId(0)),
-            parents: Stack::new(),
-        };
-        assert_eq!(v1, v2);
-
-        let v3 = Vertex {
-            lhs_syntax: Some(SyntaxId(0)),
-            rhs_syntax: Some(SyntaxId(0)),
-            parents: Stack::new().push(EnteredDelimiter::PopBoth(SyntaxId(1), SyntaxId(2))),
-        };
-        assert_ne!(v1, v3);
     }
 
     #[test]
@@ -775,49 +410,6 @@ mod tests {
             Edge::EnterNovelDelimiterLHS.cost(),
             Edge::EnterNovelDelimiterRHS.cost()
         );
-    }
-
-    #[test]
-    fn matching_atoms_yield_unchanged_edge() {
-        let mut arena = SyntaxArena::new();
-        let lhs_id = mk_atom(&mut arena, "ident", "x");
-        let rhs_id = mk_atom(&mut arena, "ident", "x");
-        let vertex = Vertex {
-            lhs_syntax: Some(lhs_id),
-            rhs_syntax: Some(rhs_id),
-            parents: Stack::new(),
-        };
-        let edges = neighbours(&arena, &arena, &vertex);
-        assert!(edges
-            .iter()
-            .any(|(e, _)| matches!(e, Edge::UnchangedNode { .. })));
-    }
-
-    #[test]
-    fn distinct_atoms_yield_only_novel_edges() {
-        let mut arena = SyntaxArena::new();
-        let lhs_id = mk_atom(&mut arena, "ident", "alpha");
-        let rhs_id = mk_atom(&mut arena, "ident", "beta");
-        let vertex = Vertex {
-            lhs_syntax: Some(lhs_id),
-            rhs_syntax: Some(rhs_id),
-            parents: Stack::new(),
-        };
-        let edges = neighbours(&arena, &arena, &vertex);
-        assert!(!edges.is_empty());
-        assert!(edges
-            .iter()
-            .all(|(e, _)| matches!(e, Edge::NovelAtomLHS | Edge::NovelAtomRHS)));
-    }
-
-    #[test]
-    fn end_vertex_is_recognized() {
-        let v = Vertex {
-            lhs_syntax: None,
-            rhs_syntax: None,
-            parents: Stack::new(),
-        };
-        assert!(v.is_end());
     }
 
     #[test]
@@ -871,21 +463,5 @@ mod tests {
         let ident = mk_atom(&mut arena, "identifier", "alpha");
         assert!(probably_punctuation(arena.get(comma)));
         assert!(!probably_punctuation(arena.get(ident)));
-    }
-
-    #[test]
-    fn similar_comments_yield_replaced_comment_edge() {
-        let mut arena = SyntaxArena::new();
-        let lhs_id = mk_atom(&mut arena, "line_comment", "// alpha beta gamma");
-        let rhs_id = mk_atom(&mut arena, "line_comment", "// alpha beta delta");
-        let vertex = Vertex {
-            lhs_syntax: Some(lhs_id),
-            rhs_syntax: Some(rhs_id),
-            parents: Stack::new(),
-        };
-        let edges = neighbours(&arena, &arena, &vertex);
-        assert!(edges
-            .iter()
-            .any(|(e, _)| matches!(e, Edge::ReplacedComment { .. })));
     }
 }

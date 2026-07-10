@@ -30,6 +30,7 @@
 mod arena;
 mod content_id;
 mod dijkstra;
+mod fx;
 mod graph;
 mod line_diff;
 mod lower;

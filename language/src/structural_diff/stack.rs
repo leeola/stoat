@@ -1,10 +1,9 @@
 //! Persistent (immutable, structurally-shared) linked-list stack.
 //!
 //! Difftastic uses this to share the [`super::graph::EnteredDelimiter`]
-//! stack across millions of [`super::graph::Vertex`] allocations
-//! without paying the cost of cloning the full stack on every push.
-//! Two vertices that branch off the same parent share their tail
-//! through an `Arc`.
+//! stack across the millions of vertices the diff search allocates,
+//! without cloning the full stack on every push. Two vertices that
+//! branch off the same parent share their tail through an `Arc`.
 //!
 //! Reference: `references/difftastic/src/diff/stack.rs`. We follow the
 //! same shape but with [`Arc`] instead of `bumpalo` for simplicity;
@@ -85,28 +84,6 @@ impl<T> Stack<T> {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
-    }
-
-    /// Iterate the values from the top of the stack to the bottom.
-    pub fn iter(&self) -> Iter<'_, T> {
-        Iter {
-            cur: self.head.as_deref(),
-        }
-    }
-}
-
-/// Top-to-bottom iterator over a [`Stack`], returned by [`Stack::iter`].
-pub struct Iter<'a, T> {
-    cur: Option<&'a Node<T>>,
-}
-
-impl<'a, T> Iterator for Iter<'a, T> {
-    type Item = &'a T;
-
-    fn next(&mut self) -> Option<&'a T> {
-        let node = self.cur?;
-        self.cur = node.next.as_deref();
-        Some(&node.value)
     }
 }
 
@@ -207,12 +184,6 @@ mod tests {
             Stack::<u32>::new().ptr_eq(&Stack::new()),
             "two empty stacks"
         );
-    }
-
-    #[test]
-    fn iter_yields_top_to_bottom() {
-        let s = Stack::<u32>::new().push(1).push(2).push(3);
-        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![3, 2, 1]);
     }
 
     #[test]

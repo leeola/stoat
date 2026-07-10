@@ -4028,6 +4028,7 @@ dependencies = [
  "cc",
  "divan",
  "serde",
+ "smallvec",
  "stoat_scheduler",
  "stoat_text",
  "tree-sitter",
