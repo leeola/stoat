@@ -38,6 +38,41 @@ pub enum FinderScope {
     Named(String),
 }
 
+impl FinderScope {
+    /// The stable name under which this scope is remembered across sessions,
+    /// or `None` for a scope that is never persisted.
+    ///
+    /// [`FinderScope::Buffers`] returns `None`: it is a dedicated picker, not a
+    /// sticky mode, so closing in it leaves the prior remembered scope intact.
+    pub(crate) fn persist_name(&self) -> Option<String> {
+        match self {
+            FinderScope::All => Some("all".to_string()),
+            FinderScope::Modified => Some("modified".to_string()),
+            FinderScope::Named(name) => Some(name.clone()),
+            FinderScope::Buffers => None,
+        }
+    }
+
+    /// Resolve a remembered or configured scope name against the current named
+    /// scopes, or `None` when the name matches nothing valid.
+    ///
+    /// A persisted name whose scope has since been removed from config must
+    /// not resurrect, so validation returns `None` and the caller falls
+    /// through to its next default. `"buffers"` is intentionally not accepted,
+    /// as it is never a sticky or default scope.
+    pub(crate) fn from_persist_name(
+        name: &str,
+        named: &BTreeMap<String, Vec<String>>,
+    ) -> Option<FinderScope> {
+        match name {
+            "all" => Some(FinderScope::All),
+            "modified" => Some(FinderScope::Modified),
+            other if named.contains_key(other) => Some(FinderScope::Named(other.to_string())),
+            _ => None,
+        }
+    }
+}
+
 /// What the finder should do with the selected file when the user submits.
 /// Set at open time; consumed by the submit handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -894,6 +929,92 @@ mod tests {
         let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
         assert_eq!(base.len(), 1, "code scope should list only src/a.rs");
         assert!(base[0].ends_with("src/a.rs"));
+    }
+
+    #[test]
+    fn space_p_reopens_last_scope() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_keys("backtab");
+        h.type_keys("escape");
+        assert!(h.stoat.file_finder.is_none(), "escape closes the finder");
+
+        h.type_keys("space p");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::Modified,
+            "space p reopens in the scope the finder last closed in"
+        );
+    }
+
+    #[test]
+    fn space_p_falls_through_stale_remembered_scope_to_default() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/a.rs", "")]);
+        h.stoat.settings.finder_scopes =
+            BTreeMap::from([("code".to_string(), vec!["src/**".to_string()])]);
+        h.stoat.settings.finder_default_scope = Some("code".to_string());
+        h.stoat.active_workspace_mut().last_finder_scope = Some("ghost".to_string());
+
+        h.type_keys("space p");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::Named("code".to_string()),
+            "a remembered name with no matching scope falls through to the default"
+        );
+    }
+
+    #[test]
+    fn space_p_opens_all_when_nothing_valid_is_remembered_or_configured() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", "")]);
+        h.stoat.active_workspace_mut().last_finder_scope = Some("ghost".to_string());
+
+        h.type_keys("space p");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::All,
+            "a stale name with no valid default resolves to All"
+        );
+    }
+
+    #[test]
+    fn scope_persist_name_and_validation() {
+        let named = BTreeMap::from([("code".to_string(), vec!["src/**".to_string()])]);
+
+        assert_eq!(FinderScope::All.persist_name().as_deref(), Some("all"));
+        assert_eq!(
+            FinderScope::Modified.persist_name().as_deref(),
+            Some("modified")
+        );
+        assert_eq!(
+            FinderScope::Named("code".to_string())
+                .persist_name()
+                .as_deref(),
+            Some("code")
+        );
+        assert_eq!(FinderScope::Buffers.persist_name(), None);
+
+        assert_eq!(
+            FinderScope::from_persist_name("all", &named),
+            Some(FinderScope::All)
+        );
+        assert_eq!(
+            FinderScope::from_persist_name("modified", &named),
+            Some(FinderScope::Modified)
+        );
+        assert_eq!(
+            FinderScope::from_persist_name("code", &named),
+            Some(FinderScope::Named("code".to_string()))
+        );
+        assert_eq!(FinderScope::from_persist_name("ghost", &named), None);
+        assert_eq!(
+            FinderScope::from_persist_name("buffers", &named),
+            None,
+            "buffers is never a sticky or default scope"
+        );
     }
 
     #[test]

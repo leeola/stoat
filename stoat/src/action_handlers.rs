@@ -125,30 +125,24 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             file::open_file(stoat, &open.path);
             UpdateEffect::Redraw
         },
-        ActionKind::OpenFileFinder => file_finder::open_file_finder(
-            stoat,
-            crate::file_finder::OpenIntent::Replace,
-            crate::file_finder::FinderScope::All,
-        ),
-        ActionKind::OpenFileFinderHSplit => file_finder::open_file_finder(
-            stoat,
-            crate::file_finder::OpenIntent::HSplit,
-            crate::file_finder::FinderScope::All,
-        ),
-        ActionKind::OpenFileFinderVSplit => file_finder::open_file_finder(
-            stoat,
-            crate::file_finder::OpenIntent::VSplit,
-            crate::file_finder::FinderScope::All,
-        ),
+        ActionKind::OpenFileFinder => {
+            file_finder::open_file_finder(stoat, crate::file_finder::OpenIntent::Replace, None)
+        },
+        ActionKind::OpenFileFinderHSplit => {
+            file_finder::open_file_finder(stoat, crate::file_finder::OpenIntent::HSplit, None)
+        },
+        ActionKind::OpenFileFinderVSplit => {
+            file_finder::open_file_finder(stoat, crate::file_finder::OpenIntent::VSplit, None)
+        },
         ActionKind::OpenChangedFilePicker => file_finder::open_file_finder(
             stoat,
             crate::file_finder::OpenIntent::Replace,
-            crate::file_finder::FinderScope::Modified,
+            Some(crate::file_finder::FinderScope::Modified),
         ),
         ActionKind::OpenBufferPicker => file_finder::open_file_finder(
             stoat,
             crate::file_finder::OpenIntent::Replace,
-            crate::file_finder::FinderScope::Buffers,
+            Some(crate::file_finder::FinderScope::Buffers),
         ),
         ActionKind::FileFinderSelectPrev => file_finder::file_finder_move_selection(stoat, -1),
         ActionKind::FileFinderSelectNext => file_finder::file_finder_move_selection(stoat, 1),

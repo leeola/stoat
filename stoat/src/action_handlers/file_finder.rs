@@ -111,11 +111,13 @@ fn sync_file_finder_browse(stoat: &mut Stoat) {
 pub(super) fn open_file_finder(
     stoat: &mut Stoat,
     open_intent: OpenIntent,
-    initial_scope: FinderScope,
+    forced_scope: Option<FinderScope>,
 ) -> UpdateEffect {
     if stoat.file_finder.is_some() {
         return UpdateEffect::None;
     }
+
+    let initial_scope = forced_scope.unwrap_or_else(|| resolve_remembered_scope(stoat));
 
     stoat.set_focused_mode("normal".into());
 
@@ -140,6 +142,32 @@ pub(super) fn open_file_finder(
         &finder_scopes,
     ));
     UpdateEffect::Redraw
+}
+
+/// Resolve the scope a finder open with no forced scope should land in.
+///
+/// Prefers the workspace's remembered scope, then the configured default, then
+/// [`FinderScope::All`]. Both the remembered name and the configured default
+/// are validated against the current named scopes, so a name whose scope has
+/// been removed from config falls through to the next fallback rather than
+/// opening an empty list.
+fn resolve_remembered_scope(stoat: &Stoat) -> FinderScope {
+    let named = &stoat.settings.finder_scopes;
+    let remembered = stoat
+        .active_workspace()
+        .last_finder_scope
+        .as_deref()
+        .and_then(|name| FinderScope::from_persist_name(name, named));
+
+    remembered
+        .or_else(|| {
+            stoat
+                .settings
+                .finder_default_scope
+                .as_deref()
+                .and_then(|name| FinderScope::from_persist_name(name, named))
+        })
+        .unwrap_or(FinderScope::All)
 }
 
 /// Spawn the streaming workspace-file walker rooted at `git_root`.
@@ -272,12 +300,18 @@ fn dispatch_open_file(stoat: &mut Stoat, path: PathBuf) -> UpdateEffect {
 }
 
 /// Dispose the finder's owned editors and restore the pre-open mode.
+///
+/// Records the scope the finder closed in on the workspace so `space p`
+/// reopens there. [`FinderScope::Buffers`] has no persisted name, so closing
+/// in it leaves the prior remembered scope intact.
 pub(crate) fn close_file_finder(stoat: &mut Stoat) {
     let Some(finder) = stoat.file_finder.take() else {
         return;
     };
-    {
-        let active_idx = stoat.active_workspace;
-        finder.dispose(&mut stoat.workspaces[active_idx]);
+
+    let active_idx = stoat.active_workspace;
+    if let Some(name) = finder.scope().persist_name() {
+        stoat.workspaces[active_idx].last_finder_scope = Some(name);
     }
+    finder.dispose(&mut stoat.workspaces[active_idx]);
 }

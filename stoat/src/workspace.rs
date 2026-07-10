@@ -110,6 +110,13 @@ pub struct Workspace {
     /// current root. Set once by [`crate::diff_warm::ensure_diff_warm`], reset
     /// when the cwd changes so the new root warms afresh.
     pub(crate) diff_warmed: bool,
+    /// Persisted name of the finder scope this workspace last closed in, so
+    /// `space p` reopens where the user left off. Holds `"all"`, `"modified"`,
+    /// or a named-scope key, and is `None` until a finder closes here. Buffers
+    /// is never recorded (a dedicated picker, not a sticky mode). Resolved back
+    /// to a scope at open time and validated against the current config, so a
+    /// name whose scope has since been removed falls back to the default.
+    pub(crate) last_finder_scope: Option<String>,
     pub panes: PaneTree,
     pub(crate) docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
@@ -198,6 +205,7 @@ impl Workspace {
             git_root,
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,
+            last_finder_scope: None,
             panes,
             docks: SlotMap::with_key(),
             focus: FocusTarget::SplitPane(initial_focus),

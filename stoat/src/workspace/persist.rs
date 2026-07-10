@@ -60,6 +60,11 @@ pub(crate) struct WorkspaceStateV1 {
     /// the field; restore regenerates a default from `uid` in that case.
     #[serde(default)]
     pub name: String,
+    /// Finder scope this workspace last closed in, so `space p` reopens there.
+    /// `None` on legacy files that predate the field and whenever no finder has
+    /// closed here yet.
+    #[serde(default)]
+    pub last_finder_scope: Option<String>,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -208,6 +213,7 @@ impl Workspace {
             rebase: self.rebase.clone(),
             rebase_active,
             name: self.name.clone(),
+            last_finder_scope: self.last_finder_scope.clone(),
         }
     }
 
@@ -290,6 +296,7 @@ impl Workspace {
         } else {
             state.name
         };
+        self.last_finder_scope = state.last_finder_scope;
     }
 }
 
@@ -817,6 +824,26 @@ mod tests {
         let mut fresh = Workspace::new(ws_dir.clone(), &exec);
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.name, "my workspace");
+    }
+
+    #[test]
+    fn last_finder_scope_round_trips_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.last_finder_scope = Some("modified".to_string());
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        assert_eq!(
+            fresh.last_finder_scope, None,
+            "fresh workspace remembers nothing"
+        );
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(fresh.last_finder_scope, Some("modified".to_string()));
     }
 
     #[test]
