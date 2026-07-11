@@ -35,7 +35,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 fn review_shows_fixture_diff() {
     let (_dir, _root, mut harness) = fixture_harness("basic-diff");
     harness.run(|mut handle| async move {
-        handle.send_keys("R").await.expect("open review");
+        handle.send_keys("<Space>d").await.expect("open review");
         handle
             .await_frame(|text| text.contains("delta changed"), REVIEW_TIMEOUT)
             .await
