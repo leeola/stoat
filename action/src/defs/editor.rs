@@ -1012,6 +1012,16 @@ define_action!(
 );
 
 define_action!(
+    ReplaceWithYankedDef,
+    ReplaceWithYanked,
+    "ReplaceWithYanked",
+    ActionKind::ReplaceWithYanked,
+    "replace selections with register",
+    "Replace every non-empty selection with the selected register's content (unnamed by default), distributing fragments across the selections in start-offset order, repeating the last fragment across extra selections, and repeating each fragment by the pending count. The inserted text is left selected. No-op when the register is empty.",
+    ActionPriority::Common
+);
+
+define_action!(
     YankToClipboardDef,
     YankToClipboard,
     "YankToClipboard",

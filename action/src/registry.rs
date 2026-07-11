@@ -35,7 +35,7 @@ use crate::{
             OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
             PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
             RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
-            ReplaceChar, ReplayMacro, RotateSelectionContentsBackward,
+            ReplaceChar, ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
             RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
             SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
             SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
@@ -446,6 +446,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Yank::DEF, |_| Ok(Box::new(Yank)));
     add(PasteAfter::DEF, |_| Ok(Box::new(PasteAfter)));
     add(PasteBefore::DEF, |_| Ok(Box::new(PasteBefore)));
+    add(ReplaceWithYanked::DEF, |_| Ok(Box::new(ReplaceWithYanked)));
     add(YankToClipboard::DEF, |_| Ok(Box::new(YankToClipboard)));
     add(YankMainToClipboard::DEF, |_| {
         Ok(Box::new(YankMainToClipboard))
@@ -1212,7 +1213,8 @@ mod tests {
         // + 2 ExtendToLineBounds / ShrinkToLineBounds.
         // + 1 EnsureSelectionsForward.
         // + 2 RotateSelectionContentsForward/Backward.
-        assert_eq!(all().count(), 330);
+        // + 1 ReplaceWithYanked.
+        assert_eq!(all().count(), 331);
     }
 
     #[test]

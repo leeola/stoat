@@ -138,6 +138,7 @@ pub enum ActionKind {
     Yank,
     PasteAfter,
     PasteBefore,
+    ReplaceWithYanked,
     YankToClipboard,
     YankMainToClipboard,
     PasteClipboardAfter,

@@ -326,7 +326,7 @@ on key {
         ] -> SetMode(bracket_next);
         [ -> SetMode(bracket_prev);
         m -> SetMode(match);
-        R -> Diff();
+        R -> ReplaceWithYanked();
         / -> OpenSearchInput();
         ? -> OpenReverseSearchInput();
         n -> SearchNext();
@@ -437,6 +437,7 @@ on key {
         Alt-c -> [DeleteSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
         y -> [Yank(), SetMode(normal)];
+        R -> [ReplaceWithYanked(), SetMode(normal)];
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
         Alt-` -> SwitchToUppercase();
@@ -618,6 +619,7 @@ on key {
         " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
+        d -> [Diff(), SetMode(normal)];
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];

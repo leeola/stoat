@@ -110,6 +110,97 @@ pub(super) fn paste_before(stoat: &mut Stoat) -> UpdateEffect {
     paste(stoat, PasteSide::Before)
 }
 
+/// Replace every non-empty selection with the caller-selected register's
+/// content (or the unnamed register when none is set), following Helix's
+/// `replace_with_yanked`.
+///
+/// Fragments distribute across the selections in start-offset order, the last
+/// fragment repeating when the selections outnumber them, and the pending
+/// count repeats each fragment. Each replaced selection re-covers the text it
+/// received. Empty selections are left untouched and consume no fragment.
+///
+/// No-op when the register is empty or the focused pane is not an editor.
+pub(super) fn replace_with_yanked(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
+    let source = stoat.consume_selected_register();
+    let Some(fragments) = read_register_fragments(stoat, source) else {
+        return UpdateEffect::None;
+    };
+    if fragments.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let (buffer_id, entries) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let mut entries: Vec<(usize, usize, usize)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .filter_map(|sel| {
+                let s = buf_snap.resolve_anchor(&sel.start);
+                let e = buf_snap.resolve_anchor(&sel.end);
+                let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
+                (lo != hi).then_some((sel.id, lo, hi))
+            })
+            .collect();
+        entries.sort_by_key(|(_, start, _)| *start);
+        (buffer_id, entries)
+    };
+
+    if entries.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    let payloads: Vec<String> = (0..entries.len())
+        .map(|idx| fragments[idx.min(fragments.len() - 1)].repeat(count))
+        .collect();
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for (i, (_, start, end)) in entries.iter().enumerate().rev() {
+            guard.edit(*start..*end, &payloads[i]);
+        }
+    }
+
+    // Each selection re-covers its replacement. A running length delta shifts
+    // later ranges when a fragment differs in length from the text it replaced.
+    let mut new_ranges: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::new();
+    let mut shift = 0isize;
+    for (i, (id, start, end)) in entries.iter().enumerate() {
+        let new_start = (*start as isize + shift) as usize;
+        let new_end = new_start + payloads[i].len();
+        new_ranges.insert(*id, (new_start, new_end));
+        shift += payloads[i].len() as isize - (*end - *start) as isize;
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor.selections.transform(new_buf, |sel| {
+        let mut new = sel.clone();
+        if let Some(&(start, end)) = new_ranges.get(&sel.id) {
+            new.start = new_buf.anchor_at(start, Bias::Right);
+            new.end = new_buf.anchor_at(end, Bias::Right);
+            new.reversed = false;
+            new.goal = SelectionGoal::None;
+        }
+        new
+    });
+    UpdateEffect::Redraw
+}
+
 /// Write every non-collapsed selection's content (joined by
 /// newlines, in start-offset order) to the system clipboard via
 /// the active [`crate::host::ClipboardHost`]. No-op when every
@@ -1139,5 +1230,89 @@ mod tests {
         let text = buffer_text(&h, &path);
         assert!(text.contains('1'), "expected '1' in {text:?}");
         assert!(text.contains('2'), "expected '2' in {text:?}");
+    }
+
+    #[test]
+    fn replace_with_yanked_replaces_selection_and_selects_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(buffer_text(&h, &path), "xyz\n");
+        assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
+    }
+
+    #[test]
+    fn replace_with_yanked_empty_register_is_noop() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn replace_with_yanked_distributes_one_fragment_per_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        h.stoat.registers.write(
+            crate::register::Register::Unnamed,
+            vec!["A".to_string(), "B".to_string()],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(buffer_text(&h, &path), "A\nB\n");
+    }
+
+    #[test]
+    fn replace_with_yanked_repeats_last_fragment_across_extra_selections() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["A".to_string()]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(buffer_text(&h, &path), "A\nA\n");
+    }
+
+    #[test]
+    fn replace_with_yanked_honors_count() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["x".to_string()]);
+        h.type_keys("v l l");
+        h.stoat.pending_count = Some(3);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
+        assert_eq!(buffer_text(&h, &path), "xxx\n");
+    }
+
+    #[test]
+    fn replace_with_yanked_via_r_binding() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
+        h.type_keys("R");
+        assert_eq!(buffer_text(&h, &path), "xyzbc\n");
+    }
+
+    #[test]
+    fn replace_with_yanked_select_mode_exits_to_normal() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
+        h.type_keys("v l l");
+        h.type_keys("R");
+        assert_eq!(buffer_text(&h, &path), "xyz\n");
+        assert_eq!(h.stoat.focused_mode(), "normal");
     }
 }
