@@ -541,6 +541,7 @@ on key {
     mode == insert {
         Escape -> SetMode(normal);
         Tab -> SmartTab();
+        BackTab -> InsertTab();
         Ctrl-Space -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();

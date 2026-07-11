@@ -25,20 +25,20 @@ use crate::{
             GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
             GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
-            IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, JumpBackward,
-            JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd, MarkTrailStart,
-            MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
-            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
-            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
-            MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker,
-            OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter,
-            PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo,
-            RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro,
-            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
-            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectAllChildren,
-            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
-            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
-            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
+            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd,
+            MarkTrailStart, MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
+            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
+            MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch,
+            OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
+            PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
+            RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
+            ReplaceChar, ReplayMacro, RotateSelectionsBackward, RotateSelectionsForward,
+            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
+            SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
+            SelectPrevSibling, SelectRegister, SelectTextobjectAround, SelectTextobjectInner,
+            SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
             ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
             SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints, ToggleSyntaxHighlight,
@@ -404,6 +404,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
     add(SmartTab::DEF, |_| Ok(Box::new(SmartTab)));
+    add(InsertTab::DEF, |_| Ok(Box::new(InsertTab)));
     add(TriggerCompletion::DEF, |_| Ok(Box::new(TriggerCompletion)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
@@ -1188,7 +1189,8 @@ mod tests {
         // + 2 AppendMode / InsertAtLineEnd.
         // + 1 EnterInsertMode.
         // + 1 InsertAtLineStart.
-        assert_eq!(all().count(), 323);
+        // + 1 InsertTab.
+        assert_eq!(all().count(), 324);
     }
 
     #[test]

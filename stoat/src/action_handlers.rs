@@ -193,6 +193,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CloseBuffer => file::close_buffer(stoat),
         ActionKind::AcceptCompletion => crate::completion::accept::execute(stoat),
         ActionKind::SmartTab => completion::smart_tab(stoat),
+        ActionKind::InsertTab => completion::insert_tab(stoat),
         ActionKind::TriggerCompletion => completion::trigger_completion(stoat),
         ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),

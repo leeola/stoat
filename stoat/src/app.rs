@@ -48,7 +48,7 @@ use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
-use stoat_text::{Anchor, Bias, Selection};
+use stoat_text::{Anchor, Bias, IndentStyle, Selection};
 use stoatty_widgets::ApcScene;
 use tokio::sync::{
     mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
@@ -4220,6 +4220,17 @@ impl Stoat {
         language::line_leading_whitespace(guard.rope(), row)
     }
 
+    /// The indentation unit `buffer_id` uses, detected from its content, for
+    /// inserting or removing one indent level. Falls back to the default for a
+    /// missing buffer.
+    pub(crate) fn buffer_indent_style(&self, buffer_id: BufferId) -> IndentStyle {
+        self.active_workspace()
+            .buffers
+            .get(buffer_id)
+            .map(|buffer| buffer.read().expect("buffer poisoned").indent_style())
+            .unwrap_or_default()
+    }
+
     /// The leading whitespace `row` in `buffer_id` should carry given its
     /// enclosing syntax, for re-indenting a blank line to its block depth.
     ///
@@ -4255,13 +4266,9 @@ impl Stoat {
     }
 
     fn editor_backspace(&mut self, editor_id: EditorId, buffer_id: BufferId) {
-        self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
-            let prev_len = rope
-                .reversed_chars_at(cursor)
-                .next()
-                .map(|ch| ch.len_utf8())
-                .unwrap_or(0);
-            (cursor - prev_len, cursor)
+        let indent_width = self.buffer_indent_style(buffer_id).indent_width(TAB_WIDTH);
+        self.editor_delete_ranges(editor_id, buffer_id, move |rope, cursor| {
+            backspace_range(rope, cursor, indent_width)
         });
     }
 
@@ -5494,6 +5501,65 @@ impl Stoat {
 /// inputs that should not surface in the dot register.
 fn is_insert_run_mode(mode: &str) -> bool {
     mode == "insert"
+}
+
+/// Visual columns a tab advances, for the column math in [`backspace_range`].
+/// Matches the editor's default render tab size.
+const TAB_WIDTH: usize = 4;
+
+/// The backward-delete span for one insert-mode backspace at `cursor`.
+///
+/// When the cursor follows only whitespace on its line, backspace works by
+/// indent level. A preceding tab is removed on its own, and a run of spaces is
+/// trimmed back to the previous `indent_width` column (a full unit when already
+/// aligned). Anywhere else it removes a single grapheme. Returns `(start, end)`
+/// with `start == end` for a no-op at the buffer start.
+fn backspace_range(rope: &stoat_text::Rope, cursor: usize, indent_width: usize) -> (usize, usize) {
+    if cursor == 0 {
+        return (0, 0);
+    }
+
+    let prev = rope.reversed_chars_at(cursor).next();
+    let one_back = (cursor - prev.map(|ch| ch.len_utf8()).unwrap_or(1), cursor);
+
+    let row = rope.offset_to_point(cursor).row;
+    let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+
+    // Visual width of the leading run before the cursor, if it is all whitespace.
+    let mut width = 0usize;
+    let mut pos = line_start;
+    let mut indent_only = line_start < cursor;
+    for ch in rope.chars_at(line_start) {
+        if pos >= cursor {
+            break;
+        }
+        match ch {
+            ' ' => width += 1,
+            '\t' => width += TAB_WIDTH,
+            _ => {
+                indent_only = false;
+                break;
+            },
+        }
+        pos += ch.len_utf8();
+    }
+
+    if !indent_only || prev == Some('\t') {
+        return one_back;
+    }
+
+    let mut drop = width % indent_width;
+    if drop == 0 {
+        drop = indent_width;
+    }
+    let mut start = cursor;
+    for ch in rope.reversed_chars_at(cursor).take(drop) {
+        if ch != ' ' {
+            break;
+        }
+        start -= 1;
+    }
+    (start, cursor)
 }
 
 /// The byte sequence a VT terminal sends for `key`, or `None` when the key has
@@ -9730,12 +9796,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_after_whitespace_inserts_tab() {
+    fn tab_after_whitespace_inserts_indent_unit() {
         let mut h = Stoat::test();
+        // The 2-space indent makes the buffer space-styled, so Tab inserts it.
         let path = open_scratch_file(&mut h, "  abc\n");
         h.type_keys("l l i");
         h.type_keys("tab");
-        assert_eq!(buffer_text(&h, &path), "  \tabc\n");
+        assert_eq!(buffer_text(&h, &path), "    abc\n");
     }
 
     #[test]
@@ -9744,6 +9811,25 @@ mod tests {
         let path = open_scratch_file(&mut h, "abc\n");
         h.type_keys("l l l i");
         h.type_keys("tab");
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn backtab_inserts_indent_unit_unconditionally() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\n");
+        h.type_keys("l l i");
+        h.type_keys("backtab");
+        assert_eq!(buffer_text(&h, &path), "ab\tc\n");
+    }
+
+    #[test]
+    fn backspace_on_leading_indent_removes_one_width() {
+        let mut h = Stoat::test();
+        // The 4-space indent makes the buffer a 4-space style.
+        let path = open_scratch_file(&mut h, "    abc\n");
+        h.type_keys("l l l l i");
+        h.type_keys("backspace");
         assert_eq!(buffer_text(&h, &path), "abc\n");
     }
 
@@ -9795,11 +9881,12 @@ mod tests {
     #[test]
     fn tab_with_no_popup_smart_indents_after_whitespace() {
         let mut h = Stoat::test();
+        // The 2-space indent makes the buffer space-styled.
         let path = open_scratch_file(&mut h, "  abc\n");
         h.type_keys("l l i");
         assert!(h.stoat.pending_completion.is_none());
         h.type_keys("tab");
-        assert_eq!(buffer_text(&h, &path), "  \tabc\n");
+        assert_eq!(buffer_text(&h, &path), "    abc\n");
     }
 
     #[test]

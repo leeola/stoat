@@ -19,13 +19,13 @@ pub(crate) struct ResolvedCompletion {
     documentation: Option<String>,
 }
 
-/// Arbitrate the Tab key in insert mode. Advance the active snippet
-/// placeholder if one is in flight; accept the highlighted completion
-/// item if the popup is open; otherwise insert a tab when the cursor
-/// follows only whitespace on the current line. Returns
-/// [`UpdateEffect::None`] when none of those branches apply so other
-/// dispatch layers (or the user) can decide what to do with the
-/// keystroke.
+/// Arbitrate the Tab key in insert mode.
+///
+/// An in-flight snippet advances its placeholder. An open completion popup
+/// accepts its highlighted item. Otherwise, a cursor following only whitespace
+/// on its line inserts the buffer's indent unit. Returns [`UpdateEffect::None`]
+/// when none of those branches apply, so other dispatch layers (or the user)
+/// can decide what to do with the keystroke.
 pub(super) fn smart_tab(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_snippet.is_some() {
         crate::completion::snippet::advance(stoat);
@@ -38,10 +38,25 @@ pub(super) fn smart_tab(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
     if stoat.cursor_after_only_whitespace(editor_id, buffer_id) {
-        stoat.editor_insert(editor_id, buffer_id, "\t");
+        let unit = stoat.buffer_indent_style(buffer_id).as_str();
+        stoat.editor_insert(editor_id, buffer_id, unit);
         return UpdateEffect::Redraw;
     }
     UpdateEffect::None
+}
+
+/// Insert the buffer's indent unit at every cursor, unconditionally.
+///
+/// The plain counterpart to [`smart_tab`], skipping the snippet, completion,
+/// and leading-whitespace arbitration, so a keystroke bound to it always
+/// indents. Typically bound to Shift-Tab.
+pub(super) fn insert_tab(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() else {
+        return UpdateEffect::None;
+    };
+    let unit = stoat.buffer_indent_style(buffer_id).as_str();
+    stoat.editor_insert(editor_id, buffer_id, unit);
+    UpdateEffect::Redraw
 }
 
 /// Force a completion request even when the buffer signature is
@@ -171,13 +186,14 @@ mod tests {
     }
 
     #[test]
-    fn smart_tab_inserts_tab_at_indent_position() {
+    fn smart_tab_inserts_indent_unit_at_indent_position() {
         let mut h = Stoat::test();
+        // The 2-space indent makes the buffer space-styled.
         let path = h.write_file("a.rs", "  abc\n");
         h.open_file(&path);
         h.type_keys("l l i");
         dispatch(&mut h.stoat, &SmartTab);
-        assert_eq!(buffer_text(&h.stoat, &path), "  \tabc\n");
+        assert_eq!(buffer_text(&h.stoat, &path), "    abc\n");
     }
 
     #[test]
