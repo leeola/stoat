@@ -22,8 +22,11 @@ use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 /// Under stoatty (a `scene` is threaded and the colors resolve to RGB) it
 /// instead emits a hairline `panel` APC frame with rounded corners and a drop
 /// shadow, plus, for `Some(title)`, a full-size title [`TextRun`] over the top
-/// edge whose background masks the hairline the way a Block title masks the
-/// border glyphs. No box-drawing glyphs are written in this arm.
+/// edge. The panel's `title_gap` notches the hairline out under the title, so
+/// the run's background no longer masks it. It resolves to the surface color
+/// (the theme's `UI_BACKGROUND`, falling back to `style`'s bg) so it backs the
+/// glyphs without banding the notched span, which callers clear to that same
+/// surface. No box-drawing glyphs are written in this arm.
 ///
 /// The caller owns background clearing. Sites that masked what was behind the
 /// modal still call [`Clear`](ratatui::widgets::Clear) before this, and sites
@@ -45,9 +48,10 @@ pub(crate) fn modal_frame(
     let rich = scene.and_then(|scene| {
         let border = style_rgb(style.fg)?;
         let mask = style_rgb(
-            style
-                .bg
-                .or_else(|| theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg)),
+            theme
+                .try_get(scope::UI_BACKGROUND)
+                .and_then(|s| s.bg)
+                .or(style.bg),
         )?;
         Some((scene, border, mask))
     });
