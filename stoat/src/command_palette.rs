@@ -854,7 +854,7 @@ mod tests {
 
     #[test]
     fn case_insensitive_filter() {
-        assert_eq!(names_for("quit"), vec!["Quit", "QuitAll"]);
+        assert_eq!(names_for("quit"), vec!["Quit", "QuitAll", "WriteQuit"]);
     }
 
     #[test]
@@ -870,8 +870,8 @@ mod tests {
             &mut match_indices,
             &mut selected,
         );
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(selected, 1);
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(selected, 2);
     }
 
     #[test]

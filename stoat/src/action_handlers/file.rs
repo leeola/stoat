@@ -42,6 +42,36 @@ pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
     save_effect(save_flow(stoat, true))
 }
 
+/// Save the focused buffer, then close its pane and exit when it is the last,
+/// like [`Quit`](stoat_action::Quit). Backs the `:wq` command.
+///
+/// The quit aborts whenever the save did not land. A scratch buffer with no
+/// path, a file changed on disk since it was opened, or a write error all leave
+/// the app running with the failure in [`Stoat::pending_message`]. When
+/// `format_on_save` defers the write, the quit is deferred too --
+/// [`Stoat::quit_after_save`] arms it and [`pump_format_on_save`] quits once the
+/// formatted write actually lands.
+pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
+    match save_flow(stoat, false) {
+        SaveFlow::Wrote => {
+            if super::pane::close_focused_pane(stoat) {
+                UpdateEffect::Redraw
+            } else {
+                UpdateEffect::Quit
+            }
+        },
+        SaveFlow::Armed | SaveFlow::AlreadyPending => {
+            stoat.quit_after_save = true;
+            UpdateEffect::Redraw
+        },
+        SaveFlow::RefusedDiskChanged | SaveFlow::Failed => UpdateEffect::Redraw,
+        SaveFlow::NoTarget => {
+            stoat.pending_message = Some("nothing to write; use :q to quit".to_string());
+            UpdateEffect::Redraw
+        },
+    }
+}
+
 /// What a save attempt did, so a caller can chain on the outcome (e.g. quit
 /// only once the write actually lands).
 ///
@@ -203,7 +233,13 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
                     );
                 }
             }
-            write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path);
+            let wrote = write_buffer_to_disk(stoat, outcome.buffer_id, &outcome.path);
+            // A `:wq` that deferred behind this write quits once it lands, but
+            // only if it succeeded, so a failed deferred write leaves the buffer
+            // for the user instead of exiting over unsaved changes.
+            if std::mem::take(&mut stoat.quit_after_save) {
+                stoat.quit_requested = wrote;
+            }
             true
         },
         Poll::Pending => {
@@ -487,7 +523,7 @@ mod tests {
         Stoat,
     };
     use std::path::{Path, PathBuf};
-    use stoat_action::{CloseBuffer, ForceSaveBuffer, OpenBuffer, OpenFile, SaveBuffer};
+    use stoat_action::{CloseBuffer, ForceSaveBuffer, OpenBuffer, OpenFile, SaveBuffer, WriteQuit};
 
     /// Open `name` (seeded with `seed`) under `root`, dirty the buffer with a
     /// leading insert, and return its absolute path. The open records the disk
@@ -798,6 +834,106 @@ mod tests {
         assert_eq!(
             written, b"edited original\n",
             "force save overwrites the external edit",
+        );
+    }
+
+    #[test]
+    fn write_quit_saves_and_quits_the_last_pane() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/wq-save");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+
+        assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Quit);
+        assert_eq!(
+            on_disk(&h, &path),
+            b"edited original\n",
+            "wq wrote the buffer"
+        );
+        assert!(!focused_dirty(&h.stoat), "wq cleared the dirty flag");
+    }
+
+    #[test]
+    fn write_quit_refuses_when_disk_changed() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/wq-guard");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+        h.fake_fs().insert_file(&path, b"external\n");
+
+        assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("file changed on disk; use :w! to overwrite"),
+        );
+        assert_eq!(
+            on_disk(&h, &path),
+            b"external\n",
+            "aborted wq leaves disk untouched"
+        );
+        assert!(focused_dirty(&h.stoat), "aborted wq keeps the buffer dirty");
+    }
+
+    #[test]
+    fn write_quit_on_scratch_buffer_reports_nothing_to_write() {
+        let mut h = Stoat::test();
+
+        assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("nothing to write; use :q to quit"),
+        );
+    }
+
+    #[test]
+    fn write_quit_with_format_on_save_defers_the_quit_until_the_write_lands() {
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/wq-fos");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+
+        assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
+        assert!(
+            h.stoat.quit_after_save,
+            "the quit defers behind the formatted write"
+        );
+        assert!(!h.stoat.quit_requested);
+
+        h.settle();
+
+        assert_eq!(
+            on_disk(&h, &path),
+            b"fn main() {}\n",
+            "the formatted write landed"
+        );
+        assert!(!h.stoat.quit_after_save, "the deferred quit is consumed");
+        assert!(h.stoat.quit_requested, "the landed write requests the quit");
+    }
+
+    #[test]
+    fn write_quit_deferred_write_failure_aborts_the_quit() {
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/wq-fos-fail");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+        h.fake_fs()
+            .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
+
+        assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
+        assert!(h.stoat.quit_after_save);
+
+        h.settle();
+
+        assert!(!h.stoat.quit_after_save, "the deferred quit is consumed");
+        assert!(
+            !h.stoat.quit_requested,
+            "a failed deferred write aborts the quit"
         );
     }
 

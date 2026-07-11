@@ -735,6 +735,16 @@ pub struct Stoat {
     /// ignored so a burst does not queue duplicate writes.
     pub(crate) pending_format_on_save:
         Option<stoat_scheduler::Task<action_handlers::file::FormatOnSaveOutcome>>,
+    /// Set by `:wq` ([`action_handlers::file::write_quit`]) when the save it
+    /// triggered was deferred to an in-flight format-on-save write. Consumed by
+    /// [`action_handlers::file::pump_format_on_save`] when that write lands: it
+    /// sets [`Self::quit_requested`] only if the write succeeded, so a failed
+    /// deferred write aborts the quit and leaves the buffer for the user.
+    pub(crate) quit_after_save: bool,
+    /// Set once a `:wq`-driven write has landed and the app should exit. The run
+    /// loop takes it right after [`Self::drive_background`] and quits, so a quit
+    /// deferred behind a format-on-save write happens on the frame it completes.
+    pub(crate) quit_requested: bool,
 
     /// Editor autocomplete popup waiting to be painted. Set by the
     /// trigger pipeline (item 83) when a completion request resolves;
@@ -1065,6 +1075,8 @@ impl Stoat {
             pending_workspace_symbol_picker: None,
             pending_format_request: None,
             pending_format_on_save: None,
+            quit_after_save: false,
+            quit_requested: false,
             pending_completion: None,
             pending_completion_request: None,
             pending_completion_resolve: None,
@@ -1352,6 +1364,13 @@ impl Stoat {
             match effect {
                 UpdateEffect::Redraw => {
                     self.drive_background();
+                    // A `:wq` deferred behind a format-on-save write sets
+                    // `quit_requested` from the pump inside `drive_background`
+                    // once the write lands, so quit on the frame it completes.
+                    if std::mem::take(&mut self.quit_requested) {
+                        self.save_all_workspaces();
+                        break;
+                    }
                     let (buffer, undercurl) = {
                         let mut b = Buffer::empty(self.size);
                         #[cfg(feature = "perf")]

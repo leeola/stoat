@@ -692,6 +692,17 @@ define_action!(
 );
 
 define_action!(
+    WriteQuitDef,
+    WriteQuit,
+    "WriteQuit",
+    ActionKind::WriteQuit,
+    "save the focused buffer and quit",
+    "Write the focused buffer with SaveBuffer semantics, then close the focused pane, exiting when it is the last. The quit aborts when the buffer has no path, the file changed on disk since it was opened, or the write fails. With format_on_save enabled the quit waits for the deferred formatted write to land.",
+    ActionPriority::Common,
+    aliases = &["wq", "x"]
+);
+
+define_action!(
     CloseBufferDef,
     CloseBuffer,
     "CloseBuffer",

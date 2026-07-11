@@ -44,8 +44,8 @@ pub use defs::{
         ShellPipe, ShellPipeTo, ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection,
         SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
         SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
-        ToggleSyntaxHighlight, TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank,
-        YankMainToClipboard, YankToClipboard,
+        ToggleSyntaxHighlight, TriggerCompletion, TrimSelections, Undo, UnindentSelection,
+        WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
     },
     file::{ForceSaveBuffer, OpenBuffer, OpenFile},
     file_finder::{

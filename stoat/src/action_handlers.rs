@@ -195,6 +195,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ShellKeepPipe => shell::open_keep_pipe(stoat),
         ActionKind::SaveBuffer => file::save_buffer(stoat),
         ActionKind::ForceSaveBuffer => file::force_save_buffer(stoat),
+        ActionKind::WriteQuit => file::write_quit(stoat),
         ActionKind::CloseBuffer => file::close_buffer(stoat),
         ActionKind::AcceptCompletion => crate::completion::accept::execute(stoat),
         ActionKind::SmartTab => completion::smart_tab(stoat),

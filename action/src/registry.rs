@@ -46,7 +46,7 @@ use crate::{
             SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
             SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
             ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
-            UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            UnindentSelection, WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::{ForceSaveBuffer, OpenBuffer, OpenFile},
         file_finder::{
@@ -405,6 +405,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShellKeepPipe::DEF, |_| Ok(Box::new(ShellKeepPipe)));
     add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
     add(ForceSaveBuffer::DEF, |_| Ok(Box::new(ForceSaveBuffer)));
+    add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
     add(SmartTab::DEF, |_| Ok(Box::new(SmartTab)));
@@ -795,6 +796,7 @@ mod tests {
 
     const ZERO_ARG_NAMES: &[&str] = &[
         "Quit",
+        "WriteQuit",
         "QuitAll",
         "QuitAllConfirm",
         "QuitAllCancel",
@@ -1047,6 +1049,13 @@ mod tests {
     }
 
     #[test]
+    fn write_quit_aliases_resolve() {
+        for token in ["wq", "x", "WQ"] {
+            assert_eq!(lookup_alias(token).expect(token).def.name(), "WriteQuit");
+        }
+    }
+
+    #[test]
     fn terminal_alias_resolves() {
         for token in ["term", "TERM"] {
             assert_eq!(lookup_alias(token).expect(token).def.name(), "terminal");
@@ -1147,6 +1156,7 @@ mod tests {
         // + 5 ShellPipe / ShellPipeTo / ShellInsertOutput / ShellAppendOutput / ShellKeepPipe.
         // + 1 SaveBuffer.
         // + 1 ForceSaveBuffer.
+        // + 1 WriteQuit.
         // + 1 CloseBuffer.
         // + 1 AcceptCompletion.
         // + 2 SmartTab/TriggerCompletion.
@@ -1223,7 +1233,7 @@ mod tests {
         // + 2 RotateSelectionContentsForward/Backward.
         // + 1 ReplaceWithYanked.
         // + 2 JoinSelections / JoinSelectionsSpace.
-        assert_eq!(all().count(), 334);
+        assert_eq!(all().count(), 335);
     }
 
     #[test]
