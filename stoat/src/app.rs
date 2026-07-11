@@ -2194,11 +2194,14 @@ impl Stoat {
                 break;
             };
             self.review_pending_git_refresh = None;
-            let working_tree = matches!(
-                self.active_workspace().review.as_ref().map(|s| &s.source),
-                Some(ReviewSource::WorkingTree { .. })
+            // A working-tree review refreshes on any git write. An auto_source
+            // session refreshes too even when it currently displays a Commit,
+            // so a rebase-fallback view re-decides and follows each rebase step.
+            let refreshes = matches!(
+                self.active_workspace().review.as_ref(),
+                Some(s) if matches!(s.source, ReviewSource::WorkingTree { .. }) || s.auto_source
             );
-            if working_tree {
+            if refreshes {
                 action_handlers::dispatch(self, &ReviewRefresh);
                 progressed = true;
             } else {

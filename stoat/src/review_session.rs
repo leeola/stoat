@@ -10,7 +10,7 @@ use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use stoat_language::Language;
@@ -64,6 +64,20 @@ pub(crate) enum ReviewSource {
     InMemory {
         files: Arc<Vec<InMemoryFile>>,
     },
+}
+
+impl ReviewSource {
+    /// The working directory this source diffs against, for the git-backed
+    /// variants. `None` for the non-git sources (agent edits, in-memory), which
+    /// have no repository to re-decide against.
+    pub(crate) fn workdir(&self) -> Option<&Path> {
+        match self {
+            ReviewSource::WorkingTree { workdir }
+            | ReviewSource::Commit { workdir, .. }
+            | ReviewSource::CommitRange { workdir, .. } => Some(workdir),
+            ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => None,
+        }
+    }
 }
 
 /// Test-only / future-facing carrier for agent-proposed edits. Kept as a
@@ -302,6 +316,13 @@ pub(crate) enum ReviewOrigin {
 // to `Pending`.
 pub(crate) struct ReviewSession {
     pub source: ReviewSource,
+    /// True when the `:diff` command owns this session, so a git refresh
+    /// re-decides its content from the working tree rather than rescanning the
+    /// displayed source as-is. It is what keeps a rebase-fallback [`Commit`]
+    /// session (otherwise frozen) following each rebase step.
+    ///
+    /// [`Commit`]: ReviewSource::Commit
+    pub auto_source: bool,
     pub files: Vec<ReviewFile>,
     pub chunks: HashMap<ReviewChunkId, ReviewChunk>,
     pub order: Vec<ReviewChunkId>,
@@ -332,6 +353,7 @@ impl ReviewSession {
     pub(crate) fn new(source: ReviewSource) -> Self {
         Self {
             source,
+            auto_source: false,
             files: Vec::new(),
             chunks: HashMap::new(),
             order: Vec::new(),
@@ -1057,9 +1079,13 @@ mod tests {
         // chunk covers them all.
         assert_eq!(view.rows.len(), 3);
         assert!(
-            view.rows
-                .iter()
-                .all(|r| matches!(r, ReviewRow::Changed { left: None, right: Some(_) })),
+            view.rows.iter().all(|r| matches!(
+                r,
+                ReviewRow::Changed {
+                    left: None,
+                    right: Some(_)
+                }
+            )),
             "every row of a new file is all-added with no left side",
         );
         assert_eq!(view.chunk_row_ranges, vec![(ids[0], 0..3)]);
@@ -1397,8 +1423,7 @@ mod tests {
             &[("a.rs", "v1\n", "v2\n")],
             &[("b.rs", "staged\n")],
         );
-        let repo =
-            crate::host::GitHost::discover(&*h.fake_git, std::path::Path::new("/work")).unwrap();
+        let repo = crate::host::GitHost::discover(&*h.fake_git, Path::new("/work")).unwrap();
         let changed = repo.changed_files();
         assert_eq!(changed.len(), 2);
         let mut abs_paths: Vec<_> = changed.iter().map(|f| f.path.clone()).collect();

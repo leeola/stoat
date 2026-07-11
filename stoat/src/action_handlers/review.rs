@@ -849,13 +849,24 @@ pub(super) fn review_refresh(
         let Some(old) = ws.review.as_ref() else {
             return UpdateEffect::None;
         };
-        old.source.clone()
+        // An auto_source session re-decides from the working tree on every
+        // refresh, so rescan a WorkingTree source built from its workdir rather
+        // than the frozen source it currently displays. This is what lets a
+        // rebase-fallback Commit session swap back to the working-tree diff when
+        // the tree goes dirty, or to the clean view when the rebase finishes.
+        match (old.auto_source, old.source.workdir()) {
+            (true, Some(workdir)) => ReviewSource::WorkingTree {
+                workdir: workdir.to_path_buf(),
+            },
+            _ => old.source.clone(),
+        }
     };
 
     if is_git_source(&source) {
         let git_host = stoat.git_host.clone();
         let fs_host = stoat.fs_host.clone();
         let langs = stoat.language_registry.clone();
+        let rebase_head = stoat.settings.review_rebase_head != Some(false);
 
         // A refresh sends only Complete, never streaming First/File increments:
         // streaming would replace the live session with fresh Pending chunks and
@@ -866,7 +877,9 @@ pub(super) fn review_refresh(
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            if let Some(session) = rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source) {
+            if let Some(session) =
+                rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source, rebase_head)
+            {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -952,16 +965,20 @@ fn rescan_git_source_pure(
     fs: &dyn FsHost,
     langs: &LanguageRegistry,
     source: &ReviewSource,
+    rebase_head_enabled: bool,
 ) -> Option<ReviewSession> {
     match source {
-        // A clean working tree keeps the view open with an empty session, so the
-        // watch pipeline can live-populate it when changes reappear.
-        ReviewSource::WorkingTree { workdir } => scan_working_tree_pure(git, fs, langs, workdir)
-            .or_else(|| {
-                Some(ReviewSession::new(ReviewSource::WorkingTree {
-                    workdir: workdir.clone(),
-                }))
-            }),
+        // A clean working tree keeps the view open. The result is an empty
+        // session the watch pipeline live-populates, or a rebase step's commit
+        // diff. Either result is auto_source so the next refresh re-decides it.
+        ReviewSource::WorkingTree { workdir } => Some(
+            scan_working_tree_pure(git, fs, langs, workdir)
+                .map(|mut session| {
+                    session.auto_source = true;
+                    session
+                })
+                .unwrap_or_else(|| clean_tree_fallback(git, langs, workdir, rebase_head_enabled)),
+        ),
         ReviewSource::Commit { workdir, sha } => scan_commit_pure(git, langs, workdir, sha),
         ReviewSource::CommitRange { workdir, from, to } => {
             scan_commit_range_pure(git, langs, workdir, from, to)
@@ -1445,19 +1462,24 @@ pub(super) fn open_review(stoat: &mut Stoat) {
     let fs_host = stoat.fs_host.clone();
     let langs = stoat.language_registry.clone();
     let cache = stoat.diff_cache.clone();
+    let rebase_head = stoat.settings.review_rebase_head != Some(false);
 
     spawn_review_scan(stoat, None, true, move |tx, redraw, cancel| {
         let Some((workdir, inputs)) =
             crate::diff::scan_working_tree(&*git_host, &*fs_host, &langs, &git_root)
         else {
-            // A clean tree in a repo opens an empty, persistent view the watch
-            // pipeline later fills. A true non-repo sends nothing, and the pump
-            // badges instead.
+            // A clean tree in a repo opens a persistent view the watch pipeline
+            // later fills. That view is empty, or shows a rebase step's commit
+            // diff when a rebase is paused. A true non-repo sends nothing, and
+            // the pump badges instead.
             if !cancel.load(Ordering::Relaxed)
                 && let Some(workdir) = git_host.discover(&git_root).and_then(|repo| repo.workdir())
             {
-                let _ = tx.send(ReviewScanMsg::Complete(ReviewSession::new(
-                    ReviewSource::WorkingTree { workdir },
+                let _ = tx.send(ReviewScanMsg::Complete(clean_tree_fallback(
+                    &*git_host,
+                    &langs,
+                    &workdir,
+                    rebase_head,
                 )));
                 redraw.notify_one();
             }
@@ -1508,7 +1530,10 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
             file,
             hunks,
         }) => {
+            // `First` is only ever the streamed `:diff` working-tree open, which
+            // the git-refresh pipeline re-decides, so mark it auto_source.
             let mut session = ReviewSession::new(source);
+            session.auto_source = true;
             session.add_file_streamed(file, hunks);
             install_review_session(stoat, session);
 
@@ -1543,8 +1568,10 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
                 .map(carried_statuses)
                 .unwrap_or_default();
             apply_carried_status(&mut session, &carried);
-            install_review_session(stoat, session);
 
+            // Clear the scanning badge before installing, so a rebase-fallback
+            // badge that install_review_session emits for this session survives
+            // rather than being swept away with the scanning badge.
             if pending.scanning_badge {
                 use crate::badge::BadgeSource;
                 stoat
@@ -1552,6 +1579,8 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
                     .badges
                     .remove_by_source(BadgeSource::Review);
             }
+            install_review_session(stoat, session);
+
             if let Some(path) = pending.sync_path {
                 post_refresh_sync(stoat, &path);
             }
@@ -1683,6 +1712,46 @@ fn scan_commit_pure(
 /// used by the reopen, removal, refresh, and rebase paths that scan inline.
 pub(super) fn scan_commit(stoat: &Stoat, workdir: &Path, sha: &str) -> Option<ReviewSession> {
     scan_commit_pure(&*stoat.git_host, &stoat.language_registry, workdir, sha)
+}
+
+/// The diff to show for a `:diff` on a clean working tree.
+///
+/// With `rebase_head_enabled` and a rebase paused on the tree, this is the
+/// just-applied commit's diff (a [`ReviewSource::Commit`]) so the user sees what
+/// the rebase step produced. Otherwise it is an empty
+/// [`ReviewSource::WorkingTree`] view. Either way the session is marked
+/// [`auto_source`](ReviewSession::auto_source) so a later git refresh re-decides
+/// it as the rebase advances or the tree changes.
+fn clean_tree_fallback(
+    git: &dyn GitHost,
+    langs: &LanguageRegistry,
+    workdir: &Path,
+    rebase_head_enabled: bool,
+) -> ReviewSession {
+    let mut session = rebase_head_enabled
+        .then(|| commit_fallback_session(git, langs, workdir))
+        .flatten()
+        .unwrap_or_else(|| {
+            ReviewSession::new(ReviewSource::WorkingTree {
+                workdir: workdir.to_path_buf(),
+            })
+        });
+    session.auto_source = true;
+    session
+}
+
+/// The HEAD commit's diff when the repo is paused mid-rebase, else `None`.
+fn commit_fallback_session(
+    git: &dyn GitHost,
+    langs: &LanguageRegistry,
+    workdir: &Path,
+) -> Option<ReviewSession> {
+    let repo = git.discover(workdir)?;
+    if !repo.rebase_in_progress() {
+        return None;
+    }
+    let head = repo.log_commits(None, 1).into_iter().next()?;
+    scan_commit_pure(git, langs, workdir, &head.sha)
 }
 
 /// Build a session from a commit range `from..=to` (inclusive of `to`,
@@ -1866,8 +1935,34 @@ pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSessi
         }
     }
 
+    // A rebase-fallback session names the commit it is showing. When the view
+    // leaves that fallback (the tree went dirty, or the rebase finished) the
+    // badge is cleared so it never lingers, but only then, so unrelated review
+    // badges (an apply or stage result) survive an ordinary refresh.
+    let old_was_rebase_fallback =
+        stoat.active_workspace().review.as_ref().is_some_and(|old| {
+            old.auto_source && matches!(old.source, ReviewSource::Commit { .. })
+        });
+    let rebase_badge = match &session.source {
+        ReviewSource::Commit { sha, .. } if session.auto_source => Some(format!(
+            "rebase: showing {}",
+            sha.chars().take(7).collect::<String>()
+        )),
+        _ => None,
+    };
+    let clear_rebase_badge = old_was_rebase_fallback && rebase_badge.is_none();
+
     stoat.active_workspace_mut().review = Some(session);
     render_review_editor(stoat);
+
+    if let Some(label) = rebase_badge {
+        emit_review_info_badge(stoat, &label);
+    } else if clear_rebase_badge {
+        stoat
+            .active_workspace_mut()
+            .badges
+            .remove_by_source(crate::badge::BadgeSource::Review);
+    }
 }
 
 /// Rebuild the review editor from the currently installed session.
@@ -2015,8 +2110,11 @@ fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<B
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::REVIEW_EXTERNAL_EDIT_DEBOUNCE, diff_cache::DiffCacheKey, host::FsEventKind,
-        review_session::ChunkStatus, test_harness::TestHarness,
+        app::REVIEW_EXTERNAL_EDIT_DEBOUNCE,
+        diff_cache::DiffCacheKey,
+        host::FsEventKind,
+        review_session::{ChunkStatus, ReviewSource},
+        test_harness::TestHarness,
     };
     use std::path::PathBuf;
 
@@ -2899,6 +2997,101 @@ mod tests {
             before,
             "a commit-source review does not refresh on a git-state change",
         );
+    }
+
+    /// Open a `:diff` on a clean tree while a rebase is paused at commit `c2`
+    /// (whose diff against `c1` changes `a.rs`), with `review.rebase_head` set
+    /// to `rebase_head`.
+    fn open_review_mid_rebase(h: &mut TestHarness, rebase_head: Option<bool>) {
+        h.stoat.settings.review_rebase_head = rebase_head;
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")])
+            .set_head("c2")
+            .set_rebase_in_progress(true);
+        h.stoat.open_review();
+        h.settle();
+    }
+
+    /// Simulate a `.git` write so the debounced git-refresh fires.
+    fn inject_git_write(h: &mut TestHarness) {
+        h.fake_fs_watcher().inject(
+            PathBuf::from("/work/.git/refs/heads/main"),
+            FsEventKind::Modified,
+        );
+        h.stoat.drain_fs_watch_events();
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+    }
+
+    #[test]
+    fn rebase_paused_on_clean_tree_shows_the_head_commit_diff() {
+        let mut h = TestHarness::with_size(80, 14);
+        open_review_mid_rebase(&mut h, None);
+
+        let (source, auto, files) =
+            h.with_review(|s| (s.source.clone(), s.auto_source, s.files.len()));
+        assert!(
+            matches!(&source, ReviewSource::Commit { sha, .. } if sha == "c2"),
+            "a clean tree mid-rebase shows the just-applied commit, got {source:?}",
+        );
+        assert!(
+            auto,
+            "the rebase-fallback session is auto_source so it keeps following"
+        );
+        assert_eq!(files, 1, "the HEAD commit's one changed file renders");
+    }
+
+    #[test]
+    fn finishing_the_rebase_swaps_back_to_the_clean_view() {
+        let mut h = TestHarness::with_size(80, 14);
+        open_review_mid_rebase(&mut h, None);
+        assert!(h.with_review(|s| matches!(s.source, ReviewSource::Commit { .. })));
+
+        h.fake_git.add_repo("/work").set_rebase_in_progress(false);
+        inject_git_write(&mut h);
+
+        let (source, files) = h.with_review(|s| (s.source.clone(), s.files.len()));
+        assert!(
+            matches!(source, ReviewSource::WorkingTree { .. }),
+            "the finished rebase swaps back to the clean working-tree view, got {source:?}",
+        );
+        assert_eq!(files, 0, "the clean view is empty");
+    }
+
+    #[test]
+    fn rebase_head_disabled_keeps_the_empty_clean_view() {
+        let mut h = TestHarness::with_size(80, 14);
+        open_review_mid_rebase(&mut h, Some(false));
+
+        let (source, files) = h.with_review(|s| (s.source.clone(), s.files.len()));
+        assert!(
+            matches!(source, ReviewSource::WorkingTree { .. }),
+            "review.rebase_head = false keeps the empty clean-tree view, got {source:?}",
+        );
+        assert_eq!(files, 0, "the clean view is empty");
+    }
+
+    #[test]
+    fn a_dirty_tree_wins_over_the_rebase_fallback() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "v1\n", "dirty\n")]);
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")])
+            .set_head("c2")
+            .set_rebase_in_progress(true);
+        h.stoat.open_review();
+        h.settle();
+
+        let (source, files) = h.with_review(|s| (s.source.clone(), s.files.len()));
+        assert!(
+            matches!(source, ReviewSource::WorkingTree { .. }),
+            "a dirty tree shows the working-tree diff, not the rebase fallback, got {source:?}",
+        );
+        assert_eq!(files, 1, "the dirty working-tree change renders");
     }
 
     /// A change to a working-tree file not yet in the session pulls it

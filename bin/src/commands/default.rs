@@ -217,6 +217,7 @@ fn run_tui(
         direnv_reload_on_cd: None,
         direnv_unset_on_exit: None,
         review_follow: None,
+        review_rebase_head: None,
         review_precompute: None,
         mode_badges: std::collections::BTreeMap::new(),
         lsp_servers: std::collections::BTreeMap::new(),
