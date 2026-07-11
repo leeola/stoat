@@ -3667,6 +3667,30 @@ impl Stoat {
                 self.editor_delete_word_backward(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
             },
+            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                self.editor_kill_to_line_start(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => {
+                self.editor_kill_to_line_end(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Char('d') if key.modifiers == KeyModifiers::ALT => {
+                self.editor_delete_word_forward(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Char('h') if key.modifiers == KeyModifiers::CONTROL => {
+                self.editor_backspace(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                self.editor_delete(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
+                self.editor_insert_newline(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
             KeyCode::Esc if self.pending_completion.is_some() => {
                 self.pending_completion = None;
                 self.pending_completion_request = None;
@@ -3701,11 +3725,7 @@ impl Stoat {
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let insertion = match self.newest_cursor_offset(editor_id) {
-                    Some(offset) => self.newline_continuation(buffer_id, offset),
-                    None => "\n".to_string(),
-                };
-                self.editor_insert(editor_id, buffer_id, &insertion);
+                self.editor_insert_newline(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Left => {
@@ -4287,6 +4307,42 @@ impl Stoat {
                 .unwrap_or(0);
             (cursor, cursor + next_len)
         });
+    }
+
+    fn editor_delete_word_forward(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
+            (cursor, stoat_text::next_word_end(rope, cursor))
+        });
+    }
+
+    fn editor_kill_to_line_start(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
+            (kill_to_line_start_target(rope, cursor), cursor)
+        });
+    }
+
+    fn editor_kill_to_line_end(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
+            let row = rope.offset_to_point(cursor).row;
+            let line_end = rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
+            if cursor < line_end {
+                return (cursor, line_end);
+            }
+            let next_len = rope
+                .chars_at(cursor)
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(0);
+            (cursor, cursor + next_len)
+        });
+    }
+
+    fn editor_insert_newline(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        let insertion = match self.newest_cursor_offset(editor_id) {
+            Some(offset) => self.newline_continuation(buffer_id, offset),
+            None => "\n".to_string(),
+        };
+        self.editor_insert(editor_id, buffer_id, &insertion);
     }
 
     /// Delete a per-selection range at every cursor in one multi-edit, mirroring
@@ -5560,6 +5616,41 @@ fn backspace_range(rope: &stoat_text::Rope, cursor: usize, indent_width: usize) 
         start -= 1;
     }
     (start, cursor)
+}
+
+/// The deletion target for one insert-mode kill-to-line-start at `cursor`,
+/// matching Helix's `kill_to_line_start`.
+///
+/// A cursor already at its line start (below the first line) targets the
+/// previous line's content end, so the kill removes the separator and joins
+/// the lines. A cursor after the line's first non-whitespace char targets that
+/// char, preserving the indent. Anywhere else it targets the line start.
+/// Returns `cursor` itself for a no-op at the buffer start.
+fn kill_to_line_start_target(rope: &stoat_text::Rope, cursor: usize) -> usize {
+    let row = rope.offset_to_point(cursor).row;
+    let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+
+    if cursor == line_start {
+        if row == 0 {
+            return cursor;
+        }
+        return rope.point_to_offset(stoat_text::Point::new(row - 1, rope.line_len(row - 1)));
+    }
+
+    let line_end = rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
+    let mut pos = line_start;
+    for ch in rope.chars_at(line_start) {
+        if pos >= line_end || !ch.is_whitespace() {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+
+    if pos < line_end && pos < cursor {
+        pos
+    } else {
+        line_start
+    }
 }
 
 /// The byte sequence a VT terminal sends for `key`, or `None` when the key has
@@ -9390,6 +9481,133 @@ mod tests {
         h.type_keys("alt-backspace");
         assert_eq!(buffer_text(&h, &path), "o\n");
         assert_eq!(h.head_offsets(), vec![0]);
+    }
+
+    #[test]
+    fn ctrl_u_kills_to_first_non_whitespace_then_line_start() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "  foo bar");
+        h.type_keys("A");
+        h.type_keys("ctrl-u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "  ",
+            "first kill preserves the indent"
+        );
+        h.type_keys("ctrl-u");
+        assert_eq!(buffer_text(&h, &path), "", "second kill removes the indent");
+    }
+
+    #[test]
+    fn ctrl_u_inside_indent_kills_to_line_start() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "  foo");
+        h.type_keys("l i");
+        h.type_keys("ctrl-u");
+        assert_eq!(buffer_text(&h, &path), " foo");
+    }
+
+    #[test]
+    fn ctrl_u_at_line_start_joins_previous_line() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "ab\ncd");
+        h.type_keys("j i");
+        h.type_keys("ctrl-u");
+        assert_eq!(buffer_text(&h, &path), "abcd");
+    }
+
+    #[test]
+    fn ctrl_u_at_buffer_start_is_noop() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("i");
+        h.type_keys("ctrl-u");
+        assert_eq!(buffer_text(&h, &path), "abc");
+    }
+
+    #[test]
+    fn ctrl_k_kills_to_line_end() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "ab cd\nxy");
+        h.type_keys("l l i");
+        h.type_keys("ctrl-k");
+        assert_eq!(buffer_text(&h, &path), "ab\nxy");
+    }
+
+    #[test]
+    fn ctrl_k_at_line_end_deletes_line_separator() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "ab\ncd");
+        h.type_keys("A");
+        h.type_keys("ctrl-k");
+        assert_eq!(buffer_text(&h, &path), "abcd");
+    }
+
+    #[test]
+    fn ctrl_k_at_buffer_end_is_noop() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("A");
+        h.type_keys("ctrl-k");
+        assert_eq!(buffer_text(&h, &path), "abc");
+    }
+
+    #[test]
+    fn ctrl_k_applies_at_every_cursor() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "ax\nbx\n");
+        h.type_keys("C");
+        h.type_keys("i");
+        h.type_keys("ctrl-k");
+        assert_eq!(buffer_text(&h, &path), "\n\n");
+        assert_eq!(h.head_offsets(), vec![0, 1]);
+    }
+
+    #[test]
+    fn alt_d_deletes_next_word() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "foo bar");
+        h.type_keys("i");
+        h.type_keys("alt-d");
+        assert_eq!(buffer_text(&h, &path), " bar");
+        h.type_keys("alt-d");
+        assert_eq!(buffer_text(&h, &path), "");
+    }
+
+    #[test]
+    fn alt_d_at_buffer_end_is_noop() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("A");
+        h.type_keys("alt-d");
+        assert_eq!(buffer_text(&h, &path), "abc");
+    }
+
+    #[test]
+    fn ctrl_h_deletes_previous_char() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("A");
+        h.type_keys("ctrl-h");
+        assert_eq!(buffer_text(&h, &path), "ab");
+    }
+
+    #[test]
+    fn ctrl_d_deletes_next_char() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef");
+        h.type_keys("l l i");
+        h.type_keys("ctrl-d");
+        assert_eq!(buffer_text(&h, &path), "abdef");
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline_with_continued_indent() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "  ab");
+        h.type_keys("A");
+        h.type_keys("ctrl-j");
+        assert_eq!(buffer_text(&h, &path), "  ab\n  ");
     }
 
     #[test]
