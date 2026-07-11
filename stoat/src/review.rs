@@ -318,6 +318,36 @@ fn extract_review_hunks_from_diff(
     context: u32,
     rel_path_for: &dyn Fn(&Path) -> Option<String>,
 ) -> Vec<ReviewHunk> {
+    let all_rows = aligned_rows_from_diff(diff_result, base_text, buffer_text, rel_path_for);
+    extract_hunks_with_context(&all_rows, context)
+}
+
+/// The full aligned diff rows for a base/buffer pair, before trimming to hunks.
+///
+/// `left` on each row is the base side and `right` the buffer side. Every base
+/// line appears exactly once as a `left`-Some row, so two walks that share an
+/// ancestor can be paired positionally by the three-way merge view.
+pub(crate) fn aligned_rows(
+    base_text: &str,
+    buffer_text: &str,
+    language: Option<&Arc<Language>>,
+) -> Vec<ReviewRow> {
+    let diff = match language {
+        Some(language) => {
+            structural_diff::diff_with_language_cancellable(language, base_text, buffer_text, None)
+                .unwrap_or_else(|| structural_diff::diff(base_text, buffer_text))
+        },
+        None => structural_diff::diff(base_text, buffer_text),
+    };
+    aligned_rows_from_diff(&diff, base_text, buffer_text, &|_| None)
+}
+
+fn aligned_rows_from_diff(
+    diff_result: &DiffResult,
+    base_text: &str,
+    buffer_text: &str,
+    rel_path_for: &dyn Fn(&Path) -> Option<String>,
+) -> Vec<ReviewRow> {
     let lhs_lines = split_lines(base_text);
     let rhs_lines = split_lines(buffer_text);
 
@@ -333,7 +363,7 @@ fn extract_review_hunks_from_diff(
     let rhs_prov =
         collect_moved_provenance(&rhs_lines, &diff_result.changes, Side::Rhs, rel_path_for);
 
-    let all_rows = structural_walk(
+    structural_walk(
         WalkSide {
             lines: &lhs_lines,
             changed: &lhs_changed,
@@ -348,8 +378,7 @@ fn extract_review_hunks_from_diff(
             moved: &rhs_moved,
             provenance: &rhs_prov,
         },
-    );
-    extract_hunks_with_context(&all_rows, context)
+    )
 }
 
 pub(crate) fn split_lines(text: &str) -> Vec<&str> {
