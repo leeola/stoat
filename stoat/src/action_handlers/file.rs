@@ -32,42 +32,84 @@ use stoat_scheduler::Executor;
 /// override. Write errors likewise leave the dirty flag set and surface the
 /// failure in the bottom message row rather than logging it silently.
 pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
-    save_buffer_inner(stoat, false)
+    save_effect(save_flow(stoat, false))
 }
 
 /// Save the focused buffer even when it changed on disk since it was opened,
 /// overwriting the external edit. Backs the `:w!` command. See [`save_buffer`]
 /// for the guarded variant.
 pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
-    save_buffer_inner(stoat, true)
+    save_effect(save_flow(stoat, true))
 }
 
-fn save_buffer_inner(stoat: &mut Stoat, force: bool) -> UpdateEffect {
+/// What a save attempt did, so a caller can chain on the outcome (e.g. quit
+/// only once the write actually lands).
+///
+/// [`save_flow`] returns this; [`save_effect`] maps it back to the
+/// [`UpdateEffect`] the save commands surface.
+enum SaveFlow {
+    /// No focused editor, or the buffer is a scratch buffer with no backing
+    /// path. Nothing to save.
+    NoTarget,
+    /// The file changed on disk since it was opened, so a guarded save was
+    /// refused and [`Stoat::pending_message`] set. `:w!` overrides.
+    RefusedDiskChanged,
+    /// A format-on-save request was armed. The write lands asynchronously when
+    /// the request resolves, via [`pump_format_on_save`].
+    Armed,
+    /// A format-on-save write was already in flight, so this save was dropped.
+    /// The in-flight write still lands the latest text.
+    AlreadyPending,
+    /// The buffer's bytes were written to disk and the dirty flag cleared.
+    Wrote,
+    /// The write was attempted and failed. [`Stoat::pending_message`] carries
+    /// the error and the buffer stays dirty.
+    Failed,
+}
+
+/// Map a [`SaveFlow`] to the [`UpdateEffect`] the save commands return.
+///
+/// A no-op outcome (nothing to save, or a dropped duplicate) needs no redraw;
+/// every other outcome touched the message row, the buffer, or the disk.
+fn save_effect(flow: SaveFlow) -> UpdateEffect {
+    match flow {
+        SaveFlow::NoTarget | SaveFlow::AlreadyPending => UpdateEffect::None,
+        SaveFlow::RefusedDiskChanged | SaveFlow::Armed | SaveFlow::Wrote | SaveFlow::Failed => {
+            UpdateEffect::Redraw
+        },
+    }
+}
+
+fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
     let Some(editor) = super::focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
+        return SaveFlow::NoTarget;
     };
     let buffer_id = editor.buffer_id;
     let path = match stoat.active_workspace().buffers.path_for(buffer_id) {
         Some(p) => p.to_path_buf(),
-        None => return UpdateEffect::None,
+        None => return SaveFlow::NoTarget,
     };
 
     if !force && disk_changed_since_open(stoat, buffer_id, &path) {
         stoat.pending_message = Some("file changed on disk; use :w! to overwrite".to_string());
-        return UpdateEffect::Redraw;
+        return SaveFlow::RefusedDiskChanged;
     }
 
     if format_on_save_enabled(stoat) {
         // A save already formatting drops later ones so a burst does not queue
         // duplicate writes. The in-flight one still lands the latest text.
         if stoat.pending_format_on_save.is_some() {
-            return UpdateEffect::None;
+            return SaveFlow::AlreadyPending;
         }
         arm_format_on_save(stoat, buffer_id, path);
-        return UpdateEffect::Redraw;
+        return SaveFlow::Armed;
     }
 
-    write_buffer_to_disk(stoat, buffer_id, &path)
+    if write_buffer_to_disk(stoat, buffer_id, &path) {
+        SaveFlow::Wrote
+    } else {
+        SaveFlow::Failed
+    }
 }
 
 /// What a completed format-on-save request hands back to the pump.
@@ -175,9 +217,14 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
 /// recorded disk mtime, persist the saved shard, and fire the LSP `did_save`
 /// notification. Reads the buffer fresh so a format-on-save edit applied just
 /// before is included.
-fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> UpdateEffect {
+///
+/// Returns `true` when the bytes landed and the buffer was marked clean, and
+/// `false` when the write failed (with [`Stoat::pending_message`] set) or the
+/// buffer had already vanished. A skipped `did_save` notification (an
+/// unmappable path) still counts as a successful write.
+fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> bool {
     let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
-        return UpdateEffect::None;
+        return false;
     };
     let text = {
         let guard = buffer.read().expect("buffer poisoned");
@@ -187,7 +234,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
     if let Err(err) = stoat.fs_host.write_atomic(path, text.as_bytes()) {
         tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
         stoat.pending_message = Some(format!("save failed: {err}"));
-        return UpdateEffect::Redraw;
+        return false;
     }
     {
         let mut guard = buffer.write().expect("buffer poisoned");
@@ -207,10 +254,10 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
     }
     stoat.persist_saved_shard(buffer_id, path, &text);
     let Some(path_str) = path.to_str() else {
-        return UpdateEffect::Redraw;
+        return true;
     };
     let Ok(uri) = Uri::from_str(&format!("file://{path_str}")) else {
-        return UpdateEffect::Redraw;
+        return true;
     };
     let params = DidSaveTextDocumentParams {
         text_document: TextDocumentIdentifier { uri },
@@ -225,7 +272,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
             }
         })
         .detach();
-    UpdateEffect::Redraw
+    true
 }
 
 /// True when the file at `path` has an on-disk mtime newer than the baseline
