@@ -45,10 +45,12 @@ struct LocalGitRepo {
 
 const STAGED: Status = Status::INDEX_NEW
     .union(Status::INDEX_MODIFIED)
+    .union(Status::INDEX_DELETED)
     .union(Status::INDEX_RENAMED);
 
 const UNSTAGED: Status = Status::WT_NEW
     .union(Status::WT_MODIFIED)
+    .union(Status::WT_DELETED)
     .union(Status::WT_RENAMED);
 
 impl GitRepo for LocalGitRepo {
@@ -77,7 +79,7 @@ impl GitRepo for LocalGitRepo {
 
         let statuses = {
             let mut opts = StatusOptions::new();
-            opts.include_untracked(false);
+            opts.include_untracked(true).recurse_untracked_dirs(true);
             match repo.statuses(Some(&mut opts)) {
                 Ok(s) => s,
                 Err(_) => return Vec::new(),

@@ -361,9 +361,11 @@ pub enum FixtureError {
 ///   [`crate::host::GitRepo::changed_files`] reports one entry of each kind.
 /// - `diff-kinds`: one working tree carrying every git change kind at once -- staged and unstaged
 ///   modifications, a staged addition, an untracked file, staged and unstaged deletions, a staged
-///   rename, and a two-hunk unstaged edit. A probe for the status surface: under the current
-///   [`crate::host::GitRepo::changed_files`] options the untracked file, both deletions, and the
-///   rename source stay hidden, so it reports three staged and two unstaged entries.
+///   rename, and a two-hunk unstaged edit. It probes the full status surface.
+///   [`crate::host::GitRepo::changed_files`] reports all of them, five staged (the addition, the
+///   staged deletion, the staged modification, and the rename's old and new paths -- status runs no
+///   rename detection, so the old path shows as a deletion) and four unstaged (the untracked file,
+///   the unstaged deletion, and the two unstaged modifications).
 /// - `many-files`: one HEAD commit of twelve files across `src/`, `docs/`, and `config/`, then five
 ///   staged and five unstaged modifications with two left clean, so
 ///   [`crate::host::GitRepo::changed_files`] reports ten changed files spanning nested directories
@@ -726,12 +728,16 @@ mod tests {
             got,
             vec![
                 ("added-staged.txt".to_string(), true),
+                ("deleted-staged.txt".to_string(), true),
                 ("modified-staged.txt".to_string(), true),
+                ("renamed-from.txt".to_string(), true),
                 ("renamed-to.txt".to_string(), true),
+                ("deleted-unstaged.txt".to_string(), false),
                 ("hunks.txt".to_string(), false),
                 ("modified-unstaged.txt".to_string(), false),
+                ("untracked.txt".to_string(), false),
             ],
-            "untracked file, both deletions, and the rename source stay hidden under current status options",
+            "every change kind surfaces: the untracked file, both deletions, and the rename source (a delete of the old path, no rename detection) join the modifications and additions",
         );
     }
 

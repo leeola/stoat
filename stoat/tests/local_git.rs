@@ -160,11 +160,14 @@ fn changed_files_deduplicates_staged_and_unstaged() {
 }
 
 #[test]
-fn changed_files_empty_on_no_commits() {
+fn changed_files_reports_untracked_on_no_commits() {
     let tr = TestRepo::new();
     tr.write("new.rs", "x");
     let repo = LocalGit::new().discover(tr.path()).unwrap();
-    assert!(repo.changed_files().is_empty());
+    let files = repo.changed_files();
+    assert_eq!(files.len(), 1);
+    assert!(!files[0].staged);
+    assert!(files[0].path.ends_with("new.rs"));
 }
 
 #[test]

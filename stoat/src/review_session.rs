@@ -1289,6 +1289,44 @@ mod tests {
     }
 
     #[test]
+    fn scan_renders_deleted_file_as_all_removed() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .with_fs(&h.fake_fs)
+            .deleted("gone.rs", "line1\nline2\n");
+        h.stoat.open_review();
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].rel_path, "gone.rs");
+        assert_eq!(session.files[0].base_text.as_str(), "line1\nline2\n");
+        assert_eq!(session.files[0].buffer_text.as_str(), "");
+    }
+
+    #[test]
+    fn scan_renders_untracked_file_as_all_added() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .with_fs(&h.fake_fs)
+            .added("fresh.rs", "brand new\n");
+        h.stoat.open_review();
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].rel_path, "fresh.rs");
+        assert_eq!(session.files[0].base_text.as_str(), "");
+        assert_eq!(session.files[0].buffer_text.as_str(), "brand new\n");
+    }
+
+    #[test]
     fn open_agent_edit_review_via_helper_builds_session() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_agent_edit_review(&[("a.rs", "old\n", "new\n"), ("b.rs", "", "added\n")]);
