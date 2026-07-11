@@ -1,12 +1,15 @@
 use crate::{
+    merge_view,
     pane::Pane,
     rebase::{ActiveRebase, RebasePause},
     render::{
         layout::split_pane_status,
         pane::render_overlay_status,
+        review::{render_empty_num, render_side_num, render_side_text},
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
+    review::ReviewSide,
 };
 use ratatui::{buffer::Buffer, style::Style};
 
@@ -51,8 +54,6 @@ pub(crate) fn render_conflict(
     let ours_style = theme.get(s::VCS_CONFLICT_OURS);
     let theirs_style = theme.get(s::VCS_CONFLICT_THEIRS);
     let file_style = theme.get(s::UI_TEXT);
-    let add_hl = theme.get(s::DIFF_ADDED);
-    let del_hl = theme.get(s::DIFF_DELETED);
 
     crate::render::chrome::vline(buf, sep_x, inner.y, inner.height, dim, scene);
 
@@ -142,21 +143,99 @@ pub(crate) fn render_conflict(
         draw_line(&mut y, header.0, header.1, buf);
         y += 1;
 
-        draw_line(&mut y, "<<<<<<< ours", del_hl, buf);
-        for line in file.ours.as_deref().unwrap_or("").lines() {
-            draw_line(&mut y, line, file_style, buf);
-        }
-        draw_line(&mut y, "=======", dim, buf);
-        for line in file.theirs.as_deref().unwrap_or("").lines() {
-            draw_line(&mut y, line, file_style, buf);
-        }
-        draw_line(&mut y, ">>>>>>> theirs", add_hl, buf);
-        if let Some(ancestor) = &file.ancestor {
+        let col_w = right_w / 3;
+        let ours_x = right_x;
+        let base_x = right_x + col_w;
+        let theirs_x = right_x + 2 * col_w;
+        let text_cols = (col_w as usize).saturating_sub(6);
+
+        if y < max_y {
+            write_str(buf, ours_x, y, "ours", ours_style);
+            write_str(buf, base_x, y, "ancestor", dim);
+            write_str(buf, theirs_x, y, "theirs", theirs_style);
             y += 1;
-            draw_line(&mut y, "--- ancestor ---", dim, buf);
-            for line in ancestor.lines() {
-                draw_line(&mut y, line, dim, buf);
-            }
         }
+
+        let ancestor = file.ancestor.as_deref().unwrap_or("");
+        let ours = file.ours.as_deref().unwrap_or("");
+        let theirs = file.theirs.as_deref().unwrap_or("");
+        for row in merge_view::build_merge_rows(ancestor, ours, theirs, None) {
+            if y >= max_y {
+                break;
+            }
+            // A conflict row (both sides changed the ancestor line) tints with
+            // the conflict header so the divergence stands out across columns.
+            let base_style = if row.conflict {
+                header_style
+            } else {
+                file_style
+            };
+            paint_merge_side(
+                buf,
+                ours_x,
+                y,
+                row.ours.as_ref(),
+                text_cols,
+                base_style,
+                ours_style,
+                dim,
+            );
+            paint_merge_side(
+                buf,
+                base_x,
+                y,
+                row.base.as_ref(),
+                text_cols,
+                base_style,
+                base_style,
+                dim,
+            );
+            paint_merge_side(
+                buf,
+                theirs_x,
+                y,
+                row.theirs.as_ref(),
+                text_cols,
+                base_style,
+                theirs_style,
+                dim,
+            );
+            y += 1;
+        }
+    }
+}
+
+/// Paint one column of a merge row. A present side renders a muted line number
+/// and its text with change spans highlighted. An absent side renders a
+/// placeholder gutter, which happens for a deletion or a one-sided insertion the
+/// other column carries.
+#[allow(clippy::too_many_arguments)]
+fn paint_merge_side(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    side: Option<&ReviewSide>,
+    text_cols: usize,
+    base_style: Style,
+    highlight_style: Style,
+    dim: Style,
+) {
+    match side {
+        Some(side) => {
+            render_side_num(buf, x, y, side.line_num, dim);
+            render_side_text(
+                buf,
+                x + 5,
+                y,
+                &side.text,
+                text_cols,
+                base_style,
+                &side.change_spans,
+                highlight_style,
+                &side.moved_spans,
+                base_style,
+            );
+        },
+        None => render_empty_num(buf, x, y, dim),
     }
 }

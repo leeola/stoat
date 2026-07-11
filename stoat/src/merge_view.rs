@@ -12,8 +12,6 @@ use stoat_language::Language;
 /// that descend from it (`base` set), or carries a one-sided insertion with no
 /// ancestor line (`base` None). `conflict` is set when both sides changed the
 /// ancestor line the row covers.
-// Consumed by render_conflict, the merge-view rendering sibling.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MergeRow {
     pub base: Option<ReviewSide>,
@@ -29,8 +27,6 @@ pub(crate) struct MergeRow {
 /// into one [`MergeRow`], and side-only insertions interleave after their
 /// preceding ancestor line with ours before theirs. A row is a conflict when
 /// both sides changed the ancestor line it covers.
-// Consumed by render_conflict, the merge-view rendering sibling.
-#[allow(dead_code)]
 pub(crate) fn build_merge_rows(
     ancestor: &str,
     ours: &str,
