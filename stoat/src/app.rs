@@ -5107,17 +5107,23 @@ impl Stoat {
                 width: list.width,
                 height: list.height,
             };
-            let scroll_row = finder
-                .core
-                .picklist
-                .selected
-                .saturating_sub(list.height.saturating_sub(1) as usize)
-                as u32;
-            // The visible row set is the finder's filtered indices; a re-filter
-            // changes it, so its hash is the pool's content version.
+            let core = finder.active_core_ref();
+            let scroll_row =
+                core.picklist
+                    .selected
+                    .saturating_sub(list.height.saturating_sub(1) as usize) as u32;
+            // The visible rows are the active picker's filtered indices, and in
+            // browse mode the typed directory re-roots them, so both feed the
+            // pool's content version: a re-filter or a re-root refills it.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
-                finder.core.picklist.filtered.hash(&mut hasher);
+                finder
+                    .browse
+                    .as_ref()
+                    .map(|browse| browse.typed_dir.as_str())
+                    .unwrap_or_default()
+                    .hash(&mut hasher);
+                core.picklist.filtered.hash(&mut hasher);
                 hasher.finish()
             };
             crate::smooth_scroll::emit_into(
@@ -5195,21 +5201,27 @@ impl Stoat {
                 width: list.width,
                 height: list.height,
             };
-            let scroll_row = picker
-                .core
-                .picklist
-                .selected
-                .saturating_sub(list.height.saturating_sub(1) as usize)
-                as u32;
-            // The visible row set is the picker's filtered paths, so their hash
-            // is the pool's content version and a re-filter refills it. The
+            let core = picker.active_core_ref();
+            let scroll_row =
+                core.picklist
+                    .selected
+                    .saturating_sub(list.height.saturating_sub(1) as usize) as u32;
+            // The visible rows are the active picker's filtered paths, so their
+            // hash is the pool's content version and a re-filter refills it. The
             // leading discriminant keeps this arg-mode list from aliasing a
-            // filter-mode list that shares this pool id and matches region and
-            // scroll.
+            // filter-mode list that shares this pool id, and the browse typed
+            // directory folds re-roots in so two same-shaped filtered sets from
+            // different roots cannot alias.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
                 1u8.hash(&mut hasher);
-                picker.core.picklist.filtered.hash(&mut hasher);
+                picker
+                    .browse
+                    .as_ref()
+                    .map(|browse| browse.typed_dir.as_str())
+                    .unwrap_or_default()
+                    .hash(&mut hasher);
+                core.picklist.filtered.hash(&mut hasher);
                 hasher.finish()
             };
             crate::smooth_scroll::emit_into(
