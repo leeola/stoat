@@ -443,7 +443,10 @@ fn sync_incremental(
     let mut wrap_edits = Patch::empty();
 
     for edit in tab_edits {
-        new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
+        // Bias::Right so the prefix keeps every input row before the edit,
+        // including the transform ending exactly at edit.old.start. Bias::Left
+        // stops one row short and drops that row from the rebuilt tree.
+        new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Right), ());
         let old_output_start = cursor.start().1 .0;
 
         cursor.seek_forward(&InputRow(edit.old.end), Bias::Right);
@@ -593,7 +596,10 @@ impl WrapSnapshot {
         let mut wrap_edits = Patch::empty();
 
         for edit in tab_edits {
-            new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
+            // Bias::Right so the prefix keeps every input row before the edit,
+            // including the transform ending exactly at edit.old.start. Bias::Left
+            // stops one row short and drops that row from the rebuilt tree.
+            new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Right), ());
             let old_output_start = cursor.start().1 .0;
 
             cursor.seek_forward(&InputRow(edit.old.end), Bias::Right);

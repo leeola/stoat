@@ -1077,6 +1077,49 @@ mod tests {
     }
 
     #[test]
+    fn line_count_survives_successive_mid_buffer_inserts() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "aaaa\nbbbb\ncccc\ndddd\n");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+
+        let before = display_map.snapshot().line_count();
+        assert_eq!(
+            before, 5,
+            "five display rows including the trailing phantom row"
+        );
+
+        for ch in ["x", "y"] {
+            {
+                let mut buf = shared.write().unwrap();
+                buf.edit(6..6, ch);
+            }
+            assert_eq!(
+                display_map.snapshot().line_count(),
+                before,
+                "a mid-buffer insert must not drop a display row",
+            );
+        }
+    }
+
+    #[test]
+    fn typing_mid_buffer_keeps_the_last_line_rendered() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 10);
+        let path = h.write_file("edit.txt", "alpha\nbravo\ncharlie\ndelta\n");
+        h.open_file(&path);
+
+        h.type_keys("j j i");
+        h.type_text("XY");
+
+        let frame = h.snapshot();
+        assert!(
+            frame.content.contains("delta"),
+            "the last line stays rendered while typing mid-buffer:\n{}",
+            frame.content,
+        );
+    }
+
+    #[test]
     fn insert_blocks_after_snapshot_grows_line_count() {
         let mut display_map = create_display_map("line1\nline2\nline3");
         // Prime the snapshot cache, then insert a one-row block. The next
