@@ -1,5 +1,6 @@
 use crate::{
     app::Stoat,
+    file_finder::{Browse, BROWSE_PATH_CAP},
     fuzzy,
     host::FsHost,
     input_view::{InputView, SubmitTarget},
@@ -66,6 +67,12 @@ pub(crate) struct ArgPicker {
     /// walk feeding `all_paths`. A buffer picker seeds `all_paths` with the
     /// fixed open-buffer set and has no walk.
     pub(crate) core: PathPicker,
+    /// Active directory-browse mode for a `/` or `~/` directory argument, or
+    /// `None` for the workspace-derived list. Mirrors
+    /// [`crate::file_finder::FileFinder`]'s browse: a separate walk rooted at
+    /// the typed directory, leaving `core` untouched so backspacing out of the
+    /// path restores the workspace list.
+    pub(crate) browse: Option<Browse>,
 }
 
 impl ArgPicker {
@@ -79,7 +86,28 @@ impl ArgPicker {
     ) -> Self {
         let mut core = PathPicker::new(ws, executor, git_root, walk);
         core.all_paths = all_paths;
-        Self { source, core }
+        Self {
+            source,
+            core,
+            browse: None,
+        }
+    }
+
+    /// The picker currently driving the list. Browse mode (a `/` or `~/`
+    /// argument) swaps in its own directory-walk picker; every other argument
+    /// drives the workspace `core`.
+    fn active_core(&mut self) -> &mut PathPicker {
+        match &mut self.browse {
+            Some(browse) => &mut browse.picker,
+            None => &mut self.core,
+        }
+    }
+
+    fn active_core_ref(&self) -> &PathPicker {
+        match &self.browse {
+            Some(browse) => &browse.picker,
+            None => &self.core,
+        }
     }
 
     /// The argument source this picker was installed for. The palette compares
@@ -91,20 +119,45 @@ impl ArgPicker {
 
     /// Absolute path of the currently selected filtered row, if any.
     pub(crate) fn selected_path(&self) -> Option<&Path> {
-        self.core.selected_path()
+        self.active_core_ref().selected_path()
+    }
+
+    /// Absolute path of the selected row while directory-browse mode is active,
+    /// or `None` when listing the workspace directories. Submit prefers this
+    /// over the typed path so Enter descends into the highlighted directory.
+    pub(crate) fn browse_selected_path(&self) -> Option<&Path> {
+        self.browse.as_ref()?.picker.selected_path()
     }
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        self.core.move_selection(delta);
+        self.active_core().move_selection(delta);
+    }
+
+    /// Page the selection cursor by the rendered list height in `dir`.
+    pub(crate) fn page(&mut self, dir: i32) {
+        self.active_core().page(dir);
     }
 
     fn pump_walk(&mut self) -> bool {
-        self.core.pump_walk()
+        match &mut self.browse {
+            Some(browse) => {
+                let pumped = browse.picker.pump_walk();
+                if browse.picker.all_paths.len() >= BROWSE_PATH_CAP {
+                    browse.picker.all_paths.truncate(BROWSE_PATH_CAP);
+                    browse.picker.stop_walk();
+                }
+                pumped
+            },
+            None => self.core.pump_walk(),
+        }
     }
 
     fn refilter(&mut self, query: &str) {
-        self.core.refilter(query);
+        match &mut self.browse {
+            Some(browse) => browse.picker.refilter(&browse.partial),
+            None => self.core.refilter(query),
+        }
     }
 
     /// Sync the preview pane per this picker's source. A buffer source previews
@@ -122,8 +175,25 @@ impl ArgPicker {
             ValueSource::Directories => PreviewPolicy::NoPreview,
             _ => PreviewPolicy::File,
         };
-        self.core
+        self.active_core()
             .sync_preview(ws, fs_host, language_registry, policy);
+    }
+
+    /// Leave directory-browse mode, disposing the browse picker's preview so
+    /// the registry returns to its pre-browse size. No-op when not browsing.
+    pub(crate) fn leave_browse(&mut self, ws: &mut Workspace) {
+        if let Some(browse) = self.browse.take() {
+            browse.picker.dispose(ws);
+        }
+    }
+
+    /// Tear down the preview editor slots owned by the core and any active
+    /// browse picker. Called on every palette-close and picker-teardown path.
+    pub(crate) fn dispose(&self, ws: &mut Workspace) {
+        self.core.dispose(ws);
+        if let Some(browse) = &self.browse {
+            browse.picker.dispose(ws);
+        }
     }
 }
 
@@ -309,7 +379,7 @@ impl CommandPalette {
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
         if let Some(picker) = &self.arg_picker {
-            picker.core.preview.dispose(ws);
+            picker.dispose(ws);
         }
     }
 
@@ -318,7 +388,7 @@ impl CommandPalette {
     /// argument source changes so a fresh picker installs in its place.
     pub(crate) fn dispose_arg_picker(&mut self, ws: &mut Workspace) {
         if let Some(picker) = self.arg_picker.take() {
-            picker.core.preview.dispose(ws);
+            picker.dispose(ws);
         }
     }
 
@@ -426,15 +496,22 @@ impl CommandPalette {
         let text = self.input.text(ws);
         if let Some((entry, arg)) = parse_command(&text) {
             let param = &entry.def.params()[0];
-            // An explicit `/` or `~` path is a destination the user typed
-            // verbatim, so it wins over whatever the fuzzy picker happens to
-            // have highlighted.
+            // An explicit `/` or `~` path browses the real filesystem, so a
+            // highlighted browse directory wins and Enter descends into it.
+            // With no browse selection (a bare `~`, or an empty browse list)
+            // the typed path dispatches verbatim rather than being overridden
+            // by a fuzzy workspace-directory match.
             let explicit_path = {
                 let arg = arg.trim();
                 arg.starts_with('/') || arg.starts_with('~')
             };
             let chosen = if explicit_path {
-                arg.to_string()
+                self.arg_picker
+                    .as_ref()
+                    .filter(|picker| picker.source() == param.value_source)
+                    .and_then(|picker| picker.browse_selected_path())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| arg.to_string())
             } else {
                 self.arg_picker
                     .as_ref()
@@ -1058,23 +1135,126 @@ mod tests {
         );
     }
 
-    #[test]
-    fn palette_cd_explicit_path_overrides_dir_match() {
-        let mut h = Stoat::test();
-        seed_palette_workspace(&mut h, &[("outer/inner/main.rs", "")]);
-        h.fake_fs().insert_dir("/inner");
+    /// Sorted directory names listed by the arg picker's active browse walk.
+    fn browse_dir_rows(h: &TestHarness) -> Vec<String> {
+        let picker = arg_picker(h);
+        let browse = picker.browse.as_ref().expect("browse active");
+        let mut rows: Vec<String> = browse
+            .picker
+            .picklist
+            .filtered
+            .iter()
+            .filter_map(|&i| {
+                browse.picker.picklist.base[i]
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
 
-        h.type_text(":cd /inner");
-        h.snapshot();
+    #[test]
+    fn dir_arg_browses_home() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs().insert_files([
+            (home.join("alpha/f.rs"), "a".as_bytes()),
+            (home.join("beta/f.rs"), "b".as_bytes()),
+        ]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_text(":cd ~/");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        assert!(
+            arg_picker(&h).browse.is_some(),
+            "a ~/ tail enters browse mode"
+        );
+        assert_eq!(browse_dir_rows(&h), ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn dir_arg_browse_reroots_on_deeper_segment() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs()
+            .insert_files([(home.join("alpha/nested/f.rs"), "d".as_bytes())]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_text(":cd ~/");
+        let _ = h.snapshot();
+        assert_eq!(
+            arg_picker(&h).browse.as_ref().map(|b| b.root.clone()),
+            Some(home.clone()),
+        );
+
+        h.type_text("alpha/");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert_eq!(
+            arg_picker(&h).browse.as_ref().map(|b| b.root.clone()),
+            Some(home.join("alpha")),
+            "a deeper path segment re-roots the browse walk",
+        );
+        assert_eq!(browse_dir_rows(&h), ["nested"]);
+    }
+
+    #[test]
+    fn dir_arg_browse_enter_sets_git_root() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs()
+            .insert_files([(home.join("projects/f.rs"), "p".as_bytes())]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_text(":cd ~/proj");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
         assert!(
             arg_picker(&h)
                 .selected_path()
-                .is_some_and(|p| p.ends_with("outer/inner")),
-            "the workspace dir outer/inner fuzzy-matches the typed /inner"
+                .is_some_and(|p| p.ends_with("projects")),
+            "the browse walk surfaces ~/projects",
         );
 
         h.type_keys("enter");
-        assert_eq!(h.stoat.active_workspace().git_root, PathBuf::from("/inner"));
+        assert_eq!(h.stoat.active_workspace().git_root, home.join("projects"));
+    }
+
+    #[test]
+    fn dir_arg_browse_backspace_restores_workspace_dirs() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+
+        h.type_text(":cd /");
+        let _ = h.snapshot();
+        assert!(
+            arg_picker(&h).browse.is_some(),
+            "a / tail enters browse mode"
+        );
+
+        h.type_keys("backspace");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert!(
+            arg_picker(&h).browse.is_none(),
+            "backspacing out of the path shape leaves browse mode"
+        );
+        let picker = arg_picker(&h);
+        let idx = picker.core.picklist.filtered[0];
+        assert!(
+            picker.core.picklist.base[idx].ends_with("wsdir"),
+            "the workspace directory list is restored"
+        );
     }
 
     #[test]

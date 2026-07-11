@@ -1,6 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     command_palette::PaletteOutcome,
+    file_finder::Browse,
+    picker::PathPicker,
 };
 use std::path::PathBuf;
 use stoat_action::ValueSource;
@@ -117,10 +119,89 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
         }
     }
 
+    if source == ValueSource::Directories {
+        sync_arg_picker_browse(stoat, &tail);
+    }
+
     let fs_host = stoat.fs_host.clone();
     let ws = &mut stoat.workspaces[active_idx];
     if let Some(palette) = stoat.command_palette.as_mut() {
         palette.sync_arg_picker(&tail, ws, &*fs_host, &stoat.language_registry);
+    }
+}
+
+/// Enter, re-root, or leave the `:cd` argument picker's directory-browse mode
+/// for the current `tail`.
+///
+/// Mirrors [`super::file_finder::sync_file_finder_browse`] for the palette's
+/// [`ValueSource::Directories`] argument. A `/` or `~/` tail walks the typed
+/// directory via [`super::file_finder::spawn_workspace_dir_walk`], re-rooting a
+/// fresh walk whenever the directory part changes. A tail that stops being
+/// path-shaped drops browse so the workspace-derived directory list resumes.
+fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
+    let home = stoat.env_host.var("HOME");
+
+    let Some((typed_dir, root, partial)) =
+        crate::file_finder::split_path_query(tail, home.as_deref())
+    else {
+        let active_idx = stoat.active_workspace;
+        if let Some(picker) = stoat
+            .command_palette
+            .as_mut()
+            .and_then(|palette| palette.arg_picker.as_mut())
+        {
+            picker.leave_browse(&mut stoat.workspaces[active_idx]);
+        }
+        return;
+    };
+
+    let root_changed = stoat
+        .command_palette
+        .as_ref()
+        .and_then(|palette| palette.arg_picker.as_ref())
+        .and_then(|picker| picker.browse.as_ref())
+        .map(|browse| &browse.root)
+        != Some(&root);
+
+    if root_changed {
+        let (walk_rx, walk_task) =
+            super::file_finder::spawn_workspace_dir_walk(stoat, root.clone());
+        let executor = stoat.executor.clone();
+        let active_idx = stoat.active_workspace;
+        let ws = &mut stoat.workspaces[active_idx];
+        if let Some(picker) = stoat
+            .command_palette
+            .as_mut()
+            .and_then(|palette| palette.arg_picker.as_mut())
+        {
+            match &mut picker.browse {
+                Some(browse) => {
+                    browse.root = root.clone();
+                    browse.picker.git_root = root.clone();
+                    browse.picker.reset_walk(walk_rx, walk_task);
+                },
+                None => {
+                    let walk_picker =
+                        PathPicker::new(ws, executor, root.clone(), Some((walk_rx, walk_task)));
+                    picker.browse = Some(Browse {
+                        typed_dir: String::new(),
+                        root: root.clone(),
+                        partial: String::new(),
+                        picker: walk_picker,
+                    });
+                },
+            }
+        }
+    }
+
+    if let Some(browse) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.arg_picker.as_mut())
+        .and_then(|picker| picker.browse.as_mut())
+    {
+        browse.typed_dir = typed_dir;
+        browse.partial = partial;
     }
 }
 
@@ -185,7 +266,7 @@ pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
         && palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()
     {
-        picker.core.page(dir);
+        picker.page(dir);
         return UpdateEffect::Redraw;
     }
     let step = match stoat.command_palette.as_ref() {

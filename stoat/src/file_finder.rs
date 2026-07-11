@@ -16,7 +16,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// Upper bound on the paths a directory-browse walk collects. A bare `/` walk
 /// could traverse the whole filesystem, so draining stops here and the walk is
 /// dropped, keeping the list and its refilter bounded.
-const BROWSE_PATH_CAP: usize = 100_000;
+pub(crate) const BROWSE_PATH_CAP: usize = 100_000;
 
 /// Which subset of files the finder currently lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
