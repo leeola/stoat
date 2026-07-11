@@ -21,6 +21,12 @@ const HOVER_TEXT_SCALE: u16 = 218;
 /// threshold.
 const MIN_HEIGHT: u16 = 6;
 
+/// Absolute popup caps, matching Helix's popup limits, so a large hover never
+/// dominates the pane. On a small window the [`hover_popup_layout`] half-pane
+/// cap bites first. These bound the popup on a large one.
+const MAX_HEIGHT: u16 = 26;
+const MAX_WIDTH: u16 = 120;
+
 /// Paint the hover popup, if any, anchored to the focused editor's
 /// primary cursor.
 ///
@@ -173,7 +179,7 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
         .map(|line| truncate_line(line, interior_width as usize))
         .collect();
     let max_line_width = body.iter().map(|line| line_width(line)).max().unwrap_or(0) as u16;
-    let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
+    let popup_width = (max_line_width + 2).clamp(3, content_area.width.clamp(3, MAX_WIDTH));
 
     let rel_y = cursor_screen.1.saturating_sub(content_area.y);
     let below = content_area.height > rel_y + MIN_HEIGHT;
@@ -182,7 +188,13 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     } else {
         rel_y
     };
-    let popup_height = (body.len() as u16 + 2).min(max_height.max(3));
+    // Cap at the room beside the cursor and the absolute MAX_HEIGHT, then at
+    // half the content area, which is the bound that actually shrinks a large
+    // hover on a small window. Both bounds hold a 3-row minimum box.
+    let height_cap = max_height
+        .clamp(3, MAX_HEIGHT)
+        .min((content_area.height / 2).max(3));
+    let popup_height = (body.len() as u16 + 2).min(height_cap);
 
     let popup_x = cursor_screen
         .0

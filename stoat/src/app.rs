@@ -7439,6 +7439,54 @@ mod tests {
         );
     }
 
+    /// Lay out a hover of `num_lines` lines each `line_width` wide in a
+    /// `width` x `height` window, returning the popup and inner rects.
+    fn hover_layout(width: u16, height: u16, num_lines: usize, line_width: usize) -> (Rect, Rect) {
+        use crate::{action_handlers::lsp::HoverPopup, test_harness::TestHarness};
+        use ratatui::style::Style;
+
+        let mut h = TestHarness::with_size(width, height);
+        let root = std::path::PathBuf::from("/hover");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        let text = "x".repeat(line_width);
+        let lines = (0..num_lines)
+            .map(|_| vec![(text.clone(), Style::default())])
+            .collect();
+        h.stoat.pending_hover = Some(HoverPopup {
+            lines,
+            anchor_offset: 0,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+        });
+        crate::render::hover::hover_popup_layout(&mut h.stoat).expect("hover layout")
+    }
+
+    #[test]
+    fn hover_popup_stays_compact_on_a_small_window() {
+        // Thirty lines of hover in a 12-row window used to fill nearly the pane.
+        let (popup, _) = hover_layout(40, 12, 30, 20);
+        assert!(
+            (3..=6).contains(&popup.height),
+            "a tall hover on a small window caps near half the pane, got {}",
+            popup.height,
+        );
+    }
+
+    #[test]
+    fn hover_popup_caps_at_helix_absolute_limits() {
+        // On a large window the absolute caps bound the popup before half-pane.
+        let (popup, _) = hover_layout(200, 60, 40, 130);
+        assert_eq!(popup.height, 26, "tall content caps at MAX_HEIGHT");
+        assert_eq!(popup.width, 120, "wide content caps at MAX_WIDTH");
+    }
+
     #[test]
     fn apc_scene_emits_nothing_for_a_plain_editor_frame() {
         let mut h = Stoat::test();
