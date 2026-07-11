@@ -4,7 +4,9 @@
 //! Lives in the app crate, off the terminal-core crates, so [`stoatty_term`]
 //! stays a pure bytes-to-grid model. The reader thread feeds bytes back through
 //! a caller-supplied sink, which the app forwards onto the winit event loop, so
-//! a blocking PTY read never stalls rendering.
+//! a blocking PTY read never stalls rendering. A dedicated writer thread absorbs
+//! blocking writes the same way, so a child that stops draining its input parks
+//! that thread rather than the UI thread that forwards key presses.
 
 use libc::passwd;
 use portable_pty::{self, Child, CommandBuilder, MasterPty, PtySize};
@@ -14,6 +16,7 @@ use std::{
     mem::MaybeUninit,
     path::Path,
     ptr,
+    sync::mpsc::{self, Sender},
     thread::{self, JoinHandle},
 };
 
@@ -33,13 +36,13 @@ pub(crate) enum PtyOutput<'a> {
 
 /// A running shell attached to a pseudoterminal.
 ///
-/// Owns the PTY master (for resizing), the writer to the shell's input (for
-/// forwarding key presses), the child handle, and the reader thread. Dropping
-/// it kills the shell, which closes the slave and ends the reader thread, so
-/// closing the window tears the shell down.
+/// Owns the PTY master (for resizing), a channel to the writer thread that
+/// forwards key presses to the shell's input, the child handle, and the reader
+/// thread. Dropping it kills the shell, which closes the slave and ends both
+/// worker threads, so closing the window tears the shell down.
 pub(crate) struct Pty {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Sender<Vec<u8>>,
     child: Box<dyn Child + Send + Sync>,
     _reader: JoinHandle<()>,
 }
@@ -86,7 +89,7 @@ impl Pty {
 
         Ok(Pty {
             master: pair.master,
-            writer,
+            writer: spawn_writer(writer),
             child,
             _reader: reader_thread,
         })
@@ -104,14 +107,18 @@ impl Pty {
             .map_err(io::Error::other)
     }
 
-    /// Write `bytes` to the shell's input, flushing so the shell sees them
-    /// promptly.
+    /// Queue `bytes` for the shell's input, to be written and flushed by the
+    /// writer thread.
     ///
     /// Encoded key presses flow through here, so typing in the window reaches
-    /// the shell.
+    /// the shell. The call returns as soon as the bytes are queued and never
+    /// blocks on the write itself, so a child that has stopped draining its
+    /// input cannot stall the UI thread. An [`io::ErrorKind::BrokenPipe`] error
+    /// means the writer thread has exited.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()
+        self.writer
+            .send(bytes.to_vec())
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
     }
 }
 
@@ -119,6 +126,26 @@ impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
+}
+
+/// Spawn a thread that writes each received chunk to `writer`, flushing after
+/// each so the shell sees input promptly. Returns the sender that feeds it.
+///
+/// Decouples [`Pty::write`] from the blocking write on the PTY master. A child
+/// that stops draining its input parks the `write_all` on this thread rather
+/// than on the caller. The thread exits when the channel closes or a write
+/// fails, so dropping the [`Pty`] ends it: the sender drops to unblock an idle
+/// writer, and killing the child closes the slave to unblock a parked one.
+fn spawn_writer(mut writer: Box<dyn Write + Send>) -> Sender<Vec<u8>> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        while let Ok(bytes) = rx.recv() {
+            if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                break;
+            }
+        }
+    });
+    tx
 }
 
 /// Build the shell command to launch under stoatty, running in `cwd` when
@@ -278,12 +305,13 @@ fn passwd_shell() -> Option<String> {
 mod tests {
     use super::{
         configure_child_env, prepend_path, read_loop, shell_command, shell_or_default,
-        CommandBuilder, PtyOutput, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
+        spawn_writer, CommandBuilder, PtyOutput, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
     };
     use std::{
         ffi::{OsStr, OsString},
         io::{self, Cursor, Write},
         path::Path,
+        sync::{Arc, Condvar, Mutex},
         thread,
     };
 
@@ -399,6 +427,68 @@ mod tests {
             "a full buffer, then the remainder"
         );
         assert!(eof, "ends with Eof");
+    }
+
+    /// An in-memory [`Write`] that parks every write on a gate until it opens,
+    /// then records the bytes, standing in for a PTY master whose child has
+    /// stopped draining its input.
+    struct GatedWriter {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        written: Arc<(Mutex<Vec<u8>>, Condvar)>,
+    }
+
+    impl Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let (open_lock, open_cvar) = &*self.gate;
+            let mut open = open_lock.lock().unwrap();
+            while !*open {
+                open = open_cvar.wait(open).unwrap();
+            }
+            drop(open);
+
+            let (buf_lock, buf_cvar) = &*self.written;
+            buf_lock.lock().unwrap().extend_from_slice(buf);
+            buf_cvar.notify_all();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn spawn_writer_does_not_block_the_sender_on_a_parked_write() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let written = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let tx = spawn_writer(Box::new(GatedWriter {
+            gate: gate.clone(),
+            written: written.clone(),
+        }));
+
+        tx.send(b"foo".to_vec()).unwrap();
+        tx.send(b"bar".to_vec()).unwrap();
+        assert!(
+            written.0.lock().unwrap().is_empty(),
+            "the sender returns while the writer is parked, so nothing is written yet",
+        );
+
+        {
+            let (open_lock, open_cvar) = &*gate;
+            *open_lock.lock().unwrap() = true;
+            open_cvar.notify_all();
+        }
+
+        let (buf_lock, buf_cvar) = &*written;
+        let mut got = buf_lock.lock().unwrap();
+        while got.len() < 6 {
+            got = buf_cvar.wait(got).unwrap();
+        }
+        assert_eq!(
+            got.as_slice(),
+            b"foobar",
+            "the queued chunks are written in order once the gate opens",
+        );
     }
 
     #[test]
