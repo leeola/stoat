@@ -3,7 +3,7 @@ use crate::{
     host::WatchToken,
     review::{
         extract_review_hunks_changeset, line_byte_offsets, split_lines, ReviewFileInput,
-        ReviewHunk, ReviewRow,
+        ReviewHunk, ReviewRow, ReviewSide,
     },
 };
 use std::{
@@ -143,13 +143,16 @@ impl ReviewProgress {
 /// and so navigation handlers can map a chunk id to a display row.
 #[derive(Clone, Debug)]
 pub(crate) struct ReviewViewState {
-    /// Flattened rows across every file's chunks, in visit order. One row
-    /// per placeholder-buffer line.
+    /// Every file's full before/after source as aligned rows, in visit order.
+    /// One row per placeholder-buffer line. Chunk rows carry the diff. The
+    /// unchanged regions between and around them are filled with derived
+    /// Context rows so the whole file renders, not just the changed excerpts.
     pub rows: Vec<ReviewRow>,
-    /// (chunk_id, first_display_row) ordered by display row. Used both for
-    /// row lookup and for chunk-to-scroll-row lookup.
-    pub chunk_row_starts: Vec<(ReviewChunkId, u32)>,
-    /// Status of each chunk, indexed parallel to `chunk_row_starts`. Kept
+    /// Half-open display-row range each chunk occupies, ordered by row and
+    /// non-overlapping. Rows falling in the gaps between ranges belong to no
+    /// chunk. Used for row-to-chunk lookup and chunk-to-scroll-row lookup.
+    pub chunk_row_ranges: Vec<(ReviewChunkId, Range<u32>)>,
+    /// Status of each chunk, indexed parallel to `chunk_row_ranges`. Kept
     /// here so `render_review` can paint gutter glyphs without holding a
     /// reference to the session.
     pub chunk_statuses: Vec<ChunkStatus>,
@@ -169,20 +172,52 @@ pub(crate) struct ReviewViewState {
 impl ReviewViewState {
     pub(crate) fn from_session(session: &ReviewSession) -> Self {
         let mut rows: Vec<ReviewRow> = Vec::new();
-        let mut chunk_row_starts: Vec<(ReviewChunkId, u32)> = Vec::new();
+        let mut chunk_row_ranges: Vec<(ReviewChunkId, Range<u32>)> = Vec::new();
         let mut chunk_statuses: Vec<ChunkStatus> = Vec::new();
+
         for file in &session.files {
+            let base_lines = split_lines(&file.base_text);
+            let buffer_lines = split_lines(&file.buffer_text);
+            let mut base_cursor: u32 = 0;
+            let mut buffer_cursor: u32 = 0;
+
             for chunk_id in &file.chunks {
-                if let Some(chunk) = session.chunks.get(chunk_id) {
-                    chunk_row_starts.push((*chunk_id, rows.len() as u32));
-                    chunk_statuses.push(chunk.status);
-                    rows.extend(chunk.hunk.rows.iter().cloned());
-                }
+                let Some(chunk) = session.chunks.get(chunk_id) else {
+                    continue;
+                };
+                let (base_disp, buffer_disp) = hunk_display_ranges(&chunk.hunk);
+                let base_start = base_disp.as_ref().map_or(base_cursor, |r| r.start);
+                let buffer_start = buffer_disp.as_ref().map_or(buffer_cursor, |r| r.start);
+
+                emit_context_gap(
+                    &mut rows,
+                    &base_lines,
+                    &buffer_lines,
+                    base_cursor..base_start,
+                    buffer_cursor..buffer_start,
+                );
+
+                let start = rows.len() as u32;
+                rows.extend(chunk.hunk.rows.iter().cloned());
+                chunk_row_ranges.push((*chunk_id, start..rows.len() as u32));
+                chunk_statuses.push(chunk.status);
+
+                base_cursor = base_disp.map_or(base_cursor, |r| r.end);
+                buffer_cursor = buffer_disp.map_or(buffer_cursor, |r| r.end);
             }
+
+            emit_context_gap(
+                &mut rows,
+                &base_lines,
+                &buffer_lines,
+                base_cursor..base_lines.len() as u32,
+                buffer_cursor..buffer_lines.len() as u32,
+            );
         }
+
         Self {
             rows,
-            chunk_row_starts,
+            chunk_row_ranges,
             chunk_statuses,
             current_chunk: session.cursor.current,
             session_version: session.version,
@@ -198,8 +233,8 @@ impl ReviewViewState {
             return;
         }
         self.chunk_statuses.clear();
-        self.chunk_statuses.reserve(self.chunk_row_starts.len());
-        for (id, _) in &self.chunk_row_starts {
+        self.chunk_statuses.reserve(self.chunk_row_ranges.len());
+        for (id, _) in &self.chunk_row_ranges {
             let status = session
                 .chunks
                 .get(id)
@@ -211,24 +246,28 @@ impl ReviewViewState {
         self.session_version = session.version;
     }
 
-    /// Returns the (chunk_id, status) for the given display row, if any.
+    /// Returns the (chunk_id, status) for the given display row, or `None` when
+    /// the row falls in an unchanged gap between chunks and so belongs to none.
     pub(crate) fn chunk_and_status_at_row(&self, row: u32) -> Option<(ReviewChunkId, ChunkStatus)> {
         let idx = self
-            .chunk_row_starts
-            .partition_point(|(_, start)| *start <= row)
+            .chunk_row_ranges
+            .partition_point(|(_, range)| range.start <= row)
             .checked_sub(1)?;
-        let (id, _) = self.chunk_row_starts[idx];
+        let (id, range) = &self.chunk_row_ranges[idx];
+        if row >= range.end {
+            return None;
+        }
         let status = self.chunk_statuses.get(idx).copied()?;
-        Some((id, status))
+        Some((*id, status))
     }
 
     /// Returns the first display row of the given chunk, or `None` if the
     /// chunk is not represented in this view.
     pub(crate) fn row_of_chunk(&self, id: ReviewChunkId) -> Option<u32> {
-        self.chunk_row_starts
+        self.chunk_row_ranges
             .iter()
             .find(|(c, _)| *c == id)
-            .map(|(_, r)| *r)
+            .map(|(_, r)| r.start)
     }
 }
 
@@ -637,6 +676,77 @@ fn hunk_line_ranges(hunk: &ReviewHunk) -> (Range<u32>, Range<u32>) {
     (base, buffer)
 }
 
+/// The (base, buffer) 0-based half-open line ranges a hunk's full displayed
+/// extent spans, context rows included.
+///
+/// Unlike [`hunk_line_ranges`], which reports only the changed extent, this
+/// covers every row the hunk renders. `None` on a side the hunk never touches:
+/// a wholly-added file has no base line on any row, a wholly-deleted file no
+/// buffer line, so the caller leaves that side's walk cursor where it is and
+/// emits no gap there.
+fn hunk_display_ranges(hunk: &ReviewHunk) -> (Option<Range<u32>>, Option<Range<u32>>) {
+    let mut base: Option<Range<u32>> = None;
+    let mut buffer: Option<Range<u32>> = None;
+
+    for row in &hunk.rows {
+        let (left, right) = match row {
+            ReviewRow::Context { left, right } => (Some(left), Some(right)),
+            ReviewRow::Changed { left, right } => (left.as_ref(), right.as_ref()),
+        };
+        if let Some(l) = left {
+            base = Some(extend_line_range(base, l.line_num.saturating_sub(1)));
+        }
+        if let Some(r) = right {
+            buffer = Some(extend_line_range(buffer, r.line_num.saturating_sub(1)));
+        }
+    }
+
+    (base, buffer)
+}
+
+fn extend_line_range(current: Option<Range<u32>>, line: u32) -> Range<u32> {
+    match current {
+        Some(r) => r.start.min(line)..r.end.max(line + 1),
+        None => line..line + 1,
+    }
+}
+
+/// Emit one Context row per unchanged line in the gap, pairing base line with
+/// buffer line 1:1.
+///
+/// The two ranges cover the same unchanged region on each side, so they have
+/// equal length in a well-formed diff. Zipping tolerates the degenerate
+/// boundary case (one side empty) without emitting a half-populated row.
+fn emit_context_gap(
+    rows: &mut Vec<ReviewRow>,
+    base_lines: &[&str],
+    buffer_lines: &[&str],
+    base_range: Range<u32>,
+    buffer_range: Range<u32>,
+) {
+    for (b, r) in base_range.zip(buffer_range) {
+        let (Some(base_line), Some(buffer_line)) =
+            (base_lines.get(b as usize), buffer_lines.get(r as usize))
+        else {
+            continue;
+        };
+        rows.push(ReviewRow::Context {
+            left: context_side(base_line, b + 1),
+            right: context_side(buffer_line, r + 1),
+        });
+    }
+}
+
+fn context_side(text: &str, line_num: u32) -> ReviewSide {
+    ReviewSide {
+        text: text.to_string(),
+        line_num,
+        change_spans: Vec::new(),
+        moved_spans: Vec::new(),
+        move_provenance: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn view_state_flattens_rows_in_order() {
+    fn view_state_covers_full_file_with_gap_rows() {
         let mut s = in_memory_session();
         let a = add(
             &mut s,
@@ -903,14 +1013,12 @@ mod tests {
         );
         assert_eq!(a.len(), 2);
         let view = ReviewViewState::from_session(&s);
-        assert_eq!(view.chunk_row_starts.len(), 2);
-        assert_eq!(view.chunk_row_starts[0].0, a[0]);
-        assert_eq!(view.chunk_row_starts[0].1, 0);
-        assert_eq!(view.chunk_row_starts[1].0, a[1]);
-        assert_eq!(
-            view.chunk_row_starts[1].1,
-            s.chunks[&a[0]].hunk.rows.len() as u32
-        );
+
+        // Every one of the 11 file lines renders. The two 4-row hunks sit at
+        // rows 0..4 and 7..11, with the 3 unchanged lines e, f, g filling the
+        // gap between them.
+        assert_eq!(view.rows.len(), 11);
+        assert_eq!(view.chunk_row_ranges, vec![(a[0], 0..4), (a[1], 7..11)]);
         assert_eq!(view.session_version, s.version);
     }
 
@@ -924,25 +1032,37 @@ mod tests {
             "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
         );
         let view = ReviewViewState::from_session(&s);
-        let first_chunk_len = s.chunks[&ids[0]].hunk.rows.len() as u32;
 
-        assert_eq!(
-            view.chunk_and_status_at_row(0).map(|(id, _)| id),
-            Some(ids[0])
-        );
-        assert_eq!(
-            view.chunk_and_status_at_row(first_chunk_len - 1)
-                .map(|(id, _)| id),
-            Some(ids[0]),
-        );
-        assert_eq!(
-            view.chunk_and_status_at_row(first_chunk_len)
-                .map(|(id, _)| id),
-            Some(ids[1]),
-        );
+        let chunk_of = |row| view.chunk_and_status_at_row(row).map(|(id, _)| id);
+
+        assert_eq!(chunk_of(0), Some(ids[0]));
+        assert_eq!(chunk_of(3), Some(ids[0]));
+        assert_eq!(chunk_of(4), None, "the unchanged gap belongs to no chunk");
+        assert_eq!(chunk_of(6), None, "the unchanged gap belongs to no chunk");
+        assert_eq!(chunk_of(7), Some(ids[1]));
+        assert_eq!(chunk_of(10), Some(ids[1]));
 
         assert_eq!(view.row_of_chunk(ids[0]), Some(0));
-        assert_eq!(view.row_of_chunk(ids[1]), Some(first_chunk_len));
+        assert_eq!(view.row_of_chunk(ids[1]), Some(7));
+    }
+
+    #[test]
+    fn view_state_renders_added_file_all_added() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "new.txt", "", "x\ny\nz\n");
+        let view = ReviewViewState::from_session(&s);
+
+        // An empty base leaves no line to walk on the left, so every row is
+        // all-added. Each has a right side and an absent left one, and a single
+        // chunk covers them all.
+        assert_eq!(view.rows.len(), 3);
+        assert!(
+            view.rows
+                .iter()
+                .all(|r| matches!(r, ReviewRow::Changed { left: None, right: Some(_) })),
+            "every row of a new file is all-added with no left side",
+        );
+        assert_eq!(view.chunk_row_ranges, vec![(ids[0], 0..3)]);
     }
 
     #[test]
@@ -994,13 +1114,14 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         let second = h.with_review(|s| s.order[1]);
-        // The first chunk spans four buffer rows. The fourth `j` clears the
-        // chunk-2 header block and lands the cursor on the second chunk.
-        h.type_keys("j j j j");
+        // The first chunk spans rows 0..4, then twelve unchanged gap rows (lines
+        // e..p) render before the second chunk at row 16. Walking the text cursor
+        // down onto that row carries the chunk cursor across into it.
+        h.type_keys(&"j ".repeat(16));
         assert_eq!(
             h.current_review_chunk_id(),
             second,
-            "crossing the boundary moves the chunk cursor to the second chunk"
+            "crossing into the second chunk moves the chunk cursor to it"
         );
         h.assert_snapshot("review_cursor_crosses_into_second_chunk");
     }
@@ -1011,12 +1132,13 @@ mod tests {
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         let (first, second) = h.with_review(|s| (s.order[0], s.order[1]));
 
-        // `n` jumps the cursor to the second chunk, `k` carries it back across
-        // the boundary into the first, so staging must act on the first chunk
-        // rather than the last chunk-nav target.
+        // `n` jumps the cursor to the second chunk. Walking the text cursor back
+        // up through the unchanged gap and into the first chunk's rows carries
+        // the chunk cursor with it, so staging acts on the first chunk rather
+        // than the last chunk-nav target.
         h.type_keys("n");
         assert_eq!(h.current_review_chunk_id(), second);
-        h.type_keys("k");
+        h.type_keys(&"k ".repeat(16));
         assert_eq!(h.current_review_chunk_id(), first);
 
         h.type_keys("s");

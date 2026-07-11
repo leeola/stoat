@@ -1970,8 +1970,8 @@ pub(crate) fn populate_diff_cache_from(
 }
 
 fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<BlockProperties> {
-    let mut blocks: Vec<BlockProperties> = Vec::with_capacity(view.chunk_row_starts.len());
-    for (chunk_id, row) in &view.chunk_row_starts {
+    let mut blocks: Vec<BlockProperties> = Vec::with_capacity(view.chunk_row_ranges.len());
+    for (chunk_id, range) in &view.chunk_row_ranges {
         let Some(chunk) = session.chunks.get(chunk_id) else {
             continue;
         };
@@ -2001,7 +2001,7 @@ fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<B
             })
         };
         blocks.push(BlockProperties {
-            placement: BlockPlacement::Above(*row),
+            placement: BlockPlacement::Above(range.start),
             height: Some(1),
             style: BlockStyle::Fixed,
             render,
