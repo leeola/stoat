@@ -37,13 +37,13 @@ use crate::{
             ReplaceChar, ReplayMacro, RotateSelectionsBackward, RotateSelectionsForward,
             SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
             SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
-            SelectPrevSibling, SelectRegister, SelectTextobjectAround, SelectTextobjectInner,
-            SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
-            ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
-            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints, ToggleSyntaxHighlight,
-            TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank,
-            YankMainToClipboard, YankToClipboard,
+            SelectPrevSibling, SelectRegex, SelectRegister, SelectTextobjectAround,
+            SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
+            ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection,
+            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
+            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
+            ToggleInlayHints, ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion,
+            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::{ForceSaveBuffer, OpenBuffer, OpenFile},
         file_finder::{
@@ -390,6 +390,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(GlobalSearchPickerClose))
     });
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
+    add(SelectRegex::DEF, |_| Ok(Box::new(SelectRegex)));
     add(KeepSelections::DEF, |_| Ok(Box::new(KeepSelections)));
     add(RemoveSelections::DEF, |_| Ok(Box::new(RemoveSelections)));
     add(RecordMacro::DEF, |_| Ok(Box::new(RecordMacro)));
@@ -1190,7 +1191,8 @@ mod tests {
         // + 1 EnterInsertMode.
         // + 1 InsertAtLineStart.
         // + 1 InsertTab.
-        assert_eq!(all().count(), 324);
+        // + 1 SelectRegex.
+        assert_eq!(all().count(), 325);
     }
 
     #[test]

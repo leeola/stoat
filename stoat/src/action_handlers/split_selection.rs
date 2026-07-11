@@ -4,28 +4,39 @@ use crate::{
 };
 use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
-/// Active state while the user is typing the split-on-regex pattern
-/// into the input modal. Disposed by [`submit`] / [`cancel`].
-pub(crate) struct SplitSelectionInputState {
-    pub(crate) input: InputView,
+/// Whether the regex modal splits selections at matches or replaces them with
+/// the matches. The modal, input state, and submit path are shared. Only the
+/// transform applied on submit differs.
+#[derive(Copy, Clone)]
+pub(crate) enum RegexSelectKind {
+    Split,
+    Select,
 }
 
-pub(super) fn open(stoat: &mut Stoat) -> UpdateEffect {
+/// Active state while the user is typing the regex pattern into the input
+/// modal, for either splitting on or selecting matches. Disposed by [`submit`] /
+/// [`cancel`].
+pub(crate) struct SplitSelectionInputState {
+    pub(crate) input: InputView,
+    kind: RegexSelectKind,
+}
+
+pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
     if stoat.split_selection_input.is_some() {
         return UpdateEffect::None;
     }
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::SplitSelection, "", "insert", 1);
-    stoat.split_selection_input = Some(SplitSelectionInputState { input });
+    stoat.split_selection_input = Some(SplitSelectionInputState { input, kind });
     UpdateEffect::Redraw
 }
 
-/// Submit the split-selection regex. Reads the typed pattern,
-/// compiles it, and runs `selections.split_each` to split every
-/// existing selection at every match. Empty pattern, invalid regex,
-/// or no enclosing editor close the input without changing
-/// selections. Returns `true` when the input modal was open.
+/// Submit the regex modal. Reads the typed pattern, compiles it, and either
+/// splits every selection at each match or replaces the selections with the
+/// matches, per the modal's kind. Empty pattern, invalid regex, or no enclosing
+/// editor close the input without changing selections. Returns `true` when the
+/// input modal was open.
 pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.split_selection_input.take() else {
         return false;
@@ -40,8 +51,17 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         Ok(r) => r,
         Err(_) => return true,
     };
+    match state.kind {
+        RegexSelectKind::Split => split_on_matches(stoat, &regex),
+        RegexSelectKind::Select => select_on_matches(stoat, &regex),
+    }
+    true
+}
+
+/// Split every selection at each match, keeping the gaps between matches.
+fn split_on_matches(stoat: &mut Stoat, regex: &regex::Regex) {
     let Some(editor) = focused_editor_mut(stoat) else {
-        return true;
+        return;
     };
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
@@ -56,25 +76,73 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         let mut pieces: Vec<Selection<Anchor>> = Vec::new();
         let mut piece_start = start;
         for m in regex.find_iter(&text) {
-            let match_start_global = start + m.start();
-            let match_end_global = start + m.end();
             pieces.push(make_anchor_selection(
                 buffer_snapshot,
                 piece_start,
-                match_start_global,
+                start + m.start(),
             ));
-            piece_start = match_end_global;
+            piece_start = start + m.end();
         }
         if piece_start < end {
             pieces.push(make_anchor_selection(buffer_snapshot, piece_start, end));
         }
-        if pieces.is_empty() {
-            Vec::new()
-        } else {
-            pieces
-        }
+        pieces
     });
-    true
+}
+
+/// Replace the selections with every match found inside them. When nothing
+/// matches anywhere, the selections are kept and a message is shown.
+fn select_on_matches(stoat: &mut Stoat, regex: &regex::Regex) {
+    let matched = {
+        let Some(editor) = focused_editor_mut(stoat) else {
+            return;
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+        editor.selections.all_anchors().iter().any(|sel| {
+            let start = buffer_snapshot.resolve_anchor(&sel.start);
+            let end = buffer_snapshot.resolve_anchor(&sel.end);
+            if start >= end {
+                return false;
+            }
+            let text: String = rope.chunks_in_range(start..end).collect();
+            regex.find_iter(&text).any(|m| start + m.start() != end)
+        })
+    };
+    if !matched {
+        stoat.pending_message = Some("nothing selected".to_string());
+        return;
+    }
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    editor.selections.split_each(buffer_snapshot, |sel| {
+        let start = buffer_snapshot.resolve_anchor(&sel.start);
+        let end = buffer_snapshot.resolve_anchor(&sel.end);
+        if start >= end {
+            return Vec::new();
+        }
+        let text: String = rope.chunks_in_range(start..end).collect();
+        let mut matches: Vec<Selection<Anchor>> = Vec::new();
+        for m in regex.find_iter(&text) {
+            let match_start = start + m.start();
+            // Skip an empty match sitting at the selection end (from `$`-style
+            // anchors), matching Helix.
+            if match_start == end {
+                continue;
+            }
+            matches.push(make_anchor_selection(
+                buffer_snapshot,
+                match_start,
+                start + m.end(),
+            ));
+        }
+        matches
+    });
 }
 
 /// Cancel the input modal without splitting. Returns `true` when
@@ -216,5 +284,42 @@ mod tests {
         assert_eq!(spans, vec![(0, 11, false)]);
         assert!(h.stoat.split_selection_input.is_none());
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    #[test]
+    fn select_regex_selects_every_match() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("foo bar foo");
+        select_range(&mut h, 0, 11);
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("foo");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        let spans = editor::selection_spans(&mut h.stoat);
+        assert_eq!(spans, vec![(0, 3, false), (8, 11, false)]);
+    }
+
+    #[test]
+    fn select_regex_no_match_keeps_selection_and_messages() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc def");
+        select_range(&mut h, 0, 7);
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("\\d+");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        let spans = editor::selection_spans(&mut h.stoat);
+        assert_eq!(spans, vec![(0, 7, false)]);
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("nothing selected"));
+    }
+
+    #[test]
+    fn select_regex_invalid_regex_keeps_selection() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("foo bar foo");
+        select_range(&mut h, 0, 11);
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("[unclosed");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        let spans = editor::selection_spans(&mut h.stoat);
+        assert_eq!(spans, vec![(0, 11, false)]);
     }
 }

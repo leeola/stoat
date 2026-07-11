@@ -36,7 +36,7 @@ pub use defs::{
         RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
         RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
         SearchPrev, SelectAll, SelectAllChildren, SelectAllSiblings, SelectLineBelow,
-        SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
+        SelectNextSibling, SelectPrevSibling, SelectRegex, SelectRegister, SelectTextobjectAround,
         SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
         ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection, SurroundAdd,
         SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,

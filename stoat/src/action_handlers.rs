@@ -178,7 +178,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
         ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
         ActionKind::SplitSelectionOnNewline => movement::split_selection_on_newline(stoat),
-        ActionKind::SplitSelection => split_selection::open(stoat),
+        ActionKind::SplitSelection => {
+            split_selection::open(stoat, split_selection::RegexSelectKind::Split)
+        },
+        ActionKind::SelectRegex => {
+            split_selection::open(stoat, split_selection::RegexSelectKind::Select)
+        },
         ActionKind::KeepSelections => filter_selections::open_keep(stoat),
         ActionKind::RemoveSelections => filter_selections::open_remove(stoat),
         ActionKind::RecordMacro => macro_recording::toggle_record(stoat),

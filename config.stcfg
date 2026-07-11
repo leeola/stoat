@@ -277,6 +277,7 @@ on key {
         Alt-; -> FlipSelections();
         Alt-s -> SplitSelectionOnNewline();
         S -> SplitSelection();
+        s -> SelectRegex();
         Alt-K -> RemoveSelections();
         Q -> RecordMacro();
         Alt-| -> ShellPipeTo();
@@ -414,6 +415,7 @@ on key {
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
         S -> SplitSelection();
+        s -> SelectRegex();
         Q -> RecordMacro();
         > -> IndentSelection();
         < -> UnindentSelection();

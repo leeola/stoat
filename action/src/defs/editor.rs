@@ -581,6 +581,16 @@ define_action!(
 );
 
 define_action!(
+    SelectRegexDef,
+    SelectRegex,
+    "SelectRegex",
+    ActionKind::SelectRegex,
+    "select regex matches in selections",
+    "Open an input modal for a regex pattern. On submit, replace the selections with every match of the pattern found inside them. When nothing matches, the selections are kept and a message is shown. Invalid or empty regex is a silent no-op.",
+    ActionPriority::Common
+);
+
+define_action!(
     KeepSelectionsDef,
     KeepSelections,
     "KeepSelections",

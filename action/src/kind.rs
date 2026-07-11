@@ -94,6 +94,7 @@ pub enum ActionKind {
     GlobalSearchPickerSelect,
     GlobalSearchPickerClose,
     SplitSelection,
+    SelectRegex,
     KeepSelections,
     RemoveSelections,
     RecordMacro,
