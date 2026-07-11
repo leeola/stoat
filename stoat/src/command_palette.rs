@@ -426,13 +426,23 @@ impl CommandPalette {
         let text = self.input.text(ws);
         if let Some((entry, arg)) = parse_command(&text) {
             let param = &entry.def.params()[0];
-            let chosen = self
-                .arg_picker
-                .as_ref()
-                .filter(|picker| picker.source() == param.value_source)
-                .and_then(|picker| picker.selected_path())
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| arg.to_string());
+            // An explicit `/` or `~` path is a destination the user typed
+            // verbatim, so it wins over whatever the fuzzy picker happens to
+            // have highlighted.
+            let explicit_path = {
+                let arg = arg.trim();
+                arg.starts_with('/') || arg.starts_with('~')
+            };
+            let chosen = if explicit_path {
+                arg.to_string()
+            } else {
+                self.arg_picker
+                    .as_ref()
+                    .filter(|picker| picker.source() == param.value_source)
+                    .and_then(|picker| picker.selected_path())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| arg.to_string())
+            };
             return match ParamValue::parse(param.kind, &chosen) {
                 Ok(value) => {
                     self.input.dispose(ws);
@@ -995,6 +1005,13 @@ mod tests {
         h.type_keys("enter");
 
         assert_eq!(h.stoat.active_workspace().git_root, sub);
+        assert_eq!(
+            h.stoat.pending_message,
+            Some(format!(
+                "Current working directory is now {}",
+                sub.display()
+            )),
+        );
         assert!(
             h.stoat.command_palette.is_none(),
             "palette closes on submit"
@@ -1016,6 +1033,48 @@ mod tests {
             root,
             "an unresolvable path leaves the root untouched"
         );
+        assert!(
+            h.stoat
+                .pending_message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("cd: cannot resolve")),
+            "the failure surfaces as a status message"
+        );
+    }
+
+    #[test]
+    fn palette_cd_expands_tilde() {
+        let mut h = Stoat::test();
+        h.fake_env().set("HOME", "/home/tester");
+        h.fake_fs().insert_dir("/home/tester/proj");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/elsewhere");
+
+        h.type_text(":cd ~/proj");
+        h.type_keys("enter");
+
+        assert_eq!(
+            h.stoat.active_workspace().git_root,
+            PathBuf::from("/home/tester/proj"),
+        );
+    }
+
+    #[test]
+    fn palette_cd_explicit_path_overrides_dir_match() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("outer/inner/main.rs", "")]);
+        h.fake_fs().insert_dir("/inner");
+
+        h.type_text(":cd /inner");
+        h.snapshot();
+        assert!(
+            arg_picker(&h)
+                .selected_path()
+                .is_some_and(|p| p.ends_with("outer/inner")),
+            "the workspace dir outer/inner fuzzy-matches the typed /inner"
+        );
+
+        h.type_keys("enter");
+        assert_eq!(h.stoat.active_workspace().git_root, PathBuf::from("/inner"));
     }
 
     #[test]

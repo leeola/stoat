@@ -133,20 +133,29 @@ pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
 /// Set the active workspace's `git_root` to `path`, the root the file finder,
 /// diff, and review resolve against.
 ///
-/// A relative path resolves against the current root. An empty path, an
-/// unresolvable path, or a non-directory leaves the root untouched.
+/// A leading `~` or `~/` resolves against `$HOME`, an absolute path is taken
+/// as-is, and a relative path resolves against the current root. The new root,
+/// or why the change was refused, surfaces as the one-shot bottom-row status
+/// message. An empty path, an unresolvable path (including a `~` form with no
+/// `$HOME`), or a non-directory leaves the root untouched.
 pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
     let path = path.trim();
     if path.is_empty() {
-        tracing::warn!("cd: empty path");
+        stoat.pending_message = Some("cd: empty path".to_string());
         return;
     }
 
-    let raw = Path::new(path);
-    let candidate = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        stoat.active_workspace().git_root.join(raw)
+    let candidate = {
+        let tilde = if path == "~" {
+            Some("")
+        } else {
+            path.strip_prefix("~/")
+        };
+        match tilde.zip(stoat.env_host.var("HOME")) {
+            Some((rest, home)) => Path::new(&home).join(rest),
+            None if Path::new(path).is_absolute() => Path::new(path).to_path_buf(),
+            None => stoat.active_workspace().git_root.join(path),
+        }
     };
 
     match stoat.fs_host.canonicalize(&candidate) {
@@ -175,8 +184,16 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
             {
                 crate::project_env::spawn_load(stoat, ws_id, false);
             }
+
+            let root = stoat.active_workspace().git_root.display().to_string();
+            stoat.pending_message = Some(format!("Current working directory is now {root}"));
         },
-        Ok(_) => tracing::warn!("cd: not a directory: {}", candidate.display()),
-        Err(e) => tracing::warn!("cd: cannot resolve {}: {}", candidate.display(), e),
+        Ok(_) => {
+            stoat.pending_message = Some(format!("cd: not a directory: {}", candidate.display()));
+        },
+        Err(e) => {
+            stoat.pending_message =
+                Some(format!("cd: cannot resolve {}: {e}", candidate.display()));
+        },
     }
 }
