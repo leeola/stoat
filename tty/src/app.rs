@@ -1218,6 +1218,13 @@ impl ApplicationHandler<PtyEvent> for App {
                     }
                 }
 
+                // A Cmd-combo stoatty did not handle above (copy on an empty
+                // selection, or any other Cmd-key) must not reach encode_key as a
+                // bare character on macOS, matching Terminal.app and iTerm2.
+                if swallow_super_combo(state.modifiers) {
+                    return;
+                }
+
                 if let Some(bytes) = encode_key(
                     &event.logical_key,
                     state.modifiers.control_key(),
@@ -1533,6 +1540,19 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     } else {
         text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
+}
+
+/// Whether an unhandled key press is a macOS Cmd-combo that should be swallowed
+/// rather than forwarded to the child.
+///
+/// True only on macOS while the super (Command) modifier is held. Terminal.app
+/// and iTerm2 eat a Cmd-combo the terminal itself does not act on rather than
+/// leak its bare character to the child, so a Cmd-C over an empty selection does
+/// not reach the child editor as a `c`. Ctrl-based combos are never swallowed,
+/// so a bare Ctrl-C still delivers SIGINT and the Linux ctrl+shift clipboard
+/// chord is untouched.
+fn swallow_super_combo(modifiers: ModifiersState) -> bool {
+    cfg!(target_os = "macos") && modifiers.super_key()
 }
 
 /// Encode a key press into the bytes a terminal sends to the shell, or `None`
@@ -2002,7 +2022,8 @@ mod tests {
         ease, ease_corners, encode_key, font_step, paste_bytes, popover_overflow,
         selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes,
         step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
-        step_scrollback_scroll, sweep_launch_shift, wheel_lines, SCROLLBACK_MIN_STEP,
+        step_scrollback_scroll, swallow_super_combo, sweep_launch_shift, wheel_lines,
+        SCROLLBACK_MIN_STEP,
     };
     use alacritty_terminal::sync::FairMutex;
     use std::time::{Duration, Instant};
@@ -2015,8 +2036,20 @@ mod tests {
     use winit::{
         dpi::PhysicalPosition,
         event::MouseScrollDelta,
-        keyboard::{Key, NamedKey},
+        keyboard::{Key, ModifiersState, NamedKey},
     };
+
+    #[test]
+    fn super_combo_swallowed_only_on_macos() {
+        // A held Command is swallowed on macOS and forwarded everywhere else.
+        assert_eq!(
+            swallow_super_combo(ModifiersState::SUPER),
+            cfg!(target_os = "macos"),
+        );
+        // Ctrl (SIGINT, the Linux clipboard chord) and no modifier never are.
+        assert!(!swallow_super_combo(ModifiersState::CONTROL));
+        assert!(!swallow_super_combo(ModifiersState::empty()));
+    }
 
     #[test]
     fn cursor_in_region_uses_exclusive_far_edges() {
