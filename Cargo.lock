@@ -4090,10 +4090,12 @@ dependencies = [
  "serde",
  "snafu",
  "stoat_cli",
+ "stoat_log",
  "stoatty_protocol",
  "stoatty_render",
  "stoatty_term",
  "toml",
+ "tracing",
  "winit",
 ]
 

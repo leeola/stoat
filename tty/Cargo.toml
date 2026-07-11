@@ -20,6 +20,8 @@ stoatty_protocol = { path = "../tty_protocol" }
 stoatty_term = { path = "../tty_term" }
 stoatty_render = { path = "../tty_render" }
 stoat_cli = { path = "../cli" }
+stoat_log = { path = "../log" }
+tracing.workspace = true
 alacritty_terminal.workspace = true
 arboard.workspace = true
 clap.workspace = true
