@@ -1685,6 +1685,18 @@ impl Stoat {
                                 &manifest,
                                 self.fs_host.as_ref(),
                             );
+                            if let Ok(pruned) = crate::code_index::store::prune_shards(
+                                &dir,
+                                &manifest,
+                                self.fs_host.as_ref(),
+                            ) && pruned > 0
+                            {
+                                tracing::info!(
+                                    target: "stoat::app",
+                                    pruned,
+                                    "pruned stale index shards",
+                                );
+                            }
                         }
                     }
                 },

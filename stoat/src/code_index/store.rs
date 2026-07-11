@@ -7,6 +7,7 @@
 use crate::{host::FsHost, workspace::anchor_state_dir};
 use codegraph::{decode_manifest, encode_manifest, FileEntry, Manifest, SCHEMA_VERSION};
 use std::{
+    collections::HashSet,
     hash::{Hash, Hasher},
     io,
     path::{Path, PathBuf},
@@ -36,6 +37,48 @@ pub(crate) fn write_manifest(
         &encode_manifest(manifest),
         fs,
     )
+}
+
+/// Delete shard files under `index_dir` that no longer back a `manifest` entry,
+/// returning the number removed.
+///
+/// A build only writes and rewrites shards. A source file that is renamed or
+/// deleted leaves its shard behind, so the directory grows without bound. This
+/// reconciles the directory against the manifest, removing every `.shard` file
+/// whose name is not the [`shard_path`] of a current entry.
+///
+/// A missing shards directory yields zero removals rather than an error, so a
+/// prune before the first shard write is a no-op.
+pub(crate) fn prune_shards(
+    index_dir: &Path,
+    manifest: &Manifest,
+    fs: &dyn FsHost,
+) -> io::Result<usize> {
+    let expected: HashSet<PathBuf> = manifest
+        .files
+        .iter()
+        .map(|entry| shard_path(index_dir, &entry.rel_path))
+        .collect();
+
+    let shards_dir = index_dir.join(SHARDS_DIR);
+    let entries = match fs.list_dir(&shards_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+
+    let mut removed = 0;
+    for entry in entries {
+        if entry.is_dir || !entry.name.ends_with(".shard") {
+            continue;
+        }
+        let path = shards_dir.join(entry.name.as_str());
+        if !expected.contains(&path) {
+            fs.remove_file(&path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Read and decode the index manifest under `index_dir`.
@@ -136,10 +179,12 @@ fn read_bytes(path: &Path, fs: &dyn FsHost) -> io::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_manifest, read_shard, update_manifest_entry, write_manifest, write_shard};
+    use super::{
+        prune_shards, read_manifest, read_shard, update_manifest_entry, write_manifest, write_shard,
+    };
     use crate::{buffer_registry::fingerprint_bytes, host::FakeFs};
     use codegraph::{FileEntry, Manifest, SCHEMA_VERSION};
-    use std::path::Path;
+    use std::{io, path::Path};
 
     fn manifest_for(content: &str) -> Manifest {
         Manifest {
@@ -204,6 +249,45 @@ mod tests {
                     content_hash: [2u8; 32],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn prune_shards_removes_shards_absent_from_the_manifest() {
+        let fs = FakeFs::new();
+        let dir = Path::new("/idx");
+
+        write_shard(dir, "a.rs", &[1u8], &fs).unwrap();
+        write_shard(dir, "b.rs", &[2u8], &fs).unwrap();
+        write_shard(dir, "c.rs", &[3u8], &fs).unwrap();
+
+        let manifest = Manifest {
+            schema_version: SCHEMA_VERSION,
+            files: vec![FileEntry {
+                rel_path: "a.rs".to_string(),
+                content_hash: [1u8; 32],
+            }],
+        };
+
+        assert_eq!(
+            prune_shards(dir, &manifest, &fs).unwrap(),
+            2,
+            "the two shards absent from the manifest are pruned",
+        );
+        assert_eq!(
+            read_shard(dir, "a.rs", &fs).unwrap(),
+            vec![1u8],
+            "the manifest's shard survives with its bytes intact",
+        );
+        assert_eq!(
+            read_shard(dir, "b.rs", &fs).unwrap_err().kind(),
+            io::ErrorKind::NotFound,
+            "the b.rs shard is gone",
+        );
+        assert_eq!(
+            read_shard(dir, "c.rs", &fs).unwrap_err().kind(),
+            io::ErrorKind::NotFound,
+            "the c.rs shard is gone",
         );
     }
 }
