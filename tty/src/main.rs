@@ -3,6 +3,7 @@
 //! loop until the window closes.
 
 use clap::{CommandFactory, Parser};
+use std::{backtrace::Backtrace, panic, sync::Once};
 use stoat_cli::FixtureSub;
 use stoat_log::LogTarget;
 use stoatty::cli::{Cli, TtyCommand};
@@ -23,6 +24,7 @@ fn main() {
         eprintln!("Failed to initialize logging: {e}");
         std::process::exit(1);
     }
+    install_panic_hook();
     tracing::info!("starting stoatty");
 
     match cli.command_sub.take() {
@@ -70,4 +72,34 @@ fn resolve_log_path() -> std::io::Result<std::path::PathBuf> {
     let dir = stoat_log::log_dir()?;
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(format!("stoatty-{}.log", std::process::id())))
+}
+
+/// Install a process-global panic hook that records the panic message,
+/// location, and a captured backtrace via [`tracing::error`] before delegating
+/// to the prior hook, so a panic survives in `stoatty-<pid>.log` after the
+/// window is gone. Idempotent across repeated calls.
+///
+/// Unlike the editor's hook, stoatty runs a GUI rather than a raw-mode terminal,
+/// so there is no cooked-mode restore to perform here.
+fn install_panic_hook() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        let prior = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let panic_message = match info.payload().downcast_ref::<&'static str>() {
+                Some(message) => *message,
+                None => match info.payload().downcast_ref::<String>() {
+                    Some(message) => message.as_str(),
+                    None => "Box<Any>",
+                },
+            };
+            let location = info
+                .location()
+                .map(|loc| format!("{}:{}", loc.file(), loc.line()));
+            let backtrace = Backtrace::force_capture();
+            tracing::error!(panic = true, ?location, %panic_message, %backtrace, "stoatty panic");
+
+            prior(info);
+        }));
+    });
 }

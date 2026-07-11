@@ -548,6 +548,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         }
                     },
                     PtyOutput::Eof => {
+                        tracing::info!("child closed the pty");
                         let _ = proxy.send_event(PtyEvent::Exited);
                     },
                 },
@@ -672,7 +673,10 @@ impl ApplicationHandler<PtyEvent> for App {
         };
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                tracing::info!("window close requested");
+                event_loop.exit();
+            },
             WindowEvent::Focused(gained) => {
                 state.focused = gained;
                 if state.terminal.lock().report_focus_in_out() {

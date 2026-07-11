@@ -16,7 +16,11 @@ use std::{
     mem::MaybeUninit,
     path::Path,
     ptr,
-    sync::mpsc::{self, Sender},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Sender},
+        Arc,
+    },
     thread::{self, JoinHandle},
 };
 
@@ -43,9 +47,15 @@ pub(crate) enum PtyOutput<'a> {
 pub(crate) struct Pty {
     master: Box<dyn MasterPty + Send>,
     writer: Sender<Vec<u8>>,
+    write_queue_depth: Arc<AtomicUsize>,
     child: Box<dyn Child + Send + Sync>,
     _reader: JoinHandle<()>,
 }
+
+/// Queued-write count that trips the writer-stall warning. When this many chunks
+/// sit unwritten the child has stopped draining its input, which is the
+/// mechanism behind a frozen terminal.
+const WRITE_STALL_THRESHOLD: usize = 256;
 
 impl Pty {
     /// Spawn `program` with `args` over a fresh PTY sized `rows` by `cols` and
@@ -82,14 +92,17 @@ impl Pty {
             .slave
             .spawn_command(shell_command(program, args, cwd, stoat_dir))
             .map_err(io::Error::other)?;
-        let writer = pair.master.take_writer().map_err(io::Error::other)?;
+        tracing::info!(program, pid = ?child.process_id(), "spawned child over pty");
+        let master_writer = pair.master.take_writer().map_err(io::Error::other)?;
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
 
         let reader_thread = thread::spawn(move || read_loop(reader, sink));
 
+        let write_queue_depth = Arc::new(AtomicUsize::new(0));
         Ok(Pty {
             master: pair.master,
-            writer: spawn_writer(writer),
+            writer: spawn_writer(master_writer, write_queue_depth.clone()),
+            write_queue_depth,
             child,
             _reader: reader_thread,
         })
@@ -116,6 +129,13 @@ impl Pty {
     /// input cannot stall the UI thread. An [`io::ErrorKind::BrokenPipe`] error
     /// means the writer thread has exited.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let queued = self.write_queue_depth.fetch_add(1, Ordering::Relaxed);
+        if queued == WRITE_STALL_THRESHOLD {
+            tracing::warn!(
+                queued = queued + 1,
+                "pty writer backlog crossed {WRITE_STALL_THRESHOLD}; the child is not draining its input"
+            );
+        }
         self.writer
             .send(bytes.to_vec())
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
@@ -131,16 +151,21 @@ impl Drop for Pty {
 /// Spawn a thread that writes each received chunk to `writer`, flushing after
 /// each so the shell sees input promptly. Returns the sender that feeds it.
 ///
+/// Decrements `depth` after writing each chunk, mirroring [`Pty::write`]'s
+/// increment on send, so `depth` tracks the queued-but-unwritten backlog.
+///
 /// Decouples [`Pty::write`] from the blocking write on the PTY master. A child
 /// that stops draining its input parks the `write_all` on this thread rather
 /// than on the caller. The thread exits when the channel closes or a write
 /// fails, so dropping the [`Pty`] ends it: the sender drops to unblock an idle
 /// writer, and killing the child closes the slave to unblock a parked one.
-fn spawn_writer(mut writer: Box<dyn Write + Send>) -> Sender<Vec<u8>> {
+fn spawn_writer(mut writer: Box<dyn Write + Send>, depth: Arc<AtomicUsize>) -> Sender<Vec<u8>> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     thread::spawn(move || {
         while let Ok(bytes) = rx.recv() {
-            if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+            let wrote = writer.write_all(&bytes).and_then(|()| writer.flush());
+            depth.fetch_sub(1, Ordering::Relaxed);
+            if wrote.is_err() {
                 break;
             }
         }
@@ -311,7 +336,10 @@ mod tests {
         ffi::{OsStr, OsString},
         io::{self, Cursor, Write},
         path::Path,
-        sync::{Arc, Condvar, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Condvar, Mutex,
+        },
         thread,
     };
 
@@ -461,16 +489,27 @@ mod tests {
     fn spawn_writer_does_not_block_the_sender_on_a_parked_write() {
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let written = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
-        let tx = spawn_writer(Box::new(GatedWriter {
-            gate: gate.clone(),
-            written: written.clone(),
-        }));
+        let depth = Arc::new(AtomicUsize::new(0));
+        let tx = spawn_writer(
+            Box::new(GatedWriter {
+                gate: gate.clone(),
+                written: written.clone(),
+            }),
+            depth.clone(),
+        );
 
-        tx.send(b"foo".to_vec()).unwrap();
-        tx.send(b"bar".to_vec()).unwrap();
+        for chunk in [b"foo".as_slice(), b"bar".as_slice()] {
+            depth.fetch_add(1, Ordering::Relaxed);
+            tx.send(chunk.to_vec()).unwrap();
+        }
         assert!(
             written.0.lock().unwrap().is_empty(),
             "the sender returns while the writer is parked, so nothing is written yet",
+        );
+        assert_eq!(
+            depth.load(Ordering::Relaxed),
+            2,
+            "both queued chunks count toward the backlog while the writer is parked",
         );
 
         {
