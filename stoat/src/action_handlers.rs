@@ -462,6 +462,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RotateSelectionContentsBackward => {
             movement::rotate_selection_contents_backward(stoat)
         },
+        ActionKind::JoinSelections => movement::join_selections(stoat),
+        ActionKind::JoinSelectionsSpace => movement::join_selections_space(stoat),
         ActionKind::TrimSelections => movement::trim_selections(stoat),
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::SpawnClaude => agent::spawn_claude_pane(stoat),

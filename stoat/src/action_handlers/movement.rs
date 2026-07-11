@@ -1211,6 +1211,157 @@ fn rotate_selection_contents(stoat: &mut Stoat, forward: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn join_selections(stoat: &mut Stoat) -> UpdateEffect {
+    join_selections_impl(stoat, false)
+}
+
+pub(super) fn join_selections_space(stoat: &mut Stoat) -> UpdateEffect {
+    join_selections_impl(stoat, true)
+}
+
+/// Join every line each selection touches onto one line, following Helix's
+/// `join_selections_impl`.
+///
+/// Each newline plus the following indentation is replaced with a single
+/// space, except that a blank joining line contributes no space. When the
+/// selection's first line is a comment line, the leading comment token is
+/// stripped from each subsequent joined line so only the first survives. A
+/// single-line selection joins with the line below.
+///
+/// With `select_space`, the inserted spaces are left selected. Otherwise the
+/// selection is remapped through the edit. No-op when the focused pane is not
+/// an editor or nothing joins.
+fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let comment_token = ws
+        .buffers
+        .language_for(buffer_id)
+        .and_then(|lang| lang.line_comment);
+
+    let mut changes: Vec<(usize, usize, bool)> = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+        let max_row = rope.max_point().row;
+        let mut changes = Vec::new();
+        for sel in editor.selections.all_anchors() {
+            let (start_row, mut end_row) = selection_line_range(sel, rope, buffer_snapshot);
+            if start_row == end_row {
+                end_row = (end_row + 1).min(max_row);
+            }
+
+            let first_start = rope.point_to_offset(Point::new(start_row, 0));
+            let first_end = line_content_end(rope, start_row);
+            let mut in_comment = comment_token
+                .is_some_and(|token| line_comment_continues(rope, first_start, first_end, token));
+
+            for line in start_row..end_row {
+                let join_start = line_content_end(rope, line);
+                let next_end = line_content_end(rope, line + 1);
+                let next_start = rope.point_to_offset(Point::new(line + 1, 0));
+                let mut join_end = skip_spaces_tabs(rope, next_start, next_end);
+
+                if let Some(token) = comment_token
+                    && rope_matches_at(rope, join_end, next_end, token)
+                {
+                    if in_comment {
+                        join_end = skip_spaces_tabs(rope, join_end + token.len(), next_end);
+                    } else {
+                        in_comment = true;
+                    }
+                }
+
+                let has_space = join_end != next_end;
+                changes.push((join_start, join_end, has_space));
+            }
+        }
+        changes
+    };
+
+    if changes.is_empty() {
+        return UpdateEffect::None;
+    }
+    changes.sort_by_key(|(start, _, _)| *start);
+    changes.dedup();
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for (start, end, has_space) in changes.iter().rev() {
+            guard.edit(*start..*end, if *has_space { " " } else { "" });
+        }
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+
+    let spaces: Vec<Selection<Anchor>> = if select_space {
+        let mut spaces = Vec::new();
+        let mut delta = 0isize;
+        for (start, end, has_space) in &changes {
+            let new_start = (*start as isize + delta) as usize;
+            let replaced = if *has_space { 1 } else { 0 };
+            if *has_space {
+                spaces.push(Selection {
+                    id: 0,
+                    start: new_buf.anchor_at(new_start, Bias::Right),
+                    end: new_buf.anchor_at(new_start + 1, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                });
+            }
+            delta += replaced - (*end - *start) as isize;
+        }
+        spaces
+    } else {
+        Vec::new()
+    };
+
+    if spaces.is_empty() {
+        editor.selections.transform(new_buf, |sel| sel.clone());
+    } else {
+        editor.selections.replace_with(spaces, new_buf);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Offset just past the content of buffer `row`, before its line ending (the
+/// rope end for the last line).
+fn line_content_end(rope: &Rope, row: u32) -> usize {
+    rope.point_to_offset(Point::new(row, rope.line_len(row)))
+}
+
+/// Advance past spaces and tabs from `offset`, stopping at `limit` or the first
+/// other character. A newline stops the scan, so it never crosses a line.
+fn skip_spaces_tabs(rope: &Rope, offset: usize, limit: usize) -> usize {
+    let mut cursor = offset;
+    for ch in rope.chars_at(offset) {
+        if cursor >= limit || (ch != ' ' && ch != '\t') {
+            break;
+        }
+        cursor += ch.len_utf8();
+    }
+    cursor
+}
+
+/// Whether `token` occurs at `offset` within `[offset, limit)`.
+fn rope_matches_at(rope: &Rope, offset: usize, limit: usize, token: &str) -> bool {
+    if offset + token.len() > limit {
+        return false;
+    }
+    rope.chars_at(offset)
+        .zip(token.chars())
+        .all(|(actual, expected)| actual == expected)
+}
+
 pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -4688,5 +4839,48 @@ mod tests {
             &stoat_action::RotateSelectionContentsBackward,
         );
         assert_eq!(buffer_string(&mut h), "bca\n");
+    }
+
+    #[test]
+    fn join_selections_space_joins_two_lines_and_selects_space() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "ab\ncd\n");
+        h.open_file(&path);
+        set_range(&mut h, 0, 5);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+        assert_eq!(buffer_string(&mut h), "ab cd\n");
+        assert_eq!(h.selection_spans(), vec![(2, 3, false)]);
+    }
+
+    #[test]
+    fn join_selections_space_single_line_joins_with_next() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "ab\ncd\n");
+        h.open_file(&path);
+        set_range(&mut h, 0, 1);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+        assert_eq!(buffer_string(&mut h), "ab cd\n");
+        assert_eq!(h.selection_spans(), vec![(2, 3, false)]);
+    }
+
+    #[test]
+    fn join_selections_drops_second_comment_token() {
+        let mut h = TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "// foo\n// bar\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
+        assert_eq!(buffer_string(&mut h), "// foo bar\n");
+    }
+
+    #[test]
+    fn join_selections_joins_without_selecting_the_space() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "ab\ncd\n");
+        h.open_file(&path);
+        set_range(&mut h, 0, 5);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JoinSelections);
+        assert_eq!(buffer_string(&mut h), "ab cd\n");
+        assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
     }
 }

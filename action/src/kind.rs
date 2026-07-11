@@ -216,6 +216,8 @@ pub enum ActionKind {
     RotateSelectionsBackward,
     RotateSelectionContentsForward,
     RotateSelectionContentsBackward,
+    JoinSelections,
+    JoinSelectionsSpace,
     TrimSelections,
     SplitSelectionOnNewline,
     AlignSelections,

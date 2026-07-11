@@ -27,25 +27,26 @@ use crate::{
             GotoPrevClass, GotoPrevFunction, GotoPrevParagraph, GotoReferences, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
             IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
-            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, MarkTrailEnd,
-            MarkTrailStart, MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd,
-            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
-            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
-            MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch,
-            OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
-            PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
-            RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
-            ReplaceChar, ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
-            RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
-            SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
-            SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
-            SelectPrevSibling, SelectRegex, SelectRegister, SelectTextobjectAround,
-            SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
-            ShellPipe, ShellPipeTo, ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection,
-            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
-            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            ToggleInlayHints, ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion,
-            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward, KeepPrimarySelection,
+            KeepSelections, MarkTrailEnd, MarkTrailStart, MatchBrackets, MoveDown, MoveLeft,
+            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
+            MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
+            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
+            OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput,
+            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
+            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
+            RepeatLastMotion, ReplaceChar, ReplaceWithYanked, ReplayMacro,
+            RotateSelectionContentsBackward, RotateSelectionContentsForward,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
+            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectAllChildren,
+            SelectAllSiblings, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegex,
+            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
+            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline,
+            SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
+            ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
+            UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::{ForceSaveBuffer, OpenBuffer, OpenFile},
         file_finder::{
@@ -585,6 +586,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(RotateSelectionContentsBackward::DEF, |_| {
         Ok(Box::new(RotateSelectionContentsBackward))
+    });
+    add(JoinSelections::DEF, |_| Ok(Box::new(JoinSelections)));
+    add(JoinSelectionsSpace::DEF, |_| {
+        Ok(Box::new(JoinSelectionsSpace))
     });
     add(TrimSelections::DEF, |_| Ok(Box::new(TrimSelections)));
     add(SplitSelectionOnNewline::DEF, |_| {
@@ -1214,7 +1219,8 @@ mod tests {
         // + 1 EnsureSelectionsForward.
         // + 2 RotateSelectionContentsForward/Backward.
         // + 1 ReplaceWithYanked.
-        assert_eq!(all().count(), 331);
+        // + 2 JoinSelections / JoinSelectionsSpace.
+        assert_eq!(all().count(), 333);
     }
 
     #[test]

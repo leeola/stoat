@@ -1662,6 +1662,26 @@ define_action!(
 );
 
 define_action!(
+    JoinSelectionsDef,
+    JoinSelections,
+    "JoinSelections",
+    ActionKind::JoinSelections,
+    "join selected lines",
+    "Join every line each selection touches onto one line, replacing each newline and the following indentation with a single space. A blank joining line contributes no space, and a joined line's leading comment token is dropped after the first. A single-line selection joins with the line below.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    JoinSelectionsSpaceDef,
+    JoinSelectionsSpace,
+    "JoinSelectionsSpace",
+    ActionKind::JoinSelectionsSpace,
+    "join selected lines, select spaces",
+    "Join selected lines like `JoinSelections`, leaving the inserted joining spaces selected so a following operation acts on them.",
+    ActionPriority::Rare
+);
+
+define_action!(
     TrimSelectionsDef,
     TrimSelections,
     "TrimSelections",

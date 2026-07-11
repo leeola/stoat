@@ -306,6 +306,7 @@ on key {
         ) -> RotateSelectionsForward();
         Alt-( -> RotateSelectionContentsBackward();
         Alt-) -> RotateSelectionContentsForward();
+        Alt-J -> JoinSelectionsSpace();
         _ -> TrimSelections();
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
@@ -426,6 +427,7 @@ on key {
         Alt-x -> ShrinkToLineBounds();
         Alt-( -> RotateSelectionContentsBackward();
         Alt-) -> RotateSelectionContentsForward();
+        Alt-J -> JoinSelectionsSpace();
         Q -> RecordMacro();
         > -> IndentSelection();
         < -> UnindentSelection();
