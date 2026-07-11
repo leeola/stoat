@@ -316,6 +316,7 @@ pub enum ActionKind {
     CloseWorkspace,
     RenameWorkspace,
     SetCwd,
+    ShowCwd,
     ReloadEnv,
     SubmitPromptInput,
     CancelPromptInput,

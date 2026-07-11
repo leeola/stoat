@@ -203,6 +203,56 @@ impl Action for SetCwd {
 }
 
 #[derive(Debug)]
+pub struct ShowCwdDef;
+
+impl ActionDef for ShowCwdDef {
+    fn name(&self) -> &'static str {
+        "ShowCwd"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ShowCwd
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "show the working directory"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Report the active workspace's working directory as a status message. This is the root the file finder, diff, and review resolve against, not the process working directory."
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["pwd"]
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+
+#[derive(Debug)]
+pub struct ShowCwd;
+
+impl ShowCwd {
+    pub const DEF: &ShowCwdDef = &ShowCwdDef;
+}
+
+impl Action for ShowCwd {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct ReloadEnvDef;
 
 impl ActionDef for ReloadEnvDef {
@@ -277,6 +327,9 @@ mod tests {
         assert_eq!(set_cwd.kind(), ActionKind::SetCwd);
         assert_eq!(set_cwd.def().name(), "SetCwd");
         assert_eq!(set_cwd.def().aliases(), &["cd"]);
+        assert_eq!(ShowCwd.kind(), ActionKind::ShowCwd);
+        assert_eq!(ShowCwd.def().name(), "ShowCwd");
+        assert_eq!(ShowCwd.def().aliases(), &["pwd"]);
         assert_eq!(ReloadEnv.kind(), ActionKind::ReloadEnv);
         assert_eq!(ReloadEnv.def().name(), "ReloadEnv");
         assert_eq!(ReloadEnv.def().aliases(), &["reload-env"]);
@@ -297,6 +350,7 @@ mod tests {
         assert!(CopyWorkspace.def().params().is_empty());
         assert!(SwitchWorkspace.def().params().is_empty());
         assert!(CloseWorkspace.def().params().is_empty());
+        assert!(ShowCwd.def().params().is_empty());
         assert!(ReloadEnv.def().params().is_empty());
     }
 

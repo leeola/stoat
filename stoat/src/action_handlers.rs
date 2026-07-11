@@ -682,6 +682,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             workspace::set_cwd(stoat, &action.path);
             UpdateEffect::Redraw
         },
+        ActionKind::ShowCwd => {
+            workspace::show_cwd(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::ReloadEnv => {
             crate::project_env::reload_active_workspace(stoat);
             UpdateEffect::Redraw
@@ -2083,6 +2087,19 @@ mod tests {
         assert!(
             version_badge_label(&h.stoat).is_none(),
             "the next key press retires the version badge",
+        );
+    }
+
+    #[test]
+    fn dispatch_show_cwd_reports_git_root() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = "/some/root".into();
+
+        dispatch(&mut h.stoat, &stoat_action::ShowCwd);
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("Current working directory is /some/root"),
         );
     }
 

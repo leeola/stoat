@@ -101,8 +101,8 @@ use crate::{
         terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
-            SwitchWorkspace, WorkspacePickerClose, WorkspacePickerNext, WorkspacePickerPrev,
-            WorkspacePickerSelect,
+            ShowCwd, SwitchWorkspace, WorkspacePickerClose, WorkspacePickerNext,
+            WorkspacePickerPrev, WorkspacePickerSelect,
         },
     },
     param::{MissingSnafu, WrongKindSnafu},
@@ -747,6 +747,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: raw.to_owned(),
         }))
     });
+    add(ShowCwd::DEF, |_| Ok(Box::new(ShowCwd)));
     add(ReloadEnv::DEF, |_| Ok(Box::new(ReloadEnv)));
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
     add(CancelPromptInput::DEF, |_| Ok(Box::new(CancelPromptInput)));
@@ -979,6 +980,7 @@ mod tests {
         "GlobalSearchPickerSelect",
         "GlobalSearchPickerClose",
         "CloseWorkspace",
+        "ShowCwd",
         "ReloadEnv",
         "HelpSelectPrev",
         "HelpSelectNext",
@@ -1209,6 +1211,7 @@ mod tests {
         // + 4 LocationPicker Next/Prev/Select/Close.
         // + 4 GlobalSearchPicker Next/Prev/Select/Close.
         // + 1 SetCwd.
+        // + 1 ShowCwd.
         // + 1 ReloadEnv.
         // + 2 AppendMode / InsertAtLineEnd.
         // + 1 EnterInsertMode.
@@ -1220,7 +1223,7 @@ mod tests {
         // + 2 RotateSelectionContentsForward/Backward.
         // + 1 ReplaceWithYanked.
         // + 2 JoinSelections / JoinSelectionsSpace.
-        assert_eq!(all().count(), 333);
+        assert_eq!(all().count(), 334);
     }
 
     #[test]

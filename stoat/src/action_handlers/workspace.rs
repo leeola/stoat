@@ -197,3 +197,14 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
         },
     }
 }
+
+/// Report the active workspace's `git_root` as the one-shot bottom-row status
+/// message.
+///
+/// This is the root the file finder, diff, and review resolve against, which
+/// [`set_cwd`] moves. It is not the process working directory, which is never
+/// changed.
+pub(super) fn show_cwd(stoat: &mut Stoat) {
+    let root = stoat.active_workspace().git_root.display().to_string();
+    stoat.pending_message = Some(format!("Current working directory is {root}"));
+}
