@@ -1563,9 +1563,22 @@ impl Stoat {
     /// The scan runs on the blocking pool and streams shards back through
     /// [`Self::index_update_rx`], which [`Self::drain_index_updates`] merges
     /// each tick. The worker task is held so the scan is not cancelled.
+    ///
+    /// Indexing and the recursive fs-watch only run when the workspace root is
+    /// inside a git repository. A non-repo root, such as stoat launched from a
+    /// bare home directory, returns early without building or watching, so the
+    /// index never spans an unbounded tree.
     pub(crate) fn start_index_build(&mut self) {
         let workspace = self.active_workspace;
         let git_root = self.active_workspace().git_root.clone();
+        if self.git_host.discover(&git_root).is_none() {
+            tracing::info!(
+                target: "stoat::app",
+                root = %git_root.display(),
+                "workspace root is not in a git repository; code indexing and fs-watching disabled",
+            );
+            return;
+        }
         let warm = self.warm_index_load(&git_root);
         if !self.persistence_disabled {
             let _ = self.fs_watch_host.watch_recursive(&git_root);
@@ -6042,6 +6055,40 @@ mod tests {
         assert_eq!(
             ws.code_graph.symbol_at(codegraph::FileId(0), 5),
             Some(codegraph::SymbolKey([1u8; 16]))
+        );
+    }
+
+    #[test]
+    fn non_repo_root_skips_the_index_build() {
+        use crate::host::{FakeFs, FakeGit};
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/scratch"),
+        );
+        stoat.persistence_disabled = true;
+
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/scratch/a.rs", "fn foo() {}\n");
+        stoat.set_fs_host(fs);
+        stoat.set_git_host(Arc::new(FakeGit::new()));
+
+        stoat.start_index_build();
+        scheduler.run_until_parked();
+        stoat.drain_index_updates();
+
+        let ws = stoat.active_workspace();
+        assert_eq!(
+            ws.index_generation, 0,
+            "a non-repo root builds no index shards",
+        );
+        assert_eq!(
+            ws.code_graph
+                .symbol_at(crate::code_index::build::file_id("a.rs"), 5),
+            None,
+            "no symbol is indexed when the workspace root is not a repo",
         );
     }
 
