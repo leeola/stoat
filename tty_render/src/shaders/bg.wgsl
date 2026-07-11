@@ -8,14 +8,50 @@ struct Globals {
     cursor_corners_01: vec4<f32>,
     cursor_corners_23: vec4<f32>,
     scroll_y: f32,
-    pad: f32,
-    pad2: f32,
+    // Occluder count the cell fragment shader loops over, and the flag that
+    // bypasses the seq test. Both non-zero only on an occludable pool composite,
+    // so the live cell fill and the cursor leave panel_count zero and never loop.
+    panel_count: u32,
+    occlude_all: u32,
     pad3: f32,
     cursor_color: vec4<f32>,
 }
 
 @group(0) @binding(0)
 var<uniform> globals: Globals;
+
+// One rect per live modal box, in whole-cell units, plus its declaration-order
+// seq. Read only by the cell fragment shader on a pool composite: occlude_all is
+// set there, so a pooled cell inside any box rect is discarded whatever its seq.
+struct Occluder {
+    cell: vec2<f32>,
+    size: vec2<f32>,
+    seq: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+}
+
+@group(0) @binding(1)
+var<storage, read> occluders: array<Occluder>;
+
+// True when the fragment at `frag` (physical px) lies inside a box that hides
+// it. With occlude_all set, any panel rect hides a pooled cell regardless of
+// seq; a zero panel_count (the live fill and the cursor) skips the loop.
+fn occluded(frag: vec2<f32>) -> bool {
+    for (var j = 0u; j < globals.panel_count; j = j + 1u) {
+        let o = occluders[j];
+        if globals.occlude_all == 1u {
+            let box_min = o.cell * globals.cell_size;
+            let box_max = (o.cell + o.size) * globals.cell_size;
+            if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y
+                && frag.y < box_max.y {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -56,6 +92,13 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // A composited pane pool's cell beneath a later box is discarded so its
+    // background cannot show through the box body. The live cell fill leaves
+    // panel_count zero, so this never fires for it.
+    if occluded(in.clip.xy) {
+        discard;
+    }
+
     return vec4<f32>(in.color, 1.0);
 }
 

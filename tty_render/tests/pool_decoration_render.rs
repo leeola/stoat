@@ -122,7 +122,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
             decoration_damage: &no_decoration,
         };
         renderer.render_into(&device, &queue, &view, &base, plain);
-        renderer.composite_pool(&device, &queue, &view, &pool, full, shift, true);
+        renderer.composite_pool(&device, &queue, &view, &pool, &[], full, shift, true, true);
         read_back(&device, &queue, &target, width, height)
     };
 

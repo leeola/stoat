@@ -215,6 +215,20 @@ pub struct PoolRegionCommand {
     pub height: u16,
 }
 
+/// First pool id reserved for non-pane surfaces. Split-pane editor pools
+/// occupy `[1, NON_PANE_POOL_BASE)`.
+///
+/// The two id ranges also encode a z-relationship the renderer relies on when
+/// it composites pools against modal boxes. A pool below the base is
+/// editor-pane content that sits *under* every box, so its eased composite is
+/// occluded by any box it slides beneath. A pool at or above the base is a
+/// box's own content, such as a finder or palette list easing, so it is never
+/// occluded.
+///
+/// Shared here because the pool producer (stoat) and the compositor (stoatty)
+/// must agree on the split.
+pub const NON_PANE_POOL_BASE: u32 = 1 << 24;
+
 /// Composite a fixed renderer-drawn status icon at a grid cell.
 ///
 /// The icon is a signed-distance shape, not a glyph or image: the terminal draws

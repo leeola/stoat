@@ -14,8 +14,10 @@ struct Globals {
     cell_size: vec2<f32>,
     scroll_y: f32,
     panel_count: u32,
+    // 1 discards a fragment inside any occluder regardless of seq, for a pool
+    // composite that sits under every box; 0 keeps the seq test.
+    occlude_all: u32,
     pad0: u32,
-    pad1: u32,
 }
 
 @group(0) @binding(0)
@@ -43,14 +45,17 @@ var<storage, read> occluders: array<Occluder>;
 const KIND_MASK: u32 = 0u;
 const KIND_COLOR: u32 = 1u;
 
-// True when the fragment at `frag` (physical px) lies inside a box declared
-// later (higher seq) than `seq`, so a text run beneath an upper box is hidden by
-// it. Text-run glyphs and rects carry their run's seq; every other glyph carries
-// a sentinel seq no panel exceeds, and its draw leaves panel_count at zero.
+// True when the fragment at `frag` (physical px) lies inside a box that should
+// hide it. Under the seq test that is a box declared later (higher seq) than
+// `seq`, so a text run beneath an upper box is hidden by it. Text-run glyphs and
+// rects carry their run's seq; every other live glyph carries a sentinel seq no
+// panel exceeds and leaves panel_count at zero. When occlude_all is set the seq
+// test is bypassed and any panel rect hides the fragment, so a pool composite
+// beneath every box is occluded whatever seq its glyphs carry.
 fn occluded(frag: vec2<f32>, seq: u32) -> bool {
     for (var j = 0u; j < globals.panel_count; j = j + 1u) {
         let o = occluders[j];
-        if o.seq > seq {
+        if globals.occlude_all == 1u || o.seq > seq {
             let box_min = o.cell * globals.cell_size;
             let box_max = (o.cell + o.size) * globals.cell_size;
             if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y
@@ -205,6 +210,13 @@ fn underline_coverage(style: u32, pos: vec2<f32>, cell: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_underline(in: UnderlineVsOut) -> @location(0) vec4<f32> {
+    // A composited pool's underline sits under a box like its glyphs, so
+    // occlude_all discards it inside any panel rect. Live underlines leave
+    // panel_count at zero, so this never fires for them.
+    if occluded(in.clip.xy, 0u) {
+        discard;
+    }
+
     let pos = in.local * globals.cell_size;
     let coverage = underline_coverage(in.style, pos, globals.cell_size);
     return vec4<f32>(in.color, coverage);

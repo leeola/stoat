@@ -10,7 +10,7 @@
 
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
-    render::{build_occluders, CellMetrics, Frame, Occluder},
+    render::{build_occluders, composite_occlusion, CellMetrics, Frame, Occluder},
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
@@ -21,7 +21,7 @@ use cosmic_text::{
 use rustc_hash::FxHashMap;
 use std::{mem, sync::Arc};
 use stoatty_term::{
-    grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle},
+    grid::{Cell, Grid, Overlay, Panel, Rgb, Scale, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -129,12 +129,17 @@ struct TextGlobals {
     /// the glyph instances. Differs per draw: grid scroll for plain glyphs,
     /// region scroll for region glyphs, zero for screen-anchored runs/overlays.
     scroll_y: f32,
-    /// Panel-occluder count the fragment shader loops over. Non-zero only in the
-    /// static globals bound for the text-run draws, so grid, region, overlay,
-    /// and pool draws skip the loop entirely.
+    /// Panel-occluder count the fragment shader loops over. Non-zero in the
+    /// static globals bound for the live text-run draws and in the composite
+    /// globals of an occludable pool. Zero for grid, region, and overlay draws,
+    /// which skip the loop entirely.
     panel_count: u32,
+    /// 1 makes the shader discard a fragment inside any occluder regardless of
+    /// seq, set only for a pool composite that sits under every box; 0 keeps
+    /// the seq test.
+    occlude_all: u32,
     /// Pads the struct to the 32-byte (16-aligned) size a uniform requires.
-    _pad: [f32; 2],
+    _pad: f32,
 }
 
 /// The instanced glyph pipeline together with the font system, glyph atlas, and
@@ -663,6 +668,8 @@ impl TextPass {
         // screen-anchored runs and overlays. Done every frame so a scroll-only
         // frame refreshes the uniforms without rebuilding instances.
         let cell_size = [self.metrics.width, self.metrics.height];
+        // Live draws never bypass the seq test, so occlude_all stays zero. Only
+        // the static globals' text-run draws occlude, and they do it by seq.
         let write_globals = |buffer: &Buffer, scroll_y: f32, panel_count: u32| {
             queue.write_buffer(
                 buffer,
@@ -672,7 +679,8 @@ impl TextPass {
                     cell_size,
                     scroll_y,
                     panel_count,
-                    _pad: [0.0; 2],
+                    occlude_all: 0,
+                    _pad: 0.0,
                 }),
             );
         };
@@ -882,17 +890,25 @@ impl TextPass {
     /// the atlas bind group the live draw also binds is recreated afterward.
     /// Covers only plain glyphs and underlines, the two buffers [`Self::draw`]
     /// reads.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
+        panels: &[Panel],
         resolution: [f32; 2],
         shift_rows: f32,
         content_changed: bool,
+        occludable: bool,
     ) {
-        // A pool draw carries page content, not chrome beneath a box, so its
-        // globals leave the panel count at zero and the shader loop never runs.
+        // An occludable pane pool sits under every box, so its composite draws
+        // discard inside any panel rect with the seq test bypassed. A non-pane
+        // pool is box content and leaves the panel count at zero. The composite
+        // draws bind self.globals, so the occlusion rides that buffer alone.
+        let occluders = build_occluders(panels);
+        self.upload_occluders(device, queue, &occluders);
+        let (panel_count, occlude_all) = composite_occlusion(occludable, &occluders);
         queue.write_buffer(
             &self.globals,
             0,
@@ -900,8 +916,9 @@ impl TextPass {
                 resolution,
                 cell_size: [self.metrics.width, self.metrics.height],
                 scroll_y: shift_rows * self.metrics.height,
-                panel_count: 0,
-                _pad: [0.0; 2],
+                panel_count,
+                occlude_all,
+                _pad: 0.0,
             }),
         );
 

@@ -27,7 +27,7 @@ use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::thread;
-use stoatty_term::grid::{Grid, Rgb};
+use stoatty_term::grid::{Grid, Panel, Rgb};
 use wgpu::{
     Adapter, Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
     DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations, PowerPreference,
@@ -503,9 +503,11 @@ impl Renderer {
         queue: &Queue,
         view: &TextureView,
         pool_grid: &Grid,
+        panels: &[Panel],
         scissor: [u32; 4],
         shift_rows: f32,
         content_changed: bool,
+        occludable: bool,
     ) {
         let Some(scissor) = clamp_scissor(scissor, self.width, self.height) else {
             return;
@@ -516,20 +518,31 @@ impl Renderer {
             device,
             queue,
             pool_grid,
+            panels,
             resolution,
             shift_rows,
             content_changed,
+            occludable,
         );
         self.text.prepare_composite(
             device,
             queue,
             pool_grid,
+            panels,
             resolution,
             shift_rows,
             content_changed,
+            occludable,
         );
-        self.bar
-            .prepare_composite(device, queue, pool_grid.bars(), resolution, shift_rows);
+        self.bar.prepare_composite(
+            device,
+            queue,
+            pool_grid.bars(),
+            panels,
+            resolution,
+            shift_rows,
+            occludable,
+        );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
 
@@ -705,6 +718,15 @@ pub struct PoolComposite<'a> {
     /// it built last frame and only re-apply the shift, rather than reshape and
     /// re-upload identical rows.
     pub content_changed: bool,
+    /// Whether this pool sits under the modal boxes, so its composite is
+    /// occluded by them. True for an editor-pane pool, which glides beneath any
+    /// box. False for a pool that is itself a box's content, such as a finder or
+    /// palette list easing.
+    ///
+    /// A false pool is never occluded, so a non-pane pool easing under a later
+    /// box (a hints box over a still-easing palette list) can still bleed for
+    /// the frames of the glide.
+    pub occludable: bool,
 }
 
 /// Clamp `scissor` (`[x, y, width, height]` in physical pixels) to a
@@ -1052,15 +1074,18 @@ impl GpuContext {
                 ..frame
             },
         );
+        let panels = live_grid.panels();
         for pool in pools {
             self.renderer.composite_pool(
                 &self.device,
                 &self.queue,
                 &view,
                 pool.grid,
+                panels,
                 pool.scissor,
                 pool.shift_rows,
                 pool.content_changed,
+                pool.occludable,
             );
         }
         if cursor_corners.is_some() {

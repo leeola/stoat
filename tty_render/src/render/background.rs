@@ -8,10 +8,10 @@
 //!
 //! [`Cell`]: stoatty_term::grid::Cell
 
-use crate::render::CellMetrics;
+use crate::render::{build_occluders, composite_occlusion, CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::{
-    grid::{Grid, Rgb},
+    grid::{Grid, Panel, Rgb},
     term::Damage,
 };
 use wgpu::{
@@ -46,9 +46,12 @@ struct BgInstance {
 /// [TL, TR] then [BL, BR] in fractional cell coordinates), the cursor color,
 /// and the grid's eased vertical scroll offset in pixels.
 ///
-/// `scroll_y` and the three `pad` floats fill one 16-byte slot so the following
-/// `cursor_color` lands on the 16-byte offset the uniform layout requires. The
-/// `vec4` corner pairs already sit on 16-byte boundaries.
+/// `scroll_y`, `panel_count`, `occlude_all`, and `pad3` fill one 16-byte slot
+/// so the following `cursor_color` lands on the 16-byte offset the uniform
+/// layout requires. The `vec4` corner pairs already sit on 16-byte boundaries.
+///
+/// `panel_count` and `occlude_all` are non-zero only on an occludable pool
+/// composite, so the live cell fill and the cursor draw skip the occluder loop.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
@@ -57,8 +60,8 @@ struct Globals {
     cursor_corners_01: [f32; 4],
     cursor_corners_23: [f32; 4],
     scroll_y: f32,
-    pad: f32,
-    pad2: f32,
+    panel_count: u32,
+    occlude_all: u32,
     pad3: f32,
     cursor_color: [f32; 4],
 }
@@ -79,12 +82,21 @@ pub struct BackgroundPass {
     pipeline: RenderPipeline,
     globals: Buffer,
     bind_group: BindGroup,
+    /// The group-0 layout the globals bind group uses, kept so the bind group
+    /// can be rebuilt when [`Self::occluders`] reallocates.
+    bind_group_layout: BindGroupLayout,
     instances: Buffer,
     capacity: usize,
     count: u32,
     composite_instances: Buffer,
     composite_capacity: usize,
     composite_count: u32,
+    /// One occluder per live panel at binding 1, read by the cell fragment
+    /// shader on an occludable pool composite to discard a page cell a box
+    /// covers. Unused by the live cell fill and the cursor, which leave the
+    /// panel count at zero.
+    occluders: Buffer,
+    occluder_capacity: usize,
     cursor_pipeline: RenderPipeline,
     cursor_visible: bool,
     metrics: CellMetrics,
@@ -107,16 +119,28 @@ impl BackgroundPass {
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("background globals"),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -164,14 +188,8 @@ impl BackgroundPass {
             mapped_at_creation: false,
         });
 
-        let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("background globals"),
-            layout: &bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: globals.as_entire_binding(),
-            }],
-        });
+        let occluders = alloc_occluders(device, INITIAL_CAPACITY);
+        let bind_group = make_bind_group(device, &bind_group_layout, &globals, &occluders);
 
         let instances = alloc_instances(device, INITIAL_CAPACITY);
         let composite_instances = alloc_instances(device, INITIAL_CAPACITY);
@@ -180,12 +198,15 @@ impl BackgroundPass {
             pipeline,
             globals,
             bind_group,
+            bind_group_layout,
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
             composite_instances,
             composite_capacity: INITIAL_CAPACITY,
             composite_count: 0,
+            occluders,
+            occluder_capacity: INITIAL_CAPACITY,
             cursor_pipeline,
             cursor_visible: false,
             metrics,
@@ -196,6 +217,24 @@ impl BackgroundPass {
     /// Replace the cell metrics so the next frame lays out cells at the new size.
     pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
         self.metrics = metrics;
+    }
+
+    /// Upload the panel occluders, reallocating the buffer and rebuilding the
+    /// globals bind group when the panel count outgrows the current capacity.
+    fn upload_occluders(&mut self, device: &Device, queue: &Queue, occluders: &[Occluder]) {
+        if occluders.len() > self.occluder_capacity {
+            self.occluder_capacity = occluders.len().next_power_of_two();
+            self.occluders = alloc_occluders(device, self.occluder_capacity);
+            self.bind_group = make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.globals,
+                &self.occluders,
+            );
+        }
+        if !occluders.is_empty() {
+            queue.write_buffer(&self.occluders, 0, bytemuck::cast_slice(occluders));
+        }
     }
 
     /// Upload the frame's uniform and per-cell instances for `grid`.
@@ -224,8 +263,8 @@ impl BackgroundPass {
             cursor_corners_01: [c[0][0], c[0][1], c[1][0], c[1][1]],
             cursor_corners_23: [c[2][0], c[2][1], c[3][0], c[3][1]],
             scroll_y: grid_scroll * self.metrics.height,
-            pad: 0.0,
-            pad2: 0.0,
+            panel_count: 0,
+            occlude_all: 0,
             pad3: 0.0,
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
@@ -286,23 +325,35 @@ impl BackgroundPass {
     /// `grid_scroll` shifts the grid up by that many rows. The pool grid changes
     /// wholesale each frame, so every cell is rebuilt with no per-row damage
     /// path. No cursor draws over a composite, so the shared globals carry none.
+    ///
+    /// `occludable` marks a pane pool that sits under every box. Its page cells
+    /// are then occluded against `panels` with the seq test bypassed, so a
+    /// pooled cell gliding beneath a modal is hidden by it. A non-pane pool
+    /// passes `false` and its cells never occlude, since they are box content.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
+        panels: &[Panel],
         resolution: [f32; 2],
         grid_scroll: f32,
         content_changed: bool,
+        occludable: bool,
     ) {
+        let occluders = build_occluders(panels);
+        self.upload_occluders(device, queue, &occluders);
+        let (panel_count, occlude_all) = composite_occlusion(occludable, &occluders);
+
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             cursor_corners_01: [0.0; 4],
             cursor_corners_23: [0.0; 4],
             scroll_y: grid_scroll * self.metrics.height,
-            pad: 0.0,
-            pad2: 0.0,
+            panel_count,
+            occlude_all,
             pad3: 0.0,
             cursor_color: [0.0; 4],
         };
@@ -352,8 +403,8 @@ impl BackgroundPass {
             cursor_corners_01: [c[0][0], c[0][1], c[1][0], c[1][1]],
             cursor_corners_23: [c[2][0], c[2][1], c[3][0], c[3][1]],
             scroll_y: grid_scroll * self.metrics.height,
-            pad: 0.0,
-            pad2: 0.0,
+            panel_count: 0,
+            occlude_all: 0,
             pad3: 0.0,
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
@@ -417,6 +468,40 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
         size: (capacity * size_of::<BgInstance>()) as u64,
         usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    })
+}
+
+fn alloc_occluders(device: &Device, capacity: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("background occluders"),
+        size: (capacity * size_of::<Occluder>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// Bind the globals uniform (binding 0) and the panel-occluder storage buffer
+/// (binding 1). Rebuilt whenever the occluder buffer reallocates, since the bind
+/// group holds a reference to the specific buffer.
+fn make_bind_group(
+    device: &Device,
+    layout: &BindGroupLayout,
+    globals: &Buffer,
+    occluders: &Buffer,
+) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
+        label: Some("background globals"),
+        layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: globals.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: occluders.as_entire_binding(),
+            },
+        ],
     })
 }
 

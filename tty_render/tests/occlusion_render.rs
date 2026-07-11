@@ -181,6 +181,159 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
     assert_eq!(cell(3, 3), rgb(modal_bg), "icon is occluded inside the box");
 }
 
+/// A pane pool composited beneath a box is occluded by it, while a non-pane
+/// pool (box content itself) bleeds through.
+///
+/// Renders a live grid carrying a box, then composites a solid-colored pool over
+/// the whole surface. With `occludable` true the pool's cells are discarded
+/// inside the box rect, so the box shows there while the pool paints outside it.
+/// With `occludable` false the pool paints everywhere, the accepted glide-frame
+/// bleed for a pool that is a box's own content. Skips without a GPU adapter.
+#[test]
+fn a_box_occludes_the_pool_composite_beneath_it() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("occlusion_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 30;
+    let [cell_w, cell_h] = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell_w.round() as u32, cell_h.round() as u32);
+    let (width, height) = (128u32, cell_h * 6);
+
+    let live_bg = Rgb::new(10, 20, 30);
+    let pool_bg = Rgb::new(240, 180, 20);
+    let border = Rgb::new(128, 128, 128);
+
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("pool occlusion target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        Rgb::new(0, 0, 0),
+        Rgb::new(0, 0, 0),
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 5 && cols >= 7, "grid too small: {rows}x{cols}");
+
+    let panels = vec![Panel {
+        top: 0,
+        left: 2,
+        width: 4,
+        height: rows as u16,
+        style: BorderStyle::Light,
+        border,
+        corner_radius: 0,
+        fill: None,
+        shadow: false,
+        title_gap: None,
+        seq: 100,
+    }];
+
+    // The live grid carries the box over cols 2..6. Its unfilled interior keeps
+    // the live background, so an occluded pool cell falls back to it.
+    let mut live = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            live.get_mut(r, c).bg = live_bg;
+        }
+    }
+    live.set_panels(panels.clone());
+
+    // The pool is a full viewport of the pool background, standing in for an
+    // editor pane's eased page rows.
+    let mut pool = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            pool.get_mut(r, c).bg = pool_bg;
+        }
+    }
+
+    let full = [0, 0, width, height];
+    let render_live = |renderer: &mut Renderer| {
+        renderer.render_into(
+            &device,
+            &queue,
+            &view,
+            &live,
+            Frame {
+                cursor: None,
+                cursor_corners: None,
+                scroll: Scroll {
+                    grid: 0.0,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: 0.0,
+                    popovers: &[],
+                },
+                damage: &Damage::Full,
+                decoration_damage: &Damage::Partial(Vec::new()),
+            },
+        );
+    };
+
+    let cell = |pixels: &[u8], row: u32, col: u32| -> (u8, u8, u8) {
+        let x = col * cell_w + cell_w / 2;
+        let y = row * cell_h + cell_h / 2;
+        let i = ((y * width + x) * 4) as usize;
+        (pixels[i], pixels[i + 1], pixels[i + 2])
+    };
+    let rgb = |c: Rgb| (c.r, c.g, c.b);
+
+    render_live(&mut renderer);
+    renderer.composite_pool(
+        &device, &queue, &view, &pool, &panels, full, 0.0, true, true,
+    );
+    let occluded = read_back(&device, &queue, &target, width, height);
+    assert_eq!(
+        cell(&occluded, 2, 0),
+        rgb(pool_bg),
+        "the pool paints outside the box"
+    );
+    assert_eq!(
+        cell(&occluded, 2, 3),
+        rgb(live_bg),
+        "the pane pool is occluded inside the box"
+    );
+
+    // A non-pane pool is box content, so it is never occluded: the same pool
+    // composited with occludable=false paints through the box.
+    render_live(&mut renderer);
+    renderer.composite_pool(
+        &device, &queue, &view, &pool, &panels, full, 0.0, true, false,
+    );
+    let bled = read_back(&device, &queue, &target, width, height);
+    assert_eq!(
+        cell(&bled, 2, 3),
+        rgb(pool_bg),
+        "a non-pane pool bleeds through the box"
+    );
+}
+
 /// Copy `texture` into a mappable buffer and return its RGBA bytes, row-major
 /// with no padding (the caller sizes the texture so `4 * width` is 256-aligned).
 fn read_back(

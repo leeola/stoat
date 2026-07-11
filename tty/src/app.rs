@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat_cli::CommonArgs;
-use stoatty_protocol::command::PoolRegionCommand;
+use stoatty_protocol::command::{PoolRegionCommand, NON_PANE_POOL_BASE};
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll},
     render,
@@ -1059,6 +1059,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 scissor: [x0, y0, x1 - x0, y1 - y0],
                                 shift_rows: -pool.frac,
                                 content_changed: pool.content_changed,
+                                occludable: pool.id < NON_PANE_POOL_BASE,
                             }
                         })
                         .collect::<Vec<_>>();

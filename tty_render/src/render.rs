@@ -132,6 +132,23 @@ pub(crate) fn build_occluders(panels: &[Panel]) -> Vec<Occluder> {
         .collect()
 }
 
+/// The `(panel_count, occlude_all)` a pool composite writes into its globals
+/// uniform for `panels`.
+///
+/// A pane pool sits beneath every box, so it occludes against all `panels`
+/// with the seq test bypassed. The returned `occlude_all` of 1 tells the
+/// shader to discard a fragment inside any panel rect regardless of seq. A
+/// non-pane pool is box content itself and never occludes, so it reports no
+/// panels. The returned pair maps directly onto the `panel_count` and
+/// `occlude_all` fields the bar, text, and background composite shaders read.
+pub(crate) fn composite_occlusion(occludable: bool, panels: &[Occluder]) -> (u32, u32) {
+    if occludable {
+        (panels.len() as u32, 1)
+    } else {
+        (0, 0)
+    }
+}
+
 /// The `[width, height]` of one cell, in pixels, for `font_size` at
 /// `scale_factor`.
 ///
@@ -146,7 +163,31 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::CellMetrics;
+    use super::{composite_occlusion, CellMetrics, Occluder};
+
+    fn occluder() -> Occluder {
+        Occluder {
+            cell: [0.0, 0.0],
+            size: [1.0, 1.0],
+            seq: 0,
+            _pad: [0; 3],
+        }
+    }
+
+    #[test]
+    fn occludable_pool_occludes_all_panels_without_a_seq_test() {
+        let panels = [occluder(), occluder()];
+        assert_eq!(
+            composite_occlusion(true, &panels),
+            (2, 1),
+            "a pane pool reports every panel and bypasses the seq test"
+        );
+        assert_eq!(
+            composite_occlusion(false, &panels),
+            (0, 0),
+            "a non-pane pool is box content and never occludes"
+        );
+    }
 
     #[test]
     fn metrics_scale_logical_font_size_by_density() {

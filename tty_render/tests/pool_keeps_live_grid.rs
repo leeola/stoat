@@ -116,8 +116,10 @@ fn pool_composite_keeps_live_instances() {
         &queue,
         &view,
         &pool,
+        &[],
         [0, 0, width, height],
         0.0,
+        true,
         true,
     );
     let idle = Damage::Partial(vec![false; rows]);
@@ -241,7 +243,17 @@ fn shift_only_composite_reuses_prior_rows() {
 
     // Build the composite instances from the gray pool.
     renderer.render_into(&device, &queue, &view, &live, frame(&Damage::Full));
-    renderer.composite_pool(&device, &queue, &view, &gray_pool, full_surface, 0.0, true);
+    renderer.composite_pool(
+        &device,
+        &queue,
+        &view,
+        &gray_pool,
+        &[],
+        full_surface,
+        0.0,
+        true,
+        true,
+    );
 
     // Reset the surface to the live grid, then composite the white pool as a
     // shift-only reuse, which must redraw the gray instances and ignore white.
@@ -252,9 +264,11 @@ fn shift_only_composite_reuses_prior_rows() {
         &queue,
         &view,
         &white_pool,
+        &[],
         full_surface,
         0.0,
         false,
+        true,
     );
     let reused = read_back(&device, &queue, &target, width, height);
 

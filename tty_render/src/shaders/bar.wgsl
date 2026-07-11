@@ -7,9 +7,11 @@ struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
     panel_count: u32,
+    // 1 discards a fragment inside any occluder regardless of seq, for a pool
+    // composite that sits under every box; 0 keeps the seq test.
+    occlude_all: u32,
     pad0: u32,
     pad1: u32,
-    pad2: u32,
 }
 
 @group(0) @binding(0)
@@ -74,7 +76,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let frag = in.clip.xy;
     for (var j = 0u; j < globals.panel_count; j = j + 1u) {
         let o = occluders[j];
-        if o.seq > in.seq {
+        if globals.occlude_all == 1u || o.seq > in.seq {
             let box_min = o.cell * globals.cell_size;
             let box_max = (o.cell + o.size) * globals.cell_size;
             if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y

@@ -7,7 +7,7 @@
 //! cell-fraction units and the vertex shader scales it by the live cell size, so
 //! bars track font zoom.
 
-use crate::render::{build_occluders, CellMetrics, Occluder};
+use crate::render::{build_occluders, composite_occlusion, CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Bar, Panel, Rgb};
 use wgpu::{
@@ -39,16 +39,18 @@ struct BarInstance {
 }
 
 /// The uniform shared by every instance. Carries the surface resolution and
-/// cell size the vertex shader maps cell-fraction coordinates through, and the
-/// panel-occluder count the fragment shader loops over. Padded to 32 bytes to
-/// match the WGSL uniform layout.
+/// cell size the vertex shader maps cell-fraction coordinates through, the
+/// panel-occluder count the fragment shader loops over, and the `occlude_all`
+/// flag that bypasses the seq test for a pool composite beneath every box.
+/// Padded to 32 bytes to match the WGSL uniform layout.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
     panel_count: u32,
-    _pad: [u32; 3],
+    occlude_all: u32,
+    _pad: [u32; 2],
 }
 
 /// The instanced color-bar pipeline and its per-frame buffers.
@@ -205,7 +207,8 @@ impl BarPass {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count: occluders.len() as u32,
-            _pad: [0; 3],
+            occlude_all: 0,
+            _pad: [0; 2],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -246,21 +249,32 @@ impl BarPass {
     /// Writes a buffer separate from the live [`Self::prepare`], reusing the
     /// shared globals uniform the live pass already wrote this frame. Reallocates
     /// only when the bar count outgrows the composite capacity.
+    ///
+    /// `occludable` marks a pane pool that sits under every box. Its bars are
+    /// then occluded against `panels` with the seq test bypassed, so a gutter
+    /// bar gliding beneath a modal is hidden by it. A non-pane pool passes
+    /// `false` and its bars never occlude, since they are a box's own content.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_composite(
         &mut self,
         device: &Device,
         queue: &Queue,
         bars: &[Bar],
+        panels: &[Panel],
         resolution: [f32; 2],
         shift_rows: f32,
+        occludable: bool,
     ) {
-        // Pool bars are box content, not chrome beneath a box, so the composite
-        // draw never occludes. A zero panel count makes the shader loop a no-op.
+        let occluders = build_occluders(panels);
+        self.upload_occluders(device, queue, &occluders);
+        let (panel_count, occlude_all) = composite_occlusion(occludable, &occluders);
+
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
-            panel_count: 0,
-            _pad: [0; 3],
+            panel_count,
+            occlude_all,
+            _pad: [0; 2],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 

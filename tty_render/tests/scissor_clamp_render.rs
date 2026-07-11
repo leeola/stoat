@@ -101,7 +101,17 @@ fn oversized_scissors_are_clamped_not_validated() {
             decoration_damage: &no_decoration,
         },
     );
-    renderer.composite_pool(&device, &queue, &view, &pool, oversized, 0.0, true);
+    renderer.composite_pool(
+        &device,
+        &queue,
+        &view,
+        &pool,
+        &[],
+        oversized,
+        0.0,
+        true,
+        true,
+    );
     renderer.draw_cursor_over(
         &device,
         &queue,

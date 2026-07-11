@@ -75,8 +75,15 @@ const WINDOW_PAGES: u64 = 5;
 // per-surface emit items as they land, so they read as unused until then.
 #[allow(dead_code)]
 pub(crate) mod non_pane_pool {
-    /// First id reserved for non-pane surfaces; panes occupy `[1, BASE)`.
-    pub(crate) const BASE: u32 = 1 << 24;
+    use stoatty_protocol::command::NON_PANE_POOL_BASE;
+
+    /// First id reserved for non-pane surfaces. Panes occupy `[1, BASE)`.
+    ///
+    /// The compositor keys the same split off
+    /// [`NON_PANE_POOL_BASE`](stoatty_protocol::command::NON_PANE_POOL_BASE) to
+    /// decide which pools a modal box occludes, so both sides share that
+    /// constant.
+    pub(crate) const BASE: u32 = NON_PANE_POOL_BASE;
     pub(crate) const COMMITS: u32 = BASE;
     pub(crate) const FINDER: u32 = BASE + 1;
     pub(crate) const PALETTE: u32 = BASE + 2;
