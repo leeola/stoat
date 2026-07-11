@@ -1,7 +1,7 @@
 use crate::{
     action_handlers::focused_editor_mut,
     app::{Stoat, UpdateEffect},
-    display_map::DisplayPoint,
+    display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::EditorState,
     multi_buffer::MultiBufferSnapshot,
     pane::View,
@@ -188,73 +188,103 @@ enum AddDirection {
     Below,
 }
 
+/// Copy each selection's shape onto the nearest eligible lines in `dir`,
+/// following Helix's `copy_selection_on_line`.
+///
+/// A copy preserves the source's width and direction, landing on lines a full
+/// selection-height apart. A line too short to hold the anchor or head column is
+/// skipped rather than clamped onto, so the copy keeps its shape or does not
+/// appear at all.
 fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1);
-    let mut effect = UpdateEffect::None;
-    for _ in 0..count {
-        match add_selection_in_direction_step(stoat, dir) {
-            UpdateEffect::Redraw => effect = UpdateEffect::Redraw,
-            UpdateEffect::None => break,
-            UpdateEffect::Quit => return UpdateEffect::Quit,
-        }
-    }
-    effect
-}
-
-fn add_selection_in_direction_step(stoat: &mut Stoat, dir: AddDirection) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
-    let display_snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let display = editor.display_map.snapshot();
+    let buffer = display.buffer_snapshot();
+    let rope = buffer.rope();
+    let max_row = display.max_point().row;
 
-    let source = editor.selections.newest_anchor().clone();
-    let rope = buffer_snapshot.rope();
-    let source_cursor = cursor_offset(
-        rope,
-        buffer_snapshot.resolve_anchor(&source.tail()),
-        buffer_snapshot.resolve_anchor(&source.head()),
-    );
-    let source_point = rope.offset_to_point(source_cursor);
-    let source_display = display_snapshot.buffer_to_display(source_point);
+    let sources = editor.selections.all_anchors().to_vec();
+    let mut copies: Vec<Selection<usize>> = Vec::new();
+    for source in &sources {
+        let anchor_off = buffer.resolve_anchor(&source.tail());
+        let head_off = cursor_offset(rope, anchor_off, buffer.resolve_anchor(&source.head()));
+        let anchor_pt = display.buffer_to_display(rope.offset_to_point(anchor_off));
+        let head_pt = display.buffer_to_display(rope.offset_to_point(head_off));
+        let height = anchor_pt.row.max(head_pt.row) - anchor_pt.row.min(head_pt.row) + 1;
 
-    let goal_col = match source.goal {
-        SelectionGoal::Column(c) => c,
-        SelectionGoal::None => source_display.column,
-    };
+        let mut made = 0usize;
+        let mut step = 1u32;
+        loop {
+            if made >= count {
+                break;
+            }
+            let offset = step * height;
+            let (anchor_row, head_row) = match dir {
+                AddDirection::Below => (anchor_pt.row + offset, head_pt.row + offset),
+                AddDirection::Above => {
+                    match (
+                        anchor_pt.row.checked_sub(offset),
+                        head_pt.row.checked_sub(offset),
+                    ) {
+                        (Some(a), Some(h)) => (a, h),
+                        _ => break,
+                    }
+                },
+            };
+            if anchor_row > max_row || head_row > max_row {
+                break;
+            }
 
-    let max_row = display_snapshot.max_point().row;
-    let mut row = source_display.row;
-    let target = loop {
-        match dir {
-            AddDirection::Below => {
-                if row >= max_row {
-                    return UpdateEffect::None;
-                }
-                row += 1;
-            },
-            AddDirection::Above => {
-                if row == 0 {
-                    return UpdateEffect::None;
-                }
-                row -= 1;
-            },
+            if let (Some(new_anchor), Some(new_head)) = (
+                offset_at_exact_col(&display, buffer, anchor_row, anchor_pt.column),
+                offset_at_exact_col(&display, buffer, head_row, head_pt.column),
+            ) {
+                let point = Selection {
+                    id: source.id,
+                    start: new_anchor,
+                    end: new_anchor,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                };
+                copies.push(point.put_cursor(rope, new_head, true));
+                made += 1;
+            }
+
+            if anchor_row == 0 && head_row == 0 {
+                break;
+            }
+            step += 1;
         }
-        let clamped_col = goal_col.min(display_snapshot.line_len(row));
-        let raw = DisplayPoint::new(row, clamped_col);
-        let clipped = display_snapshot.clip_point(raw, Bias::Left);
-        let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
-            continue;
-        };
-        let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
-        let anchor = buffer_snapshot.anchor_at(offset, Bias::Right);
-        break anchor;
-    };
+    }
 
-    editor
-        .selections
-        .insert_cursor(target, SelectionGoal::Column(goal_col), buffer_snapshot);
+    if copies.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    for copy in copies {
+        let anchored = anchor_selection(copy, buffer);
+        editor.selections.insert_range(anchored, buffer);
+    }
     UpdateEffect::Redraw
+}
+
+/// Byte offset of the buffer position at display `(row, col)`, or `None` when
+/// the line is too short to reach `col` exactly (so the caller skips it rather
+/// than clamping).
+fn offset_at_exact_col(
+    display: &DisplaySnapshot,
+    buffer: &MultiBufferSnapshot,
+    row: u32,
+    col: u32,
+) -> Option<usize> {
+    if col > display.line_len(row) {
+        return None;
+    }
+    let clipped = display.clip_point(DisplayPoint::new(row, col), Bias::Left);
+    let buffer_pt = display.display_to_buffer(clipped)?;
+    Some(buffer.rope().point_to_offset(buffer_pt))
 }
 
 pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {

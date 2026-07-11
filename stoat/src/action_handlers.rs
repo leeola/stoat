@@ -1675,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn add_selection_below_preserves_goal_column_on_short_line() {
+    fn add_selection_below_copies_each_selection_skipping_short_lines() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
 
@@ -1700,15 +1700,10 @@ mod tests {
             dispatch(&mut stoat, &AddSelectionBelow),
             UpdateEffect::Redraw
         );
-        let after_one = editor::cursor_display_positions(&mut stoat);
-        assert_eq!(after_one, vec![(0, 0), (0, 7), (1, 2)]);
-
-        assert_eq!(
-            dispatch(&mut stoat, &AddSelectionBelow),
-            UpdateEffect::Redraw
-        );
-        let after_two = editor::cursor_display_positions(&mut stoat);
-        assert_eq!(after_two, vec![(0, 0), (0, 7), (1, 2), (2, 7)]);
+        // The column-0 cursor copies onto row 1. The column-7 cursor cannot fit
+        // on the short row 1, so it skips to row 2 rather than clamping.
+        let positions = editor::cursor_display_positions(&mut stoat);
+        assert_eq!(positions, vec![(0, 0), (0, 7), (1, 0), (2, 7)]);
     }
 
     #[test]

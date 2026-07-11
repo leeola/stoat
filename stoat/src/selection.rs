@@ -79,6 +79,34 @@ impl SelectionsCollection {
         self.disjoint.insert(pos, selection);
     }
 
+    /// Insert `selection`, minting a fresh id and keeping its span and
+    /// direction. A duplicate of an existing span is skipped, so copying a
+    /// selection onto a line it already covers is a no-op.
+    pub(crate) fn insert_range(
+        &mut self,
+        mut selection: Selection<Anchor>,
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        let start = snapshot.resolve_anchor(&selection.start);
+        let end = snapshot.resolve_anchor(&selection.end);
+
+        let pos = self
+            .disjoint
+            .binary_search_by(|s| snapshot.resolve_anchor(&s.start).cmp(&start))
+            .unwrap_or_else(|p| p);
+
+        if let Some(existing) = self.disjoint.get(pos)
+            && snapshot.resolve_anchor(&existing.start) == start
+            && snapshot.resolve_anchor(&existing.end) == end
+        {
+            return;
+        }
+
+        selection.id = self.next_selection_id;
+        self.next_selection_id += 1;
+        self.disjoint.insert(pos, selection);
+    }
+
     /// Replace the collection with a single 1-wide block cursor over the first
     /// character, widened against `snapshot`.
     ///
@@ -722,6 +750,27 @@ mod tests {
         h.open_file(&path);
         h.type_keys("shift-C");
         h.assert_snapshot("shift_c_adds_selection_below");
+    }
+
+    #[test]
+    fn add_selection_below_copies_selection_shape() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "foobar\nfoobar\n");
+        h.open_file(&path);
+        // Select `foo`, return to normal mode, then copy it downward.
+        h.type_keys("v l l v");
+        h.type_keys("shift-C");
+        assert_eq!(h.selection_spans(), vec![(0, 3, false), (7, 10, false)]);
+    }
+
+    #[test]
+    fn add_selection_below_skips_too_short_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "foobar\nx\nfoobar\n");
+        h.open_file(&path);
+        h.type_keys("v l l v");
+        h.type_keys("shift-C");
+        assert_eq!(h.selection_spans(), vec![(0, 3, false), (9, 12, false)]);
     }
 
     #[test]

@@ -5,8 +5,8 @@ define_action!(
     AddSelectionBelow,
     "AddSelectionBelow",
     ActionKind::AddSelectionBelow,
-    "add cursor below",
-    "Add a new cursor on the line below the newest cursor.",
+    "copy selection below",
+    "Copy each selection's shape onto the next line below, preserving its width and direction. Lines too short to hold the selection's columns are skipped rather than clamped onto.",
     ActionPriority::Rare
 );
 
@@ -15,8 +15,8 @@ define_action!(
     AddSelectionAbove,
     "AddSelectionAbove",
     ActionKind::AddSelectionAbove,
-    "add cursor above",
-    "Add a new cursor on the line above the newest cursor.",
+    "copy selection above",
+    "Copy each selection's shape onto the next line above, preserving its width and direction. Lines too short to hold the selection's columns are skipped rather than clamped onto.",
     ActionPriority::Rare
 );
 
