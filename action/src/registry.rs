@@ -11,15 +11,16 @@ use crate::{
             AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
             AlignViewBottom, AlignViewCenter, AlignViewTop, AppendMode, ChangeSelection,
             CloseBuffer, CollapseSelection, CommitUndoCheckpoint, Decrement, DeleteSelection,
-            DeleteSelectionNoYank, EnterInsertMode, ExpandSelection, ExtendDown,
-            ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
-            ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoWindowBottom,
-            ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd,
-            ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
-            ExtendPrevWordStart, ExtendRight, ExtendSelectNextSibling, ExtendSelectPrevSibling,
-            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
-            ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
-            FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
+            DeleteSelectionNoYank, EnsureSelectionsForward, EnterInsertMode, ExpandSelection,
+            ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
+            ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
+            ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
+            ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
+            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+            ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
+            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineBounds,
+            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
+            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
             GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoImplementors,
             GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
             GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
@@ -554,6 +555,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ExtendToLastLine::DEF, |_| Ok(Box::new(ExtendToLastLine)));
     add(CollapseSelection::DEF, |_| Ok(Box::new(CollapseSelection)));
     add(FlipSelections::DEF, |_| Ok(Box::new(FlipSelections)));
+    add(EnsureSelectionsForward::DEF, |_| {
+        Ok(Box::new(EnsureSelectionsForward))
+    });
     add(SelectAll::DEF, |_| Ok(Box::new(SelectAll)));
     add(SelectLineBelow::DEF, |_| Ok(Box::new(SelectLineBelow)));
     add(ExtendToLineBounds::DEF, |_| {
@@ -1199,7 +1203,8 @@ mod tests {
         // + 1 InsertTab.
         // + 1 SelectRegex.
         // + 2 ExtendToLineBounds / ShrinkToLineBounds.
-        assert_eq!(all().count(), 327);
+        // + 1 EnsureSelectionsForward.
+        assert_eq!(all().count(), 328);
     }
 
     #[test]

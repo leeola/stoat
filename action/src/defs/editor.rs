@@ -1542,6 +1542,16 @@ define_action!(
 );
 
 define_action!(
+    EnsureSelectionsForwardDef,
+    EnsureSelectionsForward,
+    "EnsureSelectionsForward",
+    ActionKind::EnsureSelectionsForward,
+    "make selections face forward",
+    "Orient every selection forward, placing the cursor at the end of each range. A selection already facing forward is left unchanged.",
+    ActionPriority::Rare
+);
+
+define_action!(
     SelectAllDef,
     SelectAll,
     "SelectAll",

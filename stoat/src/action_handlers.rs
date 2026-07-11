@@ -446,6 +446,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendToLastLine => movement::goto_last_line(stoat, true),
         ActionKind::CollapseSelection => movement::collapse_selection(stoat),
         ActionKind::FlipSelections => movement::flip_selections(stoat),
+        ActionKind::EnsureSelectionsForward => movement::ensure_selections_forward(stoat),
         ActionKind::SelectAll => movement::select_all(stoat),
         ActionKind::SelectLineBelow => movement::select_line_below(stoat),
         ActionKind::ExtendToLineBounds => movement::extend_to_line_bounds(stoat),

@@ -204,6 +204,7 @@ pub enum ActionKind {
     ExtendToLastLine,
     CollapseSelection,
     FlipSelections,
+    EnsureSelectionsForward,
     SelectAll,
     SelectLineBelow,
     ExtendToLineBounds,

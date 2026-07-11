@@ -1107,6 +1107,20 @@ pub(super) fn flip_selections(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn ensure_selections_forward(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let mut new = sel.clone();
+        new.reversed = false;
+        new
+    });
+    UpdateEffect::Redraw
+}
+
 pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -4492,5 +4506,37 @@ mod tests {
         set_range(&mut h, 1, 4);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkToLineBounds);
         assert_eq!(h.selection_spans(), vec![(1, 4, false)]);
+    }
+
+    #[test]
+    fn ensure_selections_forward_orients_every_selection() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let buf = snapshot.buffer_snapshot();
+            let fwd_start = buf.anchor_at(0, Bias::Right);
+            let fwd_end = buf.anchor_at(2, Bias::Right);
+            editor.selections.transform(buf, |sel| Selection {
+                id: sel.id,
+                start: fwd_start,
+                end: fwd_end,
+                reversed: false,
+                goal: SelectionGoal::None,
+            });
+            let reversed = Selection {
+                id: 0,
+                start: buf.anchor_at(3, Bias::Right),
+                end: buf.anchor_at(5, Bias::Right),
+                reversed: true,
+                goal: SelectionGoal::None,
+            };
+            editor.selections.insert_range(reversed, buf);
+        }
+        assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, true)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::EnsureSelectionsForward);
+        assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, false)]);
     }
 }

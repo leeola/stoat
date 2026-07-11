@@ -275,6 +275,7 @@ on key {
         End -> GotoLineEnd();
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
+        Alt-: -> EnsureSelectionsForward();
         Alt-s -> SplitSelectionOnNewline();
         S -> SplitSelection();
         s -> SelectRegex();
@@ -416,6 +417,7 @@ on key {
         g -> SetMode(select_goto);
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
+        Alt-: -> EnsureSelectionsForward();
         S -> SplitSelection();
         s -> SelectRegex();
         X -> ExtendToLineBounds();
