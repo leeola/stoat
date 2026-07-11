@@ -340,6 +340,29 @@ impl CodeGraph {
         self.rebuild_adjacency();
     }
 
+    /// Re-index one file without re-resolving edges or rebuilding adjacency.
+    ///
+    /// Evicts the file's prior symbols and edges, then merges the new shard.
+    /// Unlike [`Self::reindex`], cross-file links are left stale and the
+    /// `out`/`inn` adjacency is left inconsistent. A caller applying many
+    /// updates in a batch must call [`Self::reresolve_unresolved`] once
+    /// afterward to restore both. The graph must not be queried until then.
+    pub fn apply_reindex(&mut self, file: FileId, shard: FileShard) {
+        self.evict_file_inner(file);
+        self.insert_shard(shard);
+    }
+
+    /// Remove a file without re-resolving edges or rebuilding adjacency.
+    ///
+    /// Like [`Self::evict_file`] but leaves the `out`/`inn` adjacency
+    /// inconsistent, with edges that pointed at the removed symbols degraded to
+    /// unresolved and not yet re-linked. A caller applying many updates in a
+    /// batch must call [`Self::reresolve_unresolved`] once afterward to restore
+    /// both. The graph must not be queried until then.
+    pub fn apply_remove(&mut self, file: FileId) {
+        self.evict_file_inner(file);
+    }
+
     /// Rebuild `out`/`inn` from the current edges, indexing only edges
     /// whose target resolves to a present symbol.
     fn rebuild_adjacency(&mut self) {

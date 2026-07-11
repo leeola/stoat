@@ -75,6 +75,12 @@ const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(8);
 /// a single large jump.
 const MAX_FRAME_DT: f32 = 0.1;
 
+/// Maximum index updates [`Stoat::drain_index_updates`] processes in one call.
+/// Bounds the graph work per event-loop turn so a large reindex burst cannot
+/// stall input. On hitting the cap the drain reschedules itself to finish the
+/// remainder on the next turn.
+const INDEX_DRAIN_CAP: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateEffect {
     Redraw,
@@ -1612,13 +1618,22 @@ impl Stoat {
         (manifest.schema_version == codegraph::SCHEMA_VERSION).then_some((dir, manifest))
     }
 
-    /// Merge any pending cold-build shards into their workspace graphs.
+    /// Merge pending index updates into their workspace graphs.
     ///
-    /// Each shard is inserted and, in non-test runs, written to disk. On
-    /// [`IndexUpdate::Complete`] the workspace's cross-file references are
-    /// re-resolved and the manifest is persisted.
+    /// Each shard is inserted and, in non-test runs, written to disk. Reindex
+    /// and remove updates apply without re-resolving inline. Every touched
+    /// workspace has its cross-file references re-resolved once after the
+    /// drain, so N queued updates cost one graph sweep rather than N.
+    ///
+    /// At most [`INDEX_DRAIN_CAP`] updates are processed per call. On hitting
+    /// the cap the drain schedules a redraw and returns, leaving the remainder
+    /// queued for the next turn.
     fn drain_index_updates(&mut self) {
+        let mut resolve_pending: std::collections::HashSet<WorkspaceId> =
+            std::collections::HashSet::new();
+        let mut drained: usize = 0;
         while let Ok(update) = self.index_update_rx.try_recv() {
+            drained += 1;
             match update {
                 IndexUpdate::Shard {
                     workspace,
@@ -1656,9 +1671,7 @@ impl Stoat {
                     workspace,
                     manifest,
                 } => {
-                    if let Some(ws) = self.workspaces.get_mut(workspace) {
-                        ws.code_graph.reresolve_unresolved();
-                    }
+                    resolve_pending.insert(workspace);
                     if !self.persistence_disabled {
                         let git_root = self.workspaces.get(workspace).map(|ws| ws.git_root.clone());
                         if let Some(git_root) = git_root
@@ -1687,9 +1700,10 @@ impl Stoat {
                     let Some(ws) = self.workspaces.get_mut(workspace) else {
                         continue;
                     };
-                    ws.code_graph.reindex(file, shard);
+                    ws.code_graph.apply_reindex(file, shard);
                     ws.file_paths.insert(file, PathBuf::from(&rel_path));
                     ws.index_generation += 1;
+                    resolve_pending.insert(workspace);
                     let git_root = ws.git_root.clone();
                     if let Some((bytes, content_hash)) = to_persist
                         && !self.persistence_disabled
@@ -1720,10 +1734,10 @@ impl Stoat {
                     let Some(ws) = self.workspaces.get_mut(workspace) else {
                         continue;
                     };
-                    ws.code_graph.evict_file(file);
-                    ws.code_graph.reresolve_unresolved();
+                    ws.code_graph.apply_remove(file);
                     ws.file_paths.remove(&file);
                     ws.index_generation += 1;
+                    resolve_pending.insert(workspace);
                     let git_root = ws.git_root.clone();
                     if !self.persistence_disabled
                         && let Ok(dir) = crate::code_index::store::index_dir_for(
@@ -1743,6 +1757,17 @@ impl Stoat {
                         );
                     }
                 },
+            }
+
+            if drained >= INDEX_DRAIN_CAP {
+                self.redraw_notify.notify_one();
+                break;
+            }
+        }
+
+        for workspace in resolve_pending {
+            if let Some(ws) = self.workspaces.get_mut(workspace) {
+                ws.code_graph.reresolve_unresolved();
             }
         }
     }
@@ -6089,6 +6114,139 @@ mod tests {
                 .symbol_at(crate::code_index::build::file_id("a.rs"), 5),
             None,
             "no symbol is indexed when the workspace root is not a repo",
+        );
+    }
+
+    #[test]
+    fn batched_reindex_drain_cross_links_like_sequential() {
+        let file_a = codegraph::FileId(1);
+        let file_b = codegraph::FileId(2);
+        let caller = codegraph::SymbolKey([1u8; 16]);
+        let callee = codegraph::SymbolKey([2u8; 16]);
+
+        let callees_after = |drain_between: bool| -> Vec<codegraph::SymbolKey> {
+            let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+            let mut stoat = Stoat::new(
+                scheduler.executor(),
+                Settings::default(),
+                PathBuf::from("/repo"),
+            );
+            stoat.persistence_disabled = true;
+            let workspace = stoat.active_workspace;
+
+            let symbol = |key, file, name: &str| codegraph::Symbol {
+                key,
+                file,
+                name: name.to_string(),
+                kind: stoat_language::SymbolKind::Function,
+                container: vec![],
+                def_range: 0..10,
+                name_range: 3..6,
+                body_hash: [0u8; 32],
+            };
+            let reindex = |file, rel_path: &str, symbols, edges| IndexUpdate::Reindex {
+                workspace,
+                file,
+                rel_path: rel_path.to_string(),
+                shard: codegraph::FileShard {
+                    content_hash: [0u8; 32],
+                    symbols,
+                    edges,
+                },
+                persist: false,
+            };
+
+            stoat
+                .index_update_tx
+                .send(reindex(
+                    file_a,
+                    "a.rs",
+                    vec![symbol(caller, file_a, "caller")],
+                    vec![codegraph::Edge {
+                        from: caller,
+                        to: codegraph::Target::Unresolved {
+                            name: "callee".to_string(),
+                            kind: stoat_language::RefKind::Call,
+                        },
+                        kind: codegraph::EdgeKind::Calls,
+                        site_range: 0..6,
+                        confidence: codegraph::Confidence::NameMatch,
+                    }],
+                ))
+                .unwrap();
+            if drain_between {
+                stoat.drain_index_updates();
+            }
+            stoat
+                .index_update_tx
+                .send(reindex(
+                    file_b,
+                    "b.rs",
+                    vec![symbol(callee, file_b, "callee")],
+                    vec![],
+                ))
+                .unwrap();
+            stoat.drain_index_updates();
+
+            stoat.active_workspace().code_graph.step(
+                caller,
+                codegraph::EdgeKind::Calls,
+                codegraph::Dir::Down,
+            )
+        };
+
+        assert_eq!(
+            callees_after(false),
+            vec![callee],
+            "one batched drain resolves file A's call to file B's definition",
+        );
+        assert_eq!(
+            callees_after(true),
+            callees_after(false),
+            "batching two reindexes into one drain matches draining them one at a time",
+        );
+    }
+
+    #[test]
+    fn a_capped_drain_leaves_the_remainder_for_the_next_tick() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+        let workspace = stoat.active_workspace;
+
+        let total = INDEX_DRAIN_CAP + 1;
+        for i in 0..total {
+            stoat
+                .index_update_tx
+                .send(IndexUpdate::Shard {
+                    workspace,
+                    rel_path: format!("f{i}.rs"),
+                    shard: codegraph::FileShard {
+                        content_hash: [0u8; 32],
+                        symbols: vec![],
+                        edges: vec![],
+                    },
+                    persist: false,
+                })
+                .unwrap();
+        }
+
+        stoat.drain_index_updates();
+        assert_eq!(
+            stoat.active_workspace().index_generation,
+            INDEX_DRAIN_CAP as u64,
+            "the drain caps its work and leaves the remainder queued",
+        );
+
+        stoat.drain_index_updates();
+        assert_eq!(
+            stoat.active_workspace().index_generation,
+            total as u64,
+            "the next drain completes the queued remainder",
         );
     }
 
