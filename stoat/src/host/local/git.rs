@@ -5,7 +5,9 @@ use crate::host::git::{
     BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
     CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
 };
-use git2::{ApplyLocation, Diff, DiffOptions, Repository, Sort, Status, StatusOptions};
+use git2::{
+    ApplyLocation, Diff, DiffOptions, Repository, RepositoryState, Sort, Status, StatusOptions,
+};
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
@@ -68,6 +70,16 @@ impl GitRepo for LocalGitRepo {
         // A libgit2 error (path outside the repo, unreadable ignore file) falls
         // back to not-ignored, so an uncertain path still refreshes the review.
         repo.is_path_ignored(rel).unwrap_or(false)
+    }
+
+    fn rebase_in_progress(&self) -> bool {
+        let repo = self.repo.lock().expect("git repo lock");
+        matches!(
+            repo.state(),
+            RepositoryState::Rebase
+                | RepositoryState::RebaseInteractive
+                | RepositoryState::RebaseMerge
+        )
     }
 
     fn changed_files(&self) -> Vec<ChangedFile> {

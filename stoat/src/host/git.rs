@@ -106,6 +106,14 @@ pub trait GitRepo: Send + Sync {
     /// gitignore rules. Lets a watcher skip build churn such as `target/` when
     /// deciding whether a change should refresh a review.
     fn is_path_ignored(&self, path: &Path) -> bool;
+
+    /// Whether the repository is paused mid-rebase. This covers an interactive
+    /// rebase stopped at an `edit`/`break` step and a rebase halted on conflicts.
+    ///
+    /// The working tree is typically clean at such a stop with HEAD at the
+    /// just-applied commit, which the diff view uses to decide whether to show
+    /// that commit's diff instead of an empty clean-tree view.
+    fn rebase_in_progress(&self) -> bool;
     /// Read the UTF-8 content of each `paths` entry as it appears in HEAD, in
     /// input order. An entry is `None` for an orphan branch, a path not in HEAD,
     /// or a binary blob. Resolves HEAD's tree once for the whole batch so a

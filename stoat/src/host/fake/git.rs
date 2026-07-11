@@ -413,6 +413,13 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Make [`GitRepo::rebase_in_progress`] report `in_progress`, simulating a
+    /// repo paused mid-rebase (e.g. stopped at an `edit`/`break` step).
+    pub fn set_rebase_in_progress(&mut self, in_progress: bool) -> &mut Self {
+        self.mutate_repo(|state| state.rebase_in_progress = in_progress);
+        self
+    }
+
     /// Remove any injected apply failure so subsequent
     /// [`GitRepo::apply_to_index`] calls succeed again.
     pub fn clear_apply_failure(&mut self) -> &mut Self {
@@ -443,6 +450,9 @@ struct FakeRepoState {
     /// Absolute paths [`GitRepo::is_path_ignored`] reports as gitignored, seeded
     /// via [`FakeRepoBuilder::ignored`]. Empty by default.
     ignored: HashSet<PathBuf>,
+    /// What [`GitRepo::rebase_in_progress`] reports, seeded via
+    /// [`FakeRepoBuilder::set_rebase_in_progress`]. False by default.
+    rebase_in_progress: bool,
     applied_patches: Vec<String>,
     /// When `Some`, the next [`GitRepo::apply_to_index`] call returns
     /// `Err(GitApplyError::Backend(_))` with this message. The failing
@@ -497,6 +507,11 @@ impl GitRepo for FakeGitRepo {
     fn is_path_ignored(&self, path: &Path) -> bool {
         let state = self.state.lock().unwrap();
         state.ignored.contains(path)
+    }
+
+    fn rebase_in_progress(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.rebase_in_progress
     }
 
     fn changed_files(&self) -> Vec<ChangedFile> {
@@ -803,6 +818,17 @@ mod tests {
         host.add_repo("/outer/inner");
         let repo = host.discover(Path::new("/outer/inner/sub/a.rs")).unwrap();
         assert_eq!(repo.workdir().as_deref(), Some(Path::new("/outer/inner")));
+    }
+
+    #[test]
+    fn rebase_in_progress_reflects_the_builder_flag() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        assert!(!host.discover(&workdir()).unwrap().rebase_in_progress());
+
+        let host = FakeGit::new();
+        host.add_repo(workdir()).set_rebase_in_progress(true);
+        assert!(host.discover(&workdir()).unwrap().rebase_in_progress());
     }
 
     #[test]
