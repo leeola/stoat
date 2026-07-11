@@ -733,14 +733,34 @@ fn sync_fold_incremental(
         }
     };
 
+    // The incoming edits carry OLD row indices, and the cursor walks the old
+    // transform tree in OLD input-offset space, so old rows must resolve through
+    // the OLD inlay text. Converting them through `row_to_offset` (built over the
+    // new text) overshoots after a mid-buffer insert and truncates the tail.
+    let old_inlay = old_snapshot.inlay_snapshot();
+    let old_has_inlays = old_inlay.has_inlays();
+    let old_rope = old_inlay.rope();
+    let old_text = if old_has_inlays {
+        old_inlay.inlay_text()
+    } else {
+        old_inlay.buffer_snapshot().text()
+    };
+    let old_row_to_offset = |row: u32| -> usize {
+        if old_has_inlays {
+            old_inlay.inlay_offset_at_row(row).0
+        } else {
+            old_rope.point_to_offset(Point::new(row, 0))
+        }
+    };
+
     let mut new_transforms = SumTree::new(());
     let mut cursor = old_snapshot.transforms.cursor::<InputOffset>(());
     let mut row_edits = Patch::empty();
 
     let mut edits_iter = inlay_edits.into_iter().peekable();
     while let Some(edit) = edits_iter.next() {
-        let old_start_offset = row_to_offset(edit.old.start);
-        let old_end_offset = row_to_offset(edit.old.end).min(text.len());
+        let old_start_offset = old_row_to_offset(edit.old.start);
+        let old_end_offset = old_row_to_offset(edit.old.end).min(old_text.len());
 
         // Preserve unchanged prefix
         new_transforms.append(cursor.slice(&InputOffset(old_start_offset), Bias::Left), ());
@@ -885,7 +905,7 @@ fn sync_fold_incremental(
             let cursor_end = cursor.start().0 + item.summary.input.len;
             if edits_iter
                 .peek()
-                .is_none_or(|next| row_to_offset(next.old.start) >= cursor_end)
+                .is_none_or(|next| old_row_to_offset(next.old.start) >= cursor_end)
             {
                 let tail = cursor_end - old_end_offset;
                 let tail_end_new = new_end_offset + tail;
@@ -1581,6 +1601,66 @@ mod tests {
         fold_map.fold(anchor_ranges, FoldPlaceholder::default(), &buffer_snapshot);
         let (snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         snapshot
+    }
+
+    /// Prime a fold map on `content`, apply one buffer edit, and drive the
+    /// incremental sync path. Returns the resynced snapshot and the new inlay
+    /// text length in bytes.
+    fn fold_snapshot_after_edit(
+        content: &str,
+        edit: std::ops::Range<usize>,
+        insert: &str,
+    ) -> (Arc<super::FoldSnapshot>, usize) {
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap0 = multi_buffer.snapshot();
+        let (mut inlay_map, inlay_snap0) = InlayMap::new(snap0.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snap0);
+
+        {
+            let mut buf = shared.write().unwrap();
+            buf.edit(edit, insert);
+        }
+
+        let snap1 = multi_buffer.snapshot();
+        let new_len = snap1.rope().len();
+        let buffer_edits = snap1.edits_since(snap0.version());
+        let (inlay_snap1, inlay_edits) = inlay_map.sync(snap1, &buffer_edits);
+        let (fold_snap1, _) = fold_map.sync(inlay_snap1, &inlay_edits);
+        (fold_snap1, new_len)
+    }
+
+    #[test]
+    fn incremental_insert_keeps_the_trailing_rows() {
+        let (snap, new_len) = fold_snapshot_after_edit("aaaa\nbbbb\ncccc\ndddd\n", 6..6, "x");
+        assert_eq!(
+            snap.line_count(),
+            5,
+            "all five rows survive a mid-buffer insert"
+        );
+        assert_eq!(
+            snap.transforms.summary().input.len,
+            new_len,
+            "the transform tree covers the full new text",
+        );
+    }
+
+    #[test]
+    fn incremental_delete_keeps_the_trailing_rows() {
+        // Delete the newline after "bbbb", joining two rows: five rows become
+        // four. The rows below the edit must all survive the rebuild.
+        let (snap, new_len) = fold_snapshot_after_edit("aaaa\nbbbb\ncccc\ndddd\n", 9..10, "");
+        assert_eq!(
+            snap.line_count(),
+            4,
+            "the rows below a mid-buffer delete survive"
+        );
+        assert_eq!(
+            snap.transforms.summary().input.len,
+            new_len,
+            "the transform tree covers the full new text",
+        );
     }
 
     #[test]
