@@ -636,6 +636,11 @@ pub struct Panel {
     /// width)` in sixteenths of a cell from the left edge, or [`None`] for an
     /// unbroken top edge.
     pub title_gap: Option<(u16, u16)>,
+    /// Monotonic declaration-order index across all non-cell components. A later
+    /// component (higher `seq`) draws on top, so a box's own runs and bars carry
+    /// a higher `seq` than its panel while a lower box's components carry a lower
+    /// one, letting the renderer occlude what a box covers.
+    pub seq: u32,
 }
 
 /// A scrollable sub-rectangle of the grid.
@@ -686,6 +691,9 @@ pub struct Icon {
     /// Signed `[x, y]` pixel offset from the anchor cell, carried from the
     /// `IconCommand` so the icon can shift inside a popover's inset content.
     pub offset: [i16; 2],
+    /// Monotonic declaration-order index across all non-cell components. See
+    /// [`Panel::seq`].
+    pub seq: u32,
 }
 
 /// Which status icon an [`Icon`] draws.
@@ -713,6 +721,9 @@ pub struct TextRun {
     pub color: Rgb,
     pub bg: Rgb,
     pub text: String,
+    /// Monotonic declaration-order index across all non-cell components. See
+    /// [`Panel::seq`].
+    pub seq: u32,
 }
 
 /// A thin rectangle filled off the cell grid in a solid color.
@@ -730,6 +741,9 @@ pub struct Bar {
     pub width: u16,
     pub height: u16,
     pub color: Rgb,
+    /// Monotonic declaration-order index across all non-cell components. See
+    /// [`Panel::seq`].
+    pub seq: u32,
 }
 
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
@@ -959,6 +973,7 @@ mod tests {
             color: Rgb::new(220, 50, 47),
             size: 1,
             offset: [0, 0],
+            seq: 0,
         };
         grid.set_icons(vec![icon]);
 
@@ -978,6 +993,7 @@ mod tests {
             color: Rgb::new(150, 160, 170),
             bg: Rgb::new(24, 26, 32),
             text: "42".to_owned(),
+            seq: 0,
         };
         grid.set_text_runs(vec![run.clone()]);
 
@@ -996,6 +1012,7 @@ mod tests {
             width: 3,
             height: 16,
             color: Rgb::new(220, 50, 47),
+            seq: 0,
         };
         grid.set_bars(vec![bar]);
 
@@ -1092,6 +1109,7 @@ mod tests {
             color: Rgb::new(1, 2, 3),
             size: 1,
             offset: [0, 0],
+            seq: 0,
         }]);
 
         assert!(

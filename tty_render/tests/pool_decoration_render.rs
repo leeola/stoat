@@ -92,6 +92,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
         width: cols as u16 * 16,
         height: 16,
         color: bar_color,
+        seq: 0,
     }]);
     pool.set_text_runs(vec![TextRun {
         col: 0,
@@ -100,6 +101,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
         color: black,
         bg: run_bg,
         text: "   ".to_owned(),
+        seq: 0,
     }]);
 
     let no_decoration = Damage::Partial(Vec::new());

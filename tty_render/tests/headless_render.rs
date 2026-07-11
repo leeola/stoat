@@ -114,6 +114,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         fill: Some(Rgb::new(30, 30, 50)),
         shadow: true,
         title_gap: None,
+        seq: 0,
     }]);
 
     // A scroll region with a glyph inside it, scrolled by a non-zero offset, so
@@ -136,6 +137,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             color: Rgb::new(220, 50, 47),
             size: 1,
             offset: [0, 0],
+            seq: 0,
         },
         Icon {
             top: 5,
@@ -144,6 +146,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             color: Rgb::new(255, 200, 0),
             size: 1,
             offset: [0, 0],
+            seq: 0,
         },
         Icon {
             top: 5,
@@ -152,6 +155,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             color: Rgb::new(38, 139, 210),
             size: 2,
             offset: [3, 6],
+            seq: 0,
         },
     ]);
 
@@ -164,6 +168,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         color: Rgb::new(150, 160, 170),
         bg: Rgb::new(0, 0, 0),
         text: "127".to_owned(),
+        seq: 0,
     }]);
 
     // Two sub-cell color bars, so the bar pass fills thin rectangles at a
@@ -175,6 +180,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             width: 3,
             height: 16,
             color: Rgb::new(220, 50, 47),
+            seq: 0,
         },
         Bar {
             x: 30,
@@ -182,6 +188,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             width: 1,
             height: 96,
             color: Rgb::new(88, 88, 88),
+            seq: 0,
         },
     ]);
 

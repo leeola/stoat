@@ -353,6 +353,7 @@ mod tests {
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: true,
             title_gap: Some((48, 64)),
+            seq: 0,
         }];
 
         let instances = build_panel_instances(&panels);
@@ -383,6 +384,7 @@ mod tests {
             fill: None,
             shadow: false,
             title_gap: None,
+            seq: 0,
         }];
 
         let instances = build_panel_instances(&panels);

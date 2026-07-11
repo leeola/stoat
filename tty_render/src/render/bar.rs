@@ -320,6 +320,7 @@ mod tests {
             width: 3,
             height: 24,
             color: Rgb::new(220, 50, 47),
+            seq: 0,
         }];
 
         let instances = build_bar_instances(&bars, 0.0);
@@ -341,6 +342,7 @@ mod tests {
             width: 2,
             height: 16,
             color: Rgb::new(1, 2, 3),
+            seq: 0,
         }];
 
         let instances = build_bar_instances(&bars, -0.5);

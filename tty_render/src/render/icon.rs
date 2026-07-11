@@ -267,6 +267,7 @@ mod tests {
             color: Rgb::new(255, 200, 0),
             size: 2,
             offset: [3, 6],
+            seq: 0,
         }];
 
         let instances = build_icon_instances(&icons);

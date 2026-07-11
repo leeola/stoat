@@ -110,6 +110,18 @@ pub struct Terminal {
     /// the grid by [`Self::project`]. Replaced, not accumulated, like the scroll
     /// region: the latest layout wins.
     line_layout: Option<LineLayoutCommand>,
+    /// Per-component declaration-order seq, held in lockstep with the four
+    /// accumulating decoration lists above so each grid component carries the
+    /// z-order the renderer occludes by. Pushed and cleared exactly where its
+    /// list is.
+    panel_seq: Vec<u32>,
+    icon_seq: Vec<u32>,
+    text_run_seq: Vec<u32>,
+    bar_seq: Vec<u32>,
+    /// Next seq to stamp, incremented per decoration and reset by a
+    /// `Gstoatty;reset` frame. Starts at 1 so pool-composited content (seq 0)
+    /// sorts below every declared decoration.
+    decoration_seq: u32,
     /// Which decoration command lists changed since the last [`Self::project`],
     /// so a projection re-stamps only the components that changed rather than all
     /// of them every frame.
@@ -415,6 +427,11 @@ impl Terminal {
             text_runs: Vec::new(),
             bars: Vec::new(),
             line_layout: None,
+            panel_seq: Vec::new(),
+            icon_seq: Vec::new(),
+            text_run_seq: Vec::new(),
+            bar_seq: Vec::new(),
+            decoration_seq: 1,
             decorations_dirty: DecorationDirty::default(),
             last_decoration_footprint: Vec::new(),
             footprint_scratch: Vec::new(),
@@ -824,6 +841,8 @@ impl Terminal {
             },
             Command::Panel(panel) => {
                 self.panels.push(panel);
+                self.panel_seq.push(self.decoration_seq);
+                self.decoration_seq += 1;
                 self.decorations_dirty.panels = true;
             },
             Command::Scale(scale) => {
@@ -836,6 +855,8 @@ impl Terminal {
             },
             Command::Icon(icon) => {
                 self.icons.push(icon);
+                self.icon_seq.push(self.decoration_seq);
+                self.decoration_seq += 1;
                 self.decorations_dirty.icons = true;
             },
             Command::LineLayout(layout) => {
@@ -844,6 +865,8 @@ impl Terminal {
             },
             Command::Bar(bar) => {
                 self.bars.push(bar);
+                self.bar_seq.push(self.decoration_seq);
+                self.decoration_seq += 1;
                 self.decorations_dirty.bars = true;
             },
             Command::Popover(popover) => {
@@ -852,6 +875,8 @@ impl Terminal {
             },
             Command::TextRun(text_run) => {
                 self.text_runs.push(text_run);
+                self.text_run_seq.push(self.decoration_seq);
+                self.decoration_seq += 1;
                 self.decorations_dirty.text_runs = true;
             },
             Command::Reset => self.clear_decorations(),
@@ -1140,6 +1165,11 @@ impl Terminal {
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
+        self.panel_seq.clear();
+        self.icon_seq.clear();
+        self.text_run_seq.clear();
+        self.bar_seq.clear();
+        self.decoration_seq = 1;
         self.scroll_region = None;
         self.line_layout = None;
         // Every list emptied, so the next projection must re-apply all of them to
@@ -1370,22 +1400,22 @@ impl Terminal {
             apply_popovers(grid, &self.popovers);
         }
         if self.decorations_dirty.panels || resized {
-            apply_panels(grid, &self.panels);
+            apply_panels(grid, &self.panels, &self.panel_seq);
         }
         if self.decorations_dirty.scroll_region || resized {
             apply_scroll_region(grid, self.scroll_region);
         }
         if self.decorations_dirty.icons || resized {
-            apply_icons(grid, &self.icons);
+            apply_icons(grid, &self.icons, &self.icon_seq);
         }
         if layout_changed {
             apply_line_layout(grid, self.line_layout.as_ref());
         }
         if self.decorations_dirty.text_runs || layout_changed {
-            apply_text_runs(grid, &self.text_runs);
+            apply_text_runs(grid, &self.text_runs, &self.text_run_seq);
         }
         if self.decorations_dirty.bars || layout_changed {
-            apply_bars(grid, &self.bars);
+            apply_bars(grid, &self.bars, &self.bar_seq);
         }
 
         // Accumulate renderer-facing decoration row-damage for the borders,
@@ -2206,8 +2236,12 @@ fn apply_popovers(grid: &mut Grid, commands: &[PopoverCommand]) {
     grid.set_overlays(overlays);
 }
 
-fn apply_panels(grid: &mut Grid, commands: &[PanelCommand]) {
-    let panels = commands.iter().map(panel_grid).collect();
+fn apply_panels(grid: &mut Grid, commands: &[PanelCommand], seqs: &[u32]) {
+    let panels = commands
+        .iter()
+        .zip(seqs)
+        .map(|(command, &seq)| panel_grid(command, seq))
+        .collect();
     grid.set_panels(panels);
 }
 
@@ -2231,16 +2265,18 @@ fn apply_scroll_region(grid: &mut Grid, command: Option<ScrollRegionCommand>) {
 /// Grid-level like the overlays, so the full list is set each projection rather
 /// than stamped per cell. The renderer clamps an out-of-grid anchor, so wire
 /// coordinates need no guard here.
-fn apply_icons(grid: &mut Grid, commands: &[IconCommand]) {
+fn apply_icons(grid: &mut Grid, commands: &[IconCommand], seqs: &[u32]) {
     let icons = commands
         .iter()
-        .map(|command| Icon {
+        .zip(seqs)
+        .map(|(command, &seq)| Icon {
             top: command.top,
             left: command.left,
             kind: grid_icon_kind(command.kind),
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
             size: command.size,
             offset: command.offset,
+            seq,
         })
         .collect();
     grid.set_icons(icons);
@@ -2308,8 +2344,10 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
         }
     }
 
-    apply_text_runs(out, &text_runs);
-    apply_bars(out, &bars);
+    // Pool-composited page content is the base layer, so it carries seq 0 and
+    // any declared panel above it occludes it.
+    apply_text_runs(out, &text_runs, &vec![0; text_runs.len()]);
+    apply_bars(out, &bars, &vec![0; bars.len()]);
 }
 
 /// Replace the grid's text-run list with each stored text-run command's run.
@@ -2318,16 +2356,18 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
 /// than stamped per cell. The declared row is a logical row resolved through the
 /// line layout, so a run tracks expansions above it. The renderer clamps an
 /// out-of-grid anchor, so wire coordinates need no guard here.
-fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand]) {
+fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand], seqs: &[u32]) {
     let text_runs = commands
         .iter()
-        .map(|command| TextRun {
+        .zip(seqs)
+        .map(|(command, &seq)| TextRun {
             col: command.col,
             row: resolve_logical_row(grid, command.row),
             scale: command.scale,
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
             bg: Rgb::new(command.bg[0], command.bg[1], command.bg[2]),
             text: command.text.clone(),
+            seq,
         })
         .collect();
     grid.set_text_runs(text_runs);
@@ -2338,15 +2378,17 @@ fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand]) {
 /// Grid-level like the overlays, so the full list is set each projection rather
 /// than stamped per cell. The declared `y` is a logical row resolved through the
 /// line layout, so a bar tracks expansions above it.
-fn apply_bars(grid: &mut Grid, commands: &[BarCommand]) {
+fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32]) {
     let bars = commands
         .iter()
-        .map(|command| Bar {
+        .zip(seqs)
+        .map(|(command, &seq)| Bar {
             x: command.x,
             y: resolve_logical_row(grid, command.y),
             width: command.width,
             height: command.height,
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+            seq,
         })
         .collect();
     grid.set_bars(bars);
@@ -2388,7 +2430,7 @@ fn popover_overlay(command: &PopoverCommand) -> Overlay {
     }
 }
 
-fn panel_grid(command: &PanelCommand) -> Panel {
+fn panel_grid(command: &PanelCommand, seq: u32) -> Panel {
     Panel {
         top: command.top,
         left: command.left,
@@ -2400,6 +2442,7 @@ fn panel_grid(command: &PanelCommand) -> Panel {
         fill: command.fill.map(|[r, g, b]| Rgb::new(r, g, b)),
         shadow: command.shadow,
         title_gap: command.title_gap,
+        seq,
     }
 }
 
@@ -3163,6 +3206,7 @@ mod tests {
                 fill: Some(Rgb::new(10, 20, 30)),
                 shadow: true,
                 title_gap: Some((16, 64)),
+                seq: 1,
             }]
         );
     }
@@ -3189,6 +3233,67 @@ mod tests {
         terminal.project(&mut grid);
 
         assert!(grid.panels().is_empty());
+    }
+
+    #[test]
+    fn decoration_seq_stamps_declaration_order_and_resets() {
+        let mut stream = encode_panel(&PanelCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: None,
+            shadow: false,
+            title_gap: None,
+        });
+        stream.extend_from_slice(&encode_icon(&IconCommand {
+            top: 0,
+            left: 0,
+            kind: ProtoIconKind::Error,
+            color: [1, 2, 3],
+            size: 1,
+            offset: [0, 0],
+        }));
+        stream.extend_from_slice(&encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: [0, 0, 0],
+            text: "x".to_owned(),
+        }));
+        stream.extend_from_slice(&encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 16,
+            color: [1, 2, 3],
+        }));
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&stream);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            (
+                grid.panels()[0].seq,
+                grid.icons()[0].seq,
+                grid.text_runs()[0].seq,
+                grid.bars()[0].seq,
+            ),
+            (1, 2, 3, 4),
+            "one counter stamps declaration order across all four decoration lists"
+        );
+
+        terminal.advance(&encode_reset());
+        terminal.advance(&stream);
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.panels()[0].seq, 1, "reset renumbers the seq from 1");
     }
 
     #[test]
@@ -3455,6 +3560,7 @@ mod tests {
                 color: Rgb::new(255, 200, 0),
                 size: 2,
                 offset: [3, 6],
+                seq: 1,
             }]
         );
     }
@@ -3484,6 +3590,7 @@ mod tests {
                 color: Rgb::new(150, 160, 170),
                 bg: Rgb::new(24, 26, 32),
                 text: "42".to_owned(),
+                seq: 1,
             }]
         );
     }
@@ -3511,6 +3618,7 @@ mod tests {
                 width: 3,
                 height: 16,
                 color: Rgb::new(220, 50, 47),
+                seq: 1,
             }]
         );
     }
@@ -4025,6 +4133,7 @@ mod tests {
                 color: Rgb::new(4, 5, 6),
                 bg: Rgb::new(0, 0, 0),
                 text: "bb".to_owned(),
+                seq: 0,
             }]
         );
     }

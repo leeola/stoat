@@ -2109,6 +2109,7 @@ mod tests {
             color: Rgb::new(1, 2, 3),
             bg: Rgb::new(4, 5, 6),
             text: "42".to_string(),
+            seq: 0,
         }]);
         document.set_bars(vec![Bar {
             x: 2,
@@ -2116,6 +2117,7 @@ mod tests {
             width: 8,
             height: 1,
             color: Rgb::new(7, 8, 9),
+            seq: 0,
         }]);
 
         let mut pool = Grid::new(5, 5);
@@ -2130,6 +2132,7 @@ mod tests {
                 color: Rgb::new(1, 2, 3),
                 bg: Rgb::new(4, 5, 6),
                 text: "42".to_string(),
+                seq: 0,
             }],
             "the text run shifts by the region origin (left*16, top*16)"
         );
@@ -2141,6 +2144,7 @@ mod tests {
                 width: 8,
                 height: 1,
                 color: Rgb::new(7, 8, 9),
+                seq: 0,
             }],
             "the bar shifts by the region origin (left*16, top*16)"
         );

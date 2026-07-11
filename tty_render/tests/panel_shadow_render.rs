@@ -85,6 +85,7 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         fill: None,
         shadow: true,
         title_gap: None,
+        seq: 0,
     };
     let mut grid = Grid::new(rows, cols);
     // Paint every cell the surface color so the panel's interior and its
@@ -209,6 +210,7 @@ fn title_gap_notches_the_top_stroke() {
         fill: None,
         shadow: false,
         title_gap: Some((48, 64)),
+        seq: 0,
     };
     let mut grid = Grid::new(rows, cols);
     for r in 0..rows {
