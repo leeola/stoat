@@ -11,11 +11,12 @@ use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{BorderStyle, Grid, Panel, Rgb};
 use wgpu::{
-    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor,
-    BufferUsages, ColorTargetState, ColorWrites, Device, FragmentState, PipelineLayoutDescriptor,
-    Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages, TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
+    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
+    BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, Device,
+    FragmentState, PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline,
+    RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat,
+    VertexBufferLayout, VertexState, VertexStepMode,
 };
 
 /// Instance buffer capacity, in panels, allocated up front. Grows by doubling
@@ -52,18 +53,23 @@ struct PanelInstance {
     gap: [f32; 2],
 }
 
-/// The uniform shared by every instance. Carries the surface resolution and cell
-/// size the vertex shader maps cell coordinates through.
+/// The uniform shared by every instance. Carries the surface resolution, the
+/// cell size the vertex shader maps cell coordinates through, and the panel
+/// count the fragment shader loops over for self-occlusion. Padded to 32 bytes
+/// so the layout matches the WGSL uniform.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
+    count: u32,
+    _pad: [u32; 3],
 }
 
 /// The instanced panel pipeline and its per-frame buffers.
 pub struct PanelPass {
     pipeline: RenderPipeline,
+    bind_group_layout: BindGroupLayout,
     globals: Buffer,
     bind_group: BindGroup,
     instances: Buffer,
@@ -82,16 +88,28 @@ impl PanelPass {
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("panel globals"),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -148,19 +166,12 @@ impl PanelPass {
             mapped_at_creation: false,
         });
 
-        let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("panel globals"),
-            layout: &bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: globals.as_entire_binding(),
-            }],
-        });
-
         let instances = alloc_instances(device, INITIAL_CAPACITY);
+        let bind_group = make_bind_group(device, &bind_group_layout, &globals, &instances);
 
         PanelPass {
             pipeline,
+            bind_group_layout,
             globals,
             bind_group,
             instances,
@@ -180,14 +191,17 @@ impl PanelPass {
     /// `resolution` is the surface size in physical pixels. Reallocates the
     /// instance buffer only when the panel count outgrows the current capacity.
     pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
+        let instances = build_panel_instances(grid.panels());
+        self.count = instances.len() as u32;
+
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
+            count: self.count,
+            _pad: [0; 3],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
-        let instances = build_panel_instances(grid.panels());
-        self.count = instances.len() as u32;
         if instances.is_empty() {
             return;
         }
@@ -195,6 +209,12 @@ impl PanelPass {
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
+            self.bind_group = make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.globals,
+                &self.instances,
+            );
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
     }
@@ -219,8 +239,35 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
     device.create_buffer(&BufferDescriptor {
         label: Some("panel instances"),
         size: (capacity * size_of::<PanelInstance>()) as u64,
-        usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        // STORAGE so the fragment shader can read every instance's box rect for
+        // self-occlusion, alongside the per-instance vertex fetch.
+        usage: BufferUsages::VERTEX | BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    })
+}
+
+/// Bind the globals uniform (binding 0) and the instance storage buffer
+/// (binding 1). Rebuilt whenever the instance buffer is reallocated, since the
+/// bind group holds a reference to the specific buffer.
+fn make_bind_group(
+    device: &Device,
+    layout: &BindGroupLayout,
+    globals: &Buffer,
+    instances: &Buffer,
+) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
+        label: Some("panel globals"),
+        layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: globals.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: instances.as_entire_binding(),
+            },
+        ],
     })
 }
 

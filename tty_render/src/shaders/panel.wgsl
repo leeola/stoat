@@ -7,10 +7,22 @@
 struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
+    count: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 @group(0) @binding(0)
 var<uniform> globals: Globals;
+
+// Every panel instance's raw floats, for self-occlusion. Each instance spans
+// INSTANCE_STRIDE floats; the box anchor cell is floats 0-1 and the size in
+// cells is floats 2-3, matching the PanelInstance memory layout.
+@group(0) @binding(1)
+var<storage, read> instances: array<f32>;
+
+const INSTANCE_STRIDE: u32 = 18u;
 
 // Border style codes, matching the protocol's border style ordering.
 const STYLE_LIGHT: u32 = 0u;
@@ -47,11 +59,15 @@ struct VsOut {
     // Top-edge title-gap span as box-relative pixel offsets [start, end]. An
     // empty span (end <= start) leaves the top hairline unbroken.
     @location(9) @interpolate(flat) gap: vec2<f32>,
+    // This panel's draw index, so the fragment shader can occlude against every
+    // later (higher-index, on-top) panel.
+    @location(10) @interpolate(flat) instance: u32,
 }
 
 @vertex
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
     @location(0) cell_pos: vec2<f32>,
     @location(1) size: vec2<f32>,
     @location(2) fill: vec3<f32>,
@@ -101,6 +117,7 @@ fn vs_main(
     out.fill_flag = fill_flag;
     out.style = style;
     out.gap = gap * globals.cell_size.x;
+    out.instance = instance_index;
     return out;
 }
 
@@ -128,6 +145,23 @@ fn line_coverage(style: u32, d: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Self-occlusion: discard fragments falling inside the box rect of any later
+    // panel (a higher index draws on top), so a lower box's shadow, fill, and
+    // stroke cannot show through an upper box's body. A later panel's exterior
+    // shadow lies outside its box rect, so shadows past a box edge keep blending.
+    let frag = in.clip.xy;
+    for (var j = in.instance + 1u; j < globals.count; j = j + 1u) {
+        let base = j * INSTANCE_STRIDE;
+        let cell_j = vec2<f32>(instances[base], instances[base + 1u]);
+        let size_j = vec2<f32>(instances[base + 2u], instances[base + 3u]);
+        let box_min = cell_j * globals.cell_size;
+        let box_max = (cell_j + size_j) * globals.cell_size;
+        if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y
+            && frag.y < box_max.y {
+            discard;
+        }
+    }
+
     let p = in.quad_px;
 
     let center = (in.box_min + in.box_max) * 0.5;
