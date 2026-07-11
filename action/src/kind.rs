@@ -213,6 +213,8 @@ pub enum ActionKind {
     RemovePrimarySelection,
     RotateSelectionsForward,
     RotateSelectionsBackward,
+    RotateSelectionContentsForward,
+    RotateSelectionContentsBackward,
     TrimSelections,
     SplitSelectionOnNewline,
     AlignSelections,

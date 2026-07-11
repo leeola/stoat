@@ -1121,6 +1121,96 @@ pub(super) fn ensure_selections_forward(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn rotate_selection_contents_forward(stoat: &mut Stoat) -> UpdateEffect {
+    rotate_selection_contents(stoat, true)
+}
+
+pub(super) fn rotate_selection_contents_backward(stoat: &mut Stoat) -> UpdateEffect {
+    rotate_selection_contents(stoat, false)
+}
+
+/// Cyclically move the text of each selection into the next (`forward`) or
+/// previous selection's range, following Helix's `reorder_selection_contents`.
+///
+/// The selections stay in place and re-cover their new text. Fewer than two
+/// non-empty selections is a no-op. Unlike `(`/`)`, which rotate only which
+/// selection is primary, this rewrites the buffer.
+fn rotate_selection_contents(stoat: &mut Stoat, forward: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1) as usize;
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let (buffer_id, entries) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+        let mut entries: Vec<(usize, usize, usize, String)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .filter_map(|sel| {
+                let s = buffer_snapshot.resolve_anchor(&sel.start);
+                let e = buffer_snapshot.resolve_anchor(&sel.end);
+                (s != e).then(|| (sel.id, s, e, rope.chunks_in_range(s..e).collect()))
+            })
+            .collect();
+        entries.sort_by_key(|(_, start, _, _)| *start);
+        (buffer_id, entries)
+    };
+
+    if entries.len() < 2 {
+        return UpdateEffect::None;
+    }
+
+    let rotate_by = count.min(entries.len());
+    let mut rotated: Vec<String> = entries.iter().map(|(_, _, _, text)| text.clone()).collect();
+    if forward {
+        rotated.rotate_right(rotate_by);
+    } else {
+        rotated.rotate_left(rotate_by);
+    }
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for (i, (_, start, end, _)) in entries.iter().enumerate().rev() {
+            guard.edit(*start..*end, &rotated[i]);
+        }
+    }
+
+    // Each selection re-covers its new text. A running length delta shifts later
+    // ranges when fragments differ in length.
+    let mut new_ranges: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::new();
+    let mut shift = 0isize;
+    for (i, (id, start, end, _)) in entries.iter().enumerate() {
+        let new_start = (*start as isize + shift) as usize;
+        let new_end = new_start + rotated[i].len();
+        new_ranges.insert(*id, (new_start, new_end));
+        shift += rotated[i].len() as isize - (*end - *start) as isize;
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor.selections.transform(new_buf, |sel| {
+        let mut new = sel.clone();
+        if let Some(&(start, end)) = new_ranges.get(&sel.id) {
+            new.start = new_buf.anchor_at(start, Bias::Right);
+            new.end = new_buf.anchor_at(end, Bias::Right);
+            new.goal = SelectionGoal::None;
+        }
+        new
+    });
+    UpdateEffect::Redraw
+}
+
 pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -4538,5 +4628,65 @@ mod tests {
         assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, true)]);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::EnsureSelectionsForward);
         assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, false)]);
+    }
+
+    fn buffer_string(h: &mut TestHarness) -> String {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        snapshot.buffer_snapshot().rope().to_string()
+    }
+
+    fn set_three_single_char_selections(h: &mut TestHarness) {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        editor.selections.transform(buf, |sel| Selection {
+            id: sel.id,
+            start: buf.anchor_at(0, Bias::Right),
+            end: buf.anchor_at(1, Bias::Right),
+            reversed: false,
+            goal: SelectionGoal::None,
+        });
+        for (start, end) in [(1usize, 2usize), (2, 3)] {
+            let sel = Selection {
+                id: 0,
+                start: buf.anchor_at(start, Bias::Right),
+                end: buf.anchor_at(end, Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            editor.selections.insert_range(sel, buf);
+        }
+    }
+
+    #[test]
+    fn rotate_selection_contents_forward_and_back() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        set_three_single_char_selections(&mut h);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::RotateSelectionContentsForward,
+        );
+        assert_eq!(buffer_string(&mut h), "cab\n");
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::RotateSelectionContentsBackward,
+        );
+        assert_eq!(buffer_string(&mut h), "abc\n");
+    }
+
+    #[test]
+    fn rotate_selection_contents_backward_shifts_left() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        set_three_single_char_selections(&mut h);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::RotateSelectionContentsBackward,
+        );
+        assert_eq!(buffer_string(&mut h), "bca\n");
     }
 }

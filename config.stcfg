@@ -304,6 +304,8 @@ on key {
         Alt-, -> RemovePrimarySelection();
         ( -> RotateSelectionsBackward();
         ) -> RotateSelectionsForward();
+        Alt-( -> RotateSelectionContentsBackward();
+        Alt-) -> RotateSelectionContentsForward();
         _ -> TrimSelections();
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
@@ -422,6 +424,8 @@ on key {
         s -> SelectRegex();
         X -> ExtendToLineBounds();
         Alt-x -> ShrinkToLineBounds();
+        Alt-( -> RotateSelectionContentsBackward();
+        Alt-) -> RotateSelectionContentsForward();
         Q -> RecordMacro();
         > -> IndentSelection();
         < -> UnindentSelection();

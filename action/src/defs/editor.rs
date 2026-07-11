@@ -1632,6 +1632,26 @@ define_action!(
 );
 
 define_action!(
+    RotateSelectionContentsForwardDef,
+    RotateSelectionContentsForward,
+    "RotateSelectionContentsForward",
+    ActionKind::RotateSelectionContentsForward,
+    "rotate selection contents forward",
+    "Cyclically move each selection's text into the next selection's range (wrapping at the end), rewriting the buffer while the selections re-cover their new text.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    RotateSelectionContentsBackwardDef,
+    RotateSelectionContentsBackward,
+    "RotateSelectionContentsBackward",
+    ActionKind::RotateSelectionContentsBackward,
+    "rotate selection contents backward",
+    "Cyclically move each selection's text into the previous selection's range (wrapping at the start), rewriting the buffer while the selections re-cover their new text.",
+    ActionPriority::Rare
+);
+
+define_action!(
     TrimSelectionsDef,
     TrimSelections,
     "TrimSelections",

@@ -35,7 +35,8 @@ use crate::{
             OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown,
             PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
             RecordMacro, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
-            ReplaceChar, ReplayMacro, RotateSelectionsBackward, RotateSelectionsForward,
+            ReplaceChar, ReplayMacro, RotateSelectionContentsBackward,
+            RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
             SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
             SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
             SelectPrevSibling, SelectRegex, SelectRegister, SelectTextobjectAround,
@@ -577,6 +578,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(RotateSelectionsBackward::DEF, |_| {
         Ok(Box::new(RotateSelectionsBackward))
+    });
+    add(RotateSelectionContentsForward::DEF, |_| {
+        Ok(Box::new(RotateSelectionContentsForward))
+    });
+    add(RotateSelectionContentsBackward::DEF, |_| {
+        Ok(Box::new(RotateSelectionContentsBackward))
     });
     add(TrimSelections::DEF, |_| Ok(Box::new(TrimSelections)));
     add(SplitSelectionOnNewline::DEF, |_| {
@@ -1204,7 +1211,8 @@ mod tests {
         // + 1 SelectRegex.
         // + 2 ExtendToLineBounds / ShrinkToLineBounds.
         // + 1 EnsureSelectionsForward.
-        assert_eq!(all().count(), 328);
+        // + 2 RotateSelectionContentsForward/Backward.
+        assert_eq!(all().count(), 330);
     }
 
     #[test]

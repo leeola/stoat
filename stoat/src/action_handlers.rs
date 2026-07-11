@@ -455,6 +455,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RemovePrimarySelection => movement::remove_primary_selection(stoat),
         ActionKind::RotateSelectionsForward => movement::rotate_selections_forward(stoat),
         ActionKind::RotateSelectionsBackward => movement::rotate_selections_backward(stoat),
+        ActionKind::RotateSelectionContentsForward => {
+            movement::rotate_selection_contents_forward(stoat)
+        },
+        ActionKind::RotateSelectionContentsBackward => {
+            movement::rotate_selection_contents_backward(stoat)
+        },
         ActionKind::TrimSelections => movement::trim_selections(stoat),
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::SpawnClaude => agent::spawn_claude_pane(stoat),
