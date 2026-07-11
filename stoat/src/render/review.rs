@@ -30,6 +30,10 @@ pub(crate) fn render_review(
     let Some(view) = editor.review_view.as_ref() else {
         return;
     };
+    if view.rows.is_empty() {
+        render_review_empty(view.watching, inner, theme, buf);
+        return;
+    }
     render_review_rows(
         &snapshot,
         view,
@@ -41,6 +45,28 @@ pub(crate) fn render_review(
         scene,
     );
     render_review_cursor(editor, &snapshot, inner, theme, buf, stoatty);
+}
+
+/// Paint the clean-tree empty state as a centered dim line, so the diff view
+/// reads as intentionally open and waiting rather than broken. The watching
+/// clause is dropped when `review_follow` will not auto-refresh the view.
+fn render_review_empty(watching: bool, inner: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
+    let message = if watching {
+        "working tree clean, watching for changes"
+    } else {
+        "working tree clean"
+    };
+    let chars: Vec<char> = message.chars().collect();
+    let width = chars.len() as u16;
+    if width > inner.width || inner.height == 0 {
+        return;
+    }
+    let style = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    let start_x = inner.x + (inner.width - width) / 2;
+    let y = inner.y + inner.height / 2;
+    for (i, ch) in chars.into_iter().enumerate() {
+        buf[(start_x + i as u16, y)].set_char(ch).set_style(style);
+    }
 }
 
 /// X column where the right pane's text begins. Mirrors the right-pane layout

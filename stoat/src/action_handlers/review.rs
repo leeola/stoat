@@ -57,11 +57,6 @@ pub(crate) struct PendingReviewScan {
     rx: mpsc::Receiver<ReviewScanMsg>,
     _task: Task<()>,
     sync_path: Option<std::path::PathBuf>,
-    /// Close the open session when the scan finds nothing, rather than leaving
-    /// its now-stale diffs up. Set only by a working-tree refresh, where an
-    /// empty result means the tree was fully committed. An open or a commit
-    /// scan leaves it `false`.
-    close_on_empty: bool,
     /// This scan armed a "scanning diff" badge on open, so its completion clears
     /// the review badge tray. A refresh or commits-mode open leaves it `false`,
     /// so a progress or apply-result badge already in the tray survives the
@@ -90,7 +85,6 @@ pub(crate) struct PendingReviewScan {
 fn spawn_review_scan(
     stoat: &mut Stoat,
     sync_path: Option<std::path::PathBuf>,
-    close_on_empty: bool,
     scanning_badge: bool,
     produce: impl FnOnce(&mpsc::Sender<ReviewScanMsg>, &Arc<tokio::sync::Notify>, &AtomicBool)
         + Send
@@ -118,7 +112,6 @@ fn spawn_review_scan(
         rx,
         _task: task,
         sync_path,
-        close_on_empty,
         scanning_badge,
         total: 0,
         streamed: 0,
@@ -275,7 +268,7 @@ pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
     let workdir = workdir.to_path_buf();
     let sha = sha.to_string();
 
-    spawn_review_scan(stoat, None, false, true, move |tx, redraw, cancel| {
+    spawn_review_scan(stoat, None, true, move |tx, redraw, cancel| {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -494,7 +487,7 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
     let git_host = stoat.git_host.clone();
     let langs = stoat.language_registry.clone();
 
-    spawn_review_scan(stoat, None, false, false, move |tx, redraw, cancel| {
+    spawn_review_scan(stoat, None, false, move |tx, redraw, cancel| {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -518,7 +511,7 @@ pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: 
     let from = from.to_string();
     let to = to.to_string();
 
-    spawn_review_scan(stoat, None, false, true, move |tx, redraw, cancel| {
+    spawn_review_scan(stoat, None, true, move |tx, redraw, cancel| {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -860,9 +853,6 @@ pub(super) fn review_refresh(
     };
 
     if is_git_source(&source) {
-        // A committed-away working tree closes the session on refresh. A commit
-        // diff is a fixed snapshot, so it never closes on an empty rescan.
-        let close_on_empty = matches!(source, ReviewSource::WorkingTree { .. });
         let git_host = stoat.git_host.clone();
         let fs_host = stoat.fs_host.clone();
         let langs = stoat.language_registry.clone();
@@ -870,27 +860,20 @@ pub(super) fn review_refresh(
         // A refresh sends only Complete, never streaming First/File increments:
         // streaming would replace the live session with fresh Pending chunks and
         // flicker the user's decisions away. Leaving the old session up until
-        // Complete lets the pump reapply carried statuses from it.
-        spawn_review_scan(
-            stoat,
-            sync_path,
-            close_on_empty,
-            false,
-            move |tx, redraw, cancel| {
+        // Complete lets the pump reapply carried statuses from it. A clean
+        // working-tree rescan yields an empty session, so the view stays open.
+        spawn_review_scan(stoat, sync_path, false, move |tx, redraw, cancel| {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            if let Some(session) = rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source) {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                if let Some(session) =
-                    rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source)
-                {
-                    if cancel.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let _ = tx.send(ReviewScanMsg::Complete(session));
-                    redraw.notify_one();
-                }
-            },
-        );
+                let _ = tx.send(ReviewScanMsg::Complete(session));
+                redraw.notify_one();
+            }
+        });
         return UpdateEffect::Redraw;
     }
 
@@ -971,7 +954,14 @@ fn rescan_git_source_pure(
     source: &ReviewSource,
 ) -> Option<ReviewSession> {
     match source {
-        ReviewSource::WorkingTree { workdir } => scan_working_tree_pure(git, fs, langs, workdir),
+        // A clean working tree keeps the view open with an empty session, so the
+        // watch pipeline can live-populate it when changes reappear.
+        ReviewSource::WorkingTree { workdir } => scan_working_tree_pure(git, fs, langs, workdir)
+            .or_else(|| {
+                Some(ReviewSession::new(ReviewSource::WorkingTree {
+                    workdir: workdir.clone(),
+                }))
+            }),
         ReviewSource::Commit { workdir, sha } => scan_commit_pure(git, langs, workdir, sha),
         ReviewSource::CommitRange { workdir, from, to } => {
             scan_commit_range_pure(git, langs, workdir, from, to)
@@ -1093,7 +1083,10 @@ pub(super) fn toggle_diff(stoat: &mut Stoat) -> UpdateEffect {
 /// row stashed, so the editor GC keeps the parked editor alive.
 fn toggle_diff_off(stoat: &mut Stoat) -> UpdateEffect {
     let Some((path, line)) = review_cursor_file_target(stoat) else {
-        return UpdateEffect::None;
+        // An empty diff view (clean tree) has no file under the cursor to swap
+        // in, so there is nothing to toggle to.
+        stoat.pending_message = Some("no file to open in the diff view".to_string());
+        return UpdateEffect::Redraw;
     };
 
     park_review_session(stoat);
@@ -1453,10 +1446,21 @@ pub(super) fn open_review(stoat: &mut Stoat) {
     let langs = stoat.language_registry.clone();
     let cache = stoat.diff_cache.clone();
 
-    spawn_review_scan(stoat, None, false, true, move |tx, redraw, cancel| {
+    spawn_review_scan(stoat, None, true, move |tx, redraw, cancel| {
         let Some((workdir, inputs)) =
             crate::diff::scan_working_tree(&*git_host, &*fs_host, &langs, &git_root)
         else {
+            // A clean tree in a repo opens an empty, persistent view the watch
+            // pipeline later fills. A true non-repo sends nothing, and the pump
+            // badges instead.
+            if !cancel.load(Ordering::Relaxed)
+                && let Some(workdir) = git_host.discover(&git_root).and_then(|repo| repo.workdir())
+            {
+                let _ = tx.send(ReviewScanMsg::Complete(ReviewSession::new(
+                    ReviewSource::WorkingTree { workdir },
+                )));
+                redraw.notify_one();
+            }
             return;
         };
         stream_review_inputs(
@@ -1484,10 +1488,10 @@ pub(super) fn open_review(stoat: &mut Stoat) {
 /// the test scheduler, so draining one at a time is what makes the install
 /// appear file by file.
 ///
-/// A channel that closes before any file streamed means the source had no
-/// changes. A working-tree refresh ([`PendingReviewScan::close_on_empty`]) with
-/// a session still open closes it with a "working tree clean" badge, otherwise a
-/// "no changes to review" badge keeps an empty scan from being silent.
+/// A channel that closes before any file streamed and installs no session means
+/// the root is not a git repository, which badges "not a git repository". A clean
+/// tree in a repo instead sends an empty [`ReviewScanMsg::Complete`], keeping the
+/// diff view open on an empty session for the watch pipeline to fill.
 ///
 /// Returns whether a message was drained this call, mirroring the other
 /// render-time pumps. Driven from [`Stoat::render`] and the test harness
@@ -1558,13 +1562,11 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
             false
         },
         Err(mpsc::TryRecvError::Disconnected) => {
-            if pending.streamed == 0 {
-                if pending.close_on_empty && stoat.active_workspace().review.is_some() {
-                    let _ = close_review(stoat);
-                    emit_review_info_badge(stoat, "working tree clean");
-                } else {
-                    emit_review_info_badge(stoat, "no changes to review");
-                }
+            if pending.streamed == 0 && stoat.active_workspace().review.is_none() {
+                // The only empty scan that installs no session is a non-repo
+                // open. A clean tree in a repo sends an empty Complete above, so
+                // it never reaches here. The badge replaces the scanning one.
+                emit_review_info_badge(stoat, "not a git repository");
             } else if pending.scanning_badge {
                 // A full-cache-hit open streamed every file and sent no Complete,
                 // so clear the scanning badge here rather than leaving it stuck.
@@ -1877,12 +1879,14 @@ pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSessi
 /// `ws.review`.
 fn render_review_editor(stoat: &mut Stoat) {
     let executor = stoat.executor.clone();
+    let watching = stoat.settings.review_follow != Some(false);
     let ws = stoat.active_workspace_mut();
     let Some(session) = ws.review.as_ref() else {
         return;
     };
 
-    let view = ReviewViewState::from_session(session);
+    let mut view = ReviewViewState::from_session(session);
+    view.watching = watching;
     let blocks = build_review_blocks(session, &view);
     // The buffer mirrors the new (right) side of each row so the cursor and
     // motions have real text to move over. Row indices, blocks, and
@@ -2629,28 +2633,34 @@ mod tests {
     }
 
     #[test]
-    fn open_on_a_clean_tree_shows_no_changes_to_review() {
-        use crate::badge::BadgeSource;
-
+    fn open_on_a_clean_tree_opens_an_empty_view() {
         let mut h = TestHarness::with_size(80, 14);
         h.fake_git.add_repo("/work");
         h.stoat.active_workspace_mut().git_root = "/work".into();
         h.stoat.open_review();
         h.settle();
 
+        let session = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .expect("a clean tree in a repo opens an empty, persistent view");
         assert!(
-            h.stoat.active_workspace().review.is_none(),
-            "a clean tree installs no session",
+            session.files.is_empty(),
+            "the opened session holds no files on a clean tree"
         );
-        let ws = h.stoat.active_workspace();
-        let id = ws
-            .badges
-            .find_by_source(BadgeSource::Review)
-            .expect("an empty scan is not silent");
-        assert_eq!(
-            ws.badges.get(id).expect("badge").label,
-            "no changes to review"
-        );
+    }
+
+    #[test]
+    fn snapshot_review_clean_tree() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.fake_git.add_repo("/work");
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.stoat.open_review();
+        h.settle();
+
+        h.assert_snapshot("snapshot_review_clean_tree");
     }
 
     #[test]
@@ -2848,9 +2858,15 @@ mod tests {
         h.stoat.drain_fs_watch_events();
         h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
 
+        let session = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .expect("a .git write refreshes the review, which persists as an empty view");
         assert!(
-            h.stoat.active_workspace().review.is_none(),
-            "a .git write refreshes the review, which closes on the now-clean tree",
+            session.files.is_empty(),
+            "the refreshed session is empty on the now-clean tree",
         );
     }
 

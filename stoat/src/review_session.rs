@@ -159,6 +159,11 @@ pub(crate) struct ReviewViewState {
     pub current_chunk: Option<ReviewChunkId>,
     /// Session version this cache was built from.
     pub session_version: u64,
+    /// Whether the diff view auto-refreshes on repo changes, mirroring
+    /// `review_follow`. Only affects the empty-state message: a clean tree that
+    /// is watched invites the user to expect live updates, one that is not does
+    /// not. Set by the render editor build, which has the settings.
+    pub watching: bool,
 }
 
 impl ReviewViewState {
@@ -181,6 +186,7 @@ impl ReviewViewState {
             chunk_statuses,
             current_chunk: session.cursor.current,
             session_version: session.version,
+            watching: true,
         }
     }
 
@@ -1169,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn review_refresh_on_clean_tree_closes_the_session() {
+    fn review_refresh_on_clean_tree_keeps_the_view_open() {
         let mut h = TestHarness::with_size(80, 14);
         h.stage_review_scenario(
             "/work",
@@ -1184,25 +1190,20 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
         h.settle();
 
+        let session = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .expect("a clean-tree refresh keeps the view open on an empty session");
         assert!(
-            h.stoat.active_workspace().review.is_none(),
-            "a clean-tree refresh closes the stale session"
-        );
-        assert_eq!(h.stoat.focused_mode(), "normal");
-        let badges = &h.stoat.active_workspace().badges;
-        let label = badges
-            .find_by_source(crate::badge::BadgeSource::Review)
-            .and_then(|id| badges.get(id))
-            .map(|b| b.label.as_str());
-        assert_eq!(
-            label,
-            Some("working tree clean"),
-            "the clean-tree close surfaces an info badge"
+            session.files.is_empty(),
+            "the refreshed session holds no files once the tree is clean"
         );
     }
 
     #[test]
-    fn review_open_on_clean_tree_shows_no_changes_badge() {
+    fn review_open_on_clean_tree_opens_an_empty_view() {
         let mut h = TestHarness::with_size(80, 14);
         h.stoat.active_workspace_mut().git_root = "/work".into();
         h.fake_git().add_repo("/work").clear_changes();
@@ -1210,19 +1211,15 @@ mod tests {
         h.stoat.open_review();
         h.settle();
 
+        let session = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .expect("a clean tree opens an empty, persistent view");
         assert!(
-            h.stoat.active_workspace().review.is_none(),
-            "a clean tree opens no session"
-        );
-        let badges = &h.stoat.active_workspace().badges;
-        let label = badges
-            .find_by_source(crate::badge::BadgeSource::Review)
-            .and_then(|id| badges.get(id))
-            .map(|b| b.label.as_str());
-        assert_eq!(
-            label,
-            Some("no changes to review"),
-            "an empty open surfaces an info badge instead of doing nothing"
+            session.files.is_empty(),
+            "the opened session holds no files on a clean tree"
         );
     }
 
