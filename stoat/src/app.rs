@@ -81,6 +81,11 @@ const MAX_FRAME_DT: f32 = 0.1;
 /// remainder on the next turn.
 const INDEX_DRAIN_CAP: usize = 512;
 
+/// One [`Stoat::drain_index_updates`] pass slower than this warns, naming the
+/// drained update count. A drain this slow blocks the event loop, the mechanism
+/// behind an index-driven wedge.
+const SLOW_DRAIN_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(100);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateEffect {
     Redraw,
@@ -1413,6 +1418,8 @@ impl Stoat {
             }
         }
 
+        tracing::info!(target: "stoat::app", "stoat exiting");
+
         #[cfg(feature = "perf")]
         self.log_perf_table();
 
@@ -1586,6 +1593,12 @@ impl Stoat {
             return;
         }
         let warm = self.warm_index_load(&git_root);
+        tracing::info!(
+            target: "stoat::app",
+            root = %git_root.display(),
+            mode = if warm.is_some() { "warm" } else { "cold" },
+            "index build starting",
+        );
         if !self.persistence_disabled {
             let _ = self.fs_watch_host.watch_recursive(&git_root);
         }
@@ -1629,7 +1642,10 @@ impl Stoat {
     /// the cap the drain schedules a redraw and returns, leaving the remainder
     /// queued for the next turn.
     fn drain_index_updates(&mut self) {
+        let started = std::time::Instant::now();
         let mut resolve_pending: std::collections::HashSet<WorkspaceId> =
+            std::collections::HashSet::new();
+        let mut completed: std::collections::HashSet<WorkspaceId> =
             std::collections::HashSet::new();
         let mut drained: usize = 0;
         while let Ok(update) = self.index_update_rx.try_recv() {
@@ -1672,6 +1688,7 @@ impl Stoat {
                     manifest,
                 } => {
                     resolve_pending.insert(workspace);
+                    completed.insert(workspace);
                     if !self.persistence_disabled {
                         let git_root = self.workspaces.get(workspace).map(|ws| ws.git_root.clone());
                         if let Some(git_root) = git_root
@@ -1780,7 +1797,27 @@ impl Stoat {
         for workspace in resolve_pending {
             if let Some(ws) = self.workspaces.get_mut(workspace) {
                 ws.code_graph.reresolve_unresolved();
+                if completed.contains(&workspace) {
+                    let stats = ws.code_graph.stats();
+                    tracing::info!(
+                        target: "stoat::app",
+                        symbols = stats.symbols,
+                        edges = stats.edges,
+                        unresolved = stats.unresolved_edges,
+                        "code graph resolved after index build",
+                    );
+                }
             }
+        }
+
+        let elapsed = started.elapsed();
+        if drained > 0 && elapsed > SLOW_DRAIN_THRESHOLD {
+            tracing::warn!(
+                target: "stoat::app",
+                drained,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "index update drain exceeded the slow threshold",
+            );
         }
     }
 

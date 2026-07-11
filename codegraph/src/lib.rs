@@ -157,6 +157,17 @@ pub struct CodeGraph {
     content_hashes: HashMap<FileId, [u8; 32]>,
 }
 
+/// Aggregate counts describing a [`CodeGraph`]'s size, for logging and
+/// diagnostics. `unresolved_edges` is the count of cross-file references still
+/// awaiting a defining symbol, which stays high while a build is mid-flight and
+/// falls as [`CodeGraph::reresolve_unresolved`] links them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphStats {
+    pub symbols: usize,
+    pub edges: usize,
+    pub unresolved_edges: usize,
+}
+
 impl CodeGraph {
     /// Create an empty graph. Populate it by merging [`FileShard`]s.
     pub fn new() -> Self {
@@ -304,6 +315,19 @@ impl CodeGraph {
     pub fn reresolve_unresolved(&mut self) {
         self.reresolve_unresolved_inner();
         self.rebuild_adjacency();
+    }
+
+    /// Aggregate symbol, edge, and unresolved-edge counts for the whole graph.
+    pub fn stats(&self) -> GraphStats {
+        GraphStats {
+            symbols: self.symbols.len(),
+            edges: self.edges.len(),
+            unresolved_edges: self
+                .edges
+                .iter()
+                .filter(|edge| matches!(edge.to, Target::Unresolved { .. }))
+                .count(),
+        }
     }
 
     /// Re-link unresolved edges without rebuilding adjacency.
@@ -628,8 +652,8 @@ fn stitch_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_shard, CodeGraph, Confidence, Dir, Edge, EdgeKind, FileId, FileShard, Symbol,
-        SymbolKey, Target,
+        build_shard, CodeGraph, Confidence, Dir, Edge, EdgeKind, FileId, FileShard, GraphStats,
+        Symbol, SymbolKey, Target,
     };
     use stoat_language::{
         extract_references, extract_symbols, parse_rope, LanguageRegistry, RefKind, SymbolKind,
@@ -699,6 +723,35 @@ mod tests {
             .find(|e| e.0 == kind)
             .unwrap()
             .1
+    }
+
+    #[test]
+    fn stats_counts_symbols_edges_and_unresolved() {
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(shard_of(FileId(0), "a.rs", "fn a() {\n    foo();\n}\n"));
+        graph.insert_shard(shard_of(FileId(1), "b.rs", "fn foo() {}\n"));
+
+        assert_eq!(
+            graph.stats(),
+            GraphStats {
+                symbols: 2,
+                edges: 1,
+                unresolved_edges: 1,
+            },
+            "the cross-file call is unresolved until reresolve",
+        );
+
+        graph.reresolve_unresolved();
+
+        assert_eq!(
+            graph.stats(),
+            GraphStats {
+                symbols: 2,
+                edges: 1,
+                unresolved_edges: 0,
+            },
+            "reresolve links the call to the defined symbol",
+        );
     }
 
     #[test]

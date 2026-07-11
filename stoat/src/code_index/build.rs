@@ -20,6 +20,7 @@ use std::{
     ops::ControlFlow,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 use stoat_language::{extract_references, extract_symbols, parse_rope, Language, LanguageRegistry};
 use stoat_scheduler::{Executor, Task};
@@ -100,6 +101,7 @@ pub(crate) fn build_index(
         redraw,
     } = handles;
     executor.spawn_blocking(move || {
+        let started = Instant::now();
         let (index_dir, known) = match warm {
             Some((dir, manifest)) => {
                 let known: HashMap<String, [u8; 32]> = manifest
@@ -173,11 +175,18 @@ pub(crate) fn build_index(
             schema_version: SCHEMA_VERSION,
             files: entries,
         };
+        let file_count = manifest.files.len();
         let _ = tx.send(IndexUpdate::Complete {
             workspace,
             manifest,
         });
         redraw.notify_one();
+        tracing::info!(
+            target: "stoat::code_index",
+            files = file_count,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "index build complete",
+        );
     })
 }
 
