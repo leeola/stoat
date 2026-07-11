@@ -6,14 +6,34 @@
 struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
+    panel_count: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 @group(0) @binding(0)
 var<uniform> globals: Globals;
 
+// One rect per live modal box, in whole-cell units, plus its declaration-order
+// seq. A bar fragment is discarded inside any occluder whose seq exceeds the
+// bar's own, so a box hides the lower chrome beneath its body.
+struct Occluder {
+    cell: vec2<f32>,
+    size: vec2<f32>,
+    seq: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+}
+
+@group(0) @binding(1)
+var<storage, read> occluders: array<Occluder>;
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) color: vec3<f32>,
+    @location(1) @interpolate(flat) seq: u32,
 }
 
 @vertex
@@ -22,6 +42,7 @@ fn vs_main(
     @location(0) origin: vec2<f32>,
     @location(1) size: vec2<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) seq: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -42,10 +63,26 @@ fn vs_main(
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.color = color;
+    out.seq = seq;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Discard where a box declared later (higher seq) covers this bar, so a
+    // gutter hairline or a lower box's bar cannot show through an upper box.
+    let frag = in.clip.xy;
+    for (var j = 0u; j < globals.panel_count; j = j + 1u) {
+        let o = occluders[j];
+        if o.seq > in.seq {
+            let box_min = o.cell * globals.cell_size;
+            let box_max = (o.cell + o.size) * globals.cell_size;
+            if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y
+                && frag.y < box_max.y {
+                discard;
+            }
+        }
+    }
+
     return vec4<f32>(in.color, 1.0);
 }

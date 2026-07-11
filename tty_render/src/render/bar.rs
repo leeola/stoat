@@ -7,15 +7,16 @@
 //! cell-fraction units and the vertex shader scales it by the live cell size, so
 //! bars track font zoom.
 
-use crate::render::CellMetrics;
+use crate::render::{build_occluders, CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
-use stoatty_term::grid::{Bar, Rgb};
+use stoatty_term::grid::{Bar, Panel, Rgb};
 use wgpu::{
-    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor,
-    BufferUsages, ColorTargetState, ColorWrites, Device, FragmentState, PipelineLayoutDescriptor,
-    Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages, TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
+    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
+    BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, Device,
+    FragmentState, PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline,
+    RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat,
+    VertexBufferLayout, VertexState, VertexStepMode,
 };
 
 /// Instance buffer capacity, in bars, allocated up front. Grows by doubling when
@@ -25,28 +26,35 @@ const INITIAL_CAPACITY: usize = 16;
 /// Sixteenths of a cell per whole cell, the unit a [`Bar`] is declared in.
 const SIXTEENTHS: f32 = 16.0;
 
-/// Per-bar instance: the top-left and the size in cell-fraction units, and the
-/// fill color.
+/// The per-bar instance data. Carries the top-left and the size in
+/// cell-fraction units, the fill color, and the declaration-order seq the
+/// fragment shader occludes by.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct BarInstance {
     origin: [f32; 2],
     size: [f32; 2],
     color: [f32; 3],
+    seq: u32,
 }
 
-/// Uniform shared by every instance: the surface resolution and cell size the
-/// vertex shader maps cell-fraction coordinates through.
+/// The uniform shared by every instance. Carries the surface resolution and
+/// cell size the vertex shader maps cell-fraction coordinates through, and the
+/// panel-occluder count the fragment shader loops over. Padded to 32 bytes to
+/// match the WGSL uniform layout.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
+    panel_count: u32,
+    _pad: [u32; 3],
 }
 
 /// The instanced color-bar pipeline and its per-frame buffers.
 pub struct BarPass {
     pipeline: RenderPipeline,
+    bind_group_layout: BindGroupLayout,
     globals: Buffer,
     bind_group: BindGroup,
     instances: Buffer,
@@ -58,6 +66,11 @@ pub struct BarPass {
     composite_instances: Buffer,
     composite_capacity: usize,
     composite_count: u32,
+    /// One occluder per live panel, read by the fragment shader to discard bar
+    /// fragments a later box covers. Bound alongside the globals, and rebuilt
+    /// into a new bind group whenever it reallocates.
+    occluders: Buffer,
+    occluder_capacity: usize,
     metrics: CellMetrics,
 }
 
@@ -71,16 +84,28 @@ impl BarPass {
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("bar globals"),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -103,6 +128,7 @@ impl BarPass {
                         0 => Float32x2,
                         1 => Float32x2,
                         2 => Float32x3,
+                        3 => Uint32,
                     ],
                 }],
             },
@@ -130,20 +156,15 @@ impl BarPass {
             mapped_at_creation: false,
         });
 
-        let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("bar globals"),
-            layout: &bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: globals.as_entire_binding(),
-            }],
-        });
+        let occluders = alloc_occluders(device, INITIAL_CAPACITY);
+        let bind_group = make_bind_group(device, &bind_group_layout, &globals, &occluders);
 
         let instances = alloc_instances(device, INITIAL_CAPACITY);
         let composite_instances = alloc_instances(device, INITIAL_CAPACITY);
 
         BarPass {
             pipeline,
+            bind_group_layout,
             globals,
             bind_group,
             instances,
@@ -152,6 +173,8 @@ impl BarPass {
             composite_instances,
             composite_capacity: INITIAL_CAPACITY,
             composite_count: 0,
+            occluders,
+            occluder_capacity: INITIAL_CAPACITY,
             metrics,
         }
     }
@@ -161,14 +184,28 @@ impl BarPass {
         self.metrics = metrics;
     }
 
-    /// Upload the frame's uniform and one instance per grid bar.
+    /// Upload the frame's uniform, one occluder per live panel, and one instance
+    /// per grid bar.
     ///
-    /// `resolution` is the surface size in physical pixels. Reallocates the
-    /// instance buffer only when the bar count outgrows the current capacity.
-    pub fn prepare(&mut self, device: &Device, queue: &Queue, bars: &[Bar], resolution: [f32; 2]) {
+    /// `resolution` is the surface size in physical pixels. `panels` are the live
+    /// panels the bars occlude against. Reallocates the instance or occluder
+    /// buffer only when its count outgrows the current capacity.
+    pub fn prepare(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        bars: &[Bar],
+        panels: &[Panel],
+        resolution: [f32; 2],
+    ) {
+        let occluders = build_occluders(panels);
+        self.upload_occluders(device, queue, &occluders);
+
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
+            panel_count: occluders.len() as u32,
+            _pad: [0; 3],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -185,6 +222,24 @@ impl BarPass {
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
     }
 
+    /// Upload the panel occluders, reallocating the buffer and rebuilding the
+    /// bind group when the panel count outgrows the current capacity.
+    fn upload_occluders(&mut self, device: &Device, queue: &Queue, occluders: &[Occluder]) {
+        if occluders.len() > self.occluder_capacity {
+            self.occluder_capacity = occluders.len().next_power_of_two();
+            self.occluders = alloc_occluders(device, self.occluder_capacity);
+            self.bind_group = make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.globals,
+                &self.occluders,
+            );
+        }
+        if !occluders.is_empty() {
+            queue.write_buffer(&self.occluders, 0, bytemuck::cast_slice(occluders));
+        }
+    }
+
     /// Upload one instance per bar of a pool grid being composited, offset down
     /// by the pool's eased `shift_rows` so the bars glide with the page cells.
     ///
@@ -199,9 +254,13 @@ impl BarPass {
         resolution: [f32; 2],
         shift_rows: f32,
     ) {
+        // Pool bars are box content, not chrome beneath a box, so the composite
+        // draw never occludes. A zero panel count makes the shader loop a no-op.
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
+            panel_count: 0,
+            _pad: [0; 3],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -264,6 +323,40 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
     })
 }
 
+fn alloc_occluders(device: &Device, capacity: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("bar occluders"),
+        size: (capacity * size_of::<Occluder>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// Bind the globals uniform (binding 0) and the panel-occluder storage buffer
+/// (binding 1). Rebuilt whenever the occluder buffer reallocates, since the bind
+/// group holds a reference to the specific buffer.
+fn make_bind_group(
+    device: &Device,
+    layout: &BindGroupLayout,
+    globals: &Buffer,
+    occluders: &Buffer,
+) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
+        label: Some("bar globals"),
+        layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: globals.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: occluders.as_entire_binding(),
+            },
+        ],
+    })
+}
+
 /// One instance per bar, in draw order, converting the sixteenth-cell wire units
 /// to the cell-fraction units the shader scales by the cell size.
 ///
@@ -283,6 +376,7 @@ fn build_bar_instances(bars: &[Bar], shift_rows: f32) -> Vec<BarInstance> {
                 f32::from(bar.height) / SIXTEENTHS,
             ],
             color: rgb_f32(bar.color),
+            seq: bar.seq,
         })
         .collect()
 }
@@ -320,7 +414,7 @@ mod tests {
             width: 3,
             height: 24,
             color: Rgb::new(220, 50, 47),
-            seq: 0,
+            seq: 7,
         }];
 
         let instances = build_bar_instances(&bars, 0.0);
@@ -332,6 +426,7 @@ mod tests {
             instances[0].color,
             [220.0 / 255.0, 50.0 / 255.0, 47.0 / 255.0]
         );
+        assert_eq!(instances[0].seq, 7, "the bar's occlusion seq is carried");
     }
 
     #[test]

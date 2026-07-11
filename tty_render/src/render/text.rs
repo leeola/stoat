@@ -10,7 +10,7 @@
 
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
-    render::{CellMetrics, Frame},
+    render::{build_occluders, CellMetrics, Frame, Occluder},
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
@@ -44,6 +44,12 @@ const INITIAL_CAPACITY: usize = 2048;
 const KIND_MASK: u32 = 0;
 const KIND_COLOR: u32 = 1;
 
+/// The seq stamped on glyphs no box occludes. Grid, region, overlay, and HUD
+/// glyphs carry it. It is larger than any panel's seq, so the occlusion loop
+/// never discards them, leaving only the off-grid text runs (which carry a real
+/// per-run seq) occludable.
+const UNOCCLUDED_SEQ: u32 = u32::MAX;
+
 /// Underline style packed into each decoration instance, matching the shader's
 /// constants.
 const STYLE_STRAIGHT: u32 = 0;
@@ -74,6 +80,9 @@ struct TextInstance {
     fg: [f32; 3],
     /// Atlas to sample: [`KIND_MASK`] or [`KIND_COLOR`].
     kind: u32,
+    /// Declaration-order seq the fragment shader occludes by. Text-run glyphs
+    /// carry their run's seq, and every other glyph carries [`UNOCCLUDED_SEQ`].
+    seq: u32,
 }
 
 /// Per-underlined-cell decoration instance.
@@ -103,6 +112,9 @@ struct RectInstance {
     dim: [f32; 2],
     /// Fill color, normalized sRGB.
     color: [f32; 3],
+    /// Declaration-order seq the fragment shader occludes by, taken from the run
+    /// this rect backs.
+    seq: u32,
 }
 
 /// Uniform shared by every instance: the surface resolution the vertex shader
@@ -117,8 +129,12 @@ struct TextGlobals {
     /// the glyph instances. Differs per draw: grid scroll for plain glyphs,
     /// region scroll for region glyphs, zero for screen-anchored runs/overlays.
     scroll_y: f32,
+    /// Panel-occluder count the fragment shader loops over. Non-zero only in the
+    /// static globals bound for the text-run draws, so grid, region, overlay,
+    /// and pool draws skip the loop entirely.
+    panel_count: u32,
     /// Pads the struct to the 32-byte (16-aligned) size a uniform requires.
-    _pad: [f32; 3],
+    _pad: [f32; 2],
 }
 
 /// The instanced glyph pipeline together with the font system, glyph atlas, and
@@ -142,6 +158,14 @@ pub struct TextPass {
     /// overlay-content draws, which must not move with the grid.
     static_globals: Buffer,
     static_globals_bind_group: BindGroup,
+    /// The group-0 layout the three globals bind groups share, kept so they can
+    /// be rebuilt when [`Self::occluders`] reallocates.
+    globals_layout: BindGroupLayout,
+    /// One occluder per live panel at binding 1, shared by all three globals
+    /// bind groups. Read by the run-glyph and run-rect fragment shaders to
+    /// discard run fragments a later box covers.
+    occluders: Buffer,
+    occluder_capacity: usize,
     atlas_layout: BindGroupLayout,
     sampler: Sampler,
     atlas_bind_group: BindGroup,
@@ -300,19 +324,31 @@ impl TextPass {
 
         let globals_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("text globals"),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                // The underline pipeline shares this layout and reads
-                // globals.cell_size in its fragment to place the underline, so
-                // globals must be visible to the fragment stage.
-                visibility: ShaderStages::VERTEX_FRAGMENT,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    // The underline pipeline shares this layout and reads
+                    // globals.cell_size in its fragment to place the underline, so
+                    // globals must be visible to the fragment stage.
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let atlas_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -351,6 +387,7 @@ impl TextPass {
                         2 => Float32x4,
                         3 => Float32x3,
                         4 => Uint32,
+                        5 => Uint32,
                     ],
                 }],
             },
@@ -374,14 +411,20 @@ impl TextPass {
         let underline_pipeline = build_underline_pipeline(device, &shader, &globals_layout, format);
         let rect_pipeline = build_rect_pipeline(device, &shader, &globals_layout, format);
 
+        // The three globals buffers and the run-rect and glyph pipelines all
+        // read the same panel occluders at binding 1, so it is allocated before
+        // their bind groups.
+        let occluders = alloc_occluders(device, INITIAL_CAPACITY);
+
         // Three globals buffers share one layout but carry a different scroll_y,
         // so the plain, region, and screen-anchored draws each scroll correctly
         // within a single render pass.
-        let (globals, globals_bind_group) = make_globals(device, &globals_layout, "text globals");
+        let (globals, globals_bind_group) =
+            make_globals(device, &globals_layout, &occluders, "text globals");
         let (region_globals, region_globals_bind_group) =
-            make_globals(device, &globals_layout, "text region globals");
+            make_globals(device, &globals_layout, &occluders, "text region globals");
         let (static_globals, static_globals_bind_group) =
-            make_globals(device, &globals_layout, "text static globals");
+            make_globals(device, &globals_layout, &occluders, "text static globals");
 
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("text atlas"),
@@ -461,6 +504,9 @@ impl TextPass {
             region_globals_bind_group,
             static_globals,
             static_globals_bind_group,
+            globals_layout,
+            occluders,
+            occluder_capacity: INITIAL_CAPACITY,
             atlas_layout,
             sampler,
             atlas_bind_group,
@@ -538,6 +584,40 @@ impl TextPass {
         self.shape_cache.clear();
     }
 
+    /// Upload the panel occluders, reallocating the buffer and rebuilding all
+    /// three globals bind groups when the panel count outgrows the current
+    /// capacity.
+    fn upload_occluders(&mut self, device: &Device, queue: &Queue, occluders: &[Occluder]) {
+        if occluders.len() > self.occluder_capacity {
+            self.occluder_capacity = occluders.len().next_power_of_two();
+            self.occluders = alloc_occluders(device, self.occluder_capacity);
+            self.globals_bind_group = make_globals_bind_group(
+                device,
+                &self.globals_layout,
+                &self.globals,
+                &self.occluders,
+                "text globals",
+            );
+            self.region_globals_bind_group = make_globals_bind_group(
+                device,
+                &self.globals_layout,
+                &self.region_globals,
+                &self.occluders,
+                "text region globals",
+            );
+            self.static_globals_bind_group = make_globals_bind_group(
+                device,
+                &self.globals_layout,
+                &self.static_globals,
+                &self.occluders,
+                "text static globals",
+            );
+        }
+        if !occluders.is_empty() {
+            queue.write_buffer(&self.occluders, 0, bytemuck::cast_slice(occluders));
+        }
+    }
+
     /// Shape, rasterize, and upload the frame's glyph instances for `grid`.
     ///
     /// `resolution` is the surface size in physical pixels. `scroll.popovers`
@@ -571,12 +651,19 @@ impl TextPass {
         let damage = frame.damage;
         let decoration_damage = frame.decoration_damage;
 
+        // Upload one occluder per live panel, shared by the three globals bind
+        // groups. Only the static globals carry a non-zero panel count, so only
+        // the screen-anchored text-run draws occlude against these.
+        let occluders = build_occluders(grid.panels());
+        self.upload_occluders(device, queue, &occluders);
+        let panel_count = occluders.len() as u32;
+
         // Write each globals buffer with its own scroll: grid scroll for the
         // plain glyphs, region scroll for the region glyphs, none for the
         // screen-anchored runs and overlays. Done every frame so a scroll-only
         // frame refreshes the uniforms without rebuilding instances.
         let cell_size = [self.metrics.width, self.metrics.height];
-        let write_globals = |buffer: &Buffer, scroll_y: f32| {
+        let write_globals = |buffer: &Buffer, scroll_y: f32, panel_count: u32| {
             queue.write_buffer(
                 buffer,
                 0,
@@ -584,16 +671,18 @@ impl TextPass {
                     resolution,
                     cell_size,
                     scroll_y,
-                    _pad: [0.0; 3],
+                    panel_count,
+                    _pad: [0.0; 2],
                 }),
             );
         };
         write_globals(
             &self.globals,
             (scroll.grid + scroll.document + scroll.scrollback) * self.metrics.height,
+            0,
         );
-        write_globals(&self.region_globals, scroll.region * self.metrics.height);
-        write_globals(&self.static_globals, 0.0);
+        write_globals(&self.region_globals, scroll.region * self.metrics.height, 0);
+        write_globals(&self.static_globals, 0.0, panel_count);
 
         // Underlines are built first, before the glyph path can return early on
         // an all-blank grid: an underlined space has no glyph but still draws.
@@ -802,6 +891,8 @@ impl TextPass {
         shift_rows: f32,
         content_changed: bool,
     ) {
+        // A pool draw carries page content, not chrome beneath a box, so its
+        // globals leave the panel count at zero and the shader loop never runs.
         queue.write_buffer(
             &self.globals,
             0,
@@ -809,7 +900,8 @@ impl TextPass {
                 resolution,
                 cell_size: [self.metrics.width, self.metrics.height],
                 scroll_y: shift_rows * self.metrics.height,
-                _pad: [0.0; 3],
+                panel_count: 0,
+                _pad: [0.0; 2],
             }),
         );
 
@@ -975,6 +1067,7 @@ impl TextPass {
                 uv: info.uv,
                 fg: rgb_f32(glyph.fg),
                 kind: kind_flag(info.kind),
+                seq: UNOCCLUDED_SEQ,
             });
         }
         instances
@@ -1058,6 +1151,7 @@ impl TextPass {
                     uv: info.uv,
                     fg: rgb_f32(run.color),
                     kind: kind_flag(info.kind),
+                    seq: run.seq,
                 });
             }
         }
@@ -1087,6 +1181,7 @@ impl TextPass {
                 pos: [col * self.metrics.width, row * self.metrics.height],
                 dim: [width, self.metrics.height],
                 color: rgb_f32(run.bg),
+                seq: run.seq,
             });
         }
         rects
@@ -1311,6 +1406,7 @@ impl TextPass {
                     uv: info.uv,
                     fg: READOUT_FG,
                     kind: kind_flag(info.kind),
+                    seq: UNOCCLUDED_SEQ,
                 });
             }
         }
@@ -1965,6 +2061,7 @@ fn build_rect_pipeline(
                     0 => Float32x2,
                     1 => Float32x2,
                     2 => Float32x3,
+                    3 => Uint32,
                 ],
             }],
         },
@@ -1989,23 +2086,56 @@ fn build_rect_pipeline(
 /// Build a [`TextGlobals`] uniform buffer and its bind group over `layout`.
 ///
 /// The pass keeps three: one per distinct per-draw `scroll_y`, all sharing the
-/// group-0 layout.
-fn make_globals(device: &Device, layout: &BindGroupLayout, label: &str) -> (Buffer, BindGroup) {
+/// group-0 layout and the shared `occluders` storage buffer at binding 1.
+fn make_globals(
+    device: &Device,
+    layout: &BindGroupLayout,
+    occluders: &Buffer,
+    label: &str,
+) -> (Buffer, BindGroup) {
     let buffer = device.create_buffer(&BufferDescriptor {
         label: Some(label),
         size: size_of::<TextGlobals>() as u64,
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+    let bind_group = make_globals_bind_group(device, layout, &buffer, occluders, label);
+    (buffer, bind_group)
+}
+
+/// Bind a globals uniform (binding 0) and the shared panel-occluder storage
+/// buffer (binding 1) over `layout`. Rebuilt for each of the three globals
+/// buffers whenever the occluder buffer reallocates.
+fn make_globals_bind_group(
+    device: &Device,
+    layout: &BindGroupLayout,
+    globals: &Buffer,
+    occluders: &Buffer,
+    label: &str,
+) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
         label: Some(label),
         layout,
-        entries: &[BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
-    });
-    (buffer, bind_group)
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: globals.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: occluders.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+fn alloc_occluders(device: &Device, capacity: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("text occluders"),
+        size: (capacity * size_of::<Occluder>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn create_atlas_bind_group(
@@ -2505,7 +2635,7 @@ mod tests {
         Family, FontSystem,
     };
     use stoatty_term::{
-        grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle},
+        grid::{Cell, Grid, Overlay, Rgb, Scale, TextRun, UnderlineStyle},
         term::Damage,
     };
     use wgpu::{
@@ -2918,6 +3048,31 @@ mod tests {
         for (col, ch) in text.chars().enumerate() {
             grid.get_mut(row, col).ch = ch;
         }
+    }
+
+    #[test]
+    fn run_rect_carries_its_run_occlusion_seq() {
+        let Some((_device, _queue, pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(2, 12);
+        grid.set_text_runs(vec![TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(1, 2, 3),
+            bg: Rgb::new(4, 5, 6),
+            text: "42".to_owned(),
+            seq: 42,
+        }]);
+
+        let rects = pass.build_run_rects(&grid);
+
+        assert_eq!(rects.len(), 1);
+        assert_eq!(
+            rects[0].seq, 42,
+            "the run rect carries its run's occlusion seq"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The grid render passes that draw [`stoatty_term`]'s cells.
 
-use stoatty_term::term::Damage;
+use bytemuck::{Pod, Zeroable};
+use stoatty_term::{grid::Panel, term::Damage};
 
 pub mod background;
 pub mod bar;
@@ -97,6 +98,38 @@ impl CellMetrics {
             height: font_size * 1.2,
         }
     }
+}
+
+/// A panel's cell rectangle plus its declaration-order seq, uploaded to a
+/// storage buffer the bar, text-run, and icon fragment shaders read to occlude
+/// what a box covers.
+///
+/// The rect is in whole-cell units, which a shader scales by the cell size. A
+/// drawn fragment is discarded when it lies inside an occluder whose `seq`
+/// exceeds the drawn instance's own seq, so a box declared later (higher seq)
+/// hides the lower chrome beneath its body while a box's own runs and bars
+/// (seq above their panel) survive. Padded to 32 bytes so the storage-array
+/// stride matches the 8-byte-aligned `vec2` layout WGSL computes.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct Occluder {
+    cell: [f32; 2],
+    size: [f32; 2],
+    seq: u32,
+    _pad: [u32; 3],
+}
+
+/// One occluder per panel, in declaration order.
+pub(crate) fn build_occluders(panels: &[Panel]) -> Vec<Occluder> {
+    panels
+        .iter()
+        .map(|panel| Occluder {
+            cell: [panel.left as f32, panel.top as f32],
+            size: [panel.width as f32, panel.height as f32],
+            seq: panel.seq,
+            _pad: [0; 3],
+        })
+        .collect()
 }
 
 /// The `[width, height]` of one cell, in pixels, for `font_size` at

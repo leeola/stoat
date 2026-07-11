@@ -375,8 +375,10 @@ impl Renderer {
         self.text.prepare(device, queue, grid, resolution, &frame);
         self.panel.prepare(device, queue, grid, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
-        self.icon.prepare(device, queue, grid.icons(), resolution);
-        self.bar.prepare(device, queue, grid.bars(), resolution);
+        self.icon
+            .prepare(device, queue, grid.icons(), grid.panels(), resolution);
+        self.bar
+            .prepare(device, queue, grid.bars(), grid.panels(), resolution);
 
         // Time this frame's GPU work when the timer's current slot is free.
         #[cfg(feature = "perf")]

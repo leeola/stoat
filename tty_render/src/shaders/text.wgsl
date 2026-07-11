@@ -13,10 +13,28 @@ struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
     scroll_y: f32,
+    panel_count: u32,
+    pad0: u32,
+    pad1: u32,
 }
 
 @group(0) @binding(0)
 var<uniform> globals: Globals;
+
+// One rect per live modal box, in whole-cell units, plus its declaration-order
+// seq. Only the static globals bound for the text-run draws carry a non-zero
+// panel_count, so grid, region, overlay, and pool draws never loop here.
+struct Occluder {
+    cell: vec2<f32>,
+    size: vec2<f32>,
+    seq: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+}
+
+@group(0) @binding(1)
+var<storage, read> occluders: array<Occluder>;
 
 @group(1) @binding(0) var mask_atlas: texture_2d<f32>;
 @group(1) @binding(1) var color_atlas: texture_2d<f32>;
@@ -25,11 +43,31 @@ var<uniform> globals: Globals;
 const KIND_MASK: u32 = 0u;
 const KIND_COLOR: u32 = 1u;
 
+// True when the fragment at `frag` (physical px) lies inside a box declared
+// later (higher seq) than `seq`, so a text run beneath an upper box is hidden by
+// it. Text-run glyphs and rects carry their run's seq; every other glyph carries
+// a sentinel seq no panel exceeds, and its draw leaves panel_count at zero.
+fn occluded(frag: vec2<f32>, seq: u32) -> bool {
+    for (var j = 0u; j < globals.panel_count; j = j + 1u) {
+        let o = occluders[j];
+        if o.seq > seq {
+            let box_min = o.cell * globals.cell_size;
+            let box_max = (o.cell + o.size) * globals.cell_size;
+            if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y
+                && frag.y < box_max.y {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) fg: vec3<f32>,
     @location(2) @interpolate(flat) kind: u32,
+    @location(3) @interpolate(flat) seq: u32,
 }
 
 @vertex
@@ -40,6 +78,7 @@ fn vs_main(
     @location(2) uv: vec4<f32>,
     @location(3) fg: vec3<f32>,
     @location(4) kind: u32,
+    @location(5) seq: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -62,11 +101,19 @@ fn vs_main(
     out.uv = mix(uv.xy, uv.zw, corner);
     out.fg = fg;
     out.kind = kind;
+    out.seq = seq;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // A text-run glyph beneath a later box is discarded so it cannot show
+    // through the box body. Grid, region, overlay, and pool glyphs carry a
+    // sentinel seq and a zero panel count, so this never fires for them.
+    if occluded(in.clip.xy, in.seq) {
+        discard;
+    }
+
     // Premultiplied-alpha coverage. The pipeline blends this over the
     // framebuffer, and because the target is not sRGB, that fixed-function
     // blend is a per-channel sRGB-space mix from the destination to `fg`.
@@ -171,6 +218,7 @@ fn fs_underline(in: UnderlineVsOut) -> @location(0) vec4<f32> {
 struct RectVsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) color: vec3<f32>,
+    @location(1) @interpolate(flat) seq: u32,
 }
 
 @vertex
@@ -179,6 +227,7 @@ fn vs_rect(
     @location(0) pos: vec2<f32>,
     @location(1) dim: vec2<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) seq: u32,
 ) -> RectVsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -199,10 +248,17 @@ fn vs_rect(
     var out: RectVsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.color = color;
+    out.seq = seq;
     return out;
 }
 
 @fragment
 fn fs_rect(in: RectVsOut) -> @location(0) vec4<f32> {
+    // A run-background rect beneath a later box is discarded, like the run's
+    // glyphs, so the opaque box masks it instead of it showing through.
+    if occluded(in.clip.xy, in.seq) {
+        discard;
+    }
+
     return vec4<f32>(in.color, 1.0);
 }

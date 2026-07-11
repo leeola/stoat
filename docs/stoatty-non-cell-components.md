@@ -152,6 +152,17 @@ leaves blank, so its bars and numbers sit over the cleared gutter region rather
 than over body text. Exact z-order among components follows declaration order,
 as the overlay and icon lists already do.
 
+Fragment occlusion now enforces that order among the off-grid primitives. Each
+panel, bar, text run, and icon carries a monotonic declaration-order `seq`, and
+the panel, bar, run, and icon fragment shaders discard any fragment that falls
+inside a panel declared later (higher `seq`) than the fragment's own. A box's
+body therefore reads as opaque over the lower chrome beneath it -- a lower box's
+border and shadow, gutter hairlines and line numbers, and status icons no longer
+show through an upper box -- while a box's own runs and bars (declared after its
+panel, so higher `seq`) survive. Pool-composited page content carries `seq` 0
+and its draws leave the panel count at zero, so the occlusion is confined to the
+live main-pass decorations.
+
 ### (5) Staging toward multi-surface compositing
 
 The surface abstraction is chosen so multiple surfaces are an extension, not a
