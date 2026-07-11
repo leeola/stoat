@@ -96,14 +96,14 @@ impl ArgPicker {
     /// The picker currently driving the list. Browse mode (a `/` or `~/`
     /// argument) swaps in its own directory-walk picker; every other argument
     /// drives the workspace `core`.
-    fn active_core(&mut self) -> &mut PathPicker {
+    pub(crate) fn active_core(&mut self) -> &mut PathPicker {
         match &mut self.browse {
             Some(browse) => &mut browse.picker,
             None => &mut self.core,
         }
     }
 
-    fn active_core_ref(&self) -> &PathPicker {
+    pub(crate) fn active_core_ref(&self) -> &PathPicker {
         match &self.browse {
             Some(browse) => &browse.picker,
             None => &self.core,
@@ -1175,6 +1175,24 @@ mod tests {
             "a ~/ tail enters browse mode"
         );
         assert_eq!(browse_dir_rows(&h), ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn snapshot_palette_cd_browse_rows() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs().insert_files([
+            (home.join("alpha/f.rs"), "a".as_bytes()),
+            (home.join("beta/f.rs"), "b".as_bytes()),
+        ]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_text(":cd ~/");
+        let _ = h.snapshot();
+        h.settle();
+
+        h.assert_snapshot("snapshot_palette_cd_browse_rows");
     }
 
     #[test]

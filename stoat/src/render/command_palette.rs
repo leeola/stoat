@@ -185,7 +185,7 @@ fn render_palette_arg_picker(
             scene,
         );
         crate::render::picker::render_picker_preview(
-            &picker.core.preview,
+            &picker.active_core_ref().preview,
             preview_rect,
             theme,
             ws,
@@ -193,17 +193,22 @@ fn render_palette_arg_picker(
         );
     }
 
-    picker.core.picklist.viewport_rows = Some(list.height as usize);
+    let prefix = picker
+        .browse
+        .as_ref()
+        .map(|browse| browse.typed_dir.clone())
+        .unwrap_or_default();
+    picker.active_core().picklist.viewport_rows = Some(list.height as usize);
     let rows = list.height as usize;
-    let start_row = picker
-        .core
+    let core = picker.active_core_ref();
+    let start_row = core
         .picklist
         .selected
         .saturating_sub(rows.saturating_sub(1));
     crate::render::picker::paint_path_rows(
-        &picker.core.picklist,
-        &picker.core.git_root,
-        "",
+        &core.picklist,
+        &core.git_root,
+        &prefix,
         list,
         start_row,
         theme,

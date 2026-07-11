@@ -607,10 +607,16 @@ pub(crate) fn render_arg_page(
     let start_row = page
         .saturating_mul(region_height as u64)
         .min(usize::MAX as u64) as usize;
+    let core = picker.active_core_ref();
+    let prefix = picker
+        .browse
+        .as_ref()
+        .map(|browse| browse.typed_dir.as_str())
+        .unwrap_or_default();
     crate::render::picker::paint_path_rows(
-        &picker.core.picklist,
-        &picker.core.git_root,
-        "",
+        &core.picklist,
+        &core.git_root,
+        prefix,
         area,
         start_row,
         theme,
