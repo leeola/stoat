@@ -1562,6 +1562,26 @@ define_action!(
 );
 
 define_action!(
+    ExtendToLineBoundsDef,
+    ExtendToLineBounds,
+    "ExtendToLineBounds",
+    ActionKind::ExtendToLineBounds,
+    "extend to line bounds",
+    "Extend every selection to cover the whole lines it touches, from the first line's start to past the last line's ending, preserving direction.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ShrinkToLineBoundsDef,
+    ShrinkToLineBounds,
+    "ShrinkToLineBounds",
+    ActionKind::ShrinkToLineBounds,
+    "shrink to line bounds",
+    "Shrink every multi-line selection to the whole lines fully inside it, trimming a partial first or last line. A selection within one line is left unchanged.",
+    ActionPriority::Rare
+);
+
+define_action!(
     KeepPrimarySelectionDef,
     KeepPrimarySelection,
     "KeepPrimarySelection",

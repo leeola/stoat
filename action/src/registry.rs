@@ -18,8 +18,8 @@ use crate::{
             ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
             ExtendPrevWordStart, ExtendRight, ExtendSelectNextSibling, ExtendSelectPrevSibling,
             ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
-            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
-            FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
+            ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
+            FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
             GotoDiffCallerUp, GotoFileStart, GotoFirstNonwhitespace, GotoImplementors,
             GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact,
             GotoNextChange, GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange,
@@ -39,7 +39,7 @@ use crate::{
             SelectAllChildren, SelectAllSiblings, SelectLineBelow, SelectNextSibling,
             SelectPrevSibling, SelectRegex, SelectRegister, SelectTextobjectAround,
             SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
-            ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection,
+            ShellPipe, ShellPipeTo, ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection,
             SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
             SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
             ToggleInlayHints, ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion,
@@ -556,6 +556,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(FlipSelections::DEF, |_| Ok(Box::new(FlipSelections)));
     add(SelectAll::DEF, |_| Ok(Box::new(SelectAll)));
     add(SelectLineBelow::DEF, |_| Ok(Box::new(SelectLineBelow)));
+    add(ExtendToLineBounds::DEF, |_| {
+        Ok(Box::new(ExtendToLineBounds))
+    });
+    add(ShrinkToLineBounds::DEF, |_| {
+        Ok(Box::new(ShrinkToLineBounds))
+    });
     add(KeepPrimarySelection::DEF, |_| {
         Ok(Box::new(KeepPrimarySelection))
     });
@@ -1192,7 +1198,8 @@ mod tests {
         // + 1 InsertAtLineStart.
         // + 1 InsertTab.
         // + 1 SelectRegex.
-        assert_eq!(all().count(), 325);
+        // + 2 ExtendToLineBounds / ShrinkToLineBounds.
+        assert_eq!(all().count(), 327);
     }
 
     #[test]

@@ -297,6 +297,8 @@ on key {
         & -> AlignSelections();
         % -> SelectAll();
         x -> SelectLineBelow();
+        X -> ExtendToLineBounds();
+        Alt-x -> ShrinkToLineBounds();
         , -> KeepPrimarySelection();
         Alt-, -> RemovePrimarySelection();
         ( -> RotateSelectionsBackward();
@@ -416,6 +418,8 @@ on key {
         Alt-; -> FlipSelections();
         S -> SplitSelection();
         s -> SelectRegex();
+        X -> ExtendToLineBounds();
+        Alt-x -> ShrinkToLineBounds();
         Q -> RecordMacro();
         > -> IndentSelection();
         < -> UnindentSelection();

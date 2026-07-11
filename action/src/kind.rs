@@ -206,6 +206,8 @@ pub enum ActionKind {
     FlipSelections,
     SelectAll,
     SelectLineBelow,
+    ExtendToLineBounds,
+    ShrinkToLineBounds,
     KeepPrimarySelection,
     RemovePrimarySelection,
     RotateSelectionsForward,

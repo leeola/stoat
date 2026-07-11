@@ -2328,6 +2328,109 @@ pub(super) fn select_line_below(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn extend_to_line_bounds(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let max_row = rope.max_point().row;
+    let rope_len = rope.len();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let (start_row, end_row) = selection_line_range(sel, rope, buffer_snapshot);
+        let start = line_start_offset(rope, start_row, max_row, rope_len);
+        let end = line_start_offset(rope, end_row + 1, max_row, rope_len);
+        line_bound_selection(sel, start, end, rope, buffer_snapshot)
+    });
+    UpdateEffect::Redraw
+}
+
+pub(super) fn shrink_to_line_bounds(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let max_row = rope.max_point().row;
+    let rope_len = rope.len();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let (start_row, end_row) = selection_line_range(sel, rope, buffer_snapshot);
+        // A selection within one line stays put, sparing this command any
+        // single-line special cases.
+        if start_row == end_row {
+            return sel.clone();
+        }
+        let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
+        let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
+
+        let mut start = line_start_offset(rope, start_row, max_row, rope_len);
+        let mut end = line_start_offset(rope, end_row + 1, max_row, rope_len);
+        // Trim a partial first or last line. A start already at the line
+        // boundary stays, otherwise it moves down one line, and likewise the end
+        // moves up when it is not at the line-after boundary.
+        if start != start_offset {
+            start = line_start_offset(rope, start_row + 1, max_row, rope_len);
+        }
+        if end != end_offset {
+            end = line_start_offset(rope, end_row, max_row, rope_len);
+        }
+        line_bound_selection(sel, start, end, rope, buffer_snapshot)
+    });
+    UpdateEffect::Redraw
+}
+
+/// Offset of the start of display-independent buffer `row`, or the rope end for
+/// a row past the last one (so a selection can extend past the final line).
+fn line_start_offset(rope: &Rope, row: u32, max_row: u32, rope_len: usize) -> usize {
+    if row > max_row {
+        rope_len
+    } else {
+        rope.point_to_offset(Point::new(row, 0))
+    }
+}
+
+/// The first and last buffer rows a selection covers, following Helix's
+/// `line_range`: a forward selection ending exactly at a line start does not
+/// count that line, since its block cursor rests on the previous line.
+fn selection_line_range(
+    sel: &Selection<Anchor>,
+    rope: &Rope,
+    buffer: &MultiBufferSnapshot,
+) -> (u32, u32) {
+    let start_offset = buffer.resolve_anchor(&sel.start);
+    let end_offset = buffer.resolve_anchor(&sel.end);
+    let start_row = rope.offset_to_point(start_offset).row;
+    let end_point = rope.offset_to_point(end_offset);
+    let end_row = if end_offset > start_offset && end_point.column == 0 {
+        end_point.row.saturating_sub(1)
+    } else {
+        end_point.row
+    };
+    (start_row, end_row)
+}
+
+/// Build a selection spanning `[start, end)`, preserving the source direction
+/// and widening a collapsed span to one cell.
+fn line_bound_selection(
+    sel: &Selection<Anchor>,
+    start: usize,
+    end: usize,
+    rope: &Rope,
+    buffer: &MultiBufferSnapshot,
+) -> Selection<Anchor> {
+    let resolved = Selection {
+        id: sel.id,
+        start,
+        end,
+        reversed: sel.reversed,
+        goal: SelectionGoal::None,
+    }
+    .min_width_1(rope);
+    anchor_selection(resolved, buffer)
+}
+
 pub(super) fn keep_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -4342,5 +4445,52 @@ mod tests {
             editor.scroll_offset as u32, editor.scroll_row,
             "offset syncs to the integer row"
         );
+    }
+
+    fn set_range(h: &mut TestHarness, start: usize, end: usize) {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf = snapshot.buffer_snapshot();
+        let start_anchor = buf.anchor_at(start, Bias::Right);
+        let end_anchor = buf.anchor_at(end, Bias::Right);
+        editor.selections.transform(buf, |sel| Selection {
+            id: sel.id,
+            start: start_anchor,
+            end: end_anchor,
+            reversed: false,
+            goal: SelectionGoal::None,
+        });
+    }
+
+    #[test]
+    fn extend_to_line_bounds_covers_full_lines() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        // "bc\nd" spans the middle of line 0 through the middle of line 1.
+        set_range(&mut h, 1, 5);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLineBounds);
+        assert_eq!(h.selection_spans(), vec![(0, 8, false)]);
+    }
+
+    #[test]
+    fn shrink_to_line_bounds_trims_partial_lines() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        // Line 0 from its middle through line 2's middle: only line 1 is whole.
+        set_range(&mut h, 1, 9);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkToLineBounds);
+        assert_eq!(h.selection_spans(), vec![(4, 8, false)]);
+    }
+
+    #[test]
+    fn shrink_to_line_bounds_within_one_line_is_noop() {
+        let mut h = TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        set_range(&mut h, 1, 4);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkToLineBounds);
+        assert_eq!(h.selection_spans(), vec![(1, 4, false)]);
     }
 }
