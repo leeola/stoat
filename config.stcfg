@@ -147,27 +147,72 @@ on init {
     # absolute (each line's own number), or off (diagnostic marks only).
     editor.line_numbers = relative;
 
+    # Rows the view keeps between the cursor and the top or bottom edge when
+    # following the cursor.
+    editor.scrolloff = 3;
+
+    # Log the LSP text-protocol transcript. Off by default.
+    text_proto_log = false;
+
+    # Run LSP formatting on the focused buffer before each save when the server
+    # advertises the capability. Off by default. A format that errors or exceeds
+    # the save-time budget writes the buffer unchanged.
+    format_on_save = false;
+
     # Automatically follow an open working-tree review as the project changes
-    # on disk: external edits, commits, and newly-changed files refresh it.
-    # Default on. Set false to require a manual `r` instead.
-    # review.follow = false;
+    # on disk: external edits, commits, and newly-changed files refresh it. On
+    # by default. Set false to require a manual `r` instead.
+    review.follow = true;
 
     # When a rebase pauses on a clean tree (an external `git rebase` stopped at
     # edit or break), show the just-applied commit's diff and follow each step.
-    # Default on. Set false to keep the empty clean-tree view instead.
-    # review.rebase_head = false;
+    # On by default. Set false to keep the empty clean-tree view instead.
+    review.rebase_head = true;
+
+    # Warm the diff cache in the background so opening review is near-instant. On
+    # by default. Set false to turn the background diffing off.
+    review.precompute = true;
+
+    # Mouse-capture policy at startup: auto disables capture under a parent
+    # multiplexer ($TMUX / $ZELLIJ) so it keeps drag-select, always forces
+    # capture on, never disables it.
+    mouse.capture = auto;
+
+    # Load the workspace's direnv environment automatically (nix flakes,
+    # `.envrc`). On by default. Set false to disable all automatic loading.
+    direnv.load = true;
+
+    # Reload the direnv environment when the working directory changes. On by
+    # default. Ignored when direnv.load is off.
+    direnv.reload_on_cd = true;
+
+    # Apply a direnv diff that only reverts the inherited environment. Off by
+    # default, so opening a directory with no governing `.envrc` keeps the
+    # inherited env. A diff that loads an `.envrc` always applies regardless.
+    direnv.unset_on_exit = false;
+
+    # Finder scope a fresh workspace opens in: a builtin (all / modified) or a
+    # finder.scope.<name> entry.
+    finder.default_scope = all;
+
+    # Program a terminal pane spawns as its subshell. Falls back to $SHELL, then
+    # /bin/sh, when unset.
+    # terminal.shell = "/bin/zsh";
+
+    # Arguments passed to the terminal pane's subshell.
+    # terminal.args = ["-l"];
 
     # Override the language server for a language. The first list element is
     # the executable and the rest are arguments. An empty list disables it.
     # lsp.server.rust = ["rust-analyzer"];
 
-    # Load the workspace's direnv environment automatically (nix flakes,
-    # `.envrc`). Default on. Set false to disable all automatic loading.
-    # direnv.load = false;
+    # Status-line badge label for a mode, overriding the builtin table so a
+    # user-defined mode shows something clearer than `---`.
+    # ui.mode_badge.mymode = "MYM";
 
-    # Reload the direnv environment when the working directory changes.
-    # Default on. Ignored when direnv.load is off.
-    # direnv.reload_on_cd = false;
+    # Named finder scope: globs relative to the workspace root that Shift-Tab
+    # cycles to after All and Modified.
+    # finder.scope.src = ["src/**"];
 }
 
 on key {

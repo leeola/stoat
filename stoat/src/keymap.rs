@@ -545,7 +545,8 @@ pub(crate) fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stoat_config::{LineNumbers, Settings};
+    use std::collections::BTreeMap;
+    use stoat_config::{LineNumbers, MouseCapturePolicy, Settings};
 
     struct TestState {
         values: HashMap<String, StateValue>,
@@ -928,11 +929,33 @@ mod tests {
     }
 
     #[test]
-    fn default_config_sets_relative_line_numbers() {
+    fn default_config_pins_every_setting_default() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        // The embedded config must actively set every fixed-default scalar, so
+        // this asserts the full resolved state. Adding a Settings field breaks
+        // the literal, forcing a matching default entry in config.stcfg.
         assert_eq!(
-            Settings::from_config(&config).editor_line_numbers,
-            Some(LineNumbers::Relative),
+            Settings::from_config(&config),
+            Settings {
+                text_proto_log: Some(false),
+                format_on_save: Some(false),
+                review_follow: Some(true),
+                review_rebase_head: Some(true),
+                review_precompute: Some(true),
+                theme: Some("default_dark".to_string()),
+                mouse_capture: Some(MouseCapturePolicy::Auto),
+                scrolloff: Some(3),
+                editor_line_numbers: Some(LineNumbers::Relative),
+                terminal_shell: None,
+                terminal_args: None,
+                direnv_load: Some(true),
+                direnv_reload_on_cd: Some(true),
+                direnv_unset_on_exit: Some(false),
+                mode_badges: BTreeMap::new(),
+                lsp_servers: BTreeMap::new(),
+                finder_scopes: BTreeMap::new(),
+                finder_default_scope: Some("all".to_string()),
+            },
         );
     }
 
