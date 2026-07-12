@@ -18,7 +18,7 @@ use lsp_types::{
     CodeActionOrCommand, CodeActionParams, ColorInformation, ColorPresentation,
     ColorPresentationParams, CompletionClientCapabilities, CompletionItem,
     CompletionItemCapability, CompletionItemCapabilityResolveSupport, CompletionParams,
-    CompletionResponse, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    CompletionResponse, DiagnosticTag, DidChangeConfigurationParams, DidChangeTextDocumentParams,
     DidChangeWatchedFilesClientCapabilities, DidChangeWatchedFilesParams,
     DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, DocumentColorParams, DocumentDiagnosticParams,
@@ -35,10 +35,11 @@ use lsp_types::{
     RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
     SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
     ShowMessageParams, ShowMessageRequestClientCapabilities, SignatureHelp, SignatureHelpParams,
-    TextDocumentClientCapabilities, TextDocumentPositionParams, TextEdit, TypeHierarchyItem,
-    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
-    WindowClientCapabilities, WorkspaceClientCapabilities, WorkspaceEdit,
-    WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    TagSupport, TextDocumentClientCapabilities, TextDocumentPositionParams, TextEdit,
+    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    TypeHierarchySupertypesParams, Uri, WindowClientCapabilities, WorkspaceClientCapabilities,
+    WorkspaceEdit, WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -911,6 +912,9 @@ fn client_capabilities() -> ClientCapabilities {
             }),
             publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
                 version_support: Some(true),
+                tag_support: Some(TagSupport {
+                    value_set: vec![DiagnosticTag::UNNECESSARY],
+                }),
                 ..Default::default()
             }),
             inlay_hint: Some(InlayHintClientCapabilities {
@@ -939,7 +943,9 @@ fn client_capabilities() -> ClientCapabilities {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, encode_message, FrameDecoder, Routed};
+    use super::{
+        classify, client_capabilities, encode_message, DiagnosticTag, FrameDecoder, Routed,
+    };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::json;
 
@@ -1024,6 +1030,19 @@ mod tests {
             },
             _ => panic!("expected a diagnostics notification"),
         }
+    }
+
+    #[test]
+    fn client_capabilities_advertise_the_unnecessary_diagnostic_tag() {
+        let tags = client_capabilities()
+            .text_document
+            .expect("text_document capabilities")
+            .publish_diagnostics
+            .expect("publish_diagnostics capability")
+            .tag_support
+            .expect("tag_support")
+            .value_set;
+        assert_eq!(tags, vec![DiagnosticTag::UNNECESSARY]);
     }
 
     #[test]
