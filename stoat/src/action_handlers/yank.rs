@@ -42,7 +42,7 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// Shared by yank and by delete, which yanks the removed text before deleting
 /// it.
-pub(super) fn write_fragments_to_register(
+pub(crate) fn write_fragments_to_register(
     stoat: &mut Stoat,
     target: Register,
     fragments: Vec<String>,

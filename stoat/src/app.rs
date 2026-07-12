@@ -3381,6 +3381,23 @@ impl Stoat {
                 }
                 return UpdateEffect::Redraw;
             }
+            // `y` yanks a live hover selection into the register and keeps the
+            // popup and selection open. With no selection it falls through to
+            // the auto-close, so a bare `y` still dispatches as normal.
+            if key.code == KeyCode::Char('y') && !ctrl {
+                let text = self
+                    .pending_hover
+                    .as_ref()
+                    .map(crate::render::hover::hover_selected_text)
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    let fragments = text.split('\n').map(String::from).collect();
+                    let target = self.consume_selected_register();
+                    action_handlers::yank::write_fragments_to_register(self, target, fragments);
+                    self.pending_message = Some("yanked hover selection".to_string());
+                    return UpdateEffect::Redraw;
+                }
+            }
             self.pending_hover = None;
             self.pending_hover_request = None;
             if matches!(key.code, KeyCode::Esc) {
@@ -7767,6 +7784,48 @@ mod tests {
             buf[(inner.x + 5, inner.y)].bg,
             sel_bg,
             "a cell past the selection keeps the modal background",
+        );
+    }
+
+    #[test]
+    fn hover_y_yanks_the_live_selection() {
+        use crate::{action_handlers::lsp::HoverSelection, register::Register};
+
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "x\n");
+        h.stoat.pending_hover = Some(hover_sel_popup(&["hello world"], 0));
+        if let Some(popup) = h.stoat.pending_hover.as_mut() {
+            popup.selection = Some(HoverSelection {
+                anchor: (0, 0),
+                head: (0, 5),
+                dragging: false,
+            });
+        }
+
+        h.type_keys("y");
+
+        assert_eq!(
+            h.stoat.registers.read(Register::Unnamed),
+            Some(["hello".to_string()].as_slice()),
+            "y yanks the selected text into the register",
+        );
+        assert!(
+            h.stoat.pending_hover.is_some(),
+            "the popup and selection stay open after a yank",
+        );
+    }
+
+    #[test]
+    fn hover_y_without_a_selection_closes_the_popup() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "x\n");
+        h.stoat.pending_hover = Some(hover_sel_popup(&["hello world"], 0));
+
+        h.type_keys("y");
+
+        assert!(
+            h.stoat.pending_hover.is_none(),
+            "y with no selection closes the popup like any other key",
         );
     }
 
