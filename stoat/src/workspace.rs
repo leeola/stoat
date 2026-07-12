@@ -483,7 +483,15 @@ impl Workspace {
         // set so a completing job cannot repopulate a just-evicted buffer.
         let mut protected = visible;
         protected.extend(self.parse_jobs.keys().copied());
-        self.buffers.evict_hidden_highlights(&protected, retention);
+        let evicted = self.buffers.evict_hidden_highlights(&protected, retention);
+        if !evicted.is_empty() {
+            tracing::debug!(
+                target: "stoat::app",
+                evicted = evicted.len(),
+                cap = retention,
+                "evicted hidden highlight state"
+            );
+        }
     }
 
     /// Detect and assign a language to every path-bearing buffer that

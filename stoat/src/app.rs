@@ -891,6 +891,16 @@ impl Stoat {
             .unwrap_or_default()
             .merge(cli_settings);
 
+        let highlight_retention = settings
+            .highlight_retention
+            .unwrap_or(DEFAULT_HIGHLIGHT_RETENTION);
+        tracing::info!(
+            target: "stoat::app",
+            highlight_retention,
+            configured = settings.highlight_retention.is_some(),
+            "highlight retention: caching syntax trees and token sets for hidden buffers"
+        );
+
         let theme = {
             let name = settings.theme.as_deref().unwrap_or("default_dark");
             match config.as_ref() {
