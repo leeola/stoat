@@ -3053,6 +3053,12 @@ impl Stoat {
         let Some(target) = self.target_at(column, row) else {
             return;
         };
+        // A mouse focus change closes any open hover. Its popup was anchored
+        // against the previously focused editor and must not re-anchor here.
+        if self.active_workspace().focus != target {
+            self.pending_hover = None;
+            self.pending_hover_request = None;
+        }
         let ws = self.active_workspace_mut();
         ws.focus = target;
         if let FocusTarget::SplitPane(id) = target {
@@ -7597,9 +7603,11 @@ mod tests {
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
 
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
         h.stoat.pending_hover = Some(HoverPopup {
             lines: vec![vec![("hovered".to_string(), Style::default())]],
             anchor_offset: 0,
+            editor_id,
             scroll_half_pages: 0,
             area: Rect::default(),
             inner: Rect::default(),
@@ -7647,9 +7655,11 @@ mod tests {
         let lines = (0..num_lines)
             .map(|_| vec![(text.clone(), Style::default())])
             .collect();
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
         h.stoat.pending_hover = Some(HoverPopup {
             lines,
             anchor_offset: 0,
+            editor_id,
             scroll_half_pages: 0,
             area: Rect::default(),
             inner: Rect::default(),
@@ -7690,6 +7700,7 @@ mod tests {
                 .map(|l| vec![(l.to_string(), Style::default())])
                 .collect(),
             anchor_offset: 0,
+            editor_id: EditorId::default(),
             scroll_half_pages,
             area: Rect {
                 x: 9,
@@ -7782,6 +7793,7 @@ mod tests {
         let popup = HoverPopup {
             lines: vec![vec![("x".repeat(60), Style::default())]],
             anchor_offset: 0,
+            editor_id: EditorId::default(),
             scroll_half_pages: 0,
             area: Rect::default(),
             inner: Rect {
@@ -7817,9 +7829,11 @@ mod tests {
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
 
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
         h.stoat.pending_hover = Some(HoverPopup {
             lines: vec![vec![("hello world".to_string(), Style::default())]],
             anchor_offset: 0,
+            editor_id,
             scroll_half_pages: 0,
             area: Rect::default(),
             inner: Rect::default(),
@@ -7937,9 +7951,11 @@ mod tests {
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
 
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
         h.stoat.pending_hover = Some(HoverPopup {
             lines: vec![vec![("hovered".to_string(), Style::default())]],
             anchor_offset: 0,
+            editor_id,
             scroll_half_pages: 0,
             area: Rect::default(),
             inner: Rect::default(),
@@ -9767,6 +9783,45 @@ mod tests {
             5,
         ));
         assert!(h.stoat.divider_drag.is_none(), "releasing clears the drag");
+    }
+
+    #[test]
+    fn mouse_focus_change_closes_the_hover_popup() {
+        use crate::action_handlers::lsp::HoverPopup;
+        use ratatui::style::Style;
+
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let left = ws.panes.focus();
+        let right = ws.panes.split(crate::pane::Axis::Vertical);
+        ws.panes.resize(Rect::new(0, 0, 101, 24));
+        let left_area = h.stoat.active_workspace().panes.pane(left).area;
+        let right_area = h.stoat.active_workspace().panes.pane(right).area;
+
+        // Focus the right pane through the real path so ws.focus tracks it, then
+        // open a popup there. Its empty area makes any click land outside it.
+        h.stoat.focus_at(right_area.x + 1, right_area.y + 1);
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        h.stoat.pending_hover = Some(HoverPopup {
+            lines: vec![vec![("hi".to_string(), Style::default())]],
+            anchor_offset: 0,
+            editor_id,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
+        });
+
+        // A left-button Down over the other pane moves focus and closes it.
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            left_area.x + 1,
+            left_area.y + 1,
+        ));
+        assert!(
+            h.stoat.pending_hover.is_none(),
+            "a mouse focus change closes the hover popup"
+        );
     }
 
     #[test]

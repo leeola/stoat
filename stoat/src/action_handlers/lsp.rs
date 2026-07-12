@@ -17,6 +17,7 @@ use crate::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
         HighlightStyleInterner, InlayKind, SemanticTokenHighlight,
     },
+    editor_state::EditorId,
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
     theme::scope,
@@ -916,6 +917,10 @@ pub(crate) struct HoverResponse {
     pub(crate) text: String,
     pub(crate) plain: bool,
     pub(crate) anchor_offset: usize,
+    /// The editor focused when the request fired. A response is dropped if
+    /// focus has since moved, so a popup never anchors against a pane that did
+    /// not request it.
+    pub(crate) editor_id: EditorId,
 }
 
 /// A live text selection over the hover popup body.
@@ -938,6 +943,9 @@ pub(crate) struct HoverPopup {
     /// Rendered content, one line per entry, each a list of styled spans.
     pub(crate) lines: Vec<Vec<(String, Style)>>,
     pub(crate) anchor_offset: usize,
+    /// The editor that requested this hover. Set from the response's
+    /// [`HoverResponse::editor_id`] once focus is confirmed unchanged.
+    pub(crate) editor_id: EditorId,
     /// Half-page scroll offset applied by [`crate::render::hover::render_hover`],
     /// advanced by Ctrl-d/Ctrl-u while the popup is open. Clamped to the content
     /// height at render, so an over-scroll past the bottom does not accumulate.
@@ -972,6 +980,10 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
     {
         return UpdateEffect::None;
     }
+
+    let Some((editor_id, _)) = stoat.focused_editor_ids() else {
+        return UpdateEffect::None;
+    };
 
     let encoding = stoat.lsp_host.offset_encoding();
     let (anchor_offset, buffer_id, focused_rope, is_review) = {
@@ -1033,6 +1045,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
                     text,
                     plain,
                     anchor_offset,
+                    editor_id,
                 })
             },
             Ok(None) => None,
@@ -1169,6 +1182,13 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(Some(response)) => {
+            // Drop a response whose editor lost focus while the request was in
+            // flight, so the popup never anchors against a pane that did not
+            // request it.
+            if stoat.focused_editor_ids().map(|(id, _)| id) != Some(response.editor_id) {
+                stoat.pending_hover = None;
+                return true;
+            }
             let lines = if response.plain {
                 response
                     .text
@@ -1185,6 +1205,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             stoat.pending_hover = Some(HoverPopup {
                 lines,
                 anchor_offset: response.anchor_offset,
+                editor_id: response.editor_id,
                 scroll_half_pages: 0,
                 area: Rect::default(),
                 inner: Rect::default(),
@@ -4822,6 +4843,28 @@ mod tests {
             vec![vec![("fn foo() -> u32".to_string(), Style::default())]]
         );
         assert_eq!(popup.anchor_offset, 0);
+    }
+
+    #[test]
+    fn hover_response_dropped_when_focus_moved_to_another_editor() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "fn foo() -> u32");
+
+        // Hover from the focused pane, then split so focus moves to the new
+        // pane's editor before the response settles.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        h.settle();
+
+        assert!(
+            h.stoat.pending_hover.is_none(),
+            "a response for an editor that lost focus is dropped"
+        );
     }
 
     #[test]
