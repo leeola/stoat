@@ -52,6 +52,17 @@ define_action!(
     ActionPriority::Normal
 );
 
+define_action!(
+    OpenLogsDef,
+    OpenLogs,
+    "OpenLogs",
+    ActionKind::OpenLogs,
+    "open the session log file",
+    "Open this session's log file in the focused pane and follow it as new lines are written, with the cursor on the last line. Use `:auto-reload off` to stop following. Reports in the status line when the session has no log file.",
+    ActionPriority::Normal,
+    aliases = &["logs"]
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

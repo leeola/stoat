@@ -1,7 +1,7 @@
 use crate::{
     defs::{
         agent::SpawnClaude,
-        app::{Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
+        app::{OpenLogs, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
@@ -131,6 +131,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(QuitAllConfirm::DEF, |_| Ok(Box::new(QuitAllConfirm)));
     add(QuitAllCancel::DEF, |_| Ok(Box::new(QuitAllCancel)));
     add(ShowVersion::DEF, |_| Ok(Box::new(ShowVersion)));
+    add(OpenLogs::DEF, |_| Ok(Box::new(OpenLogs)));
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
     add(SplitNewRight::DEF, |_| Ok(Box::new(SplitNewRight)));
@@ -801,6 +802,7 @@ mod tests {
         "QuitAllConfirm",
         "QuitAllCancel",
         "ShowVersion",
+        "OpenLogs",
         "SplitRight",
         "SplitDown",
         "SplitNewRight",
@@ -1215,6 +1217,7 @@ mod tests {
         // + 1 ToggleSyntaxHighlight.
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
+        // + 1 OpenLogs.
         // + 1 GotoDeclaration.
         // + 4 JumplistPicker Next/Prev/Select/Close.
         // + 4 DiagnosticsPicker Next/Prev/Select/Close.
@@ -1233,7 +1236,7 @@ mod tests {
         // + 2 RotateSelectionContentsForward/Backward.
         // + 1 ReplaceWithYanked.
         // + 2 JoinSelections / JoinSelectionsSpace.
-        assert_eq!(all().count(), 335);
+        assert_eq!(all().count(), 336);
     }
 
     #[test]

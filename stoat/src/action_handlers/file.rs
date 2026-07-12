@@ -443,25 +443,74 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
 
         let ws = stoat.active_workspace_mut();
         for eid in followers {
-            let Some(editor) = ws.editors.get_mut(eid) else {
-                continue;
-            };
-            let snapshot = editor.display_map.snapshot();
-            let buf_snap = snapshot.buffer_snapshot();
-            let end = buf_snap.rope().len();
-            let anchor = buf_snap.anchor_at(end, Bias::Left);
-            editor.selections.transform(buf_snap, |s| {
-                let mut sel = s.clone();
-                sel.collapse_to(anchor, SelectionGoal::None);
-                sel
-            });
-            super::movement::ensure_cursor_in_view(editor, scrolloff);
+            if let Some(editor) = ws.editors.get_mut(eid) {
+                collapse_to_buffer_end(editor, scrolloff);
+            }
         }
     }
 
     if changed {
         super::lsp::notify_buffer_changes_pending(stoat);
     }
+}
+
+/// Open this session's log file and follow it as new lines are written.
+///
+/// Resolves `stoat_log::log_dir()/stoat-<pid>.log` and delegates to
+/// [`open_log_buffer`]. Reports via [`Stoat::pending_message`] when the log
+/// directory cannot be resolved.
+pub(super) fn open_logs(stoat: &mut Stoat) -> UpdateEffect {
+    let Ok(dir) = stoat_log::log_dir() else {
+        stoat.pending_message = Some("could not resolve the log directory".to_string());
+        return UpdateEffect::Redraw;
+    };
+    let path = dir.join(format!("stoat-{}.log", std::process::id()));
+    open_log_buffer(stoat, &path)
+}
+
+/// Open `path` as an auto-reloading buffer tailing its end, or report when the
+/// file is absent.
+///
+/// The path is taken as a parameter so tests inject a fixture. When no file
+/// exists there (e.g. the session logs to stderr), sets [`Stoat::pending_message`]
+/// and opens nothing. Otherwise opens the file, flags it auto-reload, arms the
+/// poll, and drops the focused cursor on the last line.
+pub(crate) fn open_log_buffer(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
+    if !matches!(stoat.fs_host.metadata(path), Ok(Some(_))) {
+        stoat.pending_message =
+            Some("no log file for this session; started with --log-stderr?".to_string());
+        return UpdateEffect::Redraw;
+    }
+
+    let Some(id) = open_file(stoat, path) else {
+        return UpdateEffect::Redraw;
+    };
+    stoat
+        .active_workspace_mut()
+        .buffers
+        .set_auto_reload(id, true);
+    ensure_auto_reload_poll(stoat);
+
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    if let Some(editor) = super::focused_editor_mut(stoat) {
+        collapse_to_buffer_end(editor, scrolloff);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Collapse `editor`'s selection onto the end of its buffer and scroll it into
+/// view, so a tailing buffer shows its newest content.
+fn collapse_to_buffer_end(editor: &mut EditorState, scrolloff: u32) {
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    let end = buf_snap.rope().len();
+    let anchor = buf_snap.anchor_at(end, Bias::Left);
+    editor.selections.transform(buf_snap, |s| {
+        let mut sel = s.clone();
+        sel.collapse_to(anchor, SelectionGoal::None);
+        sel
+    });
+    super::movement::ensure_cursor_in_view(editor, scrolloff);
 }
 
 /// The buffer-line row of `editor`'s primary cursor, resolved through its
@@ -870,6 +919,68 @@ mod tests {
         assert!(
             h.stoat.auto_reload_poll.is_none(),
             "the pump drops the poll task when no buffer is flagged"
+        );
+    }
+
+    #[test]
+    fn open_log_buffer_flags_auto_reload_and_tails() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/logs-open");
+        let path = root.join("stoat-1.log");
+        h.fake_fs().insert_file(&path, b"line1\nline2\nline3\n");
+        h.stoat.active_workspace_mut().git_root = root;
+
+        assert_eq!(
+            super::open_log_buffer(&mut h.stoat, &path),
+            UpdateEffect::Redraw
+        );
+
+        let id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let flagged = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .auto_reload_paths()
+            .iter()
+            .any(|(fid, _)| *fid == id);
+        assert!(flagged, "the log buffer is flagged auto-reload");
+        assert!(h.stoat.auto_reload_poll.is_some(), "the poll is armed");
+        assert_eq!(
+            focused_cursor_row(&mut h),
+            3,
+            "the cursor tails the last line"
+        );
+    }
+
+    #[test]
+    fn open_log_buffer_reports_a_missing_log_file() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/logs-missing");
+        let path = root.join("stoat-1.log");
+        h.stoat.active_workspace_mut().git_root = root;
+
+        assert_eq!(
+            super::open_log_buffer(&mut h.stoat, &path),
+            UpdateEffect::Redraw
+        );
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no log file for this session; started with --log-stderr?")
+        );
+        assert!(
+            h.stoat.auto_reload_poll.is_none(),
+            "no poll is armed for a missing log"
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(&path)
+                .is_none(),
+            "no buffer is opened for a missing log"
         );
     }
 

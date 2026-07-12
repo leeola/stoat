@@ -73,6 +73,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::QuitAllConfirm => quit_all_confirm(stoat),
         ActionKind::QuitAllCancel => quit_all_cancel(stoat),
         ActionKind::ShowVersion => show_version(stoat),
+        ActionKind::OpenLogs => file::open_logs(stoat),
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),
         ActionKind::SplitNewRight => pane::split_pane_new(stoat, Axis::Vertical),

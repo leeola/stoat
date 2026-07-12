@@ -5,6 +5,7 @@ pub enum ActionKind {
     QuitAllConfirm,
     QuitAllCancel,
     ShowVersion,
+    OpenLogs,
     SplitRight,
     SplitDown,
     SplitNewRight,
