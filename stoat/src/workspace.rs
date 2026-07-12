@@ -287,23 +287,33 @@ impl Workspace {
     }
 
     /// Build a fresh [`EditorState`] for `buffer_id`, seeded with the buffer's
-    /// retained tree-sitter tokens when the registry holds them.
+    /// retained tree-sitter and LSP tokens when the registry holds them.
     ///
     /// A re-shown buffer therefore paints styled on its first frame. Without the
     /// seed the fresh editor starts with empty highlight caches, and
     /// [`Self::drive_parse_jobs`] skips a version-current buffer, so it would
-    /// otherwise stay unstyled until the next edit forces a reparse.
+    /// otherwise stay unstyled until the next edit forces a reparse. The LSP
+    /// tokens are seeded only while their cached version still matches the
+    /// buffer, since a stale set would misplace the highlights.
     pub(crate) fn seeded_editor(
         &self,
         buffer_id: BufferId,
         buffer: SharedBuffer,
         executor: Executor,
     ) -> EditorState {
+        let current_version = buffer.read().expect("buffer poisoned").snapshot.version;
         let mut editor = EditorState::new(buffer_id, buffer, executor);
         if let Some((tokens, interner)) = self.buffers.tokens_for(buffer_id) {
             editor
                 .display_map
                 .set_semantic_token_highlights(buffer_id, tokens, interner);
+        }
+        if let Some((version, tokens, interner)) = self.buffers.lsp_tokens_for(buffer_id)
+            && version == current_version
+        {
+            editor
+                .display_map
+                .set_lsp_token_highlights(buffer_id, tokens, interner);
         }
         editor
     }

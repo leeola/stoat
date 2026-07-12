@@ -2083,9 +2083,11 @@ struct DecodedToken {
     scope: &'static str,
 }
 
-/// A completed semantic-tokens request's payload. It carries the buffer and the
-/// resolved `(byte range, scope stem)` spans in request-time coordinates.
-pub(crate) type SemanticTokensOutcome = (BufferId, Vec<(std::ops::Range<usize>, &'static str)>);
+/// A completed semantic-tokens request's payload. It carries the buffer, the
+/// buffer version the request was built against, and the resolved `(byte range,
+/// scope stem)` spans in request-time coordinates.
+pub(crate) type SemanticTokensOutcome =
+    (BufferId, u64, Vec<(std::ops::Range<usize>, &'static str)>);
 
 /// Request semantic tokens for the focused editor when the server advertises a
 /// full-document legend and the `(buffer, version)` key changed.
@@ -2111,6 +2113,22 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
         return;
     }
     stoat.last_semantic_tokens_key = Some(key);
+
+    // When the buffer is unchanged since tokens were last computed, reinstall
+    // the retained set instead of re-requesting behind the debounce. The
+    // invalidate below then fires only on the true re-request path.
+    if let Some((cached_version, tokens, interner)) =
+        stoat.active_workspace().buffers.lsp_tokens_for(buffer_id)
+        && cached_version == version
+    {
+        if let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) {
+            editor
+                .display_map
+                .set_lsp_token_highlights(buffer_id, tokens, interner);
+        }
+        return;
+    }
+
     if let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) {
         editor.display_map.invalidate_lsp_highlights(buffer_id);
     }
@@ -2122,6 +2140,7 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
         match lsp.semantic_tokens_full(params).await {
             Ok(Some(result)) => Some((
                 buffer_id,
+                version,
                 convert_semantic_tokens(result, &legend, &rope, encoding),
             )),
             Ok(None) => None,
@@ -2272,8 +2291,8 @@ pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some((buffer_id, items))) => {
-            apply_semantic_tokens(stoat, buffer_id, items);
+        Poll::Ready(Some((buffer_id, version, items))) => {
+            apply_semantic_tokens(stoat, buffer_id, version, items);
             true
         },
         Poll::Ready(None) => true,
@@ -2287,6 +2306,7 @@ pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
 fn apply_semantic_tokens(
     stoat: &mut Stoat,
     buffer_id: BufferId,
+    version: u64,
     items: Vec<(std::ops::Range<usize>, &'static str)>,
 ) {
     let mut interner = HighlightStyleInterner::default();
@@ -2300,16 +2320,16 @@ fn apply_semantic_tokens(
         .collect();
     let interner = Arc::new(interner);
 
-    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+    let ws = stoat.active_workspace_mut();
+    let Some(shared) = ws.buffers.get(buffer_id) else {
         return;
     };
-    if editor.buffer_id != buffer_id {
-        return;
-    }
 
+    // Anchor against the buffer's own snapshot from the registry, not the
+    // focused editor's, so the response lands and is retained even when focus
+    // has since moved to another buffer.
     let tokens: Arc<[SemanticTokenHighlight]> = {
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
+        let buf_snap = shared.read().expect("buffer poisoned").snapshot.clone();
         styled
             .into_iter()
             .map(|(range, style)| SemanticTokenHighlight {
@@ -2319,9 +2339,18 @@ fn apply_semantic_tokens(
             })
             .collect()
     };
-    editor
-        .display_map
-        .set_lsp_token_highlights(buffer_id, tokens, interner);
+
+    ws.buffers
+        .store_lsp_tokens(buffer_id, version, tokens.clone(), interner.clone());
+    for editor in ws.editors.values_mut() {
+        if editor.buffer_id == buffer_id {
+            editor.display_map.set_lsp_token_highlights(
+                buffer_id,
+                tokens.clone(),
+                interner.clone(),
+            );
+        }
+    }
 }
 
 /// Debounce before requesting folding ranges, so a burst of edits collapses into
@@ -7071,6 +7100,73 @@ mod tests {
             tree_sitter_token_count(&mut h) > 0,
             "re-shown buffer is styled on the first frame after switch-back"
         );
+    }
+
+    fn one_full_token(path: &Path) -> impl Fn(&TestHarness) + '_ {
+        use lsp_types::{SemanticToken, SemanticTokens, SemanticTokensResult};
+        move |h: &TestHarness| {
+            h.fake_lsp().set_semantic_tokens_full(
+                path.to_str().unwrap(),
+                SemanticTokensResult::Tokens(SemanticTokens {
+                    result_id: None,
+                    data: vec![SemanticToken {
+                        delta_line: 0,
+                        delta_start: 8,
+                        length: 1,
+                        token_type: 0,
+                        token_modifiers_bitset: 0,
+                    }],
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn switching_back_keeps_lsp_tokens_on_first_frame() {
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_tokens(&h);
+        let root = seed(&mut h, &[("a.rs", "let x = y\n"), ("b.rs", "let z = w\n")]);
+        let path_a = root.join("a.rs");
+
+        open_buffer(&mut h, path_a.clone());
+        one_full_token(&path_a)(&h);
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        assert_eq!(lsp_token_count(&mut h), 1, "A receives LSP tokens");
+
+        open_buffer(&mut h, root.join("b.rs"));
+
+        // Switch back to A with no debounce cycle. The fresh editor keeps the
+        // LSP highlighting only if seeded from the registry's cached tokens.
+        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path_a });
+        assert!(
+            lsp_token_count(&mut h) > 0,
+            "re-shown buffer keeps LSP tokens on the first frame"
+        );
+    }
+
+    #[test]
+    fn cached_lsp_tokens_skip_the_re_request() {
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_tokens(&h);
+        let root = seed(&mut h, &[("a.rs", "let x = y\n")]);
+        let path_a = root.join("a.rs");
+
+        open_buffer(&mut h, path_a.clone());
+        one_full_token(&path_a)(&h);
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        assert_eq!(lsp_token_count(&mut h), 1);
+
+        // Re-triggering for the same unchanged version reinstalls the cached
+        // tokens without spawning a second request.
+        h.stoat.last_semantic_tokens_key = None;
+        super::semantic_tokens_trigger(&mut h.stoat);
+        assert!(
+            h.stoat.pending_semantic_tokens.is_none(),
+            "a version-current cache hit spawns no request"
+        );
+        assert_eq!(lsp_token_count(&mut h), 1, "cached tokens are reinstalled");
     }
 
     fn enable_folding_range(h: &TestHarness) {

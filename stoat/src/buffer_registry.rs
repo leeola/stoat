@@ -49,6 +49,15 @@ struct BufferEntry {
     /// so a fresh editor built for an already-parsed buffer can be seeded and
     /// paint styled on its first frame instead of waiting for a reparse.
     tokens: Option<(Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)>,
+    /// LSP semantic tokens retained across editor lifetimes, keyed by the buffer
+    /// version they were computed against. A fresh editor is seeded from them,
+    /// and the trigger reinstalls them instead of re-requesting, but only while
+    /// the version still matches the buffer.
+    lsp_tokens: Option<(
+        u64,
+        Arc<[SemanticTokenHighlight]>,
+        Arc<HighlightStyleInterner>,
+    )>,
     diff: Option<CachedDiff>,
     /// Marks this buffer as a transient preview surface (e.g. the
     /// file finder's preview pane). The parse pipeline pulls these
@@ -155,6 +164,7 @@ impl BufferRegistry {
                 syntax: None,
                 syntax_map: None,
                 tokens: None,
+                lsp_tokens: None,
                 diff: None,
                 preview,
                 disk_mtime: None,
@@ -184,6 +194,7 @@ impl BufferRegistry {
                 syntax: None,
                 syntax_map: None,
                 tokens: None,
+                lsp_tokens: None,
                 diff: None,
                 preview: false,
                 disk_mtime: None,
@@ -285,6 +296,7 @@ impl BufferRegistry {
             entry.syntax = None;
             entry.syntax_map = None;
             entry.tokens = None;
+            entry.lsp_tokens = None;
         }
     }
 
@@ -326,6 +338,7 @@ impl BufferRegistry {
             }
             entry.syntax_map = None;
             entry.tokens = None;
+            entry.lsp_tokens = None;
         }
     }
 
@@ -370,6 +383,34 @@ impl BufferRegistry {
         id: BufferId,
     ) -> Option<(Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)> {
         self.buffers.get(&id)?.tokens.clone()
+    }
+
+    /// Retain the LSP semantic tokens computed for `id` at buffer `version`, so
+    /// a fresh editor can be seeded and the trigger can skip a re-request while
+    /// the version still matches.
+    pub(crate) fn store_lsp_tokens(
+        &mut self,
+        id: BufferId,
+        version: u64,
+        tokens: Arc<[SemanticTokenHighlight]>,
+        interner: Arc<HighlightStyleInterner>,
+    ) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.lsp_tokens = Some((version, tokens, interner));
+        }
+    }
+
+    /// The retained `(version, tokens, interner)` triple for `id`, if an LSP
+    /// semantic-tokens response has been applied to it.
+    pub(crate) fn lsp_tokens_for(
+        &self,
+        id: BufferId,
+    ) -> Option<(
+        u64,
+        Arc<[SemanticTokenHighlight]>,
+        Arc<HighlightStyleInterner>,
+    )> {
+        self.buffers.get(&id)?.lsp_tokens.clone()
     }
 
     /// Move the prior [`SyntaxState`] out of the registry. The caller is
@@ -505,6 +546,7 @@ impl BufferRegistry {
                     syntax: None,
                     syntax_map: None,
                     tokens: None,
+                    lsp_tokens: None,
                     diff: None,
                     preview: false,
                     disk_mtime: None,
