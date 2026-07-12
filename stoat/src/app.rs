@@ -5070,7 +5070,15 @@ impl Stoat {
         // The hover popup is cursor-anchored like the completion popup. Its
         // interior body region pools so Ctrl-u/Ctrl-d and the wheel ease. The
         // layout reads the focused editor, so it borrows self.
-        let hover_layout = (!overlay)
+        // A live hover selection is painted by the live frame's highlight, so
+        // the pooled body defers, since its glide path carries no selection.
+        // Skipping the layout retires the HOVER pool via drop_absent below.
+        let hover_selected = self
+            .pending_hover
+            .as_ref()
+            .and_then(|p| p.selection.as_ref())
+            .is_some();
+        let hover_layout = (!overlay && !hover_selected)
             .then(|| crate::render::hover::hover_popup_layout(self))
             .flatten();
 
@@ -7826,6 +7834,84 @@ mod tests {
         assert!(
             h.stoat.pending_hover.is_none(),
             "y with no selection closes the popup like any other key",
+        );
+    }
+
+    #[test]
+    fn hover_drag_under_stoatty_maps_through_the_apc_scale() {
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        let _ = open_scratch_file(&mut h, "x\n");
+        let long = "x".repeat(40);
+        h.stoat.pending_hover = Some(hover_sel_popup(&[&long], 0));
+
+        // inner.x is 10. A pointer 10 cells in maps through the 0.85x scale.
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 2));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 20, 2));
+
+        let sel = h.stoat.pending_hover.as_ref().unwrap().selection.unwrap();
+        assert_eq!(sel.anchor, (0, 0));
+        assert_eq!(
+            sel.head.1,
+            (10 * 256 + 128) / 218,
+            "the drag column maps through the stoatty 256/218 inverse",
+        );
+    }
+
+    #[test]
+    fn a_live_hover_selection_retires_the_pool() {
+        use crate::action_handlers::lsp::{HoverPopup, HoverSelection};
+        use ratatui::{layout::Rect, style::Style};
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.pending_hover = Some(HoverPopup {
+            lines: vec![vec![("hovered".to_string(), Style::default())]],
+            anchor_offset: 0,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
+        });
+        h.stoat.emit_smooth_scroll();
+        let opened = drain_apc(&mut rx);
+        assert!(
+            opened.iter().any(|cmd| matches!(
+                cmd,
+                Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER
+            )),
+            "an unselected hover pools its body, got {opened:?}",
+        );
+
+        if let Some(popup) = h.stoat.pending_hover.as_mut() {
+            popup.selection = Some(HoverSelection {
+                anchor: (0, 0),
+                head: (0, 3),
+                dragging: false,
+            });
+        }
+        h.stoat.emit_smooth_scroll();
+        let dropped = drain_apc(&mut rx);
+        assert!(
+            dropped.iter().any(|cmd| matches!(
+                cmd,
+                Command::PoolDrop(d) if d.pool == crate::smooth_scroll::non_pane_pool::HOVER
+            )),
+            "a live selection retires the pool so the live frame owns it, got {dropped:?}",
         );
     }
 

@@ -7,7 +7,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Color, Style},
     widgets::{Block, Borders, Clear, StatefulWidget, Widget},
 };
 use stoatty_widgets::{text_run::TextRun, ApcScene};
@@ -96,25 +96,77 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
     );
     match (scene, modal_fg, run_bg) {
         (Some(scene), Some(modal_fg), Some(run_bg)) => {
+            let sel_rgb = crate::render::review::style_rgb(
+                stoat.theme.get(crate::theme::scope::UI_SELECTION).bg,
+            );
             for (row_idx, line) in body.iter().skip(scroll).enumerate() {
                 let row = inner.y + row_idx as u16;
                 if row >= inner.y + inner.height {
                     break;
                 }
-                let mut chars_before = 0u16;
-                for (text, style) in line {
-                    let col = (chars_before * HOVER_TEXT_SCALE + 8) / 16;
-                    let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
-                    TextRun {
-                        col,
-                        row: 0,
-                        scale: HOVER_TEXT_SCALE,
-                        color,
-                        bg: run_bg,
-                        text,
+                let selection = sel_rgb.and_then(|rgb| {
+                    hover_line_selection(&popup, scroll + row_idx).map(|(c0, c1)| (c0, c1, rgb))
+                });
+
+                // Patch the cell bg behind the 0.85x glyph boxes so the selection
+                // band spans full cell height. Chars map to cells through the
+                // scale, floored at the start and ceiled at the end.
+                if let Some((c0, c1, rgb)) = selection {
+                    let cell0 = c0 * HOVER_TEXT_SCALE as usize / 256;
+                    let cell1 = (c1 * HOVER_TEXT_SCALE as usize).div_ceil(256);
+                    let x0 = inner.x + (cell0 as u16).min(inner.width);
+                    let x1 = inner.x + (cell1 as u16).min(inner.width);
+                    let color = Color::Rgb(rgb[0], rgb[1], rgb[2]);
+                    for x in x0..x1 {
+                        buf[(x, row)].set_bg(color);
                     }
-                    .render(Rect::new(inner.x, row, 1, 1), buf, scene);
-                    chars_before += text.chars().count() as u16;
+                }
+
+                let mut chars_before = 0usize;
+                for (text, style) in line {
+                    let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
+                    let span_chars: Vec<char> = text.chars().collect();
+                    let span_end = chars_before + span_chars.len();
+                    let (b0, b1) = match selection {
+                        Some((c0, c1, _)) => (
+                            c0.clamp(chars_before, span_end),
+                            c1.clamp(chars_before, span_end),
+                        ),
+                        None => (chars_before, chars_before),
+                    };
+
+                    // Split the span at the selection so its selected piece
+                    // composites over the selection bg and the rest over the
+                    // modal bg.
+                    for (seg_start, seg_end, selected) in [
+                        (chars_before, b0, false),
+                        (b0, b1, true),
+                        (b1, span_end, false),
+                    ] {
+                        if seg_start >= seg_end {
+                            continue;
+                        }
+                        let seg_text: String = span_chars
+                            [(seg_start - chars_before)..(seg_end - chars_before)]
+                            .iter()
+                            .collect();
+                        let col = (seg_start as u16 * HOVER_TEXT_SCALE + 8) / 16;
+                        let bg = if selected {
+                            selection.map_or(run_bg, |(_, _, rgb)| rgb)
+                        } else {
+                            run_bg
+                        };
+                        TextRun {
+                            col,
+                            row: 0,
+                            scale: HOVER_TEXT_SCALE,
+                            color,
+                            bg,
+                            text: &seg_text,
+                        }
+                        .render(Rect::new(inner.x, row, 1, 1), buf, scene);
+                    }
+                    chars_before = span_end;
                 }
             }
         },
@@ -144,13 +196,33 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
     }
 }
 
+/// The half-open char range selected on content `line`, bounded to the line's
+/// text. `None` when the line lies outside the selection or there is none.
+///
+/// A middle line of a multi-line selection covers its whole text. The first and
+/// last lines start and end at the selection's char columns.
+fn hover_line_selection(popup: &HoverPopup, line: usize) -> Option<(usize, usize)> {
+    let HoverSelection { anchor, head, .. } = popup.selection?;
+    let (start, end) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    if line < start.0 || line > end.0 {
+        return None;
+    }
+    let width = popup.lines.get(line).map(|l| line_width(l)).unwrap_or(0);
+    let c0 = if line == start.0 { start.1 } else { 0 };
+    let c1 = if line == end.0 { end.1 } else { width };
+    Some((c0.min(width), c1.min(width)))
+}
+
 /// Restyle the selected cells of the grid-rendered body with the selection
 /// background, a per-row post-pass over the painted text.
 ///
 /// Grid cells map to characters 1:1, so the selected column range on each
-/// visible line is the selection's char range clamped to the interior. Middle
-/// lines of a multi-line selection extend to the right edge, matching the usual
-/// terminal look. No-op when the theme carries no selection background.
+/// visible line is [`hover_line_selection`]. No-op when the theme carries no
+/// selection background.
 fn highlight_grid_selection(
     buf: &mut Buffer,
     popup: &HoverPopup,
@@ -158,28 +230,13 @@ fn highlight_grid_selection(
     scroll: usize,
     theme: &crate::theme::Theme,
 ) {
-    let Some(HoverSelection { anchor, head, .. }) = popup.selection else {
-        return;
-    };
     let Some(bg) = theme.get(crate::theme::scope::UI_SELECTION).bg else {
         return;
     };
-    let (start, end) = if anchor <= head {
-        (anchor, head)
-    } else {
-        (head, anchor)
-    };
-
     for row_idx in 0..inner.height {
         let line = scroll + row_idx as usize;
-        if line < start.0 || line > end.0 {
+        let Some((c0, c1)) = hover_line_selection(popup, line) else {
             continue;
-        }
-        let c0 = if line == start.0 { start.1 } else { 0 };
-        let c1 = if line == end.0 {
-            end.1
-        } else {
-            inner.width as usize
         };
         let x0 = inner.x + (c0 as u16).min(inner.width);
         let x1 = inner.x + (c1 as u16).min(inner.width);
