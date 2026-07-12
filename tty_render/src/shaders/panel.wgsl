@@ -38,7 +38,8 @@ const SHADOW_ALPHA: f32 = 0.22;
 
 // Vertical reach of the title-gap notch from the top-edge centerline, in
 // pixels. Covers the widest stroke a style draws (the double line's outer
-// hairline peaks ~3px out), so the notch clears the whole top stroke.
+// hairline peaks ~3px out), so the notch clears the whole top stroke and the
+// drop-shadow sliver that reaches the same band just above the edge.
 const GAP_EDGE_REACH: f32 = 3.5;
 
 struct VsOut {
@@ -171,12 +172,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Hairline frame straddling the perimeter, weighted by the border style.
     // A title gap notches the top edge. Where the fragment's x lies in the gap
-    // span and its y sits within the top stroke's band, the stroke drops to
-    // zero, leaving the corners, sides, and bottom untouched.
+    // span and its y sits within the top stroke's band (`in_notch`), the stroke
+    // drops to zero, leaving the corners, sides, and bottom untouched. The same
+    // notch drops the shadow below, so the notched span reads as clean surface.
     let rel_x = p.x - in.box_min.x;
     let in_gap = in.gap.y > in.gap.x && rel_x >= in.gap.x && rel_x <= in.gap.y;
     let near_top = abs(p.y - in.box_min.y) <= GAP_EDGE_REACH;
-    let stroke = select(line_coverage(in.style, abs(box_sdf)), 0.0, in_gap && near_top);
+    let in_notch = in_gap && near_top;
+    let stroke = select(line_coverage(in.style, abs(box_sdf)), 0.0, in_notch);
     // Optional interior fill, faded across the rounded edge.
     let interior = 1.0 - smoothstep(-1.0, 1.0, box_sdf);
     let fill_alpha = in.fill_flag * interior;
@@ -190,11 +193,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let d = max(vec2<f32>(0.0, 0.0), max(shadow_min - p, p - shadow_max));
     // Gate the shadow to the box exterior so an unfilled panel's interior is not
     // washed by its own shadow. `interior` is 1 inside the box and 0 outside.
-    let shadow_alpha = select(
+    let shadow_base = select(
         0.0,
         SHADOW_ALPHA * (1.0 - smoothstep(0.0, margin, length(d))),
         margin > 0.0
     ) * (1.0 - interior);
+    // Drop the shadow in the title notch too: the blur reaches into the gap just
+    // above the top edge, and a dark sliver there reads as a broken border
+    // instead of the clean surface the notch should show.
+    let shadow_alpha = select(shadow_base, 0.0, in_notch);
 
     // Composite bottom-up: the shadow, then the optional fill, then the stroke.
     var color = SHADOW_COLOR;
