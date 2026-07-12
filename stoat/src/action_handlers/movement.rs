@@ -1584,9 +1584,6 @@ where
             .filter_map(|sel| {
                 let s = buffer_snapshot.resolve_anchor(&sel.start);
                 let e = buffer_snapshot.resolve_anchor(&sel.end);
-                if s == e {
-                    return None;
-                }
                 let text = buffer_snapshot.rope().slice(s..e).to_string();
                 let new_text = transform(&text);
                 if new_text == text {
@@ -1833,14 +1830,10 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
             .selections
             .all_anchors()
             .iter()
-            .filter_map(|sel| {
+            .map(|sel| {
                 let s = buffer_snapshot.resolve_anchor(&sel.start);
                 let e = buffer_snapshot.resolve_anchor(&sel.end);
-                if s != e {
-                    Some((sel.id, s, e))
-                } else {
-                    None
-                }
+                (sel.id, s, e)
             })
             .collect();
         (buffer_id, deletions)
@@ -2142,12 +2135,9 @@ pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
             .selections
             .all_anchors()
             .iter()
-            .filter_map(|sel| {
+            .map(|sel| {
                 let s = buffer_snapshot.resolve_anchor(&sel.start);
                 let e = buffer_snapshot.resolve_anchor(&sel.end);
-                if s == e {
-                    return None;
-                }
                 let mut chars = 0usize;
                 let mut byte_pos = s;
                 for c in rope.chars_at(s) {
@@ -2161,7 +2151,7 @@ pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
                 for _ in 0..chars {
                     replacement.push(ch);
                 }
-                Some((sel.id, s, e, replacement))
+                (sel.id, s, e, replacement)
             })
             .collect();
         (buffer_id, entries)

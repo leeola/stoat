@@ -146,11 +146,11 @@ pub(super) fn replace_with_yanked(stoat: &mut Stoat) -> UpdateEffect {
             .selections
             .all_anchors()
             .iter()
-            .filter_map(|sel| {
+            .map(|sel| {
                 let s = buf_snap.resolve_anchor(&sel.start);
                 let e = buf_snap.resolve_anchor(&sel.end);
                 let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
-                (lo != hi).then_some((sel.id, lo, hi))
+                (sel.id, lo, hi)
             })
             .collect();
         entries.sort_by_key(|(_, start, _)| *start);
@@ -291,9 +291,9 @@ enum PasteSide {
 }
 
 /// Walk every selection in the focused editor in start-offset order and
-/// slice each non-collapsed range out of the rope, one fragment per
-/// selection like Helix. Returns `None` when the focused pane is not an
-/// editor, and an empty vec when every selection is collapsed.
+/// slice each range out of the rope, one fragment per selection like Helix. A
+/// collapsed selection yields an empty fragment. Returns `None` when the
+/// focused pane is not an editor.
 pub(super) fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -309,7 +309,7 @@ pub(super) fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
         .selections
         .all_anchors()
         .iter()
-        .filter_map(|sel| {
+        .map(|sel| {
             let start = buf_snap.resolve_anchor(&sel.start);
             let end = buf_snap.resolve_anchor(&sel.end);
             let (lo, hi) = if start <= end {
@@ -317,7 +317,7 @@ pub(super) fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
             } else {
                 (end, start)
             };
-            (lo != hi).then_some((lo, hi))
+            (lo, hi)
         })
         .collect();
     ranges.sort_unstable();
@@ -585,6 +585,24 @@ mod tests {
             .read(crate::register::Register::Unnamed)
             .map(|f| f.join("\n"));
         assert_eq!(stored, Some("a".to_string()));
+    }
+
+    #[test]
+    fn yank_on_empty_buffer_yanks_one_empty_fragment() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Unnamed)
+                .map(<[String]>::to_vec),
+            Some(vec![String::new()])
+        );
+        assert_eq!(
+            h.stoat.pending_message,
+            Some("yanked 1 selection(s)".to_string())
+        );
     }
 
     #[test]
