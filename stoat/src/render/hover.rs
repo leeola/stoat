@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::lsp::HoverPopup,
+    action_handlers::lsp::{HoverPopup, HoverSelection},
     app::Stoat,
     pane::{FocusTarget, View},
     render::layout::split_pane_status,
@@ -73,6 +73,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
     if let Some(open) = stoat.pending_hover.as_mut() {
         open.scroll_half_pages = scroll / half_page;
         open.area = popup_area;
+        open.inner = inner;
     }
 
     let end_x = inner.x + inner.width;
@@ -138,8 +139,130 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
                     x = next_x;
                 }
             }
+            highlight_grid_selection(buf, &popup, inner, scroll, &stoat.theme);
         },
     }
+}
+
+/// Restyle the selected cells of the grid-rendered body with the selection
+/// background, a per-row post-pass over the painted text.
+///
+/// Grid cells map to characters 1:1, so the selected column range on each
+/// visible line is the selection's char range clamped to the interior. Middle
+/// lines of a multi-line selection extend to the right edge, matching the usual
+/// terminal look. No-op when the theme carries no selection background.
+fn highlight_grid_selection(
+    buf: &mut Buffer,
+    popup: &HoverPopup,
+    inner: Rect,
+    scroll: usize,
+    theme: &crate::theme::Theme,
+) {
+    let Some(HoverSelection { anchor, head, .. }) = popup.selection else {
+        return;
+    };
+    let Some(bg) = theme.get(crate::theme::scope::UI_SELECTION).bg else {
+        return;
+    };
+    let (start, end) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+
+    for row_idx in 0..inner.height {
+        let line = scroll + row_idx as usize;
+        if line < start.0 || line > end.0 {
+            continue;
+        }
+        let c0 = if line == start.0 { start.1 } else { 0 };
+        let c1 = if line == end.0 {
+            end.1
+        } else {
+            inner.width as usize
+        };
+        let x0 = inner.x + (c0 as u16).min(inner.width);
+        let x1 = inner.x + (c1 as u16).min(inner.width);
+        let y = inner.y + row_idx;
+        for x in x0..x1 {
+            buf[(x, y)].set_bg(bg);
+        }
+    }
+}
+
+/// Map a screen pointer over the hover body to a `(content line, char column)`
+/// position, clamped to the popup interior and the target line's length.
+///
+/// Replays [`render_hover`]'s scroll clamp to resolve the line. Under stoatty it
+/// inverts the 0.85x popover scale (256ths of a cell over [`HOVER_TEXT_SCALE`])
+/// to resolve the column. The grid path maps a cell to a column 1:1.
+pub(crate) fn hover_hit_test(
+    popup: &HoverPopup,
+    stoatty: bool,
+    col: u16,
+    row: u16,
+) -> (usize, usize) {
+    let inner = popup.inner;
+    let clamped_col = col.clamp(inner.x, inner.x + inner.width.saturating_sub(1));
+    let clamped_row = row.clamp(inner.y, inner.y + inner.height.saturating_sub(1));
+
+    let interior = inner.height as usize;
+    let half_page = (interior / 2).max(1);
+    let scroll = popup
+        .lines
+        .len()
+        .saturating_sub(interior)
+        .min(popup.scroll_half_pages * half_page);
+    let line = (scroll + (clamped_row - inner.y) as usize).min(popup.lines.len().saturating_sub(1));
+
+    let cell = (clamped_col - inner.x) as usize;
+    let char_col = if stoatty {
+        (cell * 256 + 128) / HOVER_TEXT_SCALE as usize
+    } else {
+        cell
+    };
+    let max_col = popup.lines.get(line).map(|l| line_width(l)).unwrap_or(0);
+    (line, char_col.min(max_col))
+}
+
+/// The text of the popup's live selection, joined across full logical lines.
+///
+/// Endpoints clamp to visible columns, but a render-truncated middle line copies
+/// as its whole logical text, since cell-granular mouse reporting cannot address
+/// the truncated tail. Empty with no selection or a collapsed one.
+pub(crate) fn hover_selected_text(popup: &HoverPopup) -> String {
+    let Some(HoverSelection { anchor, head, .. }) = popup.selection else {
+        return String::new();
+    };
+    let (start, end) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    let logical = |line: usize| -> String {
+        popup
+            .lines
+            .get(line)
+            .map(|spans| spans.iter().map(|(t, _)| t.as_str()).collect())
+            .unwrap_or_default()
+    };
+
+    if start.0 == end.0 {
+        return logical(start.0)
+            .chars()
+            .skip(start.1)
+            .take(end.1.saturating_sub(start.1))
+            .collect();
+    }
+
+    let mut out: String = logical(start.0).chars().skip(start.1).collect();
+    for line in (start.0 + 1)..end.0 {
+        out.push('\n');
+        out.push_str(&logical(line));
+    }
+    out.push('\n');
+    out.extend(logical(end.0).chars().take(end.1));
+    out
 }
 
 /// Compute the hover popup's screen rect and its interior rect.

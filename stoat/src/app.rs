@@ -2539,6 +2539,15 @@ impl Stoat {
             return UpdateEffect::Redraw;
         }
 
+        // A left-button drag over an open hover popup selects its text. Routed
+        // ahead of focus_at and the pane handlers so the click never reaches the
+        // editor, leaving the buffer selection and cursor untouched.
+        if self.pending_hover.is_some()
+            && let Some(effect) = self.handle_hover_selection_mouse(mouse)
+        {
+            return effect;
+        }
+
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             if let Some(hit) = self
                 .active_workspace()
@@ -2567,6 +2576,100 @@ impl Stoat {
             "mouse event routed to focused element"
         );
         UpdateEffect::None
+    }
+
+    /// Route a left-button press over the open hover popup to its text
+    /// selection. Returns `Some` when the event is consumed (a press, drag, or
+    /// release over the popup), `None` when it should fall through to normal
+    /// mouse handling.
+    ///
+    /// A press inside starts a drag selection. A press outside clears any
+    /// selection and falls through, leaving the popup open. A release keeps the
+    /// selection live and copies it to the clipboard when non-empty.
+    fn handle_hover_selection_mouse(&mut self, mouse: MouseEvent) -> Option<UpdateEffect> {
+        let popup_area = self.pending_hover.as_ref()?.area;
+        let inside = popup_area.contains(Position {
+            x: mouse.column,
+            y: mouse.row,
+        });
+        let stoatty = self.stoatty;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !inside {
+                    if let Some(popup) = self.pending_hover.as_mut() {
+                        popup.selection = None;
+                    }
+                    return None;
+                }
+                let pos = crate::render::hover::hover_hit_test(
+                    self.pending_hover.as_ref()?,
+                    stoatty,
+                    mouse.column,
+                    mouse.row,
+                );
+                if let Some(popup) = self.pending_hover.as_mut() {
+                    popup.selection = Some(action_handlers::lsp::HoverSelection {
+                        anchor: pos,
+                        head: pos,
+                        dragging: true,
+                    });
+                }
+                Some(UpdateEffect::Redraw)
+            },
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if !self.hover_selection_dragging() {
+                    return None;
+                }
+                let pos = crate::render::hover::hover_hit_test(
+                    self.pending_hover.as_ref()?,
+                    stoatty,
+                    mouse.column,
+                    mouse.row,
+                );
+                if let Some(sel) = self
+                    .pending_hover
+                    .as_mut()
+                    .and_then(|p| p.selection.as_mut())
+                {
+                    sel.head = pos;
+                }
+                Some(UpdateEffect::Redraw)
+            },
+            MouseEventKind::Up(MouseButton::Left) => {
+                if !self.hover_selection_dragging() {
+                    return None;
+                }
+                if let Some(sel) = self
+                    .pending_hover
+                    .as_mut()
+                    .and_then(|p| p.selection.as_mut())
+                {
+                    sel.dragging = false;
+                }
+                let text = crate::render::hover::hover_selected_text(self.pending_hover.as_ref()?);
+                if text.is_empty() {
+                    if let Some(popup) = self.pending_hover.as_mut() {
+                        popup.selection = None;
+                    }
+                } else {
+                    crate::host::clipboard_copy(
+                        self.clipboard_host().as_ref(),
+                        self.env_host().as_ref(),
+                        &text,
+                    );
+                }
+                Some(UpdateEffect::Redraw)
+            },
+            _ => None,
+        }
+    }
+
+    fn hover_selection_dragging(&self) -> bool {
+        self.pending_hover
+            .as_ref()
+            .and_then(|p| p.selection)
+            .is_some_and(|s| s.dragging)
     }
 
     /// Scrolls the pane under the wheel pointer.
@@ -7416,6 +7519,8 @@ mod tests {
             anchor_offset: 0,
             scroll_half_pages: 0,
             area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
         });
         h.stoat.emit_smooth_scroll();
         let opened = drain_apc(&mut rx);
@@ -7464,6 +7569,8 @@ mod tests {
             anchor_offset: 0,
             scroll_half_pages: 0,
             area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
         });
         crate::render::hover::hover_popup_layout(&mut h.stoat).expect("hover layout")
     }
@@ -7485,6 +7592,182 @@ mod tests {
         let (popup, _) = hover_layout(200, 60, 40, 130);
         assert_eq!(popup.height, 26, "tall content caps at MAX_HEIGHT");
         assert_eq!(popup.width, 120, "wide content caps at MAX_WIDTH");
+    }
+
+    /// A hover popup at a fixed area (`9,1 22x7`) with interior (`10,2 20x5`),
+    /// `lines` as single unstyled spans and the given scroll offset.
+    fn hover_sel_popup(
+        lines: &[&str],
+        scroll_half_pages: usize,
+    ) -> action_handlers::lsp::HoverPopup {
+        use ratatui::style::Style;
+        action_handlers::lsp::HoverPopup {
+            lines: lines
+                .iter()
+                .map(|l| vec![(l.to_string(), Style::default())])
+                .collect(),
+            anchor_offset: 0,
+            scroll_half_pages,
+            area: Rect {
+                x: 9,
+                y: 1,
+                width: 22,
+                height: 7,
+            },
+            inner: Rect {
+                x: 10,
+                y: 2,
+                width: 20,
+                height: 5,
+            },
+            selection: None,
+        }
+    }
+
+    #[test]
+    fn hover_drag_copies_and_leaves_the_editor_untouched() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "buffer text\n");
+        h.stoat.pending_hover = Some(hover_sel_popup(&["hello world", "second line"], 0));
+
+        // Down at inner (10,2) = (line 0, col 0); drag to (13,2) = col 3.
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 2));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 13, 2));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 13, 2));
+
+        assert_eq!(h.fake_clipboard().writes(), vec!["hel"]);
+        assert!(
+            h.stoat.editor_drag.is_none(),
+            "a hover drag never arms the editor selection",
+        );
+        assert!(
+            h.stoat.pending_hover.as_ref().unwrap().selection.is_some(),
+            "the selection stays live after release",
+        );
+    }
+
+    #[test]
+    fn hover_drag_outside_the_rect_clamps_into_the_popup() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "x\n");
+        h.stoat.pending_hover = Some(hover_sel_popup(&["hello world"], 0));
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 12, 2));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            200,
+            200,
+        ));
+
+        let sel = h.stoat.pending_hover.as_ref().unwrap().selection.unwrap();
+        assert_eq!(sel.anchor, (0, 2));
+        assert_eq!(
+            sel.head,
+            (0, 11),
+            "a drag past the rect clamps to the last line and its char count",
+        );
+    }
+
+    #[test]
+    fn hover_selection_maps_through_the_scroll_offset() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "x\n");
+        let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        // Interior height 5 => half_page 2; scroll 3 => scroll = min(15, 6) = 6.
+        h.stoat.pending_hover = Some(hover_sel_popup(&refs, 3));
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 2));
+
+        let sel = h.stoat.pending_hover.as_ref().unwrap().selection.unwrap();
+        assert_eq!(
+            sel.anchor.0, 6,
+            "the top row maps to the first scrolled line"
+        );
+    }
+
+    #[test]
+    fn hover_hit_test_inverts_the_stoatty_scale() {
+        use crate::action_handlers::lsp::HoverPopup;
+        use ratatui::style::Style;
+
+        let popup = HoverPopup {
+            lines: vec![vec![("x".repeat(60), Style::default())]],
+            anchor_offset: 0,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 3,
+            },
+            selection: None,
+        };
+        for cell in 0..40u16 {
+            let (line, col) = crate::render::hover::hover_hit_test(&popup, true, cell, 0);
+            assert_eq!(line, 0);
+            assert_eq!(col, (cell as usize * 256 + 128) / 218);
+        }
+    }
+
+    #[test]
+    fn hover_grid_highlight_paints_the_selection_bg() {
+        use crate::{
+            action_handlers::lsp::{HoverPopup, HoverSelection},
+            test_harness::TestHarness,
+        };
+        use ratatui::style::Style;
+
+        let mut h = TestHarness::with_size(60, 20);
+        let root = std::path::PathBuf::from("/hover");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        h.stoat.pending_hover = Some(HoverPopup {
+            lines: vec![vec![("hello world".to_string(), Style::default())]],
+            anchor_offset: 0,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect::default(),
+            selection: Some(HoverSelection {
+                anchor: (0, 0),
+                head: (0, 4),
+                dragging: false,
+            }),
+        });
+
+        let buf = h.stoat.render();
+        let inner = h.stoat.pending_hover.as_ref().unwrap().inner;
+        let sel_bg = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_SELECTION)
+            .bg
+            .expect("theme has a selection background");
+
+        for c in 0..4u16 {
+            assert_eq!(
+                buf[(inner.x + c, inner.y)].bg,
+                sel_bg,
+                "selected cell {c} carries the selection background",
+            );
+        }
+        assert_ne!(
+            buf[(inner.x + 5, inner.y)].bg,
+            sel_bg,
+            "a cell past the selection keeps the modal background",
+        );
     }
 
     #[test]

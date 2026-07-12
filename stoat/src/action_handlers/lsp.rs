@@ -918,6 +918,18 @@ pub(crate) struct HoverResponse {
     pub(crate) anchor_offset: usize,
 }
 
+/// A live text selection over the hover popup body.
+///
+/// Endpoints are `(content line, char column)` into [`HoverPopup::lines`], so
+/// tuple ordering sorts them into a range. `dragging` is true between the mouse
+/// down and its release, so a drag past the popup rect keeps extending the head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HoverSelection {
+    pub(crate) anchor: (usize, usize),
+    pub(crate) head: (usize, usize),
+    pub(crate) dragging: bool,
+}
+
 /// Hover popup state ready to paint. Mirrors [`HoverResponse`] but
 /// lives on [`Stoat::pending_hover`] (separate from the in-flight
 /// task slot) so the renderer can borrow it without polling.
@@ -935,6 +947,12 @@ pub(crate) struct HoverPopup {
     /// a wheel over the popup scrolls it rather than the pane beneath. Empty
     /// ([`Rect::default`]) until the first render.
     pub(crate) area: Rect,
+    /// Interior rect (inside the border) the body last painted over, stamped by
+    /// [`crate::render::hover::render_hover`]. The selection hit-test maps a
+    /// pointer through this. Empty until the first render.
+    pub(crate) inner: Rect,
+    /// The live mouse selection over the body, if any.
+    pub(crate) selection: Option<HoverSelection>,
 }
 
 /// Issue a `textDocument/hover` request for the symbol under the
@@ -1169,6 +1187,8 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
                 anchor_offset: response.anchor_offset,
                 scroll_half_pages: 0,
                 area: Rect::default(),
+                inner: Rect::default(),
+                selection: None,
             });
             true
         },
