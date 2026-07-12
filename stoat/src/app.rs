@@ -7849,6 +7849,51 @@ mod tests {
     }
 
     #[test]
+    fn unplaceable_hover_popup_stops_consuming_mouse_input() {
+        use crate::action_handlers::lsp::HoverPopup;
+        use ratatui::style::Style;
+
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "alpha beta gamma\n");
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        h.stoat.pending_hover = Some(HoverPopup {
+            lines: vec![vec![("hover".to_string(), Style::default())]],
+            anchor_offset: 0,
+            editor_id,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
+        });
+
+        // The first render stamps the popup's real screen rect.
+        let _ = h.stoat.render();
+        let rendered = h.stoat.pending_hover.as_ref().unwrap().area;
+        assert_ne!(rendered, Rect::default(), "the popup renders a rect");
+
+        // Make the anchor unplaceable (past the rope), then render again.
+        h.stoat.pending_hover.as_mut().unwrap().anchor_offset = 10_000;
+        let _ = h.stoat.render();
+        assert_eq!(
+            h.stoat.pending_hover.as_ref().unwrap().area,
+            Rect::default(),
+            "an unplaceable popup resets its stored rect",
+        );
+
+        // A Down inside the previously rendered rect falls through to the pane
+        // instead of the stale area swallowing it as a hover selection.
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            rendered.x + 1,
+            rendered.y + 1,
+        ));
+        assert!(
+            h.stoat.pending_hover.as_ref().unwrap().selection.is_none(),
+            "the stale rect no longer consumes the click as a selection",
+        );
+    }
+
+    #[test]
     fn hover_drag_outside_the_rect_clamps_into_the_popup() {
         let mut h = Stoat::test();
         let _ = open_scratch_file(&mut h, "x\n");

@@ -47,6 +47,14 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
     };
 
     let Some((popup_area, _)) = hover_popup_layout(stoat) else {
+        // An unplaceable popup paints nothing, so clear its stored rects. A
+        // default rect hit-tests to no point, so the mouse and wheel handlers
+        // fall through to the pane beneath instead of the stale area swallowing
+        // the event.
+        if let Some(open) = stoat.pending_hover.as_mut() {
+            open.area = Rect::default();
+            open.inner = Rect::default();
+        }
         return;
     };
 
