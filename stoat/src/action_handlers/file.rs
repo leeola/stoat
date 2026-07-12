@@ -498,6 +498,46 @@ pub(crate) fn open_log_buffer(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Turn auto-reload on or off for the focused buffer, backing `:auto-reload`.
+///
+/// `state` is matched case-insensitively as "on" or "off". Any other value
+/// reports the expected form and changes nothing. Enabling a scratch buffer
+/// with no backing file reports that and changes nothing. Enabling arms the
+/// poll. Disabling relies on the pump auto-disarming once no buffer is flagged.
+pub(super) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEffect {
+    let on = match state.trim().to_ascii_lowercase().as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            stoat.pending_message = Some("auto-reload: expected on or off".to_string());
+            return UpdateEffect::Redraw;
+        },
+    };
+
+    let Some(id) = super::focused_editor_mut(stoat).map(|e| e.buffer_id) else {
+        return UpdateEffect::None;
+    };
+
+    if on && stoat.active_workspace().buffers.path_for(id).is_none() {
+        stoat.pending_message = Some("buffer has no file to reload".to_string());
+        return UpdateEffect::Redraw;
+    }
+
+    stoat.active_workspace_mut().buffers.set_auto_reload(id, on);
+    if on {
+        ensure_auto_reload_poll(stoat);
+    }
+    stoat.pending_message = Some(
+        if on {
+            "auto-reload on"
+        } else {
+            "auto-reload off"
+        }
+        .to_string(),
+    );
+    UpdateEffect::Redraw
+}
+
 /// Collapse `editor`'s selection onto the end of its buffer and scroll it into
 /// view, so a tailing buffer shows its newest content.
 fn collapse_to_buffer_end(editor: &mut EditorState, scrolloff: u32) {
@@ -981,6 +1021,99 @@ mod tests {
                 .id_for_path(&path)
                 .is_none(),
             "no buffer is opened for a missing log"
+        );
+    }
+
+    /// Open `name` (seeded with `seed`) under `root` and return its clean,
+    /// unflagged buffer id.
+    fn open_plain(h: &mut TestHarness, root: &Path, name: &str, seed: &[u8]) -> BufferId {
+        let path = root.join(name);
+        h.fake_fs().insert_file(&path, seed);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id
+    }
+
+    fn is_flagged(h: &TestHarness, id: BufferId) -> bool {
+        h.stoat
+            .active_workspace()
+            .buffers
+            .auto_reload_paths()
+            .iter()
+            .any(|(fid, _)| *fid == id)
+    }
+
+    #[test]
+    fn set_buffer_auto_reload_on_flags_and_arms() {
+        let mut h = Stoat::test();
+        let id = open_plain(&mut h, &PathBuf::from("/ar-on"), "a.txt", b"x\n");
+
+        assert_eq!(
+            super::set_buffer_auto_reload(&mut h.stoat, "on"),
+            UpdateEffect::Redraw
+        );
+
+        assert!(is_flagged(&h, id), "the focused buffer is flagged");
+        assert!(h.stoat.auto_reload_poll.is_some(), "the poll is armed");
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("auto-reload on"));
+    }
+
+    #[test]
+    fn set_buffer_auto_reload_off_clears_and_pump_disarms() {
+        let mut h = Stoat::test();
+        let id = open_plain(&mut h, &PathBuf::from("/ar-off"), "a.txt", b"x\n");
+        super::set_buffer_auto_reload(&mut h.stoat, "on");
+
+        assert_eq!(
+            super::set_buffer_auto_reload(&mut h.stoat, "OFF"),
+            UpdateEffect::Redraw
+        );
+        assert!(!is_flagged(&h, id), "the flag is cleared");
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("auto-reload off"));
+
+        super::pump_auto_reload(&mut h.stoat);
+        assert!(
+            h.stoat.auto_reload_poll.is_none(),
+            "the pump drops the poll after the last flag clears"
+        );
+    }
+
+    #[test]
+    fn set_buffer_auto_reload_rejects_a_bogus_argument() {
+        let mut h = Stoat::test();
+        let id = open_plain(&mut h, &PathBuf::from("/ar-bogus"), "a.txt", b"x\n");
+
+        assert_eq!(
+            super::set_buffer_auto_reload(&mut h.stoat, "maybe"),
+            UpdateEffect::Redraw
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("auto-reload: expected on or off")
+        );
+        assert!(!is_flagged(&h, id), "no flag changed");
+        assert!(h.stoat.auto_reload_poll.is_none(), "no poll armed");
+    }
+
+    #[test]
+    fn set_buffer_auto_reload_on_rejects_a_scratch_buffer() {
+        let mut h = Stoat::test();
+
+        assert_eq!(
+            super::set_buffer_auto_reload(&mut h.stoat, "on"),
+            UpdateEffect::Redraw
+        );
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("buffer has no file to reload")
+        );
+        assert!(
+            h.stoat.auto_reload_poll.is_none(),
+            "no poll armed for a scratch buffer"
         );
     }
 

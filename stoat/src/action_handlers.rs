@@ -49,8 +49,8 @@ pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::path::Path;
 use stoat_action::{
-    Action, ActionKind, Dump, OpenBuffer, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
-    OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
+    Action, ActionKind, AutoReload, Dump, OpenBuffer, OpenFile, OpenReviewAgentEdits,
+    OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -198,6 +198,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ForceSaveBuffer => file::force_save_buffer(stoat),
         ActionKind::WriteQuit => file::write_quit(stoat),
         ActionKind::CloseBuffer => file::close_buffer(stoat),
+        ActionKind::AutoReload => {
+            let auto = action
+                .as_any()
+                .downcast_ref::<AutoReload>()
+                .expect("AutoReload action downcast");
+            file::set_buffer_auto_reload(stoat, &auto.state)
+        },
         ActionKind::AcceptCompletion => crate::completion::accept::execute(stoat),
         ActionKind::SmartTab => completion::smart_tab(stoat),
         ActionKind::InsertTab => completion::insert_tab(stoat),

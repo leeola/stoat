@@ -48,7 +48,7 @@ use crate::{
             ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
             UnindentSelection, WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
         },
-        file::{ForceSaveBuffer, OpenBuffer, OpenFile},
+        file::{AutoReload, ForceSaveBuffer, OpenBuffer, OpenFile},
         file_finder::{
             FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
             FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
@@ -609,6 +609,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             })?;
         Ok(Box::new(OpenFile {
             path: PathBuf::from(raw),
+        }))
+    });
+    add(AutoReload::DEF, |params| {
+        let raw = params
+            .first()
+            .context(MissingSnafu { name: "state" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "state",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(AutoReload {
+            state: raw.to_string(),
         }))
     });
     add(OpenBuffer::DEF, |params| {
@@ -1236,7 +1249,8 @@ mod tests {
         // + 2 RotateSelectionContentsForward/Backward.
         // + 1 ReplaceWithYanked.
         // + 2 JoinSelections / JoinSelectionsSpace.
-        assert_eq!(all().count(), 336);
+        // + 1 AutoReload.
+        assert_eq!(all().count(), 337);
     }
 
     #[test]

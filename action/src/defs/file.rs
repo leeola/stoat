@@ -121,6 +121,66 @@ impl Action for OpenBuffer {
     }
 }
 
+const AUTO_RELOAD_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "state",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: true,
+    description: "on or off",
+}];
+
+#[derive(Debug)]
+pub struct AutoReloadDef;
+
+impl ActionDef for AutoReloadDef {
+    fn name(&self) -> &'static str {
+        "AutoReload"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::AutoReload
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        AUTO_RELOAD_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "follow the focused buffer's file"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Turn auto-reload on or off for the focused buffer. When on, the buffer re-reads its file as new content is appended, following the tail. Run :auto-reload off to stop it. Only file-backed buffers can follow."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Normal
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["auto-reload"]
+    }
+}
+
+#[derive(Debug)]
+pub struct AutoReload {
+    pub state: String,
+}
+
+impl AutoReload {
+    pub const DEF: &AutoReloadDef = &AutoReloadDef;
+}
+
+impl Action for AutoReload {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[derive(Debug)]
 pub struct ForceSaveBufferDef;
 

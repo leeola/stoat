@@ -47,7 +47,7 @@ pub use defs::{
         ToggleSyntaxHighlight, TriggerCompletion, TrimSelections, Undo, UnindentSelection,
         WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
     },
-    file::{ForceSaveBuffer, OpenBuffer, OpenFile},
+    file::{AutoReload, ForceSaveBuffer, OpenBuffer, OpenFile},
     file_finder::{
         FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
         FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
