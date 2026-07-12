@@ -6,14 +6,19 @@ use crate::{
         undercurl::UndercurlSpan,
     },
 };
-use lsp_types::DiagnosticSeverity;
+use lsp_types::{DiagnosticSeverity, DiagnosticTag};
 use ratatui::{
-    buffer::Buffer,
+    buffer::{Buffer, Cell},
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
-use std::{cmp::Reverse, collections::BTreeMap, ops::Range, path::Path};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, HashSet},
+    ops::Range,
+    path::Path,
+};
 use stoat_config::LineNumbers;
 use stoat_text::{cursor_offset, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
@@ -250,6 +255,7 @@ pub(crate) fn render_editor_with_overlay(
             buffer_snapshot.rope(),
             &snapshot,
             theme,
+            fallback_style,
             editor.scroll_row,
             end_row,
             inner,
@@ -306,7 +312,9 @@ pub(crate) fn render_editor_with_overlay(
                 &snapshot,
                 match_start..match_end,
                 None,
-                match_style,
+                &mut |_, _, cell| {
+                    cell.set_style(match_style);
+                },
                 editor.scroll_row,
                 end_row,
                 inner,
@@ -346,7 +354,9 @@ pub(crate) fn render_editor_with_overlay(
                 &snapshot,
                 lo..hi,
                 Some(cursor),
-                selection_style,
+                &mut |_, _, cell| {
+                    cell.set_style(selection_style);
+                },
                 editor.scroll_row,
                 end_row,
                 inner,
@@ -525,6 +535,23 @@ fn severity_rank(sev: DiagnosticSeverity) -> u8 {
         DiagnosticSeverity::HINT => 3,
         _ => 0,
     }
+}
+
+/// Blend a syntax foreground 3:2 toward the pane background, keeping the hue but
+/// reading muted. Used to dim Unnecessary-tagged (inactive-code) regions without
+/// discarding their per-token syntax colors.
+fn mute_rgb(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+    let mix = |f: u8, b: u8| ((f as u16 * 3 + b as u16 * 2) / 5) as u8;
+    [mix(fg[0], bg[0]), mix(fg[1], bg[1]), mix(fg[2], bg[2])]
+}
+
+/// Whether a diagnostic carries the `Unnecessary` tag, marking dead or
+/// inactive code (e.g. a `#[cfg]`-excluded region) that renders muted rather
+/// than underlined.
+fn is_unnecessary(diag: &lsp_types::Diagnostic) -> bool {
+    diag.tags
+        .as_ref()
+        .is_some_and(|tags| tags.contains(&DiagnosticTag::UNNECESSARY))
 }
 
 fn severity_scope(sev: DiagnosticSeverity) -> &'static str {
@@ -879,6 +906,7 @@ fn paint_diagnostic_spans(
     rope: &Rope,
     snapshot: &DisplaySnapshot,
     theme: &crate::theme::Theme,
+    fallback_style: Style,
     scroll_row: u32,
     end_row: u32,
     inner: Rect,
@@ -889,6 +917,16 @@ fn paint_diagnostic_spans(
     colors: Option<&SeverityColors>,
 ) {
     let rope_len = rope.len();
+
+    // An Unnecessary-tagged hint/info span blends the cell's syntax fg toward
+    // this background rather than overwriting it. It resolves once, and the
+    // dedup set keeps overlapping muted spans from double-blending a shared cell.
+    let mute_bg = style_rgb(fallback_style.bg.or_else(|| {
+        theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|s| s.bg)
+    }));
+    let mut muted_cells: HashSet<(u16, u16)> = HashSet::new();
     // Paint least-severe first so the worst severity lands last, on top, for
     // both the cell foreground and the collected undercurl spans. rust-analyzer
     // can publish overlapping diagnostics (a WARNING and a HINT over `unused`)
@@ -913,6 +951,46 @@ fn paint_diagnostic_spans(
         if start >= end {
             continue;
         }
+        if is_unnecessary(diag)
+            && matches!(
+                sev,
+                DiagnosticSeverity::HINT | DiagnosticSeverity::INFORMATION
+            )
+        {
+            // An inactive-code region mutes each cell's syntax fg toward the
+            // background, with no underline and no undercurl. The dedup set
+            // blends a cell shared by overlapping Unnecessary spans exactly once.
+            let grey = theme.get(severity_scope(sev));
+            paint_offset_range(
+                rope,
+                snapshot,
+                start..end,
+                None,
+                &mut |x, y, cell| {
+                    if !muted_cells.insert((x, y)) {
+                        return;
+                    }
+                    match (mute_bg, cell.fg) {
+                        (Some(bg), Color::Rgb(r, g, b)) => {
+                            let [mr, mg, mb] = mute_rgb([r, g, b], bg);
+                            cell.set_fg(Color::Rgb(mr, mg, mb));
+                        },
+                        _ => {
+                            cell.set_style(grey);
+                        },
+                    }
+                },
+                scroll_row,
+                end_row,
+                inner,
+                right,
+                bottom,
+                buf,
+                None,
+            );
+            continue;
+        }
+
         let style = theme
             .get(severity_scope(sev))
             .add_modifier(Modifier::UNDERLINED);
@@ -926,7 +1004,9 @@ fn paint_diagnostic_spans(
             snapshot,
             start..end,
             None,
-            style,
+            &mut |_, _, cell| {
+                cell.set_style(style);
+            },
             scroll_row,
             end_row,
             inner,
@@ -1204,7 +1284,7 @@ fn paint_offset_range(
     snapshot: &DisplaySnapshot,
     range: Range<usize>,
     skip_offset: Option<usize>,
-    style: Style,
+    apply: &mut dyn FnMut(u16, u16, &mut Cell),
     scroll_row: u32,
     end_row: u32,
     inner: Rect,
@@ -1228,7 +1308,7 @@ fn paint_offset_range(
         let y = inner.y + (display_row - scroll_row) as u16;
         let x = inner.x + display_col as u16;
         if x < right && y < bottom {
-            buf[(x, y)].set_style(style);
+            apply(x, y, &mut buf[(x, y)]);
             if collect {
                 painted.push((x, y));
             }
@@ -1359,7 +1439,7 @@ mod tests {
         action_handlers::{self, dispatch},
         Stoat,
     };
-    use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range};
     use ratatui::{buffer::Buffer, layout::Rect};
     use std::path::PathBuf;
     use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
@@ -1724,6 +1804,13 @@ mod tests {
         }
     }
 
+    fn tagged_overlap_diag(line: u32, start: u32, end: u32, sev: DiagnosticSeverity) -> Diagnostic {
+        Diagnostic {
+            tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+            ..overlap_diag(line, start, end, sev)
+        }
+    }
+
     #[test]
     fn snapshot_diagnostic_overlap_warning_beats_hint() {
         let mut h = Stoat::test();
@@ -1766,6 +1853,88 @@ mod tests {
             ],
         );
         h.assert_snapshot("diagnostic_overlap_error_beats_hint");
+    }
+
+    #[test]
+    fn snapshot_diagnostic_unnecessary_mutes_syntax() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-unnecessary");
+        let path = root.join("a.rs");
+        h.fake_fs()
+            .insert_file(&path, b"let x = 1;\nlet y = 2;\nlet z = 3;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        // An Unnecessary-tagged hint marks inactive code. Its span blends each
+        // token's syntax fg toward the background, keeping the per-token hues
+        // rather than flattening the line to one hint color or underlining it.
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT)],
+        );
+        h.assert_snapshot("diagnostic_unnecessary_mutes_syntax");
+    }
+
+    #[test]
+    fn snapshot_diagnostic_warning_over_unnecessary_still_underlines() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-warn-over-unnecessary");
+        let path = root.join("a.rs");
+        h.fake_fs()
+            .insert_file(&path, b"let x = 1;\nlet y = 2;\nlet z = 3;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        // A warning overlapping an inactive-code region sorts last and paints on
+        // top, so its underline lands over the muted span rather than being
+        // erased by the mute.
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![
+                tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT),
+                overlap_diag(1, 4, 5, DiagnosticSeverity::WARNING),
+            ],
+        );
+        h.assert_snapshot("diagnostic_warning_over_unnecessary_still_underlines");
+    }
+
+    #[test]
+    fn unnecessary_span_blends_a_shared_cell_once() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-unnecessary-dedup");
+        let path = root.join("a.rs");
+        h.fake_fs()
+            .insert_file(&path, b"let x = 1;\nlet y = 2;\nlet z = 3;\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        let row_fg = |stoat: &mut Stoat| {
+            let buf = stoat.render();
+            (0..buf.area.width)
+                .map(|x| buf[(x, 1)].fg)
+                .collect::<Vec<_>>()
+        };
+
+        h.stoat.diagnostics.replace_for_path(
+            path.clone(),
+            vec![tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT)],
+        );
+        let once = row_fg(&mut h.stoat);
+
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![
+                tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT),
+                tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT),
+            ],
+        );
+        let twice = row_fg(&mut h.stoat);
+
+        assert_eq!(
+            once, twice,
+            "overlapping muted spans must blend a shared cell exactly once"
+        );
     }
 
     #[test]
