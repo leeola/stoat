@@ -1390,7 +1390,7 @@ mod tests {
 
         let new_buffer = ws.buffers.get(new_buffer_id).expect("buffer exists");
         let guard = new_buffer.read().expect("buffer poisoned");
-        assert_eq!(guard.snapshot.visible_text.to_string(), "");
+        assert_eq!(guard.snapshot.visible_text.to_string(), "\n");
 
         let original_buffer = ws.buffers.get(original_buffer_id).expect("buffer exists");
         let original_guard = original_buffer.read().expect("buffer poisoned");
@@ -1990,7 +1990,7 @@ mod tests {
     fn select_all_on_empty_buffer() {
         let mut stoat = stoat();
         dispatch(&mut stoat, &SelectAll);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
     }
 
     #[test]

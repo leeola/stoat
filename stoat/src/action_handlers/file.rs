@@ -436,7 +436,7 @@ pub(crate) fn open_file_in_pane(
     };
     let content = match read_string_via_host(&*stoat.fs_host, &absolute) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "\n".to_string(),
         Err(e) => {
             tracing::error!("failed to read {}: {}", absolute.display(), e);
             return None;
@@ -1122,7 +1122,10 @@ mod tests {
             .buffers
             .get(new_id)
             .expect("scratch buffer exists");
-        assert!(new_buffer.read().expect("poisoned").rope().is_empty());
+        assert_eq!(
+            new_buffer.read().expect("poisoned").rope().to_string(),
+            "\n"
+        );
     }
 
     #[test]

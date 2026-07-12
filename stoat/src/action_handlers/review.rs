@@ -1993,7 +1993,7 @@ fn render_review_editor(stoat: &mut Stoat) {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let (buffer_id, buffer) = ws.buffers.new_scratch();
+    let (buffer_id, buffer) = ws.buffers.new_scratch_unseeded();
     {
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.edit(0..0, &placeholder);

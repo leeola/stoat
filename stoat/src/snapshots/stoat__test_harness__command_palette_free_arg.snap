@@ -1,6 +1,5 @@
 ---
 source: stoat/src/test_harness.rs
-assertion_line: 618
 expression: text
 ---
 actions: space
@@ -9,7 +8,7 @@ mode: insert
 size: 120x30
 ---
   [0m[38;2;99;109;131m1[0m [0m[7m [0m
-
+  [0m[38;2;99;109;131m2[0m
 
 
                     [0m[38;2;198;120;221m┌ RenameWorkspace ─────────────────────────────────────────────────────────────┐[0m

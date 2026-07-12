@@ -735,7 +735,7 @@ mod tests {
         let exec = executor();
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let (scratch_id, scratch_buf) = ws.buffers.new_scratch();
+        let (scratch_id, scratch_buf) = ws.buffers.new_scratch_unseeded();
         {
             let mut guard = scratch_buf.write().expect("buffer poisoned");
             guard.edit(0..0, "notes\n");

@@ -77,10 +77,12 @@ impl BufferRegistry {
     }
 
     /// True when the registry holds exactly one buffer, that buffer has no
-    /// backing file path, and its text is empty: the state left by
-    /// [`Self::new_scratch`] without any subsequent edits. Used by
-    /// [`crate::workspace::Workspace::is_fresh`] to decide whether a
-    /// workspace is worth persisting.
+    /// backing file path, and its text is empty or the single newline
+    /// [`Self::new_scratch`] seeds. This is the state left by a new scratch
+    /// without any subsequent edits. A truly empty rope is also accepted so
+    /// workspaces persisted before the seed still read as fresh. Used by
+    /// [`crate::workspace::Workspace::is_fresh`] to decide whether a workspace
+    /// is worth persisting.
     pub(crate) fn only_empty_scratch(&self) -> bool {
         if self.buffers.len() != 1 || !self.path_to_id.is_empty() {
             return false;
@@ -91,12 +93,8 @@ impl BufferRegistry {
         if entry.path.is_some() {
             return false;
         }
-        entry
-            .buffer
-            .read()
-            .expect("buffer poisoned")
-            .snapshot
-            .is_empty()
+        let guard = entry.buffer.read().expect("buffer poisoned");
+        guard.snapshot.is_empty() || guard.snapshot.visible_text.to_string() == "\n"
     }
 
     fn allocate_id(&mut self) -> BufferId {
@@ -105,8 +103,12 @@ impl BufferRegistry {
         id
     }
 
+    /// Allocate an empty document scratch buffer, seeded with a single newline
+    /// so an untouched scratch presents a min-width-1 cursor. Use
+    /// [`Self::new_scratch_unseeded`] for surfaces that fill the buffer
+    /// themselves.
     pub(crate) fn new_scratch(&mut self) -> (BufferId, SharedBuffer) {
-        self.new_scratch_inner(false)
+        self.new_scratch_inner(false, true)
     }
 
     /// Allocate a scratch buffer flagged as a preview surface. The
@@ -115,12 +117,27 @@ impl BufferRegistry {
     /// (and any future preview surface). Callers evict the entry via
     /// [`Self::remove`] when the surface closes.
     pub(crate) fn new_scratch_preview(&mut self) -> (BufferId, SharedBuffer) {
-        self.new_scratch_inner(true)
+        self.new_scratch_inner(true, true)
     }
 
-    fn new_scratch_inner(&mut self, preview: bool) -> (BufferId, SharedBuffer) {
+    /// Allocate a scratch buffer with a genuinely empty rope.
+    ///
+    /// [`Self::new_scratch`] seeds a newline so an untouched scratch has a
+    /// min-width-1 cursor. Some surfaces overwrite the whole buffer with their
+    /// own content and must start from an empty rope, since a seeded newline
+    /// would prepend to what they insert. The command input and the
+    /// block-decorated placeholder are such surfaces.
+    pub(crate) fn new_scratch_unseeded(&mut self) -> (BufferId, SharedBuffer) {
+        self.new_scratch_inner(false, false)
+    }
+
+    fn new_scratch_inner(&mut self, preview: bool, seed: bool) -> (BufferId, SharedBuffer) {
         let id = self.allocate_id();
-        let buffer = Arc::new(RwLock::new(TextBuffer::new(id)));
+        let buffer = if seed {
+            Arc::new(RwLock::new(TextBuffer::with_text(id, "\n")))
+        } else {
+            Arc::new(RwLock::new(TextBuffer::new(id)))
+        };
         self.buffers.insert(
             id,
             BufferEntry {

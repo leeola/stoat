@@ -6851,9 +6851,10 @@ mod tests {
         };
         let buffer_id = ws.editors.get(editor_id).expect("editor is live").buffer_id;
         let buffer = ws.buffers.get(buffer_id).expect("scratch buffer is live");
-        assert!(
-            buffer.read().expect("buffer lock").rope().is_empty(),
-            "restored scratch buffer is empty",
+        assert_eq!(
+            buffer.read().expect("buffer lock").rope().to_string(),
+            "\n",
+            "restored scratch buffer holds the seeded newline",
         );
         assert_eq!(
             h.stoat.focused_mode(),

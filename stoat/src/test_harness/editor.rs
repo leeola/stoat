@@ -19,7 +19,8 @@ pub(crate) fn seed_focused_buffer(stoat: &mut Stoat, text: &str) {
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer exists");
         let mut guard = buffer.write().expect("buffer poisoned");
-        guard.edit(0..0, text);
+        let len = guard.snapshot.visible_text.len();
+        guard.edit(0..len, text);
     }
     let editor = &mut ws.editors[editor_id];
     let snapshot = editor.display_map.snapshot();

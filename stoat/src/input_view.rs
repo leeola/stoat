@@ -61,7 +61,7 @@ impl InputView {
         start_mode: &'static str,
         max_height: u16,
     ) -> Self {
-        let (buffer_id, shared_buffer) = ws.buffers.new_scratch();
+        let (buffer_id, shared_buffer) = ws.buffers.new_scratch_unseeded();
         if !seed.is_empty() {
             let mut guard = shared_buffer.write().expect("buffer poisoned");
             guard.edit(0..0, seed);
