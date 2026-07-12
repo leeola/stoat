@@ -130,6 +130,19 @@ impl GitRepo for LocalGitRepo {
         staged
     }
 
+    fn has_tracked_changes(&self) -> bool {
+        let repo = self.repo.lock().expect("git repo lock");
+        let mut opts = StatusOptions::new();
+        opts.include_untracked(false);
+        let statuses = match repo.statuses(Some(&mut opts)) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        statuses
+            .iter()
+            .any(|entry| entry.status().intersects(STAGED.union(UNSTAGED)))
+    }
+
     fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>> {
         let repo = self.repo.lock().expect("git repo lock");
         let Some(workdir) = repo.workdir() else {

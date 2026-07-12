@@ -653,4 +653,66 @@ mod tests {
             .applied_rebases(std::path::Path::new("/repo"))
             .is_empty());
     }
+
+    fn dirty_badge(h: &crate::test_harness::TestHarness) -> Option<String> {
+        use crate::badge::BadgeSource;
+        let ws = h.stoat.active_workspace();
+        ws.badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| ws.badges.get(id))
+            .map(|b| b.label.clone())
+    }
+
+    #[test]
+    fn untracked_file_does_not_block_rebase() {
+        use crate::host::GitHost;
+
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.fake_git().add_repo("/repo").untracked("scratch.txt");
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("d");
+        h.type_keys("Enter");
+        assert_ne!(
+            dirty_badge(&h).as_deref(),
+            Some("working tree dirty: commit or stash first"),
+            "untracked-only tree is not blocked"
+        );
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        assert_eq!(
+            repo.log_commits(None, 10).len(),
+            2,
+            "dropped commit rebased through the untracked tree"
+        );
+    }
+
+    #[test]
+    fn tracked_modification_blocks_rebase() {
+        use crate::host::GitHost;
+
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.fake_git()
+            .add_repo("/repo")
+            .modified("tracked.rs", "old\n", "new\n");
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("d");
+        h.type_keys("Enter");
+        assert_eq!(
+            dirty_badge(&h).as_deref(),
+            Some("working tree dirty: commit or stash first")
+        );
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        assert_eq!(
+            repo.log_commits(None, 10).len(),
+            3,
+            "blocked rebase leaves history intact"
+        );
+    }
 }

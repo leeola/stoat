@@ -102,6 +102,14 @@ pub trait GitHost: Send + Sync {
 pub trait GitRepo: Send + Sync {
     fn workdir(&self) -> Option<PathBuf>;
     fn changed_files(&self) -> Vec<ChangedFile>;
+
+    /// Whether the repository has index or working-tree changes to *tracked*
+    /// files. Untracked files are excluded, because no stoat git operation
+    /// writes the working tree, so an untracked file is never at risk.
+    ///
+    /// Guards the in-memory commit rewrites (rebase, commit-review apply) that
+    /// must refuse to run over tracked edits but tolerate untracked files.
+    fn has_tracked_changes(&self) -> bool;
     /// Whether `path` (absolute or repo-relative) is ignored by the repo's
     /// gitignore rules. Lets a watcher skip build churn such as `target/` when
     /// deciding whether a change should refresh a review.

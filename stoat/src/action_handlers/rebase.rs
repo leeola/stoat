@@ -373,7 +373,7 @@ pub(super) fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
         emit_rebase_error(stoat, "git repo not found", None);
         return UpdateEffect::Redraw;
     };
-    if !repo.changed_files().is_empty() {
+    if repo.has_tracked_changes() {
         emit_rebase_error(stoat, "working tree dirty: commit or stash first", None);
         return UpdateEffect::Redraw;
     }

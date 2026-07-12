@@ -8,7 +8,7 @@ use crate::host::{
     },
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -294,6 +294,17 @@ impl<'a> FakeRepoBuilder<'a> {
 
     /// Mark `rel_path` as gitignored, so [`GitRepo::is_path_ignored`] reports
     /// its absolute path ignored. Models a `target/` build artifact.
+    /// Record `rel_path` as an untracked working-tree file, so
+    /// [`GitRepo::changed_files`] reports it but [`GitRepo::has_tracked_changes`]
+    /// does not. Models a new file `git add` has not yet seen.
+    pub fn untracked(&mut self, rel_path: impl AsRef<Path>) -> &mut Self {
+        let abs = self.workdir.join(rel_path);
+        self.mutate_repo(move |state| {
+            state.untracked.insert(abs);
+        });
+        self
+    }
+
     pub fn ignored(&mut self, rel_path: impl AsRef<Path>) -> &mut Self {
         let abs = self.workdir.join(rel_path);
         self.mutate_repo(move |state| {
@@ -447,6 +458,11 @@ pub struct FakeGitRepo {
 struct FakeRepoState {
     head_contents: HashMap<PathBuf, String>,
     changed: Vec<ChangedFile>,
+    /// Absolute paths reported as untracked (working-tree new files), seeded via
+    /// [`FakeRepoBuilder::untracked`]. Kept apart from `changed` so
+    /// [`GitRepo::has_tracked_changes`] can exclude them while
+    /// [`GitRepo::changed_files`] still reports them.
+    untracked: BTreeSet<PathBuf>,
     /// Absolute paths [`GitRepo::is_path_ignored`] reports as gitignored, seeded
     /// via [`FakeRepoBuilder::ignored`]. Empty by default.
     ignored: HashSet<PathBuf>,
@@ -524,10 +540,19 @@ impl GitRepo for FakeGitRepo {
             .filter(|f| !f.staged)
             .cloned()
             .collect();
+        unstaged.extend(state.untracked.iter().map(|path| ChangedFile {
+            path: path.clone(),
+            staged: false,
+        }));
         staged.sort_by(|a, b| a.path.cmp(&b.path));
         unstaged.sort_by(|a, b| a.path.cmp(&b.path));
         staged.extend(unstaged);
         staged
+    }
+
+    fn has_tracked_changes(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        !state.changed.is_empty()
     }
 
     fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>> {
@@ -730,7 +755,7 @@ impl GitRepo for FakeGitRepo {
             .unwrap_or_default();
         let new_tree = &commit.tree;
 
-        let mut paths: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
         for p in parent_tree.keys().chain(new_tree.keys()) {
             paths.insert(p.clone());
         }
@@ -772,8 +797,8 @@ impl GitRepo for FakeGitRepo {
 /// lines on each side. Matches the shape of a unified diff well enough
 /// for UI tests that only care about "something changed".
 fn line_delta(base: &str, new: &str) -> (u32, u32) {
-    let base_lines: std::collections::BTreeSet<&str> = base.lines().collect();
-    let new_lines: std::collections::BTreeSet<&str> = new.lines().collect();
+    let base_lines: BTreeSet<&str> = base.lines().collect();
+    let new_lines: BTreeSet<&str> = new.lines().collect();
     let adds = new_lines.difference(&base_lines).count() as u32;
     let dels = base_lines.difference(&new_lines).count() as u32;
     (adds, dels)
@@ -905,6 +930,26 @@ mod tests {
         assert!(repo.head_content(&workdir().join("new.rs")).is_none());
         let changed = repo.changed_files();
         assert_eq!(changed.len(), 1);
+    }
+
+    #[test]
+    fn untracked_file_is_not_a_tracked_change() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).untracked("u.rs");
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(!repo.has_tracked_changes());
+        let changed = repo.changed_files();
+        assert_eq!(changed.len(), 1, "untracked file still reported as changed");
+        assert!(changed[0].path.ends_with("u.rs"));
+        assert!(!changed[0].staged);
+    }
+
+    #[test]
+    fn tracked_modification_is_a_tracked_change() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).modified("a.rs", "v1", "v2");
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(repo.has_tracked_changes());
     }
 
     #[test]

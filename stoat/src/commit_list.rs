@@ -323,6 +323,80 @@ mod tests {
         assert_eq!(h.stoat.current_view(), Some("commits"));
     }
 
+    fn dirty_badge(h: &crate::test_harness::TestHarness) -> Option<String> {
+        use crate::badge::BadgeSource;
+        let ws = h.stoat.active_workspace();
+        ws.badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| ws.badges.get(id))
+            .map(|b| b.label.clone())
+    }
+
+    fn staged_head_review(h: &mut crate::test_harness::TestHarness) {
+        use crate::review_session::ChunkStatus;
+        h.open_commits("/repo");
+        h.type_keys("o");
+        assert_eq!(h.stoat.current_view(), Some("diff"));
+        h.set_review_status(0, ChunkStatus::Staged);
+    }
+
+    #[test]
+    fn untracked_file_does_not_block_review_removal() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("parent", "prev", &[("a.rs", "one\ntwo\nthree\n")])
+            .commit_with_parent_message(
+                "head",
+                "parent",
+                "feat: drop this hunk",
+                &[("a.rs", "one\ntwo_NEW\nthree\n")],
+            )
+            .untracked("scratch.txt");
+        staged_head_review(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
+        assert_eq!(
+            h.fake_git()
+                .amend_history(std::path::Path::new("/repo"))
+                .len(),
+            1,
+            "removal proceeds over an untracked file"
+        );
+        assert_ne!(
+            dirty_badge(&h).as_deref(),
+            Some("working tree dirty: commit or stash first")
+        );
+    }
+
+    #[test]
+    fn tracked_modification_blocks_review_removal() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("parent", "prev", &[("a.rs", "one\ntwo\nthree\n")])
+            .commit_with_parent_message(
+                "head",
+                "parent",
+                "feat: drop this hunk",
+                &[("a.rs", "one\ntwo_NEW\nthree\n")],
+            )
+            .modified("tracked.rs", "old\n", "new\n");
+        staged_head_review(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
+        assert!(
+            h.fake_git()
+                .amend_history(std::path::Path::new("/repo"))
+                .is_empty(),
+            "tracked change blocks removal"
+        );
+        assert_eq!(
+            dirty_badge(&h).as_deref(),
+            Some("working tree dirty: commit or stash first")
+        );
+    }
+
     #[test]
     fn review_remove_selected_on_non_head_rewrites_chain() {
         use crate::review_session::ChunkStatus;

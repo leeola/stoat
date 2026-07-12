@@ -337,7 +337,7 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
         emit_review_error_badge(stoat, "git repo not found", None);
         return UpdateEffect::Redraw;
     };
-    if !repo.changed_files().is_empty() {
+    if repo.has_tracked_changes() {
         emit_review_error_badge(stoat, "working tree dirty: commit or stash first", None);
         return UpdateEffect::Redraw;
     }
