@@ -20,6 +20,17 @@ pub enum MouseCapturePolicy {
     Never,
 }
 
+/// How the editor gutter numbers lines. `Off` hides the number column
+/// (diagnostic marks only); `Absolute` shows each line's own number;
+/// `Relative` shows the distance from the cursor line (Helix-style).
+/// `None` on the setting falls back to `Relative`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineNumbers {
+    Off,
+    Absolute,
+    Relative,
+}
+
 /// Top-level resolved settings struct.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Settings {
@@ -54,10 +65,10 @@ pub struct Settings {
     /// edge when following it. `None` falls back to 3. Set via
     /// `editor.scrolloff = N;` in stcfg.
     pub scrolloff: Option<u32>,
-    /// Whether the editor gutter shows absolute line numbers. `None` falls back
-    /// to enabled. Set `editor.line_numbers = false;` in stcfg to restore the
-    /// diagnostic-only gutter.
-    pub editor_line_numbers: Option<bool>,
+    /// How the editor gutter numbers lines. `None` falls back to
+    /// [`LineNumbers::Relative`]. Set `editor.line_numbers = relative | absolute
+    /// | off;` in stcfg (`false` is accepted as `off`, `true` as `relative`).
+    pub editor_line_numbers: Option<LineNumbers>,
     /// Program a terminal pane spawns as its subshell. `None` lets the spawn
     /// site fall back to `$SHELL`, then `/bin/sh`. Set via
     /// `terminal.shell = "/bin/zsh";` in stcfg.
@@ -213,8 +224,19 @@ impl Settings {
                 }
             },
             ["editor", "line_numbers"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.editor_line_numbers = Some(b);
+                let numbers = match &setting.value.node {
+                    Value::Bool(false) => Some(LineNumbers::Off),
+                    Value::Bool(true) => Some(LineNumbers::Relative),
+                    Value::String(s) | Value::Ident(s) => match s.as_str() {
+                        "off" => Some(LineNumbers::Off),
+                        "absolute" => Some(LineNumbers::Absolute),
+                        "relative" => Some(LineNumbers::Relative),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(n) = numbers {
+                    self.editor_line_numbers = Some(n);
                 }
             },
             ["terminal", "shell"] => {
@@ -349,10 +371,26 @@ mod tests {
 
     #[test]
     fn from_config_extracts_editor_line_numbers() {
-        let config = parse_ok("on init { editor.line_numbers = false; }");
+        let ln = |src: &str| Settings::from_config(&parse_ok(src)).editor_line_numbers;
         assert_eq!(
-            Settings::from_config(&config).editor_line_numbers,
-            Some(false)
+            ln("on init { editor.line_numbers = false; }"),
+            Some(LineNumbers::Off)
+        );
+        assert_eq!(
+            ln("on init { editor.line_numbers = off; }"),
+            Some(LineNumbers::Off)
+        );
+        assert_eq!(
+            ln("on init { editor.line_numbers = true; }"),
+            Some(LineNumbers::Relative)
+        );
+        assert_eq!(
+            ln("on init { editor.line_numbers = absolute; }"),
+            Some(LineNumbers::Absolute)
+        );
+        assert_eq!(
+            ln("on init { editor.line_numbers = relative; }"),
+            Some(LineNumbers::Relative)
         );
     }
 

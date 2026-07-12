@@ -776,7 +776,7 @@ mod tests {
             action_handlers::{self, dispatch},
             render::editor::render_editor_with_overlay,
             theme::{scope, Theme},
-            Stoat,
+            LineNumbers, Stoat,
         };
         use std::{collections::BTreeMap, path::PathBuf};
         use stoat_action::OpenFile;
@@ -813,7 +813,7 @@ mod tests {
                 &mut expected,
                 false,
                 false,
-                true,
+                LineNumbers::Absolute,
                 None,
                 None,
                 None,

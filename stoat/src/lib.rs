@@ -88,7 +88,7 @@ pub use pane::{
     PaneTree, Placement, View,
 };
 pub use run::RunId;
-pub use stoat_config::{MouseCapturePolicy, Settings};
+pub use stoat_config::{LineNumbers, MouseCapturePolicy, Settings};
 pub use stoat_log as log;
 
 /// Resolves the [`MouseCapturePolicy`] from the compiled-in default

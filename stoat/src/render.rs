@@ -51,6 +51,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::path::Path;
+use stoat_config::LineNumbers;
 use stoatty_widgets::ApcScene;
 
 pub(crate) struct PaneCtx<'a> {
@@ -106,10 +107,10 @@ pub(crate) struct FrameCtx<'a> {
     /// document editor delegates its primary cursor to the terminal cursor
     /// (which stoatty eases) instead of painting a styled grid cell.
     pub(crate) stoatty: bool,
-    /// Whether document editor panes show the absolute-line-number gutter,
-    /// resolved from `editor.line_numbers` (default enabled). When unset the
-    /// pane keeps the diagnostic-only gutter column.
-    pub(crate) line_numbers: bool,
+    /// How document editor panes number the gutter, resolved from
+    /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
+    /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
+    pub(crate) line_numbers: LineNumbers,
     /// Terminal cell the mouse last rested over, or `None` when it has not
     /// moved over a pane. The focused editor resolves the diagnostic under it
     /// to raise a hover popover.
@@ -241,7 +242,10 @@ pub(crate) fn frame(
         diagnostics: &stoat.diagnostics,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         stoatty: stoat.stoatty,
-        line_numbers: stoat.settings.editor_line_numbers.unwrap_or(true),
+        line_numbers: stoat
+            .settings
+            .editor_line_numbers
+            .unwrap_or(LineNumbers::Relative),
         hover_cell: stoat.hover_cell,
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),

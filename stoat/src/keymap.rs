@@ -545,6 +545,7 @@ pub(crate) fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stoat_config::{LineNumbers, Settings};
 
     struct TestState {
         values: HashMap<String, StateValue>,
@@ -924,6 +925,15 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let (_, warnings) = Keymap::compile_with_warnings(&config);
         assert!(warnings.is_empty(), "shipped config warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn default_config_sets_relative_line_numbers() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        assert_eq!(
+            Settings::from_config(&config).editor_line_numbers,
+            Some(LineNumbers::Relative),
+        );
     }
 
     #[test]

@@ -45,7 +45,7 @@ use std::{
     sync::Arc,
 };
 use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
-use stoat_config::Settings;
+use stoat_config::{LineNumbers, Settings};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::{Anchor, Bias, IndentStyle, Selection};
@@ -5136,7 +5136,10 @@ impl Stoat {
         }
         let mut async_jobs: Vec<PoolFill> = Vec::new();
         let syntax_highlight = self.syntax_highlight;
-        let line_numbers = self.settings.editor_line_numbers.unwrap_or(true);
+        let line_numbers = self
+            .settings
+            .editor_line_numbers
+            .unwrap_or(LineNumbers::Relative);
         let stoatty = self.stoatty;
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
@@ -5220,7 +5223,7 @@ impl Stoat {
                         width: region.width,
                         height: region.height,
                         gutter: crate::smooth_scroll::PageGutter::new(
-                            line_numbers,
+                            line_numbers != LineNumbers::Off,
                             severity,
                             theme.clone(),
                             rich,
@@ -7929,7 +7932,7 @@ mod tests {
 
         // Line numbers off so the paint carries no off-grid gutter and the
         // scene stays genuinely widget-free.
-        h.stoat.settings.editor_line_numbers = Some(false);
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
 
         let root = std::path::PathBuf::from("/scene");
         let path = root.join("a.txt");
@@ -8015,7 +8018,7 @@ mod tests {
         h.stoat.set_stoatty_apc(true, tx);
 
         // Line numbers off so the only off-grid components are the status bar's.
-        h.stoat.settings.editor_line_numbers = Some(false);
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
 
         let root = std::path::PathBuf::from("/status");
         let path = root.join("a.txt");
@@ -11102,11 +11105,11 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        h.stoat.settings.editor_line_numbers = Some(true);
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Relative);
         h.stoat.render();
         let with_numbers = focused_gutter_width(&h);
 
-        h.stoat.settings.editor_line_numbers = Some(false);
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
         h.stoat.render();
         let without = focused_gutter_width(&h);
 

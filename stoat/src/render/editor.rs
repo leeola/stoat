@@ -14,6 +14,7 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 use std::{cmp::Reverse, collections::BTreeMap, ops::Range, path::Path};
+use stoat_config::LineNumbers;
 use stoat_text::{cursor_offset, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
@@ -44,7 +45,7 @@ pub(crate) fn render_editor(
         buf,
         is_focused,
         false,
-        false,
+        LineNumbers::Off,
         None,
         None,
         None,
@@ -63,7 +64,7 @@ pub(crate) fn render_editor_with_overlay(
     buf: &mut Buffer,
     is_focused: bool,
     stoatty: bool,
-    line_numbers: bool,
+    line_numbers: LineNumbers,
     hover_cell: Option<(u16, u16)>,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
@@ -114,7 +115,7 @@ pub(crate) fn render_editor_with_overlay(
     // The pane content area before the gutter inset below, used to resolve a
     // mouse hover cell back to a buffer offset for the diagnostic popover.
     let content_area = inner;
-    let gutter_w = if line_numbers {
+    let gutter_w = if line_numbers != LineNumbers::Off {
         draw_line_number_gutter(
             &snapshot,
             editor.scroll_row,
