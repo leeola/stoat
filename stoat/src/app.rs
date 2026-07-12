@@ -5141,6 +5141,11 @@ impl Stoat {
             .editor_line_numbers
             .unwrap_or(LineNumbers::Relative);
         let stoatty = self.stoatty;
+        // Relative numbering follows the same pane the live render calls focused:
+        // the focused split editor outside insert mode. Resolved before the ws
+        // borrow so the per-pane loop can gate on it.
+        let focused_editor = self.focused_editor_ids().map(|(id, _)| id);
+        let focused_insert = self.focused_mode() == "insert";
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -5169,19 +5174,27 @@ impl Stoat {
             // for the syntax-highlight toggle (recolors every row), a diagnostics
             // change (restyles the gutter), and a gutter-width change (reflows the
             // inset), so a buffered page must refill when any of those move.
+            // Relative numbers reference the cursor's buffer line, so a page
+            // stays valid across a wheel glide (cursor fixed) and must refill
+            // when the cursor line moves. Folding current_line into the content
+            // version below does exactly that.
+            let current_line = (line_numbers == LineNumbers::Relative
+                && !focused_insert
+                && focused_editor == Some(*editor_id))
+            .then(|| crate::render::editor::editor_cursor_position(editor).map(|(line, _)| line))
+            .flatten();
+
             let content_version = match editor.review_view.as_ref() {
                 Some(view) => view.session_version,
-                None => {
-                    let mut hasher = DefaultHasher::new();
-                    (!syntax_highlight).hash(&mut hasher);
-                    editor.gutter_width.hash(&mut hasher);
+                None => editor_page_content_version(
+                    syntax_highlight,
+                    editor.gutter_width,
+                    current_line,
                     editor
                         .gutter_severity_cache
                         .as_ref()
-                        .map_or(0, |cache| cache.version)
-                        .hash(&mut hasher);
-                    hasher.finish()
-                },
+                        .map_or(0, |cache| cache.version),
+                ),
             };
             let entered = crate::smooth_scroll::emit_into(
                 &mut out,
@@ -5227,6 +5240,7 @@ impl Stoat {
                             severity,
                             theme.clone(),
                             rich,
+                            current_line,
                         ),
                     });
                 }
@@ -5798,6 +5812,27 @@ impl Stoat {
             )
         });
     }
+}
+
+/// Content version of a pooled editor page, hashing the inputs whose change
+/// forces a buffered page to refill.
+///
+/// A page stays cached while the surface scrolls, but must repaint when the
+/// syntax-highlight toggle recolors every row, a diagnostics change restyles
+/// the gutter, a gutter-width change reflows the inset, or the cursor's buffer
+/// line moves under relative numbering.
+fn editor_page_content_version(
+    syntax_highlight: bool,
+    gutter_width: u16,
+    current_line: Option<u32>,
+    severity_version: u64,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (!syntax_highlight).hash(&mut hasher);
+    gutter_width.hash(&mut hasher);
+    current_line.hash(&mut hasher);
+    severity_version.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Convert an LSP `file:` URI to a [`PathBuf`]. Returns `None` for any
@@ -11121,6 +11156,26 @@ mod tests {
         assert_eq!(
             without, 0,
             "with no diagnostics and no line numbers there is no gutter"
+        );
+    }
+
+    #[test]
+    fn editor_page_content_version_tracks_the_cursor_line() {
+        let base = editor_page_content_version(true, 3, Some(10), 0);
+        assert_eq!(
+            base,
+            editor_page_content_version(true, 3, Some(10), 0),
+            "identical inputs keep a buffered page cached"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(true, 3, Some(11), 0),
+            "a cursor-line move refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(true, 3, None, 0),
+            "switching to absolute numbering refills"
         );
     }
 

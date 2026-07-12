@@ -414,6 +414,10 @@ pub(crate) fn render_page_from_snapshot(
 #[derive(Clone)]
 pub(crate) struct PageGutter {
     line_numbers: bool,
+    /// 1-based cursor buffer line for Helix-style relative numbering, or `None`
+    /// to paint absolute numbers. Resolved on the run loop so a pooled page
+    /// numbers relative to the cursor exactly as the live render does.
+    current_line: Option<u32>,
     severity: BTreeMap<u32, DiagnosticSeverity>,
     theme: crate::theme::Theme,
     rich: Option<RichGutterColors>,
@@ -423,15 +427,18 @@ impl PageGutter {
     /// Bundle the gutter inputs resolved on the run loop for an editor page fill.
     ///
     /// `line_numbers` off yields a gutterless page whose text starts at column
-    /// zero, matching a live render with the gutter disabled.
+    /// zero, matching a live render with the gutter disabled. `current_line`
+    /// selects relative numbering, and `None` paints absolute.
     pub(crate) fn new(
         line_numbers: bool,
         severity: BTreeMap<u32, DiagnosticSeverity>,
         theme: crate::theme::Theme,
         rich: Option<RichGutterColors>,
+        current_line: Option<u32>,
     ) -> PageGutter {
         PageGutter {
             line_numbers,
+            current_line,
             severity,
             theme,
             rich,
@@ -464,7 +471,12 @@ fn paint_page_gutter(
 
     match &gutter.rich {
         Some(rich) => {
-            let lines = gutter_component_lines(&folded, &gutter.severity, &rich.colors, None);
+            let lines = gutter_component_lines(
+                &folded,
+                &gutter.severity,
+                &rich.colors,
+                gutter.current_line,
+            );
             let widget = rich_gutter(&lines, width_digits, rich.number_fg, rich.bg);
             let mut scene = ApcScene::new();
             let mut scratch = Buffer::empty(area);
@@ -476,7 +488,7 @@ fn paint_page_gutter(
                 &folded,
                 width_digits,
                 &gutter.severity,
-                None,
+                gutter.current_line,
                 area,
                 &gutter.theme,
                 buf,
@@ -799,7 +811,7 @@ mod tests {
 
         // With line numbers on in fallback mode, the page's degraded cell gutter
         // must match the live render's so the settle handoff shows no shift.
-        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None);
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None, None);
 
         for top_row in [0u32, 4, 8, 40] {
             let area = Rect::new(0, 0, 12, 4);
@@ -831,6 +843,51 @@ mod tests {
 
             assert_eq!(got, expected, "page at top_row {top_row}");
         }
+    }
+
+    /// A pooled page baked with a cursor line paints relative numbers in its
+    /// gutter, matching the live render so the settle handoff shows no shift.
+    #[test]
+    fn pooled_page_paints_relative_numbers() {
+        use super::{paint_page_gutter, Buffer, PageGutter, Rect};
+        use crate::{
+            action_handlers::{self, dispatch},
+            theme::Theme,
+            Stoat,
+        };
+        use std::{collections::BTreeMap, path::PathBuf};
+        use stoat_action::OpenFile;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-relnum");
+        let path = root.join("doc.txt");
+        h.fake_fs()
+            .insert_file(&path, b"one\ntwo\nthree\nfour\nfive");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = Theme::empty();
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+
+        // current_line 3 numbers every line by its distance from line 3, which
+        // keeps its absolute number.
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme, None, Some(3));
+        let area = Rect::new(0, 0, 12, 5);
+        let mut buf = Buffer::empty(area);
+        let (width, _) = paint_page_gutter(&snapshot, 0, 5, &mut buf, area, &gutter);
+
+        let digits: Vec<String> = (0..5)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(digits, ["2", "1", "3", "1", "2"]);
     }
 
     fn region(pool: u32, height: u16) -> PoolRegionCommand {
@@ -990,7 +1047,7 @@ mod tests {
         let fallback = Theme::empty().get(scope::UI_TEXT);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
-        let gutter = PageGutter::new(false, BTreeMap::new(), Theme::empty(), None);
+        let gutter = PageGutter::new(false, BTreeMap::new(), Theme::empty(), None, None);
 
         let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3, &gutter);
 
@@ -1036,7 +1093,7 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let rich = resolve_rich_gutter(&theme, fallback, true)
             .expect("the shipped theme resolves the rich gutter colors");
-        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), Some(rich));
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), Some(rich), None);
 
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
