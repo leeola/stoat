@@ -30,11 +30,13 @@ const MAX_WIDTH: u16 = 120;
 /// Paint the hover popup, if any, anchored to the focused editor's
 /// primary cursor.
 ///
-/// Placement is below-biased. The popup sits below the cursor when at least
-/// [`MIN_HEIGHT`] rows remain there, and flips above otherwise. Its height
-/// shrinks to the chosen side's free space so it never renders past the pane,
-/// and content that overflows scrolls. Lines wider than the popup interior are
-/// truncated.
+/// The popup floats above panes, window-bounded rather than pane-bounded, so it
+/// can overflow into neighboring panes. Its body stays opaque over them. The
+/// landed declaration-order occlusion covers neighbors under stoatty, and the
+/// grid path's `Clear` covers plain terminals. Placement is below-biased, and
+/// its height shrinks to the chosen side's free space so it never renders past
+/// the window. Content that overflows scrolls, and lines wider than the popup
+/// interior are truncated.
 ///
 /// No-op when [`Stoat::pending_hover`] is `None`, when the focused
 /// pane is not an editor, or when the cursor is off-screen.
@@ -325,16 +327,24 @@ pub(crate) fn hover_selected_text(popup: &HoverPopup) -> String {
 /// Compute the hover popup's screen rect and its interior rect.
 ///
 /// Returns [`None`] when no popup is anchorable, which happens with no pending
-/// hover, non-editor focus, an off-screen cursor, or a pane too narrow for
+/// hover, non-editor focus, an off-screen cursor, or a terminal too narrow for
 /// content.
 ///
 /// The single source of the placement math, shared by [`render_hover`] and the
 /// smooth-scroll emit so the live frame and the pooled body agree on geometry.
-/// Placement is below-biased. The popup sits below the cursor when at least
-/// [`MIN_HEIGHT`] rows remain there, and flips above otherwise, shrinking to the
-/// chosen side's free space so it never renders past the pane.
+///
+/// The popup floats above panes. Only the cursor anchor is pane-relative, so a
+/// wide or tall hover overflows pane boundaries freely while its width and
+/// height stay bounded by the whole terminal frame. Placement is below-biased.
+/// The popup sits below the cursor when at least [`MIN_HEIGHT`] rows remain in
+/// the frame, and flips above otherwise, shrinking to the chosen side's free
+/// space so it never renders past the window.
 pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     let popup = stoat.pending_hover.as_ref()?.clone();
+
+    // The popup floats above panes, so placement is bounded by the whole
+    // terminal frame. Only the cursor anchor stays pane-relative.
+    let frame = stoat.size();
 
     let ws = stoat.active_workspace_mut();
     let FocusTarget::SplitPane(pane_id) = ws.focus else {
@@ -349,7 +359,7 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     let editor = ws.editors.get_mut(editor_id)?;
     let cursor_screen = cursor_screen_position(editor, content_area, popup.anchor_offset)?;
 
-    let interior_width = content_area.width.saturating_sub(2);
+    let interior_width = frame.width.saturating_sub(2);
     if interior_width == 0 {
         return None;
     }
@@ -359,33 +369,30 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
         .map(|line| truncate_line(line, interior_width as usize))
         .collect();
     let max_line_width = body.iter().map(|line| line_width(line)).max().unwrap_or(0) as u16;
-    let popup_width = (max_line_width + 2).clamp(3, content_area.width.clamp(3, MAX_WIDTH));
+    let popup_width = (max_line_width + 2).clamp(3, frame.width.clamp(3, MAX_WIDTH));
 
-    let rel_y = cursor_screen.1.saturating_sub(content_area.y);
-    let below = content_area.height > rel_y + MIN_HEIGHT;
+    let rel_y = cursor_screen.1.saturating_sub(frame.y);
+    let below = frame.height > rel_y + MIN_HEIGHT;
     let max_height = if below {
-        content_area.height.saturating_sub(rel_y + 1)
+        frame.height.saturating_sub(rel_y + 1)
     } else {
         rel_y
     };
     // Cap at the room beside the cursor and the absolute MAX_HEIGHT, then at
-    // half the content area, which is the bound that actually shrinks a large
-    // hover on a small window. Both bounds hold a 3-row minimum box.
+    // half the frame, which is the bound that actually shrinks a large hover on
+    // a small window. Both bounds hold a 3-row minimum box.
     let height_cap = max_height
         .clamp(3, MAX_HEIGHT)
-        .min((content_area.height / 2).max(3));
+        .min((frame.height / 2).max(3));
     let popup_height = (body.len() as u16 + 2).min(height_cap);
 
     let popup_x = cursor_screen
         .0
-        .min(content_area.x + content_area.width.saturating_sub(popup_width));
+        .min(frame.x + frame.width.saturating_sub(popup_width));
     let popup_y = if below {
         cursor_screen.1 + 1
     } else {
-        cursor_screen
-            .1
-            .saturating_sub(popup_height)
-            .max(content_area.y)
+        cursor_screen.1.saturating_sub(popup_height).max(frame.y)
     };
 
     let popup_area = Rect {

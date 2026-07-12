@@ -7687,6 +7687,111 @@ mod tests {
         assert_eq!(popup.width, 120, "wide content caps at MAX_WIDTH");
     }
 
+    #[test]
+    fn hover_popup_overflows_across_a_vertical_split() {
+        use crate::{action_handlers::lsp::HoverPopup, test_harness::TestHarness};
+        use ratatui::style::Style;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let root = std::path::PathBuf::from("/hover");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let left = {
+            let ws = h.stoat.active_workspace_mut();
+            let left = ws.panes.focus();
+            ws.panes.split(crate::pane::Axis::Vertical);
+            ws.panes.resize(Rect::new(0, 0, 80, 24));
+            left
+        };
+        let left_content = crate::render::layout::split_pane_status(
+            h.stoat.active_workspace().panes.pane(left).area,
+        )
+        .0;
+        h.stoat.focus_at(left_content.x + 1, left_content.y + 1);
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+
+        // A hover wider than the left pane.
+        h.stoat.pending_hover = Some(HoverPopup {
+            lines: vec![vec![("x".repeat(60), Style::default())]],
+            anchor_offset: 0,
+            editor_id,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
+        });
+
+        let (popup, _) = crate::render::hover::hover_popup_layout(&mut h.stoat).expect("layout");
+        assert!(
+            popup.width > left_content.width,
+            "the popup widens past the left pane ({} > {})",
+            popup.width,
+            left_content.width,
+        );
+        assert!(
+            popup.x + popup.width > left_content.x + left_content.width,
+            "the popup crosses the divider into the right pane"
+        );
+    }
+
+    #[test]
+    fn hover_popup_overflows_into_the_pane_below() {
+        use crate::{action_handlers::lsp::HoverPopup, test_harness::TestHarness};
+        use ratatui::style::Style;
+
+        let mut h = TestHarness::with_size(40, 24);
+        let root = std::path::PathBuf::from("/hover");
+        let path = root.join("a.txt");
+        let content: String = (0..40).map(|_| "x\n").collect();
+        h.fake_fs().insert_file(&path, content.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let top = {
+            let ws = h.stoat.active_workspace_mut();
+            let top = ws.panes.focus();
+            ws.panes.split(crate::pane::Axis::Horizontal);
+            ws.panes.resize(Rect::new(0, 0, 40, 24));
+            top
+        };
+        let top_content = crate::render::layout::split_pane_status(
+            h.stoat.active_workspace().panes.pane(top).area,
+        )
+        .0;
+        h.stoat.focus_at(top_content.x + 1, top_content.y + 1);
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+
+        // Anchor on the top pane's last visible row (each "x\n" line is 2 bytes).
+        let last_row_line = top_content.height as usize - 1;
+        h.stoat.pending_hover = Some(HoverPopup {
+            lines: vec![vec![("hi".to_string(), Style::default())]],
+            anchor_offset: last_row_line * 2,
+            editor_id,
+            scroll_half_pages: 0,
+            area: Rect::default(),
+            inner: Rect::default(),
+            selection: None,
+        });
+
+        let (popup, _) = crate::render::hover::hover_popup_layout(&mut h.stoat).expect("layout");
+        let cursor_row = top_content.y + last_row_line as u16;
+        assert!(
+            popup.y > cursor_row,
+            "the popup places below the cursor ({} > {}) instead of flipping above",
+            popup.y,
+            cursor_row,
+        );
+        assert!(
+            popup.y >= top_content.y + top_content.height,
+            "the popup overflows into the pane below"
+        );
+    }
+
     /// A hover popup at a fixed area (`9,1 22x7`) with interior (`10,2 20x5`),
     /// `lines` as single unstyled spans and the given scroll offset.
     fn hover_sel_popup(
