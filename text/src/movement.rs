@@ -41,18 +41,31 @@ fn long_word_category(ch: char) -> CharCategory {
     }
 }
 
+/// The scan position for a forward motion whose block cursor sits on the char
+/// at `from`, one cell past it. Converts the cursor-cell contract of the
+/// singular wrappers into the scan-position contract the `*_range` fns expect.
+fn forward_scan_start(rope: &Rope, from: usize) -> usize {
+    from + rope.chars_at(from).next().map_or(0, |c| c.len_utf8())
+}
+
+/// Start of the next word after the block-cursor cell at `from`.
 pub fn next_word_start(rope: &Rope, from: usize) -> usize {
+    let from = forward_scan_start(rope, from);
     next_word_start_with(rope, from, from, categorize_char).1
 }
 
+/// Start of the next long word after the block-cursor cell at `from`.
 pub fn next_long_word_start(rope: &Rope, from: usize) -> usize {
+    let from = forward_scan_start(rope, from);
     next_word_start_with(rope, from, from, long_word_category).1
 }
 
 /// [`next_word_start`] as a Helix `range_to_target` step: given the origin
-/// `(anchor, head)`, returns the new `(anchor, head)`. The anchor advances past
-/// a leading newline run and past a single leading boundary char so a forward
-/// word motion from whitespace or a blank line does not select the gap.
+/// `(anchor, head)` -- where `head` is the scan position, one cell past the
+/// block-cursor cell -- returns the new `(anchor, head)`. Threading feeds the
+/// returned head back in as the next origin, and the anchor advances past a
+/// leading newline run and onto each new span start, so a counted motion selects
+/// only the final word span rather than accumulating every word it crosses.
 pub fn next_word_start_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
     next_word_start_with(rope, anchor, head, categorize_char)
 }
@@ -72,11 +85,15 @@ fn next_word_start_with<F: Fn(char) -> CharCategory>(
     })
 }
 
+/// End of the next word after the block-cursor cell at `from`.
 pub fn next_word_end(rope: &Rope, from: usize) -> usize {
+    let from = forward_scan_start(rope, from);
     next_word_end_with(rope, from, from, categorize_char).1
 }
 
+/// End of the next long word after the block-cursor cell at `from`.
 pub fn next_long_word_end(rope: &Rope, from: usize) -> usize {
+    let from = forward_scan_start(rope, from);
     next_word_end_with(rope, from, from, long_word_category).1
 }
 
@@ -99,11 +116,20 @@ fn next_word_end_with<F: Fn(char) -> CharCategory>(
     })
 }
 
-/// Shared forward word-motion scan matching Helix's `range_to_target`. Scans
-/// from `from`, returning the target `head` and an `anchor` that starts at
-/// `anchor_in` and advances past a leading newline run (so the head runs through
-/// a blank line) and past a single leading boundary char (so the first target
-/// boundary at `head_start` moves the anchor onto the span start).
+/// Shared forward word-motion scan matching Helix's `range_to_target`.
+///
+/// `from` is the scan position -- one past the block-cursor cell -- and
+/// `prev_ch` is seeded from the char just before it, so the boundary straddling
+/// the cursor is visible to the scan. That seeding is what makes count threading
+/// work. Each iteration passes the previous head back in as `from`, so the
+/// `head == head_start -> anchor = head` rule advances the anchor onto every new
+/// span start rather than only across newline crossings.
+///
+/// Returns the target `head` and an `anchor` that starts at `anchor_in`,
+/// advances past a leading newline run (so the head runs through a blank line),
+/// and advances onto the first target boundary at `head_start` (so a motion from
+/// whitespace does not select the gap). A `None` `prev_ch` (scan starting at the
+/// buffer front) counts as an unconditional target, mirroring Helix.
 fn forward_word_range<C, T>(
     rope: &Rope,
     anchor_in: usize,
@@ -115,24 +141,20 @@ where
     C: Fn(char) -> CharCategory,
     T: Fn(char, char, bool) -> bool,
 {
-    let mut chars = rope.chars_at(from).peekable();
-    let Some(first_char) = chars.next() else {
-        return (anchor_in, from);
-    };
-
     let mut anchor = anchor_in;
-    let mut head = from + first_char.len_utf8();
-    let mut prev_ch = first_char;
+    let mut head = from;
+    let mut prev_ch = rope.reversed_chars_at(from).next();
 
-    if char_is_line_ending(first_char) {
-        while let Some(&ch) = chars.peek() {
-            if !char_is_line_ending(ch) {
-                break;
-            }
-            chars.next();
-            head += ch.len_utf8();
-            prev_ch = ch;
+    let mut chars = rope.chars_at(from).peekable();
+    while let Some(&ch) = chars.peek() {
+        if !char_is_line_ending(ch) {
+            break;
         }
+        chars.next();
+        head += ch.len_utf8();
+        prev_ch = Some(ch);
+    }
+    if prev_ch.is_some_and(char_is_line_ending) {
         anchor = head;
     }
 
@@ -141,15 +163,18 @@ where
         let Some(ch) = chars.next() else {
             return (anchor, head);
         };
-        let boundary = category(prev_ch) != category(ch);
-        if is_target(prev_ch, ch, boundary) {
+        let reached = match prev_ch {
+            None => true,
+            Some(prev) => is_target(prev, ch, category(prev) != category(ch)),
+        };
+        if reached {
             if head == head_start {
                 anchor = head;
             } else {
                 return (anchor, head);
             }
         }
-        prev_ch = ch;
+        prev_ch = Some(ch);
         head += ch.len_utf8();
     }
 }
@@ -187,11 +212,13 @@ fn prev_word_start_with<F: Fn(char) -> CharCategory>(
 }
 
 /// Shared backward word-motion scan, the reverse mirror of
-/// [`forward_word_range`]. Scans from `from` toward the buffer start, returning
-/// the target `head` and an `anchor` that starts at `anchor_in` and retreats
-/// past a trailing newline run (so the head runs back through a blank line) and
-/// past a single trailing boundary char (so the first target boundary at
-/// `head_start` moves the anchor onto the span end).
+/// [`forward_word_range`]. Here `from` is the block-cursor cell and `prev_ch` is
+/// seeded from the char at `from`, so the scan proceeds toward the buffer start.
+///
+/// Returns the target `head` and an `anchor` that starts at `anchor_in`, retreats
+/// past a trailing newline run (so the head runs back through a blank line), and
+/// retreats onto the head when the cell at `from` is itself a line ending (so
+/// `b` on a newline excludes it) or at the first target boundary at `head_start`.
 fn backward_word_range<C, T>(
     rope: &Rope,
     anchor_in: usize,
@@ -217,15 +244,15 @@ where
     };
     let mut anchor = anchor_in;
 
-    if iter.peek().is_some_and(|&ch| char_is_line_ending(ch)) {
-        while let Some(&ch) = iter.peek() {
-            if !char_is_line_ending(ch) {
-                break;
-            }
-            iter.next();
-            head -= ch.len_utf8();
-            prev_ch = ch;
+    while let Some(&ch) = iter.peek() {
+        if !char_is_line_ending(ch) {
+            break;
         }
+        iter.next();
+        head -= ch.len_utf8();
+        prev_ch = ch;
+    }
+    if char_is_line_ending(prev_ch) {
         anchor = head;
     }
 
@@ -506,29 +533,47 @@ mod tests {
 
     #[test]
     fn next_word_start_range_advances_anchor_like_helix() {
-        // Mirrors Helix's move_next_word_start, called as the handler does
-        // (anchor == head == seed) so the block-cursor prep already holds. Each
-        // string is short enough to read every offset directly.
-        let cases: &[(&str, usize, (usize, usize))] = &[
-            // On a word start: anchor stays, head reaches the next word.
-            ("ab cd", 0, (0, 3)),
-            // Mid-word: anchor stays at the seed.
-            ("hello", 2, (2, 5)),
-            // One leading space (a single boundary char): anchor advances past
-            // it and the head runs through the first word to the next.
-            (" ab cd", 0, (1, 4)),
-            // A multi-space run: anchor stays, head stops at the word start.
-            ("  ab cd", 0, (0, 2)),
-            // A leading newline run: anchor skips it, head runs through the word.
-            ("\n\nab cd", 0, (2, 5)),
+        // Mirrors Helix's move_next_word_start, called as the handler does with
+        // the origin `(anchor, head)` where head is the block edge (one past the
+        // cursor cell). Each string is short enough to read every offset directly.
+        let cases: &[(&str, usize, usize, (usize, usize))] = &[
+            // On a word start, anchor stays and head reaches the next word.
+            ("ab cd", 0, 1, (0, 3)),
+            // Mid-word, the anchor stays at its origin.
+            ("hello", 2, 3, (2, 5)),
+            // One leading space (a single boundary char) advances the anchor onto
+            // the word start, and the head runs through the first word to the next.
+            (" ab cd", 0, 1, (1, 4)),
+            // A multi-space run leaves the anchor put. Head stops at the word start.
+            ("  ab cd", 0, 1, (0, 2)),
+            // A leading newline run skips the anchor past it. Head runs the word.
+            ("\n\nab cd", 0, 1, (2, 5)),
         ];
-        for (text, seed, expected) in cases {
+        for (text, anchor, head, expected) in cases {
             assert_eq!(
-                next_word_start_range(&rope(text), *seed, *seed),
+                next_word_start_range(&rope(text), *anchor, *head),
                 *expected,
-                "next_word_start on {text:?} from {seed}"
+                "next_word_start on {text:?} from ({anchor}, {head})"
             );
         }
+    }
+
+    #[test]
+    fn next_word_start_range_threads_anchor_across_counts() {
+        // Feeding each result back in as the next origin advances the anchor onto
+        // every new span start, so a counted `w` selects only the final span.
+        let r = rope("abc def ghi");
+        let first = next_word_start_range(&r, 0, 1);
+        assert_eq!(first, (0, 4));
+        let second = next_word_start_range(&r, first.0, first.1);
+        assert_eq!(second, (4, 8));
+    }
+
+    #[test]
+    fn prev_word_start_range_excludes_a_cursor_newline() {
+        // `b` with the block cursor on the newline retreats the anchor onto the
+        // head so the newline is excluded, matching Helix.
+        assert_eq!(prev_word_start_range(&rope("abc def\nghi"), 8, 7), (7, 4));
     }
 
     #[test]

@@ -3733,12 +3733,12 @@ mod tests {
         let path = h.write_file("s.txt", "alpha beta gamma delta\n");
         h.open_file(&path);
         h.type_keys("3 w");
-        // "alpha beta gamma " is 16 bytes; "delta" starts at offset 17.
-        // After three next_word_start jumps, head sits at the end of
-        // the third word. With shift_to_prev_char, head lands on the
-        // last char before "delta" -- which is the space at offset 16.
-        let positions = h.cursor_display_positions();
-        assert_eq!(positions, vec![(0, 16)]);
+        // "alpha beta gamma " is 17 bytes; "delta" starts at offset 17. Three
+        // threaded `w` jumps advance the anchor onto the third word start (11)
+        // and the head onto "delta", so the span is (11, 17) and the block
+        // cursor sits one cell back, on the space at offset 16.
+        assert_eq!(h.selection_spans(), vec![(11, 17, false)]);
+        assert_eq!(h.cursor_display_positions(), vec![(0, 16)]);
     }
 
     #[test]

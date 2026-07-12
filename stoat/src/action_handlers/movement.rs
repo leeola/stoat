@@ -8,12 +8,10 @@ use crate::{
 };
 use stoat_language::structural_diff::BufferRef;
 use stoat_text::{
-    cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end,
-    next_long_word_end_range, next_long_word_start, next_long_word_start_range, next_word_end,
-    next_word_end_range, next_word_start, next_word_start_range, prev_long_word_end,
-    prev_long_word_end_range, prev_long_word_start, prev_long_word_start_range, prev_word_end,
-    prev_word_end_range, prev_word_start, prev_word_start_range, Anchor, Bias, NumberKind, Point,
-    Rope, Selection, SelectionGoal,
+    cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end_range,
+    next_long_word_start_range, next_word_end_range, next_word_start_range,
+    prev_long_word_end_range, prev_long_word_start_range, prev_word_end_range,
+    prev_word_start_range, Anchor, Bias, NumberKind, Point, Rope, Selection, SelectionGoal,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -403,13 +401,6 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
         let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
         let cursor = cursor_offset(rope, tail_offset, head_offset);
-        // Prev-word motions, and any bare 1-wide cursor, scan from the block
-        // cursor cell rather than the raw head, so `b`/`ge` and a fresh cursor's
-        // `w`/`e` do not overshoot by the trailing character. A wider selection
-        // keeps the head so a repeated next-motion advances past the span.
-        let lo = head_offset.min(tail_offset);
-        let hi = head_offset.max(tail_offset);
-        let is_bare = next_char_boundary(rope, lo) == hi;
         let is_prev = matches!(
             target,
             WordTarget::PrevStart
@@ -417,44 +408,42 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
                 | WordTarget::PrevLongStart
                 | WordTarget::PrevLongEnd
         );
-        let seed = if is_prev || is_bare {
-            cursor
+        // Scan from the block cursor cell, matching Helix's word_move. The
+        // `(anchor, head)` origin puts head one cell past the cursor forward, or
+        // on the cursor backward, and the fold threads that pair across the count
+        // so the anchor advances onto each new span rather than accumulating
+        // every word crossed.
+        let edge = next_char_boundary(rope, cursor);
+        let origin = if is_prev {
+            (edge, cursor)
         } else {
-            head_offset
+            (cursor, edge)
         };
-        let mut target_offset = seed;
+
+        let (mut anchor, mut head) = origin;
         for _ in 0..count {
-            let next = match target {
-                WordTarget::NextStart => next_word_start(rope, target_offset),
-                WordTarget::NextEnd => next_word_end(rope, target_offset),
-                WordTarget::PrevStart => prev_word_start(rope, target_offset),
-                WordTarget::PrevEnd => prev_word_end(rope, target_offset),
-                WordTarget::NextLongStart => next_long_word_start(rope, target_offset),
-                WordTarget::NextLongEnd => next_long_word_end(rope, target_offset),
-                WordTarget::PrevLongStart => prev_long_word_start(rope, target_offset),
-                WordTarget::PrevLongEnd => prev_long_word_end(rope, target_offset),
-            };
-            if next == target_offset {
+            let next = word_range_step(rope, target, anchor, head);
+            if next == (anchor, head) {
                 break;
             }
-            target_offset = next;
+            (anchor, head) = next;
         }
-        if target_offset == seed {
+        if (anchor, head) == origin {
             return sel.clone();
         }
 
         let shift_to_prev_char = || {
-            rope.reversed_chars_at(target_offset)
+            rope.reversed_chars_at(head)
                 .next()
-                .map(|ch| target_offset - ch.len_utf8())
-                .unwrap_or(target_offset)
+                .map(|ch| head - ch.len_utf8())
+                .unwrap_or(head)
         };
 
         if extend {
             let new_head_offset = if matches!(target, WordTarget::PrevEnd) {
                 shift_to_prev_char()
             } else {
-                target_offset
+                head
             };
             let head_anchor = buffer_snapshot.anchor_at(new_head_offset, Bias::Right);
             return extend_head(
@@ -466,14 +455,9 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
             );
         }
 
-        if target_offset > seed {
-            let end_offset = target_offset;
-            // Advance the tail past a leading whitespace or newline run like
-            // Helix range_to_target, so `w` from whitespace does not select the
-            // gap (and `dw` there does not eat it).
-            let tail_offset = forward_word_anchor(rope, target, seed, count);
-            let tail_anchor = buffer_snapshot.anchor_at(tail_offset, Bias::Right);
-            let head_anchor = buffer_snapshot.anchor_at(end_offset, Bias::Right);
+        if !is_prev {
+            let tail_anchor = buffer_snapshot.anchor_at(anchor, Bias::Right);
+            let head_anchor = buffer_snapshot.anchor_at(head, Bias::Right);
             Selection {
                 id: sel.id,
                 start: tail_anchor,
@@ -485,13 +469,10 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
             let resolved_head_offset = if matches!(target, WordTarget::PrevEnd) {
                 shift_to_prev_char()
             } else {
-                target_offset
+                head
             };
             let head_anchor = buffer_snapshot.anchor_at(resolved_head_offset, Bias::Right);
-            // Retreat the tail past a trailing whitespace or newline run like
-            // Helix range_to_target, mirroring the forward arm.
-            let tail_offset = backward_word_anchor(rope, target, seed, count);
-            let tail_anchor = buffer_snapshot.anchor_at(tail_offset, Bias::Right);
+            let tail_anchor = buffer_snapshot.anchor_at(anchor, Bias::Right);
             Selection {
                 id: sel.id,
                 start: head_anchor,
@@ -504,46 +485,20 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
     UpdateEffect::Redraw
 }
 
-/// The advanced tail for a forward word motion, threading Helix's
-/// `range_to_target` anchor rule across `count`. Returns `seed` unchanged for a
-/// backward target (whose non-extend arm keeps its own tail).
-fn forward_word_anchor(rope: &Rope, target: WordTarget, seed: usize, count: u32) -> usize {
-    let (mut anchor, mut head) = (seed, seed);
-    for _ in 0..count {
-        let next = match target {
-            WordTarget::NextStart => next_word_start_range(rope, anchor, head),
-            WordTarget::NextEnd => next_word_end_range(rope, anchor, head),
-            WordTarget::NextLongStart => next_long_word_start_range(rope, anchor, head),
-            WordTarget::NextLongEnd => next_long_word_end_range(rope, anchor, head),
-            _ => return anchor,
-        };
-        if next == (anchor, head) {
-            break;
-        }
-        (anchor, head) = next;
+/// One threaded `(anchor, head)` step for `target`, dispatching to the matching
+/// `stoat_text` `*_range` scan. Feeding the result back in as the next origin
+/// advances Helix's anchor rule across a count.
+fn word_range_step(rope: &Rope, target: WordTarget, anchor: usize, head: usize) -> (usize, usize) {
+    match target {
+        WordTarget::NextStart => next_word_start_range(rope, anchor, head),
+        WordTarget::NextEnd => next_word_end_range(rope, anchor, head),
+        WordTarget::NextLongStart => next_long_word_start_range(rope, anchor, head),
+        WordTarget::NextLongEnd => next_long_word_end_range(rope, anchor, head),
+        WordTarget::PrevStart => prev_word_start_range(rope, anchor, head),
+        WordTarget::PrevEnd => prev_word_end_range(rope, anchor, head),
+        WordTarget::PrevLongStart => prev_long_word_start_range(rope, anchor, head),
+        WordTarget::PrevLongEnd => prev_long_word_end_range(rope, anchor, head),
     }
-    anchor
-}
-
-/// The retreated tail for a backward word motion, threading Helix's
-/// `range_to_target` anchor rule across `count`. The origin anchor is the block
-/// edge past the seed. Returns that edge unchanged for a forward target.
-fn backward_word_anchor(rope: &Rope, target: WordTarget, seed: usize, count: u32) -> usize {
-    let (mut anchor, mut head) = (next_char_boundary(rope, seed), seed);
-    for _ in 0..count {
-        let next = match target {
-            WordTarget::PrevStart => prev_word_start_range(rope, anchor, head),
-            WordTarget::PrevEnd => prev_word_end_range(rope, anchor, head),
-            WordTarget::PrevLongStart => prev_long_word_start_range(rope, anchor, head),
-            WordTarget::PrevLongEnd => prev_long_word_end_range(rope, anchor, head),
-            _ => return anchor,
-        };
-        if next == (anchor, head) {
-            break;
-        }
-        (anchor, head) = next;
-    }
-    anchor
 }
 
 fn extend_head(

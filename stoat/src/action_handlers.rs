@@ -1648,6 +1648,74 @@ mod tests {
     }
 
     #[test]
+    fn count_next_word_start_selects_only_final_span() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "abc def ghi jkl");
+        stoat.pending_count = Some(3);
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(8, 12, false)]);
+    }
+
+    #[test]
+    fn count_next_word_start_overshoot_selects_last_word() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(
+            &mut stoat,
+            "one two three\nfour five six\nseven eight nine ten",
+        );
+        stoat.pending_count = Some(20);
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(45, 48, false)]);
+    }
+
+    #[test]
+    fn count_next_word_start_crosses_newlines() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(
+            &mut stoat,
+            "one two three\nfour five six\nseven eight nine ten",
+        );
+        stoat.pending_count = Some(5);
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(19, 24, false)]);
+    }
+
+    #[test]
+    fn count_next_word_end_selects_only_final_span() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "foo bar baz");
+        stoat.pending_count = Some(2);
+        dispatch(&mut stoat, &MoveNextWordEnd);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 7, false)]);
+    }
+
+    #[test]
+    fn next_word_start_after_word_end_scans_from_cursor_cell() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
+        // `e` lands a forward selection whose block cursor sits one cell back
+        // from the head. The following `w` scans from that cursor cell, so it
+        // selects the char after the cursor and the gap rather than the whole
+        // next word.
+        dispatch(&mut stoat, &MoveNextWordEnd);
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 4, false)]);
+    }
+
+    #[test]
+    fn count_prev_word_start_excludes_a_cursor_newline() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "abc def\nghi");
+        stoat.pending_count = Some(7);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![7]);
+        dispatch(&mut stoat, &MovePrevWordStart);
+        // `b` from the newline retreats onto the word start, excluding the
+        // newline from the selection.
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 7, true)]);
+    }
+
+    #[test]
     fn move_right_with_multiple_cursors_advances_each() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
