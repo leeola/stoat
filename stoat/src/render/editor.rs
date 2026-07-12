@@ -46,6 +46,7 @@ pub(crate) fn render_editor(
         is_focused,
         false,
         LineNumbers::Off,
+        false,
         None,
         None,
         None,
@@ -65,6 +66,7 @@ pub(crate) fn render_editor_with_overlay(
     is_focused: bool,
     stoatty: bool,
     line_numbers: LineNumbers,
+    insert_mode: bool,
     hover_cell: Option<(u16, u16)>,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
@@ -115,6 +117,23 @@ pub(crate) fn render_editor_with_overlay(
     // The pane content area before the gutter inset below, used to resolve a
     // mouse hover cell back to a buffer offset for the diagnostic popover.
     let content_area = inner;
+
+    // Relative numbering measures each line against the cursor's buffer line,
+    // and only for the focused pane outside insert mode. Every other case
+    // paints absolute. Resolved here so the digits track the cursor.
+    let current_line =
+        (line_numbers == LineNumbers::Relative && is_focused && !insert_mode).then(|| {
+            let buffer_snapshot = snapshot.buffer_snapshot();
+            let rope = buffer_snapshot.rope();
+            let sel = editor.selections.newest_anchor();
+            let cursor = cursor_offset(
+                rope,
+                buffer_snapshot.resolve_anchor(&sel.tail()),
+                buffer_snapshot.resolve_anchor(&sel.head()),
+            );
+            rope.offset_to_point(cursor).row + 1
+        });
+
     let gutter_w = if line_numbers != LineNumbers::Off {
         draw_line_number_gutter(
             &snapshot,
@@ -126,6 +145,7 @@ pub(crate) fn render_editor_with_overlay(
             fallback_style,
             theme,
             stoatty,
+            current_line,
             scene.as_deref_mut(),
             buf,
         )
@@ -695,17 +715,34 @@ pub(crate) fn gutter_geometry(
     (folded, width_digits)
 }
 
+/// The number the gutter paints for an absolute 1-based line.
+///
+/// With `current_line` set (relative numbering active), every line but the
+/// cursor's shows its distance from the cursor line. The cursor line, and the
+/// `None` case of absolute numbering, show the absolute number. Severity keying
+/// stays on the absolute number, so only the painted digits change.
+pub(crate) fn gutter_display_number(absolute: u32, current_line: Option<u32>) -> u32 {
+    match current_line {
+        Some(cur) if absolute != cur => absolute.abs_diff(cur),
+        _ => absolute,
+    }
+}
+
 /// Build the rich gutter's [`GutterLine`]s from `folded`, coloring each line's
 /// diagnostic mark from `colors`.
+///
+/// `current_line` selects relative numbering per [`gutter_display_number`]. The
+/// diagnostic mark stays keyed to the absolute buffer line.
 pub(crate) fn gutter_component_lines(
     folded: &[(u32, u16)],
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
     colors: &SeverityColors,
+    current_line: Option<u32>,
 ) -> Vec<GutterLine> {
     folded
         .iter()
         .map(|&(number, height)| GutterLine {
-            number,
+            number: gutter_display_number(number, current_line),
             height,
             git: None,
             diagnostic: row_severity.get(&(number - 1)).map(|sev| Diagnostic {
@@ -754,6 +791,7 @@ fn draw_line_number_gutter(
     fallback_style: Style,
     theme: &crate::theme::Theme,
     stoatty: bool,
+    current_line: Option<u32>,
     scene: Option<&mut ApcScene>,
     buf: &mut Buffer,
 ) -> u16 {
@@ -776,12 +814,20 @@ fn draw_line_number_gutter(
 
     match rich {
         Some((scene, colors, number_fg, bg)) => {
-            let lines = gutter_component_lines(&folded, row_severity, colors);
+            let lines = gutter_component_lines(&folded, row_severity, colors, current_line);
             let gutter = rich_gutter(&lines, width_digits, number_fg, bg);
             gutter.draw_components(inner, buf, scene);
             gutter.cell_width()
         },
-        None => draw_fallback_line_numbers(&folded, width_digits, row_severity, inner, theme, buf),
+        None => draw_fallback_line_numbers(
+            &folded,
+            width_digits,
+            row_severity,
+            current_line,
+            inner,
+            theme,
+            buf,
+        ),
     }
 }
 
@@ -791,6 +837,7 @@ pub(crate) fn draw_fallback_line_numbers(
     folded: &[(u32, u16)],
     width_digits: u16,
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    current_line: Option<u32>,
     inner: Rect,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
@@ -811,7 +858,7 @@ pub(crate) fn draw_fallback_line_numbers(
                 .set_char(severity_mark(*sev))
                 .set_style(theme.get(severity_scope(*sev)));
         }
-        let text = format!("{number}");
+        let text = format!("{}", gutter_display_number(number, current_line));
         let start = inner.x + mark_w + width_digits.saturating_sub(text.len() as u16);
         buf.set_stringn(start, y, &text, text.len(), number_style);
         top += height;
@@ -1313,8 +1360,10 @@ mod tests {
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use ratatui::{buffer::Buffer, layout::Rect};
     use std::path::PathBuf;
-    use stoat_action::{ExtendToLineEnd, MoveRight, OpenFile, OpenFileFinder};
+    use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
+    use stoat_config::LineNumbers;
     use stoat_text::{Bias, Point, SelectionGoal};
 
     fn diag(line: u32, severity: DiagnosticSeverity) -> Diagnostic {
@@ -1357,6 +1406,101 @@ mod tests {
         assert_eq!(
             [0, 9, 10, 99, 100, 1000].map(super::decimal_digits),
             [1, 1, 2, 2, 3, 4]
+        );
+    }
+
+    /// Render the focused editor's gutter in fallback (non-stoatty) mode and
+    /// return the trimmed number string each visible row paints.
+    fn rendered_gutter(
+        stoat: &mut Stoat,
+        is_focused: bool,
+        insert_mode: bool,
+        line_numbers: LineNumbers,
+        rows: u16,
+    ) -> Vec<String> {
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 12, rows);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            is_focused,
+            false,
+            line_numbers,
+            insert_mode,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let gutter_w = editor.gutter_width;
+        (0..rows)
+            .map(|y| {
+                (0..gutter_w)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn relative_line_numbers_center_on_the_cursor_line() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/relnum");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"one\ntwo\nthree\nfour\nfive");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        dispatch(&mut h.stoat, &MoveDown);
+        dispatch(&mut h.stoat, &MoveDown);
+
+        // When focused and in normal mode, the cursor's line keeps its absolute
+        // number (3) and every other line shows its distance from it.
+        assert_eq!(
+            rendered_gutter(&mut h.stoat, true, false, LineNumbers::Relative, 5),
+            ["2", "1", "3", "1", "2"],
+        );
+    }
+
+    #[test]
+    fn relative_line_numbers_fall_back_to_absolute() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/relnum-abs");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"one\ntwo\nthree\nfour\nfive");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        dispatch(&mut h.stoat, &MoveDown);
+        dispatch(&mut h.stoat, &MoveDown);
+
+        let absolute = ["1", "2", "3", "4", "5"];
+        assert_eq!(
+            rendered_gutter(&mut h.stoat, true, true, LineNumbers::Relative, 5),
+            absolute,
+            "insert mode paints absolute"
+        );
+        assert_eq!(
+            rendered_gutter(&mut h.stoat, false, false, LineNumbers::Relative, 5),
+            absolute,
+            "an unfocused pane paints absolute"
+        );
+        assert_eq!(
+            rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 5),
+            absolute,
+            "the Absolute setting paints absolute"
         );
     }
 

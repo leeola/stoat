@@ -464,7 +464,7 @@ fn paint_page_gutter(
 
     match &gutter.rich {
         Some(rich) => {
-            let lines = gutter_component_lines(&folded, &gutter.severity, &rich.colors);
+            let lines = gutter_component_lines(&folded, &gutter.severity, &rich.colors, None);
             let widget = rich_gutter(&lines, width_digits, rich.number_fg, rich.bg);
             let mut scene = ApcScene::new();
             let mut scratch = Buffer::empty(area);
@@ -476,6 +476,7 @@ fn paint_page_gutter(
                 &folded,
                 width_digits,
                 &gutter.severity,
+                None,
                 area,
                 &gutter.theme,
                 buf,
@@ -814,6 +815,7 @@ mod tests {
                 false,
                 false,
                 LineNumbers::Absolute,
+                false,
                 None,
                 None,
                 None,

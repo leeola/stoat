@@ -76,6 +76,7 @@ pub(crate) fn render_pane(
                     is_focused,
                     frame.stoatty,
                     frame.line_numbers,
+                    frame.mode == "insert",
                     if is_focused { frame.hover_cell } else { None },
                     labels,
                     frame.search_query,
