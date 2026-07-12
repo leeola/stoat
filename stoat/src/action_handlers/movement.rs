@@ -1868,16 +1868,18 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
     let new_buf = new_display.buffer_snapshot();
 
     editor.selections.transform(new_buf, |sel| {
-        let mut new = sel.clone();
         if deleted_ids.contains(&sel.id) {
             let post_offset = new_buf.resolve_anchor(&sel.start);
-            let anchor = new_buf.anchor_at(post_offset, Bias::Left);
-            new.start = anchor;
-            new.end = anchor;
-            new.reversed = false;
-            new.goal = SelectionGoal::None;
+            land_block_cursor(
+                sel.id,
+                post_offset,
+                SelectionGoal::None,
+                new_buf.rope(),
+                new_buf,
+            )
+        } else {
+            sel.clone()
         }
-        new
     });
     UpdateEffect::Redraw
 }

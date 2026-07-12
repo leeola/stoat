@@ -1956,6 +1956,35 @@ mod tests {
     }
 
     #[test]
+    fn repeated_delete_walks_forward_through_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("d d");
+        assert_eq!(focused_buffer_text(&mut h), "cdef\n");
+    }
+
+    #[test]
+    fn delete_at_line_end_rewidens_backward() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc");
+        h.open_file(&path);
+        h.type_keys("l l d d");
+        assert_eq!(focused_buffer_text(&mut h), "a");
+    }
+
+    #[test]
+    fn multi_cursor_delete_rewidens_every_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\ndef\n");
+        h.open_file(&path);
+        h.type_keys("shift-C");
+        h.type_keys("d");
+        assert_eq!(focused_buffer_text(&mut h), "bc\nef\n");
+        assert_eq!(h.selection_spans(), vec![(0, 1, false), (3, 4, false)]);
+    }
+
+    #[test]
     fn select_mode_tilde_switches_case() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abcdef\n");
