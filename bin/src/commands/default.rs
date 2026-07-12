@@ -3,7 +3,7 @@ use crossterm::event::{Event, KeyEvent};
 use snafu::{whatever, ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use stoat::{
-    host::{LocalFs, LocalFsWatcher},
+    host::{LocalClipboard, LocalFs, LocalFsWatcher},
     input_parse, Axis, Settings, Stoat,
 };
 use stoat_cli::{CommonArgs, FixtureArgs, FixtureSub};
@@ -283,6 +283,7 @@ fn run_tui(
         stoat.set_lsp_auto_spawn(true);
         stoat.set_env_auto_load(true);
         stoat.set_diff_warm_auto(true);
+        stoat.set_clipboard_host(Arc::new(LocalClipboard));
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }
