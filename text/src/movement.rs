@@ -42,27 +42,15 @@ fn long_word_category(ch: char) -> CharCategory {
 }
 
 /// The scan position for a forward motion whose block cursor sits on the char
-/// at `from`, one cell past it. Converts the cursor-cell contract of the
-/// singular wrappers into the scan-position contract the `*_range` fns expect.
+/// at `from`, one cell past it. Converts [`next_word_end`]'s cursor-cell contract
+/// into the scan-position contract the `*_range` fns expect.
 fn forward_scan_start(rope: &Rope, from: usize) -> usize {
     from + rope.chars_at(from).next().map_or(0, |c| c.len_utf8())
 }
 
-/// Start of the next word after the block-cursor cell at `from`.
-pub fn next_word_start(rope: &Rope, from: usize) -> usize {
-    let from = forward_scan_start(rope, from);
-    next_word_start_with(rope, from, from, categorize_char).1
-}
-
-/// Start of the next long word after the block-cursor cell at `from`.
-pub fn next_long_word_start(rope: &Rope, from: usize) -> usize {
-    let from = forward_scan_start(rope, from);
-    next_word_start_with(rope, from, from, long_word_category).1
-}
-
-/// [`next_word_start`] as a Helix `range_to_target` step: given the origin
-/// `(anchor, head)` -- where `head` is the scan position, one cell past the
-/// block-cursor cell -- returns the new `(anchor, head)`. Threading feeds the
+/// A Helix `range_to_target` step for the next-word-start motion. Given the
+/// origin `(anchor, head)` -- where `head` is the scan position, one cell past
+/// the block-cursor cell -- returns the new `(anchor, head)`. Threading feeds the
 /// returned head back in as the next origin, and the anchor advances past a
 /// leading newline run and onto each new span start, so a counted motion selects
 /// only the final word span rather than accumulating every word it crosses.
@@ -89,12 +77,6 @@ fn next_word_start_with<F: Fn(char) -> CharCategory>(
 pub fn next_word_end(rope: &Rope, from: usize) -> usize {
     let from = forward_scan_start(rope, from);
     next_word_end_with(rope, from, from, categorize_char).1
-}
-
-/// End of the next long word after the block-cursor cell at `from`.
-pub fn next_long_word_end(rope: &Rope, from: usize) -> usize {
-    let from = forward_scan_start(rope, from);
-    next_word_end_with(rope, from, from, long_word_category).1
 }
 
 pub fn next_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
@@ -183,10 +165,6 @@ pub fn prev_word_start(rope: &Rope, from: usize) -> usize {
     prev_word_start_with(rope, from, from, categorize_char).1
 }
 
-pub fn prev_long_word_start(rope: &Rope, from: usize) -> usize {
-    prev_word_start_with(rope, from, from, long_word_category).1
-}
-
 /// [`prev_word_start`] as a range_to_target step: given the origin
 /// `(anchor, head)`, returns the new `(anchor, head)`. The anchor retreats past
 /// a trailing newline run and past a single trailing boundary char, so a
@@ -272,14 +250,6 @@ where
         prev_ch = ch;
         head -= ch.len_utf8();
     }
-}
-
-pub fn prev_word_end(rope: &Rope, from: usize) -> usize {
-    prev_word_end_with(rope, from, from, categorize_char).1
-}
-
-pub fn prev_long_word_end(rope: &Rope, from: usize) -> usize {
-    prev_word_end_with(rope, from, from, long_word_category).1
 }
 
 pub fn prev_word_end_range(rope: &Rope, anchor: usize, head: usize) -> (usize, usize) {
@@ -531,6 +501,21 @@ mod tests {
         r
     }
 
+    /// Drive a forward `*_range` scan from the block-cursor cell at `from`,
+    /// returning the resulting head. Mirrors how the removed singular wrappers
+    /// advanced `from` past its char before scanning.
+    fn fwd_head(r: &Rope, from: usize, f: impl Fn(&Rope, usize, usize) -> (usize, usize)) -> usize {
+        let s = forward_scan_start(r, from);
+        f(r, s, s).1
+    }
+
+    /// Drive a backward `*_range` scan from the block-cursor cell at `from`,
+    /// returning the resulting head. Backward scans take the cursor cell
+    /// directly, so no advance is needed.
+    fn bwd_head(r: &Rope, from: usize, f: impl Fn(&Rope, usize, usize) -> (usize, usize)) -> usize {
+        f(r, from, from).1
+    }
+
     #[test]
     fn next_word_start_range_advances_anchor_like_helix() {
         // Mirrors Helix's move_next_word_start, called as the handler does with
@@ -613,77 +598,77 @@ mod tests {
     #[test]
     fn next_word_start_basic() {
         let r = rope("hello world");
-        assert_eq!(next_word_start(&r, 0), 6);
-        assert_eq!(next_word_start(&r, 6), 11);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 6);
+        assert_eq!(fwd_head(&r, 6, next_word_start_range), 11);
     }
 
     #[test]
     fn next_word_start_from_whitespace_jumps_across_word() {
         let r = rope("hello world foo");
-        assert_eq!(next_word_start(&r, 5), 12);
+        assert_eq!(fwd_head(&r, 5, next_word_start_range), 12);
     }
 
     #[test]
     fn next_word_start_three_words() {
         let r = rope("abc def ghi");
-        assert_eq!(next_word_start(&r, 0), 4);
-        assert_eq!(next_word_start(&r, 4), 8);
-        assert_eq!(next_word_start(&r, 8), 11);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 4);
+        assert_eq!(fwd_head(&r, 4, next_word_start_range), 8);
+        assert_eq!(fwd_head(&r, 8, next_word_start_range), 11);
     }
 
     #[test]
     fn next_word_start_at_end_is_noop() {
         let r = rope("hello");
-        assert_eq!(next_word_start(&r, 5), 5);
+        assert_eq!(fwd_head(&r, 5, next_word_start_range), 5);
     }
 
     #[test]
     fn next_word_start_empty_rope() {
         let r = rope("");
-        assert_eq!(next_word_start(&r, 0), 0);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 0);
     }
 
     #[test]
     fn next_word_start_underscore_is_word() {
         let r = rope("foo_bar baz");
-        assert_eq!(next_word_start(&r, 0), 8);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 8);
     }
 
     #[test]
     fn next_word_start_punctuation_boundary() {
         let r = rope("alphanumeric.and");
-        assert_eq!(next_word_start(&r, 0), 12);
-        assert_eq!(next_word_start(&r, 12), 16);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 12);
+        assert_eq!(fwd_head(&r, 12, next_word_start_range), 16);
     }
 
     #[test]
     fn next_word_start_punctuation_group_boundary() {
         let r = rope("alphanumeric.!,and");
-        assert_eq!(next_word_start(&r, 0), 12);
-        assert_eq!(next_word_start(&r, 12), 15);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 12);
+        assert_eq!(fwd_head(&r, 12, next_word_start_range), 15);
     }
 
     #[test]
     fn next_word_start_stops_on_newline() {
         let r = rope("foo\nbar");
-        assert_eq!(next_word_start(&r, 0), 3);
-        assert_eq!(next_word_start(&r, 3), 7);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 3);
+        assert_eq!(fwd_head(&r, 3, next_word_start_range), 7);
     }
 
     #[test]
     fn next_word_start_bridges_consecutive_newlines() {
         let r = rope("foo\n\nbar");
-        assert_eq!(next_word_start(&r, 0), 3);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 3);
         // From inside the blank run the head bridges both newlines and runs
         // through the following word to its end, matching Helix.
-        assert_eq!(next_word_start(&r, 3), 8);
+        assert_eq!(fwd_head(&r, 3, next_word_start_range), 8);
     }
 
     #[test]
     fn next_word_start_multibyte() {
         let r = rope("héllo wörld");
         let world_start = "héllo ".len();
-        assert_eq!(next_word_start(&r, 0), world_start);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), world_start);
     }
 
     #[test]
@@ -789,50 +774,50 @@ mod tests {
     #[test]
     fn next_word_start_trailing_whitespace() {
         let r = rope("hello   ");
-        assert_eq!(next_word_start(&r, 0), 8);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 8);
     }
 
     #[test]
     fn prev_word_end_basic() {
         let r = rope("hello world");
-        assert_eq!(prev_word_end(&r, 9), 5);
+        assert_eq!(bwd_head(&r, 9, prev_word_end_range), 5);
     }
 
     #[test]
     fn prev_word_end_from_end() {
         let r = rope("hello world");
-        assert_eq!(prev_word_end(&r, 11), 5);
+        assert_eq!(bwd_head(&r, 11, prev_word_end_range), 5);
     }
 
     #[test]
     fn prev_word_end_from_word_start() {
         let r = rope("foo bar");
-        assert_eq!(prev_word_end(&r, 4), 3);
+        assert_eq!(bwd_head(&r, 4, prev_word_end_range), 3);
     }
 
     #[test]
     fn prev_word_end_from_whitespace_skips_prev_word() {
         let r = rope("foo bar baz");
-        assert_eq!(prev_word_end(&r, 7), 3);
+        assert_eq!(bwd_head(&r, 7, prev_word_end_range), 3);
     }
 
     #[test]
     fn prev_word_end_at_start_is_noop() {
         let r = rope("hello");
-        assert_eq!(prev_word_end(&r, 0), 0);
+        assert_eq!(bwd_head(&r, 0, prev_word_end_range), 0);
     }
 
     #[test]
     fn prev_word_end_empty_rope() {
         let r = rope("");
-        assert_eq!(prev_word_end(&r, 0), 0);
+        assert_eq!(bwd_head(&r, 0, prev_word_end_range), 0);
     }
 
     #[test]
     fn prev_word_end_punctuation() {
         let r = rope("abc.def");
-        assert_eq!(prev_word_end(&r, 7), 4);
-        assert_eq!(prev_word_end(&r, 4), 3);
+        assert_eq!(bwd_head(&r, 7, prev_word_end_range), 4);
+        assert_eq!(bwd_head(&r, 4, prev_word_end_range), 3);
     }
 
     #[test]
@@ -840,66 +825,66 @@ mod tests {
         let r = rope("héllo wörld");
         let world_end = r.len();
         let hello_end = "héllo".len();
-        assert_eq!(prev_word_end(&r, world_end), hello_end);
+        assert_eq!(bwd_head(&r, world_end, prev_word_end_range), hello_end);
     }
 
     #[test]
     fn prev_word_end_all_newlines() {
         let r = rope("\n\n\n\n\n");
-        assert_eq!(prev_word_end(&r, 5), 0);
+        assert_eq!(bwd_head(&r, 5, prev_word_end_range), 0);
     }
 
     #[test]
     fn next_long_word_start_treats_punctuation_as_word() {
         let r = rope("foo.bar baz");
-        assert_eq!(next_long_word_start(&r, 0), 8);
-        assert_eq!(next_word_start(&r, 0), 3);
+        assert_eq!(fwd_head(&r, 0, next_long_word_start_range), 8);
+        assert_eq!(fwd_head(&r, 0, next_word_start_range), 3);
     }
 
     #[test]
     fn next_long_word_start_chained_punctuation() {
         let r = rope("a!@b cd ef");
-        assert_eq!(next_long_word_start(&r, 0), 5);
-        assert_eq!(next_long_word_start(&r, 5), 8);
+        assert_eq!(fwd_head(&r, 0, next_long_word_start_range), 5);
+        assert_eq!(fwd_head(&r, 5, next_long_word_start_range), 8);
     }
 
     #[test]
     fn next_long_word_start_stops_on_newline() {
         let r = rope("foo.bar\nbaz");
-        assert_eq!(next_long_word_start(&r, 0), 7);
-        assert_eq!(next_long_word_start(&r, 7), 11);
+        assert_eq!(fwd_head(&r, 0, next_long_word_start_range), 7);
+        assert_eq!(fwd_head(&r, 7, next_long_word_start_range), 11);
     }
 
     #[test]
     fn next_long_word_start_empty_rope() {
         let r = rope("");
-        assert_eq!(next_long_word_start(&r, 0), 0);
+        assert_eq!(fwd_head(&r, 0, next_long_word_start_range), 0);
     }
 
     #[test]
     fn next_long_word_end_treats_punctuation_as_word() {
         let r = rope("foo.bar baz");
-        assert_eq!(next_long_word_end(&r, 0), 7);
+        assert_eq!(fwd_head(&r, 0, next_long_word_end_range), 7);
         assert_eq!(next_word_end(&r, 0), 3);
     }
 
     #[test]
     fn next_long_word_end_chained_punctuation() {
         let r = rope("a!@b cd");
-        assert_eq!(next_long_word_end(&r, 0), 4);
+        assert_eq!(fwd_head(&r, 0, next_long_word_end_range), 4);
     }
 
     #[test]
     fn next_long_word_end_multibyte() {
         let r = rope("foo.héllo wörld");
         let hello_end = "foo.héllo".len();
-        assert_eq!(next_long_word_end(&r, 0), hello_end);
+        assert_eq!(fwd_head(&r, 0, next_long_word_end_range), hello_end);
     }
 
     #[test]
     fn prev_long_word_start_treats_punctuation_as_word() {
         let r = rope("foo bar.baz");
-        assert_eq!(prev_long_word_start(&r, 11), 4);
+        assert_eq!(bwd_head(&r, 11, prev_long_word_start_range), 4);
         assert_eq!(prev_word_start(&r, 11), 8);
     }
 
@@ -907,28 +892,28 @@ mod tests {
     fn prev_long_word_start_chained_punctuation() {
         let r = rope("ab cd ef!@g");
         let len = r.len();
-        assert_eq!(prev_long_word_start(&r, len), 6);
+        assert_eq!(bwd_head(&r, len, prev_long_word_start_range), 6);
     }
 
     #[test]
     fn prev_long_word_start_at_start_is_noop() {
         let r = rope("hello");
-        assert_eq!(prev_long_word_start(&r, 0), 0);
+        assert_eq!(bwd_head(&r, 0, prev_long_word_start_range), 0);
     }
 
     #[test]
     fn prev_long_word_end_treats_punctuation_as_word() {
         let r = rope("foo.bar baz");
         let len = r.len();
-        assert_eq!(prev_long_word_end(&r, len), 7);
-        assert_eq!(prev_word_end(&r, len), 7);
+        assert_eq!(bwd_head(&r, len, prev_long_word_end_range), 7);
+        assert_eq!(bwd_head(&r, len, prev_word_end_range), 7);
     }
 
     #[test]
     fn prev_long_word_end_skips_internal_punctuation_boundary() {
         let r = rope("aa bb.cc dd");
-        assert_eq!(prev_long_word_end(&r, 6), 2);
-        assert_eq!(prev_word_end(&r, 6), 5);
+        assert_eq!(bwd_head(&r, 6, prev_long_word_end_range), 2);
+        assert_eq!(bwd_head(&r, 6, prev_word_end_range), 5);
     }
 
     #[test]
