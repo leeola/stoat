@@ -1160,9 +1160,10 @@ mod tests {
         seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
         let home = PathBuf::from("/fake-home");
         h.fake_fs().insert_files([
-            (home.join("alpha/f.rs"), "a".as_bytes()),
+            (home.join("alpha/nested/f.rs"), "a".as_bytes()),
             (home.join("beta/f.rs"), "b".as_bytes()),
         ]);
+        h.fake_fs().insert_dir(home.join("gamma"));
         h.fake_env().set("HOME", home.to_str().unwrap());
 
         h.type_text(":cd ~/");
@@ -1174,7 +1175,9 @@ mod tests {
             arg_picker(&h).browse.is_some(),
             "a ~/ tail enters browse mode"
         );
-        assert_eq!(browse_dir_rows(&h), ["alpha", "beta"]);
+        // Only home's immediate child dirs: the `nested` dir under alpha never
+        // appears (no recursive walk), and the empty `gamma` does.
+        assert_eq!(browse_dir_rows(&h), ["alpha", "beta", "gamma"]);
     }
 
     #[test]

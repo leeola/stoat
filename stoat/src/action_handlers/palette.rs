@@ -2,9 +2,10 @@ use crate::{
     app::{Stoat, UpdateEffect},
     command_palette::PaletteOutcome,
     file_finder::Browse,
+    host::FsHost,
     picker::PathPicker,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use stoat_action::ValueSource;
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -130,14 +131,36 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     }
 }
 
+/// The immediate child directories of `root`, sorted non-hidden before hidden
+/// and alphabetically within each group.
+///
+/// This is a one-level listing, never a recursive descent, so empty directories
+/// appear too. A missing or unreadable root yields an empty list. The returned
+/// order is the helper's contract. The picker re-sorts rows alphabetically for
+/// display.
+fn list_child_dirs(fs_host: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
+    let mut entries = fs_host.list_dir(root).unwrap_or_default();
+    entries.retain(|entry| entry.is_dir);
+    entries.sort_by(|a, b| {
+        let a_hidden = a.name.starts_with('.');
+        let b_hidden = b.name.starts_with('.');
+        a_hidden.cmp(&b_hidden).then_with(|| a.name.cmp(&b.name))
+    });
+    entries
+        .into_iter()
+        .map(|entry| root.join(entry.name.as_str()))
+        .collect()
+}
+
 /// Enter, re-root, or leave the `:cd` argument picker's directory-browse mode
 /// for the current `tail`.
 ///
 /// Mirrors [`super::file_finder::sync_file_finder_browse`] for the palette's
-/// [`ValueSource::Directories`] argument. A `/` or `~/` tail walks the typed
-/// directory via [`super::file_finder::spawn_workspace_dir_walk`], re-rooting a
-/// fresh walk whenever the directory part changes. A tail that stops being
-/// path-shaped drops browse so the workspace-derived directory list resumes.
+/// [`ValueSource::Directories`] argument. A `/` or `~/` tail lists the typed
+/// directory's immediate child directories synchronously via
+/// [`FsHost::list_dir`], re-rooting whenever the directory part changes. A tail
+/// that stops being path-shaped drops browse so the workspace-derived directory
+/// list resumes.
 fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
     let home = stoat.env_host.var("HOME");
 
@@ -164,8 +187,7 @@ fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
         != Some(&root);
 
     if root_changed {
-        let (walk_rx, walk_task) =
-            super::file_finder::spawn_workspace_dir_walk(stoat, root.clone());
+        let fs_host = stoat.fs_host.clone();
         let executor = stoat.executor.clone();
         let active_idx = stoat.active_workspace;
         let ws = &mut stoat.workspaces[active_idx];
@@ -174,20 +196,23 @@ fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
             .as_mut()
             .and_then(|palette| palette.arg_picker.as_mut())
         {
+            let children = list_child_dirs(&*fs_host, &root);
             match &mut picker.browse {
                 Some(browse) => {
                     browse.root = root.clone();
                     browse.picker.git_root = root.clone();
-                    browse.picker.reset_walk(walk_rx, walk_task);
+                    browse.picker.stop_walk();
+                    browse.picker.all_paths = children;
+                    browse.picker.invalidate();
                 },
                 None => {
-                    let walk_picker =
-                        PathPicker::new(ws, executor, root.clone(), Some((walk_rx, walk_task)));
+                    let mut child_picker = PathPicker::new(ws, executor, root.clone(), None);
+                    child_picker.all_paths = children;
                     picker.browse = Some(Browse {
                         typed_dir: String::new(),
                         root: root.clone(),
                         partial: String::new(),
-                        picker: walk_picker,
+                        picker: child_picker,
                     });
                 },
             }
@@ -320,4 +345,32 @@ fn close_palette(stoat: &mut Stoat) -> bool {
         palette.dispose(&mut workspaces[active_idx]);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list_child_dirs;
+    use crate::host::FakeFs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn list_child_dirs_lists_one_level_sorted_hidden_last() {
+        let fs = FakeFs::new();
+        let root = PathBuf::from("/root");
+        fs.insert_dir(root.join("visible"));
+        fs.insert_dir(root.join("zeta"));
+        fs.insert_dir(root.join(".hidden"));
+        // A file is not a directory, and a nested dir is not an immediate child.
+        fs.insert_file(root.join("a-file.txt"), b"y");
+        fs.insert_file(root.join("visible/nested/f.rs"), b"x");
+
+        assert_eq!(
+            list_child_dirs(&fs, &root),
+            [
+                root.join("visible"),
+                root.join("zeta"),
+                root.join(".hidden"),
+            ],
+        );
+    }
 }
