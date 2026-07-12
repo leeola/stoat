@@ -4208,6 +4208,27 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_x_selects_line_below() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        h.type_keys("v x");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 2, false)],
+            "vx selects the first line including its newline"
+        );
+        assert_eq!(h.stoat.focused_mode(), "select", "x stays in select mode");
+
+        h.type_keys("x");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(0, 4, false)],
+            "a second x extends to the line below"
+        );
+    }
+
+    #[test]
     fn count_prefix_extends_already_line_shaped_select_line_below() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 10);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");

@@ -481,6 +481,7 @@ on key {
         Alt-: -> EnsureSelectionsForward();
         S -> SplitSelection();
         s -> SelectRegex();
+        x -> SelectLineBelow();
         X -> ExtendToLineBounds();
         Alt-x -> ShrinkToLineBounds();
         Alt-( -> RotateSelectionContentsBackward();
