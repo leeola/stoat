@@ -69,6 +69,11 @@ pub struct Settings {
     /// [`LineNumbers::Relative`]. Set `editor.line_numbers = relative | absolute
     /// | off;` in stcfg (`false` is accepted as `off`, `true` as `relative`).
     pub editor_line_numbers: Option<LineNumbers>,
+    /// How many hidden buffers keep their full highlight state (syntax tree,
+    /// tokens) before the least-recently-shown are evicted. `None` falls back to
+    /// 64. `0` drops a buffer's state as soon as it is hidden. Set via
+    /// `editor.highlight_retention = N;` in stcfg.
+    pub highlight_retention: Option<u32>,
     /// Program a terminal pane spawns as its subshell. `None` lets the spawn
     /// site fall back to `$SHELL`, then `/bin/sh`. Set via
     /// `terminal.shell = "/bin/zsh";` in stcfg.
@@ -153,6 +158,7 @@ impl Settings {
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             scrolloff: other.scrolloff.or(self.scrolloff),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
+            highlight_retention: other.highlight_retention.or(self.highlight_retention),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
             direnv_load: other.direnv_load.or(self.direnv_load),
@@ -221,6 +227,11 @@ impl Settings {
             ["editor", "scrolloff"] => {
                 if let Value::Number(n) = setting.value.node {
                     self.scrolloff = Some(n as u32);
+                }
+            },
+            ["editor", "highlight_retention"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.highlight_retention = Some(n as u32);
                 }
             },
             ["editor", "line_numbers"] => {
@@ -332,6 +343,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
                 direnv_load: None,
@@ -392,6 +404,12 @@ mod tests {
             ln("on init { editor.line_numbers = relative; }"),
             Some(LineNumbers::Relative)
         );
+    }
+
+    #[test]
+    fn from_config_extracts_highlight_retention() {
+        let config = parse_ok("on init { editor.highlight_retention = 8; }");
+        assert_eq!(Settings::from_config(&config).highlight_retention, Some(8));
     }
 
     #[test]
@@ -465,6 +483,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
                 direnv_load: None,
@@ -493,6 +512,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
                 direnv_load: None,
@@ -530,6 +550,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
             direnv_load: None,
@@ -550,6 +571,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
             direnv_load: None,
@@ -572,6 +594,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
                 direnv_load: None,
@@ -597,6 +620,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
             direnv_load: None,
@@ -620,6 +644,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
                 direnv_load: None,
@@ -656,6 +681,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
                 direnv_load: None,
@@ -684,6 +710,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
                 direnv_load: None,
@@ -709,6 +736,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
             direnv_load: None,
@@ -729,6 +757,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
             direnv_load: None,

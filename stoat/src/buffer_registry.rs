@@ -72,12 +72,19 @@ struct BufferEntry {
     /// to clobber it. `None` for scratch buffers and for files whose
     /// metadata could not be read.
     disk_mtime: Option<SystemTime>,
+    /// Monotonic tick of when this buffer was last shown in a pane, from
+    /// [`BufferRegistry::mark_shown`]. It orders eviction of hidden buffers'
+    /// highlight state, dropping the lowest values first.
+    last_shown: u64,
 }
 
 pub(crate) struct BufferRegistry {
     buffers: HashMap<BufferId, BufferEntry>,
     path_to_id: HashMap<PathBuf, BufferId>,
     next_id: u64,
+    /// Monotonic counter stamped onto [`BufferEntry::last_shown`] by
+    /// [`Self::mark_shown`] to order highlight eviction by recency.
+    shown_counter: u64,
 }
 
 impl BufferRegistry {
@@ -86,6 +93,7 @@ impl BufferRegistry {
             buffers: HashMap::new(),
             path_to_id: HashMap::new(),
             next_id: 1,
+            shown_counter: 0,
         }
     }
 
@@ -168,6 +176,7 @@ impl BufferRegistry {
                 diff: None,
                 preview,
                 disk_mtime: None,
+                last_shown: 0,
             },
         );
         (id, buffer)
@@ -198,6 +207,7 @@ impl BufferRegistry {
                 diff: None,
                 preview: false,
                 disk_mtime: None,
+                last_shown: 0,
             },
         );
         (id, buffer)
@@ -413,6 +423,65 @@ impl BufferRegistry {
         self.buffers.get(&id)?.lsp_tokens.clone()
     }
 
+    /// Stamp `id` as the most-recently-shown buffer for highlight-eviction
+    /// recency, called whenever a buffer is shown in a pane.
+    pub(crate) fn mark_shown(&mut self, id: BufferId) {
+        self.shown_counter += 1;
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.last_shown = self.shown_counter;
+        }
+    }
+
+    /// Evict retained highlight state from the least-recently-shown hidden
+    /// buffers, keeping at most `cap` of them beyond the `visible` set. Returns
+    /// the evicted ids.
+    ///
+    /// A buffer is a candidate when it holds any highlight state (syntax tree,
+    /// syntax map, tree-sitter or LSP tokens) and is not in `visible`. The
+    /// oldest candidates past `cap` have that state dropped, with the syntax
+    /// tree draining on a background thread as in [`Self::clear_syntax`].
+    pub(crate) fn evict_hidden_highlights(
+        &mut self,
+        visible: &[BufferId],
+        cap: usize,
+    ) -> Vec<BufferId> {
+        let mut candidates: Vec<(BufferId, u64)> = self
+            .buffers
+            .iter()
+            .filter(|(id, entry)| {
+                !visible.contains(id)
+                    && (entry.syntax.is_some()
+                        || entry.syntax_map.is_some()
+                        || entry.tokens.is_some()
+                        || entry.lsp_tokens.is_some())
+            })
+            .map(|(id, entry)| (*id, entry.last_shown))
+            .collect();
+        if candidates.len() <= cap {
+            return Vec::new();
+        }
+
+        candidates.sort_by_key(|(_, last_shown)| *last_shown);
+        let evict_count = candidates.len() - cap;
+        let evicted: Vec<BufferId> = candidates
+            .iter()
+            .take(evict_count)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in &evicted {
+            if let Some(entry) = self.buffers.get_mut(id) {
+                if let Some(state) = entry.syntax.take() {
+                    drop_syntax_in_background(state);
+                }
+                entry.syntax_map = None;
+                entry.tokens = None;
+                entry.lsp_tokens = None;
+            }
+        }
+        evicted
+    }
+
     /// Move the prior [`SyntaxState`] out of the registry. The caller is
     /// expected to update it (`tree.edit` + reparse) and put it back via
     /// [`Self::store_syntax`]. Returns `None` if no state has been stored.
@@ -550,6 +619,7 @@ impl BufferRegistry {
                     diff: None,
                     preview: false,
                     disk_mtime: None,
+                    last_shown: 0,
                 },
             );
         }
@@ -651,6 +721,34 @@ mod tests {
             reg.tokens_for(id).is_none(),
             "set_language drops retained tokens"
         );
+    }
+
+    #[test]
+    fn evict_hidden_highlights_spares_visible_and_the_newest_cap() {
+        let mut reg = BufferRegistry::new();
+        let tokens: Arc<[SemanticTokenHighlight]> = Arc::from(Vec::new());
+        let interner = Arc::new(HighlightStyleInterner::default());
+        let ids: Vec<BufferId> = (0..5)
+            .map(|_| {
+                let (id, _) = reg.new_scratch();
+                reg.store_tokens(id, tokens.clone(), interner.clone());
+                reg.mark_shown(id);
+                id
+            })
+            .collect();
+
+        // ids[0] is the oldest but marked visible, so it survives. Over the four
+        // remaining hidden buffers with cap 2, the two oldest evict.
+        let evicted = reg.evict_hidden_highlights(&[ids[0]], 2);
+        assert_eq!(evicted, vec![ids[1], ids[2]]);
+        assert!(
+            reg.tokens_for(ids[0]).is_some(),
+            "visible spared despite being oldest"
+        );
+        assert!(reg.tokens_for(ids[1]).is_none());
+        assert!(reg.tokens_for(ids[2]).is_none());
+        assert!(reg.tokens_for(ids[3]).is_some(), "within the newest cap");
+        assert!(reg.tokens_for(ids[4]).is_some());
     }
 
     #[test]

@@ -151,6 +151,10 @@ on init {
     # following the cursor.
     editor.scrolloff = 3;
 
+    # How many hidden buffers keep their full highlight state before the
+    # least-recently-shown are evicted. 0 drops state as soon as a buffer hides.
+    editor.highlight_retention = 64;
+
     # Log the LSP text-protocol transcript. Off by default.
     text_proto_log = false;
 

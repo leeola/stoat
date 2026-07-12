@@ -333,6 +333,7 @@ impl Workspace {
         syntax_styles: &SyntaxStyles,
         redraw_notify: &Arc<Notify>,
         index_update_tx: &UnboundedSender<IndexUpdate>,
+        retention: usize,
     ) {
         let waker = futures::task::noop_waker();
         let mut completed: Vec<ParseJobOutput> = Vec::new();
@@ -402,7 +403,7 @@ impl Workspace {
             }
         }
 
-        for buffer_id in visible {
+        for &buffer_id in &visible {
             let Some(lang) = self.buffers.language_for(buffer_id) else {
                 continue;
             };
@@ -477,6 +478,12 @@ impl Workspace {
                 },
             );
         }
+
+        // Cap retained highlight state. In-flight parse ids join the visible
+        // set so a completing job cannot repopulate a just-evicted buffer.
+        let mut protected = visible;
+        protected.extend(self.parse_jobs.keys().copied());
+        self.buffers.evict_hidden_highlights(&protected, retention);
     }
 
     /// Detect and assign a language to every path-bearing buffer that
@@ -765,6 +772,51 @@ mod tests {
         assert!(
             !ws.parse_jobs.contains_key(&id),
             "swapping preview content drops the prior file's parse job"
+        );
+    }
+
+    #[test]
+    fn highlight_retention_evicts_least_recently_shown() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::OpenFile;
+
+        let mut h = TestHarness::with_size(24, 4);
+        h.stoat.settings.highlight_retention = Some(1);
+        let root = PathBuf::from("/retention");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            h.fake_fs().insert_file(root.join(name), b"fn f() {}\n");
+        }
+
+        // Open and render each so its syntax parses. The last render also runs
+        // the eviction that caps retention once a and b are both hidden.
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            dispatch(
+                &mut h.stoat,
+                &OpenFile {
+                    path: root.join(name),
+                },
+            );
+            h.snapshot();
+        }
+
+        let ws = h.stoat.active_workspace();
+        let syntax_of = |name: &str| {
+            ws.buffers
+                .id_for_path(&root.join(name))
+                .and_then(|id| ws.buffers.syntax_version(id))
+        };
+        assert!(
+            syntax_of("a.rs").is_none(),
+            "the least-recently-shown hidden buffer is evicted"
+        );
+        assert!(
+            syntax_of("b.rs").is_some(),
+            "the newest hidden buffer stays within the cap"
+        );
+        assert!(
+            syntax_of("c.rs").is_some(),
+            "the visible buffer is never evicted"
         );
     }
 }

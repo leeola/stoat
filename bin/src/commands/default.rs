@@ -211,6 +211,7 @@ fn run_tui(
         mouse_capture: None,
         scrolloff: None,
         editor_line_numbers: None,
+        highlight_retention: None,
         terminal_shell: None,
         terminal_args: None,
         direnv_load: None,

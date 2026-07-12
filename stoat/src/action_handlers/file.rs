@@ -487,6 +487,7 @@ pub(crate) fn show_buffer_in_pane(
     executor: Executor,
 ) -> Option<BufferId> {
     let ws = stoat.active_workspace_mut();
+    ws.buffers.mark_shown(buffer_id);
     if let View::Editor(eid) = ws.panes.pane(target).view
         && ws
             .editors

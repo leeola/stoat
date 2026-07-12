@@ -81,6 +81,10 @@ const MAX_FRAME_DT: f32 = 0.1;
 /// remainder on the next turn.
 const INDEX_DRAIN_CAP: usize = 512;
 
+/// Hidden buffers that keep their full highlight state when `editor.highlight_retention`
+/// is unset. Beyond this many, the least-recently-shown hidden buffers are evicted.
+const DEFAULT_HIGHLIGHT_RETENTION: u32 = 64;
+
 /// One [`Stoat::drain_index_updates`] pass slower than this warns, naming the
 /// drained update count. A drain this slow blocks the event loop, the mechanism
 /// behind an index-driven wedge.
@@ -4895,6 +4899,10 @@ impl Stoat {
     /// the parsed snapshot, so they remain valid even if the buffer has been
     /// edited further while the parse was running.
     fn drive_parse_jobs(&mut self) {
+        let retention = self
+            .settings
+            .highlight_retention
+            .unwrap_or(DEFAULT_HIGHLIGHT_RETENTION) as usize;
         let Self {
             workspaces,
             active_workspace,
@@ -4909,6 +4917,7 @@ impl Stoat {
             syntax_styles,
             redraw_notify,
             index_update_tx,
+            retention,
         );
     }
 
