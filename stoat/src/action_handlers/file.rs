@@ -2,7 +2,7 @@ use crate::{
     action_handlers::read_string_via_host,
     app::{Stoat, UpdateEffect},
     buffer::{BufferId, SharedBuffer},
-    editor_state::EditorState,
+    editor_state::{EditorId, EditorState},
     host::LanguageServerFeature,
     pane::{PaneId, View},
 };
@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 use stoat_scheduler::Executor;
+use stoat_text::{Bias, SelectionGoal};
 
 /// Write the focused buffer to its backing file via
 /// [`crate::host::FsHost::write_atomic`], clear the dirty flag, and notify the
@@ -333,6 +334,145 @@ fn disk_changed_since_open(stoat: &Stoat, buffer_id: BufferId, path: &Path) -> b
     current > recorded
 }
 
+/// Arm the auto-reload poll if it is not already running.
+///
+/// Spawns a timer loop that wakes [`Stoat::drive_background`] every
+/// [`crate::app::AUTO_RELOAD_POLL`] so [`pump_auto_reload`] can re-read flagged
+/// buffers. The task cancels when dropped, and [`pump_auto_reload`] drops it
+/// once no buffer is flagged. Called when a buffer opts into file-following,
+/// such as the session log buffer and the `:auto-reload` command.
+#[allow(dead_code)]
+pub(crate) fn ensure_auto_reload_poll(stoat: &mut Stoat) {
+    if stoat.auto_reload_poll.is_some() {
+        return;
+    }
+    let executor = stoat.executor.clone();
+    let redraw = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn(async move {
+        loop {
+            executor.timer(crate::app::AUTO_RELOAD_POLL).await;
+            redraw.notify_one();
+        }
+    });
+    stoat.auto_reload_poll = Some(task);
+}
+
+/// Re-read every auto-reload-flagged buffer whose file advanced past its
+/// recorded mtime, and disarm the poll when none remain.
+///
+/// A dirty buffer is skipped so in-memory edits are never clobbered. When the
+/// new content extends the old it is appended in place, preserving anchors for
+/// the log-tail case. Otherwise the buffer is fully replaced. A cursor sitting
+/// on the old last line follows to the new end, while any other cursor stays
+/// put.
+pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
+    if stoat.auto_reload_poll.is_none() {
+        return;
+    }
+    let paths = stoat.active_workspace().buffers.auto_reload_paths();
+    if paths.is_empty() {
+        stoat.auto_reload_poll = None;
+        return;
+    }
+
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    let mut changed = false;
+
+    for (id, path) in paths {
+        let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
+            continue;
+        };
+        if buffer.read().expect("buffer poisoned").dirty {
+            continue;
+        }
+        let Some(mtime) = stoat
+            .fs_host
+            .metadata(&path)
+            .ok()
+            .flatten()
+            .map(|m| m.modified)
+        else {
+            continue;
+        };
+        if stoat.active_workspace().buffers.disk_mtime(id) == Some(mtime) {
+            continue;
+        }
+        let Ok(new) = read_string_via_host(&*stoat.fs_host, &path) else {
+            continue;
+        };
+
+        let (old, old_last_row) = {
+            let guard = buffer.read().expect("buffer poisoned");
+            (
+                guard.snapshot.visible_text.to_string(),
+                guard.snapshot.visible_text.max_point().row,
+            )
+        };
+        if new == old {
+            stoat
+                .active_workspace_mut()
+                .buffers
+                .set_disk_mtime(id, mtime);
+            continue;
+        }
+
+        let followers: Vec<EditorId> = stoat
+            .active_workspace_mut()
+            .editors
+            .iter_mut()
+            .filter_map(|(eid, editor)| {
+                (editor.buffer_id == id && editor_cursor_row(editor) == old_last_row).then_some(eid)
+            })
+            .collect();
+
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            let old_len = old.len();
+            if new.starts_with(&old) {
+                guard.edit(old_len..old_len, &new[old_len..]);
+            } else {
+                guard.edit(0..old_len, &new);
+            }
+            guard.mark_clean();
+        }
+        stoat
+            .active_workspace_mut()
+            .buffers
+            .set_disk_mtime(id, mtime);
+        changed = true;
+
+        let ws = stoat.active_workspace_mut();
+        for eid in followers {
+            let Some(editor) = ws.editors.get_mut(eid) else {
+                continue;
+            };
+            let snapshot = editor.display_map.snapshot();
+            let buf_snap = snapshot.buffer_snapshot();
+            let end = buf_snap.rope().len();
+            let anchor = buf_snap.anchor_at(end, Bias::Left);
+            editor.selections.transform(buf_snap, |s| {
+                let mut sel = s.clone();
+                sel.collapse_to(anchor, SelectionGoal::None);
+                sel
+            });
+            super::movement::ensure_cursor_in_view(editor, scrolloff);
+        }
+    }
+
+    if changed {
+        super::lsp::notify_buffer_changes_pending(stoat);
+    }
+}
+
+/// The buffer-line row of `editor`'s primary cursor, resolved through its
+/// current display snapshot.
+fn editor_cursor_row(editor: &mut EditorState) -> u32 {
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    let head = buf_snap.resolve_anchor(&editor.selections.newest_anchor().head());
+    buf_snap.rope().offset_to_point(head).row
+}
+
 /// Drop the focused buffer from the workspace's
 /// [`crate::buffer_registry::BufferRegistry`] and notify the LSP
 /// server via [`crate::host::LspHost::did_close`]. Editor states
@@ -354,7 +494,7 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let executor = stoat.executor.clone();
-    let editor_ids: Vec<crate::editor_state::EditorId> = stoat
+    let editor_ids: Vec<EditorId> = stoat
         .active_workspace()
         .editors
         .iter()
@@ -518,12 +658,15 @@ mod tests {
     use crate::{
         action_handlers::dispatch,
         app::UpdateEffect,
+        buffer::BufferId,
         host::{FakeFsOp, FsHost},
         test_harness::TestHarness,
         Stoat,
     };
     use std::path::{Path, PathBuf};
-    use stoat_action::{CloseBuffer, ForceSaveBuffer, OpenBuffer, OpenFile, SaveBuffer, WriteQuit};
+    use stoat_action::{
+        CloseBuffer, ForceSaveBuffer, MoveDown, OpenBuffer, OpenFile, SaveBuffer, WriteQuit,
+    };
 
     /// Open `name` (seeded with `seed`) under `root`, dirty the buffer with a
     /// leading insert, and return its absolute path. The open records the disk
@@ -565,6 +708,169 @@ mod tests {
             .expect("buffer");
         let guard = buffer.read().expect("buffer poisoned");
         guard.dirty
+    }
+
+    /// Open `name` (seeded with `seed`) under `root`, flag it auto-reload, and
+    /// arm the poll. Returns the absolute path and buffer id.
+    fn open_auto_reload(
+        h: &mut TestHarness,
+        root: &Path,
+        name: &str,
+        seed: &[u8],
+    ) -> (PathBuf, BufferId) {
+        let path = root.join(name);
+        h.fake_fs().insert_file(&path, seed);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        let id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .set_auto_reload(id, true);
+        super::ensure_auto_reload_poll(&mut h.stoat);
+        (path, id)
+    }
+
+    fn buffer_text(h: &TestHarness, id: BufferId) -> String {
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .snapshot
+            .visible_text
+            .to_string()
+    }
+
+    fn focused_cursor_row(h: &mut TestHarness) -> u32 {
+        super::editor_cursor_row(
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor"),
+        )
+    }
+
+    #[test]
+    fn pump_auto_reload_appends_and_keeps_the_buffer_clean() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-append");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
+
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        super::pump_auto_reload(&mut h.stoat);
+
+        assert_eq!(buffer_text(&h, id), "line1\nline2\n");
+        assert!(!focused_dirty(&h.stoat), "a reloaded buffer stays clean");
+    }
+
+    #[test]
+    fn pump_auto_reload_skips_dirty_buffers() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-dirty");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        super::pump_auto_reload(&mut h.stoat);
+
+        assert_eq!(
+            buffer_text(&h, id),
+            "xline1\n",
+            "a dirty buffer keeps its in-memory edits"
+        );
+    }
+
+    #[test]
+    fn pump_auto_reload_tail_follows_a_last_line_cursor() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-tail");
+        // The seed has no trailing newline, so the last line "ccc" carries
+        // content and a col-0 cursor on it sits before the append point. Natural
+        // anchoring leaves such a cursor put. Only the tail-follow carries it to
+        // the new end.
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"aaa\nbbb\nccc");
+        dispatch(&mut h.stoat, &MoveDown);
+        dispatch(&mut h.stoat, &MoveDown);
+        assert_eq!(
+            focused_cursor_row(&mut h),
+            2,
+            "cursor starts on the last line"
+        );
+
+        h.fake_fs().insert_file(&path, b"aaa\nbbb\nccc\nddd\n");
+        super::pump_auto_reload(&mut h.stoat);
+
+        assert_eq!(buffer_text(&h, id), "aaa\nbbb\nccc\nddd\n");
+        assert_eq!(
+            focused_cursor_row(&mut h),
+            4,
+            "a last-line cursor follows the append to the new end"
+        );
+    }
+
+    #[test]
+    fn pump_auto_reload_leaves_a_mid_file_cursor_put() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-mid");
+        let (path, _) = open_auto_reload(&mut h, &root, "log.txt", b"a\nb\nc\nd\n");
+        assert_eq!(focused_cursor_row(&mut h), 0, "cursor starts mid-file");
+
+        h.fake_fs().insert_file(&path, b"a\nb\nc\nd\ne\n");
+        super::pump_auto_reload(&mut h.stoat);
+
+        assert_eq!(
+            focused_cursor_row(&mut h),
+            0,
+            "a mid-file cursor stays put through an append"
+        );
+    }
+
+    #[test]
+    fn pump_auto_reload_ignores_unflagged_buffers() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-unflagged");
+        let path = root.join("log.txt");
+        h.fake_fs().insert_file(&path, b"line1\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        let id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        super::ensure_auto_reload_poll(&mut h.stoat);
+
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        super::pump_auto_reload(&mut h.stoat);
+
+        assert_eq!(
+            buffer_text(&h, id),
+            "line1\n",
+            "an unflagged buffer is never reloaded"
+        );
+    }
+
+    #[test]
+    fn pump_auto_reload_disarms_when_no_buffer_is_flagged() {
+        let mut h = Stoat::test();
+        super::ensure_auto_reload_poll(&mut h.stoat);
+        assert!(h.stoat.auto_reload_poll.is_some(), "poll armed");
+
+        super::pump_auto_reload(&mut h.stoat);
+
+        assert!(
+            h.stoat.auto_reload_poll.is_none(),
+            "the pump drops the poll task when no buffer is flagged"
+        );
     }
 
     #[test]
@@ -1012,7 +1318,7 @@ mod tests {
         );
     }
 
-    fn focused_buffer_id(stoat: &mut Stoat) -> crate::buffer::BufferId {
+    fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
         crate::action_handlers::focused_editor_mut(stoat)
             .expect("editor")
             .buffer_id
@@ -1085,7 +1391,7 @@ mod tests {
         );
     }
 
-    fn open_path(h: &mut TestHarness, content: &[u8]) -> (PathBuf, crate::buffer::BufferId) {
+    fn open_path(h: &mut TestHarness, content: &[u8]) -> (PathBuf, BufferId) {
         let root = PathBuf::from("/close-test");
         let path = root.join("file.txt");
         h.fake_fs().insert_file(&path, content);

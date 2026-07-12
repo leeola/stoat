@@ -72,6 +72,10 @@ struct BufferEntry {
     /// to clobber it. `None` for scratch buffers and for files whose
     /// metadata could not be read.
     disk_mtime: Option<SystemTime>,
+    /// When set, [`BufferRegistry::auto_reload_paths`] reports this buffer so the
+    /// auto-reload pump re-reads its file as the on-disk mtime advances. Set for
+    /// the session log buffer and any buffer that opts in.
+    auto_reload: bool,
     /// Monotonic tick of when this buffer was last shown in a pane, from
     /// [`BufferRegistry::mark_shown`]. It orders eviction of hidden buffers'
     /// highlight state, dropping the lowest values first.
@@ -176,6 +180,7 @@ impl BufferRegistry {
                 diff: None,
                 preview,
                 disk_mtime: None,
+                auto_reload: false,
                 last_shown: 0,
             },
         );
@@ -207,6 +212,7 @@ impl BufferRegistry {
                 diff: None,
                 preview: false,
                 disk_mtime: None,
+                auto_reload: false,
                 last_shown: 0,
             },
         );
@@ -263,6 +269,30 @@ impl BufferRegistry {
     /// scratch buffer, an unknown id, or a file whose metadata never read.
     pub(crate) fn disk_mtime(&self, id: BufferId) -> Option<SystemTime> {
         self.buffers.get(&id).and_then(|e| e.disk_mtime)
+    }
+
+    /// Flag `id` to be re-read from disk as its file grows, or clear the flag.
+    /// No-op for an unknown id. The auto-reload pump only acts on flagged,
+    /// path-bound buffers.
+    ///
+    /// Called when a buffer opts into file-following, such as the session log
+    /// buffer and the `:auto-reload` command.
+    #[allow(dead_code)]
+    pub(crate) fn set_auto_reload(&mut self, id: BufferId, on: bool) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.auto_reload = on;
+        }
+    }
+
+    /// The `(id, path)` of every auto-reload-flagged buffer that is path-bound,
+    /// for the auto-reload pump to poll. Scratch buffers are skipped since they
+    /// have no file to re-read.
+    pub(crate) fn auto_reload_paths(&self) -> Vec<(BufferId, PathBuf)> {
+        self.buffers
+            .iter()
+            .filter(|(_, e)| e.auto_reload)
+            .filter_map(|(&id, e)| e.path.as_ref().map(|p| (id, p.clone())))
+            .collect()
     }
 
     /// Returns paths of currently-open path-bound buffers in lexicographic
@@ -619,6 +649,7 @@ impl BufferRegistry {
                     diff: None,
                     preview: false,
                     disk_mtime: None,
+                    auto_reload: false,
                     last_shown: 0,
                 },
             );

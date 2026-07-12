@@ -75,6 +75,12 @@ const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(8);
 /// a single large jump.
 const MAX_FRAME_DT: f32 = 0.1;
 
+/// Poll cadence for auto-reloading buffers. While any buffer is flagged, a
+/// timer at this interval wakes [`Stoat::drive_background`] so
+/// [`crate::action_handlers::file::pump_auto_reload`] can re-read files whose
+/// on-disk mtime advanced.
+pub(crate) const AUTO_RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Maximum index updates [`Stoat::drain_index_updates`] processes in one call.
 /// Bounds the graph work per event-loop turn so a large reindex burst cannot
 /// stall input. On hitting the cap the drain reschedules itself to finish the
@@ -473,6 +479,11 @@ pub struct Stoat {
     /// only the most recent edit's snapshot ever reaches the
     /// server.
     pub(crate) lsp_pending_changes: std::collections::HashMap<BufferId, stoat_scheduler::Task<()>>,
+    /// Poll task re-reading auto-reload-flagged buffers, live only while at
+    /// least one buffer is flagged. Dropping the task cancels its timer loop, so
+    /// [`crate::action_handlers::file::pump_auto_reload`] clears this field to
+    /// disarm the poll once no buffer wants following.
+    pub(crate) auto_reload_poll: Option<stoat_scheduler::Task<()>>,
     /// LSP-protocol document version per buffer. Starts at 0 from
     /// `did_open` and increments at `did_change` spawn time. Gaps
     /// (e.g. the prior task was cancelled before fire) are allowed
@@ -1041,6 +1052,7 @@ impl Stoat {
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
+            auto_reload_poll: None,
             lsp_doc_versions: std::collections::HashMap::new(),
             lsp_last_delivered_text: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
@@ -5738,6 +5750,7 @@ impl Stoat {
         crate::diff_warm::install_finished(self);
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
+        action_handlers::file::pump_auto_reload(self);
         self.drive_parse_jobs();
         action_handlers::pump_commits(self);
         action_handlers::pump_review_scan(self);
