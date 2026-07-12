@@ -1,7 +1,4 @@
-use crate::{
-    render::review::style_rgb,
-    theme::{scope, Theme},
-};
+use crate::{render::review::style_rgb, theme::Theme};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -14,24 +11,23 @@ use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 /// Draw a modal frame around `area` and return the inner content rect.
 ///
 /// This is the single chrome primitive behind every stoat modal and cursor
-/// popup. The fallback -- taken when `scene` is absent or the theme is not an
-/// RGB theme -- draws a ratatui [`Block`] with [`Borders::ALL`], `style` on the
+/// popup. The fallback -- taken when `scene` is absent or `style`'s foreground
+/// is not RGB -- draws a ratatui [`Block`] with [`Borders::ALL`], `style` on the
 /// border, and `title` styled the same, which is exactly what the sites drew
 /// before, so their snapshots stay identical.
 ///
-/// Under stoatty (a `scene` is threaded and the colors resolve to RGB) it
+/// Under stoatty (a `scene` is threaded and the border color resolves to RGB) it
 /// instead emits a hairline `panel` APC frame with rounded corners and a drop
 /// shadow, plus, for `Some(title)`, a full-size title [`TextRun`] over the top
-/// edge. The panel's `title_gap` notches the hairline out under the title, so
-/// the run's background no longer masks it. It resolves to the surface color
-/// (the theme's `UI_BACKGROUND`, falling back to `style`'s bg) so it backs the
-/// glyphs without banding the notched span, which callers clear to that same
-/// surface. No box-drawing glyphs are written in this arm.
+/// edge. The hairline runs unbroken through the title span, and the title run
+/// carries no background box, so its glyphs blend directly over the grid cells
+/// behind them. No box-drawing glyphs are written in this arm.
 ///
-/// The caller owns background clearing. Sites that masked what was behind the
-/// modal still call [`Clear`](ratatui::widgets::Clear) before this, and sites
-/// that painted every cell themselves still skip it. This draws only the frame,
-/// so either behavior is preserved exactly.
+/// The caller owns background clearing, and a titled caller must clear the
+/// border-row cells to the surface color so the title glyphs blend over a clean
+/// surface rather than stale content. Sites that masked what was behind the
+/// modal call [`Clear`](ratatui::widgets::Clear) before this; sites that paint
+/// every cell themselves clear implicitly. This draws only the frame.
 ///
 /// The returned rect is the area inset by the one-cell border, matching the
 /// layout the sites lay their content out over regardless of arm.
@@ -40,29 +36,18 @@ pub(crate) fn modal_frame(
     area: Rect,
     title: Option<&str>,
     style: Style,
-    theme: &Theme,
+    _theme: &Theme,
     scene: Option<&mut ApcScene>,
 ) -> Rect {
     let inner = Block::default().borders(Borders::ALL).inner(area);
 
     let rich = scene.and_then(|scene| {
         let border = style_rgb(style.fg)?;
-        let mask = style_rgb(
-            theme
-                .try_get(scope::UI_BACKGROUND)
-                .and_then(|s| s.bg)
-                .or(style.bg),
-        )?;
-        Some((scene, border, mask))
+        Some((scene, border))
     });
 
     match rich {
-        Some((scene, border, mask)) => {
-            // The title TextRun anchors one cell in (col 16 sixteenths) and each
-            // char spans a full cell at scale 256, so the notch it needs is
-            // (16, chars * 16) sixteenths from the panel's left edge.
-            let title_gap = title.map(|t| (16, t.chars().count() as u16 * 16));
-
+        Some((scene, border)) => {
             command::encode_panel_into(
                 scene.buffer(),
                 &PanelCommand {
@@ -75,7 +60,7 @@ pub(crate) fn modal_frame(
                     corner_radius: 6,
                     fill: None,
                     shadow: true,
-                    title_gap,
+                    title_gap: None,
                 },
             );
             if let Some(title) = title {
@@ -84,7 +69,7 @@ pub(crate) fn modal_frame(
                     row: 0,
                     scale: 256,
                     color: border,
-                    bg: mask,
+                    bg: None,
                     text: title,
                 }
                 .render(area, buf, scene);
@@ -199,7 +184,7 @@ pub(crate) fn text(
                 row: 0,
                 scale,
                 color,
-                bg,
+                bg: Some(bg),
                 text: content,
             }
             .render(Rect::new(x, y, 1, 1), buf, scene);
@@ -257,9 +242,8 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
         let mut scene = ApcScene::new();
         let theme = Theme::empty();
-        // A bg on the style makes the title mask resolve without a themed
-        // background, so the rich arm engages.
-        let style = rgb_style().bg(Color::Rgb(9, 9, 9));
+        // The rich arm engages purely on the border color (style.fg) being RGB.
+        let style = rgb_style();
 
         let inner = modal_frame(
             &mut buf,
@@ -284,16 +268,20 @@ mod tests {
             corner_radius: 6,
             fill: None,
             shadow: true,
-            title_gap: Some((16, 64)),
+            title_gap: None,
         });
-        assert!(
-            scene.buffer().starts_with(&panel),
-            "the panel frame at the modal rect leads the batch",
-        );
-        assert!(
-            scene.buffer().len() > panel.len(),
-            "the title text run follows the panel",
-        );
+        // The title run carries no background box and anchors one cell into the
+        // modal (area.x * 16 + 16 = 48, area.y * 16 = 16), so the hairline draws
+        // unbroken and the glyphs blend over the caller-cleared cells.
+        let title = encode_text_run(&TextRunCommand {
+            col: 48,
+            row: 16,
+            scale: 256,
+            color: [1, 2, 3],
+            bg: None,
+            text: " hi ".to_owned(),
+        });
+        assert_eq!(scene.buffer(), &[panel, title].concat());
     }
 
     #[test]
@@ -384,7 +372,7 @@ mod tests {
                 row: 0,
                 scale: 218,
                 color: [1, 2, 3],
-                bg: [9, 9, 9],
+                bg: Some([9, 9, 9]),
                 text: "hi".to_owned(),
             })
         );

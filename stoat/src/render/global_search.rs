@@ -1,5 +1,9 @@
 use crate::{global_search::GlobalSearchPicker, render::text::write_str};
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    widgets::{Clear, Widget},
+};
 
 pub(crate) fn render_global_search(
     picker: &GlobalSearchPicker,
@@ -35,6 +39,7 @@ pub(crate) fn render_global_search(
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     let title = format!(" search: {} ", picker.query());
+    Clear.render(modal_area, buf);
     let inner = crate::render::chrome::modal_frame(
         buf,
         modal_area,

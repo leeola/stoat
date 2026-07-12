@@ -48,7 +48,7 @@ impl StatusBar<'_> {
                 row: 0,
                 scale: self.scale,
                 color: seg.fg,
-                bg: seg.bg,
+                bg: Some(seg.bg),
                 text: seg.text,
             }
             .render(area, buf, scene);
@@ -66,7 +66,7 @@ impl StatusBar<'_> {
                 row: 0,
                 scale: self.scale,
                 color: seg.fg,
-                bg: seg.bg,
+                bg: Some(seg.bg),
                 text: seg.text,
             }
             .render(area, buf, scene);
@@ -133,7 +133,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [1, 2, 3],
-            bg: [4, 5, 6],
+            bg: Some([4, 5, 6]),
             text: "ab".to_owned(),
         });
         // advance("ab") = 2 * 160 / 16 = 20
@@ -142,7 +142,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [7, 8, 9],
-            bg: [10, 11, 12],
+            bg: Some([10, 11, 12]),
             text: "c".to_owned(),
         });
         assert!(contains(scene.buffer(), &first), "first segment at col 0");
@@ -177,7 +177,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [1, 2, 3],
-            bg: [4, 5, 6],
+            bg: Some([4, 5, 6]),
             text: "xy".to_owned(),
         });
         assert!(
@@ -217,7 +217,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [3, 3, 3],
-            bg: [4, 4, 4],
+            bg: Some([4, 4, 4]),
             text: "R".to_owned(),
         });
         assert!(

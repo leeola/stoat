@@ -22,9 +22,9 @@ pub struct TextRun<'a> {
     /// Glyph size in 256ths of the cell size.
     pub scale: u16,
     pub color: [u8; 3],
-    /// Background the run composites over; must match the color beneath it for
-    /// the glyph boxes to blend cleanly.
-    pub bg: [u8; 3],
+    /// Opaque background box the run composites over, or `None` to blend the
+    /// glyphs directly over the surface behind the run with no backing box.
+    pub bg: Option<[u8; 3]>,
     pub text: &'a str,
 }
 
@@ -64,7 +64,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [99, 109, 131],
-            bg: [40, 44, 52],
+            bg: Some([40, 44, 52]),
             text: "42",
         }
         .render(Rect::new(3, 5, 2, 1), &mut buf, &mut scene);
@@ -74,7 +74,7 @@ mod tests {
             row: 5 * 16,
             scale: 160,
             color: [99, 109, 131],
-            bg: [40, 44, 52],
+            bg: Some([40, 44, 52]),
             text: "42".to_owned(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());

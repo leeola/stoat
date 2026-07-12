@@ -161,7 +161,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
                             row: 0,
                             scale: HOVER_TEXT_SCALE,
                             color,
-                            bg,
+                            bg: Some(bg),
                             text: &seg_text,
                         }
                         .render(Rect::new(inner.x, row, 1, 1), buf, scene);
@@ -445,7 +445,7 @@ pub(crate) fn render_hover_page(
                 row: 0,
                 scale: HOVER_TEXT_SCALE,
                 color,
-                bg: run_bg,
+                bg: Some(run_bg),
                 text,
             }
             .render(Rect::new(0, row_idx, 1, 1), &mut scratch, &mut scene);

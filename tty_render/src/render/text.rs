@@ -1175,15 +1175,20 @@ impl TextPass {
         instances
     }
 
-    /// One opaque background rect per scaled text run, painted before its glyphs
-    /// so they alpha-blend over it.
+    /// One opaque background rect per scaled text run that carries a background,
+    /// painted before its glyphs so they alpha-blend over it.
     ///
-    /// The rect spans the run's full character width (including spaces) and one
-    /// full cell height, so it masks any panel hairline the run sits over across
-    /// the whole span, not just where glyphs land.
+    /// A run with no background contributes no rect. Its glyphs blend directly
+    /// over whatever lies beneath, so a title run leaves the panel hairline it
+    /// sits over unbroken. When present, the rect spans the run's full character
+    /// width (spaces included) and one full cell height, an opaque backing where
+    /// a run needs one.
     fn build_run_rects(&self, grid: &Grid) -> Vec<RectInstance> {
         let mut rects = Vec::new();
         for run in grid.text_runs() {
+            let Some(bg) = run.bg else {
+                continue;
+            };
             let scale = f32::from(run.scale) / 256.0;
             if scale <= 0.0 {
                 continue;
@@ -1197,7 +1202,7 @@ impl TextPass {
             rects.push(RectInstance {
                 pos: [col * self.metrics.width, row * self.metrics.height],
                 dim: [width, self.metrics.height],
-                color: rgb_f32(run.bg),
+                color: rgb_f32(bg),
                 seq: run.seq,
             });
         }
@@ -3078,7 +3083,7 @@ mod tests {
             row: 0,
             scale: 256,
             color: Rgb::new(1, 2, 3),
-            bg: Rgb::new(4, 5, 6),
+            bg: Some(Rgb::new(4, 5, 6)),
             text: "42".to_owned(),
             seq: 42,
         }]);
@@ -3089,6 +3094,28 @@ mod tests {
         assert_eq!(
             rects[0].seq, 42,
             "the run rect carries its run's occlusion seq"
+        );
+    }
+
+    #[test]
+    fn run_without_bg_builds_no_rect() {
+        let Some((_device, _queue, pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(2, 12);
+        grid.set_text_runs(vec![TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(1, 2, 3),
+            bg: None,
+            text: "42".to_owned(),
+            seq: 42,
+        }]);
+
+        assert!(
+            pass.build_run_rects(&grid).is_empty(),
+            "a run with no background paints no backing rect"
         );
     }
 

@@ -99,7 +99,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
         row: 32,
         scale: 256,
         color: black,
-        bg: run_bg,
+        bg: Some(run_bg),
         text: "   ".to_owned(),
         seq: 0,
     }]);

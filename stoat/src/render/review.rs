@@ -414,7 +414,7 @@ fn draw_side_num(
                 row: (y - inner.y) * 16,
                 scale: NUMBER_SCALE,
                 color: rg.colors.dim,
-                bg: rg.colors.bg,
+                bg: Some(rg.colors.bg),
                 text: &text,
             }
             .render(inner, buf, &mut *rg.scene);

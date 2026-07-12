@@ -719,7 +719,9 @@ pub struct TextRun {
     pub row: i16,
     pub scale: u16,
     pub color: Rgb,
-    pub bg: Rgb,
+    /// Opaque background box painted behind the glyphs, or `None` to blend the
+    /// glyphs directly over the surface behind the run with no backing box.
+    pub bg: Option<Rgb>,
     pub text: String,
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
@@ -991,7 +993,7 @@ mod tests {
             row: 32,
             scale: 192,
             color: Rgb::new(150, 160, 170),
-            bg: Rgb::new(24, 26, 32),
+            bg: Some(Rgb::new(24, 26, 32)),
             text: "42".to_owned(),
             seq: 0,
         };

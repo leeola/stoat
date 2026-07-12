@@ -113,7 +113,7 @@ impl Gutter<'_> {
                 row: y,
                 scale: self.number_scale,
                 color: self.number_fg,
-                bg: self.bg,
+                bg: Some(self.bg),
                 text,
             }
             .render(area, buf, scene);

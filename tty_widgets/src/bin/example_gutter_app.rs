@@ -293,7 +293,7 @@ fn draw_body(frame: &mut Frame<'_>, scene: &mut ApcScene, pane: &Pane, cell_widt
                     row: 0,
                     scale: EXPANSION_SCALE,
                     color: diag_color(Diag::Error),
-                    bg: EDITOR_BG,
+                    bg: Some(EDITOR_BG),
                     text: run,
                 },
                 Rect::new(body_col, row + 1 + offset as u16, body_width, 1),

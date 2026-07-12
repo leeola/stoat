@@ -92,7 +92,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
             row: 0,
             scale: TITLE_SCALE,
             color: TITLE_FG,
-            bg: EDITOR_BG,
+            bg: Some(EDITOR_BG),
             text: " Panel ",
         },
         dialog,

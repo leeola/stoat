@@ -2145,7 +2145,7 @@ mod tests {
             row: 3,
             scale: 160,
             color: Rgb::new(1, 2, 3),
-            bg: Rgb::new(4, 5, 6),
+            bg: Some(Rgb::new(4, 5, 6)),
             text: "42".to_string(),
             seq: 0,
         }]);
@@ -2168,7 +2168,7 @@ mod tests {
                 row: 19,
                 scale: 160,
                 color: Rgb::new(1, 2, 3),
-                bg: Rgb::new(4, 5, 6),
+                bg: Some(Rgb::new(4, 5, 6)),
                 text: "42".to_string(),
                 seq: 0,
             }],

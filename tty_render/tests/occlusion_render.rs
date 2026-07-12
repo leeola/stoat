@@ -113,7 +113,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         row: 32,
         scale: 256,
         color: Rgb::new(0, 0, 0),
-        bg: run_bg,
+        bg: Some(run_bg),
         text: " ".repeat(cols),
         seq: 2,
     }]);

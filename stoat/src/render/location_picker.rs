@@ -1,5 +1,9 @@
 use crate::{location_picker::LocationPicker, render::text::write_str};
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    widgets::{Clear, Widget},
+};
 use std::path::Path;
 
 pub(crate) fn render_location_picker(
@@ -35,6 +39,7 @@ pub(crate) fn render_location_picker(
     let modal_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
+    Clear.render(modal_area, buf);
     let inner = crate::render::chrome::modal_frame(
         buf,
         modal_area,

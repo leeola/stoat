@@ -166,7 +166,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         row: 48,
         scale: 192,
         color: Rgb::new(150, 160, 170),
-        bg: Rgb::new(0, 0, 0),
+        bg: Some(Rgb::new(0, 0, 0)),
         text: "127".to_owned(),
         seq: 0,
     }]);

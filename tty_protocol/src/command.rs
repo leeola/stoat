@@ -267,16 +267,17 @@ pub enum IconKind {
 /// fractional. The run advances one scaled cell width per character and is
 /// vertically centered within the target row.
 ///
-/// `bg` is the run's background. The renderer paints it as one opaque box
-/// spanning the run's full width, spaces included, and the glyphs alpha-blend
-/// over it, so `bg` need not match whatever already lies beneath the run.
+/// `bg`, when `Some`, is an opaque background box the renderer paints across the
+/// run's full width (spaces included) before the glyphs alpha-blend over it, so
+/// it need not match whatever lies beneath. `None` draws the glyphs with no
+/// backing box, blending them directly over the surface behind the run.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TextRunCommand {
     pub col: i16,
     pub row: i16,
     pub scale: u16,
     pub color: [u8; 3],
-    pub bg: [u8; 3],
+    pub bg: Option<[u8; 3]>,
     pub text: String,
 }
 
@@ -621,7 +622,7 @@ pub fn encode_text_run_into(
     row: i16,
     scale: u16,
     color: [u8; 3],
-    bg: [u8; 3],
+    bg: Option<[u8; 3]>,
     text: &str,
 ) {
     frame::begin(out, "text_run");
@@ -630,7 +631,8 @@ pub fn encode_text_run_into(
         w.write_all(&row.to_be_bytes())?;
         w.write_all(&scale.to_be_bytes())?;
         w.write_all(&color)?;
-        w.write_all(&bg)
+        w.write_all(&bg.unwrap_or([0, 0, 0]))?;
+        w.write_all(&[bg.is_some() as u8])
     });
     frame::end(out);
     out.extend_from_slice(text.as_bytes());
@@ -1010,14 +1012,25 @@ fn decode_icon(args: &[Vec<u8>]) -> Option<IconCommand> {
 /// bytes after this frame and is captured by the terminal between the open
 /// marker and [`Command::TextRunEnd`], so it is empty here.
 fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
-    let head: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
+    let arg = args.first()?;
+    if arg.len() < 12 {
+        return None;
+    }
+
+    // A 12-byte head predates the bg-presence byte and always carries a bg. A
+    // 13-byte head gates the bg on its trailing presence byte.
+    let bg = if arg.len() >= 13 {
+        (arg[12] != 0).then_some([arg[9], arg[10], arg[11]])
+    } else {
+        Some([arg[9], arg[10], arg[11]])
+    };
 
     Some(TextRunCommand {
-        col: i16::from_be_bytes([head[0], head[1]]),
-        row: i16::from_be_bytes([head[2], head[3]]),
-        scale: u16::from_be_bytes([head[4], head[5]]),
-        color: [head[6], head[7], head[8]],
-        bg: [head[9], head[10], head[11]],
+        col: i16::from_be_bytes([arg[0], arg[1]]),
+        row: i16::from_be_bytes([arg[2], arg[3]]),
+        scale: u16::from_be_bytes([arg[4], arg[5]]),
+        color: [arg[6], arg[7], arg[8]],
+        bg,
         text: String::new(),
     })
 }
@@ -1133,7 +1146,7 @@ mod tests {
         encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
         encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
         IconCommand, IconKind, LineLayoutCommand, PanelCommand, PoolDropCommand, PoolRegionCommand,
-        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -1392,8 +1405,32 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_text_run_payload() {
-        // The first arg here decodes to 3 bytes, not the 9 a text run needs.
+        // The first arg here decodes to 3 bytes, short of the 12 a text run head needs.
         assert!(decode(b"Gstoatty;text_run;YWJj").is_none());
+    }
+
+    #[test]
+    fn text_run_decodes_legacy_arg_without_bg_presence() {
+        // A 12-byte head predates the bg-presence byte and decodes to an opaque bg.
+        let mut arg = Vec::new();
+        arg.extend_from_slice(&(-8i16).to_be_bytes());
+        arg.extend_from_slice(&48i16.to_be_bytes());
+        arg.extend_from_slice(&192u16.to_be_bytes());
+        arg.extend_from_slice(&[150, 160, 170]);
+        arg.extend_from_slice(&[24, 26, 32]);
+        assert_eq!(arg.len(), 12);
+
+        assert_eq!(
+            super::decode_text_run(&[arg]),
+            Some(TextRunCommand {
+                col: -8,
+                row: 48,
+                scale: 192,
+                color: [150, 160, 170],
+                bg: Some([24, 26, 32]),
+                text: String::new(),
+            })
+        );
     }
 
     #[test]

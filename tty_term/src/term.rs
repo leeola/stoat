@@ -2365,7 +2365,7 @@ fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand], seqs: &[u32]) {
             row: resolve_logical_row(grid, command.row),
             scale: command.scale,
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-            bg: Rgb::new(command.bg[0], command.bg[1], command.bg[2]),
+            bg: command.bg.map(|b| Rgb::new(b[0], b[1], b[2])),
             text: command.text.clone(),
             seq,
         })
@@ -3262,7 +3262,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [1, 2, 3],
-            bg: [0, 0, 0],
+            bg: Some([0, 0, 0]),
             text: "x".to_owned(),
         }));
         stream.extend_from_slice(&encode_bar(&BarCommand {
@@ -3572,7 +3572,7 @@ mod tests {
             row: 48,
             scale: 192,
             color: [150, 160, 170],
-            bg: [24, 26, 32],
+            bg: Some([24, 26, 32]),
             text: "42".to_owned(),
         });
 
@@ -3588,7 +3588,7 @@ mod tests {
                 row: 48,
                 scale: 192,
                 color: Rgb::new(150, 160, 170),
-                bg: Rgb::new(24, 26, 32),
+                bg: Some(Rgb::new(24, 26, 32)),
                 text: "42".to_owned(),
                 seq: 1,
             }]
@@ -3635,7 +3635,7 @@ mod tests {
             row: 48,
             scale: 256,
             color: [150, 160, 170],
-            bg: [0, 0, 0],
+            bg: Some([0, 0, 0]),
             text: "4".to_owned(),
         });
         let bar = encode_bar(&BarCommand {
@@ -3697,7 +3697,7 @@ mod tests {
             row: 48,
             scale: 256,
             color: [150, 160, 170],
-            bg: [0, 0, 0],
+            bg: Some([0, 0, 0]),
             text: "4".to_owned(),
         });
 
@@ -3838,7 +3838,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [200, 200, 200],
-            bg: [0, 0, 0],
+            bg: Some([0, 0, 0]),
             text: text.to_owned(),
         })
     }
@@ -4053,7 +4053,7 @@ mod tests {
             row: 16,
             scale: 160,
             color: [150, 160, 170],
-            bg: [24, 26, 32],
+            bg: Some([24, 26, 32]),
             text: "42".to_owned(),
         }));
         stream.extend_from_slice(&encode_fill_end());
@@ -4070,7 +4070,7 @@ mod tests {
                 row: 16,
                 scale: 160,
                 color: [150, 160, 170],
-                bg: [24, 26, 32],
+                bg: Some([24, 26, 32]),
                 text: "42".to_owned(),
             }]
         );
@@ -4104,7 +4104,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [1, 2, 3],
-            bg: [0, 0, 0],
+            bg: Some([0, 0, 0]),
             text: "aa".to_owned(),
         }));
         stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
@@ -4113,7 +4113,7 @@ mod tests {
             row: 0,
             scale: 160,
             color: [4, 5, 6],
-            bg: [0, 0, 0],
+            bg: Some([0, 0, 0]),
             text: "bb".to_owned(),
         }));
         stream.extend_from_slice(&encode_fill_end());
@@ -4131,7 +4131,7 @@ mod tests {
                 row: 16,
                 scale: 160,
                 color: Rgb::new(4, 5, 6),
-                bg: Rgb::new(0, 0, 0),
+                bg: Some(Rgb::new(0, 0, 0)),
                 text: "bb".to_owned(),
                 seq: 0,
             }]

@@ -1,5 +1,9 @@
 use crate::{jumplist_picker::JumplistPicker, render::text::write_str};
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    widgets::{Clear, Widget},
+};
 
 pub(crate) fn render_jumplist_picker(
     picker: &JumplistPicker,
@@ -33,6 +37,7 @@ pub(crate) fn render_jumplist_picker(
     let modal_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
+    Clear.render(modal_area, buf);
     let inner = crate::render::chrome::modal_frame(
         buf,
         modal_area,

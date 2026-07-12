@@ -3,7 +3,11 @@ use crate::{
     render::text::write_str,
 };
 use lsp_types::DiagnosticSeverity;
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    widgets::{Clear, Widget},
+};
 use std::path::Path;
 
 pub(crate) fn render_diagnostics_picker(
@@ -43,6 +47,7 @@ pub(crate) fn render_diagnostics_picker(
         PickerScope::Local => " diagnostics ",
         PickerScope::Workspace => " diagnostics (workspace) ",
     };
+    Clear.render(modal_area, buf);
     let inner =
         crate::render::chrome::modal_frame(buf, modal_area, Some(title), modal_style, theme, scene);
 
