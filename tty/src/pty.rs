@@ -9,7 +9,7 @@
 //! that thread rather than the UI thread that forwards key presses.
 
 use libc::passwd;
-use portable_pty::{self, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{self, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use std::{
     ffi::{c_char, CStr, OsString},
     io::{self, Read, Write},
@@ -22,6 +22,7 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 /// A chunk of PTY activity handed to the [`Pty::spawn`] sink.
@@ -139,6 +140,17 @@ impl Pty {
         self.writer
             .send(bytes.to_vec())
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
+    }
+
+    /// Wait up to `timeout` for the child's exit status, or `None` if it has
+    /// not exited by then.
+    ///
+    /// A child can close the pty yet linger before exiting, so this polls
+    /// rather than reading the status once. The bound matters because this runs
+    /// on the main thread at shutdown, where a child that never exits must not
+    /// stall the window close.
+    pub(crate) fn exit_status(&mut self, timeout: Duration) -> Option<ExitStatus> {
+        wait_exit_status(self.child.as_mut(), timeout, Duration::from_millis(10))
     }
 }
 
@@ -261,6 +273,89 @@ fn read_loop(mut reader: impl Read, mut sink: impl FnMut(PtyOutput<'_>)) {
     sink(PtyOutput::Eof);
 }
 
+/// Append `bytes` to `tail`, then drop the oldest so `tail` retains at most the
+/// newest `cap` bytes.
+///
+/// Maintains a bounded rolling window of the child's most recent output, held
+/// for the diagnostic logged when the pty closes.
+pub(crate) fn push_tail(tail: &mut Vec<u8>, bytes: &[u8], cap: usize) {
+    tail.extend_from_slice(bytes);
+    if tail.len() > cap {
+        tail.drain(..tail.len() - cap);
+    }
+}
+
+/// Strip terminal escape sequences and control characters from `text`, leaving
+/// human-readable output fit for a single log line.
+///
+/// Removes CSI sequences (`ESC [` through a final byte in `0x40..=0x7e`), OSC
+/// sequences (`ESC ]` through `BEL` or the `ESC \` string terminator), other
+/// two-character `ESC` sequences, and control characters other than newline,
+/// then trims surrounding whitespace. The child's output tail is captured raw,
+/// so it carries the cursor moves and color codes that would otherwise render
+/// the log line unreadable.
+pub(crate) fn strip_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            if ch == '\n' || !ch.is_control() {
+                out.push(ch);
+            }
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            },
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Poll `child` every `poll` interval until it reports an exit status or
+/// `timeout` elapses, returning `None` on timeout or a wait error.
+///
+/// Split out from [`Pty::exit_status`] so the polling loop can be driven by a
+/// stub child in tests. Always calls `try_wait` at least once, so a child that
+/// has already exited is reported without waiting a full `poll` interval.
+fn wait_exit_status(
+    child: &mut (dyn Child + Send + Sync),
+    timeout: Duration,
+    poll: Duration,
+) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {},
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(poll);
+    }
+}
+
 /// The shell to launch, in order of preference: `$SHELL`, the passwd entry's
 /// login shell, then `/bin/sh`.
 ///
@@ -329,9 +424,11 @@ fn passwd_shell() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_child_env, prepend_path, read_loop, shell_command, shell_or_default,
-        spawn_writer, CommandBuilder, PtyOutput, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
+        configure_child_env, prepend_path, push_tail, read_loop, shell_command, shell_or_default,
+        spawn_writer, strip_escapes, wait_exit_status, Child, CommandBuilder, ExitStatus,
+        PtyOutput, MULTIPLEXER_ENV_VARS, READ_BUF_SIZE,
     };
+    use portable_pty::ChildKiller;
     use std::{
         ffi::{OsStr, OsString},
         io::{self, Cursor, Write},
@@ -341,6 +438,7 @@ mod tests {
             Arc, Condvar, Mutex,
         },
         thread,
+        time::Duration,
     };
 
     fn shell(path: &str) -> Option<String> {
@@ -565,5 +663,108 @@ mod tests {
             "pty read {mb:.0}MB: {chunks} chunks, {elapsed:?}, {:.0} MB/s",
             mb / elapsed.as_secs_f64()
         );
+    }
+
+    #[test]
+    fn push_tail_retains_only_the_newest_cap_bytes() {
+        let mut tail = Vec::new();
+        push_tail(&mut tail, b"abc", 4);
+        assert_eq!(tail, b"abc", "within cap, nothing is dropped");
+
+        push_tail(&mut tail, b"defg", 4);
+        assert_eq!(
+            tail, b"defg",
+            "overflow drops the oldest, keeping the newest cap"
+        );
+    }
+
+    #[test]
+    fn strip_escapes_reduces_the_repro_sample_to_the_error_line() {
+        let raw = "\x1b[?1049l\x1b[?1006l\x1b[?1002l\x1b[?1000l\
+                   Error: requested fixture `rust-lsp` was not found\n";
+        assert_eq!(
+            strip_escapes(raw),
+            "Error: requested fixture `rust-lsp` was not found"
+        );
+    }
+
+    #[test]
+    fn strip_escapes_drops_osc_and_sgr_but_keeps_text_and_newlines() {
+        let raw = "\x1b]0;window title\x07\x1b[31mred line\x1b[0m\nplain line";
+        assert_eq!(strip_escapes(raw), "red line\nplain line");
+    }
+
+    #[derive(Debug)]
+    struct StubKiller;
+
+    impl ChildKiller for StubKiller {
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(StubKiller)
+        }
+    }
+
+    /// A [`Child`] that reports "still running" for `polls_left` calls, then
+    /// exits with `code`, so [`wait_exit_status`]'s polling loop runs
+    /// deterministically without a real process.
+    #[derive(Debug)]
+    struct StubChild {
+        polls_left: usize,
+        code: u32,
+    }
+
+    impl ChildKiller for StubChild {
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(StubKiller)
+        }
+    }
+
+    impl Child for StubChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            if self.polls_left == 0 {
+                return Ok(Some(ExitStatus::with_exit_code(self.code)));
+            }
+            self.polls_left -= 1;
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(self.code))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[test]
+    fn wait_exit_status_returns_the_code_after_polling() {
+        let mut child = StubChild {
+            polls_left: 3,
+            code: 3,
+        };
+        let status = wait_exit_status(&mut child, Duration::from_secs(1), Duration::from_millis(1));
+        assert_eq!(status.map(|status| status.exit_code()), Some(3));
+    }
+
+    #[test]
+    fn wait_exit_status_times_out_when_the_child_never_exits() {
+        let mut child = StubChild {
+            polls_left: usize::MAX,
+            code: 0,
+        };
+        let status = wait_exit_status(
+            &mut child,
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+        );
+        assert!(status.is_none(), "no status resolved within the timeout");
     }
 }

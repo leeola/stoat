@@ -59,6 +59,11 @@ const FONT_SIZE_FLOOR: u32 = 6;
 /// the wheel reports forwarded to a mouse-reporting app.
 const SCROLLBACK_SCROLL_MULTIPLIER: i32 = 3;
 
+/// Bytes of the child's most recent output retained for the exit diagnostic
+/// logged when the pty closes, enough to carry a startup error line without
+/// holding the whole session's scrollback.
+const CHILD_OUTPUT_TAIL_CAP: usize = 2048;
+
 /// Open the stoatty window running the launch command, or the resolved stoat
 /// editor when none is given, at the winit default window size.
 ///
@@ -199,7 +204,10 @@ enum PtyEvent {
     /// off the grid (window title, clipboard). Sent only when a parse yields
     /// events.
     Term(Vec<TermEvent>),
-    Exited,
+    /// The child closed the pty and the reader thread ended. `last_output` is
+    /// the escape-stripped tail of what the child wrote, empty when it produced
+    /// nothing, carried so the main thread can log it alongside the exit status.
+    Exited { last_output: String },
 }
 
 /// The text-rendering configuration read from the config once, which [`App`]
@@ -513,6 +521,7 @@ impl ApplicationHandler<PtyEvent> for App {
             let terminal = terminal.clone();
             let dirty = dirty.clone();
             let sync_pending = sync_pending.clone();
+            let mut tail: Vec<u8> = Vec::new();
             Pty::spawn(
                 &self.program,
                 &self.args,
@@ -522,6 +531,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 cols as u16,
                 move |output| match output {
                     PtyOutput::Data(bytes) => {
+                        pty::push_tail(&mut tail, bytes, CHILD_OUTPUT_TAIL_CAP);
                         // Parse on the reader thread under the shared lock.
                         let (redraw, responses, events) = {
                             let mut terminal = terminal.lock();
@@ -549,7 +559,8 @@ impl ApplicationHandler<PtyEvent> for App {
                     },
                     PtyOutput::Eof => {
                         tracing::info!("child closed the pty");
-                        let _ = proxy.send_event(PtyEvent::Exited);
+                        let last_output = pty::strip_escapes(&String::from_utf8_lossy(&tail));
+                        let _ = proxy.send_event(PtyEvent::Exited { last_output });
                     },
                 },
             )
@@ -609,7 +620,21 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             PtyEvent::Term(events) => handle_term_events(state, events),
-            PtyEvent::Exited => event_loop.exit(),
+            PtyEvent::Exited { last_output } => {
+                let status = state.pty.exit_status(Duration::from_millis(500));
+                if status.as_ref().is_none_or(|status| !status.success()) {
+                    let exit_code = status.as_ref().map(|status| status.exit_code());
+                    let signal = status.as_ref().and_then(|status| status.signal());
+                    if last_output.is_empty() {
+                        tracing::warn!(?exit_code, ?signal, "child exited with error");
+                    } else {
+                        tracing::warn!(?exit_code, ?signal, %last_output, "child exited with error");
+                    }
+                } else {
+                    tracing::info!("child exited cleanly");
+                }
+                event_loop.exit();
+            },
         }
     }
 
