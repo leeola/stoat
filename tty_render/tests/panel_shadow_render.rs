@@ -84,7 +84,6 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         corner_radius: 6,
         fill: None,
         shadow: true,
-        title_gap: None,
         seq: 0,
     };
     let mut grid = Grid::new(rows, cols);
@@ -143,128 +142,6 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         exterior[0] < center[0].saturating_sub(20),
         "a pixel past the box's bottom-right edge should be shadow-darkened, \
          got exterior {exterior:?} vs center {center:?}"
-    );
-}
-
-#[test]
-fn title_gap_notches_the_top_stroke() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
-        return;
-    };
-
-    let format = TextureFormat::Rgba8Unorm;
-    let font_size = 24;
-    let cell = cell_size(font_size, 1.0);
-    let (cell_w, cell_h) = (cell[0], cell[1]);
-    let (width, height) = (256u32, (cell_h * 8.0).round() as u32);
-
-    let surface = Rgb::new(120, 120, 120);
-    let border = Rgb::new(0, 200, 0);
-
-    let target = device.create_texture(&TextureDescriptor {
-        label: Some("panel title-gap target"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&TextureViewDescriptor::default());
-
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        surface,
-        Rgb::new(255, 255, 255),
-    );
-
-    let (rows, cols) = renderer.grid_size();
-    assert!(rows >= 5 && cols >= 12, "grid too small: {rows}x{cols}");
-
-    // A title gap three cells in from the panel's left edge, four cells wide, so
-    // the notch clears the corner radius. Both probe columns sit on the top
-    // edge, one inside the gap and one to its left over solid stroke.
-    let panel = Panel {
-        top: 2,
-        left: 2,
-        width: cols as u16 - 4,
-        height: rows as u16 - 4,
-        style: BorderStyle::Light,
-        border,
-        corner_radius: 6,
-        fill: None,
-        shadow: false,
-        title_gap: Some((48, 64)),
-        seq: 0,
-    };
-    let mut grid = Grid::new(rows, cols);
-    for r in 0..rows {
-        for c in 0..cols {
-            grid.get_mut(r, c).bg = surface;
-        }
-    }
-    grid.set_panels(vec![panel]);
-
-    renderer.render_into(
-        &device,
-        &queue,
-        &view,
-        &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-        },
-    );
-
-    let pixels = read_back(&device, &queue, &target, width, height);
-    let px = |x: u32, y: u32| -> [u8; 3] {
-        let i = ((y * width + x) * 4) as usize;
-        [pixels[i], pixels[i + 1], pixels[i + 2]]
-    };
-
-    let top_y = (2.0 * cell_h).round() as u32;
-    // Middle of the gap span (panel left + 5 cells) versus one cell in from the
-    // left edge, left of the gap and past the corner.
-    let in_gap = px(((2.0 + 5.0) * cell_w) as u32, top_y);
-    let on_stroke = px(((2.0 + 1.0) * cell_w) as u32, top_y);
-
-    assert!(
-        in_gap
-            .iter()
-            .zip([120, 120, 120])
-            .all(|(&got, want)| got.abs_diff(want) <= 4),
-        "a top-edge pixel inside the title gap should show no stroke, got {in_gap:?}"
-    );
-    // The green border suppresses red and blue where it draws, so a stroked
-    // pixel reads green-dominant while the neutral gap pixel does not.
-    assert!(
-        on_stroke[1] > on_stroke[0] + 40 && on_stroke[1] > on_stroke[2] + 40,
-        "a top-edge pixel outside the title gap should show the green border stroke, \
-         got {on_stroke:?} vs gap {in_gap:?}"
     );
 }
 

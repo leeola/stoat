@@ -632,10 +632,6 @@ pub struct Panel {
     pub corner_radius: u8,
     pub fill: Option<Rgb>,
     pub shadow: bool,
-    /// Span where the top hairline is suppressed for a title, as `(start,
-    /// width)` in sixteenths of a cell from the left edge, or [`None`] for an
-    /// unbroken top edge.
-    pub title_gap: Option<(u16, u16)>,
     /// Monotonic declaration-order index across all non-cell components. A later
     /// component (higher `seq`) draws on top, so a box's own runs and bars carry
     /// a higher `seq` than its panel while a lower box's components carry a lower

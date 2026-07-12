@@ -114,12 +114,6 @@ pub enum BorderStyle {
 ///
 /// `fill` is [`Some`] to paint the interior that color, or [`None`] to leave the
 /// cells' own SGR backgrounds showing through.
-///
-/// `title_gap` is [`Some`] to interrupt the top hairline over a title, giving
-/// the span as `(start, width)` in sixteenths of a cell measured from the
-/// panel's left edge. The stroke is suppressed there so a title reads as a notch
-/// in the frame rather than sitting over a half-masked line. [`None`] draws an
-/// unbroken top edge.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PanelCommand {
     pub top: u16,
@@ -131,7 +125,6 @@ pub struct PanelCommand {
     pub corner_radius: u8,
     pub fill: Option<[u8; 3]>,
     pub shadow: bool,
-    pub title_gap: Option<(u16, u16)>,
 }
 
 /// Draw the glyph at a cell `scale` times the cell size.
@@ -416,10 +409,6 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
         w.write_all(&[command.fill.is_some() as u8])?;
         w.write_all(&command.fill.unwrap_or([0, 0, 0]))?;
         w.write_all(&[command.shadow as u8])?;
-        if let Some((start, width)) = command.title_gap {
-            w.write_all(&start.to_be_bytes())?;
-            w.write_all(&width.to_be_bytes())?;
-        }
         Ok(())
     });
     frame::end(out);
@@ -904,13 +893,6 @@ fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         return None;
     }
 
-    let title_gap = (arg.len() >= 22).then(|| {
-        (
-            u16::from_be_bytes([arg[18], arg[19]]),
-            u16::from_be_bytes([arg[20], arg[21]]),
-        )
-    });
-
     Some(PanelCommand {
         top: u16::from_be_bytes([arg[0], arg[1]]),
         left: u16::from_be_bytes([arg[2], arg[3]]),
@@ -921,7 +903,6 @@ fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         corner_radius: arg[12],
         fill: (arg[13] != 0).then_some([arg[14], arg[15], arg[16]]),
         shadow: arg[17] != 0,
-        title_gap,
     })
 }
 
@@ -1201,7 +1182,6 @@ mod tests {
             corner_radius: 6,
             fill: Some([20, 22, 30]),
             shadow: true,
-            title_gap: Some((16, 80)),
         };
 
         assert_eq!(
@@ -1222,7 +1202,6 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
-            title_gap: None,
         };
 
         assert_eq!(
@@ -1238,8 +1217,10 @@ mod tests {
     }
 
     #[test]
-    fn panel_decodes_legacy_arg_without_title_gap() {
-        // An 18-byte arg predates the title-gap field and decodes to no gap.
+    fn panel_decode_ignores_legacy_title_gap_bytes() {
+        // A 22-byte arg carries four trailing bytes from an emitter that still
+        // wrote the retired title-gap span. The decoder reads the 18-byte base
+        // and ignores the rest rather than rejecting the frame.
         let mut arg = Vec::new();
         arg.extend_from_slice(&3u16.to_be_bytes());
         arg.extend_from_slice(&12u16.to_be_bytes());
@@ -1251,7 +1232,9 @@ mod tests {
         arg.push(1);
         arg.extend_from_slice(&[20, 22, 30]);
         arg.push(1);
-        assert_eq!(arg.len(), 18);
+        arg.extend_from_slice(&16u16.to_be_bytes());
+        arg.extend_from_slice(&80u16.to_be_bytes());
+        assert_eq!(arg.len(), 22);
 
         assert_eq!(
             super::decode_panel(&[arg]),
@@ -1265,7 +1248,6 @@ mod tests {
                 corner_radius: 6,
                 fill: Some([20, 22, 30]),
                 shadow: true,
-                title_gap: None,
             })
         );
     }

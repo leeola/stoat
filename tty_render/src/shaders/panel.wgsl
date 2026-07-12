@@ -22,7 +22,7 @@ var<uniform> globals: Globals;
 @group(0) @binding(1)
 var<storage, read> instances: array<f32>;
 
-const INSTANCE_STRIDE: u32 = 18u;
+const INSTANCE_STRIDE: u32 = 16u;
 
 // Border style codes, matching the protocol's border style ordering.
 const STYLE_LIGHT: u32 = 0u;
@@ -35,12 +35,6 @@ const STYLE_ROUNDED: u32 = 3u;
 // just past the box edge, falling to zero across the shadow margin.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const SHADOW_ALPHA: f32 = 0.22;
-
-// Vertical reach of the title-gap notch from the top-edge centerline, in
-// pixels. Covers the widest stroke a style draws (the double line's outer
-// hairline peaks ~3px out), so the notch clears the whole top stroke and the
-// drop-shadow sliver that reaches the same band just above the edge.
-const GAP_EDGE_REACH: f32 = 3.5;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -57,12 +51,9 @@ struct VsOut {
     // 1.0 to paint the interior fill, 0.0 to leave the cells showing through.
     @location(7) @interpolate(flat) fill_flag: f32,
     @location(8) @interpolate(flat) style: u32,
-    // Top-edge title-gap span as box-relative pixel offsets [start, end]. An
-    // empty span (end <= start) leaves the top hairline unbroken.
-    @location(9) @interpolate(flat) gap: vec2<f32>,
     // This panel's draw index, so the fragment shader can occlude against every
     // later (higher-index, on-top) panel.
-    @location(10) @interpolate(flat) instance: u32,
+    @location(9) @interpolate(flat) instance: u32,
 }
 
 @vertex
@@ -78,7 +69,6 @@ fn vs_main(
     @location(6) corner_radius: f32,
     @location(7) fill_flag: f32,
     @location(8) style: u32,
-    @location(9) gap: vec2<f32>,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -117,7 +107,6 @@ fn vs_main(
     out.corner_radius = corner_radius;
     out.fill_flag = fill_flag;
     out.style = style;
-    out.gap = gap * globals.cell_size.x;
     out.instance = instance_index;
     return out;
 }
@@ -171,15 +160,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let box_sdf = rounded_box_sdf(p - center, half, radius);
 
     // Hairline frame straddling the perimeter, weighted by the border style.
-    // A title gap notches the top edge. Where the fragment's x lies in the gap
-    // span and its y sits within the top stroke's band (`in_notch`), the stroke
-    // drops to zero, leaving the corners, sides, and bottom untouched. The same
-    // notch drops the shadow below, so the notched span reads as clean surface.
-    let rel_x = p.x - in.box_min.x;
-    let in_gap = in.gap.y > in.gap.x && rel_x >= in.gap.x && rel_x <= in.gap.y;
-    let near_top = abs(p.y - in.box_min.y) <= GAP_EDGE_REACH;
-    let in_notch = in_gap && near_top;
-    let stroke = select(line_coverage(in.style, abs(box_sdf)), 0.0, in_notch);
+    let stroke = line_coverage(in.style, abs(box_sdf));
     // Optional interior fill, faded across the rounded edge.
     let interior = 1.0 - smoothstep(-1.0, 1.0, box_sdf);
     let fill_alpha = in.fill_flag * interior;
@@ -198,14 +179,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         SHADOW_ALPHA * (1.0 - smoothstep(0.0, margin, length(d))),
         margin > 0.0
     ) * (1.0 - interior);
-    // Drop the shadow in the title notch too: the blur reaches into the gap just
-    // above the top edge, and a dark sliver there reads as a broken border
-    // instead of the clean surface the notch should show.
-    let shadow_alpha = select(shadow_base, 0.0, in_notch);
 
     // Composite bottom-up: the shadow, then the optional fill, then the stroke.
     var color = SHADOW_COLOR;
-    var alpha = shadow_alpha;
+    var alpha = shadow_base;
     color = mix(color, in.fill, fill_alpha);
     alpha = max(alpha, fill_alpha);
     color = mix(color, in.border, stroke);
