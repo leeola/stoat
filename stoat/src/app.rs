@@ -8405,6 +8405,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn diagnostic_popover_dodges_a_cursor_under_the_below_placement() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_diagnostic_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/diag-popover-dodge");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"aaaaa\nbbbbb\nccccc\nddddd\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        // A multi-line span keeps the cursor inside the diagnostic after it moves
+        // down, and a multi-line message makes the below-anchor popover tall
+        // enough to sit over the row beneath the diagnostic's start.
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: 3,
+                        character: 0,
+                    },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                message: "line one\nline two\nline three".to_string(),
+                ..Default::default()
+            }],
+        );
+
+        // Drop the cursor onto the row the below-anchor popover would occupy.
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let (cx, cy) = h
+            .stoat
+            .primary_cursor_screen_pos()
+            .expect("primary cursor on screen");
+        let cmds = drain_apc(&mut rx);
+        let popover = cmds
+            .iter()
+            .find_map(|c| match c {
+                Command::Popover(p) => Some(p),
+                _ => None,
+            })
+            .expect("a diagnostic popover frame");
+
+        let covers_cursor = cx >= popover.left
+            && cx < popover.left + popover.width
+            && cy >= popover.top
+            && cy < popover.top + popover.height;
+        assert!(
+            !covers_cursor,
+            "popover rect {popover:?} must not cover the cursor cell {:?}",
+            (cx, cy)
+        );
+    }
+
     /// modal_frame's rich arm engages only when the border fg and the mask bg
     /// both resolve to RGB, so the modal APC tests need a hex theme. The default
     /// theme uses named colors and would fall back to glyphs.

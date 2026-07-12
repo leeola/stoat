@@ -9,7 +9,7 @@ use crate::{
 use lsp_types::{DiagnosticSeverity, DiagnosticTag};
 use ratatui::{
     buffer::{Buffer, Cell},
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
@@ -446,6 +446,7 @@ pub(crate) fn render_editor_with_overlay(
                     anchor_col,
                     anchor_row,
                     content_area,
+                    primary_cell,
                 ) {
                     suppress = Some(index);
                 }
@@ -1168,6 +1169,77 @@ fn popover_rect(anchor_col: u16, anchor_row: u16, w: u16, h: u16, pane: Rect) ->
     }
 }
 
+/// Place a `w` by `h` popover near `(anchor_col, anchor_row)` within `pane`
+/// without covering the `cursor` cell.
+///
+/// Tries [`popover_rect`]'s below-the-anchor placement first, then above the
+/// anchor, then a horizontal dodge to the left and right of the cursor column
+/// at the below placement's row. Returns [`None`] when every candidate still
+/// covers the cursor, since keeping the cursor visible outranks showing the
+/// popover. With no `cursor`, this is [`popover_rect`].
+fn popover_rect_avoiding(
+    anchor_col: u16,
+    anchor_row: u16,
+    w: u16,
+    h: u16,
+    pane: Rect,
+    cursor: Option<(u16, u16)>,
+) -> Option<Rect> {
+    let below = popover_rect(anchor_col, anchor_row, w, h, pane);
+    let Some((cursor_col, cursor_row)) = cursor else {
+        return Some(below);
+    };
+    let cursor = Position::new(cursor_col, cursor_row);
+    if !below.contains(cursor) {
+        return Some(below);
+    }
+
+    let w = w.min(pane.width);
+    let h = h.min(pane.height);
+
+    let above = {
+        let max_y = (pane.y + pane.height).saturating_sub(h);
+        Rect {
+            x: below.x,
+            y: anchor_row
+                .saturating_sub(h)
+                .clamp(pane.y, max_y.max(pane.y)),
+            width: w,
+            height: h,
+        }
+    };
+    if !above.contains(cursor) {
+        return Some(above);
+    }
+
+    let max_x = (pane.x + pane.width).saturating_sub(w);
+    let left = Rect {
+        x: cursor_col
+            .saturating_sub(w)
+            .clamp(pane.x, max_x.max(pane.x)),
+        y: below.y,
+        width: w,
+        height: h,
+    };
+    if !left.contains(cursor) {
+        return Some(left);
+    }
+
+    if cursor_col.saturating_add(1).saturating_add(w) <= pane.x + pane.width {
+        let right = Rect {
+            x: cursor_col + 1,
+            y: below.y,
+            width: w,
+            height: h,
+        };
+        if !right.contains(cursor) {
+            return Some(right);
+        }
+    }
+
+    None
+}
+
 /// Scale each channel of `rgb` to 82% to darken a fill roughly 18% below the
 /// editor background, so a popover reads as a raised surface over the text.
 fn darken(rgb: [u8; 3]) -> [u8; 3] {
@@ -1196,8 +1268,9 @@ fn clip_chars(s: &str, max: usize) -> &str {
 /// with a severity icon in its first cell. Returns whether it rendered.
 ///
 /// The content is the first four message lines, each clipped to 40 columns. The
-/// box is sized to fit and placed by [`popover_rect`]. A message with no text
-/// draws nothing.
+/// box is sized to fit and placed by [`popover_rect_avoiding`] so it never
+/// covers `cursor_cell`. A message with no text, or a popover with nowhere to
+/// go that clears the cursor, draws nothing.
 #[allow(clippy::too_many_arguments)]
 fn render_diagnostic_popover(
     scene: &mut ApcScene,
@@ -1208,6 +1281,7 @@ fn render_diagnostic_popover(
     anchor_col: u16,
     anchor_row: u16,
     pane: Rect,
+    cursor_cell: Option<(u16, u16)>,
 ) -> bool {
     let lines: Vec<&str> = diag
         .message
@@ -1230,7 +1304,9 @@ fn render_diagnostic_popover(
 
     let w = (longest as u16).saturating_add(4);
     let h = (lines.len() as u16).saturating_add(2);
-    let rect = popover_rect(anchor_col, anchor_row, w, h, pane);
+    let Some(rect) = popover_rect_avoiding(anchor_col, anchor_row, w, h, pane, cursor_cell) else {
+        return false;
+    };
     if rect.width < 3 || rect.height < 3 {
         return false;
     }
@@ -1643,6 +1719,45 @@ mod tests {
         assert_eq!(
             super::popover_rect(35, 2, 12, 4, pane),
             Rect::new(28, 3, 12, 4)
+        );
+    }
+
+    #[test]
+    fn popover_rect_avoiding_dodges_the_cursor() {
+        use ratatui::layout::Rect;
+        let pane = Rect::new(0, 0, 40, 10);
+
+        // With no cursor it reproduces popover_rect's below/flip/clamp result.
+        for &(col, row) in &[(5, 2), (5, 8), (35, 2)] {
+            assert_eq!(
+                super::popover_rect_avoiding(col, row, 12, 4, pane, None),
+                Some(super::popover_rect(col, row, 12, 4, pane)),
+            );
+        }
+
+        // Cursor inside the below rect flips the popover above the anchor.
+        assert_eq!(
+            super::popover_rect_avoiding(5, 2, 12, 4, pane, Some((8, 4))),
+            Some(Rect::new(5, 0, 12, 4)),
+        );
+
+        // Cursor covered by both below and above, near the left edge, dodges right.
+        assert_eq!(
+            super::popover_rect_avoiding(5, 2, 12, 4, pane, Some((8, 3))),
+            Some(Rect::new(9, 3, 12, 4)),
+        );
+
+        // Same, near the right edge, dodges left.
+        assert_eq!(
+            super::popover_rect_avoiding(35, 2, 12, 4, pane, Some((35, 3))),
+            Some(Rect::new(23, 3, 12, 4)),
+        );
+
+        // A full-width popover cannot dodge, so a covered cursor drops it.
+        let narrow = Rect::new(0, 0, 12, 10);
+        assert_eq!(
+            super::popover_rect_avoiding(0, 2, 12, 4, narrow, Some((5, 3))),
+            None,
         );
     }
 
