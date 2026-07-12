@@ -1,4 +1,7 @@
-use crate::buffer::{BufferHistory, BufferId, SharedBuffer, TextBuffer};
+use crate::{
+    buffer::{BufferHistory, BufferId, SharedBuffer, TextBuffer},
+    display_map::{HighlightStyleInterner, SemanticTokenHighlight},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -41,6 +44,11 @@ struct BufferEntry {
     /// callers migrate to capture merging. The `parse_buffer_step`
     /// pipeline writes to both fields on every reparse.
     syntax_map: Option<SyntaxMap>,
+    /// Tree-sitter highlight tokens retained across editor lifetimes. The parse
+    /// pipeline stores the same `(tokens, interner)` it installs onto editors,
+    /// so a fresh editor built for an already-parsed buffer can be seeded and
+    /// paint styled on its first frame instead of waiting for a reparse.
+    tokens: Option<(Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)>,
     diff: Option<CachedDiff>,
     /// Marks this buffer as a transient preview surface (e.g. the
     /// file finder's preview pane). The parse pipeline pulls these
@@ -146,6 +154,7 @@ impl BufferRegistry {
                 language: None,
                 syntax: None,
                 syntax_map: None,
+                tokens: None,
                 diff: None,
                 preview,
                 disk_mtime: None,
@@ -174,6 +183,7 @@ impl BufferRegistry {
                 language: None,
                 syntax: None,
                 syntax_map: None,
+                tokens: None,
                 diff: None,
                 preview: false,
                 disk_mtime: None,
@@ -274,6 +284,7 @@ impl BufferRegistry {
             entry.language = Some(lang);
             entry.syntax = None;
             entry.syntax_map = None;
+            entry.tokens = None;
         }
     }
 
@@ -314,6 +325,7 @@ impl BufferRegistry {
                 drop_syntax_in_background(state);
             }
             entry.syntax_map = None;
+            entry.tokens = None;
         }
     }
 
@@ -336,6 +348,28 @@ impl BufferRegistry {
                 drop_syntax_in_background(prev);
             }
         }
+    }
+
+    /// Retain the tree-sitter highlight tokens the parse pipeline installed onto
+    /// this buffer's editors, so a later fresh editor can be seeded from them.
+    pub(crate) fn store_tokens(
+        &mut self,
+        id: BufferId,
+        tokens: Arc<[SemanticTokenHighlight]>,
+        interner: Arc<HighlightStyleInterner>,
+    ) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.tokens = Some((tokens, interner));
+        }
+    }
+
+    /// The retained `(tokens, interner)` pair for `id`, if the parse pipeline
+    /// has produced tree-sitter tokens for it.
+    pub(crate) fn tokens_for(
+        &self,
+        id: BufferId,
+    ) -> Option<(Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)> {
+        self.buffers.get(&id)?.tokens.clone()
     }
 
     /// Move the prior [`SyntaxState`] out of the registry. The caller is
@@ -470,6 +504,7 @@ impl BufferRegistry {
                     language: None,
                     syntax: None,
                     syntax_map: None,
+                    tokens: None,
                     diff: None,
                     preview: false,
                     disk_mtime: None,
@@ -545,6 +580,35 @@ mod tests {
         assert_eq!(reg.syntax_version(id), None);
         reg.clear_syntax(id);
         assert_eq!(reg.syntax_version(id), None);
+    }
+
+    #[test]
+    fn clear_syntax_and_set_language_drop_retained_tokens() {
+        use stoat_language::LanguageRegistry;
+
+        let mut reg = BufferRegistry::new();
+        let (id, _) = reg.open(Path::new("/a.rs"), "fn a() {}\n");
+        let tokens: Arc<[SemanticTokenHighlight]> = Arc::from(Vec::new());
+        let interner = Arc::new(HighlightStyleInterner::default());
+
+        reg.store_tokens(id, tokens.clone(), interner.clone());
+        assert!(reg.tokens_for(id).is_some(), "stored tokens are retained");
+
+        reg.clear_syntax(id);
+        assert!(
+            reg.tokens_for(id).is_none(),
+            "clear_syntax drops retained tokens"
+        );
+
+        reg.store_tokens(id, tokens, interner);
+        let lang = LanguageRegistry::standard()
+            .for_path(Path::new("/a.rs"))
+            .expect("rust language");
+        reg.set_language(id, lang);
+        assert!(
+            reg.tokens_for(id).is_none(),
+            "set_language drops retained tokens"
+        );
     }
 
     #[test]

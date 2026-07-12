@@ -118,9 +118,8 @@ pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
         if let Some(buffer_id) = ws.editors.get(source_editor_id).map(|e| e.buffer_id)
             && let Some(buffer) = ws.buffers.get(buffer_id)
         {
-            let new_editor_id = ws
-                .editors
-                .insert(EditorState::new(buffer_id, buffer, executor));
+            let editor = ws.seeded_editor(buffer_id, buffer, executor);
+            let new_editor_id = ws.editors.insert(editor);
             ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
         }
         clear_split_source_mode(ws, source_editor_id);

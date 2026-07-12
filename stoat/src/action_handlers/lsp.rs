@@ -7033,6 +7033,46 @@ mod tests {
         h.assert_snapshot("semantic_tokens_recolor");
     }
 
+    fn tree_sitter_token_count(h: &mut TestHarness) -> usize {
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        snapshot
+            .semantic_token_highlights()
+            .values()
+            .map(|(tokens, _)| tokens.len())
+            .sum()
+    }
+
+    #[test]
+    fn switching_back_keeps_tree_sitter_highlights_on_first_frame() {
+        let mut h = TestHarness::with_size(24, 4);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+
+        // A render cycle drives the parse so A's tokens land in the registry and
+        // on its editor.
+        open_buffer(&mut h, root.join("a.rs"));
+        h.snapshot();
+        assert!(tree_sitter_token_count(&mut h) > 0, "file A parses on open");
+
+        open_buffer(&mut h, root.join("b.rs"));
+        h.snapshot();
+
+        // Switch back to A with no render or parse cycle in between. The parse
+        // pipeline skips a version-current buffer, so the fresh editor is styled
+        // only if it was seeded from the registry's retained tokens.
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("a.rs"),
+            },
+        );
+        assert!(
+            tree_sitter_token_count(&mut h) > 0,
+            "re-shown buffer is styled on the first frame after switch-back"
+        );
+    }
+
     fn enable_folding_range(h: &TestHarness) {
         use lsp_types::{FoldingRangeProviderCapability, ServerCapabilities};
         h.fake_lsp().set_capabilities(ServerCapabilities {

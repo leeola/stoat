@@ -5,7 +5,7 @@ use crate::{
     agent_status::AgentStatus,
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
     badge::BadgeTray,
-    buffer::BufferId,
+    buffer::{BufferId, SharedBuffer},
     buffer_registry::{self, BufferRegistry},
     code_index::{
         build::{file_id, reindex_buffer, IndexUpdate, ReindexTarget},
@@ -286,6 +286,28 @@ impl Workspace {
         self.parse_jobs.remove(&id);
     }
 
+    /// Build a fresh [`EditorState`] for `buffer_id`, seeded with the buffer's
+    /// retained tree-sitter tokens when the registry holds them.
+    ///
+    /// A re-shown buffer therefore paints styled on its first frame. Without the
+    /// seed the fresh editor starts with empty highlight caches, and
+    /// [`Self::drive_parse_jobs`] skips a version-current buffer, so it would
+    /// otherwise stay unstyled until the next edit forces a reparse.
+    pub(crate) fn seeded_editor(
+        &self,
+        buffer_id: BufferId,
+        buffer: SharedBuffer,
+        executor: Executor,
+    ) -> EditorState {
+        let mut editor = EditorState::new(buffer_id, buffer, executor);
+        if let Some((tokens, interner)) = self.buffers.tokens_for(buffer_id) {
+            editor
+                .display_map
+                .set_semantic_token_highlights(buffer_id, tokens, interner);
+        }
+        editor
+    }
+
     /// Drive background parse jobs: poll any in-flight tasks for completion,
     /// install their results, then spawn new jobs for visible buffers whose
     /// stored syntax version is stale.
@@ -318,6 +340,11 @@ impl Workspace {
         for out in completed {
             self.buffers.store_syntax(out.buffer_id, out.syntax);
             self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
+            self.buffers.store_tokens(
+                out.buffer_id,
+                out.tokens.clone(),
+                syntax_styles.interner.clone(),
+            );
             for editor in self.editors.values_mut() {
                 if editor.buffer_id == out.buffer_id {
                     editor.display_map.set_semantic_token_highlights(
@@ -403,6 +430,11 @@ impl Workspace {
             ) {
                 self.buffers.store_syntax(out.buffer_id, out.syntax);
                 self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
+                self.buffers.store_tokens(
+                    out.buffer_id,
+                    out.tokens.clone(),
+                    syntax_styles.interner.clone(),
+                );
                 for editor in self.editors.values_mut() {
                     if editor.buffer_id == out.buffer_id {
                         editor.display_map.set_semantic_token_highlights(

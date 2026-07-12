@@ -496,9 +496,8 @@ pub(crate) fn show_buffer_in_pane(
         return Some(buffer_id);
     }
 
-    let new_editor_id = ws
-        .editors
-        .insert(EditorState::new(buffer_id, buffer, executor));
+    let editor = ws.seeded_editor(buffer_id, buffer, executor);
+    let new_editor_id = ws.editors.insert(editor);
 
     let old = match ws.panes.pane(target).view {
         View::Editor(eid) => Some(eid),
