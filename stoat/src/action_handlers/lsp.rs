@@ -173,71 +173,86 @@ pub(crate) fn notify_buffer_opened(
             text: text.to_string(),
         },
     };
-    let lsp = stoat.lsp_for(buffer_id);
-    stoat
-        .executor
-        .spawn(async move {
-            if let Err(err) = lsp.did_open(params).await {
-                tracing::warn!(target: "stoat::lsp", ?err, "did_open notification failed");
-            }
-        })
-        .detach();
+    for lsp in stoat.hosts_for_buffer(buffer_id) {
+        let params = params.clone();
+        stoat
+            .executor
+            .spawn(async move {
+                if let Err(err) = lsp.did_open(params).await {
+                    tracing::warn!(target: "stoat::lsp", ?err, "did_open notification failed");
+                }
+            })
+            .detach();
+    }
 }
 
-/// Launch the language server for `buffer_id`'s language the first time a
-/// buffer of that language opens, registering it in [`Stoat::lsp_registry`]
+/// Launch the language servers for `buffer_id`'s language the first time a
+/// buffer of that language opens, registering each in [`Stoat::lsp_registry`]
 /// once it is ready.
 ///
-/// No-op unless auto-spawn is enabled, the buffer's language has a known
-/// [`crate::lsp::servers::server_command`], no real host already serves that
-/// language, and its server has not already been spawn-attempted. Each
-/// language spawns its own server, and a failed spawn is not retried. The
-/// binary opts into auto-spawn via [`Stoat::set_lsp_auto_spawn`]. Tests leave
-/// it off, so no server IO happens.
+/// No-op unless auto-spawn is enabled and the language has known servers
+/// ([`crate::lsp::servers::resolve_servers`]). Each of the language's servers
+/// spawns at most once. A server already up or already spawn-attempted is
+/// skipped, and a real injected sole host (tests, legacy) suppresses spawning
+/// entirely. The binary opts into auto-spawn via [`Stoat::set_lsp_auto_spawn`].
+/// Tests leave it off, so no server IO happens.
 ///
-/// The spawn plus `initialize` handshake runs detached on the workspace
-/// [`Stoat::executor`]. The ready host, or the failure, is parked in
-/// [`Stoat::pending_lsp_host`] for [`Stoat::update`] to install.
+/// Each spawn plus `initialize` handshake runs detached on the workspace
+/// [`Stoat::executor`] via [`spawn_server`]. The ready host, or the failure, is
+/// parked in [`Stoat::pending_lsp_host`] for [`Stoat::update`] to install.
 pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
     if !stoat.lsp_auto_spawn {
+        return;
+    }
+    // A real injected sole host (tests, legacy) already serves every language.
+    if stoat.lsp_registry.has_real_sole_client() {
         return;
     }
     let Some(language) = stoat.active_workspace().buffers.language_for(buffer_id) else {
         return;
     };
-    let Some((command, args)) =
-        crate::lsp::servers::resolve_server_command(&stoat.settings, language.name)
-    else {
-        return;
-    };
     let language_name = language.name.to_string();
 
-    // Already served by a real host, or this server has already been tried (a
-    // failed spawn is never retried) -- either way, do not spawn it again.
-    if stoat.lsp_registry.serves_language(&language_name)
-        || stoat.lsp_registry.spawn_attempted(&command)
-    {
+    // Only the language's servers not already up and not already tried this
+    // session. A failed spawn is never retried.
+    let to_spawn: Vec<crate::lsp::servers::ResolvedServer> =
+        crate::lsp::servers::resolve_servers(&stoat.settings, &language_name)
+            .into_iter()
+            .filter(|server| {
+                !stoat.lsp_registry.contains_client(&server.name)
+                    && !stoat.lsp_registry.spawn_attempted(&server.name)
+            })
+            .collect();
+    if to_spawn.is_empty() {
         return;
     }
 
-    // The workspace's direnv environment is still loading. Park the spawn
+    // The workspace's direnv environment is still loading. Park the spawns
     // rather than race the load with the wrong PATH. install_pending re-fires
-    // it once the env lands, so the server starts with the project (e.g.
-    // flake) toolchain.
+    // them once the env lands, so servers start with the project (e.g. flake)
+    // toolchain.
     if stoat.active_workspace().env.state == crate::project_env::EnvLoadState::Loading {
         stoat.lsp_spawn_deferred = Some(buffer_id);
         return;
     }
 
-    stoat.lsp_registry.mark_spawn_attempted(command.clone());
+    for server in to_spawn {
+        stoat.lsp_registry.mark_spawn_attempted(server.name.clone());
+        spawn_server(stoat, server, language_name.clone());
+    }
+}
 
+/// Spawn one resolved `server` for `language` detached on the workspace
+/// executor, parking the ready host or the failure in
+/// [`Stoat::pending_lsp_host`].
+fn spawn_server(stoat: &mut Stoat, server: crate::lsp::servers::ResolvedServer, language: String) {
     let git_root = stoat.active_workspace().git_root.clone();
     let env = stoat.active_workspace().env.diff.clone();
     let root_uri = path_to_uri(&git_root);
     let slot = stoat.pending_lsp_host.clone();
     let wake = stoat.redraw_notify.clone();
     let transcript = if stoat.settings.text_proto_log == Some(true) {
-        match create_lsp_transcript() {
+        match create_lsp_transcript(&server.name) {
             Ok(transcript) => Some(transcript),
             Err(err) => {
                 tracing::warn!(target: "stoat::lsp", ?err, "text_proto_log transcript disabled");
@@ -247,6 +262,13 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
     } else {
         None
     };
+
+    let crate::lsp::servers::ResolvedServer {
+        name: command,
+        argv,
+        ..
+    } = server;
+    let args: Vec<String> = argv.into_iter().skip(1).collect();
 
     stoat
         .executor
@@ -258,7 +280,7 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
                         tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
                         slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
                             server: command.clone(),
-                            language: language_name,
+                            language: language.clone(),
                             result: Err(format!("{command}: {err}")),
                         });
                         return;
@@ -277,7 +299,7 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
                     tracing::warn!(target: "stoat::lsp", ?err, %command, "language server initialize failed");
                     slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
                         server: command.clone(),
-                        language: language_name,
+                        language: language.clone(),
                         result: Err(format!("{command}: {err}")),
                     });
                     return;
@@ -285,7 +307,7 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
             }
             slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
                 server: command,
-                language: language_name,
+                language,
                 result: Ok(host),
             });
         })
@@ -342,13 +364,23 @@ fn report_lsp_unavailable(stoat: &mut Stoat, what: &str) -> UpdateEffect {
 /// Writes `lsp-<pid>.tx.jsonl` (frames sent to the server) and
 /// `lsp-<pid>.rx.jsonl` (frames received) under the shared log directory,
 /// creating that directory if it does not exist.
-fn create_lsp_transcript() -> io::Result<LspTranscript> {
+fn create_lsp_transcript(server: &str) -> io::Result<LspTranscript> {
     let dir = stoat_log::log_dir()?;
     std::fs::create_dir_all(&dir)?;
     let pid = std::process::id();
-    let tx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}.tx.jsonl")))?;
-    let rx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}.rx.jsonl")))?;
+    let slug = transcript_slug(server);
+    let tx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}-{slug}.tx.jsonl")))?;
+    let rx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}-{slug}.rx.jsonl")))?;
     Ok(LspTranscript { tx, rx })
+}
+
+/// A filesystem-safe slug for `server`, so several servers' transcripts under
+/// one pid do not collide. Non-alphanumeric characters become `-`.
+fn transcript_slug(server: &str) -> String {
+    server
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Scan every buffer in [`Stoat::lsp_opened`] for an updated
@@ -402,7 +434,7 @@ pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
             content_changes: plan.content_changes,
         };
 
-        let lsp = stoat.lsp_for(plan.id);
+        let hosts = stoat.hosts_for_buffer(plan.id);
         let executor = stoat.executor.clone();
         let last_text = stoat.lsp_last_delivered_text.clone();
         let last_version = stoat.lsp_last_delivered_buffer_version.clone();
@@ -412,18 +444,25 @@ pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
 
         let task = stoat.executor.spawn(async move {
             executor.timer(LSP_DID_CHANGE_DEBOUNCE).await;
-            if let Err(err) = lsp.did_change(params).await {
-                tracing::warn!(target: "stoat::lsp", ?err, "did_change notification failed");
-                return;
+            let mut delivered = true;
+            for lsp in hosts {
+                if let Err(err) = lsp.did_change(params.clone()).await {
+                    tracing::warn!(target: "stoat::lsp", ?err, "did_change notification failed");
+                    delivered = false;
+                }
             }
-            last_text
-                .lock()
-                .expect("lsp text mutex")
-                .insert(buffer_id, target_text);
-            last_version
-                .lock()
-                .expect("lsp version mutex")
-                .insert(buffer_id, target_version);
+            // Only advance the delivered baseline when every server received
+            // the change, so a failed server's next delta still replays it.
+            if delivered {
+                last_text
+                    .lock()
+                    .expect("lsp text mutex")
+                    .insert(buffer_id, target_text);
+                last_version
+                    .lock()
+                    .expect("lsp version mutex")
+                    .insert(buffer_id, target_version);
+            }
         });
         stoat.lsp_pending_changes.insert(plan.id, task);
     }

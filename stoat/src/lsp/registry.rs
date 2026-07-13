@@ -4,21 +4,36 @@ use std::{
     sync::Arc,
 };
 
-/// Language servers keyed by server name, with a language-to-server table and
-/// a per-server spawn-attempt guard.
+/// One server serving a language, referenced by its registry name.
 ///
-/// Each language runs its own server. [`Self::route`] resolves a buffer's
-/// language to its server, and [`Self::serves_language`] plus
-/// [`Self::spawn_attempted`] gate spawning so each server starts at most once.
+/// A language's selectors are an ordered list, so a primary server can be
+/// paired with specialized ones.
+#[derive(Debug, Clone)]
+pub(crate) struct ServerSelector {
+    pub(crate) name: String,
+}
+
+#[cfg(test)]
+impl ServerSelector {
+    /// A selector for `name`.
+    pub(crate) fn all(name: String) -> Self {
+        Self { name }
+    }
+}
+
+/// Language servers keyed by server name, with an ordered per-language selector
+/// table and a per-server spawn-attempt guard.
+///
+/// A language may run several servers. [`Self::hosts_for_language`] returns all
+/// of them for document sync, and [`Self::route`] picks the primary.
 ///
 /// [`Self::set_sole_client`] injects a single host that serves every language,
-/// used by tests and the legacy single-host path. It is kept in a slot
-/// separate from the per-language [`Self::insert`] clients so the spawn gate
-/// can tell "one real host covers everything" from "one language happens to
-/// have a server up".
+/// used by tests and the legacy single-host path. It is kept in a slot separate
+/// from the per-language clients so the spawn gate can tell "one real host
+/// covers everything" from "one language happens to have a server up".
 pub(crate) struct LspRegistry {
     clients: HashMap<String, Arc<dyn LspHost>>,
-    languages: HashMap<String, String>,
+    languages: HashMap<String, Vec<ServerSelector>>,
     spawn_attempted: HashSet<String>,
     sole: Option<Arc<dyn LspHost>>,
     noop: Arc<dyn LspHost>,
@@ -40,9 +55,19 @@ impl LspRegistry {
         self.clients.insert(name, host);
     }
 
-    /// Record that `language` is served by the server named `name`.
+    /// Map `language` to a single default-feature server named `name`.
+    ///
+    /// A test convenience for the one-server-per-language case. Production sets
+    /// the full selector list via [`Self::set_selectors`].
+    #[cfg(test)]
     pub(crate) fn set_language(&mut self, language: String, name: String) {
-        self.languages.insert(language, name);
+        self.languages
+            .insert(language, vec![ServerSelector::all(name)]);
+    }
+
+    /// Set `language`'s ordered server selectors, replacing any prior list.
+    pub(crate) fn set_selectors(&mut self, language: String, selectors: Vec<ServerSelector>) {
+        self.languages.insert(language, selectors);
     }
 
     /// Inject a single host that serves every language, replacing all
@@ -50,7 +75,7 @@ impl LspRegistry {
     ///
     /// Used when a host is supplied without a language (tests, the legacy
     /// single-host path). The host lands in a slot separate from the
-    /// per-language clients so [`Self::serves_language`] reads it as "every
+    /// per-language clients so [`Self::has_real_sole_client`] reads it as "every
     /// language is served" rather than as one language's server.
     pub(crate) fn set_sole_client(&mut self, host: Arc<dyn LspHost>) {
         self.clients.clear();
@@ -58,15 +83,22 @@ impl LspRegistry {
         self.sole = Some(host);
     }
 
-    /// The host serving `language` through the per-language table, if one is
-    /// registered. Ignores the injected sole client.
+    /// The up client for `language`'s primary (first selector's) server, if any.
+    /// Ignores the injected sole client.
     pub(crate) fn host_for_language(&self, language: &str) -> Option<Arc<dyn LspHost>> {
-        let name = self.languages.get(language)?;
-        self.clients.get(name).cloned()
+        self.languages
+            .get(language)?
+            .iter()
+            .find_map(|selector| self.clients.get(&selector.name).cloned())
     }
 
-    /// Resolves a buffer of `language` to the host it should use, preferring
-    /// its own server, then the injected sole client, then a noop.
+    /// Whether a server named `name` is up.
+    pub(crate) fn contains_client(&self, name: &str) -> bool {
+        self.clients.contains_key(name)
+    }
+
+    /// Resolves a buffer of `language` to its primary host, preferring its own
+    /// server, then the injected sole client, then a noop.
     ///
     /// Unlike [`Self::sole_or_noop`], an unmapped language never borrows an
     /// unrelated single client, so a second language does not route to the
@@ -79,8 +111,8 @@ impl LspRegistry {
     }
 
     /// Returns a single active client for editor-wide and cross-language
-    /// traffic, preferring the injected sole client, then the only
-    /// per-language client when exactly one is up, then a noop.
+    /// traffic, preferring the injected sole client, then the only per-language
+    /// client when exactly one is up, then a noop.
     pub(crate) fn sole_or_noop(&self) -> Arc<dyn LspHost> {
         if let Some(sole) = &self.sole {
             return sole.clone();
@@ -91,14 +123,30 @@ impl LspRegistry {
         }
     }
 
-    /// Whether a real (non-noop) host already serves `language`, so no spawn
-    /// is needed. True when the language has its own server or a real injected
-    /// sole client covers it.
-    pub(crate) fn serves_language(&self, language: &str) -> bool {
-        if let Some(host) = self.host_for_language(language) {
-            return !host.is_noop();
-        }
+    /// Whether a real (non-noop) host is injected as the sole client.
+    ///
+    /// The spawn gate uses this to suppress auto-spawn when a test or the legacy
+    /// path has provided a host that already serves every language.
+    pub(crate) fn has_real_sole_client(&self) -> bool {
         self.sole.as_ref().is_some_and(|host| !host.is_noop())
+    }
+
+    /// Every up host serving `language`, for document-sync notifications that
+    /// each running server must mirror.
+    ///
+    /// Falls back to the injected sole client when the language has no
+    /// per-language servers up.
+    pub(crate) fn hosts_for_language(&self, language: &str) -> Vec<Arc<dyn LspHost>> {
+        if let Some(selectors) = self.languages.get(language) {
+            let hosts: Vec<Arc<dyn LspHost>> = selectors
+                .iter()
+                .filter_map(|selector| self.clients.get(&selector.name).cloned())
+                .collect();
+            if !hosts.is_empty() {
+                return hosts;
+            }
+        }
+        self.sole.iter().cloned().collect()
     }
 
     /// Returns every host that can emit server-initiated traffic, the
@@ -147,7 +195,6 @@ impl LspRegistry {
 mod tests {
     use super::*;
     use crate::host::FakeLsp;
-
     fn fake() -> Arc<dyn LspHost> {
         Arc::new(FakeLsp::new())
     }
@@ -166,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn host_for_language_routes_to_the_registered_server() {
+    fn host_for_language_returns_the_primary_up_server() {
         let mut registry = LspRegistry::new();
         let host = fake();
         registry.insert("rust-analyzer".into(), host.clone());
@@ -208,24 +255,41 @@ mod tests {
     }
 
     #[test]
-    fn serves_language_reflects_only_real_hosts() {
+    fn hosts_for_language_returns_every_up_server() {
         let mut registry = LspRegistry::new();
-        assert!(!registry.serves_language("rust"));
-
-        registry.set_sole_client(Arc::new(NoopLsp));
-        assert!(!registry.serves_language("rust"));
-
-        registry.set_sole_client(fake());
-        assert!(registry.serves_language("rust"));
+        let primary = fake();
+        let secondary = fake();
+        registry.insert("rust-analyzer".into(), primary.clone());
+        registry.insert("extra".into(), secondary.clone());
+        registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("rust-analyzer".into()),
+                ServerSelector::all("extra".into()),
+            ],
+        );
+        let hosts = registry.hosts_for_language("rust");
+        assert_eq!(hosts.len(), 2);
+        assert!(hosts.iter().any(|h| Arc::ptr_eq(h, &primary)));
+        assert!(hosts.iter().any(|h| Arc::ptr_eq(h, &secondary)));
     }
 
     #[test]
-    fn serves_language_is_per_language_for_registered_servers() {
+    fn has_real_sole_client_ignores_the_noop() {
+        let mut registry = LspRegistry::new();
+        assert!(!registry.has_real_sole_client());
+        registry.set_sole_client(Arc::new(NoopLsp));
+        assert!(!registry.has_real_sole_client());
+        registry.set_sole_client(fake());
+        assert!(registry.has_real_sole_client());
+    }
+
+    #[test]
+    fn contains_client_checks_registration() {
         let mut registry = LspRegistry::new();
         registry.insert("rust-analyzer".into(), fake());
-        registry.set_language("rust".into(), "rust-analyzer".into());
-        assert!(registry.serves_language("rust"));
-        assert!(!registry.serves_language("python"));
+        assert!(registry.contains_client("rust-analyzer"));
+        assert!(!registry.contains_client("pyright"));
     }
 
     #[test]

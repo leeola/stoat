@@ -300,15 +300,17 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
         text_document: TextDocumentIdentifier { uri },
         text: Some(text),
     };
-    let lsp = stoat.lsp_for(buffer_id);
-    stoat
-        .executor
-        .spawn(async move {
-            if let Err(err) = lsp.did_save(params).await {
-                tracing::warn!(target: "stoat::lsp", ?err, "did_save notification failed");
-            }
-        })
-        .detach();
+    for lsp in stoat.hosts_for_buffer(buffer_id) {
+        let params = params.clone();
+        stoat
+            .executor
+            .spawn(async move {
+                if let Err(err) = lsp.did_save(params).await {
+                    tracing::warn!(target: "stoat::lsp", ?err, "did_save notification failed");
+                }
+            })
+            .detach();
+    }
     true
 }
 
@@ -631,15 +633,17 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         let params = DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
         };
-        let lsp = stoat.lsp_for(buffer_id);
-        stoat
-            .executor
-            .spawn(async move {
-                if let Err(err) = lsp.did_close(params).await {
-                    tracing::warn!(target: "stoat::lsp", ?err, "did_close notification failed");
-                }
-            })
-            .detach();
+        for lsp in stoat.hosts_for_buffer(buffer_id) {
+            let params = params.clone();
+            stoat
+                .executor
+                .spawn(async move {
+                    if let Err(err) = lsp.did_close(params).await {
+                        tracing::warn!(target: "stoat::lsp", ?err, "did_close notification failed");
+                    }
+                })
+                .detach();
+        }
     }
     UpdateEffect::Redraw
 }

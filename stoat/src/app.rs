@@ -1361,6 +1361,20 @@ impl Stoat {
         }
     }
 
+    /// Every language server that mirrors `buffer_id`'s document, for
+    /// fan-out of `did_open` / `did_change` / `did_save` / `did_close`.
+    ///
+    /// Every running server for the buffer's language needs the document, so
+    /// this returns all of them (or the injected sole client when none are up).
+    pub(crate) fn hosts_for_buffer(&self, buffer_id: BufferId) -> Vec<Arc<dyn LspHost>> {
+        let language = self.active_workspace().buffers.language_for(buffer_id);
+        let name = language
+            .as_ref()
+            .map(|language| language.name)
+            .unwrap_or("");
+        self.lsp_registry.hosts_for_language(name)
+    }
+
     /// Reap the language server on quit. Awaits [`LspHost::shutdown`]
     /// bounded by a 500ms timeout so a server that ignores the request
     /// cannot block the editor's exit. [`NoopLsp`] and the test fake
@@ -2656,8 +2670,12 @@ impl Stoat {
     /// deliver the documents to the real server. Buffers of other languages
     /// keep their own servers untouched.
     fn install_ready_server(&mut self, server: String, language: String, host: Arc<dyn LspHost>) {
-        self.lsp_registry.insert(server.clone(), host);
-        self.lsp_registry.set_language(language.clone(), server);
+        self.lsp_registry.insert(server, host);
+        let selectors = crate::lsp::servers::resolve_servers(&self.settings, &language)
+            .iter()
+            .map(|resolved| resolved.to_selector())
+            .collect();
+        self.lsp_registry.set_selectors(language.clone(), selectors);
 
         let reopen: Vec<(BufferId, PathBuf, String)> = {
             let buffers = &self.active_workspace().buffers;
