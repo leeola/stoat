@@ -913,13 +913,43 @@ impl Stoat {
     }
 
     pub fn new(executor: Executor, cli_settings: Settings, initial_git_root: PathBuf) -> Self {
-        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
-        if !errors.is_empty() {
-            tracing::error!(
-                "default keymap parse errors: {}",
-                stoat_config::format_errors(DEFAULT_KEYMAP, &errors)
-            );
-        }
+        Self::new_with_user_config(executor, cli_settings, initial_git_root, None)
+    }
+
+    /// Construct a [`Stoat`], preferring `user_config` over the embedded default when it parses
+    /// clean.
+    ///
+    /// `user_config` is the raw text of the user's `config.stcfg` (located via
+    /// [`user_config_path`](crate::user_config_path)), or [`None`] to use only the
+    /// built-in default. A user source that parses without errors replaces the
+    /// embedded config wholesale. One that fails to parse is discarded in favour
+    /// of the embedded default, logged, and surfaced as a transient status
+    /// message. CLI settings layer over the resolved config either way.
+    pub fn new_with_user_config(
+        executor: Executor,
+        cli_settings: Settings,
+        initial_git_root: PathBuf,
+        user_config: Option<String>,
+    ) -> Self {
+        let (config, config_error) = match user_config {
+            Some(source) => {
+                let (parsed, errors) = stoat_config::parse(&source);
+                if errors.is_empty() {
+                    (parsed, None)
+                } else {
+                    tracing::error!(
+                        "user config parse failed; using built-in defaults: {}",
+                        stoat_config::format_errors(&source, &errors)
+                    );
+                    (
+                        Self::parse_default_keymap(),
+                        Some("user config parse failed; using built-in defaults".to_string()),
+                    )
+                }
+            },
+            None => (Self::parse_default_keymap(), None),
+        };
+
         let settings = config
             .as_ref()
             .map(Settings::from_config)
@@ -983,7 +1013,7 @@ impl Stoat {
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
-        Self {
+        let mut stoat = Self {
             size: Rect::default(),
             fallback_mode: "normal".into(),
             user_vars: std::collections::HashMap::new(),
@@ -1153,7 +1183,25 @@ impl Stoat {
             apc_scene: ApcScene::new(),
             pending_undercurls: Vec::new(),
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
+        };
+
+        if let Some(message) = config_error {
+            stoat.set_status(message);
         }
+
+        stoat
+    }
+
+    /// Parse the embedded default keymap ([`DEFAULT_KEYMAP`]), logging any parse errors.
+    fn parse_default_keymap() -> Option<stoat_config::Config> {
+        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+        if !errors.is_empty() {
+            tracing::error!(
+                "default keymap parse errors: {}",
+                stoat_config::format_errors(DEFAULT_KEYMAP, &errors)
+            );
+        }
+        config
     }
 
     /// Look up a previously-cached diff by content hashes plus
@@ -9996,6 +10044,44 @@ mod tests {
         assert_eq!(
             stoat.pending_message, None,
             "a successful install shows no message"
+        );
+    }
+
+    #[test]
+    fn user_config_overrides_embedded_setting() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let stoat = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            Some("on init { format_on_save = true; }".to_string()),
+        );
+
+        assert_eq!(stoat.settings.format_on_save, Some(true));
+        assert_eq!(
+            stoat.pending_message, None,
+            "a clean parse shows no message"
+        );
+    }
+
+    #[test]
+    fn broken_user_config_falls_back_to_embedded_with_status() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let stoat = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            Some("on init { format_on_save = ".to_string()),
+        );
+
+        assert_eq!(
+            stoat.settings.format_on_save,
+            Some(false),
+            "the embedded default survives a broken user config"
+        );
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("user config parse failed; using built-in defaults")
         );
     }
 

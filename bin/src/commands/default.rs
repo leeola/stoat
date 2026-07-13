@@ -299,7 +299,10 @@ fn run_tui(
     let stoatty = std::env::var_os("STOATTY").is_some();
 
     rt.block_on(async {
-        let mut stoat = Stoat::new(executor.clone(), cli_settings, initial_git_root);
+        let user_config =
+            stoat::user_config_path().and_then(|path| std::fs::read_to_string(path).ok());
+        let mut stoat =
+            Stoat::new_with_user_config(executor.clone(), cli_settings, initial_git_root, user_config);
         stoat.set_stoatty_apc(stoatty, apc_tx);
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);

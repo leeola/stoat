@@ -87,6 +87,7 @@ pub use pane::{
     Axis, Direction, DockId, DockPanel, DockSide, DockVisibility, FocusTarget, Pane, PaneId,
     PaneTree, Placement, View,
 };
+pub use paths::user_config_path;
 pub use run::RunId;
 pub use stoat_config::{LineNumbers, MouseCapturePolicy, Settings};
 pub use stoat_log as log;

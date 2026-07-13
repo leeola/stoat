@@ -67,6 +67,20 @@ where
     Some(ancestor)
 }
 
+/// Absolute path to the user's editable config file,
+/// `config.stcfg` under the XDG config home (typically
+/// `~/.config/stoat/config.stcfg`).
+///
+/// Returns [`None`] when the base-directory strategy cannot resolve a
+/// config home, in which case startup falls back to the embedded
+/// default config. The path is not guaranteed to exist. Callers read
+/// it opportunistically.
+pub fn user_config_path() -> Option<PathBuf> {
+    Xdg::new()
+        .ok()
+        .map(|x| x.config_dir().join("stoat/config.stcfg"))
+}
+
 fn display_relative_with_home(path: &Path, context: &Path, home: Option<&Path>) -> String {
     if !path.is_absolute() {
         return path.to_string_lossy().into_owned();
