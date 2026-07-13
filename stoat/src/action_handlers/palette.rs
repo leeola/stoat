@@ -278,7 +278,7 @@ pub(super) fn palette_insert_newline(stoat: &mut Stoat) -> Option<UpdateEffect> 
 }
 
 /// Move the action-list selection. Returns `None` when the palette is closed.
-pub(super) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<UpdateEffect> {
+pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<UpdateEffect> {
     let palette = stoat.command_palette.as_mut()?;
     if palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()

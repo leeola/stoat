@@ -40,9 +40,11 @@ use crate::{
     workspace_picker::WorkspacePicker,
 };
 pub(crate) use commits::pump_commits;
-pub(crate) use file_finder::{close_file_finder, sync_file_finder_preview};
+pub(crate) use file_finder::{
+    close_file_finder, file_finder_move_selection, sync_file_finder_preview,
+};
 pub(crate) use lsp::pump_lsp_jumps;
-pub(crate) use palette::sync_palette_picker;
+pub(crate) use palette::{palette_move_selection, sync_palette_picker};
 pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
 #[cfg(test)]
 pub(crate) use review::install_review_session;
@@ -151,8 +153,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             crate::file_finder::OpenIntent::Replace,
             Some(crate::file_finder::FinderScope::Buffers),
         ),
-        ActionKind::FileFinderSelectPrev => file_finder::file_finder_move_selection(stoat, -1),
-        ActionKind::FileFinderSelectNext => file_finder::file_finder_move_selection(stoat, 1),
+        ActionKind::FileFinderSelectPrev => file_finder_move_selection(stoat, -1),
+        ActionKind::FileFinderSelectNext => file_finder_move_selection(stoat, 1),
         ActionKind::FileFinderPageUp => file_finder::file_finder_page(stoat, -1),
         ActionKind::FileFinderPageDown => file_finder::file_finder_page(stoat, 1),
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),

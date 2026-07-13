@@ -267,7 +267,7 @@ pub(super) fn file_finder_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
     Some(UpdateEffect::Redraw)
 }
 
-pub(super) fn file_finder_move_selection(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+pub(crate) fn file_finder_move_selection(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let Some(finder) = stoat.file_finder.as_mut() else {
         return UpdateEffect::None;
     };

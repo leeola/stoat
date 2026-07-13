@@ -2708,6 +2708,22 @@ impl Stoat {
     /// plain stepped scrolling of its output, three rows per notch, clamped to
     /// the top. Anything else drops the event.
     fn handle_mouse_scroll(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        // A wheel while a finder or palette modal is open moves its selection
+        // rather than scrolling the pane beneath, so the event never falls
+        // through. The two modals are mutually exclusive, so two checks suffice.
+        if self.file_finder.is_some() || self.command_palette.is_some() {
+            let delta = match mouse.kind {
+                MouseEventKind::ScrollDown => 1,
+                MouseEventKind::ScrollUp => -1,
+                _ => return UpdateEffect::None,
+            };
+            return if self.file_finder.is_some() {
+                action_handlers::file_finder_move_selection(self, delta)
+            } else {
+                action_handlers::palette_move_selection(self, delta).unwrap_or(UpdateEffect::Redraw)
+            };
+        }
+
         // A wheel over the open hover popup scrolls the popup, not the pane
         // beneath it. The bump mirrors the Ctrl-d/Ctrl-u path. render_hover
         // clamps it to the content height.
@@ -6258,6 +6274,111 @@ mod tests {
             after + 2 >= coasted,
             "the view stays at the coasted position rather than snapping back \
              (coasted {coasted}, after {after})",
+        );
+    }
+
+    fn pane_scroll_state(h: &mut crate::test_harness::TestHarness) -> (u32, f32) {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        (editor.scroll_row, editor.scroll_velocity)
+    }
+
+    #[test]
+    fn wheel_moves_file_finder_selection_not_the_pane() {
+        use crate::test_harness::TestHarness;
+        use stoat_action::OpenFileFinder;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let root = std::path::PathBuf::from("/finder-wheel");
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            h.fake_fs().insert_file(root.join(name), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        let before = pane_scroll_state(&mut h);
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 10, 10));
+
+        assert_eq!(
+            h.stoat
+                .file_finder
+                .as_ref()
+                .expect("finder open")
+                .active_core_ref()
+                .picklist
+                .selected,
+            1,
+            "a wheel notch moves the finder selection down",
+        );
+        assert_eq!(
+            pane_scroll_state(&mut h),
+            before,
+            "the pane beneath does not scroll",
+        );
+    }
+
+    #[test]
+    fn wheel_moves_palette_command_selection_not_the_pane() {
+        use crate::test_harness::TestHarness;
+        use stoat_action::OpenCommandPalette;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let path = h.write_file("f.rs", "x\n");
+        h.open_file(&path);
+        action_handlers::dispatch(&mut h.stoat, &OpenCommandPalette);
+        h.settle();
+        let before = pane_scroll_state(&mut h);
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 10, 10));
+
+        assert_eq!(
+            h.stoat
+                .command_palette
+                .as_ref()
+                .expect("palette open")
+                .selected,
+            1,
+            "a wheel notch moves the palette command selection down",
+        );
+        assert_eq!(
+            pane_scroll_state(&mut h),
+            before,
+            "the pane beneath does not scroll"
+        );
+    }
+
+    #[test]
+    fn wheel_moves_palette_arg_picker_selection() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let root = std::path::PathBuf::from("/arg-wheel");
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            h.fake_fs().insert_file(root.join(name), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_text(":o ");
+        h.settle();
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 10, 10));
+
+        let selected = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .arg_picker
+            .as_ref()
+            .expect("arg picker active")
+            .core
+            .picklist
+            .selected;
+        assert_eq!(
+            selected, 1,
+            "a wheel notch moves the arg picker selection down"
         );
     }
 
