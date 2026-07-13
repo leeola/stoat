@@ -78,8 +78,9 @@ use crate::{
             LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
         },
         prompt::{
-            CancelPromptInput, PalettePageDown, PalettePageUp, PaletteScopeToggle,
-            PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline, SubmitPromptInput,
+            CancelPromptInput, PaletteCompletePath, PalettePageDown, PalettePageUp,
+            PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline,
+            SubmitPromptInput,
         },
         rebase::{
             AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
@@ -776,6 +777,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PaletteScopeToggle::DEF, |_| {
         Ok(Box::new(PaletteScopeToggle))
     });
+    add(PaletteCompletePath::DEF, |_| {
+        Ok(Box::new(PaletteCompletePath))
+    });
 
     map
 }
@@ -1014,6 +1018,7 @@ mod tests {
         "PalettePageUp",
         "PalettePageDown",
         "PaletteScopeToggle",
+        "PaletteCompletePath",
     ];
 
     #[test]
@@ -1250,7 +1255,8 @@ mod tests {
         // + 1 ReplaceWithYanked.
         // + 2 JoinSelections / JoinSelectionsSpace.
         // + 1 AutoReload.
-        assert_eq!(all().count(), 337);
+        // + 1 PaletteCompletePath.
+        assert_eq!(all().count(), 338);
     }
 
     #[test]

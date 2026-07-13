@@ -1278,6 +1278,138 @@ mod tests {
         );
     }
 
+    /// The palette argument tail, or `None` when not in argument mode.
+    fn palette_arg_tail(h: &TestHarness) -> Option<String> {
+        h.stoat
+            .command_palette
+            .as_ref()
+            .and_then(|p| p.arg_tail(h.stoat.active_workspace()))
+    }
+
+    /// The full palette input text.
+    fn palette_text(h: &TestHarness) -> String {
+        h.stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .input
+            .text(h.stoat.active_workspace())
+    }
+
+    #[test]
+    fn tab_completes_browse_path_and_descends() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs()
+            .insert_files([(home.join("proj/sub/f.rs"), "x".as_bytes())]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_text(":cd ~/pr");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert!(
+            arg_picker(&h)
+                .selected_path()
+                .is_some_and(|p| p.ends_with("proj")),
+            "the browse surfaces ~/proj",
+        );
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        assert_eq!(
+            palette_arg_tail(&h).as_deref(),
+            Some("~/proj/"),
+            "Tab completes the highlighted directory with a trailing slash"
+        );
+        assert_eq!(
+            arg_picker(&h).browse.as_ref().map(|b| b.root.clone()),
+            Some(home.join("proj")),
+            "the completed tail descends the browse into ~/proj",
+        );
+        assert_eq!(browse_dir_rows(&h), ["sub"]);
+    }
+
+    #[test]
+    fn tab_completes_workspace_dir_and_descends() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        h.fake_fs().insert_dir(root.join("wsdir/kid"));
+
+        h.type_text(":cd wsd");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert!(
+            arg_picker(&h).browse.is_none(),
+            "a bare tail lists the recursive workspace dirs"
+        );
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        assert_eq!(
+            palette_arg_tail(&h).as_deref(),
+            Some("wsdir/"),
+            "Tab completes the workspace directory with a trailing slash"
+        );
+        assert_eq!(
+            arg_picker(&h).browse.as_ref().map(|b| b.root.clone()),
+            Some(root.join("wsdir")),
+            "the completed tail descends the browse into git_root/wsdir",
+        );
+        assert_eq!(browse_dir_rows(&h), ["kid"]);
+    }
+
+    #[test]
+    fn tab_with_empty_list_leaves_input_unchanged() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+
+        h.type_text(":cd zz/");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert_eq!(
+            browse_dir_rows(&h),
+            Vec::<String>::new(),
+            "empty browse list"
+        );
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            palette_arg_tail(&h).as_deref(),
+            Some("zz/"),
+            "Tab with no selectable row leaves the input unchanged"
+        );
+    }
+
+    #[test]
+    fn tab_in_command_mode_leaves_input_unchanged() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+
+        h.type_text(":q");
+        let _ = h.snapshot();
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            palette_text(&h),
+            "q",
+            "Tab in command-filter mode leaves the input unchanged"
+        );
+    }
+
     #[test]
     fn snapshot_palette_cd_browse_rows() {
         let mut h = Stoat::test();

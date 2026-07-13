@@ -329,6 +329,7 @@ pub enum ActionKind {
     PalettePageUp,
     PalettePageDown,
     PaletteScopeToggle,
+    PaletteCompletePath,
     RunHistoryPrev,
     RunHistoryNext,
     HelpSelectPrev,

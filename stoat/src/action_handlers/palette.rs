@@ -326,6 +326,60 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Complete the highlighted directory into the `:cd` input with a trailing `/`,
+/// so the next frame's browse re-root descends into it.
+///
+/// No-op unless a palette is open on a [`ValueSource::Directories`] argument
+/// with a picker and a selected row. In browse mode the completed tail keeps the
+/// typed directory prefix and appends the highlighted child. From the workspace
+/// list it is the selected directory relative to the workspace root.
+pub(super) fn palette_complete_path(stoat: &mut Stoat) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+
+    let new_text = {
+        let Some(palette) = stoat.command_palette.as_ref() else {
+            return UpdateEffect::None;
+        };
+        if palette.arg_source() != Some(ValueSource::Directories) {
+            return UpdateEffect::None;
+        }
+        let Some(picker) = palette.arg_picker.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let ws = &stoat.workspaces[active_idx];
+
+        let tail = match picker.browse.as_ref() {
+            Some(browse) => {
+                let Some(name) = picker.browse_selected_path().and_then(|p| p.file_name()) else {
+                    return UpdateEffect::None;
+                };
+                format!("{}{}/", browse.typed_dir, name.to_string_lossy())
+            },
+            None => {
+                let Some(selected) = picker.selected_path() else {
+                    return UpdateEffect::None;
+                };
+                format!(
+                    "{}/",
+                    crate::paths::display_relative(selected, &ws.git_root)
+                )
+            },
+        };
+
+        let text = palette.input.text(ws);
+        let Some((head, _)) = text.split_once(' ') else {
+            return UpdateEffect::None;
+        };
+        format!("{head} {tail}")
+    };
+
+    let ws = &mut stoat.workspaces[active_idx];
+    if let Some(palette) = stoat.command_palette.as_ref() {
+        palette.input.replace_text(ws, &new_text);
+    }
+    UpdateEffect::Redraw
+}
+
 fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
     match outcome {
         PaletteOutcome::None => UpdateEffect::Redraw,

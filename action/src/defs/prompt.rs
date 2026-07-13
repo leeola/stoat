@@ -238,6 +238,54 @@ impl Action for PaletteSelectNext {
 }
 
 #[derive(Debug)]
+pub struct PaletteCompletePathDef;
+
+impl ActionDef for PaletteCompletePathDef {
+    fn name(&self) -> &'static str {
+        "PaletteCompletePath"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::PaletteCompletePath
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "complete selected palette path"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Complete the highlighted directory into the palette input with a \
+         trailing slash, descending into it. Bound by default to Tab for a \
+         Directories argument such as :cd; a no-op for other arguments."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct PaletteCompletePath;
+
+impl PaletteCompletePath {
+    pub const DEF: &PaletteCompletePathDef = &PaletteCompletePathDef;
+}
+
+impl Action for PaletteCompletePath {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct PalettePageUpDef;
 
 impl ActionDef for PalettePageUpDef {
