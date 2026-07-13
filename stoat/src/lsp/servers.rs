@@ -6,14 +6,17 @@
 //! through, feeding the lazy-spawn path in
 //! [`crate::action_handlers::lsp::notify_buffer_opened`].
 
-use crate::lsp::registry::ServerSelector;
+use crate::{host::LanguageServerFeature, lsp::registry::ServerSelector};
+use std::collections::HashSet;
 use stoat_config::Settings;
 
-/// A language server resolved for a language, carrying its registry name and
-/// spawn argv.
+/// A language server resolved for a language, carrying its registry name, spawn
+/// argv, and the feature filters that route requests to it.
 pub(crate) struct ResolvedServer {
     pub(crate) name: String,
     pub(crate) argv: Vec<String>,
+    pub(crate) only: HashSet<LanguageServerFeature>,
+    pub(crate) except: HashSet<LanguageServerFeature>,
 }
 
 impl ResolvedServer {
@@ -21,6 +24,8 @@ impl ResolvedServer {
     pub(crate) fn to_selector(&self) -> ServerSelector {
         ServerSelector {
             name: self.name.clone(),
+            only: self.only.clone(),
+            except: self.except.clone(),
         }
     }
 }
@@ -29,6 +34,8 @@ impl ResolvedServer {
 struct BuiltinServer {
     name: &'static str,
     argv: &'static [&'static str],
+    only: &'static [LanguageServerFeature],
+    except: &'static [LanguageServerFeature],
 }
 
 /// The builtin servers for `language`, primary first.
@@ -36,6 +43,8 @@ fn builtin_servers(language: &str) -> &'static [BuiltinServer] {
     const RUST: &[BuiltinServer] = &[BuiltinServer {
         name: "rust-analyzer",
         argv: &["rust-analyzer"],
+        only: &[],
+        except: &[],
     }];
     match language {
         "rust" => RUST,
@@ -58,9 +67,15 @@ pub(crate) fn resolve_servers(settings: &Settings, language: &str) -> Vec<Resolv
 
     let mut resolved = Vec::new();
     if let Some((command, _)) = override_argv.split_first() {
+        let (only, except) = builtin
+            .first()
+            .map(|server| (feature_set(server.only), feature_set(server.except)))
+            .unwrap_or_default();
         resolved.push(ResolvedServer {
             name: command.clone(),
             argv: override_argv.clone(),
+            only,
+            except,
         });
     }
     resolved.extend(builtin.iter().skip(1).map(resolve_builtin));
@@ -71,7 +86,13 @@ fn resolve_builtin(server: &BuiltinServer) -> ResolvedServer {
     ResolvedServer {
         name: server.name.to_string(),
         argv: server.argv.iter().map(|arg| arg.to_string()).collect(),
+        only: feature_set(server.only),
+        except: feature_set(server.except),
     }
+}
+
+fn feature_set(features: &[LanguageServerFeature]) -> HashSet<LanguageServerFeature> {
+    features.iter().copied().collect()
 }
 
 #[cfg(test)]

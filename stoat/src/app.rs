@@ -11,8 +11,8 @@ use crate::{
     file_finder::FileFinder,
     help::Help,
     host::{
-        EnvHost, FsHost, FsWatchHost, GitHost, GitRepo, LocalEnv, LocalFs, LocalGit, LspHost,
-        NoopFsWatcher,
+        EnvHost, FsHost, FsWatchHost, GitHost, GitRepo, LanguageServerFeature, LocalEnv, LocalFs,
+        LocalGit, LspHost, NoopFsWatcher,
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
@@ -1373,6 +1373,30 @@ impl Stoat {
             .map(|language| language.name)
             .unwrap_or("");
         self.lsp_registry.hosts_for_language(name)
+    }
+
+    /// The language server that should answer a single-target `feature` request
+    /// for `buffer_id`, the first of its language's servers whose selector
+    /// routes the feature and whose capabilities support it.
+    ///
+    /// Falls back to [`Self::lsp_host`] (a noop when nothing supports it), so a
+    /// caller's `supports_feature` guard still rejects unavailable features.
+    pub(crate) fn lsp_for_feature(
+        &self,
+        buffer_id: BufferId,
+        feature: LanguageServerFeature,
+    ) -> Arc<dyn LspHost> {
+        let language = self.active_workspace().buffers.language_for(buffer_id);
+        let name = language
+            .as_ref()
+            .map(|language| language.name)
+            .unwrap_or("");
+        self.lsp_registry
+            .hosts_with_feature(name, feature)
+            .into_iter()
+            .next()
+            .map(|(_, host)| host)
+            .unwrap_or_else(|| self.lsp_host())
     }
 
     /// Reap the language server on quit. Awaits [`LspHost::shutdown`]

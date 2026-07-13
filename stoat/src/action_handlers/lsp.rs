@@ -1134,7 +1134,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::Hover);
     let task = stoat.spawn_woken(async move {
         match lsp.hover(params).await {
             Ok(Some(hover)) => {
@@ -1478,7 +1478,7 @@ pub(crate) fn request_signature_help(stoat: &mut Stoat) {
         work_done_progress_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::SignatureHelp);
     let task = stoat.spawn_woken(async move {
         match lsp.signature_help(params).await {
             Ok(Some(help)) => signature_help_to_popup(help, anchor_offset),
@@ -1627,7 +1627,7 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
         params,
         ..
     } = request;
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::InlayHints);
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(INLAY_HINT_DEBOUNCE).await;
@@ -1840,7 +1840,7 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
     stoat.last_document_highlight_key = Some(key);
     clear_document_highlights(stoat);
 
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::DocumentHighlight);
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(DOCUMENT_HIGHLIGHT_DEBOUNCE).await;
@@ -2062,7 +2062,7 @@ pub(crate) fn pull_diagnostics_trigger(stoat: &mut Stoat) {
             partial_result_params: Default::default(),
         };
 
-        let lsp = stoat.lsp_for(plan.id);
+        let lsp = stoat.lsp_for_feature(plan.id, LanguageServerFeature::PullDiagnostics);
         let executor = stoat.executor.clone();
         let path = plan.path;
         let task = stoat.spawn_woken(async move {
@@ -2742,7 +2742,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::CodeAction);
     let task = stoat.spawn_woken(async move {
         match lsp.code_action(params).await {
             Ok(Some(actions)) => Some(actions),
@@ -3012,7 +3012,7 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
         position,
     };
 
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::RenameSymbol);
     let task = stoat.spawn_woken(async move {
         let response = match lsp.prepare_rename(params).await {
             Ok(Some(resp)) => resp,
@@ -3247,7 +3247,7 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::DocumentSymbols);
     let task = stoat.spawn_woken(async move {
         match lsp.document_symbol(params).await {
             Ok(resp) => resp,
@@ -3687,7 +3687,7 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::Format);
     let task = stoat.spawn_woken(async move {
         match lsp.range_formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
@@ -3752,7 +3752,7 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
-    let lsp = stoat.lsp_for(buffer_id);
+    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::Format);
     let task = stoat.spawn_woken(async move {
         match lsp.formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
@@ -4044,6 +4044,67 @@ mod tests {
             .uri
             .as_str()
             .ends_with("/b.json"));
+    }
+
+    #[test]
+    fn lsp_for_feature_routes_to_the_capable_server() {
+        use crate::{
+            host::{LanguageServerFeature, LspHost},
+            lsp::registry::ServerSelector,
+        };
+        use lsp_types::{CompletionOptions, HoverProviderCapability, ServerCapabilities};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let hover_server = std::sync::Arc::new(crate::host::FakeLsp::new());
+        hover_server.set_capabilities(ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..ServerCapabilities::default()
+        });
+        let completion_server = std::sync::Arc::new(crate::host::FakeLsp::new());
+        completion_server.set_capabilities(ServerCapabilities {
+            completion_provider: Some(CompletionOptions::default()),
+            ..ServerCapabilities::default()
+        });
+        h.stoat
+            .lsp_registry
+            .insert("primary".into(), hover_server.clone());
+        h.stoat
+            .lsp_registry
+            .insert("tailwind".into(), completion_server.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                ServerSelector::all("tailwind".into()),
+            ],
+        );
+
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&root.join("a.rs"))
+            .expect("buffer open");
+
+        let hover: std::sync::Arc<dyn LspHost> = hover_server.clone();
+        let completion: std::sync::Arc<dyn LspHost> = completion_server.clone();
+        assert!(
+            std::sync::Arc::ptr_eq(
+                &h.stoat.lsp_for_feature(id, LanguageServerFeature::Hover),
+                &hover,
+            ),
+            "hover routes to the hover-capable server"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(
+                &h.stoat
+                    .lsp_for_feature(id, LanguageServerFeature::Completion),
+                &completion,
+            ),
+            "completion routes to the completion-capable server"
+        );
     }
 
     #[test]

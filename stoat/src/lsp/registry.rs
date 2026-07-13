@@ -1,23 +1,37 @@
-use crate::host::{LspHost, NoopLsp};
+use crate::host::{LanguageServerFeature, LspHost, NoopLsp};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
 
-/// One server serving a language, referenced by its registry name.
+/// One server serving a language, with the feature filters that decide which
+/// requests route to it.
 ///
-/// A language's selectors are an ordered list, so a primary server can be
-/// paired with specialized ones.
+/// The filter mirrors helix. An empty `only` set means "every feature except
+/// those in `except`", while a non-empty `only` restricts to exactly those,
+/// still minus `except`. A language pairs a primary server with specialized
+/// ones (e.g. a completion-only server) without their features overlapping.
 #[derive(Debug, Clone)]
 pub(crate) struct ServerSelector {
     pub(crate) name: String,
+    pub(crate) only: HashSet<LanguageServerFeature>,
+    pub(crate) except: HashSet<LanguageServerFeature>,
 }
 
-#[cfg(test)]
 impl ServerSelector {
-    /// A selector for `name`.
+    /// Whether requests for `feature` route to this server.
+    pub(crate) fn has_feature(&self, feature: LanguageServerFeature) -> bool {
+        (self.only.is_empty() || self.only.contains(&feature)) && !self.except.contains(&feature)
+    }
+
+    /// A selector for `name` with no feature filter, serving every feature.
+    #[cfg(test)]
     pub(crate) fn all(name: String) -> Self {
-        Self { name }
+        Self {
+            name,
+            only: HashSet::new(),
+            except: HashSet::new(),
+        }
     }
 }
 
@@ -149,6 +163,39 @@ impl LspRegistry {
         self.sole.iter().cloned().collect()
     }
 
+    /// Every up host serving `language` whose selector routes `feature` and
+    /// whose capabilities support it, each paired with its server name.
+    ///
+    /// Requests fan out over the result (completion) or take the first (hover,
+    /// goto, ...). Falls back to the injected sole client when the language has
+    /// no per-language match, so tests driving a single fake still route.
+    pub(crate) fn hosts_with_feature(
+        &self,
+        language: &str,
+        feature: LanguageServerFeature,
+    ) -> Vec<(String, Arc<dyn LspHost>)> {
+        if let Some(selectors) = self.languages.get(language) {
+            let hosts: Vec<(String, Arc<dyn LspHost>)> = selectors
+                .iter()
+                .filter(|selector| selector.has_feature(feature))
+                .filter_map(|selector| {
+                    let host = self.clients.get(&selector.name)?;
+                    host.supports_feature(feature)
+                        .then(|| (selector.name.clone(), host.clone()))
+                })
+                .collect();
+            if !hosts.is_empty() {
+                return hosts;
+            }
+        }
+        match &self.sole {
+            Some(sole) if sole.supports_feature(feature) => {
+                vec![(String::from("default"), sole.clone())]
+            },
+            _ => Vec::new(),
+        }
+    }
+
     /// Returns every host that can emit server-initiated traffic, the
     /// per-language clients plus any injected sole client.
     pub(crate) fn hosts(&self) -> Vec<Arc<dyn LspHost>> {
@@ -195,8 +242,94 @@ impl LspRegistry {
 mod tests {
     use super::*;
     use crate::host::FakeLsp;
+    use lsp_types::{CompletionOptions, HoverProviderCapability, ServerCapabilities};
+
     fn fake() -> Arc<dyn LspHost> {
         Arc::new(FakeLsp::new())
+    }
+
+    fn fake_with(caps: ServerCapabilities) -> Arc<dyn LspHost> {
+        let lsp = FakeLsp::new();
+        lsp.set_capabilities(caps);
+        Arc::new(lsp)
+    }
+
+    fn hover_caps() -> ServerCapabilities {
+        ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..ServerCapabilities::default()
+        }
+    }
+
+    fn completion_caps() -> ServerCapabilities {
+        ServerCapabilities {
+            completion_provider: Some(CompletionOptions::default()),
+            ..ServerCapabilities::default()
+        }
+    }
+
+    fn selector(name: &str, only: &[LanguageServerFeature]) -> ServerSelector {
+        ServerSelector {
+            name: name.to_string(),
+            only: only.iter().copied().collect(),
+            except: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn has_feature_honours_only_and_except() {
+        let all = ServerSelector::all("s".into());
+        assert!(all.has_feature(LanguageServerFeature::Hover));
+
+        let only = selector("s", &[LanguageServerFeature::Completion]);
+        assert!(only.has_feature(LanguageServerFeature::Completion));
+        assert!(!only.has_feature(LanguageServerFeature::Hover));
+
+        let mut except = ServerSelector::all("s".into());
+        except.except.insert(LanguageServerFeature::Hover);
+        assert!(!except.has_feature(LanguageServerFeature::Hover));
+        assert!(except.has_feature(LanguageServerFeature::Completion));
+    }
+
+    #[test]
+    fn hosts_with_feature_filters_by_selector_and_capabilities() {
+        let mut registry = LspRegistry::new();
+        // The primary advertises hover and completion. The secondary advertises
+        // only completion, and its selector restricts it to completion too.
+        registry.insert("primary".into(), fake_with(hover_caps()));
+        registry.insert("secondary".into(), fake_with(completion_caps()));
+        registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                selector("secondary", &[LanguageServerFeature::Completion]),
+            ],
+        );
+
+        // The primary advertises hover. The secondary's selector excludes it.
+        let hover = registry.hosts_with_feature("rust", LanguageServerFeature::Hover);
+        assert_eq!(hover.len(), 1);
+        assert_eq!(hover[0].0, "primary");
+
+        // The primary lacks the completion capability. The secondary has it.
+        let completion = registry.hosts_with_feature("rust", LanguageServerFeature::Completion);
+        assert_eq!(completion.len(), 1);
+        assert_eq!(completion[0].0, "secondary");
+    }
+
+    #[test]
+    fn hosts_with_feature_falls_back_to_sole_when_supported() {
+        let mut registry = LspRegistry::new();
+        registry.set_sole_client(fake_with(hover_caps()));
+        assert_eq!(
+            registry
+                .hosts_with_feature("rust", LanguageServerFeature::Hover)
+                .len(),
+            1
+        );
+        assert!(registry
+            .hosts_with_feature("rust", LanguageServerFeature::Completion)
+            .is_empty());
     }
 
     #[test]
