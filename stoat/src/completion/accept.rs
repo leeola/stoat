@@ -143,12 +143,12 @@ fn apply_or_resolve_additional_edits(
         apply_additional_edits(stoat, buffer_id, edits);
         return;
     }
-    if !resolve_advertised(stoat) {
+    let lsp = resolve_host(stoat, item, buffer_id);
+    if !resolve_advertised(&lsp) {
         return;
     }
 
     let raw = (**lsp_item).clone();
-    let lsp = stoat.lsp_for(buffer_id);
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         let resolve = std::pin::pin!(lsp.completion_resolve(raw));
@@ -163,10 +163,21 @@ fn apply_or_resolve_additional_edits(
     stoat.pending_completion_accept = Some(task);
 }
 
-fn resolve_advertised(stoat: &Stoat) -> bool {
-    stoat
-        .lsp_host()
-        .capabilities()
+/// The server to route `item`'s `completionItem/resolve` back to: the server
+/// that produced it when known, else the buffer's primary.
+fn resolve_host(
+    stoat: &Stoat,
+    item: &CompletionItem,
+    buffer_id: BufferId,
+) -> std::sync::Arc<dyn crate::host::LspHost> {
+    item.server
+        .as_deref()
+        .and_then(|name| stoat.lsp_registry.client(name))
+        .unwrap_or_else(|| stoat.lsp_for(buffer_id))
+}
+
+fn resolve_advertised(host: &std::sync::Arc<dyn crate::host::LspHost>) -> bool {
+    host.capabilities()
         .completion_provider
         .as_ref()
         .and_then(|opts| opts.resolve_provider)
@@ -285,6 +296,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             0..3,
         );
@@ -315,6 +327,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             0..5,
         );
@@ -343,6 +356,7 @@ mod tests {
                     is_snippet: false,
                     documentation: None,
                     lsp_item: None,
+                    server: None,
                 },
                 CompletionItem {
                     label: "foobar".into(),
@@ -354,6 +368,7 @@ mod tests {
                     is_snippet: false,
                     documentation: None,
                     lsp_item: None,
+                    server: None,
                 },
             ],
             selected_idx: 1,
@@ -397,6 +412,7 @@ mod tests {
                 is_snippet: true,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             0..3,
         );
@@ -442,6 +458,7 @@ mod tests {
                 is_snippet: true,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             0..3,
         );
@@ -470,6 +487,7 @@ mod tests {
                 is_snippet: true,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             0..3,
         );
@@ -510,6 +528,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             0..3,
         );
@@ -545,6 +564,7 @@ mod tests {
                 label: label.into(),
                 ..Default::default()
             })),
+            server: None,
         }
     }
 
@@ -627,6 +647,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             0..3,
         );

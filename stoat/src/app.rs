@@ -1386,17 +1386,29 @@ impl Stoat {
         buffer_id: BufferId,
         feature: LanguageServerFeature,
     ) -> Arc<dyn LspHost> {
+        self.feature_hosts(buffer_id, feature)
+            .into_iter()
+            .next()
+            .map(|(_, host)| host)
+            .unwrap_or_else(|| self.lsp_host())
+    }
+
+    /// Every server, with its registry name, that routes `feature` for
+    /// `buffer_id`'s language and advertises it.
+    ///
+    /// Fan-out requests (completion) dispatch to all of them; single-target
+    /// requests take the first via [`Self::lsp_for_feature`].
+    pub(crate) fn feature_hosts(
+        &self,
+        buffer_id: BufferId,
+        feature: LanguageServerFeature,
+    ) -> Vec<(String, Arc<dyn LspHost>)> {
         let language = self.active_workspace().buffers.language_for(buffer_id);
         let name = language
             .as_ref()
             .map(|language| language.name)
             .unwrap_or("");
-        self.lsp_registry
-            .hosts_with_feature(name, feature)
-            .into_iter()
-            .next()
-            .map(|(_, host)| host)
-            .unwrap_or_else(|| self.lsp_host())
+        self.lsp_registry.hosts_with_feature(name, feature)
     }
 
     /// Reap the language server on quit. Awaits [`LspHost::shutdown`]
@@ -9522,6 +9534,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -9825,6 +9838,7 @@ mod tests {
             is_snippet: false,
             documentation: None,
             lsp_item: None,
+            server: None,
         };
         h.stoat.pending_completion = Some(CompletionPopup {
             items: vec![item("alpha"), item("beta"), item("gamma")],
@@ -12082,6 +12096,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -12132,6 +12147,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -12166,6 +12182,7 @@ mod tests {
                     is_snippet: false,
                     documentation: None,
                     lsp_item: None,
+                    server: None,
                 },
                 CompletionItem {
                     label: "foobar".into(),
@@ -12177,6 +12194,7 @@ mod tests {
                     is_snippet: false,
                     documentation: None,
                     lsp_item: None,
+                    server: None,
                 },
                 CompletionItem {
                     label: "foobaz".into(),
@@ -12188,6 +12206,7 @@ mod tests {
                     is_snippet: false,
                     documentation: None,
                     lsp_item: None,
+                    server: None,
                 },
             ],
             selected_idx: 0,
@@ -12246,6 +12265,7 @@ mod tests {
                 is_snippet: true,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -12289,6 +12309,7 @@ mod tests {
                 is_snippet: true,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,

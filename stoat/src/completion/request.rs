@@ -171,7 +171,9 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     let trigger_char = owned.text_before_cursor.chars().last();
     let is_trigger_char = match (
         trigger_char,
-        server_trigger_characters(&stoat.lsp_for(snapshot.buffer_id)),
+        server_trigger_characters(
+            &stoat.lsp_for_feature(snapshot.buffer_id, LanguageServerFeature::Completion),
+        ),
     ) {
         (Some(ch), Some(triggers)) => triggers.contains(&ch.to_string()),
         _ => false,
@@ -191,11 +193,15 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let lsp_host = stoat.lsp_for(snapshot.buffer_id);
+    let completion_hosts =
+        stoat.feature_hosts(snapshot.buffer_id, LanguageServerFeature::Completion);
     let fs_host = stoat.fs_host.clone();
     let executor = stoat.executor.clone();
     let home_dir = stoat.env_host.var("HOME").map(PathBuf::from);
-    let encoding = lsp_host.offset_encoding();
+    let encoding = completion_hosts
+        .first()
+        .map(|(_, host)| host.offset_encoding())
+        .unwrap_or(OffsetEncoding::Utf16);
 
     let base_dir = base_dir_for(snapshot.source_path.as_deref(), &snapshot.git_root);
 
@@ -211,9 +217,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         }
     };
 
-    let lsp_params = if sources.contains(&CompletionSource::Lsp)
-        && lsp_host.supports_feature(LanguageServerFeature::Completion)
-    {
+    let lsp_params = if sources.contains(&CompletionSource::Lsp) && !completion_hosts.is_empty() {
         build_lsp_params(
             snapshot.source_path.as_deref(),
             &snapshot.rope,
@@ -229,7 +233,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         executor,
         owned,
         sources,
-        lsp_host,
+        completion_hosts,
         fs_host,
         snapshot.rope,
         encoding,
@@ -378,7 +382,7 @@ async fn run_request(
     executor: stoat_scheduler::Executor,
     owned: ContextOwned,
     sources: Vec<CompletionSource>,
-    lsp_host: Arc<dyn LspHost>,
+    completion_hosts: Vec<(String, Arc<dyn LspHost>)>,
     fs_host: Arc<dyn FsHost>,
     rope: Rope,
     encoding: OffsetEncoding,
@@ -404,17 +408,20 @@ async fn run_request(
                 ));
             },
             CompletionSource::Lsp => {
-                if let Some(params) = lsp_params.clone() {
-                    items.extend(
-                        crate::completion::lsp::fetch(
-                            &ctx,
-                            lsp_host.as_ref(),
-                            params,
-                            &rope,
-                            encoding,
-                        )
-                        .await,
-                    );
+                if let Some(params) = &lsp_params {
+                    for (name, host) in &completion_hosts {
+                        items.extend(
+                            crate::completion::lsp::fetch(
+                                &ctx,
+                                name,
+                                host.as_ref(),
+                                params.clone(),
+                                &rope,
+                                encoding,
+                            )
+                            .await,
+                        );
+                    }
                 }
             },
             CompletionSource::Word => {

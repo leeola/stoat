@@ -27,6 +27,7 @@ use stoat_text::Rope;
 /// `Ok(None)`.
 pub async fn fetch(
     ctx: &CompletionContext<'_>,
+    server: &str,
     lsp: &dyn LspHost,
     params: CompletionParams,
     rope: &Rope,
@@ -38,7 +39,7 @@ pub async fn fetch(
     };
     items
         .into_iter()
-        .map(|item| translate(item, ctx, rope, encoding))
+        .map(|item| translate(item, server, ctx, rope, encoding))
         .collect()
 }
 
@@ -51,6 +52,7 @@ fn extract_items(response: CompletionResponse) -> Vec<LspCompletionItem> {
 
 fn translate(
     lsp_item: LspCompletionItem,
+    server: &str,
     ctx: &CompletionContext<'_>,
     rope: &Rope,
     encoding: OffsetEncoding,
@@ -86,6 +88,7 @@ fn translate(
         insert_text,
         is_snippet,
         lsp_item: Some(Box::new(lsp_item)),
+        server: Some(server.to_string()),
     }
 }
 
@@ -152,7 +155,14 @@ mod tests {
         let rope = Rope::from("fn main() {}\n");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(&ctx, &lsp, params, &rope, OffsetEncoding::Utf16));
+        let items = run(fetch(
+            &ctx,
+            "test-server",
+            &lsp,
+            params,
+            &rope,
+            OffsetEncoding::Utf16,
+        ));
         assert_eq!(items, Vec::new());
     }
 
@@ -163,7 +173,14 @@ mod tests {
         let rope = Rope::from("hello world\n");
         let params = completion_params("/src/lib.rs", 0, 5);
         let ctx = ctx_at(2, 7);
-        let items = run(fetch(&ctx, &lsp, params, &rope, OffsetEncoding::Utf16));
+        let items = run(fetch(
+            &ctx,
+            "test-server",
+            &lsp,
+            params,
+            &rope,
+            OffsetEncoding::Utf16,
+        ));
         assert_eq!(items.len(), 3);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["foo", "bar", "baz"]);
@@ -195,7 +212,14 @@ mod tests {
         let rope = Rope::from("print\n");
         let params = completion_params("/src/lib.rs", 0, 5);
         let ctx = ctx_at(0, 5);
-        let items = run(fetch(&ctx, &lsp, params, &rope, OffsetEncoding::Utf16));
+        let items = run(fetch(
+            &ctx,
+            "test-server",
+            &lsp,
+            params,
+            &rope,
+            OffsetEncoding::Utf16,
+        ));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].replace_range, 0..5);
         assert_eq!(items[0].insert_text, "println!(\"\")");
@@ -217,7 +241,14 @@ mod tests {
         let rope = Rope::from("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(&ctx, &lsp, params, &rope, OffsetEncoding::Utf16));
+        let items = run(fetch(
+            &ctx,
+            "test-server",
+            &lsp,
+            params,
+            &rope,
+            OffsetEncoding::Utf16,
+        ));
         assert_eq!(
             items[0].detail.as_deref(),
             Some("fn open(path: &Path) -> io::Result<File>"),
@@ -240,7 +271,14 @@ mod tests {
         let rope = Rope::from("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(&ctx, &lsp, params, &rope, OffsetEncoding::Utf16));
+        let items = run(fetch(
+            &ctx,
+            "test-server",
+            &lsp,
+            params,
+            &rope,
+            OffsetEncoding::Utf16,
+        ));
         assert_eq!(items[0].kind, Some(CompletionItemKind::Method));
     }
 
@@ -260,7 +298,14 @@ mod tests {
         let rope = Rope::from("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(&ctx, &lsp, params, &rope, OffsetEncoding::Utf16));
+        let items = run(fetch(
+            &ctx,
+            "test-server",
+            &lsp,
+            params,
+            &rope,
+            OffsetEncoding::Utf16,
+        ));
         assert_eq!(items[0].kind, Some(CompletionItemKind::Other));
     }
 
@@ -271,7 +316,14 @@ mod tests {
         let rope = Rope::from("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(&ctx, &lsp, params, &rope, OffsetEncoding::Utf16));
+        let items = run(fetch(
+            &ctx,
+            "test-server",
+            &lsp,
+            params,
+            &rope,
+            OffsetEncoding::Utf16,
+        ));
         assert_eq!(items[0].insert_text, "bare_label");
     }
 
@@ -291,7 +343,14 @@ mod tests {
         let rope = Rope::from("");
         let params = completion_params("/src/lib.rs", 0, 0);
         let ctx = ctx_at(0, 0);
-        let items = run(fetch(&ctx, &lsp, params, &rope, OffsetEncoding::Utf16));
+        let items = run(fetch(
+            &ctx,
+            "test-server",
+            &lsp,
+            params,
+            &rope,
+            OffsetEncoding::Utf16,
+        ));
         assert_eq!(items[0].insert_text, "method");
         assert_eq!(items[0].label, "method (display)");
     }

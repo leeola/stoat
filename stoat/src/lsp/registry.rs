@@ -111,6 +111,11 @@ impl LspRegistry {
         self.clients.contains_key(name)
     }
 
+    /// The client registered under server `name`, if up.
+    pub(crate) fn client(&self, name: &str) -> Option<Arc<dyn LspHost>> {
+        self.clients.get(name).cloned()
+    }
+
     /// Resolves a buffer of `language` to its primary host, preferring its own
     /// server, then the injected sole client, then a noop.
     ///

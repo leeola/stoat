@@ -71,6 +71,7 @@ pub fn fetch(
             is_snippet: false,
             documentation: None,
             lsp_item: None,
+            server: None,
         });
     }
     items

@@ -45,6 +45,7 @@ pub fn fetch(ctx: &CompletionContext<'_>, rope: &Rope) -> Vec<CompletionItem> {
             is_snippet: false,
             documentation: None,
             lsp_item: None,
+            server: None,
         })
         .collect()
 }

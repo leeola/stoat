@@ -111,3 +111,47 @@ fn whitespace_prefix_does_not_open_popup() {
         "whitespace prefix must not arm the popup",
     );
 }
+
+#[test]
+fn completion_merges_items_from_every_server() {
+    use crate::lsp::registry::ServerSelector;
+
+    let mut h = TestHarness::with_size(60, 16);
+    let server_a = std::sync::Arc::new(crate::host::FakeLsp::new());
+    let server_b = std::sync::Arc::new(crate::host::FakeLsp::new());
+    for server in [&server_a, &server_b] {
+        server.set_capabilities(ServerCapabilities {
+            completion_provider: Some(CompletionOptions::default()),
+            ..ServerCapabilities::default()
+        });
+    }
+    server_a.set_completions("/ws/buf.rs", 0, 3, &["foo_a"]);
+    server_b.set_completions("/ws/buf.rs", 0, 3, &["foo_b"]);
+    h.stoat.lsp_registry.insert("ra".into(), server_a.clone());
+    h.stoat
+        .lsp_registry
+        .insert("tailwind".into(), server_b.clone());
+    h.stoat.lsp_registry.set_selectors(
+        "rust".into(),
+        vec![
+            ServerSelector::all("ra".into()),
+            ServerSelector::all("tailwind".into()),
+        ],
+    );
+
+    open_scratch(&mut h, "");
+    h.type_keys("i");
+    h.type_text("foo");
+    h.advance_clock(COMPLETION_DEBOUNCE);
+
+    let popup = h.stoat.pending_completion.as_ref().expect("popup open");
+    let labels: Vec<&str> = popup.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"foo_a"),
+        "server A item merged: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"foo_b"),
+        "server B item merged: {labels:?}"
+    );
+}

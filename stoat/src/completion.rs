@@ -97,6 +97,11 @@ pub struct CompletionItem {
     /// can issue `completionItem/resolve` for the selected row.
     /// `None` for non-LSP sources.
     pub lsp_item: Option<Box<lsp_types::CompletionItem>>,
+    /// The registry name of the server that produced an LSP item, so
+    /// `completionItem/resolve` and additional-text-edit resolution route back
+    /// to it when several servers contribute completions. `None` for non-LSP
+    /// sources.
+    pub server: Option<String>,
 }
 
 /// In-flight completion popup. Held on
@@ -342,6 +347,7 @@ mod tests {
             is_snippet: true,
             documentation: None,
             lsp_item: None,
+            server: None,
         };
         assert_eq!(item.clone(), item);
     }
@@ -367,6 +373,7 @@ mod tests {
             is_snippet: false,
             documentation: None,
             lsp_item: None,
+            server: None,
         };
         let popup = CompletionPopup {
             items: vec![item.clone()],
@@ -410,6 +417,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             };
             assert_eq!(item.kind, Some(kind));
         }

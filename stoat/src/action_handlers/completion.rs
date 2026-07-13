@@ -75,11 +75,10 @@ pub(super) fn trigger_completion(stoat: &mut Stoat) -> UpdateEffect {
 /// `resolveProvider`. Storing the task replaces (cancels) any prior one,
 /// so navigating past a row drops its pending resolve.
 pub(crate) fn arm_completion_resolve(stoat: &mut Stoat) {
-    let Some((label, raw)) = resolve_plan(stoat) else {
+    let Some((label, raw, lsp)) = resolve_plan(stoat) else {
         stoat.pending_completion_resolve = None;
         return;
     };
-    let lsp = stoat.lsp_host();
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(RESOLVE_DEBOUNCE).await;
@@ -99,23 +98,32 @@ pub(crate) fn arm_completion_resolve(stoat: &mut Stoat) {
 /// when no resolve should fire. No resolve fires when the server does not
 /// advertise `resolveProvider`, the selected row is not an LSP item, or
 /// it already carries both detail and documentation.
-fn resolve_plan(stoat: &Stoat) -> Option<(String, lsp_types::CompletionItem)> {
-    if !resolve_advertised(stoat) {
-        return None;
-    }
+fn resolve_plan(
+    stoat: &Stoat,
+) -> Option<(
+    String,
+    lsp_types::CompletionItem,
+    std::sync::Arc<dyn crate::host::LspHost>,
+)> {
     let popup = stoat.pending_completion.as_ref()?;
     let item = popup.items.get(popup.selected_idx)?;
     let lsp_item = item.lsp_item.as_ref()?;
     if item.detail.is_some() && item.documentation.is_some() {
         return None;
     }
-    Some((item.label.clone(), (**lsp_item).clone()))
+    let host = item
+        .server
+        .as_deref()
+        .and_then(|name| stoat.lsp_registry.client(name))
+        .unwrap_or_else(|| stoat.lsp_host());
+    if !resolve_advertised(&host) {
+        return None;
+    }
+    Some((item.label.clone(), (**lsp_item).clone(), host))
 }
 
-fn resolve_advertised(stoat: &Stoat) -> bool {
-    stoat
-        .lsp_host()
-        .capabilities()
+fn resolve_advertised(host: &std::sync::Arc<dyn crate::host::LspHost>) -> bool {
+    host.capabilities()
         .completion_provider
         .as_ref()
         .and_then(|opts| opts.resolve_provider)
@@ -223,6 +231,7 @@ mod tests {
                 is_snippet: false,
                 documentation: None,
                 lsp_item: None,
+                server: None,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -275,6 +284,7 @@ mod tests {
                 label: label.to_string(),
                 ..Default::default()
             })),
+            server: None,
         }
     }
 
