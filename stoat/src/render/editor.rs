@@ -780,9 +780,30 @@ pub(crate) fn gutter_display_number(absolute: u32, current_line: Option<u32>) ->
 ///
 /// `current_line` selects relative numbering per [`gutter_display_number`]. The
 /// diagnostic mark stays keyed to the absolute buffer line.
+/// Map each folded row lying in a diff hunk to its staged flag, for the
+/// gutter's git mark. Rows outside any hunk are absent from the result.
+pub(crate) fn gutter_staged_marks(
+    snapshot: &DisplaySnapshot,
+    folded: &[(u32, u16)],
+) -> BTreeMap<u32, bool> {
+    let Some(diff_map) = snapshot.diff_map() else {
+        return BTreeMap::new();
+    };
+    folded
+        .iter()
+        .filter_map(|&(number, _)| {
+            let row = number - 1;
+            diff_map.staged_for_line(row).map(|staged| (row, staged))
+        })
+        .collect()
+}
+
 pub(crate) fn gutter_component_lines(
     folded: &[(u32, u16)],
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    staged_marks: &BTreeMap<u32, bool>,
+    staged_rgb: Option<[u8; 3]>,
+    unstaged_rgb: Option<[u8; 3]>,
     colors: &SeverityColors,
     current_line: Option<u32>,
 ) -> Vec<GutterLine> {
@@ -791,7 +812,13 @@ pub(crate) fn gutter_component_lines(
         .map(|&(number, height)| GutterLine {
             number: gutter_display_number(number, current_line),
             height,
-            git: None,
+            git: staged_marks.get(&(number - 1)).and_then(|&staged| {
+                if staged {
+                    staged_rgb
+                } else {
+                    unstaged_rgb
+                }
+            }),
             diagnostic: row_severity.get(&(number - 1)).map(|sev| Diagnostic {
                 color: severity_color(*sev, colors),
                 mark: severity_mark(*sev),
@@ -847,6 +874,10 @@ fn draw_line_number_gutter(
     let visible = end_row.saturating_sub(scroll_row).min(inner.height as u32);
     let (folded, width_digits) = gutter_geometry(snapshot, scroll_row, visible);
 
+    let staged_marks = gutter_staged_marks(snapshot, &folded);
+    let staged_rgb = style_rgb(theme.get(s::DIFF_ADDED).fg);
+    let unstaged_rgb = style_rgb(theme.get(s::DIFF_DELETED).fg);
+
     // Rich mode needs stoatty, a scene, and every gutter color as RGB.
     let rich = scene.filter(|_| stoatty).and_then(|scene| {
         let colors = severity?;
@@ -861,7 +892,15 @@ fn draw_line_number_gutter(
 
     match rich {
         Some((scene, colors, number_fg, bg)) => {
-            let lines = gutter_component_lines(&folded, row_severity, colors, current_line);
+            let lines = gutter_component_lines(
+                &folded,
+                row_severity,
+                &staged_marks,
+                staged_rgb,
+                unstaged_rgb,
+                colors,
+                current_line,
+            );
             let gutter = rich_gutter(&lines, width_digits, number_fg, bg);
             gutter.draw_components(inner, buf, scene);
             gutter.cell_width()
@@ -870,6 +909,7 @@ fn draw_line_number_gutter(
             &folded,
             width_digits,
             row_severity,
+            &staged_marks,
             current_line,
             inner,
             theme,
@@ -880,10 +920,12 @@ fn draw_line_number_gutter(
 
 /// Paint right-aligned cell line numbers and a one-column severity mark for a
 /// terminal without the sub-cell components. Returns the reserved cell columns.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_fallback_line_numbers(
     folded: &[(u32, u16)],
     width_digits: u16,
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    staged_marks: &BTreeMap<u32, bool>,
     current_line: Option<u32>,
     inner: Rect,
     theme: &crate::theme::Theme,
@@ -904,6 +946,13 @@ pub(crate) fn draw_fallback_line_numbers(
             buf[(inner.x, y)]
                 .set_char(severity_mark(*sev))
                 .set_style(theme.get(severity_scope(*sev)));
+        } else if let Some(&staged) = staged_marks.get(&(number - 1)) {
+            let (mark, scope) = if staged {
+                ('+', crate::theme::scope::DIFF_ADDED)
+            } else {
+                ('-', crate::theme::scope::DIFF_DELETED)
+            };
+            buf[(inner.x, y)].set_char(mark).set_style(theme.get(scope));
         }
         let text = format!("{}", gutter_display_number(number, current_line));
         let start = inner.x + mark_w + width_digits.saturating_sub(text.len() as u16);
@@ -1645,6 +1694,29 @@ mod tests {
         assert_eq!(
             rendered_gutter(&mut h.stoat, true, false, LineNumbers::Relative, 5),
             ["2", "1", "3", "1", "2"],
+        );
+    }
+
+    #[test]
+    fn gutter_marks_staged_and_unstaged_hunks() {
+        let mut h = Stoat::test();
+        h.stage_index_scenario(
+            "/repo",
+            &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(std::path::Path::new("/repo/f.txt"));
+        h.settle_diff_jobs();
+
+        let gutter = rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 6);
+        let joined = gutter.join("|");
+        assert!(
+            joined.contains('+'),
+            "the staged hunk shows + in the gutter mark column: {gutter:?}"
+        );
+        assert!(
+            joined.contains('-'),
+            "the unstaged hunk shows - in the gutter mark column: {gutter:?}"
         );
     }
 

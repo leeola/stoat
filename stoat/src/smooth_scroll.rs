@@ -37,8 +37,8 @@ use crate::{
         commits::paint_commit_rows,
         completion::paint_completion_rows,
         editor::{
-            draw_fallback_line_numbers, gutter_component_lines, gutter_geometry, rich_gutter,
-            RichGutterColors,
+            draw_fallback_line_numbers, gutter_component_lines, gutter_geometry,
+            gutter_staged_marks, rich_gutter, RichGutterColors,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -494,11 +494,20 @@ fn paint_page_gutter(
     let visible = end_row.saturating_sub(top_row).min(area.height as u32);
     let (folded, width_digits) = gutter_geometry(snapshot, top_row, visible);
 
+    let staged_marks = gutter_staged_marks(snapshot, &folded);
+    let staged_rgb =
+        crate::render::review::style_rgb(gutter.theme.get(crate::theme::scope::DIFF_ADDED).fg);
+    let unstaged_rgb =
+        crate::render::review::style_rgb(gutter.theme.get(crate::theme::scope::DIFF_DELETED).fg);
+
     match &gutter.rich {
         Some(rich) => {
             let lines = gutter_component_lines(
                 &folded,
                 &gutter.severity,
+                &staged_marks,
+                staged_rgb,
+                unstaged_rgb,
                 &rich.colors,
                 gutter.current_line,
             );
@@ -513,6 +522,7 @@ fn paint_page_gutter(
                 &folded,
                 width_digits,
                 &gutter.severity,
+                &staged_marks,
                 gutter.current_line,
                 area,
                 &gutter.theme,
