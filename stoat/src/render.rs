@@ -603,7 +603,7 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-    } else if !PRIMARY_MODES.contains(&mode.as_str()) || screen == Some("diff") {
+    } else if !PRIMARY_MODES.contains(&mode.as_str()) || screen == Some("review") {
         // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
         // mutable borrow of the active workspace, so read the flags directly.
         let state = StoatKeymapState::with_flags(
@@ -613,10 +613,10 @@ pub(crate) fn frame(
             },
         )
         .with_view(screen);
-        // The diff screen rides on normal mode, so scope to its own `view ==
-        // diff` bindings. A chord sub-mode owns its whole mode, so take them all.
-        let raw = if screen == Some("diff") {
-            stoat.keymap.scoped_bindings(&state, "view", "diff")
+        // The review screen rides on normal mode, so scope to its own `view ==
+        // review` bindings. A chord sub-mode owns its whole mode, so take them all.
+        let raw = if screen == Some("review") {
+            stoat.keymap.scoped_bindings(&state, "view", "review")
         } else {
             stoat.keymap.active_bindings(&state)
         };
@@ -627,7 +627,7 @@ pub(crate) fn frame(
                 (key.as_str(), desc)
             })
             .collect();
-        let footer = if screen == Some("diff") {
+        let footer = if screen == Some("review") {
             ws.review.as_ref().map(|session| {
                 let p = session.progress();
                 let complete = session.is_complete();
@@ -650,7 +650,7 @@ pub(crate) fn frame(
         } else {
             None
         };
-        let hint_label = if screen == Some("diff") {
+        let hint_label = if screen == Some("review") {
             "review"
         } else {
             mode.as_str()

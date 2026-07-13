@@ -265,7 +265,7 @@ mod tests {
         h.open_commits("/repo");
         h.type_keys("j"); // select second commit
         h.type_keys("o"); // open review of it
-        assert_eq!(h.stoat.current_view(), Some("diff"));
+        assert_eq!(h.stoat.current_view(), Some("review"));
         let session_sha = match h
             .stoat
             .active_workspace()
@@ -305,7 +305,7 @@ mod tests {
             );
         h.open_commits("/repo");
         h.type_keys("o");
-        assert_eq!(h.stoat.current_view(), Some("diff"));
+        assert_eq!(h.stoat.current_view(), Some("review"));
 
         // Stage the only chunk then dispatch removal.
         h.set_review_status(0, ChunkStatus::Staged);
@@ -336,7 +336,7 @@ mod tests {
         use crate::review_session::ChunkStatus;
         h.open_commits("/repo");
         h.type_keys("o");
-        assert_eq!(h.stoat.current_view(), Some("diff"));
+        assert_eq!(h.stoat.current_view(), Some("review"));
         h.set_review_status(0, ChunkStatus::Staged);
     }
 
@@ -549,7 +549,7 @@ mod tests {
         h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.type_keys("o");
-        assert_eq!(h.stoat.current_view(), Some("diff"));
+        assert_eq!(h.stoat.current_view(), Some("review"));
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewApplyStaged);
         let patches = h.fake_git().applied_patches(std::path::Path::new("/repo"));

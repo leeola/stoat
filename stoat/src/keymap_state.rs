@@ -72,8 +72,8 @@ impl StoatKeymapState {
     /// Set the `view` predicate value on an otherwise flag-built state.
     ///
     /// Lets the hint-overlay renderer scope bindings to the foreground screen
-    /// (`view == diff`) without a full [`Self::from_stoat`], which it cannot call
-    /// while holding a workspace borrow.
+    /// (`view == review`) without a full [`Self::from_stoat`], which it cannot
+    /// call while holding a workspace borrow.
     pub(crate) fn with_view(mut self, view: Option<&str>) -> Self {
         self.view = view.map(|v| StateValue::String(v.into()));
         self
@@ -143,15 +143,15 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     if let Some(View::Editor(id)) = focused_view(ws)
         && ws.editors.get(*id).is_some_and(|e| e.review_view.is_some())
     {
-        return Some("diff");
+        return Some("review");
     }
     match ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref()) {
         Some(RebasePause::Reword { .. }) => return Some("reword"),
         Some(RebasePause::Conflict { .. }) => return Some("conflict"),
         // An Edit pause reviews the picked commit. It normally installs a review
-        // session (caught by the `diff` check above), but the no-session
-        // fallback still needs the diff screen so RebaseContinue stays bound.
-        Some(RebasePause::Edit { .. }) => return Some("diff"),
+        // session (caught by the `review` check above), but the no-session
+        // fallback still needs the review screen so RebaseContinue stays bound.
+        Some(RebasePause::Edit { .. }) => return Some("review"),
         None => {},
     }
     if ws.rebase.is_some() {
@@ -353,7 +353,7 @@ mod tests {
         h.open_review_from_texts(&[("a.rs", "fn a() {}\n", "fn b() {}\n")]);
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "pane"), Some("editor".to_string()));
-        assert_eq!(field(&state, "view"), Some("diff".to_string()));
+        assert_eq!(field(&state, "view"), Some("review".to_string()));
     }
 
     #[test]

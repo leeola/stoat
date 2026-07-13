@@ -578,7 +578,7 @@ on key {
         Enter -> ConflictApply();
         : -> OpenCommandPalette();
     }
-    view == diff && mode == normal {
+    view == review && mode == normal {
         Escape -> CloseReview();
         q -> CloseReview();
         Tab -> ToggleDiff();
@@ -609,7 +609,7 @@ on key {
         r -> ReviewRefresh();
         : -> OpenCommandPalette();
     }
-    view == diff && rebase_exec {
+    view == review && rebase_exec {
         C -> RebaseContinue();
     }
     mode == insert {

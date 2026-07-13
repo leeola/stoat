@@ -2513,7 +2513,7 @@ mod tests {
 
         assert_eq!(
             h.stoat.current_view(),
-            Some("diff"),
+            Some("review"),
             "toggling back re-enters the diff screen"
         );
         assert!(!h.with_review(|s| s.toggled_off), "the session is unparked");
@@ -2552,7 +2552,7 @@ mod tests {
         // rescanning the working tree.
         h.stoat.open_review();
 
-        assert_eq!(h.stoat.current_view(), Some("diff"));
+        assert_eq!(h.stoat.current_view(), Some("review"));
         assert!(
             h.stoat.pending_review_scan.is_none(),
             "re-entry swaps the parked editor back rather than arming a scan",

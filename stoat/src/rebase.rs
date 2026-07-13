@@ -483,7 +483,7 @@ mod tests {
         h.type_keys("e");
         h.type_keys("Enter");
         // Stepper paused; opened review of the just-picked commit.
-        assert_eq!(h.stoat.current_view(), Some("diff"));
+        assert_eq!(h.stoat.current_view(), Some("review"));
         assert!(
             h.stoat.active_workspace().rebase_active.is_some(),
             "rebase execution state retained during edit"
@@ -517,7 +517,7 @@ mod tests {
         h.resize(90, 16);
         h.open_review_from_texts(&[("a.rs", "fn a() {}\n", "fn a_renamed() {}\n")]);
 
-        assert_eq!(h.stoat.current_view(), Some("diff"));
+        assert_eq!(h.stoat.current_view(), Some("review"));
         assert!(
             h.stoat.active_workspace().rebase_active.is_none(),
             "a plain review has no rebase in flight"
@@ -536,7 +536,7 @@ mod tests {
         h.type_keys("C");
         assert_eq!(
             h.stoat.current_view(),
-            Some("diff"),
+            Some("review"),
             "C is inert without a rebase"
         );
         assert!(h.stoat.active_workspace().rebase_active.is_none());
