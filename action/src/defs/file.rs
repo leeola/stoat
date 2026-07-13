@@ -61,6 +61,56 @@ impl Action for OpenFile {
     }
 }
 
+#[derive(Debug)]
+pub struct OpenConfigDef;
+
+impl ActionDef for OpenConfigDef {
+    fn name(&self) -> &'static str {
+        "OpenConfig"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenConfig
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "open the user config file"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open the user config at ~/.config/stoat/config.stcfg in the focused pane, creating it from the built-in default keymap when it does not yet exist."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["config"]
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenConfig;
+
+impl OpenConfig {
+    pub const DEF: &OpenConfigDef = &OpenConfigDef;
+}
+
+impl Action for OpenConfig {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 const OPEN_BUFFER_PARAMS: &[ParamDef] = &[ParamDef {
     name: "path",
     kind: ParamKind::String,

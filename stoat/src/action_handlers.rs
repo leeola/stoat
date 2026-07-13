@@ -126,6 +126,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             file::open_file(stoat, &open.path);
             UpdateEffect::Redraw
         },
+        ActionKind::OpenConfig => {
+            file::open_config(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::OpenBuffer => {
             let open = action
                 .as_any()

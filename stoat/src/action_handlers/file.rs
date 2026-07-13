@@ -649,6 +649,34 @@ pub(crate) fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
     open_file_in_pane(stoat, target, path)
 }
 
+/// Open the user config in the focused pane.
+///
+/// Resolves the config path from the environment, setting a status message
+/// when none can be resolved. Delegates the seed-and-open to [`open_config_at`].
+pub(crate) fn open_config(stoat: &mut Stoat) {
+    match crate::paths::user_config_path() {
+        Some(path) => open_config_at(stoat, &path),
+        None => stoat.set_status("could not resolve the user config path"),
+    }
+}
+
+/// Open `path` in the focused pane, seeding it with the built-in default keymap
+/// when the filesystem reports it missing.
+pub(crate) fn open_config_at(stoat: &mut Stoat, path: &Path) {
+    if !stoat.fs_host.exists(path) {
+        if let Some(parent) = path.parent() {
+            let _ = stoat.fs_host.create_dir_all(parent);
+        }
+        if let Err(err) = stoat
+            .fs_host
+            .write(path, crate::app::DEFAULT_KEYMAP.as_bytes())
+        {
+            tracing::error!("failed to seed user config {}: {}", path.display(), err);
+        }
+    }
+    open_file(stoat, path);
+}
+
 pub(crate) fn open_file_in_pane(
     stoat: &mut Stoat,
     target: PaneId,
@@ -830,6 +858,50 @@ mod tests {
             .snapshot
             .visible_text
             .to_string()
+    }
+
+    #[test]
+    fn open_config_seeds_the_default_when_missing() {
+        let mut h = TestHarness::with_size(80, 10);
+        let path = PathBuf::from("/cfg/config.stcfg");
+
+        super::open_config_at(&mut h.stoat, &path);
+
+        let mut bytes = Vec::new();
+        h.fake_fs()
+            .read(&path, &mut bytes)
+            .expect("the missing config was seeded");
+        assert_eq!(bytes, crate::app::DEFAULT_KEYMAP.as_bytes());
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        assert_eq!(buffer_text(&h, buffer_id), crate::app::DEFAULT_KEYMAP);
+    }
+
+    #[test]
+    fn open_config_opens_an_existing_config_unmodified() {
+        let mut h = TestHarness::with_size(80, 10);
+        let path = PathBuf::from("/cfg/config.stcfg");
+        let custom = "format_on_save = true;\n";
+        h.fake_fs().insert_file(&path, custom.as_bytes());
+
+        super::open_config_at(&mut h.stoat, &path);
+
+        let mut bytes = Vec::new();
+        h.fake_fs()
+            .read(&path, &mut bytes)
+            .expect("config readable");
+        assert_eq!(
+            bytes,
+            custom.as_bytes(),
+            "an existing config is opened without being overwritten"
+        );
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        assert_eq!(buffer_text(&h, buffer_id), custom);
     }
 
     fn focused_cursor_row(h: &mut TestHarness) -> u32 {
