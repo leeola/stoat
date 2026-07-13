@@ -178,6 +178,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::ToggleDiff => review::toggle_diff(stoat),
+        ActionKind::StageHunk => review::stage_hunk(stoat, review::HunkStage::Stage),
+        ActionKind::UnstageHunk => review::stage_hunk(stoat, review::HunkStage::Unstage),
+        ActionKind::ToggleStageHunk => review::stage_hunk(stoat, review::HunkStage::Toggle),
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
         ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
         ActionKind::SplitSelectionOnNewline => movement::split_selection_on_newline(stoat),

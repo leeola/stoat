@@ -6,6 +6,7 @@ use crate::{
     host::{GitHost, WatchToken},
     pane::View,
     review::{MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
+    review_apply::chunk_to_unified_diff,
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
@@ -608,7 +609,7 @@ pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
                     return None;
                 }
                 let file = session.files.get(c.file_index)?;
-                Some((*id, chunk_to_unified_diff(file, c, &workdir)))
+                Some((*id, chunk_to_unified_diff(file, c, &workdir, false)))
             })
             .collect();
         (staged, workdir)
@@ -926,6 +927,117 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
         let on = !editor.diff_view;
         editor.set_diff_view(on);
     }
+}
+
+/// How [`stage_hunk`] acts on the hunk under the cursor.
+#[derive(Clone, Copy)]
+pub(super) enum HunkStage {
+    Stage,
+    Unstage,
+    Toggle,
+}
+
+/// Stage, unstage, or toggle the git-index state of the diff hunk under the
+/// cursor in the focused editor.
+///
+/// The hunk is resolved by diffing the file's HEAD content against the live
+/// buffer and taking the chunk whose buffer rows contain the cursor, so the
+/// action works in any editor view on a git-tracked file. A missing repo, an
+/// untracked file, or a cursor away from any hunk sets a status message and
+/// changes nothing.
+///
+/// [`HunkStage::Toggle`] has no staged-state signal to read yet, so it stages
+/// by applying the forward patch and, only when that fails because the hunk is
+/// already staged, unstages by applying the reverse patch.
+pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
+    let Some((_editor_id, buffer_id)) = stoat.focused_editor_ids() else {
+        return UpdateEffect::None;
+    };
+
+    let (cursor_row, buffer_text) = {
+        let Some(editor) = super::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let head = buffer_snapshot.resolve_anchor(&sel.head());
+        let cursor_row = buffer_snapshot.rope().offset_to_point(head).row;
+        (cursor_row, buffer_snapshot.rope().to_string())
+    };
+
+    let Some(path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let git_root = stoat.active_workspace().git_root.clone();
+
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        stoat.set_status("not in a git repository");
+        return UpdateEffect::Redraw;
+    };
+    let Some(base_text) = repo.head_content(&path) else {
+        stoat.set_status("no hunk under the cursor");
+        return UpdateEffect::Redraw;
+    };
+
+    let rel = path
+        .strip_prefix(&git_root)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .into_owned();
+    let mut session = ReviewSession::new(ReviewSource::InMemory {
+        files: Arc::new(Vec::new()),
+    });
+    session.add_files(vec![ReviewFileInput {
+        path,
+        rel_path: rel,
+        language: None,
+        base_text: Arc::new(base_text),
+        buffer_text: Arc::new(buffer_text),
+    }]);
+
+    let Some(chunk_id) = session
+        .order
+        .iter()
+        .copied()
+        .find(|id| session.chunks[id].buffer_line_range.contains(&cursor_row))
+    else {
+        stoat.set_status("no hunk under the cursor");
+        return UpdateEffect::Redraw;
+    };
+
+    let (forward, reverse) = {
+        let chunk = &session.chunks[&chunk_id];
+        let file = &session.files[chunk.file_index];
+        (
+            chunk_to_unified_diff(file, chunk, &git_root, false),
+            chunk_to_unified_diff(file, chunk, &git_root, true),
+        )
+    };
+
+    let result = match mode {
+        HunkStage::Stage => repo.apply_to_index(&forward).map(|()| "staged hunk"),
+        HunkStage::Unstage => repo.apply_to_index(&reverse).map(|()| "unstaged hunk"),
+        HunkStage::Toggle => match repo.apply_to_index(&forward) {
+            Ok(()) => Ok("staged hunk"),
+            Err(_) => repo.apply_to_index(&reverse).map(|()| "unstaged hunk"),
+        },
+    };
+
+    match result {
+        Ok(message) => {
+            stoat.active_workspace_mut().invalidate_diff(buffer_id);
+            stoat.set_status(message);
+        },
+        Err(err) => stoat.set_status(format!("could not update staging: {err}")),
+    }
+
+    UpdateEffect::Redraw
 }
 
 /// Toggle the focused pane between the side-by-side diff and a plain editor
@@ -2211,6 +2323,86 @@ mod tests {
             h.with_review(|s| s.version),
             before_version,
             "unwatched write must not refresh the session",
+        );
+    }
+
+    fn open_git_file_at_cursor(h: &mut TestHarness, row: u32) -> PathBuf {
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, row);
+        workdir
+    }
+
+    #[test]
+    fn stage_hunk_applies_the_forward_patch_for_the_cursor_hunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_git_file_at_cursor(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("--- a/a.rs\n+++ b/a.rs\n"),
+            "targets a.rs: {patch}"
+        );
+        assert!(patch.contains("-c\n"), "removes the base line: {patch}");
+        assert!(patch.contains("+X\n"), "adds the buffer line: {patch}");
+    }
+
+    #[test]
+    fn unstage_hunk_applies_the_reverse_patch() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_git_file_at_cursor(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("-X\n"),
+            "reverse removes the buffer line: {patch}"
+        );
+        assert!(
+            patch.contains("+c\n"),
+            "reverse restores the base line: {patch}"
+        );
+    }
+
+    #[test]
+    fn toggle_stage_hunk_stages_when_the_forward_patch_applies() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_git_file_at_cursor(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(
+            patches.len(),
+            1,
+            "toggle stages via the forward patch: {patches:?}"
+        );
+        assert!(patches[0].contains("-c\n") && patches[0].contains("+X\n"));
+    }
+
+    #[test]
+    fn stage_hunk_off_a_hunk_is_a_message_only_noop() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_git_file_at_cursor(&mut h, 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        assert!(
+            h.fake_git().applied_patches(&workdir).is_empty(),
+            "cursor off a hunk applies nothing"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no hunk under the cursor")
         );
     }
 }

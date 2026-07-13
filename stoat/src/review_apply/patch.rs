@@ -22,27 +22,64 @@ const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 /// lacks a trailing newline and the chunk covers the file's final
 /// line, `\ No newline at end of file` is emitted on the affected
 /// side(s) per the gnu diff convention.
+///
+/// With `reverse` set, the base and buffer sides are swapped so the
+/// emitted patch undoes the chunk when applied. This is how a hunk is
+/// unstaged: libgit2's index apply has no reverse mode, so the reversal
+/// is expressed in the patch text itself.
 pub(crate) fn chunk_to_unified_diff(
     file: &ReviewFile,
     chunk: &ReviewChunk,
     workdir: &Path,
+    reverse: bool,
 ) -> String {
     let rel = file.path.strip_prefix(workdir).unwrap_or(&file.path);
+    if reverse {
+        let rows: Vec<ReviewRow> = chunk.hunk.rows.iter().map(swap_row).collect();
+        rows_to_unified_diff(rel, &file.buffer_text, &file.base_text, &rows)
+    } else {
+        rows_to_unified_diff(rel, &file.base_text, &file.buffer_text, &chunk.hunk.rows)
+    }
+}
+
+/// Swaps a row's two sides so a forward hunk emits as its reverse.
+///
+/// Context rows carry identical text on both sides, so the swap only
+/// matters for [`ReviewRow::Changed`] rows, whose `-`/`+` roles flip.
+fn swap_row(row: &ReviewRow) -> ReviewRow {
+    match row {
+        ReviewRow::Context { left, right } => ReviewRow::Context {
+            left: right.clone(),
+            right: left.clone(),
+        },
+        ReviewRow::Changed { left, right } => ReviewRow::Changed {
+            left: right.clone(),
+            right: left.clone(),
+        },
+    }
+}
+
+fn rows_to_unified_diff(
+    rel: &Path,
+    base_text: &str,
+    buffer_text: &str,
+    rows: &[ReviewRow],
+) -> String {
     let rel_display = rel.display();
 
-    let (base_start, base_count) = base_header(&chunk.hunk.rows);
-    let (buffer_start, buffer_count) = buffer_header(&chunk.hunk.rows);
+    let (base_start, base_count) = base_header(rows);
+    let (buffer_start, buffer_count) = buffer_header(rows);
 
-    let base_total = line_count(&file.base_text);
-    let buffer_total = line_count(&file.buffer_text);
-    let base_no_nl = !file.base_text.is_empty() && !file.base_text.ends_with('\n');
-    let buffer_no_nl = !file.buffer_text.is_empty() && !file.buffer_text.ends_with('\n');
+    let base_total = line_count(base_text);
+    let buffer_total = line_count(buffer_text);
+    let base_no_nl = !base_text.is_empty() && !base_text.ends_with('\n');
+    let buffer_no_nl = !buffer_text.is_empty() && !buffer_text.ends_with('\n');
 
-    let last_left_idx = last_row_with_left(&chunk.hunk.rows);
-    let last_right_idx = last_row_with_right(&chunk.hunk.rows);
+    let last_left_idx = last_row_with_left(rows);
+    let last_right_idx = last_row_with_right(rows);
 
-    let base_is_new_file = file.base_text.is_empty();
-    let buffer_is_deleted_file = file.buffer_text.is_empty();
+    let base_is_new_file = base_text.is_empty();
+    let buffer_is_deleted_file = buffer_text.is_empty();
 
     let mut out = String::new();
     out.push_str(&format!("diff --git a/{rel_display} b/{rel_display}\n"));
@@ -65,7 +102,7 @@ pub(crate) fn chunk_to_unified_diff(
         "@@ -{base_start},{base_count} +{buffer_start},{buffer_count} @@\n"
     ));
 
-    for (i, row) in chunk.hunk.rows.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         let is_last_left = Some(i) == last_left_idx;
         let is_last_right = Some(i) == last_right_idx;
 
@@ -221,7 +258,7 @@ mod tests {
         let id = session.order[0];
         let chunk = &session.chunks[&id];
         let file = &session.files[chunk.file_index];
-        chunk_to_unified_diff(file, chunk, Path::new("/work"))
+        chunk_to_unified_diff(file, chunk, Path::new("/work"), false)
     }
 
     #[test]
@@ -328,7 +365,7 @@ mod tests {
         );
         let chunk = &session.chunks[&session.order[0]];
         let file = &session.files[chunk.file_index];
-        let patch = chunk_to_unified_diff(file, chunk, Path::new("/work"));
+        let patch = chunk_to_unified_diff(file, chunk, Path::new("/work"), false);
         assert!(
             patch.starts_with(
                 "diff --git a/sub/a.txt b/sub/a.txt\n--- a/sub/a.txt\n+++ b/sub/a.txt\n"
@@ -403,7 +440,7 @@ mod tests {
         let id = session.order[0];
         let chunk = &session.chunks[&id];
         let file = &session.files[chunk.file_index];
-        let patch = chunk_to_unified_diff(file, chunk, &workdir);
+        let patch = chunk_to_unified_diff(file, chunk, &workdir, false);
 
         let host_repo = LocalGit::new().discover(&workdir).unwrap();
         host_repo
@@ -418,6 +455,83 @@ mod tests {
             std::str::from_utf8(blob.content()).unwrap(),
             "line1\nNEW\nline3\n",
             "index must reflect the applied change"
+        );
+    }
+
+    fn first_chunk_reverse_patch(path: &str, base: &str, buffer: &str) -> String {
+        let session = session_with_file(path, base, buffer);
+        let chunk = &session.chunks[&session.order[0]];
+        let file = &session.files[chunk.file_index];
+        chunk_to_unified_diff(file, chunk, Path::new("/work"), true)
+    }
+
+    #[test]
+    fn reverse_swaps_minus_and_plus_sides() {
+        let patch = first_chunk_reverse_patch("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        assert!(
+            patch.contains("@@ -1,3 +1,3 @@\n"),
+            "header stays 1,3/1,3: {patch}"
+        );
+        assert!(
+            patch.contains("-NEW\n"),
+            "buffer line becomes the deletion: {patch}"
+        );
+        assert!(
+            patch.contains("+OLD\n"),
+            "base line becomes the addition: {patch}"
+        );
+    }
+
+    #[test]
+    fn reverse_patch_unstages_from_the_index() {
+        use crate::host::{GitHost, LocalGit};
+        use git2::{Repository, Signature};
+
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().to_path_buf();
+        let repo = Repository::init(&workdir).unwrap();
+
+        std::fs::write(workdir.join("a.rs"), "line1\nOLD\nline3\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.rs")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = Signature::now("test", "t@t").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
+            .unwrap();
+
+        std::fs::write(workdir.join("a.rs"), "line1\nNEW\nline3\n").unwrap();
+
+        let mut session = ReviewSession::new(ReviewSource::WorkingTree {
+            workdir: workdir.clone(),
+        });
+        session.add_file(
+            workdir.join("a.rs"),
+            "a.rs".into(),
+            None,
+            Arc::new("line1\nOLD\nline3\n".into()),
+            Arc::new("line1\nNEW\nline3\n".into()),
+        );
+        let chunk = &session.chunks[&session.order[0]];
+        let file = &session.files[chunk.file_index];
+
+        let host_repo = LocalGit::new().discover(&workdir).unwrap();
+        host_repo
+            .apply_to_index(&chunk_to_unified_diff(file, chunk, &workdir, false))
+            .expect("forward patch stages into the index");
+        host_repo
+            .apply_to_index(&chunk_to_unified_diff(file, chunk, &workdir, true))
+            .expect("reverse patch applies to the staged index");
+
+        let mut index = repo.index().unwrap();
+        index.read(true).unwrap();
+        let entry = index.get_path(Path::new("a.rs"), 0).unwrap();
+        let blob = repo.find_blob(entry.id).unwrap();
+        assert_eq!(
+            std::str::from_utf8(blob.content()).unwrap(),
+            "line1\nOLD\nline3\n",
+            "reverse patch must restore HEAD content in the index"
         );
     }
 }

@@ -311,6 +311,17 @@ impl Workspace {
         self.diff_versions.remove(&id);
     }
 
+    /// Force the next [`Self::drive_diff_jobs`] pass to recompute `id`'s diff
+    /// map by dropping its recorded version and any in-flight job.
+    ///
+    /// Used after a git-index mutation so the buffer re-diffs. The recompute
+    /// stays HEAD-relative, so the hunks are unchanged until the base becomes
+    /// index-aware.
+    pub(crate) fn invalidate_diff(&mut self, id: BufferId) {
+        self.diff_jobs.remove(&id);
+        self.diff_versions.remove(&id);
+    }
+
     /// Build a fresh [`EditorState`] for `buffer_id`, seeded with the buffer's
     /// retained tree-sitter and LSP tokens when the registry holds them.
     ///

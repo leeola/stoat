@@ -94,7 +94,7 @@ use crate::{
             JumpToPrevMoveSource, OpenReviewCommit, OpenReviewCommitRange, QueryMoveRelationships,
             ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk, ReviewRefresh,
             ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
-            ReviewUnstageChunk, ToggleDiff,
+            ReviewUnstageChunk, StageHunk, ToggleDiff, ToggleStageHunk, UnstageHunk,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -175,6 +175,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
     add(Diff::DEF, |_| Ok(Box::new(Diff)));
     add(ToggleDiff::DEF, |_| Ok(Box::new(ToggleDiff)));
+    add(StageHunk::DEF, |_| Ok(Box::new(StageHunk)));
+    add(UnstageHunk::DEF, |_| Ok(Box::new(UnstageHunk)));
+    add(ToggleStageHunk::DEF, |_| Ok(Box::new(ToggleStageHunk)));
     add(JumpToMoveSource::DEF, |_| Ok(Box::new(JumpToMoveSource)));
     add(JumpToMoveTarget::DEF, |_| Ok(Box::new(JumpToMoveTarget)));
     add(JumpToNextMoveSource::DEF, |_| {
@@ -1232,6 +1235,7 @@ mod tests {
         // + 2 PalettePageUp, PalettePageDown.
         // + 1 OpenBuffer.
         // + 1 ToggleDiff.
+        // + 3 StageHunk, UnstageHunk, ToggleStageHunk.
         // + 1 ToggleSyntaxHighlight.
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
@@ -1256,7 +1260,7 @@ mod tests {
         // + 2 JoinSelections / JoinSelectionsSpace.
         // + 1 AutoReload.
         // + 1 PaletteCompletePath.
-        assert_eq!(all().count(), 338);
+        assert_eq!(all().count(), 341);
     }
 
     #[test]

@@ -25,6 +25,44 @@ define_action!(
 );
 
 define_action!(
+    StageHunkDef,
+    StageHunk,
+    "StageHunk",
+    ActionKind::StageHunk,
+    "stage the hunk under the cursor",
+    "Apply the diff hunk under the cursor to the git index, staging just \
+     that change. Works in any editor view on a git-tracked file, and is \
+     a no-op with a status message when the cursor is not on a hunk.",
+    ActionPriority::Common
+);
+
+define_action!(
+    UnstageHunkDef,
+    UnstageHunk,
+    "UnstageHunk",
+    ActionKind::UnstageHunk,
+    "unstage the hunk under the cursor",
+    "Reverse-apply the diff hunk under the cursor against the git index, \
+     unstaging just that change. Works in any editor view on a git-tracked \
+     file, and is a no-op with a status message when the cursor is not on \
+     a hunk.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ToggleStageHunkDef,
+    ToggleStageHunk,
+    "ToggleStageHunk",
+    ActionKind::ToggleStageHunk,
+    "toggle staging of the hunk under the cursor",
+    "Stage the diff hunk under the cursor when it is unstaged, or unstage \
+     it when it is already staged. Works in any editor view on a \
+     git-tracked file, and is a no-op with a status message when the \
+     cursor is not on a hunk.",
+    ActionPriority::Common
+);
+
+define_action!(
     JumpToMoveSourceDef,
     JumpToMoveSource,
     "JumpToMoveSource",

@@ -615,6 +615,9 @@ on key {
     view == diff && mode == normal {
         n -> GotoNextChange();
         p -> GotoPrevChange();
+        s -> StageHunk();
+        u -> UnstageHunk();
+        Space -> ToggleStageHunk();
     }
     mode == insert {
         Escape -> SetMode(normal);

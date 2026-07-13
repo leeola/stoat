@@ -83,7 +83,7 @@ pub use defs::{
         JumpToPrevMoveSource, OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange,
         QueryMoveRelationships, ReviewApplyStaged, ReviewExternalEdit, ReviewNextChunk,
         ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk,
-        ReviewToggleStage, ReviewUnstageChunk, ToggleDiff,
+        ReviewToggleStage, ReviewUnstageChunk, StageHunk, ToggleDiff, ToggleStageHunk, UnstageHunk,
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     terminal::Terminal,
