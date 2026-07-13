@@ -202,6 +202,34 @@ impl DiffMap {
         }
     }
 
+    /// The git-index staged state of the hunk containing `line`, or `None`
+    /// when no hunk covers it.
+    ///
+    /// `Some(true)` marks a hunk already applied to the index, `Some(false)`
+    /// an unstaged one. Deletion hunks occupy no buffer rows, so no line
+    /// resolves to one here.
+    pub fn staged_for_line(&self, line: u32) -> Option<bool> {
+        let target = HunkKeyRef(Some(&line));
+        let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
+        cursor.seek(&target, Bias::Right);
+        cursor.prev();
+        cursor
+            .item()
+            .filter(|hunk| hunk.buffer_line_range.contains(&line))
+            .map(|hunk| hunk.staged)
+    }
+
+    /// Count hunks by staged state as `(staged, unstaged)` for a statusline.
+    pub fn staged_counts(&self) -> (usize, usize) {
+        self.hunks.iter().fold((0, 0), |(staged, unstaged), hunk| {
+            if hunk.staged {
+                (staged + 1, unstaged)
+            } else {
+                (staged, unstaged + 1)
+            }
+        })
+    }
+
     pub fn has_deletion_after(&self, line: u32) -> bool {
         let target_line = line + 1;
         let target = HunkKeyRef(Some(&target_line));

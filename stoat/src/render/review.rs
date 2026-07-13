@@ -162,6 +162,12 @@ pub(crate) fn paint_diff_rows(
                     buf,
                     fallback_style,
                 );
+                if let Some(staged) = snapshot
+                    .diff_map()
+                    .and_then(|dm| dm.staged_for_line(buffer_row))
+                {
+                    paint_staged_glyph(buf, right_start, y, staged, theme);
+                }
                 if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
                     let text = snapshot.display_line(display_row);
                     render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
@@ -182,6 +188,22 @@ pub(crate) fn paint_diff_rows(
             },
         }
     }
+}
+
+/// Paint the git-index staged glyph for a hunk row into a 1-cell status
+/// column. Staged hunks show `+` in the add color, unstaged `-` in the delete
+/// color, matching [`paint_status_gutter`]'s convention.
+fn paint_staged_glyph(buf: &mut Buffer, x: u16, y: u16, staged: bool, theme: &crate::theme::Theme) {
+    use crate::theme::scope as s;
+    if x >= buf.area.x + buf.area.width {
+        return;
+    }
+    let (ch, style) = if staged {
+        ('+', theme.get(s::DIFF_ADDED))
+    } else {
+        ('-', theme.get(s::DIFF_DELETED))
+    };
+    buf[(x, y)].set_char(ch).set_style(style);
 }
 
 /// Count the base-present display rows above `scroll_row` to get the base-file
@@ -848,6 +870,58 @@ mod tests {
         let mut editor = EditorState::new(BufferId::new(0), shared, executor);
         editor.set_diff_view(true);
         editor
+    }
+
+    fn diff_editor_staged(base: &str, index: &str, text: &str) -> EditorState {
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut tb = TextBuffer::with_text(BufferId::new(0), text);
+        let index_changed: Vec<std::ops::Range<u32>> =
+            DiffMap::from_structural_changes(structural_diff::diff(index, text), index, text)
+                .hunks_in_range(0..u32::MAX)
+                .iter()
+                .map(|h| h.buffer_line_range.clone())
+                .collect();
+        tb.diff_map = Some(DiffMap::from_structural_changes_staged(
+            structural_diff::diff(base, text),
+            base,
+            text,
+            &index_changed,
+        ));
+        let shared = Arc::new(RwLock::new(tb));
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor);
+        editor.set_diff_view(true);
+        editor
+    }
+
+    #[test]
+    fn diff_view_marks_staged_and_unstaged_hunks_in_the_status_column() {
+        // HEAD a/b/c/d; buffer changes line 1 (B) and line 3 (D); the index
+        // holds only the line-1 change, so line 1 is staged, line 3 is not.
+        let mut editor = diff_editor_staged("a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n");
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            false,
+        );
+
+        // The right (buffer) status column sits at right_start = (width-1)/2 + 1.
+        let status_col = (40 - 1) / 2 + 1;
+        let glyphs: String = (0..area.height)
+            .map(|y| buf[(status_col, y)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            glyphs.contains('+'),
+            "the staged hunk shows + in the status column: {glyphs:?}"
+        );
+        assert!(
+            glyphs.contains('-'),
+            "the unstaged hunk shows - in the status column: {glyphs:?}"
+        );
     }
 
     #[test]

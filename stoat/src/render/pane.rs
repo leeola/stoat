@@ -408,6 +408,14 @@ fn status_segments(
                 right_anchor = start;
             }
         }
+        if let Some(text) = focused_staged_label(view, editors, buffers) {
+            let width = text.chars().count() as u16;
+            let start = right_anchor.saturating_sub(width);
+            if start >= cursor {
+                right.push((text, base_style));
+                right_anchor = start;
+            }
+        }
         if let Some(message) = frame.status_message {
             let available = right_anchor.saturating_sub(cursor) as usize;
             if available > 0 {
@@ -543,6 +551,26 @@ fn focused_diagnostic_label(
         parts.push(format!("H{}", summary.hint));
     }
     Some((format!(" {} ", parts.join(" ")), worst))
+}
+
+/// Statusline label counting the focused buffer's staged and unstaged diff
+/// hunks, or `None` when the buffer has no diff map or no hunks.
+fn focused_staged_label(
+    view: &View,
+    editors: &SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+) -> Option<String> {
+    let View::Editor(editor_id) = view else {
+        return None;
+    };
+    let editor = editors.get(*editor_id)?;
+    let shared = buffers.get(editor.buffer_id)?;
+    let guard = shared.read().ok()?;
+    let (staged, unstaged) = guard.diff_map.as_ref().map(|dm| dm.staged_counts())?;
+    if staged == 0 && unstaged == 0 {
+        return None;
+    }
+    Some(format!(" {staged} staged / {unstaged} unstaged "))
 }
 
 fn diagnostic_severity_scope(severity: DiagnosticSeverity) -> &'static str {
@@ -729,5 +757,32 @@ mod tests {
             .diagnostics
             .replace_for_path(path, vec![diag(DiagnosticSeverity::WARNING)]);
         h.assert_snapshot("status_bar_diagnostic_badge_warning_color");
+    }
+
+    #[test]
+    fn statusline_shows_staged_and_unstaged_counts() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+        h.stage_index_scenario(
+            "/repo",
+            &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(std::path::Path::new("/repo/f.txt"));
+        h.settle_diff_jobs();
+        h.snapshot();
+
+        let buf = h.rendered_buffer();
+        let rendered: String = (buf.area.y..buf.area.y + buf.area.height)
+            .map(|y| {
+                (buf.area.x..buf.area.x + buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("1 staged / 1 unstaged"),
+            "statusline reports the hunk counts:\n{rendered}"
+        );
     }
 }
