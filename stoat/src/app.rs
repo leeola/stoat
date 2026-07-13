@@ -1511,6 +1511,9 @@ impl Stoat {
     /// pool's buffered window.
     fn tick_scroll_anim(&mut self, dt: f32) -> bool {
         let mut animating = false;
+        // Resolved before the loop because its &mut borrow forbids reading
+        // settings inside. The default mirrors the post-key view-follow.
+        let scrolloff = self.settings.scrolloff.unwrap_or(3);
         for editor in self.active_workspace_mut().editors.values_mut() {
             if editor.scroll_velocity != 0.0 {
                 let max_offset = action_handlers::movement::max_scroll_offset(editor);
@@ -1529,9 +1532,11 @@ impl Stoat {
                     // coast slows to a near standstill. Arm a page glide onto
                     // the rounded row instead so the final fraction eases in.
                     editor.scroll_row = offset.round().clamp(0.0, max_offset) as u32;
+                    action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
                     editor.scroll_glide = true;
                 } else {
                     editor.scroll_row = offset.floor() as u32;
+                    action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
                 }
                 animating = true;
             } else if editor.scroll_glide {
@@ -1979,17 +1984,15 @@ impl Stoat {
                 let effect = self.handle_key(key);
                 let cursor_moved = self.focused_cursor_pos() != before;
 
-                // Re-follow the cursor when the key moved it (the normal
-                // view-follow) or when a mouse-wheel scroll had decoupled the
-                // view. The decoupled case snaps a stranded view back to the
-                // cursor even on a clamped no-op key. The wheel flag is consumed
-                // either way. A keyboard scroll (z j / z k) never sets it, so
-                // the view it deliberately moved stays put.
+                // Re-follow the cursor when a key moved it, pulling the view
+                // along so a count jump past the margin lands the view on the
+                // cursor rather than stranding it on the edge. A keyboard scroll
+                // (z j / z k) never moves the cursor, so its view stays put, and
+                // a wheel coast already drags the cursor into view as it scrolls.
                 let scrolloff = self.settings.scrolloff.unwrap_or(3);
                 let scrolled = match action_handlers::focused_editor_mut(self) {
                     Some(editor) => {
-                        let decoupled = std::mem::take(&mut editor.scroll_decoupled);
-                        (cursor_moved || decoupled)
+                        cursor_moved
                             && action_handlers::movement::ensure_cursor_in_view(editor, scrolloff)
                     },
                     None => false,
@@ -6201,6 +6204,60 @@ mod tests {
                 .scroll_velocity,
             0.0,
             "settled velocity is zero"
+        );
+    }
+
+    #[test]
+    fn wheel_coast_drags_cursor_into_view_no_key_snapback() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        // The cursor starts at the top. Wheel-flick the view downward and let
+        // it settle.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            for _ in 0..4 {
+                action_handlers::movement::wheel_impulse(editor, true);
+            }
+        }
+        for _ in 0..1000 {
+            if !h.stoat.is_animating() {
+                break;
+            }
+            h.stoat.tick_scroll_anim(0.016);
+        }
+
+        let (coasted, row) = {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            let snapshot = editor.display_map.snapshot();
+            let buffer_snapshot = snapshot.buffer_snapshot();
+            let head = editor.selections.newest_anchor().head();
+            let offset = buffer_snapshot.resolve_anchor(&head);
+            let row = buffer_snapshot.rope().offset_to_point(offset).row;
+            (editor.scroll_row, row)
+        };
+        assert!(coasted > 3, "the wheel coast advanced the view");
+        assert!(
+            row >= coasted + 3 && row < coasted + 10,
+            "the coast dragged the cursor into the scrolloff band \
+             (scroll_row {coasted}, cursor_row {row})",
+        );
+
+        // A later cursor motion follows normally. The view does not snap back to
+        // where the cursor used to be.
+        h.type_keys("k");
+        let after = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .scroll_row;
+        assert!(
+            after + 2 >= coasted,
+            "the view stays at the coasted position rather than snapping back \
+             (coasted {coasted}, after {after})",
         );
     }
 

@@ -3827,11 +3827,9 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
 /// accumulate into a faster glide that the per-frame tick integrates. Re-seeds
 /// `scroll_offset` from `scroll_row` first when another path moved the integer
 /// row out from under the fraction, so the glide starts from the visible
-/// position. Never touches the cursor or `scroll_row`, so a coast never drags
-/// the selection.
-///
-/// Marks the view [`EditorState::scroll_decoupled`], so the next key re-couples
-/// the view to the cursor even when the wheel scrolled the cursor off screen.
+/// position. Only the velocity changes here. The tick that integrates it
+/// advances `scroll_row` and drags the cursor along via
+/// [`clamp_cursor_to_view`], so the view and selection never decouple.
 pub(crate) fn wheel_impulse(editor: &mut EditorState, down: bool) {
     const IMPULSE: f32 = 60.0;
     const MAX_VEL: f32 = 240.0;
@@ -3841,7 +3839,6 @@ pub(crate) fn wheel_impulse(editor: &mut EditorState, down: bool) {
     }
     let delta = if down { IMPULSE } else { -IMPULSE };
     editor.scroll_velocity = (editor.scroll_velocity + delta).clamp(-MAX_VEL, MAX_VEL);
-    editor.scroll_decoupled = true;
 }
 
 /// Largest `scroll_row` (a display row) that keeps the last display row in
@@ -4037,6 +4034,100 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
             .min(max_scroll);
     }
     editor.scroll_row != before
+}
+
+/// The dual of [`ensure_cursor_in_view`]: move the cursor to the view rather
+/// than the view to the cursor.
+///
+/// A wheel coast advances `scroll_row` past a stationary cursor. This drags the
+/// selection back inside the scrolloff band so the two never decouple, and a
+/// later cursor motion has no stranded view to snap back. Self-gates to a no-op
+/// when the primary cursor already sits inside the band.
+///
+/// Every selection shifts by the primary cursor's band-correction delta, the way
+/// a count `j`/`k` moves them together, preserving each goal column and clipping
+/// block rows toward the direction of travel. Extends the selection in select
+/// mode. Returns whether any selection moved.
+pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> bool {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let sel = editor.selections.newest_anchor().clone();
+    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+    let cursor = cursor_offset(rope, tail_off, head_off);
+    let cursor_row = snapshot.buffer_to_display(rope.offset_to_point(cursor)).row;
+
+    let top = scrolloff.min(viewport.saturating_sub(1) / 2);
+    let bottom = scrolloff.min(viewport / 2);
+    let max_row = snapshot.max_point().row;
+
+    let band_top = editor.scroll_row + top;
+    let band_bottom = (editor.scroll_row + viewport.saturating_sub(1))
+        .saturating_sub(bottom)
+        .min(max_row);
+
+    let (target_row, clip_bias) = if cursor_row < band_top {
+        (band_top.min(max_row), Bias::Right)
+    } else if cursor_row > band_bottom {
+        (band_bottom, Bias::Left)
+    } else {
+        return false;
+    };
+    if target_row == cursor_row {
+        return false;
+    }
+    let row_delta = target_row as i64 - cursor_row as i64;
+
+    let extend = editor.mode == "select";
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
+        let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
+        let sel_cursor = cursor_offset(rope, tail_offset, head_offset);
+        let cursor_display = snapshot.buffer_to_display(rope.offset_to_point(sel_cursor));
+        let goal_col = match sel.goal {
+            SelectionGoal::Column(c) => c,
+            SelectionGoal::None => cursor_display.column,
+        };
+        let new_row_i = (cursor_display.row as i64).saturating_add(row_delta);
+        let new_row = new_row_i.clamp(0, max_row as i64) as u32;
+        if new_row == cursor_display.row {
+            return sel.clone();
+        }
+        let clamped_col = goal_col.min(snapshot.line_len(new_row));
+        let clipped = snapshot.clip_point(DisplayPoint::new(new_row, clamped_col), clip_bias);
+        let Some(buffer_pt) = snapshot.display_to_buffer(clipped) else {
+            return sel.clone();
+        };
+        let offset = rope.point_to_offset(buffer_pt);
+        if extend {
+            let cursor_target = if clamped_col > 0 && rope.chars_at(offset).next() == Some('\n') {
+                rope.reversed_chars_at(offset)
+                    .next()
+                    .map_or(offset, |c| offset - c.len_utf8())
+            } else {
+                offset
+            };
+            extend_head_to_cursor(
+                sel,
+                cursor_target,
+                SelectionGoal::Column(goal_col),
+                rope,
+                buffer_snapshot,
+            )
+        } else {
+            land_block_cursor(
+                sel.id,
+                offset,
+                SelectionGoal::Column(goal_col),
+                rope,
+                buffer_snapshot,
+            )
+        }
+    });
+    true
 }
 
 pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -> UpdateEffect {
@@ -4345,32 +4436,127 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wheel_stranded_view_refollows_on_clamped_key() {
-        let mut h = TestHarness::with_size(40, 12);
+    /// Insert a single collapsed cursor at the buffer point `(row, col)`.
+    fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let offset = buffer_snapshot.rope().point_to_offset(Point::new(row, col));
+        let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
+        editor.selections = crate::selection::SelectionsCollection::new();
+        editor
+            .selections
+            .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
+    }
+
+    /// The buffer point of the focused editor's block cursor.
+    fn focused_cursor_point(h: &mut TestHarness) -> Point {
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let tail = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head = buffer_snapshot.resolve_anchor(&sel.head());
+        let cursor = cursor_offset(buffer_snapshot.rope(), tail, head);
+        buffer_snapshot.rope().offset_to_point(cursor)
+    }
+
+    fn open_hundred_lines(h: &mut TestHarness) {
         let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
         let path = h.write_file("long.rs", &body);
         h.open_file(&path);
+    }
 
+    #[test]
+    fn clamp_cursor_to_view_pulls_above_band_cursor_to_the_top() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_hundred_lines(&mut h);
         {
             let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
-            // Simulate a settled mouse-wheel scroll. The view moved down and is
-            // marked decoupled, stranding the row-0 cursor off screen above it.
+            place_cursor(editor, 0, 5);
             editor.scroll_row = 40;
-            wheel_impulse(editor, true);
+            // band = [40+3, 40+9-3] = [43, 46]; the row-0 cursor sits above it.
+            assert!(
+                clamp_cursor_to_view(editor, 3),
+                "an above-band cursor moves"
+            );
+            assert_eq!(editor.scroll_row, 40, "the view is left untouched");
         }
-
-        // The cursor is on row 0, off-screen above the stranded view, so `k` is
-        // a clamped no-op that never moves it -- the view must re-follow anyway.
-        h.type_keys("k");
-
         assert_eq!(
-            focused_editor_mut(&mut h.stoat)
-                .expect("focused editor")
-                .scroll_row,
-            0,
-            "a clamped no-op key re-couples a wheel-stranded view to the cursor",
+            focused_cursor_point(&mut h),
+            Point::new(43, 5),
+            "the cursor lands on the band top with its column preserved",
+        );
+    }
+
+    #[test]
+    fn clamp_cursor_to_view_is_a_noop_inside_the_band() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_hundred_lines(&mut h);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            place_cursor(editor, 45, 5);
+            editor.scroll_row = 40;
+            assert!(
+                !clamp_cursor_to_view(editor, 3),
+                "an in-band cursor does not move and returns false"
+            );
+            assert_eq!(editor.scroll_row, 40);
+        }
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(45, 5),
+            "the cursor is left where it was"
+        );
+    }
+
+    #[test]
+    fn clamp_cursor_to_view_extends_in_select_mode() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_hundred_lines(&mut h);
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+        editor.mode = "select".to_string();
+        place_cursor(editor, 0, 0);
+        editor.scroll_row = 40;
+        assert!(clamp_cursor_to_view(editor, 3));
+
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let tail_row = buffer_snapshot
+            .rope()
+            .offset_to_point(buffer_snapshot.resolve_anchor(&sel.tail()))
+            .row;
+        let head_row = buffer_snapshot
+            .rope()
+            .offset_to_point(buffer_snapshot.resolve_anchor(&sel.head()))
+            .row;
+        assert_eq!(tail_row, 0, "select mode keeps the anchor at its origin");
+        assert_eq!(head_row, 43, "the head extends down to the band top");
+    }
+
+    #[test]
+    fn clamp_cursor_to_view_clamps_column_to_a_short_edge_line() {
+        let mut h = TestHarness::with_size(40, 12);
+        let mut body = String::from("0123456789\n");
+        body.push_str(&"ab\n".repeat(99));
+        let path = h.write_file("mixed.rs", &body);
+        h.open_file(&path);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            place_cursor(editor, 0, 6);
+            editor.scroll_row = 40;
+            assert!(clamp_cursor_to_view(editor, 3));
+        }
+        // The band-top row 43 is "ab" (length 2), so the goal column 6 clamps
+        // onto the line's end rather than overrunning it.
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(43, 2),
+            "the goal column clamps to the short line's length",
         );
     }
 
