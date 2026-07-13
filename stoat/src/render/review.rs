@@ -240,7 +240,7 @@ fn render_review_empty(watching: bool, inner: Rect, theme: &crate::theme::Theme,
 /// X column where the right pane's text begins. Mirrors the right-pane layout
 /// in [`render_review_rows`]: a status glyph then a line-number column precede
 /// the text on each side.
-fn right_text_x(inner: Rect) -> u16 {
+pub(crate) fn right_text_x(inner: Rect) -> u16 {
     let full_w = inner.width as usize;
     let sep: usize = 1;
     let half_w = (full_w.saturating_sub(sep)) / 2;

@@ -3228,7 +3228,14 @@ impl Stoat {
         let ws = self.active_workspace_mut();
         let editor = ws.editors.get_mut(editor_id)?;
         let scroll_row = editor.scroll_row;
-        let gutter_width = editor.gutter_width;
+        // The diff view puts the editable text in the right column, so a click
+        // maps against the right column's start rather than the left gutter.
+        // Cells left of it (the base column and gutters) clamp to the line start.
+        let gutter_width = if editor.diff_view {
+            crate::render::review::right_text_x(area).saturating_sub(area.x)
+        } else {
+            editor.gutter_width
+        };
         let snapshot = editor.display_map.snapshot();
         crate::render::editor::display_cell_to_offset(&snapshot, scroll_row, gutter_width, col, row)
     }
@@ -10680,6 +10687,53 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    #[test]
+    fn diff_view_click_maps_into_the_right_column() {
+        let mut h = Stoat::test();
+        open_scratch_file(&mut h, "keep\nnew\ntail\n");
+
+        let (editor_id, buffer_id) = {
+            let ws = h.stoat.active_workspace();
+            let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+                View::Editor(id) => id,
+                _ => panic!("focused pane is not an editor"),
+            };
+            (editor_id, ws.editors[editor_id].buffer_id)
+        };
+        {
+            let base = "keep\nold\ntail\n";
+            let text = "keep\nnew\ntail\n";
+            let dm = crate::diff_map::DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(base, text),
+                base,
+                text,
+            );
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .diff_map = Some(dm);
+        }
+        h.stoat.active_workspace_mut().editors[editor_id].set_diff_view(true);
+
+        let area = Rect::new(0, 0, 40, 10);
+        // For width 40 the right text begins at col 26, so col 28 row 0 is the
+        // right column's 2nd character of the context line "keep".
+        assert_eq!(
+            h.stoat.editor_screen_to_offset(editor_id, area, 28, 0),
+            Some(2),
+            "a click in the right column lands on the buffer character"
+        );
+        assert_eq!(
+            h.stoat.editor_screen_to_offset(editor_id, area, 8, 0),
+            Some(0),
+            "a click left of the right column clamps to the buffer line start"
+        );
     }
 
     #[test]
