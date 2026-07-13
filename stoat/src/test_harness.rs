@@ -590,6 +590,17 @@ impl TestHarness {
         }
     }
 
+    /// Drive the background diff-populate job to completion for visible buffers.
+    ///
+    /// One pass spawns the blocking jobs, [`Self::settle`] runs them, and the
+    /// second pass installs the resulting diff maps. Requires `diff_warm_auto`.
+    pub(crate) fn settle_diff_jobs(&mut self) {
+        for _ in 0..2 {
+            self.stoat.drive_background();
+            self.settle();
+        }
+    }
+
     pub fn snapshot(&mut self) -> &Frame {
         self.capture("snapshot");
         self.frames.last().expect("no frames captured")

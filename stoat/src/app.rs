@@ -5162,6 +5162,26 @@ impl Stoat {
         );
     }
 
+    /// Populate the active workspace's visible git-tracked buffers' diff maps.
+    ///
+    /// Gated on [`Self::diff_warm_auto`] like the diff-cache warm, so the test
+    /// harness never spawns git diff jobs unbidden. Production enables it at
+    /// startup.
+    fn drive_diff_jobs(&mut self) {
+        if !self.diff_warm_auto {
+            return;
+        }
+        let Self {
+            workspaces,
+            active_workspace,
+            executor,
+            git_host,
+            redraw_notify,
+            ..
+        } = self;
+        workspaces[*active_workspace].drive_diff_jobs(executor, git_host, redraw_notify);
+    }
+
     /// Paint the current state into a fresh [`Buffer`] and return it.
     ///
     /// A convenience wrapper over [`Self::paint_into`] for the test harness,
@@ -5965,6 +5985,7 @@ impl Stoat {
         action_handlers::sync_file_finder_preview(self);
         action_handlers::file::pump_auto_reload(self);
         self.drive_parse_jobs();
+        self.drive_diff_jobs();
         action_handlers::pump_commits(self);
         action_handlers::pump_review_scan(self);
         action_handlers::pump_lsp_jumps(self);

@@ -2910,6 +2910,22 @@ mod tests {
     }
 
     #[test]
+    fn goto_next_change_uses_a_background_populated_diff_map() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        h.stage_review_scenario("/repo", &[("s.txt", "a\nb\nc\n", "a\nX\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(std::path::Path::new("/repo/s.txt"));
+        h.settle_diff_jobs();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        assert_eq!(
+            h.primary_head_offset(),
+            2,
+            "the background-populated diff map drives GotoNextChange to the modified row",
+        );
+    }
+
+    #[test]
     fn goto_prev_change_jumps_backward() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 10);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");

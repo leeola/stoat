@@ -36,7 +36,7 @@ use std::{
     collections::HashMap,
     future::Future,
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -173,6 +173,16 @@ pub struct Workspace {
     /// dropped when the plan completes or aborts.
     pub(crate) rebase_active: Option<ActiveRebase>,
     parse_jobs: HashMap<BufferId, ParseJob>,
+    /// In-flight diff-map population jobs, one per buffer, mirroring
+    /// [`Self::parse_jobs`]. Held so the spawned blocking diff is not cancelled
+    /// before it installs its [`DiffMap`] on the buffer.
+    diff_jobs: HashMap<BufferId, DiffJob>,
+    /// Buffer edit version each buffer's `diff_map` was last populated for.
+    ///
+    /// Records no-repo and untracked buffers too (with a cleared map) so they
+    /// are not retried every frame, and drives re-population when a buffer is
+    /// edited past the recorded version.
+    diff_versions: HashMap<BufferId, u64>,
     /// In-flight live-reindex jobs, one per buffer, held so the spawned
     /// extraction is not cancelled. Replaced when the buffer reparses.
     index_jobs: HashMap<BufferId, Task<()>>,
@@ -196,6 +206,17 @@ pub struct Workspace {
 struct ParseJob {
     target_version: u64,
     task: Task<Option<ParseJobOutput>>,
+}
+
+struct DiffJob {
+    target_version: u64,
+    task: Task<DiffJobOutput>,
+}
+
+struct DiffJobOutput {
+    buffer_id: BufferId,
+    target_version: u64,
+    diff_map: Option<DiffMap>,
 }
 
 impl Workspace {
@@ -239,6 +260,8 @@ impl Workspace {
             rebase: None,
             rebase_active: None,
             parse_jobs: HashMap::new(),
+            diff_jobs: HashMap::new(),
+            diff_versions: HashMap::new(),
             index_jobs: HashMap::new(),
             badges: BadgeTray::new(),
             agent: None,
@@ -284,6 +307,8 @@ impl Workspace {
     pub(crate) fn reset_preview_syntax(&mut self, id: BufferId) {
         self.buffers.clear_syntax(id);
         self.parse_jobs.remove(&id);
+        self.diff_jobs.remove(&id);
+        self.diff_versions.remove(&id);
     }
 
     /// Build a fresh [`EditorState`] for `buffer_id`, seeded with the buffer's
@@ -384,24 +409,7 @@ impl Workspace {
             }
         }
 
-        let mut visible: Vec<BufferId> = Vec::new();
-        for (_, pane) in self.panes.split_panes() {
-            match pane.view {
-                View::Editor(editor_id) => {
-                    if let Some(editor) = self.editors.get(editor_id)
-                        && !visible.contains(&editor.buffer_id)
-                    {
-                        visible.push(editor.buffer_id);
-                    }
-                },
-                View::Label(_) | View::Run(_) | View::Agent(_) | View::Terminal(_) => {},
-            }
-        }
-        for id in self.buffers.preview_buffer_ids() {
-            if !visible.contains(&id) {
-                visible.push(id);
-            }
-        }
+        let visible = self.visible_buffer_ids();
 
         for &buffer_id in &visible {
             let Some(lang) = self.buffers.language_for(buffer_id) else {
@@ -490,6 +498,116 @@ impl Workspace {
                 evicted = evicted.len(),
                 cap = retention,
                 "evicted hidden highlight state"
+            );
+        }
+    }
+
+    /// Buffer ids currently shown in a split-pane editor or held as a preview,
+    /// deduplicated. Drives which buffers the background parse and diff jobs keep
+    /// current.
+    fn visible_buffer_ids(&self) -> Vec<BufferId> {
+        let mut visible: Vec<BufferId> = Vec::new();
+        for (_, pane) in self.panes.split_panes() {
+            match pane.view {
+                View::Editor(editor_id) => {
+                    if let Some(editor) = self.editors.get(editor_id)
+                        && !visible.contains(&editor.buffer_id)
+                    {
+                        visible.push(editor.buffer_id);
+                    }
+                },
+                View::Label(_) | View::Run(_) | View::Agent(_) | View::Terminal(_) => {},
+            }
+        }
+        for id in self.buffers.preview_buffer_ids() {
+            if !visible.contains(&id) {
+                visible.push(id);
+            }
+        }
+        visible
+    }
+
+    /// Populate visible git-tracked buffers' diff maps on a background thread.
+    ///
+    /// Polls in-flight jobs and installs their diff maps, then spawns a job for
+    /// each visible git-tracked buffer whose diff is stale.
+    ///
+    /// Mirrors [`Self::drive_parse_jobs`] with at most one job per buffer,
+    /// coalescing rapid edits by re-queuing only after the in-flight job
+    /// completes. A buffer with no path, no repo, or no HEAD content records its
+    /// version with a cleared map, so it is not retried until the next edit.
+    pub(crate) fn drive_diff_jobs(
+        &mut self,
+        executor: &Executor,
+        git_host: &Arc<dyn GitHost>,
+        redraw_notify: &Arc<Notify>,
+    ) {
+        let waker = futures::task::noop_waker();
+        let mut completed: Vec<DiffJobOutput> = Vec::new();
+        self.diff_jobs.retain(|_, job| {
+            let mut cx = Context::from_waker(&waker);
+            match Pin::new(&mut job.task).poll(&mut cx) {
+                Poll::Ready(out) => {
+                    completed.push(out);
+                    false
+                },
+                Poll::Pending => true,
+            }
+        });
+        for out in completed {
+            if let Some(shared) = self.buffers.get(out.buffer_id) {
+                shared.write().expect("buffer poisoned").diff_map = out.diff_map;
+            }
+            self.diff_versions.insert(out.buffer_id, out.target_version);
+        }
+
+        let git_root = self.git_root.clone();
+        for buffer_id in self.visible_buffer_ids() {
+            let Some(path) = self.buffers.path_for(buffer_id).map(Path::to_path_buf) else {
+                continue;
+            };
+            let Some(shared) = self.buffers.get(buffer_id) else {
+                continue;
+            };
+            let (cur_version, buffer_text) = {
+                let guard = shared.read().expect("buffer poisoned");
+                (
+                    guard.snapshot.version,
+                    guard.snapshot.visible_text.to_string(),
+                )
+            };
+
+            if self.diff_versions.get(&buffer_id) == Some(&cur_version) {
+                continue;
+            }
+            if self
+                .diff_jobs
+                .get(&buffer_id)
+                .is_some_and(|job| job.target_version == cur_version)
+            {
+                continue;
+            }
+
+            let task = executor.spawn_blocking({
+                let git_host = git_host.clone();
+                let git_root = git_root.clone();
+                let redraw = redraw_notify.clone();
+                move || {
+                    let diff_map = compute_diff_map(&*git_host, &git_root, &path, &buffer_text);
+                    redraw.notify_one();
+                    DiffJobOutput {
+                        buffer_id,
+                        target_version: cur_version,
+                        diff_map,
+                    }
+                }
+            });
+            self.diff_jobs.insert(
+                buffer_id,
+                DiffJob {
+                    target_version: cur_version,
+                    task,
+                },
             );
         }
     }
@@ -648,6 +766,28 @@ impl Workspace {
     }
 }
 
+/// Compute a buffer's HEAD-vs-worktree [`DiffMap`], or [`None`] when the file
+/// is outside a repo or has no HEAD content to diff against.
+///
+/// Both `discover` and `head_content` do git and filesystem IO, so this must
+/// run on a blocking thread. Uses the language-agnostic line diff, matching
+/// [`changed_byte_ranges`].
+fn compute_diff_map(
+    git: &dyn GitHost,
+    git_root: &Path,
+    path: &Path,
+    buffer_text: &str,
+) -> Option<DiffMap> {
+    let repo = git.discover(git_root)?;
+    let base_text = repo.head_content(path)?;
+    let result = structural_diff::diff(&base_text, buffer_text);
+    Some(DiffMap::from_structural_changes(
+        result,
+        &base_text,
+        buffer_text,
+    ))
+}
+
 /// The working-tree byte ranges a file's hunks cover, diffing its HEAD text
 /// against its working-tree text.
 ///
@@ -683,7 +823,7 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{changed_byte_ranges, ParseJob, Workspace};
-    use crate::{review::ReviewFileInput, test_harness::TestHarness};
+    use crate::{host::DiffStatus, pane::View, review::ReviewFileInput, test_harness::TestHarness};
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
@@ -713,6 +853,60 @@ mod tests {
     #[test]
     fn changed_byte_ranges_empty_when_identical() {
         assert!(changed_byte_ranges(&input("fn foo() {}\n", "fn foo() {}\n")).is_empty());
+    }
+
+    #[test]
+    fn diff_job_populates_tracked_buffer_diff_map() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard
+            .diff_map
+            .as_ref()
+            .expect("the tracked buffer's diff map is populated");
+
+        assert_eq!(
+            dm.status_for_line(1),
+            DiffStatus::Modified,
+            "the edited second line reads modified"
+        );
+        assert_eq!(
+            dm.status_for_line(0),
+            DiffStatus::Unchanged,
+            "the unchanged first line reads unchanged"
+        );
+    }
+
+    #[test]
+    fn diff_job_leaves_untracked_buffer_without_a_diff_map() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.set_diff_warm_auto(true);
+        let path = h.write_file("loose.txt", "x\ny\n");
+        h.open_file(&path);
+        h.settle_diff_jobs();
+
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        assert!(
+            buffer.read().expect("poisoned").diff_map.is_none(),
+            "a buffer outside any repo gets no diff map"
+        );
     }
 
     #[test]
