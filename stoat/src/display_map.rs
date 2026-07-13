@@ -219,6 +219,15 @@ pub struct DisplayMap {
     last_buffer_version: u64,
     inserted_diff_block_ids: Vec<CustomBlockId>,
     last_diff_version: usize,
+    /// When false, `Deleted`/`Modified` diff hunks do not splice inline
+    /// deleted-line block rows into the display. A plain editor with a populated
+    /// diff map still shows gutter indicators via
+    /// [`DisplaySnapshot::line_diff_status`] but gains no extra rows. The
+    /// side-by-side diff view sets this to render the removed base lines.
+    show_deleted_blocks: bool,
+    /// The `show_deleted_blocks` value applied at the last block re-splice, so a
+    /// mid-session toggle re-splices even when the diff version is unchanged.
+    last_show_deleted_blocks: bool,
     cached_snapshot: Option<DisplaySnapshot>,
     /// Set when any highlight collection is mutated. Checked inside
     /// [`DisplayMap::snapshot_with_companion`] so a single rebuild
@@ -259,6 +268,8 @@ impl DisplayMap {
             last_buffer_version: version,
             inserted_diff_block_ids: Vec::new(),
             last_diff_version: 0,
+            show_deleted_blocks: false,
+            last_show_deleted_blocks: false,
             cached_snapshot: None,
             highlights_dirty: false,
         }
@@ -266,6 +277,15 @@ impl DisplayMap {
 
     pub fn id(&self) -> DisplayMapId {
         self.id
+    }
+
+    /// Enable or disable inline deleted-line block rows for this editor's diff
+    /// map. Off by default. The side-by-side diff view turns it on. Nulls the
+    /// snapshot cache so the next snapshot re-splices under the new setting.
+    #[cfg(test)]
+    pub(crate) fn set_show_deleted_blocks(&mut self, show: bool) {
+        self.show_deleted_blocks = show;
+        self.cached_snapshot = None;
     }
 
     pub fn folded_buffers(&self) -> &std::collections::HashSet<BufferId> {
@@ -533,15 +553,22 @@ impl DisplayMap {
         let (wrap_snapshot, wrap_edits) = self.sync_through_wrap();
         let diff_map = self.multi_buffer.snapshot().diff_map.clone();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
-        if diff_version != self.last_diff_version {
+        if diff_version != self.last_diff_version
+            || self.show_deleted_blocks != self.last_show_deleted_blocks
+        {
             self.block_map
                 .remove(&self.inserted_diff_block_ids.drain(..).collect());
-            let props = diff_map
-                .as_ref()
-                .map(|dm| dm.deleted_blocks())
-                .unwrap_or_default();
+            let props = if self.show_deleted_blocks {
+                diff_map
+                    .as_ref()
+                    .map(|dm| dm.deleted_blocks())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             self.inserted_diff_block_ids = self.block_map.insert(props);
             self.last_diff_version = diff_version;
+            self.last_show_deleted_blocks = self.show_deleted_blocks;
         }
         let companion_view =
             self.companion
@@ -1026,7 +1053,9 @@ mod tests {
         buffer.diff_map = Some(diff_map);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
-        DisplayMap::new(multi_buffer, test_executor())
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+        display_map.set_show_deleted_blocks(true);
+        display_map
     }
 
     fn make_diff_with_deletion(
@@ -1161,6 +1190,24 @@ mod tests {
 
         assert_eq!(snapshot.line_count(), 3);
         assert_eq!(snapshot.buffer_line_count(), 2);
+    }
+
+    #[test]
+    fn deleted_blocks_hidden_when_flag_off() {
+        let base = "line1\ndeleted\nline2";
+        let diff = make_diff_with_deletion(0, base, 6..13, 1);
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), "line1\nline2");
+        buffer.diff_map = Some(diff);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+        let snapshot = display_map.snapshot();
+
+        assert_eq!(
+            snapshot.line_count(),
+            snapshot.buffer_line_count(),
+            "with show_deleted_blocks off, a deletion diff splices no block rows",
+        );
     }
 
     #[test]

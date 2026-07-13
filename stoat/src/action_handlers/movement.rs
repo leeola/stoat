@@ -4408,6 +4408,7 @@ mod tests {
 
         let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
         editor.viewport_rows = Some(10);
+        editor.display_map.set_show_deleted_blocks(true);
 
         let (buffer_rows, line_count) = {
             let s = editor.display_map.snapshot();
