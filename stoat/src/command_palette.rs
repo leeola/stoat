@@ -1181,6 +1181,104 @@ mod tests {
     }
 
     #[test]
+    fn dir_arg_relative_slash_browses_workspace_child() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(
+            &mut h,
+            &[("wsdir/sub/f.rs", ""), ("wsdir/deep/nested/f.rs", "")],
+        );
+
+        h.type_text(":cd wsdir/");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        assert!(
+            arg_picker(&h).browse.is_some(),
+            "a relative dir/ tail enters browse mode"
+        );
+        assert_eq!(
+            arg_picker(&h).browse.as_ref().map(|b| b.root.clone()),
+            Some(root.join("wsdir")),
+            "the browse roots at git_root/wsdir",
+        );
+        // Only wsdir's immediate child dirs. `nested` under deep never appears.
+        assert_eq!(browse_dir_rows(&h), ["deep", "sub"]);
+    }
+
+    #[test]
+    fn dir_arg_relative_backspace_to_bare_tail_leaves_browse() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/sub/f.rs", "")]);
+
+        h.type_text(":cd wsdir/");
+        let _ = h.snapshot();
+        assert!(arg_picker(&h).browse.is_some(), "wsdir/ enters browse mode");
+
+        h.type_keys("backspace");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert!(
+            arg_picker(&h).browse.is_none(),
+            "backspacing to a bare tail with no slash leaves browse mode"
+        );
+        let picker = arg_picker(&h);
+        let idx = picker.core.picklist.filtered[0];
+        assert!(
+            picker.core.picklist.base[idx].ends_with("wsdir"),
+            "the recursive workspace directory list is restored"
+        );
+    }
+
+    #[test]
+    fn dir_arg_relative_enter_sets_git_root_to_child() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("wsdir/sub/f.rs", "")]);
+
+        h.type_text(":cd wsdir/sub");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert!(
+            arg_picker(&h)
+                .selected_path()
+                .is_some_and(|p| p.ends_with("sub")),
+            "the browse surfaces wsdir/sub",
+        );
+
+        h.type_keys("enter");
+        assert_eq!(h.stoat.active_workspace().git_root, root.join("wsdir/sub"));
+    }
+
+    #[test]
+    fn dir_arg_relative_nonexistent_shows_empty_and_enter_leaves_root() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+
+        h.type_text(":cd zz/");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert!(
+            arg_picker(&h).browse.is_some(),
+            "a nonexistent relative dir/ still enters browse mode"
+        );
+        assert_eq!(
+            browse_dir_rows(&h),
+            Vec::<String>::new(),
+            "a nonexistent directory lists nothing"
+        );
+
+        h.type_keys("enter");
+        assert_eq!(
+            h.stoat.active_workspace().git_root,
+            root,
+            "Enter on an unresolvable relative path leaves the root untouched"
+        );
+    }
+
+    #[test]
     fn snapshot_palette_cd_browse_rows() {
         let mut h = Stoat::test();
         seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);

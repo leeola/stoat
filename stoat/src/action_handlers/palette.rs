@@ -164,9 +164,22 @@ fn list_child_dirs(fs_host: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
 fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
     let home = stoat.env_host.var("HOME");
 
-    let Some((typed_dir, root, partial)) =
-        crate::file_finder::split_path_query(tail, home.as_deref())
-    else {
+    let resolved = crate::file_finder::split_path_query(tail, home.as_deref()).or_else(|| {
+        // A relative tail with a `/` (e.g. `src/`) browses git_root/<dir part>,
+        // mirroring split_path_query's split but rooted in the workspace. A bare
+        // tail with no `/` falls through to leave_browse and keeps the recursive
+        // workspace-directory list.
+        let last_slash = tail.rfind('/')?;
+        let typed_dir = tail[..=last_slash].to_string();
+        let partial = tail[last_slash + 1..].to_string();
+        let root = stoat
+            .active_workspace()
+            .git_root
+            .join(typed_dir.trim_end_matches('/'));
+        Some((typed_dir, root, partial))
+    });
+
+    let Some((typed_dir, root, partial)) = resolved else {
         let active_idx = stoat.active_workspace;
         if let Some(picker) = stoat
             .command_palette
