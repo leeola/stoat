@@ -111,6 +111,21 @@ impl LspRegistry {
         hosts
     }
 
+    /// Returns every host paired with its server name, for traffic that must
+    /// attribute progress or diagnostics to the reporting server. The injected
+    /// sole client is named `default`.
+    pub(crate) fn named_hosts(&self) -> Vec<(String, Arc<dyn LspHost>)> {
+        let mut hosts: Vec<(String, Arc<dyn LspHost>)> = self
+            .clients
+            .iter()
+            .map(|(name, host)| (name.clone(), host.clone()))
+            .collect();
+        if let Some(sole) = &self.sole {
+            hosts.push((String::from("default"), sole.clone()));
+        }
+        hosts
+    }
+
     /// Record that a spawn was attempted for server `name`.
     pub(crate) fn mark_spawn_attempted(&mut self, name: String) {
         self.spawn_attempted.insert(name);

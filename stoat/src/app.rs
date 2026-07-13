@@ -2463,12 +2463,12 @@ impl Stoat {
     /// the event loop on a pathological notification burst; the
     /// remainder drains on the next update.
     pub(crate) fn drain_lsp_notifications(&mut self) {
-        for host in self.lsp_registry.hosts() {
-            self.drain_notifications_from(&host);
+        for (server, host) in self.lsp_registry.named_hosts() {
+            self.drain_notifications_from(&server, &host);
         }
     }
 
-    fn drain_notifications_from(&mut self, host: &Arc<dyn LspHost>) {
+    fn drain_notifications_from(&mut self, server: &str, host: &Arc<dyn LspHost>) {
         use crate::host::LspNotification;
         use futures::FutureExt;
         for _ in 0..256 {
@@ -2483,7 +2483,7 @@ impl Stoat {
             let Some(notification) = slot else {
                 break;
             };
-            if self.lsp_progress.update(&notification) {
+            if self.lsp_progress.update(server, &notification) {
                 continue;
             }
             match &notification {

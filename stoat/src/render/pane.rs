@@ -603,7 +603,7 @@ fn lsp_progress_label(entry: &crate::lsp::progress::LspProgressEntry) -> String 
     if body.is_empty() {
         body.push_str("...");
     }
-    format!(" {body} ")
+    format!(" {}: {body} ", entry.server)
 }
 
 fn paint_segment(

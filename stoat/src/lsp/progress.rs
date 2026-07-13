@@ -15,20 +15,21 @@ use std::collections::HashMap;
 /// clock dependency.
 #[derive(Debug, Clone)]
 pub(crate) struct LspProgressEntry {
+    pub(crate) server: String,
     pub(crate) title: String,
     pub(crate) message: Option<String>,
     pub(crate) percentage: Option<u32>,
     pub(crate) sequence: u64,
 }
 
-/// Per-server work-done progress state. Today there is a single
-/// [`crate::host::LspHost`] slot, so this map keys by
-/// [`ProgressToken`]; multi-server support keys by
-/// `(LanguageServerId, ProgressToken)` once `LspHost` is wrapped by
-/// the planned `LspManager`.
+/// Work-done progress state keyed by `(server, token)`.
+///
+/// Keying by server as well as [`ProgressToken`] keeps concurrent language
+/// servers from colliding when they reuse the same token, and lets the status
+/// bar name which server the freshest operation belongs to.
 #[derive(Debug, Default)]
 pub(crate) struct LspProgressMap {
-    entries: HashMap<ProgressToken, LspProgressEntry>,
+    entries: HashMap<(String, ProgressToken), LspProgressEntry>,
     next_sequence: u64,
 }
 
@@ -40,16 +41,18 @@ impl LspProgressMap {
     /// Filters and dispatches a single notification. Returns `true`
     /// when the call mutated state (a `Progress` notification was
     /// recognised); other variants are no-ops at this layer.
-    pub(crate) fn update(&mut self, notification: &LspNotification) -> bool {
+    pub(crate) fn update(&mut self, server: &str, notification: &LspNotification) -> bool {
         let LspNotification::Progress { token, value } = notification else {
             return false;
         };
+        let key = (server.to_string(), token.clone());
         match value {
             WorkDoneProgress::Begin(begin) => {
                 let seq = self.bump_sequence();
                 self.entries.insert(
-                    token.clone(),
+                    key,
                     LspProgressEntry {
+                        server: server.to_string(),
                         title: begin.title.clone(),
                         message: begin.message.clone(),
                         percentage: begin.percentage,
@@ -60,7 +63,7 @@ impl LspProgressMap {
             },
             WorkDoneProgress::Report(report) => {
                 let seq = self.bump_sequence();
-                if let Some(entry) = self.entries.get_mut(token) {
+                if let Some(entry) = self.entries.get_mut(&key) {
                     if let Some(message) = &report.message {
                         entry.message = Some(message.clone());
                     }
@@ -69,12 +72,13 @@ impl LspProgressMap {
                     }
                     entry.sequence = seq;
                 } else {
-                    // Report without a prior Begin: spec allows this when
-                    // the editor missed the Begin; synthesize an entry so
-                    // progress still surfaces.
+                    // A Report can arrive without a prior Begin when the
+                    // editor missed the Begin. The spec allows it, so
+                    // synthesize an entry to keep the progress visible.
                     self.entries.insert(
-                        token.clone(),
+                        key,
                         LspProgressEntry {
+                            server: server.to_string(),
                             title: String::new(),
                             message: report.message.clone(),
                             percentage: report.percentage,
@@ -85,7 +89,7 @@ impl LspProgressMap {
                 true
             },
             WorkDoneProgress::End(_) => {
-                self.entries.remove(token);
+                self.entries.remove(&key);
                 true
             },
         }
@@ -143,8 +147,9 @@ mod tests {
             token: token(1),
             value: begin("indexing", Some(10)),
         };
-        assert!(map.update(&n));
+        assert!(map.update("ra", &n));
         let e = map.current().unwrap();
+        assert_eq!(e.server, "ra");
         assert_eq!(e.title, "indexing");
         assert_eq!(e.percentage, Some(10));
     }
@@ -152,14 +157,20 @@ mod tests {
     #[test]
     fn report_updates_existing_entry() {
         let mut map = LspProgressMap::new();
-        map.update(&LspNotification::Progress {
-            token: token(1),
-            value: begin("indexing", Some(10)),
-        });
-        map.update(&LspNotification::Progress {
-            token: token(1),
-            value: report(Some("phase 2"), Some(50)),
-        });
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: begin("indexing", Some(10)),
+            },
+        );
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: report(Some("phase 2"), Some(50)),
+            },
+        );
         let e = map.current().unwrap();
         assert_eq!(e.title, "indexing");
         assert_eq!(e.message.as_deref(), Some("phase 2"));
@@ -169,32 +180,47 @@ mod tests {
     #[test]
     fn end_removes_entry() {
         let mut map = LspProgressMap::new();
-        map.update(&LspNotification::Progress {
-            token: token(1),
-            value: begin("indexing", None),
-        });
-        map.update(&LspNotification::Progress {
-            token: token(1),
-            value: end(),
-        });
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: begin("indexing", None),
+            },
+        );
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: end(),
+            },
+        );
         assert!(map.current().is_none());
     }
 
     #[test]
     fn current_returns_most_recently_touched_among_multiple() {
         let mut map = LspProgressMap::new();
-        map.update(&LspNotification::Progress {
-            token: token(1),
-            value: begin("first", None),
-        });
-        map.update(&LspNotification::Progress {
-            token: token(2),
-            value: begin("second", None),
-        });
-        map.update(&LspNotification::Progress {
-            token: token(1),
-            value: report(Some("update"), None),
-        });
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: begin("first", None),
+            },
+        );
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(2),
+                value: begin("second", None),
+            },
+        );
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: report(Some("update"), None),
+            },
+        );
         let e = map.current().unwrap();
         assert_eq!(e.title, "first");
         assert_eq!(e.message.as_deref(), Some("update"));
@@ -203,10 +229,13 @@ mod tests {
     #[test]
     fn report_without_begin_synthesizes_entry() {
         let mut map = LspProgressMap::new();
-        map.update(&LspNotification::Progress {
-            token: token(1),
-            value: report(Some("late report"), Some(40)),
-        });
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: report(Some("late report"), Some(40)),
+            },
+        );
         let e = map.current().unwrap();
         assert_eq!(e.title, "");
         assert_eq!(e.message.as_deref(), Some("late report"));
@@ -220,7 +249,36 @@ mod tests {
             typ: lsp_types::MessageType::INFO,
             message: "hello".into(),
         };
-        assert!(!map.update(&n));
+        assert!(!map.update("ra", &n));
         assert!(map.current().is_none());
+    }
+
+    #[test]
+    fn same_token_from_two_servers_does_not_collide() {
+        let mut map = LspProgressMap::new();
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: begin("indexing rust", None),
+            },
+        );
+        map.update(
+            "pyright",
+            &LspNotification::Progress {
+                token: token(1),
+                value: begin("indexing python", None),
+            },
+        );
+        map.update(
+            "ra",
+            &LspNotification::Progress {
+                token: token(1),
+                value: end(),
+            },
+        );
+        let e = map.current().unwrap();
+        assert_eq!(e.server, "pyright");
+        assert_eq!(e.title, "indexing python");
     }
 }
