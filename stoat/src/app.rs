@@ -660,15 +660,19 @@ pub struct Stoat {
     /// [`Self::handle_key`]. `MessageType::ERROR` renders in the error
     /// style. Other levels use the default status style.
     pub(crate) lsp_message: Option<(lsp_types::MessageType, String)>,
-    /// In-flight goto-style LSP request (definition / type definition
-    /// / implementation / declaration). Replacing the entry drops the
-    /// prior task, cancelling its spawned future before the response
-    /// can land. Polled by [`action_handlers::pump_lsp_jumps`] at the
-    /// top of each render tick; `Ready(Some)` opens the target file
-    /// in the focused pane (when cross-file) and jumps the primary
-    /// cursor; `Ready(None)` silently drops.
-    pub(crate) pending_lsp_jump:
-        Option<stoat_scheduler::Task<Vec<crate::location_picker::LocationEntry>>>,
+    /// In-flight goto-style LSP request, paired with the user-facing
+    /// label of the jump kind ("definition", "references", ...) so the
+    /// pump can name it in a zero-result message. Replacing the entry
+    /// drops the prior task, cancelling its spawned future before the
+    /// response can land. Polled by [`action_handlers::pump_lsp_jumps`]
+    /// at the top of each render tick. `Ready(Some)` opens the target
+    /// file in the focused pane (when cross-file) and jumps the primary
+    /// cursor. A zero-result `Ready` reports "lsp: no {label} found" in
+    /// the status bar instead of dropping silently.
+    pub(crate) pending_lsp_jump: Option<(
+        &'static str,
+        stoat_scheduler::Task<Vec<crate::location_picker::LocationEntry>>,
+    )>,
 
     /// In-flight `textDocument/hover` request. Replacing the entry
     /// drops the prior task, cancelling its spawned future before the

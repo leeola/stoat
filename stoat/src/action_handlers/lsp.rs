@@ -699,7 +699,7 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
             &*fs,
         )
     });
-    stoat.pending_lsp_jump = Some(task);
+    stoat.pending_lsp_jump = Some(("references", task));
     UpdateEffect::None
 }
 
@@ -849,7 +849,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
         };
         resolve_goto_targets(response, &source_path, &source_rope, encoding, &*fs)
     });
-    stoat.pending_lsp_jump = Some(task);
+    stoat.pending_lsp_jump = Some((kind.status_label(), task));
     UpdateEffect::None
 }
 
@@ -1256,6 +1256,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Ready(None) => {
+            set_lsp_status(stoat, "lsp: no hover info".to_string());
             stoat.pending_hover = None;
             true
         },
@@ -2750,6 +2751,7 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
                 })
                 .collect();
             if entries.is_empty() {
+                set_lsp_status(stoat, "lsp: no code actions available".to_string());
                 stoat.pending_code_action_picker = None;
             } else if let Some(picker) = stoat.pending_code_action_picker.as_mut() {
                 picker.entries = entries;
@@ -2757,6 +2759,7 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Ready(None) => {
+            set_lsp_status(stoat, "lsp: no code actions available".to_string());
             stoat.pending_code_action_picker = None;
             true
         },
@@ -3750,13 +3753,14 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
 }
 
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
-/// and dispatch on how many locations resolved. Zero locations changes
-/// nothing. One jumps to it directly via [`apply_jump`]. Two or more
+/// and dispatch on how many locations resolved. Zero locations reports
+/// "lsp: no {label} found" in the status bar, naming the jump kind. One
+/// jumps to it directly via [`apply_jump`]. Two or more
 /// open a [`LocationPicker`] in [`Stoat::location_picker`] so the user
 /// chooses. On `Pending` puts the task back. Returns true when state
 /// changed so the caller can request a redraw.
 pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_lsp_jump.take() else {
+    let Some((label, mut task)) = stoat.pending_lsp_jump.take() else {
         return false;
     };
     let waker = futures::task::noop_waker();
@@ -3764,7 +3768,7 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(mut entries) => {
             match entries.len() {
-                0 => {},
+                0 => set_lsp_status(stoat, format!("lsp: no {label} found")),
                 1 => {
                     let entry = entries.remove(0);
                     apply_jump(stoat, &entry.path, entry.offset);
@@ -3776,7 +3780,7 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Pending => {
-            stoat.pending_lsp_jump = Some(task);
+            stoat.pending_lsp_jump = Some((label, task));
             false
         },
     }
@@ -4559,6 +4563,42 @@ mod tests {
         h.settle();
         assert_eq!(cursor_offset(&mut h), 0);
         assert_eq!(focused_buffer_path(&h), path);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: no definition found"),
+        );
+    }
+
+    #[test]
+    fn hover_no_result_reports_no_hover_info() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: no hover info"),
+        );
+    }
+
+    #[test]
+    fn code_action_no_result_reports_none_available() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: no code actions available"),
+        );
     }
 
     #[test]
