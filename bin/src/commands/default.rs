@@ -1,4 +1,4 @@
-use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueHint};
 use crossterm::event::{Event, KeyEvent};
 use snafu::{whatever, ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -30,6 +30,18 @@ pub struct Args {
 
     #[command(flatten)]
     pub common: CommonArgs,
+
+    /// Set the initial workspace root and process working directory, so the
+    /// git root and file positionals resolve against it. Defaults to the
+    /// current directory when unset.
+    #[arg(
+        short = 'd',
+        long = "working-dir",
+        alias = "working-directory",
+        value_name = "DIR",
+        value_hint = ValueHint::DirPath
+    )]
+    working_dir: Option<PathBuf>,
 
     /// Enable the LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
@@ -101,6 +113,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
     let Args {
         command,
         common,
+        working_dir,
         text_proto_log,
         ..
     } = args;
@@ -116,8 +129,8 @@ pub fn run(args: Args) -> Result<(), Whatever> {
             clap_complete::generate(shell, &mut Args::command(), "stoat", &mut std::io::stdout());
             Ok(())
         },
-        Some(Command::Review) => run_tui(text_proto_log, common, TuiStart::Review),
-        None => run_tui(text_proto_log, common, TuiStart::Files),
+        Some(Command::Review) => run_tui(text_proto_log, common, working_dir, TuiStart::Review),
+        None => run_tui(text_proto_log, common, working_dir, TuiStart::Files),
     }
 }
 
@@ -141,7 +154,7 @@ fn run_fixture(
                 whatever!("`--fixture` conflicts with the fixture subcommand");
             }
             common.fixture = Some(name);
-            run_tui(text_proto_log, common, TuiStart::Files)
+            run_tui(text_proto_log, common, None, TuiStart::Files)
         },
         (None, None) => whatever!("specify a fixture name or `ls`"),
     }
@@ -155,6 +168,7 @@ enum TuiStart {
 fn run_tui(
     text_proto_log: Option<bool>,
     common: CommonArgs,
+    working_dir: Option<PathBuf>,
     start: TuiStart,
 ) -> Result<(), Whatever> {
     let CommonArgs {
@@ -259,6 +273,14 @@ fn run_tui(
                  fixture feature (rebuild with --features fixture)"
             );
         }
+    }
+
+    // Applied after the fixture block so an explicit --working-dir wins over the
+    // degenerate --fixture plus --working-dir combination, and before the cwd is
+    // resolved so the git root and file positionals all land inside it.
+    if let Some(dir) = working_dir {
+        std::env::set_current_dir(&dir)
+            .with_whatever_context(|_| format!("set working directory to {}", dir.display()))?;
     }
 
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -443,6 +465,25 @@ mod tests {
         };
         assert_eq!(args.sub, None);
         assert_eq!(args.name.as_deref(), Some("rust-lsp"));
+    }
+
+    #[test]
+    fn working_dir_flag_parses_all_spellings() {
+        for flag in ["-d", "--working-dir", "--working-directory"] {
+            let args = Args::try_parse_from(["stoat", flag, "/tmp"])
+                .unwrap_or_else(|e| panic!("parse {flag}: {e}"));
+            assert_eq!(
+                args.working_dir,
+                Some(PathBuf::from("/tmp")),
+                "{flag} sets the working directory",
+            );
+        }
+        assert_eq!(
+            Args::try_parse_from(["stoat"])
+                .expect("bare argv")
+                .working_dir,
+            None,
+        );
     }
 
     #[test]
