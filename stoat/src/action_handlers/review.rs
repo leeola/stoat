@@ -1102,7 +1102,7 @@ fn toggle_diff_off(stoat: &mut Stoat) -> UpdateEffect {
     let Some((path, line)) = review_cursor_file_target(stoat) else {
         // An empty diff view (clean tree) has no file under the cursor to swap
         // in, so there is nothing to toggle to.
-        stoat.pending_message = Some("no file to open in the diff view".to_string());
+        stoat.set_status("no file to open in the diff view");
         return UpdateEffect::Redraw;
     };
 

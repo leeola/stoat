@@ -147,11 +147,11 @@ pub(crate) fn reload_active_workspace(stoat: &mut Stoat) {
         .is_some_and(|ws| ws.env.state == EnvLoadState::Loading);
 
     if in_flight {
-        stoat.pending_message = Some("direnv: reload already running".to_string());
+        stoat.set_status("direnv: reload already running");
         return;
     }
 
-    stoat.pending_message = Some("direnv: reloading...".to_string());
+    stoat.set_status("direnv: reloading...");
     spawn_load(stoat, ws_id, true);
 }
 
@@ -198,7 +198,7 @@ pub(crate) fn install_pending(stoat: &mut Stoat) {
     };
 
     if let Some(message) = message {
-        stoat.pending_message = Some(message);
+        stoat.set_status(message);
     }
 
     // A language-server spawn deferred while the env loaded now runs with the

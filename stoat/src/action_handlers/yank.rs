@@ -32,7 +32,7 @@ pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
     }
     let count = fragments.len();
     write_fragments_to_register(stoat, target, fragments);
-    stoat.pending_message = Some(format!("yanked {count} selection(s)"));
+    stoat.set_status(format!("yanked {count} selection(s)"));
     UpdateEffect::Redraw
 }
 

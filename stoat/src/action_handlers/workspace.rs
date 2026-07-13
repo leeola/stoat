@@ -141,7 +141,7 @@ pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
 pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
     let path = path.trim();
     if path.is_empty() {
-        stoat.pending_message = Some("cd: empty path".to_string());
+        stoat.set_status("cd: empty path");
         return;
     }
 
@@ -186,14 +186,13 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
             }
 
             let root = stoat.active_workspace().git_root.display().to_string();
-            stoat.pending_message = Some(format!("Current working directory is now {root}"));
+            stoat.set_status(format!("Current working directory is now {root}"));
         },
         Ok(_) => {
-            stoat.pending_message = Some(format!("cd: not a directory: {}", candidate.display()));
+            stoat.set_status(format!("cd: not a directory: {}", candidate.display()));
         },
         Err(e) => {
-            stoat.pending_message =
-                Some(format!("cd: cannot resolve {}: {e}", candidate.display()));
+            stoat.set_status(format!("cd: cannot resolve {}: {e}", candidate.display()));
         },
     }
 }
@@ -206,5 +205,5 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
 /// changed.
 pub(super) fn show_cwd(stoat: &mut Stoat) {
     let root = stoat.active_workspace().git_root.display().to_string();
-    stoat.pending_message = Some(format!("Current working directory is {root}"));
+    stoat.set_status(format!("Current working directory is {root}"));
 }

@@ -67,7 +67,7 @@ pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
         },
         SaveFlow::RefusedDiskChanged | SaveFlow::Failed => UpdateEffect::Redraw,
         SaveFlow::NoTarget => {
-            stoat.pending_message = Some("nothing to write; use :q to quit".to_string());
+            stoat.set_status("nothing to write; use :q to quit");
             UpdateEffect::Redraw
         },
     }
@@ -122,7 +122,7 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
     };
 
     if !force && disk_changed_since_open(stoat, buffer_id, &path) {
-        stoat.pending_message = Some("file changed on disk; use :w! to overwrite".to_string());
+        stoat.set_status("file changed on disk; use :w! to overwrite");
         return SaveFlow::RefusedDiskChanged;
     }
 
@@ -270,7 +270,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
 
     if let Err(err) = stoat.fs_host.write_atomic(path, text.as_bytes()) {
         tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
-        stoat.pending_message = Some(format!("save failed: {err}"));
+        stoat.set_status(format!("save failed: {err}"));
         return false;
     }
     {
@@ -461,7 +461,7 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
 /// directory cannot be resolved.
 pub(super) fn open_logs(stoat: &mut Stoat) -> UpdateEffect {
     let Ok(dir) = stoat_log::log_dir() else {
-        stoat.pending_message = Some("could not resolve the log directory".to_string());
+        stoat.set_status("could not resolve the log directory");
         return UpdateEffect::Redraw;
     };
     let path = dir.join(format!("stoat-{}.log", std::process::id()));
@@ -477,8 +477,7 @@ pub(super) fn open_logs(stoat: &mut Stoat) -> UpdateEffect {
 /// poll, and drops the focused cursor on the last line.
 pub(crate) fn open_log_buffer(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
     if !matches!(stoat.fs_host.metadata(path), Ok(Some(_))) {
-        stoat.pending_message =
-            Some("no log file for this session; started with --log-stderr?".to_string());
+        stoat.set_status("no log file for this session; started with --log-stderr?");
         return UpdateEffect::Redraw;
     }
 
@@ -509,7 +508,7 @@ pub(super) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEf
         "on" => true,
         "off" => false,
         _ => {
-            stoat.pending_message = Some("auto-reload: expected on or off".to_string());
+            stoat.set_status("auto-reload: expected on or off");
             return UpdateEffect::Redraw;
         },
     };
@@ -519,7 +518,7 @@ pub(super) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEf
     };
 
     if on && stoat.active_workspace().buffers.path_for(id).is_none() {
-        stoat.pending_message = Some("buffer has no file to reload".to_string());
+        stoat.set_status("buffer has no file to reload");
         return UpdateEffect::Redraw;
     }
 
@@ -527,14 +526,11 @@ pub(super) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEf
     if on {
         ensure_auto_reload_poll(stoat);
     }
-    stoat.pending_message = Some(
-        if on {
-            "auto-reload on"
-        } else {
-            "auto-reload off"
-        }
-        .to_string(),
-    );
+    stoat.set_status(if on {
+        "auto-reload on"
+    } else {
+        "auto-reload off"
+    });
     UpdateEffect::Redraw
 }
 

@@ -178,6 +178,15 @@ pub(crate) fn frame(
     undercurls: &mut Vec<UndercurlSpan>,
 ) {
     let full = stoat.size();
+
+    if let Some(deadline) = stoat.pending_message_deadline
+        && stoat.executor.now() >= deadline
+    {
+        stoat.pending_message = None;
+        stoat.pending_message_deadline = None;
+        stoat.pending_message_expiry = None;
+    }
+
     let message = if full.height >= 2 {
         stoat.pending_message.clone()
     } else {

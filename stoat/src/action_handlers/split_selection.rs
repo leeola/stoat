@@ -111,7 +111,7 @@ fn select_on_matches(stoat: &mut Stoat, regex: &regex::Regex) {
         })
     };
     if !matched {
-        stoat.pending_message = Some("nothing selected".to_string());
+        stoat.set_status("nothing selected");
         return;
     }
     let Some(editor) = focused_editor_mut(stoat) else {

@@ -81,6 +81,11 @@ const MAX_FRAME_DT: f32 = 0.1;
 /// on-disk mtime advanced.
 pub(crate) const AUTO_RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long a transient status message stays visible before it self-retires.
+/// [`Stoat::set_status`] stamps a deadline this far ahead and arms a timer that
+/// wakes the run loop so [`crate::render::frame`] can clear the expired message.
+const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Maximum index updates [`Stoat::drain_index_updates`] processes in one call.
 /// Bounds the graph work per event-loop turn so a large reindex burst cannot
 /// stall input. On hitting the cap the drain reschedules itself to finish the
@@ -322,10 +327,19 @@ pub struct Stoat {
     pub(crate) last_folding_range_key: Option<(BufferId, u64)>,
     pub(crate) render_tick: u64,
     /// Transient one-line message painted in a reserved bottom row,
-    /// such as a failed-save error. An action sets it during event
-    /// handling; [`Self::update`] clears it at the start of the next
-    /// event, so it stays visible exactly until the next input event.
+    /// such as a failed-save error. Set through [`Self::set_status`],
+    /// which stamps [`Self::pending_message_deadline`]. The message
+    /// stays visible until that deadline passes or a newer message
+    /// replaces it, and input no longer clears it.
     pub(crate) pending_message: Option<String>,
+    /// When the current [`Self::pending_message`] expires, on the
+    /// scheduler clock. [`crate::render::frame`] clears the message
+    /// once [`Executor::now`] reaches this.
+    pub(crate) pending_message_deadline: Option<std::time::Instant>,
+    /// The timer task that wakes the run loop at the deadline so an
+    /// idle screen retires the message without waiting for input.
+    /// Replacing it cancels the prior timer.
+    pub(crate) pending_message_expiry: Option<stoat_scheduler::Task<()>>,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
     /// hits an unbound key in normal mode; consumed once via
@@ -1023,6 +1037,8 @@ impl Stoat {
             last_folding_range_key: None,
             render_tick: 0,
             pending_message: None,
+            pending_message_deadline: None,
+            pending_message_expiry: None,
             pending_count: None,
             pending_find: None,
             pending_mark: None,
@@ -1971,7 +1987,6 @@ impl Stoat {
         self.drain_pending_git_refresh();
         self.drain_pending_diff_warm_files();
         self.drain_pending_index_edits();
-        self.pending_message = None;
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -2121,6 +2136,21 @@ impl Stoat {
     {
         self.executor
             .spawn_with_redraw(self.redraw_notify.clone(), future)
+    }
+
+    /// Show `text` as the transient status message for [`STATUS_MESSAGE_TTL`].
+    ///
+    /// Stamps a fresh deadline and arms a timer that wakes the run loop when it
+    /// elapses, so an idle screen retires the message on its own. A later call
+    /// replaces the message and cancels the prior timer.
+    pub(crate) fn set_status(&mut self, text: impl Into<String>) {
+        self.pending_message = Some(text.into());
+        self.pending_message_deadline = Some(self.executor.now() + STATUS_MESSAGE_TTL);
+
+        let timer = self.executor.timer(STATUS_MESSAGE_TTL);
+        self.pending_message_expiry = Some(self.spawn_woken(async move {
+            timer.await;
+        }));
     }
 
     /// Schedule a debounced [`ReviewExternalEdit`] dispatch for
@@ -2505,7 +2535,7 @@ impl Stoat {
             Some(Err(msg)) => {
                 // The server never came up, so the NoopLsp placeholder stays and
                 // the failure surfaces in the message row rather than only the log.
-                self.pending_message = Some(format!("lsp: {msg}"));
+                self.set_status(format!("lsp: {msg}"));
                 return;
             },
         };
@@ -3548,7 +3578,7 @@ impl Stoat {
                     let fragments = text.split('\n').map(String::from).collect();
                     let target = self.consume_selected_register();
                     action_handlers::yank::write_fragments_to_register(self, target, fragments);
-                    self.pending_message = Some("yanked hover selection".to_string());
+                    self.set_status("yanked hover selection");
                     return UpdateEffect::Redraw;
                 }
             }
@@ -9973,6 +10003,42 @@ mod tests {
         );
         h.type_keys("<Esc>");
         assert!(h.stoat.lsp_message.is_none(), "any key retires the message");
+    }
+
+    #[test]
+    fn status_message_survives_a_later_keypress() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        h.stoat.set_status("saved");
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("saved"));
+
+        h.type_keys("<Esc>");
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("saved"),
+            "input no longer clears the status message",
+        );
+    }
+
+    #[test]
+    fn status_message_expires_after_its_ttl() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        h.stoat.set_status("saved");
+
+        h.stoat.render();
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("saved"),
+            "the message stays visible before its ttl elapses",
+        );
+
+        h.advance_clock(STATUS_MESSAGE_TTL);
+        h.stoat.render();
+
+        assert_eq!(
+            h.stoat.pending_message, None,
+            "the message retires once its ttl elapses and a frame renders",
+        );
     }
 
     #[test]
