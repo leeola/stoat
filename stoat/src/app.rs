@@ -2538,6 +2538,69 @@ impl Stoat {
         }
     }
 
+    /// Route a mouse press to the open finder or palette modal.
+    ///
+    /// Only a left [`MouseEventKind::Down`] acts: it selects the clicked list
+    /// row. Drags, releases, and non-left presses return [`UpdateEffect::None`]
+    /// so the buffer beneath keeps its cursor and focus. A click outside the
+    /// list rect, or on an empty row past the last filtered item, is also a
+    /// swallowed no-op.
+    fn handle_modal_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        let MouseEventKind::Down(MouseButton::Left) = mouse.kind else {
+            return UpdateEffect::None;
+        };
+        let size = self.size();
+
+        let (list, selected, filtered_len) = if let Some(finder) = self.file_finder.as_ref() {
+            let Some(layout) = crate::render::file_finder::file_finder_layout(size) else {
+                return UpdateEffect::None;
+            };
+            let core = finder.active_core_ref();
+            (
+                layout.list,
+                core.picklist.selected,
+                core.picklist.filtered.len(),
+            )
+        } else if let Some(palette) = self.command_palette.as_ref() {
+            if palette.command.is_none() {
+                let Some(layout) = crate::render::command_palette::palette_filter_layout(size)
+                else {
+                    return UpdateEffect::None;
+                };
+                (layout.list, palette.selected, palette.filtered.len())
+            } else if palette.arg_source().is_some()
+                && let Some(picker) = palette.arg_picker.as_ref()
+            {
+                let Some(list) = crate::render::command_palette::palette_arg_list_rect(size) else {
+                    return UpdateEffect::None;
+                };
+                let core = picker.active_core_ref();
+                (list, core.picklist.selected, core.picklist.filtered.len())
+            } else {
+                return UpdateEffect::None;
+            }
+        } else {
+            return UpdateEffect::None;
+        };
+
+        if !list.contains(Position::new(mouse.column, mouse.row)) {
+            return UpdateEffect::None;
+        }
+        let rows = list.height as usize;
+        let start_row = selected.saturating_sub(rows.saturating_sub(1));
+        let index = start_row + (mouse.row - list.y) as usize;
+        if index >= filtered_len {
+            return UpdateEffect::None;
+        }
+
+        let delta = index as i32 - selected as i32;
+        if self.file_finder.is_some() {
+            action_handlers::file_finder_move_selection(self, delta)
+        } else {
+            action_handlers::palette_move_selection(self, delta).unwrap_or(UpdateEffect::Redraw)
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
         if matches!(
             mouse.kind,
@@ -2548,6 +2611,14 @@ impl Stoat {
         if let MouseEventKind::Moved = mouse.kind {
             return self.handle_hover(mouse.column, mouse.row);
         }
+
+        // While a finder or palette modal is open, its list owns the pointer: a
+        // left click selects a row and every other press, drag, or release is
+        // swallowed so nothing reaches divider arming, focus, or the panes.
+        if self.file_finder.is_some() || self.command_palette.is_some() {
+            return self.handle_modal_mouse(mouse);
+        }
+
         // A divider drag owns the pointer once armed. It resizes on drag,
         // releases on up, and swallows the rest so pane handlers never see it.
         if self.divider_drag.is_some() {
@@ -6379,6 +6450,111 @@ mod tests {
         assert_eq!(
             selected, 1,
             "a wheel notch moves the arg picker selection down"
+        );
+    }
+
+    /// Open a 40-line document, then a file finder over a four-entry workspace,
+    /// and return the finder's list rect. The document beneath stays focused so
+    /// callers can assert a swallowed click never disturbs its cursor.
+    fn open_finder_with_four(h: &mut crate::test_harness::TestHarness) -> Rect {
+        use stoat_action::OpenFileFinder;
+
+        let doc = h.seed_long_file("under.rs", 40);
+        h.open_file(&doc);
+
+        let root = std::path::PathBuf::from("/click-finder");
+        for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            h.fake_fs().insert_file(root.join(name), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+
+        crate::render::file_finder::file_finder_layout(h.stoat.size())
+            .expect("finder fits the test terminal")
+            .list
+    }
+
+    fn finder_selected(h: &crate::test_harness::TestHarness) -> usize {
+        h.stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .active_core_ref()
+            .picklist
+            .selected
+    }
+
+    #[test]
+    fn click_finder_row_moves_selection_not_the_pane() {
+        use crossterm::event::MouseButton;
+
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        let list = open_finder_with_four(&mut h);
+        let before = h.stoat.focused_cursor_pos();
+
+        // The third visible row is two below the list top.
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 1,
+            list.y + 2,
+        ));
+
+        assert_eq!(finder_selected(&h), 2, "clicking the third row selects it");
+        assert_eq!(
+            h.stoat.focused_cursor_pos(),
+            before,
+            "the click never reaches the buffer beneath",
+        );
+    }
+
+    #[test]
+    fn click_outside_modal_is_swallowed() {
+        use crossterm::event::MouseButton;
+
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        open_finder_with_four(&mut h);
+        let before = h.stoat.focused_cursor_pos();
+
+        // Row 0 sits above the centered modal.
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert!(
+            h.stoat.file_finder.is_some(),
+            "an outside click does not dismiss the finder"
+        );
+        assert_eq!(finder_selected(&h), 0, "the selection is unchanged");
+        assert_eq!(
+            h.stoat.focused_cursor_pos(),
+            before,
+            "the buffer is untouched"
+        );
+    }
+
+    #[test]
+    fn click_empty_row_below_last_item_is_swallowed() {
+        use crossterm::event::MouseButton;
+
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        let list = open_finder_with_four(&mut h);
+
+        // Only four items are listed, so the sixth row is empty.
+        assert!(list.height > 5, "the list is tall enough for an empty row");
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 1,
+            list.y + 5,
+        ));
+
+        assert_eq!(
+            finder_selected(&h),
+            0,
+            "a click on an empty row moves nothing"
+        );
+        assert!(
+            h.stoat.file_finder.is_some(),
+            "and does not dismiss the finder"
         );
     }
 
