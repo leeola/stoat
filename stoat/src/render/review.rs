@@ -69,7 +69,31 @@ pub(crate) fn render_diff_view(
     stoatty: bool,
 ) {
     let snapshot = editor.display_map.snapshot();
-    let scroll_row = editor.scroll_row;
+    paint_diff_rows(
+        &snapshot,
+        editor.scroll_row,
+        inner,
+        fallback_style,
+        theme,
+        buf,
+    );
+    render_review_cursor(editor, &snapshot, inner, theme, buf, stoatty);
+}
+
+/// Paint the two-column diff body for the rows visible from `scroll_row`, base
+/// text left and buffer text right.
+///
+/// Shared by the live [`render_diff_view`] and the off-loop smooth-scroll page
+/// so both paint an identical grid. It takes owned parts and paints no cursor,
+/// letting a pooled page render it on a blocking worker.
+pub(crate) fn paint_diff_rows(
+    snapshot: &DisplaySnapshot,
+    scroll_row: u32,
+    inner: Rect,
+    fallback_style: Style,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
     let total_rows = snapshot.line_count();
     let visible = inner.height as u32;
     let end_row = (scroll_row + visible).min(total_rows);
@@ -96,7 +120,7 @@ pub(crate) fn render_diff_view(
     let dim_style = theme.get(s::DIFF_CONTEXT);
     let del_style = theme.get(s::DIFF_DELETED);
 
-    let mut base_line = base_line_at(&snapshot, scroll_row);
+    let mut base_line = base_line_at(snapshot, scroll_row);
 
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;
@@ -130,7 +154,7 @@ pub(crate) fn render_diff_view(
             BlockRowKind::BufferRow { buffer_row } => {
                 render_side_num(buf, right_num_x, y, buffer_row + 1, dim_style);
                 paint_highlighted_row(
-                    &snapshot,
+                    snapshot,
                     display_row,
                     right_text_x,
                     y,
@@ -158,8 +182,6 @@ pub(crate) fn render_diff_view(
             },
         }
     }
-
-    render_review_cursor(editor, &snapshot, inner, theme, buf, stoatty);
 }
 
 /// Count the base-present display rows above `scroll_row` to get the base-file
