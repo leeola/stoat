@@ -242,6 +242,24 @@ impl TestHarness {
         }
     }
 
+    /// Seed a repo where each file carries distinct HEAD, INDEX (staged), and
+    /// working-tree text, so a diff populated over it distinguishes staged
+    /// from unstaged hunks. Tuple order is `(rel, head, index, working)`.
+    pub fn stage_index_scenario(
+        &mut self,
+        workdir: impl Into<std::path::PathBuf>,
+        files: &[(&str, &str, &str, &str)],
+    ) {
+        let workdir = workdir.into();
+        self.stoat.active_workspace_mut().git_root = workdir.clone();
+        let mut builder = self.fake_git.add_repo(workdir).with_fs(&self.fake_fs);
+        for (rel, head, index, working) in files {
+            builder.head_file(rel, head);
+            builder.index_file(rel, index);
+            builder.unstaged_file(rel, working);
+        }
+    }
+
     /// Dispatch `ReviewApplyStaged` against the current state, then settle so
     /// the post-apply refresh, now an off-loop re-scan, lands before callers
     /// inspect state or snapshot.

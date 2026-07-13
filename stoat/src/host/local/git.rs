@@ -162,6 +162,15 @@ impl GitRepo for LocalGitRepo {
             .collect()
     }
 
+    fn index_content(&self, path: &Path) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let workdir = repo.workdir()?;
+        let rel = path.strip_prefix(workdir).ok()?;
+        let entry = repo.index().ok()?.get_path(rel, 0)?;
+        let blob = repo.find_blob(entry.id).ok()?;
+        std::str::from_utf8(blob.content()).ok().map(String::from)
+    }
+
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
         let diff = Diff::from_buffer(patch.as_bytes()).map_err(err_msg)?;

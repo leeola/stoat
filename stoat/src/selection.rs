@@ -2874,6 +2874,7 @@ mod tests {
             .iter()
             .map(|&start| DiffHunk {
                 status: DiffHunkStatus::Added,
+                staged: false,
                 buffer_start_line: start,
                 buffer_line_range: start..(start + 1),
                 base_byte_range: 0..0,

@@ -791,11 +791,26 @@ fn compute_diff_map(
 ) -> Option<DiffMap> {
     let repo = git.discover(git_root)?;
     let base_text = repo.head_content(path)?;
+
+    let index_text = repo
+        .index_content(path)
+        .unwrap_or_else(|| base_text.clone());
+    let index_changed: Vec<Range<u32>> = {
+        let index_result = structural_diff::diff(&index_text, buffer_text);
+        let index_map = DiffMap::from_structural_changes(index_result, &index_text, buffer_text);
+        index_map
+            .hunks_in_range(0..u32::MAX)
+            .into_iter()
+            .map(|hunk| hunk.buffer_line_range.clone())
+            .collect()
+    };
+
     let result = structural_diff::diff(&base_text, buffer_text);
-    Some(DiffMap::from_structural_changes(
+    Some(DiffMap::from_structural_changes_staged(
         result,
         &base_text,
         buffer_text,
+        &index_changed,
     ))
 }
 
@@ -896,6 +911,41 @@ mod tests {
             dm.status_for_line(0),
             DiffStatus::Unchanged,
             "the unchanged first line reads unchanged"
+        );
+    }
+
+    #[test]
+    fn diff_job_marks_hunks_staged_from_the_index() {
+        let mut h = TestHarness::with_size(80, 24);
+        // HEAD a/b/c/d; working changes line 1 (b->B) and line 3 (d->D). The
+        // index holds only the line-1 change, so line 1 is staged, line 3 not.
+        h.stage_index_scenario(
+            "/repo",
+            &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/f.txt"));
+        h.settle_diff_jobs();
+
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+
+        let flags: Vec<(u32, bool)> = dm
+            .hunks_in_range(0..u32::MAX)
+            .iter()
+            .map(|hunk| (hunk.buffer_start_line, hunk.staged))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![(1, true), (3, false)],
+            "the index-staged line-1 hunk is staged, the line-3 hunk is not"
         );
     }
 

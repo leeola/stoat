@@ -58,6 +58,12 @@ pub struct DiffHunk {
     pub base_byte_range: Range<usize>,
     pub anchor_range: Option<Range<Anchor>>,
     pub token_detail: Option<Arc<TokenDetail>>,
+    /// Whether this hunk's change is already applied to the git index.
+    ///
+    /// Set only by [`DiffMap::from_structural_changes_staged`]. The plain
+    /// [`DiffMap::from_structural_changes`] leaves it `false`, so a map built
+    /// without index awareness reads as entirely unstaged.
+    pub staged: bool,
 }
 
 // --- SumTree plumbing (follows TreeMap/MapKey pattern from text/src/tree_map.rs) ---
@@ -143,6 +149,28 @@ impl DiffMap {
         rhs_text: &str,
     ) -> Self {
         let hunks = changes_to_hunks(&result.changes, lhs_text, rhs_text);
+        Self::from_hunks(hunks, Some(Arc::new(lhs_text.to_string())))
+    }
+
+    /// Build a [`DiffMap`] like [`Self::from_structural_changes`], additionally
+    /// marking each hunk whose change is already applied to the git index.
+    ///
+    /// `index_changed` is the set of buffer-line ranges that differ between the
+    /// index and the buffer, from a `structural_diff(index, buffer)` pass. A
+    /// hunk is staged when no such range overlaps its `buffer_line_range`,
+    /// because the index and buffer already agree over the hunk's extent.
+    pub fn from_structural_changes_staged(
+        result: stoat_language::structural_diff::DiffResult,
+        lhs_text: &str,
+        rhs_text: &str,
+        index_changed: &[Range<u32>],
+    ) -> Self {
+        let mut hunks = changes_to_hunks(&result.changes, lhs_text, rhs_text);
+        for hunk in &mut hunks {
+            hunk.staged = !index_changed
+                .iter()
+                .any(|changed| ranges_overlap(changed, &hunk.buffer_line_range));
+        }
         Self::from_hunks(hunks, Some(Arc::new(lhs_text.to_string())))
     }
 
@@ -300,6 +328,19 @@ impl DiffMap {
 /// because the metadata Arc identifies the move root. On each side
 /// we emit one [`TokenDetail::buffer_spans`] / `base_spans` entry per
 /// atom so downstream rendering can style each token independently.
+/// Whether two buffer-line ranges intersect.
+///
+/// An empty range (a deletion, which occupies no buffer rows) is treated as
+/// its anchor point, so a deletion hunk still matches an index change touching
+/// that point. Non-empty ranges use standard half-open overlap.
+fn ranges_overlap(a: &Range<u32>, b: &Range<u32>) -> bool {
+    if a.start == a.end || b.start == b.end {
+        a.start <= b.end && b.start <= a.end
+    } else {
+        a.start < b.end && b.start < a.end
+    }
+}
+
 fn changes_to_hunks(
     changes: &[stoat_language::structural_diff::DiffChange],
     lhs_text: &str,
@@ -387,6 +428,7 @@ fn changes_to_hunks(
                 .collect();
             hunks.push(DiffHunk {
                 status: DiffHunkStatus::Moved,
+                staged: false,
                 buffer_start_line: line_range.start,
                 buffer_line_range: line_range,
                 base_byte_range: base_range,
@@ -424,6 +466,7 @@ fn changes_to_hunks(
                 .collect();
             hunks.push(DiffHunk {
                 status: DiffHunkStatus::Moved,
+                staged: false,
                 buffer_start_line: lhs_line,
                 buffer_line_range: lhs_line..lhs_line,
                 base_byte_range: full_range,
@@ -465,6 +508,7 @@ fn changes_to_hunks(
             byte_range_to_line_range(&rhs_starts, rhs_text.len(), &rhs_change.byte_range);
         hunks.push(DiffHunk {
             status: DiffHunkStatus::Modified,
+            staged: false,
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: lhs_change.byte_range.clone(),
@@ -485,6 +529,7 @@ fn changes_to_hunks(
                     byte_range_to_line_range(&rhs_starts, rhs_text.len(), &cur.byte_range);
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Added,
+                    staged: false,
                     buffer_start_line: line_range.start,
                     buffer_line_range: line_range,
                     base_byte_range: 0..0,
@@ -502,6 +547,7 @@ fn changes_to_hunks(
                     .unwrap_or_else(|| line_of(&lhs_starts, cur.byte_range.start));
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Deleted,
+                    staged: false,
                     buffer_start_line: buffer_line,
                     buffer_line_range: buffer_line..buffer_line,
                     base_byte_range: cur.byte_range.clone(),
@@ -600,6 +646,7 @@ mod tests {
     fn added_hunk(line_range: std::ops::Range<u32>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Added,
+            staged: false,
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: 0..0,
@@ -611,6 +658,7 @@ mod tests {
     fn deleted_hunk(after_line: u32, base_byte_range: std::ops::Range<usize>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Deleted,
+            staged: false,
             buffer_start_line: after_line + 1,
             buffer_line_range: (after_line + 1)..(after_line + 1),
             base_byte_range,
@@ -625,6 +673,7 @@ mod tests {
     ) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Modified,
+            staged: false,
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range,
@@ -976,6 +1025,70 @@ mod tests {
         let result = stoat_language::structural_diff::diff(txt, txt);
         let dm = DiffMap::from_structural_changes(result, txt, txt);
         assert!(dm.is_empty());
+    }
+
+    #[test]
+    fn from_structural_changes_leaves_hunks_unstaged() {
+        let lhs = "a\nb\nc\n";
+        let rhs = "a\nB\nc\n";
+        let result = stoat_language::structural_diff::diff(lhs, rhs);
+        let dm = DiffMap::from_structural_changes(result, lhs, rhs);
+        assert!(
+            dm.hunks_in_range(0..u32::MAX).iter().all(|h| !h.staged),
+            "index-unaware construction reads as entirely unstaged"
+        );
+    }
+
+    #[test]
+    fn from_structural_changes_staged_marks_by_index_overlap() {
+        // HEAD a/b/c/d; buffer changes line 1 (B) and line 3 (D). The index
+        // holds only the line-1 change, so index-vs-buffer differs on line 3.
+        let base = "a\nb\nc\nd\n";
+        let index = "a\nB\nc\nd\n";
+        let buffer = "a\nB\nc\nD\n";
+        let index_changed: Vec<std::ops::Range<u32>> = DiffMap::from_structural_changes(
+            stoat_language::structural_diff::diff(index, buffer),
+            index,
+            buffer,
+        )
+        .hunks_in_range(0..u32::MAX)
+        .iter()
+        .map(|h| h.buffer_line_range.clone())
+        .collect();
+        let result = stoat_language::structural_diff::diff(base, buffer);
+        let dm = DiffMap::from_structural_changes_staged(result, base, buffer, &index_changed);
+        let flags: Vec<(u32, bool)> = dm
+            .hunks_in_range(0..u32::MAX)
+            .iter()
+            .map(|h| (h.buffer_start_line, h.staged))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![(1, true), (3, false)],
+            "line-1 change staged, line-3 change unstaged"
+        );
+    }
+
+    #[test]
+    fn ranges_overlap_treats_empty_as_a_point() {
+        use super::ranges_overlap;
+        assert!(ranges_overlap(&(1..3), &(2..5)), "standard overlap");
+        assert!(
+            !ranges_overlap(&(1..3), &(3..5)),
+            "half-open, touching does not overlap"
+        );
+        assert!(
+            ranges_overlap(&(2..2), &(1..5)),
+            "empty point inside a range"
+        );
+        assert!(
+            ranges_overlap(&(3..3), &(3..3)),
+            "coincident deletion points"
+        );
+        assert!(
+            !ranges_overlap(&(2..2), &(3..5)),
+            "empty point outside a range"
+        );
     }
 
     #[test]

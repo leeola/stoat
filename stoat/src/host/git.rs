@@ -133,6 +133,15 @@ pub trait GitRepo: Send + Sync {
     fn head_content(&self, path: &Path) -> Option<String> {
         self.head_contents(&[path]).into_iter().next().flatten()
     }
+
+    /// Read the UTF-8 content of `path` as it appears in the index, i.e. the
+    /// staged blob at stage 0.
+    ///
+    /// Returns `None` when `path` is not in the index, is a binary blob, or
+    /// lies outside the workdir. A caller wanting HEAD when a path is
+    /// unstaged falls back to [`Self::head_content`] itself.
+    fn index_content(&self, path: &Path) -> Option<String>;
+
     /// Apply a unified-diff patch to the index. Most callers will want
     /// to drive this through the review-apply flow rather than directly.
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError>;

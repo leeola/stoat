@@ -4213,6 +4213,7 @@ mod tests {
         });
         let hunk = DiffHunk {
             status: DiffHunkStatus::Moved,
+            staged: false,
             buffer_start_line: moved_line,
             buffer_line_range: moved_line..(moved_line + 1),
             base_byte_range: 0..0,
@@ -4386,6 +4387,7 @@ mod tests {
             dm.set_base_text(Arc::new("a\nb\nc\n".to_string()));
             dm.push_hunk(DiffHunk {
                 status: DiffHunkStatus::Deleted,
+                staged: false,
                 buffer_start_line: 1,
                 buffer_line_range: 1..1,
                 base_byte_range: 0..5,
@@ -4652,6 +4654,7 @@ mod tests {
         });
         let hunk = DiffHunk {
             status: DiffHunkStatus::Moved,
+            staged: false,
             buffer_start_line: 2,
             buffer_line_range: 2..3,
             base_byte_range: 0..0,

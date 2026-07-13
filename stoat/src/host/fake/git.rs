@@ -210,6 +210,19 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Seed the index (staged) blob for a path, read by
+    /// [`GitRepo::index_content`]. Combine with [`Self::head_file`] and
+    /// [`Self::unstaged_file`] to model a half-staged file (HEAD, INDEX, and
+    /// working text all distinct).
+    pub fn index_file(&mut self, rel_path: impl AsRef<Path>, content: &str) -> &mut Self {
+        self.mutate_repo(|state| {
+            state
+                .index_contents
+                .insert(rel_path.as_ref().to_path_buf(), content.to_string());
+        });
+        self
+    }
+
     /// Record `rel_path` as modified in the working tree. Writes `working`
     /// to the attached [`FakeFs`] at the absolute path if one was attached.
     pub fn unstaged_file(&mut self, rel_path: impl AsRef<Path>, working: &str) -> &mut Self {
@@ -457,6 +470,10 @@ pub struct FakeGitRepo {
 #[derive(Default)]
 struct FakeRepoState {
     head_contents: HashMap<PathBuf, String>,
+    /// Repo-relative path to its index (staged) blob text. Read by
+    /// [`GitRepo::index_content`], which falls back to `head_contents` for
+    /// paths absent here, so an unstaged file reads as its HEAD content.
+    index_contents: HashMap<PathBuf, String>,
     changed: Vec<ChangedFile>,
     /// Absolute paths reported as untracked (working-tree new files), seeded via
     /// [`FakeRepoBuilder::untracked`]. Kept apart from `changed` so
@@ -564,6 +581,16 @@ impl GitRepo for FakeGitRepo {
                 state.head_contents.get(rel).cloned()
             })
             .collect()
+    }
+
+    fn index_content(&self, path: &Path) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        let rel = path.strip_prefix(&self.workdir).ok()?;
+        state
+            .index_contents
+            .get(rel)
+            .or_else(|| state.head_contents.get(rel))
+            .cloned()
     }
 
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
@@ -920,6 +947,26 @@ mod tests {
         assert!(changed[0].path.ends_with("a.rs"));
         assert!(!changed[1].staged);
         assert!(changed[1].path.ends_with("b.rs"));
+    }
+
+    #[test]
+    fn index_content_reads_index_then_falls_back_to_head() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "head")
+            .index_file("a.rs", "staged")
+            .head_file("b.rs", "only-head");
+        let repo = host.discover(&workdir()).unwrap();
+        assert_eq!(
+            repo.index_content(&workdir().join("a.rs")).as_deref(),
+            Some("staged"),
+            "seeded index text wins over HEAD"
+        );
+        assert_eq!(
+            repo.index_content(&workdir().join("b.rs")).as_deref(),
+            Some("only-head"),
+            "an unseeded index falls back to HEAD content"
+        );
     }
 
     #[test]
