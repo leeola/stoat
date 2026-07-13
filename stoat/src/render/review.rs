@@ -1,5 +1,5 @@
 use crate::{
-    display_map::{BlockRowKind, DisplaySnapshot},
+    display_map::{highlights::HighlightStyle, BlockRowKind, DisplaySnapshot},
     editor_state::EditorState,
     host::DiffStatus,
     review::{MoveProvenance, ReviewRow},
@@ -137,16 +137,17 @@ pub(crate) fn paint_diff_rows(
             BlockRowKind::Block { .. } => {
                 let text = snapshot.display_line(display_row);
                 render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
-                render_side_text(
+                let token_spans = snapshot
+                    .diff_map()
+                    .and_then(|dm| dm.base_highlights_for_line(base_line))
+                    .unwrap_or(&[]);
+                paint_base_row(
                     buf,
                     left_text_x,
                     y,
                     &text,
                     left_content_w,
-                    del_style,
-                    &[],
-                    del_style,
-                    &[],
+                    token_spans,
                     del_style,
                 );
                 base_line += 1;
@@ -171,22 +172,55 @@ pub(crate) fn paint_diff_rows(
                 if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
                     let text = snapshot.display_line(display_row);
                     render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
-                    render_side_text(
+                    let token_spans = snapshot
+                        .diff_map()
+                        .and_then(|dm| dm.base_highlights_for_line(base_line))
+                        .unwrap_or(&[]);
+                    paint_base_row(
                         buf,
                         left_text_x,
                         y,
                         &text,
                         left_content_w,
-                        dim_style,
-                        &[],
-                        dim_style,
-                        &[],
+                        token_spans,
                         dim_style,
                     );
                     base_line += 1;
                 }
             },
         }
+    }
+}
+
+/// Paint base text with per-token syntax styles for the diff view's left
+/// column.
+///
+/// A byte inside a token span takes that token's color. Bytes outside every
+/// span fall back to `fallback` (the deletion or context color), so the diff
+/// tint still fills the gaps between tokens.
+fn paint_base_row(
+    buf: &mut Buffer,
+    start_x: u16,
+    y: u16,
+    text: &str,
+    max_cols: usize,
+    token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
+    fallback: Style,
+) {
+    for (col, (byte_idx, ch)) in text.char_indices().enumerate() {
+        if col >= max_cols {
+            break;
+        }
+        let x = start_x + col as u16;
+        if x >= buf.area.x + buf.area.width {
+            break;
+        }
+        let style = token_spans
+            .iter()
+            .find(|(range, _)| range.contains(&byte_idx))
+            .map(|(_, hs)| hs.to_ratatui_style())
+            .unwrap_or(fallback);
+        buf[(x, y)].set_char(ch).set_style(style);
     }
 }
 
@@ -1044,6 +1078,40 @@ mod tests {
         assert!(
             colors.len() >= 2,
             "the right column is syntax highlighted with distinct token colors: {colors:?}"
+        );
+    }
+
+    #[test]
+    fn diff_view_left_column_carries_base_token_colors() {
+        use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
+
+        let mut h = TestHarness::with_size(60, 10);
+        // The base carries rust keywords. The buffer differs, so the base line
+        // renders as a deleted block in the left column.
+        h.stage_review_scenario("/repo", &[("a.rs", "fn main() {}\n", "fn other() {}\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(std::path::Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        h.snapshot();
+
+        // Left text spans cols 6..29 (1-col status + 5-col number, half width 29).
+        let buf = h.rendered_buffer();
+        let mut colors = std::collections::HashSet::new();
+        for y in 0..buf.area.height {
+            for x in 6..29 {
+                let cell = &buf[(x, y)];
+                if cell.symbol().trim().is_empty() {
+                    continue;
+                }
+                colors.insert(format!("{:?}", cell.style().fg));
+            }
+        }
+        assert!(
+            colors.len() >= 2,
+            "the base column carries token colors plus the deletion fallback: {colors:?}"
         );
     }
 
