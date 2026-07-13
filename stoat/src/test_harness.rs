@@ -606,6 +606,12 @@ impl TestHarness {
         self.frames.last().expect("no frames captured")
     }
 
+    /// The most recently rendered terminal buffer, styles included. Populated by
+    /// [`Self::snapshot`] and the other capture paths, so call one first.
+    pub(crate) fn rendered_buffer(&self) -> &Buffer {
+        self.last_buffer.as_ref().expect("no rendered buffer yet")
+    }
+
     pub fn resize(&mut self, width: u16, height: u16) {
         self.step += 100;
         self.sub_frame = 0;

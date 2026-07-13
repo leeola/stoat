@@ -1,6 +1,7 @@
 use crate::{
     display_map::{BlockRowKind, DisplaySnapshot},
     editor_state::EditorState,
+    host::DiffStatus,
     review::{MoveProvenance, ReviewRow},
     review_session::{ChunkStatus, ReviewViewState},
 };
@@ -45,6 +46,173 @@ pub(crate) fn render_review(
         scene,
     );
     render_review_cursor(editor, &snapshot, inner, theme, buf, stoatty);
+}
+
+/// Paint an editor as a side-by-side diff, with base (HEAD) text on the left and
+/// the live syntax-highlighted buffer on the right, row-aligned through the
+/// display map's deleted-block splicing.
+///
+/// The right column runs the same highlighted pipeline as a plain editor, so the
+/// buffer stays fully editable and colored. The left column shows removed and
+/// modified base lines (as spliced block rows) in the diff-deleted style and
+/// mirrors unchanged lines dimmed. Added and modified new lines leave it blank.
+/// Line numbers are base-file lines on the left and buffer lines on the right.
+///
+/// Reuses [`render_review_rows`]'s two-column geometry and the ASCII gutter
+/// path. The rich sub-cell gutter is not engaged here.
+pub(crate) fn render_diff_view(
+    editor: &mut EditorState,
+    inner: Rect,
+    fallback_style: Style,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    stoatty: bool,
+) {
+    let snapshot = editor.display_map.snapshot();
+    let scroll_row = editor.scroll_row;
+    let total_rows = snapshot.line_count();
+    let visible = inner.height as u32;
+    let end_row = (scroll_row + visible).min(total_rows);
+    if end_row <= scroll_row {
+        return;
+    }
+
+    let full_w = inner.width as usize;
+    let status_w: usize = 1;
+    let num_w: usize = 5;
+    let gutter_w = status_w + num_w;
+    let sep: usize = 1;
+    let half_w = (full_w.saturating_sub(sep)) / 2;
+    let left_content_w = half_w.saturating_sub(gutter_w);
+    let right_start = inner.x + half_w as u16 + sep as u16;
+    let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
+
+    let left_num_x = inner.x + status_w as u16;
+    let left_text_x = left_num_x + num_w as u16;
+    let right_num_x = right_start + status_w as u16;
+    let right_text_x = right_num_x + num_w as u16;
+
+    use crate::theme::scope as s;
+    let dim_style = theme.get(s::DIFF_CONTEXT);
+    let del_style = theme.get(s::DIFF_DELETED);
+
+    let mut base_line = base_line_at(&snapshot, scroll_row);
+
+    for display_row in scroll_row..end_row {
+        let y = inner.y + (display_row - scroll_row) as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+
+        let sep_x = inner.x + half_w as u16;
+        if sep_x < inner.x + inner.width {
+            buf[(sep_x, y)].set_char('│').set_style(dim_style);
+        }
+
+        match snapshot.classify_row(display_row) {
+            BlockRowKind::Block { .. } => {
+                let text = snapshot.display_line(display_row);
+                render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
+                render_side_text(
+                    buf,
+                    left_text_x,
+                    y,
+                    &text,
+                    left_content_w,
+                    del_style,
+                    &[],
+                    del_style,
+                    &[],
+                    del_style,
+                );
+                base_line += 1;
+            },
+            BlockRowKind::BufferRow { buffer_row } => {
+                render_side_num(buf, right_num_x, y, buffer_row + 1, dim_style);
+                paint_highlighted_row(
+                    &snapshot,
+                    display_row,
+                    right_text_x,
+                    y,
+                    right_content_w,
+                    buf,
+                    fallback_style,
+                );
+                if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
+                    let text = snapshot.display_line(display_row);
+                    render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
+                    render_side_text(
+                        buf,
+                        left_text_x,
+                        y,
+                        &text,
+                        left_content_w,
+                        dim_style,
+                        &[],
+                        dim_style,
+                        &[],
+                        dim_style,
+                    );
+                    base_line += 1;
+                }
+            },
+        }
+    }
+
+    render_review_cursor(editor, &snapshot, inner, theme, buf, stoatty);
+}
+
+/// Count the base-present display rows above `scroll_row` to get the base-file
+/// line number at the top of the viewport.
+///
+/// Context buffer rows and deleted/modified base block rows each map to one base
+/// line. Added and modified new-line buffer rows do not, and are skipped. Walks
+/// from row 0, so a deep scroll costs one classify per row above the viewport.
+fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
+    let mut base_line = 0;
+    for row in 0..scroll_row {
+        match snapshot.classify_row(row) {
+            BlockRowKind::Block { .. } => base_line += 1,
+            BlockRowKind::BufferRow { buffer_row } => {
+                if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
+                    base_line += 1;
+                }
+            },
+        }
+    }
+    base_line
+}
+
+/// Paint one display row's syntax-highlighted chunks into a column starting at
+/// `start_x`, clamped to `max_cols` and the buffer's right edge.
+fn paint_highlighted_row(
+    snapshot: &DisplaySnapshot,
+    display_row: u32,
+    start_x: u16,
+    y: u16,
+    max_cols: usize,
+    buf: &mut Buffer,
+    fallback_style: Style,
+) {
+    let mut col = 0usize;
+    for chunk in snapshot.highlighted_chunks(display_row..display_row + 1) {
+        let style = chunk
+            .highlight_style
+            .as_ref()
+            .map(|hs| hs.to_ratatui_style())
+            .unwrap_or(fallback_style);
+        for ch in chunk.text.chars() {
+            if ch == '\n' || col >= max_cols {
+                return;
+            }
+            let x = start_x + col as u16;
+            if x >= buf.area.x + buf.area.width {
+                return;
+            }
+            buf[(x, y)].set_char(ch).set_style(style);
+            col += 1;
+        }
+    }
 }
 
 /// Paint the clean-tree empty state as a centered dim line, so the diff view
@@ -629,11 +797,158 @@ pub(crate) fn render_side_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        buffer::{BufferId, TextBuffer},
+        diff_map::DiffMap,
+        theme::Theme,
+    };
+    use std::sync::{Arc, RwLock};
+    use stoat_language::structural_diff;
+    use stoat_scheduler::{Executor, TestScheduler};
 
     fn buffer_text(buf: &Buffer, y: u16) -> String {
         (buf.area.x..buf.area.x + buf.area.width)
             .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
             .collect()
+    }
+
+    /// A diff-view editor over `text`, diffed against `base`, with the view and
+    /// its deleted-block splicing enabled.
+    fn diff_editor(base: &str, text: &str) -> EditorState {
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut tb = TextBuffer::with_text(BufferId::new(0), text);
+        tb.diff_map = Some(DiffMap::from_structural_changes(
+            structural_diff::diff(base, text),
+            base,
+            text,
+        ));
+        let shared = Arc::new(RwLock::new(tb));
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor);
+        editor.set_diff_view(true);
+        editor
+    }
+
+    #[test]
+    fn diff_view_lays_out_base_left_buffer_right() {
+        let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew\ntail\n");
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            false,
+        );
+
+        // For width 40, left text spans cols 6..19, the separator sits at col 19,
+        // and right text spans cols 26..40.
+        let rows: Vec<String> = (0..4).map(|y| buffer_text(&buf, y)).collect();
+
+        assert!(
+            rows[0][6..19].contains("keep"),
+            "row0 left mirrors context: {:?}",
+            rows[0]
+        );
+        assert!(
+            rows[0][26..40].contains("keep"),
+            "row0 right shows buffer: {:?}",
+            rows[0]
+        );
+
+        assert!(
+            rows[1][6..19].contains("old"),
+            "row1 left shows deleted base: {:?}",
+            rows[1]
+        );
+        assert_eq!(
+            rows[1][26..40].trim(),
+            "",
+            "row1 right blank for a deletion: {:?}",
+            rows[1]
+        );
+
+        assert!(
+            rows[2][26..40].contains("new"),
+            "row2 right shows the new line: {:?}",
+            rows[2]
+        );
+        assert_eq!(
+            rows[2][6..19].trim(),
+            "",
+            "row2 left blank for a modified line: {:?}",
+            rows[2]
+        );
+
+        assert!(
+            rows[3][6..19].contains("tail") && rows[3][26..40].contains("tail"),
+            "row3 context mirrors both sides: {:?}",
+            rows[3]
+        );
+
+        assert_eq!(
+            buf[(19, 0)].symbol(),
+            "│",
+            "the two columns are split by a separator"
+        );
+    }
+
+    #[test]
+    fn typing_in_diff_view_edits_the_real_buffer() {
+        use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
+
+        let mut h = TestHarness::with_size(40, 8);
+        let path = h.write_file("a.txt", "abc\n");
+        h.open_file(&path);
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+
+        h.type_keys("i");
+        h.type_text("X");
+
+        let text = focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .display_map
+            .snapshot()
+            .buffer_snapshot()
+            .rope()
+            .to_string();
+        assert!(
+            text.starts_with('X'),
+            "inserting in the diff view lands in the real buffer: {text:?}"
+        );
+    }
+
+    #[test]
+    fn diff_view_right_column_carries_syntax_colors() {
+        use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
+
+        let mut h = TestHarness::with_size(60, 10);
+        let path = h.write_file("a.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.stoat.drive_background();
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        h.snapshot();
+
+        // For width 60 the right text begins at col 36. A syntax-highlighted right
+        // column paints more than one foreground color across the row's tokens.
+        let buf = h.rendered_buffer();
+        let mut colors = std::collections::HashSet::new();
+        for x in 36..60 {
+            let cell = &buf[(x, 0)];
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            colors.insert(format!("{:?}", cell.style().fg));
+        }
+        assert!(
+            colors.len() >= 2,
+            "the right column is syntax highlighted with distinct token colors: {colors:?}"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::{
     display_map::{tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
     render::{
-        review::{render_review, style_rgb},
+        review::{render_diff_view, render_review, style_rgb},
         undercurl::UndercurlSpan,
     },
 };
@@ -85,6 +85,11 @@ pub(crate) fn render_editor_with_overlay(
     if editor.review_view.is_some() {
         let scene = if stoatty { scene } else { None };
         render_review(editor, inner, fallback_style, theme, buf, scene);
+        return;
+    }
+
+    if editor.diff_view {
+        render_diff_view(editor, inner, fallback_style, theme, buf, stoatty);
         return;
     }
 

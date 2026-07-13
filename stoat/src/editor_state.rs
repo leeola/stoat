@@ -64,6 +64,14 @@ pub(crate) struct EditorState {
     /// cache here. The cache is rebuilt by action handlers whenever the
     /// backing session's `version` advances past `review_view.session_version`.
     pub(crate) review_view: Option<ReviewViewState>,
+    /// When set, `render_editor` paints this editor as a side-by-side diff: the
+    /// right column is the normal syntax-highlighted buffer and the left column
+    /// shows the base (HEAD) text via the buffer's diff map. Unlike
+    /// [`Self::review_view`] there is no backing session -- the buffer stays the
+    /// real editable buffer, so input handling is unchanged. Set through
+    /// [`Self::set_diff_view`], which also flips the display map's
+    /// deleted-block splicing.
+    pub(crate) diff_view: bool,
     pub(crate) selections: SelectionsCollection,
     /// Per-editor cursor for cycling through ambiguous move sources.
     /// `(hunk_line, source_index)` identifies which source the user is
@@ -138,6 +146,7 @@ impl EditorState {
             scroll_glide: false,
             viewport_rows: None,
             review_view: None,
+            diff_view: false,
             selections,
             move_source_cursor: None,
             expansion_history: Vec::new(),
@@ -169,6 +178,7 @@ impl EditorState {
             scroll_glide: false,
             viewport_rows: None,
             review_view: None,
+            diff_view: false,
             selections,
             move_source_cursor: None,
             expansion_history: Vec::new(),
@@ -180,6 +190,16 @@ impl EditorState {
             gutter_width: 0,
             cursor_screen_cell: None,
         }
+    }
+
+    /// Toggle the side-by-side diff view. Enabling it also turns on the display
+    /// map's deleted-block splicing, so the base text of removed and modified
+    /// hunks aligns as block rows in the left column. Disabling it turns the
+    /// splicing back off.
+    #[cfg(test)]
+    pub(crate) fn set_diff_view(&mut self, on: bool) {
+        self.diff_view = on;
+        self.display_map.set_show_deleted_blocks(on);
     }
 
     pub(crate) fn snapshot(&self) -> EditorStateSnapshot {
