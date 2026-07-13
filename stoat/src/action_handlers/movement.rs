@@ -6,6 +6,7 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
     pane::View,
 };
+use std::path::{Path, PathBuf};
 use stoat_language::structural_diff::BufferRef;
 use stoat_text::{
     cursor_offset, find_number_seeking, next_char_boundary, next_long_word_end_range,
@@ -3265,9 +3266,17 @@ fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>)
 pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let origin = super::jump::live_entry(stoat);
+    let current_path = stoat.focused_editor_ids().and_then(|(_, buffer_id)| {
+        stoat
+            .active_workspace()
+            .buffers
+            .path_for(buffer_id)
+            .map(Path::to_path_buf)
+    });
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
+    let source_diff_view = editor.diff_view;
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
 
@@ -3278,23 +3287,17 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     let cursor = cursor_offset(rope, tail_off, head_off);
     let cursor_row = rope.offset_to_point(cursor).row;
 
-    let Some(diff_map) = display_snapshot.diff_map() else {
-        return UpdateEffect::None;
-    };
-
-    let target_row = match dir {
+    let target_row = display_snapshot.diff_map().and_then(|diff_map| match dir {
         ChangeDir::Next => {
             let next: Vec<_> = diff_map
                 .hunks_in_range(cursor_row.saturating_add(1)..u32::MAX)
                 .into_iter()
                 .filter(|h| h.buffer_start_line > cursor_row)
                 .collect();
-            if next.is_empty() {
-                None
-            } else {
+            (!next.is_empty()).then(|| {
                 let idx = (count.saturating_sub(1)).min(next.len() - 1);
-                Some(next[idx].buffer_start_line)
-            }
+                next[idx].buffer_start_line
+            })
         },
         ChangeDir::Prev => {
             let prev: Vec<_> = diff_map
@@ -3302,16 +3305,14 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
                 .into_iter()
                 .filter(|h| h.buffer_start_line < cursor_row)
                 .collect();
-            if prev.is_empty() {
-                None
-            } else {
+            (!prev.is_empty()).then(|| {
                 let idx = prev.len().saturating_sub(count);
-                Some(prev[idx].buffer_start_line)
-            }
+                prev[idx].buffer_start_line
+            })
         },
-    };
+    });
     let Some(target_row) = target_row else {
-        return UpdateEffect::None;
+        return goto_change_across_files(stoat, dir, current_path, source_diff_view, origin);
     };
 
     let target_offset = buffer_snapshot
@@ -3328,6 +3329,93 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     });
     if let Some(entry) = origin {
         super::jump::push_entry(stoat, entry);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Jump to the adjacent changed file when the focused buffer has no further
+/// hunk in `dir`.
+///
+/// Opens the neighbor in the focused pane, preserving `source_diff_view`, and
+/// lands the cursor on its first (Next) or last (Prev) hunk after computing its
+/// diff synchronously. Wraps past the repo ends with a "wrapped" status, and
+/// reports "no more changes" when no other file has changes.
+fn goto_change_across_files(
+    stoat: &mut Stoat,
+    dir: ChangeDir,
+    current_path: Option<PathBuf>,
+    source_diff_view: bool,
+    origin: Option<crate::jumplist::JumpEntry>,
+) -> UpdateEffect {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        return UpdateEffect::None;
+    };
+    let changed: Vec<PathBuf> = repo.changed_files().into_iter().map(|f| f.path).collect();
+    if changed.len() < 2 {
+        stoat.set_status("no more changes");
+        return UpdateEffect::Redraw;
+    }
+
+    let current_index = current_path
+        .as_deref()
+        .and_then(|path| changed.iter().position(|c| c == path));
+    let (target_index, wrapped) = match (current_index, dir) {
+        (Some(i), ChangeDir::Next) if i + 1 < changed.len() => (i + 1, false),
+        (Some(_), ChangeDir::Next) => (0, true),
+        (Some(i), ChangeDir::Prev) if i > 0 => (i - 1, false),
+        (Some(_), ChangeDir::Prev) => (changed.len() - 1, true),
+        (None, ChangeDir::Next) => (0, false),
+        (None, ChangeDir::Prev) => (changed.len() - 1, false),
+    };
+    let target_path = changed[target_index].clone();
+
+    let focused_pane = stoat.active_workspace().panes.focus();
+    let Some(target_buffer) = super::file::open_file_in_pane(stoat, focused_pane, &target_path)
+    else {
+        return UpdateEffect::None;
+    };
+
+    if source_diff_view && let Some(editor) = focused_editor_mut(stoat) {
+        editor.set_diff_view(true);
+    }
+
+    let git_host = stoat.git_host.clone();
+    stoat
+        .active_workspace_mut()
+        .install_diff_map_now(&git_host, target_buffer);
+
+    if let Some(editor) = focused_editor_mut(stoat) {
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let target_row = display_snapshot.diff_map().and_then(|diff_map| {
+            let hunks = diff_map.hunks_in_range(0..u32::MAX);
+            match dir {
+                ChangeDir::Next => hunks.first().map(|h| h.buffer_start_line),
+                ChangeDir::Prev => hunks.last().map(|h| h.buffer_start_line),
+            }
+        });
+        if let Some(target_row) = target_row {
+            let target_offset = buffer_snapshot
+                .rope()
+                .point_to_offset(Point::new(target_row, 0));
+            editor.selections.transform(buffer_snapshot, |sel| {
+                land_block_cursor(
+                    sel.id,
+                    target_offset,
+                    SelectionGoal::None,
+                    buffer_snapshot.rope(),
+                    buffer_snapshot,
+                )
+            });
+        }
+    }
+
+    if let Some(entry) = origin {
+        super::jump::push_entry(stoat, entry);
+    }
+    if wrapped {
+        stoat.set_status("wrapped");
     }
     UpdateEffect::Redraw
 }
@@ -4188,7 +4276,7 @@ mod tests {
     fn install_moved_hunk_to_other_file(
         h: &mut TestHarness,
         moved_line: u32,
-        target_path: &std::path::Path,
+        target_path: &Path,
         target_line: u32,
     ) {
         let buffer_ref = BufferRef {
@@ -4233,7 +4321,7 @@ mod tests {
         guard.diff_map = Some(dm);
     }
 
-    fn focused_buffer_path(h: &TestHarness) -> std::path::PathBuf {
+    fn focused_buffer_path(h: &TestHarness) -> PathBuf {
         let ws = h.stoat.active_workspace();
         let focused = ws.panes.focus();
         let editor_id = match ws.panes.pane(focused).view {
@@ -4254,6 +4342,103 @@ mod tests {
         let head = editor.selections.newest_anchor().head();
         let offset = buffer_snapshot.resolve_anchor(&head);
         buffer_snapshot.rope().offset_to_point(offset).row
+    }
+
+    /// Seed a repo with two changed files, each carrying one hunk at line 1.
+    /// `changed_files` sorts by path, so a.rs is index 0 and b.rs is index 1.
+    fn stage_two_changed_files(h: &mut TestHarness) -> PathBuf {
+        let workdir = PathBuf::from("/repo");
+        h.stage_review_scenario(
+            &workdir,
+            &[
+                ("a.rs", "a\nb\nc\n", "a\nX\nc\n"),
+                ("b.rs", "d\ne\nf\n", "d\nY\nf\n"),
+            ],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        workdir
+    }
+
+    #[test]
+    fn next_change_crosses_to_next_file_first_hunk() {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = stage_two_changed_files(&mut h);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.set_diff_view(true);
+            set_cursor_row(editor, 1);
+        }
+
+        goto_change(&mut h.stoat, ChangeDir::Next);
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            workdir.join("b.rs"),
+            "crossed to b.rs"
+        );
+        assert_eq!(focused_head_row(&mut h), 1, "landed on b.rs's first hunk");
+        assert!(
+            focused_editor_mut(&mut h.stoat).expect("editor").diff_view,
+            "diff_view carried across the file boundary"
+        );
+    }
+
+    #[test]
+    fn prev_change_crosses_to_previous_file_last_hunk() {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = stage_two_changed_files(&mut h);
+        h.open_file(&workdir.join("b.rs"));
+        h.settle_diff_jobs();
+        set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+        goto_change(&mut h.stoat, ChangeDir::Prev);
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            workdir.join("a.rs"),
+            "crossed back to a.rs"
+        );
+        assert_eq!(focused_head_row(&mut h), 1, "landed on a.rs's last hunk");
+    }
+
+    #[test]
+    fn next_change_wraps_from_the_last_file_with_a_message() {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = stage_two_changed_files(&mut h);
+        h.open_file(&workdir.join("b.rs"));
+        h.settle_diff_jobs();
+        set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+        goto_change(&mut h.stoat, ChangeDir::Next);
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            workdir.join("a.rs"),
+            "wrapped to a.rs"
+        );
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("wrapped"));
+    }
+
+    #[test]
+    fn next_change_with_one_changed_file_reports_no_more_changes() {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = PathBuf::from("/repo");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nX\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+        set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+        goto_change(&mut h.stoat, ChangeDir::Next);
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            workdir.join("a.rs"),
+            "stayed on a.rs"
+        );
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("no more changes"));
     }
 
     #[test]

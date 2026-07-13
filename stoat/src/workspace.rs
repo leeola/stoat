@@ -322,6 +322,33 @@ impl Workspace {
         self.diff_versions.remove(&id);
     }
 
+    /// Compute and install `id`'s diff map synchronously, bypassing the
+    /// background job so its hunks are available on the current turn.
+    ///
+    /// Records the buffer's version so [`Self::drive_diff_jobs`] does not
+    /// redundantly recompute the same map. A no-op for a buffer without a path.
+    pub(crate) fn install_diff_map_now(&mut self, git_host: &Arc<dyn GitHost>, id: BufferId) {
+        let Some(path) = self.buffers.path_for(id).map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(shared) = self.buffers.get(id) else {
+            return;
+        };
+        let (version, text) = {
+            let guard = shared.read().expect("buffer poisoned");
+            (
+                guard.snapshot.version,
+                guard.snapshot.visible_text.to_string(),
+            )
+        };
+
+        let diff_map = compute_diff_map(&**git_host, &self.git_root, &path, &text);
+        if let Some(shared) = self.buffers.get(id) {
+            shared.write().expect("buffer poisoned").diff_map = diff_map;
+        }
+        self.diff_versions.insert(id, version);
+    }
+
     /// Build a fresh [`EditorState`] for `buffer_id`, seeded with the buffer's
     /// retained tree-sitter and LSP tokens when the registry holds them.
     ///
