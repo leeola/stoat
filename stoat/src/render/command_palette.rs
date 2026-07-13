@@ -77,8 +77,15 @@ pub(crate) fn palette_filter_layout(area: Rect) -> Option<PaletteFilterLayout> {
 /// Shared with [`render_palette_arg_picker`] through [`arg_body_split`] so the
 /// pooled region and the painted list are the same rect.
 pub(crate) fn palette_arg_list_rect(area: Rect) -> Option<Rect> {
+    palette_arg_body(area).map(|(list, _)| list)
+}
+
+/// The arg-picker body split into its result-list rect and optional preview
+/// rect, sharing [`arg_body_split`] with the painter so hit-testing and
+/// rendering agree. `None` when the modal does not fit or the body has no rows.
+pub(crate) fn palette_arg_body(area: Rect) -> Option<(Rect, Option<Rect>)> {
     let layout = palette_filter_layout(area)?;
-    arg_body_split(layout.inner).map(|(list, _)| list)
+    arg_body_split(layout.inner)
 }
 
 /// Split the arg-picker body below the `:` input into a result-list rect and an

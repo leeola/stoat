@@ -2783,11 +2783,43 @@ impl Stoat {
         // rather than scrolling the pane beneath, so the event never falls
         // through. The two modals are mutually exclusive, so two checks suffice.
         if self.file_finder.is_some() || self.command_palette.is_some() {
-            let delta = match mouse.kind {
-                MouseEventKind::ScrollDown => 1,
-                MouseEventKind::ScrollUp => -1,
+            let down = match mouse.kind {
+                MouseEventKind::ScrollDown => true,
+                MouseEventKind::ScrollUp => false,
                 _ => return UpdateEffect::None,
             };
+            let size = self.size();
+
+            // A wheel over the visible preview pane scrolls the preview content
+            // instead of moving the selection, mirroring the editor-pane path.
+            let preview = if let Some(finder) = self.file_finder.as_ref() {
+                crate::render::file_finder::file_finder_layout(size)
+                    .and_then(|layout| layout.preview)
+                    .map(|rect| (rect, finder.active_core_ref().preview.editor))
+            } else if let Some(palette) = self.command_palette.as_ref() {
+                if palette.arg_source().is_some()
+                    && let Some(picker) = palette.arg_picker.as_ref()
+                {
+                    crate::render::command_palette::palette_arg_body(size)
+                        .and_then(|(_, preview)| preview)
+                        .map(|rect| (rect, picker.active_core_ref().preview.editor))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some((rect, editor_id)) = preview
+                && rect.contains(Position::new(mouse.column, mouse.row))
+            {
+                if let Some(editor) = self.active_workspace_mut().editors.get_mut(editor_id) {
+                    action_handlers::movement::wheel_impulse(editor, down);
+                }
+                return UpdateEffect::None;
+            }
+
+            let delta = if down { 1 } else { -1 };
             return if self.file_finder.is_some() {
                 action_handlers::file_finder_move_selection(self, delta)
             } else {
@@ -6555,6 +6587,151 @@ mod tests {
         assert!(
             h.stoat.file_finder.is_some(),
             "and does not dismiss the finder"
+        );
+    }
+
+    fn finder_preview_id(h: &crate::test_harness::TestHarness) -> EditorId {
+        h.stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .active_core_ref()
+            .preview
+            .editor
+    }
+
+    #[test]
+    fn wheel_over_finder_preview_scrolls_it_not_the_list() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 30);
+        open_finder_with_four(&mut h);
+
+        let preview = crate::render::file_finder::file_finder_layout(h.stoat.size())
+            .and_then(|layout| layout.preview)
+            .expect("the preview pane is present at this width");
+        let preview_id = finder_preview_id(&h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            preview.x + preview.width / 2,
+            preview.y + preview.height / 2,
+        ));
+
+        assert_eq!(
+            finder_selected(&h),
+            0,
+            "a wheel over the preview leaves the list selection put"
+        );
+        let velocity = h
+            .stoat
+            .active_workspace()
+            .editors
+            .get(preview_id)
+            .expect("preview editor")
+            .scroll_velocity;
+        assert!(
+            velocity > 0.0,
+            "the wheel imparts downward scroll to the preview"
+        );
+    }
+
+    #[test]
+    fn wheel_over_palette_arg_preview_scrolls_it_not_the_list() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 30);
+        let root = std::path::PathBuf::from("/arg-preview");
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            h.fake_fs().insert_file(root.join(name), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_text(":o ");
+        h.settle();
+
+        let preview = crate::render::command_palette::palette_arg_body(h.stoat.size())
+            .and_then(|(_, preview)| preview)
+            .expect("the arg preview pane is present at this width");
+        let preview_id = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .arg_picker
+            .as_ref()
+            .expect("arg picker active")
+            .active_core_ref()
+            .preview
+            .editor;
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            preview.x + preview.width / 2,
+            preview.y + preview.height / 2,
+        ));
+
+        let selected = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .arg_picker
+            .as_ref()
+            .expect("arg picker active")
+            .active_core_ref()
+            .picklist
+            .selected;
+        assert_eq!(
+            selected, 0,
+            "a wheel over the preview leaves the arg selection put"
+        );
+        let velocity = h
+            .stoat
+            .active_workspace()
+            .editors
+            .get(preview_id)
+            .expect("preview editor")
+            .scroll_velocity;
+        assert!(
+            velocity > 0.0,
+            "the wheel imparts downward scroll to the preview"
+        );
+    }
+
+    #[test]
+    fn preview_scroll_resets_on_selection_change() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 30);
+        open_finder_with_four(&mut h);
+        action_handlers::sync_file_finder_preview(&mut h.stoat);
+        let preview_id = finder_preview_id(&h);
+
+        {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(preview_id)
+                .expect("preview editor");
+            editor.scroll_offset = 5.0;
+            editor.scroll_velocity = 100.0;
+            editor.scroll_row = 5;
+            editor.scroll_glide = true;
+        }
+
+        action_handlers::file_finder_move_selection(&mut h.stoat, 1);
+        action_handlers::sync_file_finder_preview(&mut h.stoat);
+
+        let editor = h
+            .stoat
+            .active_workspace()
+            .editors
+            .get(preview_id)
+            .expect("preview editor");
+        assert_eq!(
+            (
+                editor.scroll_row,
+                editor.scroll_offset,
+                editor.scroll_velocity,
+                editor.scroll_glide,
+            ),
+            (0, 0.0, 0.0, false),
+            "a new selection resets the preview scroll to the top",
         );
     }
 

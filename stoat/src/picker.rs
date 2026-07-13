@@ -495,6 +495,9 @@ fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: Buff
             new
         });
         editor.scroll_row = 0;
+        editor.scroll_offset = 0.0;
+        editor.scroll_velocity = 0.0;
+        editor.scroll_glide = false;
     }
 }
 
