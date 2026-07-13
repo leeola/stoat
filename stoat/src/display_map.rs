@@ -279,6 +279,14 @@ impl DisplayMap {
         self.id
     }
 
+    /// Version of the underlying buffer's diff map, or 0 when it has none.
+    ///
+    /// Cheap (a buffer read, no snapshot), so the smooth-scroll page assembly can
+    /// fold it into a diff-view page's content version to refill on hunk changes.
+    pub(crate) fn diff_version(&self) -> usize {
+        self.multi_buffer.diff_version()
+    }
+
     /// Enable or disable inline deleted-line block rows for this editor's diff
     /// map. Off by default. The side-by-side diff view turns it on. Nulls the
     /// snapshot cache so the next snapshot re-splices under the new setting.

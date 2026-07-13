@@ -42,7 +42,7 @@ use crate::{
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
-        review::render_review_rows,
+        review::{paint_diff_rows, render_review_rows},
     },
     review_session::ReviewViewState,
 };
@@ -308,6 +308,7 @@ fn scroll_target(pool: u32, scroll_offset: f32, region_height: u16) -> ScrollCom
 /// the frame through the APC channel, off the run loop. The bytes are an
 /// `encode_fill_into` marker, the [`render_page_from_snapshot`] page, then an
 /// `encode_fill_end_into` terminator.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page_fill(
     snapshot: &DisplaySnapshot,
     pool: u32,
@@ -316,6 +317,7 @@ pub(crate) fn render_page_fill(
     region_width: u16,
     region_height: u16,
     gutter: &PageGutter,
+    diff_view: bool,
 ) -> Vec<u8> {
     let top_row = index
         .saturating_mul(region_height as u64)
@@ -327,6 +329,7 @@ pub(crate) fn render_page_fill(
         region_width,
         region_height,
         gutter,
+        diff_view,
     );
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
@@ -360,9 +363,25 @@ pub(crate) fn render_page_from_snapshot(
     region_width: u16,
     region_height: u16,
     gutter: &PageGutter,
+    diff_view: bool,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
     let mut buf = Buffer::empty(area);
+
+    // A diff-view page paints the two columns itself, including both line-number
+    // gutters, so it bypasses the single-column page gutter. The ASCII path emits
+    // no rich APC, so the fill is just the serialized grid.
+    if diff_view {
+        paint_diff_rows(
+            snapshot,
+            top_row,
+            area,
+            fallback_style,
+            gutter.theme(),
+            &mut buf,
+        );
+        return serialize_buffer(&buf);
+    }
 
     let end_row = top_row
         .saturating_add(region_height as u32)
@@ -443,6 +462,12 @@ impl PageGutter {
             theme,
             rich,
         }
+    }
+
+    /// The theme resolved on the run loop, reused by a diff-view page to style
+    /// its two columns off the loop.
+    pub(crate) fn theme(&self) -> &crate::theme::Theme {
+        &self.theme
     }
 }
 
@@ -839,10 +864,63 @@ mod tests {
             let expected = serialize_buffer(&expected);
 
             let snapshot = editor.display_map.snapshot();
-            let got = render_page_from_snapshot(&snapshot, top_row, fallback, 12, 4, &gutter);
+            let got =
+                render_page_from_snapshot(&snapshot, top_row, fallback, 12, 4, &gutter, false);
 
             assert_eq!(got, expected, "page at top_row {top_row}");
         }
+    }
+
+    /// A diff-view page must paint the same two columns as the live grid, so
+    /// stoatty diff scrolling rides the pool path without a settle-handoff shift.
+    #[test]
+    fn diff_view_page_paints_the_two_column_body() {
+        use super::{
+            paint_diff_rows, render_page_from_snapshot, serialize_buffer, Buffer, PageGutter, Rect,
+        };
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            diff_map::DiffMap,
+            display_map::DisplayMap,
+            multi_buffer::MultiBuffer,
+            theme::{scope, Theme},
+        };
+        use std::{
+            collections::BTreeMap,
+            sync::{Arc, RwLock},
+        };
+        use stoat_language::structural_diff;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let base = "keep\nold\ntail\n";
+        let text = "keep\nnew\ntail\n";
+        let mut tb = TextBuffer::with_text(BufferId::new(0), text);
+        tb.diff_map = Some(DiffMap::from_structural_changes(
+            structural_diff::diff(base, text),
+            base,
+            text,
+        ));
+        let shared = Arc::new(RwLock::new(tb));
+        let multi = MultiBuffer::singleton(BufferId::new(0), shared);
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut display_map = DisplayMap::new(multi, executor);
+        display_map.set_show_deleted_blocks(true);
+        let snapshot = display_map.snapshot();
+
+        let theme = Theme::empty();
+        let fallback = theme.get(scope::UI_TEXT);
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None, None);
+        let area = Rect::new(0, 0, 40, 8);
+
+        let mut expected = Buffer::empty(area);
+        paint_diff_rows(&snapshot, 0, area, fallback, &theme, &mut expected);
+        let expected = serialize_buffer(&expected);
+
+        let got = render_page_from_snapshot(&snapshot, 0, fallback, 40, 8, &gutter, true);
+        assert_eq!(
+            got, expected,
+            "the diff-view page paints the two-column body, not the single-column path"
+        );
     }
 
     /// A pooled page baked with a cursor line paints relative numbers in its
@@ -1049,7 +1127,7 @@ mod tests {
         let snapshot = editor.display_map.snapshot();
         let gutter = PageGutter::new(false, BTreeMap::new(), Theme::empty(), None, None);
 
-        let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3, &gutter);
+        let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3, &gutter, false);
 
         let cmds = commands(&frame);
         assert!(
@@ -1061,7 +1139,7 @@ mod tests {
             "frame closes the fill, got {cmds:?}"
         );
 
-        let page = render_page_from_snapshot(&snapshot, 2 * 3, fallback, 12, 3, &gutter);
+        let page = render_page_from_snapshot(&snapshot, 2 * 3, fallback, 12, 3, &gutter, false);
         assert!(
             find(&frame, &page).is_some(),
             "the page bytes ride between the fill markers"
@@ -1098,7 +1176,7 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
 
-        let frame = render_page_fill(&snapshot, 3, 0, fallback, 12, 4, &gutter);
+        let frame = render_page_fill(&snapshot, 3, 0, fallback, 12, 4, &gutter, false);
         let cmds = commands(&frame);
 
         assert!(

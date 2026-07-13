@@ -5401,6 +5401,7 @@ impl Stoat {
                 width: u16,
                 height: u16,
                 gutter: crate::smooth_scroll::PageGutter,
+                diff_view: bool,
             },
             Review {
                 snapshot: crate::display_map::DisplaySnapshot,
@@ -5471,6 +5472,8 @@ impl Stoat {
                         .gutter_severity_cache
                         .as_ref()
                         .map_or(0, |cache| cache.version),
+                    editor.diff_view,
+                    editor.display_map.diff_version(),
                 ),
             };
             let entered = crate::smooth_scroll::emit_into(
@@ -5519,6 +5522,7 @@ impl Stoat {
                             rich,
                             current_line,
                         ),
+                        diff_view: editor.diff_view,
                     });
                 }
             }
@@ -5874,6 +5878,7 @@ impl Stoat {
                     width,
                     height,
                     gutter,
+                    diff_view,
                 } => {
                     for index in pages {
                         let snapshot = snapshot.clone();
@@ -5889,6 +5894,7 @@ impl Stoat {
                                     width,
                                     height,
                                     &gutter,
+                                    diff_view,
                                 );
                                 let _ = apc_tx.send(fill);
                             })
@@ -6105,12 +6111,16 @@ fn editor_page_content_version(
     gutter_width: u16,
     current_line: Option<u32>,
     severity_version: u64,
+    diff_view: bool,
+    diff_version: usize,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
     gutter_width.hash(&mut hasher);
     current_line.hash(&mut hasher);
     severity_version.hash(&mut hasher);
+    diff_view.hash(&mut hasher);
+    diff_version.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -12238,21 +12248,26 @@ mod tests {
 
     #[test]
     fn editor_page_content_version_tracks_the_cursor_line() {
-        let base = editor_page_content_version(true, 3, Some(10), 0);
+        let base = editor_page_content_version(true, 3, Some(10), 0, false, 0);
         assert_eq!(
             base,
-            editor_page_content_version(true, 3, Some(10), 0),
+            editor_page_content_version(true, 3, Some(10), 0, false, 0),
             "identical inputs keep a buffered page cached"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(11), 0),
+            editor_page_content_version(true, 3, Some(11), 0, false, 0),
             "a cursor-line move refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, 0),
+            editor_page_content_version(true, 3, None, 0, false, 0),
             "switching to absolute numbering refills"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(true, 3, Some(10), 0, true, 7),
+            "a diff-view hunk change refills buffered pages"
         );
     }
 
