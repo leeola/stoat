@@ -169,7 +169,10 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     let owned = compute_context(&snapshot.rope, snapshot.cursor_offset);
 
     let trigger_char = owned.text_before_cursor.chars().last();
-    let is_trigger_char = match (trigger_char, server_trigger_characters(&stoat.lsp_host)) {
+    let is_trigger_char = match (
+        trigger_char,
+        server_trigger_characters(&stoat.lsp_for(snapshot.buffer_id)),
+    ) {
         (Some(ch), Some(triggers)) => triggers.contains(&ch.to_string()),
         _ => false,
     };
@@ -188,7 +191,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let lsp_host = stoat.lsp_host.clone();
+    let lsp_host = stoat.lsp_for(snapshot.buffer_id);
     let fs_host = stoat.fs_host.clone();
     let executor = stoat.executor.clone();
     let home_dir = stoat.env_host.var("HOME").map(PathBuf::from);

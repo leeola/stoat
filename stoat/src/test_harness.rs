@@ -210,7 +210,7 @@ impl TestHarness {
             "GitHost was replaced during the test; real git operations may have escaped"
         );
         assert_eq!(
-            alloc_ptr(&self.stoat.lsp_host),
+            alloc_ptr(&self.stoat.lsp_host()),
             alloc_ptr(&self.fake_lsp),
             "LspHost was replaced during the test; real LSP traffic may have escaped"
         );

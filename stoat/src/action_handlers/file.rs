@@ -163,7 +163,7 @@ const FORMAT_ON_SAVE_BUDGET: Duration = Duration::from_millis(500);
 fn format_on_save_enabled(stoat: &Stoat) -> bool {
     stoat.settings.format_on_save == Some(true)
         && stoat
-            .lsp_host
+            .lsp_host()
             .supports_feature(LanguageServerFeature::Format)
 }
 
@@ -187,7 +187,7 @@ fn arm_format_on_save(stoat: &mut Stoat, buffer_id: BufferId, path: PathBuf) {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_for(buffer_id);
     let executor = stoat.executor.clone();
     let task = stoat.executor.spawn(async move {
         let format = std::pin::pin!(lsp.formatting(params));
@@ -300,7 +300,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
         text_document: TextDocumentIdentifier { uri },
         text: Some(text),
     };
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_for(buffer_id);
     stoat
         .executor
         .spawn(async move {
@@ -631,7 +631,7 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         let params = DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
         };
-        let lsp = stoat.lsp_host.clone();
+        let lsp = stoat.lsp_for(buffer_id);
         stoat
             .executor
             .spawn(async move {

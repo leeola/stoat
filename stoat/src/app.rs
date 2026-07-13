@@ -12,7 +12,7 @@ use crate::{
     help::Help,
     host::{
         EnvHost, FsHost, FsWatchHost, GitHost, GitRepo, LocalEnv, LocalFs, LocalGit, LspHost,
-        NoopFsWatcher, NoopLsp,
+        NoopFsWatcher,
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
@@ -590,21 +590,21 @@ pub struct Stoat {
     /// install [`crate::host::FakeEnv`] without leaking real env state.
     pub(crate) env_host: Arc<dyn EnvHost>,
     /// Language-server requests route through this trait. Defaults to
-    /// [`NoopLsp`] (every method returns the empty success response)
-    /// until a real `LocalLsp` is wired in; tests install
-    /// [`crate::host::FakeLsp`] to drive end-to-end LSP scenarios.
-    pub(crate) lsp_host: Arc<dyn LspHost>,
+    /// Language servers keyed by name. Reached through [`Self::lsp_host`] and
+    /// [`Self::lsp_for`], never directly, and empty until a real `LocalLsp` is
+    /// wired in. Tests install [`crate::host::FakeLsp`] as the sole client to
+    /// drive end-to-end LSP scenarios.
+    pub(crate) lsp_registry: crate::lsp::registry::LspRegistry,
     /// Whether opening a buffer whose language has a known server
     /// command may spawn a real language server, replacing the
     /// [`NoopLsp`] placeholder. Off by default so [`NoopLsp`] stays
     /// side-effect-free for tests. The binary turns it on for a live
     /// session via [`Self::set_lsp_auto_spawn`].
     pub(crate) lsp_auto_spawn: bool,
-    /// Set once the first buffer with a known server command has
-    /// triggered a spawn, so at most one server launches per session
-    /// even as more buffers open. A failed spawn leaves it set, with no
-    /// retry.
-    pub(crate) lsp_spawn_attempted: bool,
+    /// The `(server, language)` a pending spawn resolved to, recorded so
+    /// [`Self::install_pending_lsp_host`] registers the ready host under its
+    /// server name and language. Cleared once installed or failed.
+    pub(crate) lsp_pending_registration: Option<(String, String)>,
     /// The spawn or initialize failure that left the [`NoopLsp`]
     /// placeholder in place, retained so a later LSP action can restate
     /// why no server is up. [`Self::pending_lsp_host`] is drained after
@@ -1138,9 +1138,9 @@ impl Stoat {
             index_external_edit_rx,
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
-            lsp_host: Arc::new(NoopLsp),
+            lsp_registry: crate::lsp::registry::LspRegistry::new(),
             lsp_auto_spawn: false,
-            lsp_spawn_attempted: false,
+            lsp_pending_registration: None,
             lsp_spawn_failed: None,
             lsp_spawn_deferred: None,
             pending_lsp_host: Arc::new(std::sync::Mutex::new(None)),
@@ -1310,7 +1310,7 @@ impl Stoat {
     /// harness installs [`crate::host::FakeLsp`] so LSP-driven flows
     /// run against programmed responses.
     pub fn set_lsp_host(&mut self, host: Arc<dyn LspHost>) {
-        self.lsp_host = host;
+        self.lsp_registry.set_sole_client(host);
     }
 
     /// Enable or disable lazily spawning a real language server on the
@@ -1334,9 +1334,24 @@ impl Stoat {
         self.diff_warm_auto = enabled;
     }
 
-    /// Returns the active [`LspHost`].
-    pub fn lsp_host(&self) -> &Arc<dyn LspHost> {
-        &self.lsp_host
+    /// The single active language server, or a noop when none is up.
+    ///
+    /// Editor-wide LSP traffic (shutdown, notification pumps) routes through
+    /// this. Buffer-specific requests use [`Self::lsp_for`].
+    pub(crate) fn lsp_host(&self) -> Arc<dyn LspHost> {
+        self.lsp_registry.sole_or_noop()
+    }
+
+    /// The language server that should serve `buffer_id`.
+    ///
+    /// Resolves the buffer's language to its server, falling back to the sole
+    /// client (or a noop). With one server up, every buffer resolves to it.
+    pub(crate) fn lsp_for(&self, buffer_id: BufferId) -> Arc<dyn LspHost> {
+        self.active_workspace()
+            .buffers
+            .language_for(buffer_id)
+            .and_then(|language| self.lsp_registry.host_for_language(language.name))
+            .unwrap_or_else(|| self.lsp_registry.sole_or_noop())
     }
 
     /// Reap the language server on quit. Awaits [`LspHost::shutdown`]
@@ -1345,10 +1360,12 @@ impl Stoat {
     /// return immediately, so the call is unconditional. Errors and
     /// timeouts are ignored -- the process is exiting regardless.
     pub async fn shutdown_lsp(&self) {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            self.lsp_host.shutdown(),
-        )
+        let hosts = self.lsp_registry.hosts();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async move {
+            for host in hosts {
+                let _ = host.shutdown().await;
+            }
+        })
         .await;
     }
 
@@ -2439,9 +2456,14 @@ impl Stoat {
     /// the event loop on a pathological notification burst; the
     /// remainder drains on the next update.
     pub(crate) fn drain_lsp_notifications(&mut self) {
+        for host in self.lsp_registry.hosts() {
+            self.drain_notifications_from(&host);
+        }
+    }
+
+    fn drain_notifications_from(&mut self, host: &Arc<dyn LspHost>) {
         use crate::host::LspNotification;
         use futures::FutureExt;
-        let host = self.lsp_host.clone();
         for _ in 0..256 {
             // try_recv_notification is implemented on top of a
             // non-blocking channel poll, so its future resolves
@@ -2505,12 +2527,17 @@ impl Stoat {
     /// mutates buffers synchronously here because it needs `&mut self`. Only
     /// the reply is deferred.
     pub(crate) fn drain_lsp_incoming_requests(&mut self) {
+        for host in self.lsp_registry.hosts() {
+            self.drain_incoming_requests_from(&host);
+        }
+    }
+
+    fn drain_incoming_requests_from(&mut self, host: &Arc<dyn LspHost>) {
         use crate::host::lsp::{IncomingRequest, LspResponseError};
         use futures::FutureExt;
         use lsp_types::ApplyWorkspaceEditResponse;
         use serde_json::Value;
 
-        let host = self.lsp_host.clone();
         for _ in 0..256 {
             let Some(slot) = host.try_recv_incoming_request().now_or_never() else {
                 break;
@@ -2609,7 +2636,13 @@ impl Stoat {
             },
         };
 
-        self.set_lsp_host(host);
+        match self.lsp_pending_registration.take() {
+            Some((server, language)) => {
+                self.lsp_registry.insert(server.clone(), host);
+                self.lsp_registry.set_language(language, server);
+            },
+            None => self.set_lsp_host(host),
+        }
         self.lsp_opened.clear();
         self.lsp_doc_versions.clear();
         self.lsp_buffer_versions.clear();
@@ -10072,7 +10105,7 @@ mod tests {
             Some("lsp: rust-analyzer: NotFound")
         );
         assert!(
-            stoat.lsp_host.is_noop(),
+            stoat.lsp_host().is_noop(),
             "the placeholder stays after a spawn failure"
         );
     }
@@ -10090,7 +10123,7 @@ mod tests {
         stoat.install_pending_lsp_host();
 
         assert!(
-            !stoat.lsp_host.is_noop(),
+            !stoat.lsp_host().is_noop(),
             "a ready host replaces the placeholder"
         );
         assert_eq!(

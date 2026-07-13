@@ -148,7 +148,7 @@ fn apply_or_resolve_additional_edits(
     }
 
     let raw = (**lsp_item).clone();
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_for(buffer_id);
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         let resolve = std::pin::pin!(lsp.completion_resolve(raw));
@@ -165,7 +165,7 @@ fn apply_or_resolve_additional_edits(
 
 fn resolve_advertised(stoat: &Stoat) -> bool {
     stoat
-        .lsp_host
+        .lsp_host()
         .capabilities()
         .completion_provider
         .as_ref()

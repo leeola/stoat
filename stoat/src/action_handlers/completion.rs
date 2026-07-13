@@ -79,7 +79,7 @@ pub(crate) fn arm_completion_resolve(stoat: &mut Stoat) {
         stoat.pending_completion_resolve = None;
         return;
     };
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_host();
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(RESOLVE_DEBOUNCE).await;
@@ -114,7 +114,7 @@ fn resolve_plan(stoat: &Stoat) -> Option<(String, lsp_types::CompletionItem)> {
 
 fn resolve_advertised(stoat: &Stoat) -> bool {
     stoat
-        .lsp_host
+        .lsp_host()
         .capabilities()
         .completion_provider
         .as_ref()
