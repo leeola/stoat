@@ -14,7 +14,7 @@ use crate::{
     commit_list::CommitListState,
     diff,
     diff_cache::ContentHash,
-    diff_map::DiffMap,
+    diff_map::{line_starts, BaseHighlights, DiffMap},
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost},
@@ -38,11 +38,13 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     time::UNIX_EPOCH,
 };
-use stoat_language::{structural_diff, LanguageRegistry};
+use stoat_language::{
+    extract_highlights, parse, structural_diff, HighlightSpan, Language, LanguageRegistry,
+};
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{Point, Rope};
 use tokio::sync::{mpsc::UnboundedSender, oneshot, Notify};
@@ -327,7 +329,14 @@ impl Workspace {
     ///
     /// Records the buffer's version so [`Self::drive_diff_jobs`] does not
     /// redundantly recompute the same map. A no-op for a buffer without a path.
-    pub(crate) fn install_diff_map_now(&mut self, git_host: &Arc<dyn GitHost>, id: BufferId) {
+    pub(crate) fn install_diff_map_now(
+        &mut self,
+        git_host: &Arc<dyn GitHost>,
+        language_registry: &Arc<LanguageRegistry>,
+        syntax_styles: &SyntaxStyles,
+        base_cache: &BaseHighlightCache,
+        id: BufferId,
+    ) {
         let Some(path) = self.buffers.path_for(id).map(Path::to_path_buf) else {
             return;
         };
@@ -342,7 +351,16 @@ impl Workspace {
             )
         };
 
-        let diff_map = compute_diff_map(&**git_host, &self.git_root, &path, &text);
+        let language = language_registry.for_path(&path);
+        let diff_map = compute_diff_map(
+            &**git_host,
+            &self.git_root,
+            &path,
+            &text,
+            language.as_ref(),
+            syntax_styles,
+            base_cache,
+        );
         if let Some(shared) = self.buffers.get(id) {
             shared.write().expect("buffer poisoned").diff_map = diff_map;
         }
@@ -578,6 +596,9 @@ impl Workspace {
         &mut self,
         executor: &Executor,
         git_host: &Arc<dyn GitHost>,
+        language_registry: &Arc<LanguageRegistry>,
+        syntax_styles: &SyntaxStyles,
+        base_cache: &BaseHighlightCache,
         redraw_notify: &Arc<Notify>,
     ) {
         let waker = futures::task::noop_waker();
@@ -626,12 +647,23 @@ impl Workspace {
                 continue;
             }
 
+            let language = language_registry.for_path(&path);
             let task = executor.spawn_blocking({
                 let git_host = git_host.clone();
                 let git_root = git_root.clone();
                 let redraw = redraw_notify.clone();
+                let syntax_styles = syntax_styles.clone();
+                let base_cache = base_cache.clone();
                 move || {
-                    let diff_map = compute_diff_map(&*git_host, &git_root, &path, &buffer_text);
+                    let diff_map = compute_diff_map(
+                        &*git_host,
+                        &git_root,
+                        &path,
+                        &buffer_text,
+                        language.as_ref(),
+                        &syntax_styles,
+                        &base_cache,
+                    );
                     redraw.notify_one();
                     DiffJobOutput {
                         buffer_id,
@@ -810,11 +842,20 @@ impl Workspace {
 /// Both `discover` and `head_content` do git and filesystem IO, so this must
 /// run on a blocking thread. Uses the language-agnostic line diff, matching
 /// [`changed_byte_ranges`].
+/// Memoized tree-sitter parses of base texts for the diff view's left column,
+/// keyed by base content hash and language name so an unchanged base is parsed
+/// once across edits. Values are theme-independent, so styles resolve per build.
+pub(crate) type BaseHighlightCache =
+    Arc<Mutex<HashMap<(ContentHash, String), Arc<Vec<HighlightSpan>>>>>;
+
 fn compute_diff_map(
     git: &dyn GitHost,
     git_root: &Path,
     path: &Path,
     buffer_text: &str,
+    language: Option<&Arc<Language>>,
+    syntax_styles: &SyntaxStyles,
+    base_cache: &BaseHighlightCache,
 ) -> Option<DiffMap> {
     let repo = git.discover(git_root)?;
     let base_text = repo.head_content(path)?;
@@ -833,12 +874,82 @@ fn compute_diff_map(
     };
 
     let result = structural_diff::diff(&base_text, buffer_text);
-    Some(DiffMap::from_structural_changes_staged(
-        result,
-        &base_text,
-        buffer_text,
-        &index_changed,
-    ))
+    let mut diff_map =
+        DiffMap::from_structural_changes_staged(result, &base_text, buffer_text, &index_changed);
+    if let Some(language) = language {
+        diff_map.set_base_highlights(compute_base_highlights(
+            &base_text,
+            language,
+            syntax_styles,
+            base_cache,
+        ));
+    }
+    Some(diff_map)
+}
+
+/// Highlight `base_text` for the diff view's left column, memoizing the parse in
+/// `cache`. Styles resolve against the current `syntax_styles` on every call so
+/// a theme change still takes effect on the next build.
+fn compute_base_highlights(
+    base_text: &str,
+    language: &Arc<Language>,
+    syntax_styles: &SyntaxStyles,
+    cache: &BaseHighlightCache,
+) -> Arc<BaseHighlights> {
+    let key = (
+        blake3::hash(base_text.as_bytes()).into(),
+        language.name.to_string(),
+    );
+    let spans = {
+        let mut guard = cache.lock().expect("base highlight cache poisoned");
+        guard
+            .entry(key)
+            .or_insert_with(|| {
+                let spans = parse(language, base_text, None)
+                    .map(|tree| extract_highlights(language, &tree, base_text))
+                    .unwrap_or_default();
+                Arc::new(spans)
+            })
+            .clone()
+    };
+    Arc::new(bucket_base_highlights(&spans, base_text, syntax_styles))
+}
+
+/// Resolve highlight spans to styles and bucket them per base line as line-local
+/// byte ranges. A span crossing a newline is clipped to each line it touches.
+fn bucket_base_highlights(
+    spans: &[HighlightSpan],
+    base_text: &str,
+    syntax_styles: &SyntaxStyles,
+) -> BaseHighlights {
+    let starts = line_starts(base_text);
+    let line_of = |byte: usize| starts.partition_point(|&s| s <= byte).saturating_sub(1);
+
+    let mut per_line: BaseHighlights = vec![Vec::new(); starts.len()];
+    for span in spans {
+        let Some(style_id) = syntax_styles.id_for_highlight(span.id) else {
+            continue;
+        };
+        let style = syntax_styles.interner[style_id].clone();
+
+        let first = line_of(span.byte_range.start);
+        let last = line_of(
+            span.byte_range
+                .end
+                .saturating_sub(1)
+                .max(span.byte_range.start),
+        );
+        for line in first..=last {
+            let line_start = starts[line];
+            let line_end = starts.get(line + 1).copied().unwrap_or(base_text.len());
+            let s = span.byte_range.start.max(line_start) - line_start;
+            let e = span.byte_range.end.min(line_end) - line_start;
+            if s < e {
+                per_line[line].push((s..e, style.clone()));
+            }
+        }
+    }
+    per_line
 }
 
 /// The working-tree byte ranges a file's hunks cover, diffing its HEAD text
@@ -973,6 +1084,55 @@ mod tests {
             flags,
             vec![(1, true), (3, false)],
             "the index-staged line-1 hunk is staged, the line-3 hunk is not"
+        );
+    }
+
+    #[test]
+    fn diff_job_highlights_the_base_text() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.rs", "fn main() {}\n", "fn other() {}\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().unwrap();
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        let spans = dm
+            .base_highlights_for_line(0)
+            .expect("the base's keyword line is highlighted");
+        assert!(
+            !spans.is_empty(),
+            "base line 0 carries tree-sitter token spans"
+        );
+    }
+
+    #[test]
+    fn diff_job_leaves_base_unhighlighted_without_a_language() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("notes.unknownext", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/notes.unknownext"));
+        h.settle_diff_jobs();
+
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().unwrap();
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        assert!(
+            dm.base_highlights_for_line(0).is_none(),
+            "a file with no language leaves the base unhighlighted"
         );
     }
 

@@ -1,5 +1,5 @@
 use crate::{
-    display_map::{BlockPlacement, BlockProperties, BlockStyle},
+    display_map::{highlights::HighlightStyle, BlockPlacement, BlockProperties, BlockStyle},
     host::DiffStatus,
 };
 use std::{
@@ -111,10 +111,18 @@ impl KeyedItem for DiffHunk {
 
 // --- DiffMap ---
 
+/// Syntax highlight spans for the base text, indexed by 0-based base line.
+///
+/// Each entry holds a line's spans as line-local byte ranges paired with the
+/// resolved highlight style, so the diff view's left column can paint base
+/// text with tree-sitter token colors.
+pub type BaseHighlights = Vec<Vec<(Range<usize>, HighlightStyle)>>;
+
 #[derive(Clone, Debug, Default)]
 pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
     base_text: Option<Arc<String>>,
+    base_highlights: Option<Arc<BaseHighlights>>,
     version: usize,
 }
 
@@ -130,8 +138,23 @@ impl DiffMap {
         Self {
             hunks: SumTree::from_iter(hunks, ()),
             base_text,
+            base_highlights: None,
             version: Self::next_version(),
         }
+    }
+
+    /// Attach base-text syntax highlights for the diff view's left column.
+    pub fn set_base_highlights(&mut self, highlights: Arc<BaseHighlights>) {
+        self.base_highlights = Some(highlights);
+    }
+
+    /// Syntax highlight spans for base `line`, or `None` when the base text was
+    /// not highlighted (no language) or the line is out of range.
+    pub fn base_highlights_for_line(&self, line: u32) -> Option<&[(Range<usize>, HighlightStyle)]> {
+        self.base_highlights
+            .as_ref()?
+            .get(line as usize)
+            .map(Vec::as_slice)
     }
 
     /// Build a [`DiffMap`] from a structural-diff result.
@@ -607,7 +630,7 @@ fn byte_range_to_line_range(
 /// Byte offset at the start of each line, line 0 at offset 0. Precomputed once
 /// per side so each byte-to-line conversion is a binary search rather than a
 /// prefix rescan.
-fn line_starts(text: &str) -> Vec<usize> {
+pub(crate) fn line_starts(text: &str) -> Vec<usize> {
     let mut starts = vec![0usize];
     for (idx, byte) in text.bytes().enumerate() {
         if byte == b'\n' {

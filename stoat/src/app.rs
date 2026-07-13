@@ -649,6 +649,9 @@ pub struct Stoat {
     /// invocation can reuse already-computed work instead of running
     /// the structural diff twice.
     pub(crate) diff_cache: Arc<std::sync::Mutex<crate::diff_cache::DiffCache>>,
+    /// Memoized tree-sitter parses of git-base texts, so the diff view's
+    /// syntax-highlighted left column parses each base once across edits.
+    pub(crate) base_highlights_cache: crate::workspace::BaseHighlightCache,
     /// Tracks `$/progress` notifications so the status bar can show
     /// the freshest in-progress operation. Drained from
     /// [`crate::host::LspHost::try_recv_notification`] inside
@@ -1148,6 +1151,9 @@ impl Stoat {
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
             ))),
+            base_highlights_cache: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
             lsp_message: None,
             pending_lsp_jump: None,
@@ -5185,10 +5191,20 @@ impl Stoat {
             active_workspace,
             executor,
             git_host,
+            language_registry,
+            syntax_styles,
+            base_highlights_cache,
             redraw_notify,
             ..
         } = self;
-        workspaces[*active_workspace].drive_diff_jobs(executor, git_host, redraw_notify);
+        workspaces[*active_workspace].drive_diff_jobs(
+            executor,
+            git_host,
+            language_registry,
+            syntax_styles,
+            base_highlights_cache,
+            redraw_notify,
+        );
     }
 
     /// Paint the current state into a fresh [`Buffer`] and return it.

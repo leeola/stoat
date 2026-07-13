@@ -3381,9 +3381,16 @@ fn goto_change_across_files(
     }
 
     let git_host = stoat.git_host.clone();
-    stoat
-        .active_workspace_mut()
-        .install_diff_map_now(&git_host, target_buffer);
+    let language_registry = stoat.language_registry.clone();
+    let syntax_styles = stoat.syntax_styles.clone();
+    let base_cache = stoat.base_highlights_cache.clone();
+    stoat.active_workspace_mut().install_diff_map_now(
+        &git_host,
+        &language_registry,
+        &syntax_styles,
+        &base_cache,
+        target_buffer,
+    );
 
     if let Some(editor) = focused_editor_mut(stoat) {
         let display_snapshot = editor.display_map.snapshot();
