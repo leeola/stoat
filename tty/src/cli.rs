@@ -42,7 +42,13 @@ pub struct Cli {
 
     /// Set the spawned command's working directory for this run. Defaults to
     /// stoatty's own working directory when unset.
-    #[arg(long = "working-directory", value_name = "DIR", value_hint = ValueHint::DirPath)]
+    #[arg(
+        short = 'd',
+        long = "working-dir",
+        alias = "working-directory",
+        value_name = "DIR",
+        value_hint = ValueHint::DirPath
+    )]
     pub working_directory: Option<PathBuf>,
 
     /// Files to open and the session-restore flags, forwarded to the stoat
@@ -114,8 +120,14 @@ mod tests {
     fn working_directory_parses_path() {
         use std::path::PathBuf;
 
-        let cli = Cli::parse_from(["stoatty", "--working-directory", "/tmp"]);
-        assert_eq!(cli.working_directory, Some(PathBuf::from("/tmp")));
+        for flag in ["--working-dir", "-d", "--working-directory"] {
+            let cli = Cli::parse_from(["stoatty", flag, "/tmp"]);
+            assert_eq!(
+                cli.working_directory,
+                Some(PathBuf::from("/tmp")),
+                "{flag} parses the working directory",
+            );
+        }
         assert_eq!(Cli::parse_from(["stoatty"]).working_directory, None);
     }
 
