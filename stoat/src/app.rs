@@ -1370,7 +1370,9 @@ impl Stoat {
         action_handlers::dispatch(self, &action);
     }
 
-    pub fn open_review(&mut self) {
+    /// Toggle the side-by-side diff view on the focused editor, as the `:diff`
+    /// command does. Used by the `--review` TUI-start entry point.
+    pub fn toggle_diff_view(&mut self) {
         action_handlers::dispatch(self, &Diff);
     }
 
@@ -9502,11 +9504,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
-        h.stage_review_scenario(
-            "/work",
-            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
-        );
-        h.stoat.open_review();
+        h.open_review_from_texts(&[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.settle();
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
@@ -12525,44 +12523,6 @@ mod tests {
         ));
         assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
         assert!(h.fake_clipboard().osc52_emits().is_empty());
-    }
-
-    /// Three writes inside the [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`]
-    /// window must collapse into a single pending dispatch task,
-    /// matching the formatter-on-save burst the production
-    /// watcher receives. A separate
-    /// [`crate::test_harness::TestHarness::advance_clock`] then
-    /// fires the surviving timer; the channel drains and the
-    /// pending map empties.
-    #[test]
-    fn review_external_edit_burst_within_debounce_coalesces() {
-        use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};
-
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario(
-            "/work",
-            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
-        );
-        h.stoat.open_review();
-        h.settle();
-
-        h.external_edit("a.rs", "burst1\n");
-        h.external_edit("a.rs", "burst2\n");
-        h.external_edit("a.rs", "burst3\n");
-
-        assert_eq!(
-            h.stoat.review_pending_external_edits.len(),
-            1,
-            "three writes within the debounce window must coalesce to one task",
-        );
-
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        assert_eq!(
-            h.stoat.review_pending_external_edits.len(),
-            0,
-            "the surviving task fires once advance_clock crosses the debounce window",
-        );
     }
 
     #[test]

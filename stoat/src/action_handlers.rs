@@ -174,7 +174,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::Diff => {
-            review::open_review(stoat);
+            review::toggle_diff_view(stoat);
             UpdateEffect::Redraw
         },
         ActionKind::ToggleDiff => review::toggle_diff(stoat),

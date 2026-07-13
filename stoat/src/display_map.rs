@@ -290,7 +290,6 @@ impl DisplayMap {
     /// Enable or disable inline deleted-line block rows for this editor's diff
     /// map. Off by default. The side-by-side diff view turns it on. Nulls the
     /// snapshot cache so the next snapshot re-splices under the new setting.
-    #[cfg(test)]
     pub(crate) fn set_show_deleted_blocks(&mut self, show: bool) {
         self.show_deleted_blocks = show;
         self.cached_snapshot = None;

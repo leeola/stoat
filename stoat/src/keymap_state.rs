@@ -145,6 +145,13 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     {
         return Some("review");
     }
+    // The live per-file diff view is a normal editor with `diff_view` set. It is
+    // checked after the session arm so a session screen keeps precedence.
+    if let Some(View::Editor(id)) = focused_view(ws)
+        && ws.editors.get(*id).is_some_and(|e| e.diff_view)
+    {
+        return Some("diff");
+    }
     match ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref()) {
         Some(RebasePause::Reword { .. }) => return Some("reword"),
         Some(RebasePause::Conflict { .. }) => return Some("conflict"),
@@ -354,6 +361,43 @@ mod tests {
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "pane"), Some("editor".to_string()));
         assert_eq!(field(&state, "view"), Some("review".to_string()));
+    }
+
+    #[test]
+    fn diff_action_toggles_the_diff_view() {
+        let mut h = Stoat::test();
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("file"),
+            "a plain editor starts outside the diff view"
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("diff"),
+            "Diff turns the diff view on"
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("file"),
+            "Diff again turns it back off"
+        );
+    }
+
+    #[test]
+    fn escape_in_the_diff_view_stays_in_the_view() {
+        let mut h = Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+        assert_eq!(h.stoat.current_view(), Some("diff"));
+
+        h.type_keys("Escape");
+
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("diff"),
+            "Escape does not leave the diff view"
+        );
     }
 
     #[test]

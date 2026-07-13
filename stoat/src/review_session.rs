@@ -424,22 +424,6 @@ impl ReviewSession {
         all_chunk_ids
     }
 
-    /// Append one streamed, already-diffed file to a session that is already
-    /// installed, setting the cursor to the first chunk on the first file and
-    /// bumping the version so pooled views refresh.
-    ///
-    /// The streaming scan diffs each file on its own and appends it as it
-    /// lands, rather than diffing the whole changeset before showing anything.
-    pub(crate) fn add_file_streamed(&mut self, file: ReviewFileInput, hunks: Vec<ReviewHunk>) {
-        self.push_file_with_hunks(file, hunks);
-
-        if self.cursor.current.is_none() {
-            self.cursor.current = self.order.first().copied();
-        }
-
-        self.version += 1;
-    }
-
     /// Append one already-diffed file's chunks with a stable file index,
     /// returning the ids allocated for its hunks.
     ///
@@ -1265,113 +1249,6 @@ mod tests {
     }
 
     #[test]
-    fn review_via_git_host_builds_session_from_working_tree() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario(
-            "/work",
-            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
-        );
-        h.stoat.open_review();
-        h.settle();
-
-        let ws = h.stoat.active_workspace();
-        let session = ws.review.as_ref().expect("session created by open_review");
-        assert_eq!(session.files.len(), 1);
-        assert_eq!(session.files[0].path, PathBuf::from("/work/a.rs"));
-        assert_eq!(session.files[0].base_text.as_str(), REVIEW_TWO_HUNK_BASE);
-        assert_eq!(
-            session.files[0].buffer_text.as_str(),
-            REVIEW_TWO_HUNK_BUFFER
-        );
-        assert_eq!(session.order.len(), 2);
-        assert_eq!(h.stoat.current_view(), Some("review"));
-    }
-
-    #[test]
-    fn review_via_git_host_no_repo_is_noop() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stoat.open_review();
-        assert!(h.stoat.active_workspace().review.is_none());
-        assert_eq!(h.stoat.focused_mode(), "normal");
-    }
-
-    #[test]
-    fn review_refresh_via_git_carries_status() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario(
-            "/work",
-            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
-        );
-        h.stoat.open_review();
-        h.settle();
-        h.set_review_status(0, ChunkStatus::Staged);
-
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
-        h.settle();
-
-        let statuses = h.with_review(|s| {
-            s.order
-                .iter()
-                .map(|id| s.chunks.get(id).unwrap().status)
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(
-            statuses,
-            vec![ChunkStatus::Staged, ChunkStatus::Pending],
-            "first chunk's Staged decision should survive refresh; second should default to Pending",
-        );
-    }
-
-    #[test]
-    fn review_refresh_on_clean_tree_keeps_the_view_open() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario(
-            "/work",
-            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
-        );
-        h.stoat.open_review();
-        h.settle();
-        assert!(h.stoat.active_workspace().review.is_some(), "session opens");
-
-        // Simulate everything being committed, so the working tree is clean.
-        h.fake_git().add_repo("/work").clear_changes();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
-        h.settle();
-
-        let session = h
-            .stoat
-            .active_workspace()
-            .review
-            .as_ref()
-            .expect("a clean-tree refresh keeps the view open on an empty session");
-        assert!(
-            session.files.is_empty(),
-            "the refreshed session holds no files once the tree is clean"
-        );
-    }
-
-    #[test]
-    fn review_open_on_clean_tree_opens_an_empty_view() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stoat.active_workspace_mut().git_root = "/work".into();
-        h.fake_git().add_repo("/work").clear_changes();
-
-        h.stoat.open_review();
-        h.settle();
-
-        let session = h
-            .stoat
-            .active_workspace()
-            .review
-            .as_ref()
-            .expect("a clean tree opens an empty, persistent view");
-        assert!(
-            session.files.is_empty(),
-            "the opened session holds no files on a clean tree"
-        );
-    }
-
-    #[test]
     fn review_refresh_in_memory_carries_status() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
@@ -1395,27 +1272,6 @@ mod tests {
     }
 
     #[test]
-    fn review_via_git_host_multi_file() {
-        let mut h = TestHarness::with_size(80, 20);
-        h.stage_review_scenario(
-            "/work",
-            &[
-                ("a.rs", "fn a() {}\n", "fn a_renamed() {}\n"),
-                ("b.rs", "let x = 1;\n", "let x = 1;\nlet y = 2;\n"),
-            ],
-        );
-        h.stoat.open_review();
-        h.settle();
-
-        let ws = h.stoat.active_workspace();
-        let session = ws.review.as_ref().expect("session");
-        assert_eq!(session.files.len(), 2);
-        assert_eq!(session.files[0].rel_path, "a.rs");
-        assert_eq!(session.files[1].rel_path, "b.rs");
-        assert!(session.order.len() >= 2);
-    }
-
-    #[test]
     fn stage_scenario_with_staged_seeds_both_buckets() {
         let mut h = TestHarness::with_size(80, 14);
         h.stage_review_scenario_with_staged(
@@ -1430,44 +1286,6 @@ mod tests {
         abs_paths.sort();
         assert_eq!(abs_paths[0], PathBuf::from("/work/a.rs"));
         assert_eq!(abs_paths[1], PathBuf::from("/work/b.rs"));
-    }
-
-    #[test]
-    fn scan_renders_deleted_file_as_all_removed() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stoat.active_workspace_mut().git_root = "/work".into();
-        h.fake_git
-            .add_repo("/work")
-            .with_fs(&h.fake_fs)
-            .deleted("gone.rs", "line1\nline2\n");
-        h.stoat.open_review();
-        h.settle();
-
-        let ws = h.stoat.active_workspace();
-        let session = ws.review.as_ref().expect("session");
-        assert_eq!(session.files.len(), 1);
-        assert_eq!(session.files[0].rel_path, "gone.rs");
-        assert_eq!(session.files[0].base_text.as_str(), "line1\nline2\n");
-        assert_eq!(session.files[0].buffer_text.as_str(), "");
-    }
-
-    #[test]
-    fn scan_renders_untracked_file_as_all_added() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stoat.active_workspace_mut().git_root = "/work".into();
-        h.fake_git
-            .add_repo("/work")
-            .with_fs(&h.fake_fs)
-            .added("fresh.rs", "brand new\n");
-        h.stoat.open_review();
-        h.settle();
-
-        let ws = h.stoat.active_workspace();
-        let session = ws.review.as_ref().expect("session");
-        assert_eq!(session.files.len(), 1);
-        assert_eq!(session.files[0].rel_path, "fresh.rs");
-        assert_eq!(session.files[0].base_text.as_str(), "");
-        assert_eq!(session.files[0].buffer_text.as_str(), "brand new\n");
     }
 
     #[test]

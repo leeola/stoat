@@ -335,7 +335,7 @@ fn run_tui(
         }
 
         match start {
-            TuiStart::Review => stoat.open_review(),
+            TuiStart::Review => stoat.toggle_diff_view(),
             TuiStart::Files => {
                 for (i, path) in files.iter().enumerate() {
                     if i > 0 {

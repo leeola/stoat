@@ -196,7 +196,6 @@ impl EditorState {
     /// map's deleted-block splicing, so the base text of removed and modified
     /// hunks aligns as block rows in the left column. Disabling it turns the
     /// splicing back off.
-    #[cfg(test)]
     pub(crate) fn set_diff_view(&mut self, on: bool) {
         self.diff_view = on;
         self.display_map.set_show_deleted_blocks(on);

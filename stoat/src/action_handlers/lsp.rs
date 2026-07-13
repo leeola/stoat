@@ -5526,52 +5526,6 @@ mod tests {
     }
 
     #[test]
-    fn hover_from_the_diff_cursor_targets_the_real_file() {
-        let mut h = TestHarness::with_size(80, 24);
-        enable_hover(&h);
-        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
-        h.stoat.open_review();
-        h.settle();
-
-        // Cursor on the changed row (new-side line 3, i.e. LSP line 2).
-        place_review_cursor(&mut h, 2);
-        // Seeded at the real file path and the translated new-side position,
-        // so a matching response proves the request left the placeholder
-        // buffer for the working-tree file.
-        h.fake_lsp()
-            .set_hover("/work/a.rs", 2, 0, "the changed line");
-
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
-        h.settle();
-
-        let popup = h
-            .stoat
-            .pending_hover
-            .as_ref()
-            .expect("hover popup over the diff");
-        assert_eq!(
-            popup.lines,
-            vec![vec![("the changed line".to_string(), Style::default())]]
-        );
-    }
-
-    #[test]
-    fn snapshot_hover_over_the_diff() {
-        let mut h = TestHarness::with_size(80, 14);
-        enable_hover(&h);
-        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
-        h.stoat.open_review();
-        h.settle();
-
-        place_review_cursor(&mut h, 2);
-        h.fake_lsp().set_hover("/work/a.rs", 2, 0, "changed here");
-
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
-        h.settle();
-        h.assert_snapshot("snapshot_hover_over_diff");
-    }
-
-    #[test]
     fn hover_from_a_non_working_tree_review_issues_nothing() {
         let mut h = TestHarness::with_size(80, 24);
         enable_hover(&h);
@@ -5592,45 +5546,6 @@ mod tests {
         assert!(
             h.stoat.pending_hover_request.is_none(),
             "no request was issued",
-        );
-    }
-
-    #[test]
-    fn goto_definition_from_the_diff_parks_the_review() {
-        let mut h = TestHarness::with_size(80, 24);
-        enable_goto_definition(&h);
-        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
-        h.fake_fs()
-            .insert_file(PathBuf::from("/work/lib.rs"), b"fn one() {}\nfn two() {}\n");
-        h.stoat.open_review();
-        h.settle();
-
-        place_review_cursor(&mut h, 2);
-        h.fake_lsp()
-            .set_definition("/work/a.rs", 2, 0, "/work/lib.rs", 1, 3);
-
-        let review_editor_id = h.with_review(|s| s.view_editor).expect("review editor");
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
-        h.settle();
-
-        assert_eq!(
-            focused_buffer_path(&h),
-            PathBuf::from("/work/lib.rs"),
-            "the jump lands in the target file",
-        );
-        assert_eq!(
-            h.stoat.focused_mode(),
-            "normal",
-            "the pane left review mode"
-        );
-        assert!(
-            h.with_review(|s| s.toggled_off),
-            "the review is parked so R re-enters the diff",
-        );
-        assert_eq!(
-            h.with_review(|s| s.view_editor),
-            Some(review_editor_id),
-            "the parked review editor survived the pane swap",
         );
     }
 

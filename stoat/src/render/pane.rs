@@ -647,6 +647,7 @@ pub(crate) fn screen_segment(
     use crate::theme::scope;
     let (label, default, screen_scope) = match screen? {
         "review" => ("review", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
+        "diff" => ("diff", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
         "commits" => ("commits", Color::Yellow, scope::UI_STATUSLINE_COMMITS),
         "rebase" => ("rebase", Color::Red, scope::UI_STATUSLINE_REBASE),
         "reword" => ("reword", Color::Red, scope::UI_STATUSLINE_REWORD),

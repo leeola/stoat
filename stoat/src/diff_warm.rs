@@ -48,11 +48,6 @@ impl PendingDiffWarm {
     pub(crate) fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
-
-    #[cfg(test)]
-    pub(crate) fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
-    }
 }
 
 /// An in-flight single-file diff warm, recomputing one edited file's hunks.
@@ -366,23 +361,6 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn open_review_cancels_pending_warm() {
-        let mut h = warm_harness();
-        ensure_diff_warm(&mut h.stoat);
-        assert!(h.stoat.pending_diff_warm.is_some());
-
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
-        assert!(
-            h.stoat
-                .pending_diff_warm
-                .as_ref()
-                .expect("warm still pending")
-                .cancelled(),
-            "opening review cancels the in-flight warm"
-        );
-    }
-
     /// Drive one debounced fs-watch event for `path` through to the single-file
     /// warm, mirroring the run loop's update() drains.
     fn drive_fs_event(h: &mut TestHarness, path: &Path, kind: crate::host::FsEventKind) {
@@ -449,27 +427,6 @@ mod tests {
         assert!(
             !h.stoat.active_workspace().diff_warmed,
             "a .git event clears diff_warmed so the full warm re-runs",
-        );
-    }
-
-    #[test]
-    fn fs_watch_skips_file_warm_while_review_open() {
-        let mut h = warm_harness();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
-        h.settle();
-        assert!(
-            h.stoat.active_workspace().review.is_some(),
-            "review is open"
-        );
-
-        drive_fs_event(
-            &mut h,
-            Path::new("/repo/a.txt"),
-            crate::host::FsEventKind::Modified,
-        );
-        assert!(
-            h.stoat.diff_warm_files.is_empty(),
-            "an open review handles edits itself, so no single-file warm fires",
         );
     }
 }

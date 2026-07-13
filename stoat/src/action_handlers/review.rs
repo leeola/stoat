@@ -3,9 +3,9 @@ use crate::{
     diff_cache::{DiffCache, DiffCacheKey},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState},
-    host::{FsHost, GitHost, WatchToken},
+    host::{GitHost, WatchToken},
     pane::View,
-    review::{self, MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
+    review::{MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
@@ -34,16 +34,6 @@ use stoat_text::{Bias, Point, SelectionGoal};
 /// carrying the authoritative whole-changeset session with cross-file moves.
 /// A commit scan or a refresh sends only [`Complete`](Self::Complete).
 enum ReviewScanMsg {
-    First {
-        source: ReviewSource,
-        total: usize,
-        file: ReviewFileInput,
-        hunks: Vec<ReviewHunk>,
-    },
-    File {
-        file: ReviewFileInput,
-        hunks: Vec<ReviewHunk>,
-    },
     Complete(ReviewSession),
 }
 
@@ -62,11 +52,6 @@ pub(crate) struct PendingReviewScan {
     /// so a progress or apply-result badge already in the tray survives the
     /// scan.
     scanning_badge: bool,
-    /// Files the scan will stream, learned from the first message. Drives the
-    /// "N left" badge count.
-    total: usize,
-    /// Files streamed and installed so far.
-    streamed: usize,
     /// Set true when a newer scan supersedes this one or the review closes. The
     /// scan closure polls it to abandon its diffs and send nothing more.
     cancel: Arc<AtomicBool>,
@@ -113,138 +98,8 @@ fn spawn_review_scan(
         _task: task,
         sync_path,
         scanning_badge,
-        total: 0,
-        streamed: 0,
         cancel,
     });
-}
-
-/// Stream a working-tree scan's gathered inputs: one [`ReviewScanMsg::First`]
-/// then a [`ReviewScanMsg::File`] per remaining file, then -- unless every file
-/// hit the diff cache -- a [`ReviewScanMsg::Complete`] carrying the whole-
-/// changeset session so cross-file moves are restored. Sends nothing for an
-/// empty input set.
-///
-/// Each file's hunks come from `cache` on a hit, so reopening an unchanged tree
-/// re-diffs nothing. The cache holds move-aware hunks (a whole-changeset install
-/// wrote them), so a full cache hit needs no Complete pass; a changed file
-/// misses and forces one.
-fn stream_review_inputs(
-    tx: &mpsc::Sender<ReviewScanMsg>,
-    redraw: &Arc<tokio::sync::Notify>,
-    cache: &Arc<Mutex<DiffCache>>,
-    cancel: &AtomicBool,
-    source: ReviewSource,
-    inputs: Vec<ReviewFileInput>,
-) {
-    let total = inputs.len();
-    if total == 0 {
-        return;
-    }
-
-    // Look up every file's cache entry up front so the all-hit fast path can
-    // skip diffing entirely.
-    let cached: Vec<Option<(Arc<Vec<ReviewHunk>>, bool)>> = inputs
-        .iter()
-        .map(|input| {
-            let key = diff_cache_key(
-                &input.base_text,
-                &input.buffer_text,
-                input.language.as_ref(),
-            );
-            cache.lock().expect("diff_cache poisoned").lookup(&key)
-        })
-        .collect();
-    let all_cached_move_aware = cached.iter().all(|entry| matches!(entry, Some((_, true))));
-
-    if all_cached_move_aware {
-        // Every file hit with move-aware hunks, so no Complete pass is needed.
-        // Stream the cached hunks and return without diffing anything.
-        for (index, (input, entry)) in inputs.iter().zip(&cached).enumerate() {
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            let (hunks_arc, _) = entry.as_ref().expect("every entry present on this path");
-            if !send_streamed_file(
-                tx,
-                redraw,
-                &source,
-                total,
-                index,
-                input,
-                (**hunks_arc).clone(),
-            ) {
-                return;
-            }
-        }
-        return;
-    }
-
-    // Prepare each file once and stream from that prepare, keeping the slots so
-    // the cross-file move pass reuses the same state. Cache hits are prepared
-    // too -- the move pass needs their arenas -- but they stream their cached
-    // hunks rather than a fresh finalize.
-    let mut slots = Vec::with_capacity(total);
-    for (index, input) in inputs.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let slot = review::prepare_changeset_slot(input, Some(cancel));
-        let hunks = match &cached[index] {
-            Some((hunks_arc, _)) => (**hunks_arc).clone(),
-            None => review::extract_review_hunks_from_slot(input, &slot, 3),
-        };
-        if !send_streamed_file(tx, redraw, &source, total, index, input, hunks) {
-            return;
-        }
-        slots.push(slot);
-    }
-
-    if cancel.load(Ordering::Relaxed) {
-        return;
-    }
-    // The Complete pass rebuilds cross-file move-aware hunks from the retained
-    // prepares, so no file is diffed a second time.
-    let hunks_per_file = review::extract_review_hunks_changeset_prepared(&inputs, slots, 3);
-    let mut session = ReviewSession::new(source);
-    session.add_files_with_hunks(inputs, hunks_per_file);
-    if cancel.load(Ordering::Relaxed) {
-        return;
-    }
-    let _ = tx.send(ReviewScanMsg::Complete(session));
-    redraw.notify_one();
-}
-
-/// Send one streamed file to the review UI, tagging the leading file `First`
-/// so the receiver installs the session. Returns `false` if the channel
-/// closed, so the caller can stop the scan.
-fn send_streamed_file(
-    tx: &mpsc::Sender<ReviewScanMsg>,
-    redraw: &Arc<tokio::sync::Notify>,
-    source: &ReviewSource,
-    total: usize,
-    index: usize,
-    input: &ReviewFileInput,
-    hunks: Vec<ReviewHunk>,
-) -> bool {
-    let msg = if index == 0 {
-        ReviewScanMsg::First {
-            source: source.clone(),
-            total,
-            file: input.clone(),
-            hunks,
-        }
-    } else {
-        ReviewScanMsg::File {
-            file: input.clone(),
-            hunks,
-        }
-    };
-    if tx.send(msg).is_err() {
-        return false;
-    }
-    redraw.notify_one();
-    true
 }
 
 /// Cache key matching what [`populate_diff_cache`] writes, so a scan reads back
@@ -864,22 +719,17 @@ pub(super) fn review_refresh(
 
     if is_git_source(&source) {
         let git_host = stoat.git_host.clone();
-        let fs_host = stoat.fs_host.clone();
         let langs = stoat.language_registry.clone();
-        let rebase_head = stoat.settings.review_rebase_head != Some(false);
 
-        // A refresh sends only Complete, never streaming First/File increments:
-        // streaming would replace the live session with fresh Pending chunks and
-        // flicker the user's decisions away. Leaving the old session up until
-        // Complete lets the pump reapply carried statuses from it. A clean
-        // working-tree rescan yields an empty session, so the view stays open.
+        // A refresh sends only Complete, never streaming increments: streaming
+        // would replace the live session with fresh Pending chunks and flicker
+        // the user's decisions away. Leaving the old session up until Complete
+        // lets the pump reapply carried statuses from it.
         spawn_review_scan(stoat, sync_path, false, move |tx, redraw, cancel| {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            if let Some(session) =
-                rescan_git_source_pure(&*git_host, &*fs_host, &langs, &source, rebase_head)
-            {
+            if let Some(session) = rescan_git_source_pure(&*git_host, &langs, &source) {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -962,28 +812,17 @@ fn is_git_source(source: &ReviewSource) -> bool {
 /// [`review_refresh`] handles synchronously.
 fn rescan_git_source_pure(
     git: &dyn GitHost,
-    fs: &dyn FsHost,
     langs: &LanguageRegistry,
     source: &ReviewSource,
-    rebase_head_enabled: bool,
 ) -> Option<ReviewSession> {
     match source {
-        // A clean working tree keeps the view open. The result is an empty
-        // session the watch pipeline live-populates, or a rebase step's commit
-        // diff. Either result is auto_source so the next refresh re-decides it.
-        ReviewSource::WorkingTree { workdir } => Some(
-            scan_working_tree_pure(git, fs, langs, workdir)
-                .map(|mut session| {
-                    session.auto_source = true;
-                    session
-                })
-                .unwrap_or_else(|| clean_tree_fallback(git, langs, workdir, rebase_head_enabled)),
-        ),
         ReviewSource::Commit { workdir, sha } => scan_commit_pure(git, langs, workdir, sha),
         ReviewSource::CommitRange { workdir, from, to } => {
             scan_commit_range_pure(git, langs, workdir, from, to)
         },
-        ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => None,
+        ReviewSource::WorkingTree { .. }
+        | ReviewSource::AgentEdits { .. }
+        | ReviewSource::InMemory { .. } => None,
     }
 }
 
@@ -1011,13 +850,13 @@ fn post_refresh_sync(stoat: &mut Stoat, path: &Path) {
 /// scan produced no hunks.
 fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> {
     match source {
-        ReviewSource::WorkingTree { workdir } => scan_working_tree(stoat, workdir),
         ReviewSource::Commit { workdir, sha } => scan_commit(stoat, workdir, sha),
         ReviewSource::CommitRange { workdir, from, to } => {
             scan_commit_range(stoat, workdir, from, to)
         },
         ReviewSource::AgentEdits { edits } => scan_agent_edits(stoat, edits.as_ref()),
         ReviewSource::InMemory { files } => scan_in_memory(stoat, files.as_ref()),
+        ReviewSource::WorkingTree { .. } => None,
     }
 }
 
@@ -1073,6 +912,20 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     UpdateEffect::Redraw
+}
+
+/// Toggle the live per-file diff view on the focused editor, driven by
+/// [`stoat_action::Diff`].
+///
+/// Flips `diff_view` (and the display map's deleted-block splicing) on the
+/// focused editor. Unlike the session review there is no scan, no session, and
+/// no scratch buffer -- the editor stays the real, editable file buffer, so
+/// re-pressing toggles the two columns off again.
+pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
+    if let Some(editor) = super::focused_editor_mut(stoat) {
+        let on = !editor.diff_view;
+        editor.set_diff_view(on);
+    }
 }
 
 /// Toggle the focused pane between the side-by-side diff and a plain editor
@@ -1442,60 +1295,6 @@ fn toggle_diff_on(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn open_review(stoat: &mut Stoat) {
-    // A diff toggled off with Tab parks its session and review editor. Re-
-    // entering (R / Diff) swaps that editor back in rather than rescanning, so
-    // reopening is instant and staged decisions are preserved.
-    if stoat
-        .active_workspace()
-        .review
-        .as_ref()
-        .is_some_and(|s| s.toggled_off)
-    {
-        toggle_diff_on(stoat);
-        return;
-    }
-
-    emit_review_info_badge(stoat, "scanning diff");
-    let git_root = stoat.active_workspace().git_root.clone();
-    let git_host = stoat.git_host.clone();
-    let fs_host = stoat.fs_host.clone();
-    let langs = stoat.language_registry.clone();
-    let cache = stoat.diff_cache.clone();
-    let rebase_head = stoat.settings.review_rebase_head != Some(false);
-
-    spawn_review_scan(stoat, None, true, move |tx, redraw, cancel| {
-        let Some((workdir, inputs)) =
-            crate::diff::scan_working_tree(&*git_host, &*fs_host, &langs, &git_root)
-        else {
-            // A clean tree in a repo opens a persistent view the watch pipeline
-            // later fills. That view is empty, or shows a rebase step's commit
-            // diff when a rebase is paused. A true non-repo sends nothing, and
-            // the pump badges instead.
-            if !cancel.load(Ordering::Relaxed)
-                && let Some(workdir) = git_host.discover(&git_root).and_then(|repo| repo.workdir())
-            {
-                let _ = tx.send(ReviewScanMsg::Complete(clean_tree_fallback(
-                    &*git_host,
-                    &langs,
-                    &workdir,
-                    rebase_head,
-                )));
-                redraw.notify_one();
-            }
-            return;
-        };
-        stream_review_inputs(
-            tx,
-            redraw,
-            &cache,
-            cancel,
-            ReviewSource::WorkingTree { workdir },
-            inputs,
-        );
-    });
-}
-
 /// Drain one message from the in-flight review scan, advancing the streamed
 /// install.
 ///
@@ -1519,42 +1318,11 @@ pub(super) fn open_review(stoat: &mut Stoat) {
 /// render-time pumps. Driven from [`Stoat::render`] and the test harness
 /// `settle` loop.
 pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
-    let Some(mut pending) = stoat.pending_review_scan.take() else {
+    let Some(pending) = stoat.pending_review_scan.take() else {
         return false;
     };
 
     match pending.rx.try_recv() {
-        Ok(ReviewScanMsg::First {
-            source,
-            total,
-            file,
-            hunks,
-        }) => {
-            // `First` is only ever the streamed `:diff` working-tree open, which
-            // the git-refresh pipeline re-decides, so mark it auto_source.
-            let mut session = ReviewSession::new(source);
-            session.auto_source = true;
-            session.add_file_streamed(file, hunks);
-            install_review_session(stoat, session);
-
-            pending.total = total;
-            pending.streamed = 1;
-            emit_scanning_progress_badge(stoat, &pending);
-
-            stoat.redraw_notify.notify_one();
-            stoat.pending_review_scan = Some(pending);
-            true
-        },
-        Ok(ReviewScanMsg::File { file, hunks }) => {
-            append_streamed_file(stoat, file, hunks);
-
-            pending.streamed += 1;
-            emit_scanning_progress_badge(stoat, &pending);
-
-            stoat.redraw_notify.notify_one();
-            stoat.pending_review_scan = Some(pending);
-            true
-        },
         Ok(ReviewScanMsg::Complete(mut session)) => {
             // Reapply the current session's decisions to the authoritative
             // whole-changeset session. This is empty for a fresh open, whose
@@ -1591,14 +1359,11 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
             false
         },
         Err(mpsc::TryRecvError::Disconnected) => {
-            if pending.streamed == 0 && stoat.active_workspace().review.is_none() {
-                // The only empty scan that installs no session is a non-repo
-                // open. A clean tree in a repo sends an empty Complete above, so
-                // it never reaches here. The badge replaces the scanning one.
-                emit_review_info_badge(stoat, "not a git repository");
+            if stoat.active_workspace().review.is_none() {
+                // A scan that installs no session found nothing to review, from
+                // an unknown repo or commit. The badge replaces the scanning one.
+                emit_review_info_badge(stoat, "nothing to review");
             } else if pending.scanning_badge {
-                // A full-cache-hit open streamed every file and sent no Complete,
-                // so clear the scanning badge here rather than leaving it stuck.
                 use crate::badge::BadgeSource;
                 stoat
                     .active_workspace_mut()
@@ -1608,71 +1373,6 @@ pub(crate) fn pump_review_scan(stoat: &mut Stoat) -> bool {
             true
         },
     }
-}
-
-/// Update the "scanning diff (N left)" badge for a streaming open, or leave the
-/// tray untouched for a scan that armed no scanning badge.
-fn emit_scanning_progress_badge(stoat: &mut Stoat, pending: &PendingReviewScan) {
-    if !pending.scanning_badge {
-        return;
-    }
-    let remaining = pending.total.saturating_sub(pending.streamed);
-    let label = if remaining == 0 {
-        "scanning diff".to_string()
-    } else {
-        format!("scanning diff ({remaining} left)")
-    };
-    emit_review_info_badge(stoat, &label);
-}
-
-/// Append one streamed file to the installed session and rebuild the review
-/// editor from it. Watchers are set once for the first file and refreshed
-/// wholesale by the [`ReviewScanMsg::Complete`] install, so appends only
-/// re-render.
-fn append_streamed_file(stoat: &mut Stoat, file: ReviewFileInput, hunks: Vec<ReviewHunk>) {
-    if let Some(session) = stoat.active_workspace_mut().review.as_mut() {
-        session.add_file_streamed(file, hunks);
-    }
-    render_review_editor(stoat);
-}
-
-/// Scan the git working tree rooted at `git_root` into a review session.
-/// Returns `None` when the root is not a repository or has no diff hunks.
-///
-/// Takes no `&Stoat` so the git2 diff can run on a blocking thread off the
-/// input loop. [`open_review`] drives it through `spawn_blocking`;
-/// [`scan_working_tree`] wraps it for the synchronous [`review_refresh`].
-fn scan_working_tree_pure(
-    git: &dyn GitHost,
-    fs: &dyn FsHost,
-    langs: &LanguageRegistry,
-    git_root: &Path,
-) -> Option<ReviewSession> {
-    let Some((workdir, inputs)) = crate::diff::scan_working_tree(git, fs, langs, git_root) else {
-        tracing::warn!("open_review: no working-tree changes to review");
-        return None;
-    };
-
-    let mut session = ReviewSession::new(ReviewSource::WorkingTree { workdir });
-    session.add_files(inputs);
-
-    if session.order.is_empty() {
-        tracing::warn!("open_review: no diff hunks to display");
-        return None;
-    }
-
-    Some(session)
-}
-
-/// Synchronous [`scan_working_tree_pure`] wrapper reading the hosts off
-/// `stoat`, used by [`review_refresh`] to re-scan in place.
-fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
-    scan_working_tree_pure(
-        &*stoat.git_host,
-        &*stoat.fs_host,
-        &stoat.language_registry,
-        git_root,
-    )
 }
 
 /// Build a session from a single commit by diffing its tree against its
@@ -1712,46 +1412,6 @@ fn scan_commit_pure(
 /// used by the reopen, removal, refresh, and rebase paths that scan inline.
 pub(super) fn scan_commit(stoat: &Stoat, workdir: &Path, sha: &str) -> Option<ReviewSession> {
     scan_commit_pure(&*stoat.git_host, &stoat.language_registry, workdir, sha)
-}
-
-/// The diff to show for a `:diff` on a clean working tree.
-///
-/// With `rebase_head_enabled` and a rebase paused on the tree, this is the
-/// just-applied commit's diff (a [`ReviewSource::Commit`]) so the user sees what
-/// the rebase step produced. Otherwise it is an empty
-/// [`ReviewSource::WorkingTree`] view. Either way the session is marked
-/// [`auto_source`](ReviewSession::auto_source) so a later git refresh re-decides
-/// it as the rebase advances or the tree changes.
-fn clean_tree_fallback(
-    git: &dyn GitHost,
-    langs: &LanguageRegistry,
-    workdir: &Path,
-    rebase_head_enabled: bool,
-) -> ReviewSession {
-    let mut session = rebase_head_enabled
-        .then(|| commit_fallback_session(git, langs, workdir))
-        .flatten()
-        .unwrap_or_else(|| {
-            ReviewSession::new(ReviewSource::WorkingTree {
-                workdir: workdir.to_path_buf(),
-            })
-        });
-    session.auto_source = true;
-    session
-}
-
-/// The HEAD commit's diff when the repo is paused mid-rebase, else `None`.
-fn commit_fallback_session(
-    git: &dyn GitHost,
-    langs: &LanguageRegistry,
-    workdir: &Path,
-) -> Option<ReviewSession> {
-    let repo = git.discover(workdir)?;
-    if !repo.rebase_in_progress() {
-        return None;
-    }
-    let head = repo.log_commits(None, 1).into_iter().next()?;
-    scan_commit_pure(git, langs, workdir, &head.sha)
 }
 
 /// Build a session from a commit range `from..=to` (inclusive of `to`,
@@ -2110,11 +1770,8 @@ fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<B
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::REVIEW_EXTERNAL_EDIT_DEBOUNCE,
-        diff_cache::DiffCacheKey,
-        host::FsEventKind,
-        review_session::{ChunkStatus, ReviewSource},
-        test_harness::TestHarness,
+        app::REVIEW_EXTERNAL_EDIT_DEBOUNCE, diff_cache::DiffCacheKey, host::FsEventKind,
+        review_session::ChunkStatus, test_harness::TestHarness,
     };
     use std::path::PathBuf;
 
@@ -2134,52 +1791,6 @@ mod tests {
         let mut guard = cache.lock().expect("diff_cache poisoned");
         let (hunks, _move_aware) = guard.lookup(&key).expect("cache hit after install");
         assert!(!hunks.is_empty(), "cached hunks should not be empty");
-    }
-
-    #[test]
-    fn stream_forces_complete_on_non_move_aware_hit() {
-        use super::{diff_cache_key, stream_review_inputs, ReviewScanMsg};
-        use crate::{diff_cache::DiffCache, review::ReviewFileInput, review_session::ReviewSource};
-        use std::sync::{atomic::AtomicBool, mpsc, Arc, Mutex};
-
-        let input = ReviewFileInput {
-            path: PathBuf::from("a.txt"),
-            rel_path: "a.txt".to_string(),
-            language: None,
-            base_text: Arc::new("a\n".to_string()),
-            buffer_text: Arc::new("b\n".to_string()),
-        };
-        let cache = Arc::new(Mutex::new(DiffCache::new(4)));
-        let key = diff_cache_key(
-            &input.base_text,
-            &input.buffer_text,
-            input.language.as_ref(),
-        );
-        cache
-            .lock()
-            .unwrap()
-            .insert(key, Arc::new(Vec::new()), false);
-
-        let (tx, rx) = mpsc::channel();
-        let redraw = Arc::new(tokio::sync::Notify::new());
-        let cancel = AtomicBool::new(false);
-        stream_review_inputs(
-            &tx,
-            &redraw,
-            &cache,
-            &cancel,
-            ReviewSource::WorkingTree {
-                workdir: PathBuf::from("/x"),
-            },
-            vec![input],
-        );
-        drop(tx);
-
-        assert!(
-            rx.into_iter()
-                .any(|m| matches!(m, ReviewScanMsg::Complete(_))),
-            "a non-move-aware cache hit must still force the Complete pass"
-        );
     }
 
     #[test]
@@ -2325,123 +1936,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn opening_a_diff_shows_a_scanning_badge_until_the_scan_settles() {
-        use crate::badge::{BadgeSource, BadgeState};
-
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
-        h.stoat.open_review();
-
-        {
-            let ws = h.stoat.active_workspace();
-            let id = ws
-                .badges
-                .find_by_source(BadgeSource::Review)
-                .expect("a scanning badge is shown before the scan settles");
-            let badge = ws.badges.get(id).expect("badge");
-            assert_eq!(badge.label, "scanning diff");
-            assert_eq!(badge.state, BadgeState::Active);
-        }
-        assert!(
-            h.stoat.active_workspace().review.is_none(),
-            "the session is not installed until the scan settles",
-        );
-
-        h.settle();
-
-        assert!(
-            h.stoat
-                .active_workspace()
-                .badges
-                .find_by_source(BadgeSource::Review)
-                .is_none(),
-            "the scanning badge clears once the session installs",
-        );
-        assert!(
-            h.stoat.active_workspace().review.is_some(),
-            "the session installs after the scan settles",
-        );
-    }
-
-    #[test]
-    fn a_refresh_scan_keeps_a_review_badge_it_did_not_arm() {
-        use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
-
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
-        h.stoat.open_review();
-        h.settle();
-
-        // A badge left by a stage or apply action, not armed by the scan.
-        h.stoat.active_workspace_mut().badges.insert(Badge {
-            source: BadgeSource::Review,
-            anchor: Anchor::BottomRight,
-            state: BadgeState::Complete,
-            label: "applied 1 chunk".to_string(),
-            detail: None,
-        });
-
-        h.dispatch_review_refresh();
-
-        let ws = h.stoat.active_workspace();
-        let id = ws
-            .badges
-            .find_by_source(BadgeSource::Review)
-            .expect("a badge the scan did not arm survives the refresh");
-        assert_eq!(ws.badges.get(id).expect("badge").label, "applied 1 chunk");
-    }
-
-    #[test]
-    fn open_streams_the_session_one_file_at_a_time() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario(
-            "/work",
-            &[
-                ("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n"),
-                ("b.rs", "fn b() { 1 }\n", "fn b() { 2 }\n"),
-                ("c.rs", "fn c() { 1 }\n", "fn c() { 2 }\n"),
-            ],
-        );
-        h.stoat.open_review();
-        assert!(
-            h.stoat.active_workspace().review.is_none(),
-            "nothing installs until the first file is pumped",
-        );
-
-        super::pump_review_scan(&mut h.stoat);
-        assert_eq!(
-            h.with_review(|s| s.files.len()),
-            1,
-            "the first file installs before the rest are diffed",
-        );
-        let cursor = h.current_review_chunk_id();
-
-        super::pump_review_scan(&mut h.stoat);
-        assert_eq!(
-            h.with_review(|s| s.files.len()),
-            2,
-            "the second file appends"
-        );
-        assert_eq!(
-            h.current_review_chunk_id(),
-            cursor,
-            "appending a file does not reset the cursor",
-        );
-
-        super::pump_review_scan(&mut h.stoat);
-        assert_eq!(
-            h.with_review(|s| s.files.len()),
-            3,
-            "the third file appends"
-        );
-        assert_eq!(
-            h.current_review_chunk_id(),
-            cursor,
-            "the cursor still holds"
-        );
-    }
-
     /// The 1-based new-side line and 0-based buffer row of the review
     /// editor's text cursor.
     fn review_cursor_row(h: &mut TestHarness) -> u32 {
@@ -2455,8 +1949,9 @@ mod tests {
     #[test]
     fn toggle_diff_off_opens_the_real_file_at_the_cursor_line() {
         let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
-        h.stoat.open_review();
+        h.open_review_from_texts(&[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
+        h.fake_fs()
+            .insert_file(PathBuf::from("a.rs"), b"a\nb\nX\nd\n");
         h.settle();
 
         // Put the review cursor on the changed row (new-side line 3).
@@ -2500,8 +1995,7 @@ mod tests {
     #[test]
     fn toggle_diff_back_restores_the_diff_with_staging_intact() {
         let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
-        h.stoat.open_review();
+        h.open_review_from_texts(&[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
         h.settle();
 
         let chunk = h.current_review_chunk_id();
@@ -2532,32 +2026,6 @@ mod tests {
             Some(chunk),
             "the review cursor lands on the chunk the file cursor sat in",
         );
-    }
-
-    #[test]
-    fn reentering_a_parked_diff_arms_no_scan() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
-        h.stoat.open_review();
-        h.settle();
-
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDiff);
-        assert_eq!(h.stoat.focused_mode(), "normal");
-        assert!(
-            h.stoat.pending_review_scan.is_none(),
-            "toggling off arms no scan",
-        );
-
-        // R / Diff re-enters by swapping the parked editor back in, not by
-        // rescanning the working tree.
-        h.stoat.open_review();
-
-        assert_eq!(h.stoat.current_view(), Some("review"));
-        assert!(
-            h.stoat.pending_review_scan.is_none(),
-            "re-entry swaps the parked editor back rather than arming a scan",
-        );
-        assert!(!h.with_review(|s| s.toggled_off));
     }
 
     /// Open a two-file review where `migrated` moves from a.rs's base to
@@ -2687,287 +2155,6 @@ mod tests {
         assert_eq!(badge.state, BadgeState::Active);
     }
 
-    #[test]
-    fn the_complete_pass_restores_a_cross_file_move() {
-        use crate::review::{ReviewRow, ReviewSide};
-
-        fn has_cross_file_move(session: &crate::review_session::ReviewSession) -> bool {
-            session.chunks.values().any(|chunk| {
-                chunk.hunk.rows.iter().any(|row| {
-                    let sides: [Option<&ReviewSide>; 2] = match row {
-                        ReviewRow::Context { left, right } => [Some(left), Some(right)],
-                        ReviewRow::Changed { left, right } => [left.as_ref(), right.as_ref()],
-                    };
-                    sides.iter().flatten().any(|s| s.move_provenance.is_some())
-                })
-            })
-        }
-
-        // `migrated` leaves a.rs and reappears in b.rs -- a relocation only the
-        // whole-changeset pass detects, not the per-file diffs.
-        let a_base =
-            "fn migrated() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n\nfn stays_a() {\n    call_a();\n}\n";
-        let a_rhs = "fn stays_a() {\n    call_a();\n}\n";
-        let b_base = "fn stays_b() {\n    call_b();\n}\n";
-        let b_rhs =
-            "fn stays_b() {\n    call_b();\n}\n\nfn migrated() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
-
-        let mut h = TestHarness::with_size(140, 32);
-        h.stage_review_scenario("/work", &[("a.rs", a_base, a_rhs), ("b.rs", b_base, b_rhs)]);
-        h.stoat.open_review();
-
-        super::pump_review_scan(&mut h.stoat);
-        super::pump_review_scan(&mut h.stoat);
-        assert!(
-            !h.with_review(has_cross_file_move),
-            "per-file streaming surfaces no cross-file move",
-        );
-
-        h.settle();
-        assert!(
-            h.with_review(has_cross_file_move),
-            "the whole-changeset Complete pass restores the cross-file move",
-        );
-    }
-
-    #[test]
-    fn open_on_a_clean_tree_opens_an_empty_view() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.fake_git.add_repo("/work");
-        h.stoat.active_workspace_mut().git_root = "/work".into();
-        h.stoat.open_review();
-        h.settle();
-
-        let session = h
-            .stoat
-            .active_workspace()
-            .review
-            .as_ref()
-            .expect("a clean tree in a repo opens an empty, persistent view");
-        assert!(
-            session.files.is_empty(),
-            "the opened session holds no files on a clean tree"
-        );
-    }
-
-    #[test]
-    fn snapshot_review_clean_tree() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.fake_git.add_repo("/work");
-        h.stoat.active_workspace_mut().git_root = "/work".into();
-        h.stoat.open_review();
-        h.settle();
-
-        h.assert_snapshot("snapshot_review_clean_tree");
-    }
-
-    #[test]
-    fn reopening_an_unchanged_diff_reads_the_cache() {
-        use crate::badge::BadgeSource;
-
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario(
-            "/work",
-            &[
-                ("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n"),
-                ("b.rs", "fn b() { 1 }\n", "fn b() { 2 }\n"),
-                ("c.rs", "fn c() { 1 }\n", "fn c() { 2 }\n"),
-            ],
-        );
-
-        let cache_stats = |h: &TestHarness| {
-            let cache = h.stoat.diff_cache();
-            let guard = cache.lock().expect("diff_cache");
-            (guard.hits(), guard.misses())
-        };
-
-        // The first open diffs every file and populates the cache.
-        h.stoat.open_review();
-        h.settle();
-        let (hits_1, misses_1) = cache_stats(&h);
-
-        // Reopening the unchanged tree reads every file from the cache and
-        // re-diffs nothing. Three hits, no new misses, no whole-changeset pass.
-        h.stoat.open_review();
-        h.settle();
-        let (hits_2, misses_2) = cache_stats(&h);
-
-        assert_eq!(
-            hits_2 - hits_1,
-            3,
-            "the reopen reads all three files from cache",
-        );
-        assert_eq!(misses_2, misses_1, "the reopen re-diffs nothing");
-        assert_eq!(
-            h.with_review(|s| s.files.len()),
-            3,
-            "the reopened session still has every file",
-        );
-        assert!(
-            h.stoat
-                .active_workspace()
-                .badges
-                .find_by_source(BadgeSource::Review)
-                .is_none(),
-            "the scanning badge clears on a full-cache-hit reopen",
-        );
-    }
-
-    #[test]
-    fn a_superseded_scan_is_cancelled_and_only_the_newer_installs() {
-        use std::sync::atomic::Ordering;
-
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario(
-            "/work",
-            &[
-                ("a.rs", "fn a() { 1 }\n", "fn a() { 2 }\n"),
-                ("b.rs", "fn b() { 1 }\n", "fn b() { 2 }\n"),
-            ],
-        );
-
-        // Arm a scan and capture its cancel flag before a second scan supersedes
-        // it.
-        h.stoat.open_review();
-        let first_cancel = h
-            .stoat
-            .pending_review_scan
-            .as_ref()
-            .expect("a scan is pending")
-            .cancel
-            .clone();
-
-        h.stoat.open_review();
-        assert!(
-            first_cancel.load(Ordering::Relaxed),
-            "arming a newer scan cancels the one it supersedes",
-        );
-
-        h.settle();
-        assert_eq!(
-            h.with_review(|s| s.files.len()),
-            2,
-            "only the newer scan's session installs",
-        );
-    }
-
-    /// (a) An external edit that introduces a second hunk grows
-    /// `ReviewProgress.total` from 1 to 2 and parks the chunk
-    /// cursor on the chunk that contains the smallest changed
-    /// buffer offset.
-    #[test]
-    fn external_edit_adds_new_chunk_grows_progress() {
-        let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
-        let buffer = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
-        h.stoat.open_review();
-        h.settle();
-
-        assert_review_total(&h, 1);
-
-        h.external_edit("a.rs", "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n");
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        assert_review_total(&h, 2);
-        let chunk_id = h.current_review_chunk_id();
-        assert_eq!(
-            h.with_review(|s| s.chunk(chunk_id).unwrap().file_index),
-            0,
-            "cursor parks on the chunk in the touched file",
-        );
-    }
-
-    /// (b) An external edit that shifts a previously-staged chunk
-    /// to a different `base_line_range` produces a new chunk whose
-    /// `ChunkIdentity` does not match the carried key, so the
-    /// status defaults to `Pending` rather than carrying.
-    #[test]
-    fn external_edit_drops_staged_status_on_identity_mismatch() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
-        h.stoat.open_review();
-        h.settle();
-        h.set_review_status(0, ChunkStatus::Staged);
-
-        h.external_edit("a.rs", "x\nZ\n");
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        let surviving = h.current_review_chunk_id();
-        assert_eq!(
-            h.chunk_status(surviving),
-            ChunkStatus::Pending,
-            "identity mismatch must drop the carried Staged status",
-        );
-    }
-
-    /// (c) A watcher event for a path that is not in the session
-    /// is a no-op: chunks, cursor, and review badges all stay put.
-    #[test]
-    fn external_edit_off_session_path_is_noop() {
-        let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
-        let buffer = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
-        h.stoat.open_review();
-        h.settle();
-
-        let before_total = h.with_review(|s| s.progress().total);
-        let before_cursor = h.current_review_chunk_id();
-        let before_version = h.with_review(|s| s.version);
-
-        h.fake_fs_watcher()
-            .inject(PathBuf::from("/work/b.rs"), FsEventKind::Modified);
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        assert_eq!(h.with_review(|s| s.progress().total), before_total);
-        assert_eq!(h.current_review_chunk_id(), before_cursor);
-        assert_eq!(
-            h.with_review(|s| s.version),
-            before_version,
-            "off-session path must not bump the session version",
-        );
-        assert!(
-            h.stoat
-                .active_workspace()
-                .badges
-                .find_by_source(crate::badge::BadgeSource::Review)
-                .is_none(),
-            "no badge for a no-op event",
-        );
-    }
-
-    /// A `.git` write (e.g. a commit) refreshes an open working-tree
-    /// review through the shared debounce. Here the tree is committed
-    /// clean, so the refresh finds no hunks and closes the stale session.
-    #[test]
-    fn git_state_change_refreshes_working_tree_review() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
-        h.stoat.open_review();
-        h.settle();
-        assert!(h.stoat.active_workspace().review.is_some());
-
-        h.fake_git.add_repo("/work").clear_changes();
-        h.fake_fs_watcher().inject(
-            PathBuf::from("/work/.git/refs/heads/main"),
-            FsEventKind::Modified,
-        );
-        h.stoat.drain_fs_watch_events();
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        let session = h
-            .stoat
-            .active_workspace()
-            .review
-            .as_ref()
-            .expect("a .git write refreshes the review, which persists as an empty view");
-        assert!(
-            session.files.is_empty(),
-            "the refreshed session is empty on the now-clean tree",
-        );
-    }
-
     /// A commit-source review is a fixed snapshot, so a `.git` write must
     /// not refresh it.
     #[test]
@@ -2999,192 +2186,6 @@ mod tests {
         );
     }
 
-    /// Open a `:diff` on a clean tree while a rebase is paused at commit `c2`
-    /// (whose diff against `c1` changes `a.rs`), with `review.rebase_head` set
-    /// to `rebase_head`.
-    fn open_review_mid_rebase(h: &mut TestHarness, rebase_head: Option<bool>) {
-        h.stoat.settings.review_rebase_head = rebase_head;
-        h.stoat.active_workspace_mut().git_root = "/work".into();
-        h.fake_git
-            .add_repo("/work")
-            .commit("c1", &[("a.rs", "v1\n")])
-            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")])
-            .set_head("c2")
-            .set_rebase_in_progress(true);
-        h.stoat.open_review();
-        h.settle();
-    }
-
-    /// Simulate a `.git` write so the debounced git-refresh fires.
-    fn inject_git_write(h: &mut TestHarness) {
-        h.fake_fs_watcher().inject(
-            PathBuf::from("/work/.git/refs/heads/main"),
-            FsEventKind::Modified,
-        );
-        h.stoat.drain_fs_watch_events();
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-    }
-
-    #[test]
-    fn rebase_paused_on_clean_tree_shows_the_head_commit_diff() {
-        let mut h = TestHarness::with_size(80, 14);
-        open_review_mid_rebase(&mut h, None);
-
-        let (source, auto, files) =
-            h.with_review(|s| (s.source.clone(), s.auto_source, s.files.len()));
-        assert!(
-            matches!(&source, ReviewSource::Commit { sha, .. } if sha == "c2"),
-            "a clean tree mid-rebase shows the just-applied commit, got {source:?}",
-        );
-        assert!(
-            auto,
-            "the rebase-fallback session is auto_source so it keeps following"
-        );
-        assert_eq!(files, 1, "the HEAD commit's one changed file renders");
-    }
-
-    #[test]
-    fn finishing_the_rebase_swaps_back_to_the_clean_view() {
-        let mut h = TestHarness::with_size(80, 14);
-        open_review_mid_rebase(&mut h, None);
-        assert!(h.with_review(|s| matches!(s.source, ReviewSource::Commit { .. })));
-
-        h.fake_git.add_repo("/work").set_rebase_in_progress(false);
-        inject_git_write(&mut h);
-
-        let (source, files) = h.with_review(|s| (s.source.clone(), s.files.len()));
-        assert!(
-            matches!(source, ReviewSource::WorkingTree { .. }),
-            "the finished rebase swaps back to the clean working-tree view, got {source:?}",
-        );
-        assert_eq!(files, 0, "the clean view is empty");
-    }
-
-    #[test]
-    fn rebase_head_disabled_keeps_the_empty_clean_view() {
-        let mut h = TestHarness::with_size(80, 14);
-        open_review_mid_rebase(&mut h, Some(false));
-
-        let (source, files) = h.with_review(|s| (s.source.clone(), s.files.len()));
-        assert!(
-            matches!(source, ReviewSource::WorkingTree { .. }),
-            "review.rebase_head = false keeps the empty clean-tree view, got {source:?}",
-        );
-        assert_eq!(files, 0, "the clean view is empty");
-    }
-
-    #[test]
-    fn a_dirty_tree_wins_over_the_rebase_fallback() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "v1\n", "dirty\n")]);
-        h.fake_git
-            .add_repo("/work")
-            .commit("c1", &[("a.rs", "v1\n")])
-            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")])
-            .set_head("c2")
-            .set_rebase_in_progress(true);
-        h.stoat.open_review();
-        h.settle();
-
-        let (source, files) = h.with_review(|s| (s.source.clone(), s.files.len()));
-        assert!(
-            matches!(source, ReviewSource::WorkingTree { .. }),
-            "a dirty tree shows the working-tree diff, not the rebase fallback, got {source:?}",
-        );
-        assert_eq!(files, 1, "the dirty working-tree change renders");
-    }
-
-    /// A change to a working-tree file not yet in the session pulls it
-    /// into the review on the next refresh.
-    #[test]
-    fn non_session_change_pulls_the_file_into_the_review() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
-        h.stoat.open_review();
-        h.settle();
-        assert_eq!(h.with_review(|s| s.files.len()), 1);
-
-        h.stage_review_scenario("/work", &[("b.rs", "p\n", "Q\n")]);
-        h.fake_fs_watcher()
-            .inject(PathBuf::from("/work/b.rs"), FsEventKind::Modified);
-        h.stoat.drain_fs_watch_events();
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        assert!(
-            h.with_review(|s| s.files.iter().any(|f| f.rel_path == "b.rs")),
-            "the newly-changed file is pulled into the session",
-        );
-    }
-
-    /// A gitignored path (build churn) arms no refresh even under the
-    /// git root.
-    #[test]
-    fn gitignored_change_arms_no_refresh() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
-        h.stoat.open_review();
-        h.settle();
-        h.fake_git.add_repo("/work").ignored("target/out.o");
-        let before = h.with_review(|s| s.version);
-
-        h.fake_fs_watcher()
-            .inject(PathBuf::from("/work/target/out.o"), FsEventKind::Modified);
-        h.stoat.drain_fs_watch_events();
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        assert_eq!(
-            h.with_review(|s| s.version),
-            before,
-            "a gitignored change must not refresh the review",
-        );
-    }
-
-    /// With `review.follow` off, an external edit to a session file does
-    /// not auto-refresh. A manual `r` is still required.
-    #[test]
-    fn review_follow_off_suppresses_auto_refresh() {
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
-        h.stoat.open_review();
-        h.settle();
-        h.stoat.settings.review_follow = Some(false);
-        let before = h.with_review(|s| s.version);
-
-        h.external_edit("a.rs", "x\nZ\n");
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        assert_eq!(
-            h.with_review(|s| s.version),
-            before,
-            "review.follow off must suppress the automatic refresh",
-        );
-    }
-
-    /// (d) Working-tree review opens register one watch token per
-    /// file in the session, and `CloseReview` releases them all.
-    #[test]
-    fn working_tree_watch_tokens_lifecycle() {
-        let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
-        let buffer = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n";
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
-        h.stoat.open_review();
-        h.settle();
-
-        assert_eq!(
-            h.fake_fs_watcher().watched_paths(),
-            vec![PathBuf::from("/work/a.rs")],
-            "watch token registered for the session file",
-        );
-
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseReview);
-
-        assert!(
-            h.fake_fs_watcher().watched_paths().is_empty(),
-            "CloseReview must release every watch token",
-        );
-    }
-
     /// (e) `InMemory`-source sessions never start the watcher, so
     /// fake-fs writes do not flow into them.
     #[test]
@@ -3210,43 +2211,6 @@ mod tests {
             h.with_review(|s| s.version),
             before_version,
             "unwatched write must not refresh the session",
-        );
-    }
-
-    /// (f) Three rapid writes within the debounce window collapse
-    /// into one refresh; the resulting session reflects the
-    /// most-recent write only.
-    #[test]
-    fn external_edit_burst_dispatches_once() {
-        let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
-        let buffer = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
-        let mut h = TestHarness::with_size(80, 14);
-        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
-        h.stoat.open_review();
-        h.settle();
-
-        h.external_edit("a.rs", "A1\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
-        h.external_edit("a.rs", "A2\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
-        h.external_edit("a.rs", "A3\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
-        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
-
-        let buffer_text = h.with_review(|s| s.files[0].buffer_text.as_str().to_string());
-        assert_eq!(
-            buffer_text, "A3\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
-            "post-burst session must reflect the latest write only",
-        );
-        assert_eq!(
-            h.with_review(|s| s.order.len()),
-            1,
-            "single coalesced refresh produces one chunk, not three",
-        );
-    }
-
-    fn assert_review_total(h: &TestHarness, expected: usize) {
-        let progress = h.with_review(|s| s.progress());
-        assert_eq!(
-            progress.total, expected,
-            "progress mismatch: {progress:?} expected total {expected}",
         );
     }
 }
