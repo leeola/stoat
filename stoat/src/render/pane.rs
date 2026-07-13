@@ -137,7 +137,14 @@ pub(crate) fn render_overlay_status(
     }
 
     let left = overlay_status_segments(is_focused, area, frame);
-    render_status_segments(area, base_style, frame, &left, &[], buf, scene);
+    let mut right: Vec<StatusSeg> = Vec::new();
+    if let Some(message) = frame.status_message {
+        right.push((
+            message.to_string(),
+            status_message_style(base_style, frame.theme),
+        ));
+    }
+    render_status_segments(area, base_style, frame, &left, &right, buf, scene);
 }
 
 /// Build the overlay status bar's left segments in paint order.
@@ -289,6 +296,19 @@ fn render_status_segments(
 /// One built status-bar segment pairing painted text with its cell style.
 type StatusSeg = (String, Style);
 
+/// Resolve the style for the transient status message segment from the bar's
+/// base style plus the theme's `ui.message.error` override.
+///
+/// Falls back to red when the theme leaves that scope undefined, so the message
+/// always reads as an alert rather than blending into the bar.
+fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style {
+    base_style.patch(
+        theme
+            .try_get(crate::theme::scope::UI_MESSAGE_ERROR)
+            .unwrap_or_else(|| Style::default().fg(Color::Red)),
+    )
+}
+
 /// Build the left- and right-anchored status segments as `(text, style)` pairs
 /// in paint order.
 ///
@@ -385,6 +405,16 @@ fn status_segments(
                     .add_modifier(Modifier::BOLD)
                     .patch(theme.get(diagnostic_severity_scope(worst)));
                 right.push((text, badge_style));
+                right_anchor = start;
+            }
+        }
+        if let Some(message) = frame.status_message {
+            let available = right_anchor.saturating_sub(cursor) as usize;
+            if available > 0 {
+                let text: String = message.chars().take(available).collect();
+                let width = text.chars().count() as u16;
+                let start = right_anchor.saturating_sub(width);
+                right.push((text, status_message_style(base_style, theme)));
                 right_anchor = start;
             }
         }

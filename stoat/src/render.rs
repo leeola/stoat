@@ -44,11 +44,7 @@ use crate::{
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-};
+use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::path::Path;
 use stoat_config::LineNumbers;
@@ -86,6 +82,10 @@ pub(crate) struct FrameCtx<'a> {
     /// Freshest `window/showMessage` text, painted in the right side of
     /// the status bar. `MessageType::ERROR` is styled as an error.
     pub(crate) lsp_message: Option<(lsp_types::MessageType, &'a str)>,
+    /// The transient status message ([`Stoat::pending_message`]), already
+    /// checked against its TTL deadline. Painted in the focused pane's status
+    /// bar just left of the diagnostics badge, styled as an error.
+    pub(crate) status_message: Option<&'a str>,
     /// Active labels for an in-progress `GotoWord` jump, keyed by label
     /// string with byte-offset values. Painted by the focused editor's
     /// render path; non-focused panes ignore this field.
@@ -169,8 +169,8 @@ pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
 /// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
 /// tick after the parse pipeline and commits pump have run.
 ///
-/// When [`Stoat::pending_message`] is set the bottom row is reserved for it and
-/// the body layout shrinks by one row. Otherwise the panes keep full height.
+/// Retires an expired [`Stoat::pending_message`] up front, then hands the live
+/// one to the panes as a status-bar segment. The panes always keep full height.
 pub(crate) fn frame(
     stoat: &mut Stoat,
     buf: &mut Buffer,
@@ -187,29 +187,7 @@ pub(crate) fn frame(
         stoat.pending_message_expiry = None;
     }
 
-    let message = if full.height >= 2 {
-        stoat.pending_message.clone()
-    } else {
-        None
-    };
-    let message_style = stoat
-        .theme
-        .try_get(crate::theme::scope::UI_MESSAGE_ERROR)
-        .unwrap_or_else(|| Style::default().fg(Color::Red));
-    let (size, message_row) = if message.is_some() {
-        let body = Rect {
-            height: full.height - 1,
-            ..full
-        };
-        let row = Rect {
-            y: full.y + full.height - 1,
-            height: 1,
-            ..full
-        };
-        (body, Some(row))
-    } else {
-        (full, None)
-    };
+    let size = full;
 
     let mode = stoat.focused_mode().to_string();
 
@@ -246,6 +224,7 @@ pub(crate) fn frame(
             .lsp_message
             .as_ref()
             .map(|(typ, message)| (*typ, message.as_str())),
+        status_message: stoat.pending_message.as_deref(),
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_badges: &stoat.settings.mode_badges,
         diagnostics: &stoat.diagnostics,
@@ -685,23 +664,6 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-    }
-
-    if let (Some(message), Some(row)) = (message, message_row) {
-        render_message_row(&message, message_style, row, buf);
-    }
-}
-
-/// Paint the transient bottom-row `message` into the single `row` reserved by
-/// [`frame`]. Truncates to the row width. The row is otherwise blank because
-/// the body layout was shrunk to exclude it.
-fn render_message_row(message: &str, style: Style, row: Rect, buf: &mut Buffer) {
-    for (i, ch) in message.chars().enumerate() {
-        let col = row.x + i as u16;
-        if col >= row.x + row.width {
-            break;
-        }
-        buf[(col, row.y)].set_char(ch).set_style(style);
     }
 }
 

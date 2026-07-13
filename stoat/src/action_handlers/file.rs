@@ -1300,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_save_failure_shows_message_row() {
+    fn snapshot_save_failure_shows_status_message() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/save-fail");
         h.fake_fs().insert_file(root.join("a.txt"), b"original\n");
@@ -1326,11 +1326,11 @@ mod tests {
         h.fake_fs()
             .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
         dispatch(&mut h.stoat, &SaveBuffer);
-        h.assert_snapshot("save_failure_shows_message_row");
+        h.assert_snapshot("save_failure_shows_status_message");
     }
 
     #[test]
-    fn snapshot_clean_frame_has_no_message_row() {
+    fn snapshot_clean_frame_has_no_status_message() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/save-clean");
         h.fake_fs().insert_file(root.join("a.txt"), b"original\n");
@@ -1342,7 +1342,7 @@ mod tests {
             },
         );
         h.settle();
-        h.assert_snapshot("clean_frame_has_no_message_row");
+        h.assert_snapshot("clean_frame_has_no_status_message");
     }
 
     #[test]
