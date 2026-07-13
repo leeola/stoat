@@ -11,7 +11,7 @@
 
 use crate::{
     agent_ipc::AgentQuery,
-    app::{Stoat, UpdateEffect},
+    app::{PendingSpawn, Stoat, UpdateEffect},
     buffer::BufferId,
     display_map::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
@@ -184,27 +184,22 @@ pub(crate) fn notify_buffer_opened(
         .detach();
 }
 
-/// Launch a language server for `buffer_id`'s language the first time a
-/// buffer that has one opens, replacing the [`crate::host::NoopLsp`]
-/// placeholder for the rest of the session.
+/// Launch the language server for `buffer_id`'s language the first time a
+/// buffer of that language opens, registering it in [`Stoat::lsp_registry`]
+/// once it is ready.
 ///
-/// No-op unless auto-spawn is enabled, the current host is still the
-/// [`crate::host::NoopLsp`] placeholder, the buffer's language has a
-/// known [`crate::lsp::servers::server_command`], and no spawn has been
-/// attempted yet this session. The binary opts into auto-spawn via
-/// [`Stoat::set_lsp_auto_spawn`]. Tests leave it off, so the placeholder
-/// never performs IO.
+/// No-op unless auto-spawn is enabled, the buffer's language has a known
+/// [`crate::lsp::servers::server_command`], no real host already serves that
+/// language, and its server has not already been spawn-attempted. Each
+/// language spawns its own server, and a failed spawn is not retried. The
+/// binary opts into auto-spawn via [`Stoat::set_lsp_auto_spawn`]. Tests leave
+/// it off, so no server IO happens.
 ///
 /// The spawn plus `initialize` handshake runs detached on the workspace
-/// [`Stoat::executor`]. The ready host is parked in
-/// [`Stoat::pending_lsp_host`] for [`Stoat::update`] to install. A spawn
-/// or handshake failure is logged and leaves the placeholder in place
-/// with no retry.
+/// [`Stoat::executor`]. The ready host, or the failure, is parked in
+/// [`Stoat::pending_lsp_host`] for [`Stoat::update`] to install.
 pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId) {
-    if !stoat.lsp_auto_spawn
-        || stoat.lsp_registry.spawn_attempted_any()
-        || !stoat.lsp_host().is_noop()
-    {
+    if !stoat.lsp_auto_spawn {
         return;
     }
     let Some(language) = stoat.active_workspace().buffers.language_for(buffer_id) else {
@@ -217,6 +212,14 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
     };
     let language_name = language.name.to_string();
 
+    // Already served by a real host, or this server has already been tried (a
+    // failed spawn is never retried) -- either way, do not spawn it again.
+    if stoat.lsp_registry.serves_language(&language_name)
+        || stoat.lsp_registry.spawn_attempted(&command)
+    {
+        return;
+    }
+
     // The workspace's direnv environment is still loading. Park the spawn
     // rather than race the load with the wrong PATH. install_pending re-fires
     // it once the env lands, so the server starts with the project (e.g.
@@ -227,7 +230,6 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
     }
 
     stoat.lsp_registry.mark_spawn_attempted(command.clone());
-    stoat.lsp_pending_registration = Some((command.clone(), language_name));
 
     let git_root = stoat.active_workspace().git_root.clone();
     let env = stoat.active_workspace().env.diff.clone();
@@ -251,14 +253,17 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
         .spawn(async move {
             let host: Arc<dyn LspHost> =
                 match LocalLsp::spawn(&command, &args, &env, &git_root, transcript, wake) {
-                Ok(host) => Arc::new(host),
-                Err(err) => {
-                    tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
-                    *slot.lock().expect("pending lsp host mutex") =
-                        Some(Err(format!("{command}: {err}")));
-                    return;
-                },
-            };
+                    Ok(host) => Arc::new(host),
+                    Err(err) => {
+                        tracing::warn!(target: "stoat::lsp", ?err, %command, "language server spawn failed");
+                        slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
+                            server: command.clone(),
+                            language: language_name,
+                            result: Err(format!("{command}: {err}")),
+                        });
+                        return;
+                    },
+                };
             match host.initialize(root_uri).await {
                 Ok(result) => {
                     tracing::info!(
@@ -270,12 +275,19 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
                 },
                 Err(err) => {
                     tracing::warn!(target: "stoat::lsp", ?err, %command, "language server initialize failed");
-                    *slot.lock().expect("pending lsp host mutex") =
-                        Some(Err(format!("{command}: {err}")));
+                    slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
+                        server: command.clone(),
+                        language: language_name,
+                        result: Err(format!("{command}: {err}")),
+                    });
                     return;
                 },
             }
-            *slot.lock().expect("pending lsp host mutex") = Some(Ok(host));
+            slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
+                server: command,
+                language: language_name,
+                result: Ok(host),
+            });
         })
         .detach();
 }
@@ -3958,6 +3970,41 @@ mod tests {
             h.stoat.active_workspace().env.state,
             crate::project_env::EnvLoadState::Loaded,
         );
+    }
+
+    #[test]
+    fn each_language_routes_did_open_to_its_own_server() {
+        let mut h = TestHarness::with_size(80, 24);
+        let rust_server = std::sync::Arc::new(crate::host::FakeLsp::new());
+        let json_server = std::sync::Arc::new(crate::host::FakeLsp::new());
+        h.stoat
+            .lsp_registry
+            .insert("rust-analyzer".into(), rust_server.clone());
+        h.stoat
+            .lsp_registry
+            .set_language("rust".into(), "rust-analyzer".into());
+        h.stoat
+            .lsp_registry
+            .insert("json-ls".into(), json_server.clone());
+        h.stoat
+            .lsp_registry
+            .set_language("json".into(), "json-ls".into());
+
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("b.json", "{}\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        open_buffer(&mut h, root.join("b.json"));
+
+        let rust_opens = rust_server.observed_opens();
+        assert_eq!(rust_opens.len(), 1, "rust server sees only the rust file");
+        assert!(rust_opens[0].text_document.uri.as_str().ends_with("/a.rs"));
+
+        let json_opens = json_server.observed_opens();
+        assert_eq!(json_opens.len(), 1, "json server sees only the json file");
+        assert!(json_opens[0]
+            .text_document
+            .uri
+            .as_str()
+            .ends_with("/b.json"));
     }
 
     #[test]

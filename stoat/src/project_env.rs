@@ -10,7 +10,7 @@
 //! result into [`crate::app::Stoat::pending_env`], and [`install_pending`]
 //! drains that slot on the next background pump.
 
-use crate::{app::Stoat, host::ShellOutput, workspace::WorkspaceId};
+use crate::{app::Stoat, buffer::BufferId, host::ShellOutput, workspace::WorkspaceId};
 use std::{collections::HashMap, io, path::Path};
 
 /// The exit code `sh` returns when the command it runs is not found on
@@ -201,10 +201,22 @@ pub(crate) fn install_pending(stoat: &mut Stoat) {
         stoat.set_status(message);
     }
 
-    // A language-server spawn deferred while the env loaded now runs with the
-    // freshly installed diff.
-    if let Some(buffer_id) = stoat.lsp_spawn_deferred.take() {
-        crate::action_handlers::lsp::maybe_spawn_language_server(stoat, buffer_id);
+    // Language-server spawns deferred while the env loaded now run with the
+    // freshly installed diff. Re-fire every open buffer, not just the last one
+    // deferred, so several languages opened during the load each spawn their
+    // server.
+    if stoat.lsp_spawn_deferred.take().is_some() {
+        let ids: Vec<BufferId> = {
+            let buffers = &stoat.active_workspace().buffers;
+            buffers
+                .open_paths()
+                .into_iter()
+                .filter_map(|path| buffers.id_for_path(&path))
+                .collect()
+        };
+        for id in ids {
+            crate::action_handlers::lsp::maybe_spawn_language_server(stoat, id);
+        }
     }
 }
 

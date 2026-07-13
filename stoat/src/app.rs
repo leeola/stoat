@@ -123,10 +123,22 @@ impl UpdateEffect {
     }
 }
 
-/// Shared landing slot for the detached LSP spawn task's outcome. `Ok` is the
-/// ready host to install, `Err` the failure string to surface in the message
-/// row. See [`Stoat::pending_lsp_host`].
-type PendingLspHost = Arc<std::sync::Mutex<Option<Result<Arc<dyn LspHost>, String>>>>;
+/// Shared landing queue for detached LSP spawn tasks, one entry per server.
+/// See [`Stoat::pending_lsp_host`].
+type PendingLspHost = Arc<std::sync::Mutex<Vec<PendingSpawn>>>;
+
+/// A language server whose spawn task finished, waiting for [`Stoat::update`]
+/// to install it.
+///
+/// Carries the resolved `server` command name and `language` so the registry
+/// keys the ready host and routes its language on install. `result` is the
+/// ready host, or the failure string to surface in the message row when the
+/// spawn or handshake failed.
+pub(crate) struct PendingSpawn {
+    pub(crate) server: String,
+    pub(crate) language: String,
+    pub(crate) result: Result<Arc<dyn LspHost>, String>,
+}
 
 pub struct Stoat {
     size: Rect,
@@ -601,10 +613,6 @@ pub struct Stoat {
     /// side-effect-free for tests. The binary turns it on for a live
     /// session via [`Self::set_lsp_auto_spawn`].
     pub(crate) lsp_auto_spawn: bool,
-    /// The `(server, language)` a pending spawn resolved to, recorded so
-    /// [`Self::install_pending_lsp_host`] registers the ready host under its
-    /// server name and language. Cleared once installed or failed.
-    pub(crate) lsp_pending_registration: Option<(String, String)>,
     /// The spawn or initialize failure that left the [`NoopLsp`]
     /// placeholder in place, retained so a later LSP action can restate
     /// why no server is up. [`Self::pending_lsp_host`] is drained after
@@ -1140,10 +1148,9 @@ impl Stoat {
             env_host: Arc::new(LocalEnv),
             lsp_registry: crate::lsp::registry::LspRegistry::new(),
             lsp_auto_spawn: false,
-            lsp_pending_registration: None,
             lsp_spawn_failed: None,
             lsp_spawn_deferred: None,
-            pending_lsp_host: Arc::new(std::sync::Mutex::new(None)),
+            pending_lsp_host: Arc::new(std::sync::Mutex::new(Vec::new())),
             env_auto_load: false,
             diff_warm_auto: false,
             pending_env: Arc::new(std::sync::Mutex::new(None)),
@@ -1344,14 +1351,14 @@ impl Stoat {
 
     /// The language server that should serve `buffer_id`.
     ///
-    /// Resolves the buffer's language to its server, falling back to the sole
-    /// client (or a noop). With one server up, every buffer resolves to it.
+    /// A buffer with a language routes to that language's own server, an
+    /// injected sole client, or a noop. A buffer with no language falls back
+    /// to the sole client, or a noop.
     pub(crate) fn lsp_for(&self, buffer_id: BufferId) -> Arc<dyn LspHost> {
-        self.active_workspace()
-            .buffers
-            .language_for(buffer_id)
-            .and_then(|language| self.lsp_registry.host_for_language(language.name))
-            .unwrap_or_else(|| self.lsp_registry.sole_or_noop())
+        match self.active_workspace().buffers.language_for(buffer_id) {
+            Some(language) => self.lsp_registry.route(language.name),
+            None => self.lsp_registry.sole_or_noop(),
+        }
     }
 
     /// Reap the language server on quit. Awaits [`LspHost::shutdown`]
@@ -2610,42 +2617,47 @@ impl Stoat {
         }
     }
 
-    /// Swap in a language server that finished spawning since the last
-    /// tick. The lazy-spawn task armed by
-    /// [`action_handlers::lsp::notify_buffer_opened`] parks a ready
-    /// [`crate::host::LocalLsp`] in [`Self::pending_lsp_host`]. This
-    /// takes it, replaces the [`NoopLsp`] placeholder, and re-fires
-    /// `did_open` for every open file-backed buffer so the real server
-    /// receives the documents that opened while it was starting.
+    /// Install every language server that finished spawning since the last
+    /// tick.
+    ///
+    /// The lazy-spawn tasks armed by
+    /// [`action_handlers::lsp::notify_buffer_opened`] park ready
+    /// [`crate::host::LocalLsp`] hosts in [`Self::pending_lsp_host`]. This
+    /// drains the queue. Each ready host is registered via
+    /// [`Self::install_ready_server`], and a failed spawn surfaces in the
+    /// message row while its language keeps the [`NoopLsp`] placeholder.
     fn install_pending_lsp_host(&mut self) {
-        let pending = self
-            .pending_lsp_host
-            .lock()
-            .expect("pending lsp host mutex")
-            .take();
-        let host = match pending {
-            None => return,
-            Some(Ok(host)) => host,
-            Some(Err(msg)) => {
-                // The server never came up, so the NoopLsp placeholder stays and
-                // the failure surfaces in the status bar rather than only the log.
-                // Retained so a later LSP action can restate why no server is up.
-                self.lsp_spawn_failed = Some(msg.clone());
-                self.set_status(format!("lsp: {msg}"));
-                return;
-            },
-        };
-
-        match self.lsp_pending_registration.take() {
-            Some((server, language)) => {
-                self.lsp_registry.insert(server.clone(), host);
-                self.lsp_registry.set_language(language, server);
-            },
-            None => self.set_lsp_host(host),
+        let pending = std::mem::take(
+            &mut *self
+                .pending_lsp_host
+                .lock()
+                .expect("pending lsp host mutex"),
+        );
+        for spawn in pending {
+            match spawn.result {
+                Ok(host) => self.install_ready_server(spawn.server, spawn.language, host),
+                Err(msg) => {
+                    // The server never came up, so its language keeps the noop
+                    // placeholder and the failure surfaces in the status bar
+                    // rather than only the log. Retained so a later LSP action
+                    // can restate why no server is up.
+                    self.lsp_spawn_failed = Some(msg.clone());
+                    self.set_status(format!("lsp: {msg}"));
+                },
+            }
         }
-        self.lsp_opened.clear();
-        self.lsp_doc_versions.clear();
-        self.lsp_buffer_versions.clear();
+    }
+
+    /// Register a ready `host` under its `server` name and `language`, then
+    /// re-fire `did_open` for the open buffers of that language.
+    ///
+    /// Those buffers already sent `did_open` to the noop while the server was
+    /// starting, so they are dropped from [`Self::lsp_opened`] and reopened to
+    /// deliver the documents to the real server. Buffers of other languages
+    /// keep their own servers untouched.
+    fn install_ready_server(&mut self, server: String, language: String, host: Arc<dyn LspHost>) {
+        self.lsp_registry.insert(server.clone(), host);
+        self.lsp_registry.set_language(language.clone(), server);
 
         let reopen: Vec<(BufferId, PathBuf, String)> = {
             let buffers = &self.active_workspace().buffers;
@@ -2654,6 +2666,9 @@ impl Stoat {
                 .into_iter()
                 .filter_map(|path| {
                     let id = buffers.id_for_path(&path)?;
+                    if buffers.language_for(id)?.name != language.as_str() {
+                        return None;
+                    }
                     let text = buffers
                         .get(id)?
                         .read()
@@ -2666,6 +2681,9 @@ impl Stoat {
         };
 
         for (id, path, text) in reopen {
+            self.lsp_opened.remove(&id);
+            self.lsp_doc_versions.remove(&id);
+            self.lsp_buffer_versions.remove(&id);
             action_handlers::lsp::notify_buffer_opened(self, id, &path, &text);
         }
     }
@@ -10093,10 +10111,15 @@ mod tests {
     fn lsp_spawn_failure_surfaces_in_message_row() {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
-        *stoat
+        stoat
             .pending_lsp_host
             .lock()
-            .expect("pending lsp host mutex") = Some(Err("rust-analyzer: NotFound".to_string()));
+            .expect("pending lsp host mutex")
+            .push(PendingSpawn {
+                server: "rust-analyzer".to_string(),
+                language: "rust".to_string(),
+                result: Err("rust-analyzer: NotFound".to_string()),
+            });
 
         stoat.install_pending_lsp_host();
 
@@ -10115,10 +10138,15 @@ mod tests {
         let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
         let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
         let host: Arc<dyn LspHost> = Arc::new(crate::host::FakeLsp::new());
-        *stoat
+        stoat
             .pending_lsp_host
             .lock()
-            .expect("pending lsp host mutex") = Some(Ok(host));
+            .expect("pending lsp host mutex")
+            .push(PendingSpawn {
+                server: "rust-analyzer".to_string(),
+                language: "rust".to_string(),
+                result: Ok(host),
+            });
 
         stoat.install_pending_lsp_host();
 
