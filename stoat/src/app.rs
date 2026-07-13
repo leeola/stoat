@@ -605,6 +605,12 @@ pub struct Stoat {
     /// even as more buffers open. A failed spawn leaves it set, with no
     /// retry.
     pub(crate) lsp_spawn_attempted: bool,
+    /// The spawn or initialize failure that left the [`NoopLsp`]
+    /// placeholder in place, retained so a later LSP action can restate
+    /// why no server is up. [`Self::pending_lsp_host`] is drained after
+    /// one tick, so without this the failure and an in-flight spawn are
+    /// indistinguishable.
+    pub(crate) lsp_spawn_failed: Option<String>,
     /// Buffer whose language-server spawn was deferred because the
     /// workspace's direnv env was still loading when it opened. Re-fired
     /// by [`crate::project_env::install_pending`] once the env lands, so
@@ -1098,6 +1104,7 @@ impl Stoat {
             lsp_host: Arc::new(NoopLsp),
             lsp_auto_spawn: false,
             lsp_spawn_attempted: false,
+            lsp_spawn_failed: None,
             lsp_spawn_deferred: None,
             pending_lsp_host: Arc::new(std::sync::Mutex::new(None)),
             env_auto_load: false,
@@ -2534,7 +2541,9 @@ impl Stoat {
             Some(Ok(host)) => host,
             Some(Err(msg)) => {
                 // The server never came up, so the NoopLsp placeholder stays and
-                // the failure surfaces in the message row rather than only the log.
+                // the failure surfaces in the status bar rather than only the log.
+                // Retained so a later LSP action can restate why no server is up.
+                self.lsp_spawn_failed = Some(msg.clone());
                 self.set_status(format!("lsp: {msg}"));
                 return;
             },

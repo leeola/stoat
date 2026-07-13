@@ -289,6 +289,36 @@ fn server_label(info: Option<&ServerInfo>) -> String {
     }
 }
 
+/// Deliver `msg` as the transient status message.
+fn set_lsp_status(stoat: &mut Stoat, msg: String) {
+    stoat.set_status(msg);
+}
+
+/// Report why a user-launched LSP action for `what` cannot be served, then
+/// return [`UpdateEffect::Redraw`] so the frame repaints with the message.
+///
+/// Walks the language-server state in priority order and reports the first
+/// reason that applies. An installed host that simply lacks the capability
+/// comes first, then each reason the [`NoopLsp`] placeholder is still in place,
+/// namely that the spawn failed, is deferred until the project environment
+/// loads, is still starting, or was never attempted.
+fn report_lsp_unavailable(stoat: &mut Stoat, what: &str) -> UpdateEffect {
+    let msg = if !stoat.lsp_host.is_noop() {
+        format!("lsp: server does not support {what}")
+    } else if let Some(err) = &stoat.lsp_spawn_failed {
+        format!("lsp: {err}")
+    } else if stoat.lsp_spawn_deferred.is_some() {
+        "lsp: server start waiting on the project environment".to_string()
+    } else if stoat.lsp_spawn_attempted {
+        "lsp: server still starting".to_string()
+    } else {
+        "lsp: no language server running".to_string()
+    };
+
+    set_lsp_status(stoat, msg);
+    UpdateEffect::Redraw
+}
+
 /// Create the paired protocol transcripts for `text_proto_log`, keyed by
 /// stoat's pid so they correlate with `stoat-<pid>.log`.
 ///
@@ -569,6 +599,15 @@ impl LspJumpKind {
             Self::Implementation => "goto_implementation",
         }
     }
+
+    fn status_label(self) -> &'static str {
+        match self {
+            Self::Definition => "definition",
+            Self::Declaration => "declaration",
+            Self::TypeDefinition => "type definition",
+            Self::Implementation => "implementation",
+        }
+    }
 }
 
 /// Issue a `textDocument/definition` request for the symbol under the
@@ -754,14 +793,16 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
 /// [`review_lsp_source`], so the request targets disk content, not the diff
 /// placeholder.
 ///
-/// No-op when: the focused pane is not an editor; the buffer has no
-/// path; or the server does not advertise the matching
-/// [`LanguageServerFeature`]. Replacing the prior pending task drops
-/// it, cancelling its spawned future -- only one in-flight jump is
-/// tracked at a time.
+/// No-op when the focused pane is not an editor or the buffer has no
+/// path. When the server does not advertise the matching
+/// [`LanguageServerFeature`], reports the language-server state to the
+/// status bar via [`report_lsp_unavailable`] instead of doing nothing.
+///
+/// Replacing the prior pending task drops it and cancels its spawned
+/// future, so only one in-flight jump is tracked at a time.
 fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     if !stoat.lsp_host.supports_feature(kind.feature()) {
-        return UpdateEffect::None;
+        return report_lsp_unavailable(stoat, &format!("goto {}", kind.status_label()));
     }
 
     let encoding = stoat.lsp_host.offset_encoding();
@@ -968,9 +1009,10 @@ pub(crate) struct HoverPopup {
 /// [`Stoat::pending_hover_request`] and applied by [`pump_lsp_hover`]
 /// on the next render tick.
 ///
-/// No-op when: the focused pane is not an editor; the buffer has no
-/// path; or the server does not advertise
-/// [`LanguageServerFeature::Hover`]. Replacing the prior pending task
+/// No-op when the focused pane is not an editor or the buffer has no
+/// path. When the server does not advertise
+/// [`LanguageServerFeature::Hover`], reports the language-server state
+/// to the status bar instead. Replacing the prior pending task
 /// drops it, cancelling its spawned future -- only one in-flight hover
 /// is tracked at a time.
 pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
@@ -978,7 +1020,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         .lsp_host
         .supports_feature(LanguageServerFeature::Hover)
     {
-        return UpdateEffect::None;
+        return report_lsp_unavailable(stoat, "hover");
     }
 
     let Some((editor_id, _)) = stoat.focused_editor_ids() else {
@@ -2578,9 +2620,10 @@ pub(crate) struct CodeActionPicker {
 /// [`Stoat::pending_code_action_request`] and applied by
 /// [`pump_lsp_code_actions`] on the next render tick.
 ///
-/// No-op when the focused pane is not an editor, the buffer has no
-/// path, or the server does not advertise
-/// [`LanguageServerFeature::CodeAction`]. Replacing the prior pending
+/// No-op when the focused pane is not an editor or the buffer has no
+/// path. When the server does not advertise
+/// [`LanguageServerFeature::CodeAction`], reports the language-server
+/// state to the status bar instead. Replacing the prior pending
 /// task drops it, cancelling its spawned future -- only one in-flight
 /// code-action request is tracked at a time.
 pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
@@ -2588,7 +2631,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         .lsp_host
         .supports_feature(LanguageServerFeature::CodeAction)
     {
-        return UpdateEffect::None;
+        return report_lsp_unavailable(stoat, "code actions");
     }
 
     let encoding = stoat.lsp_host.offset_encoding();
@@ -2863,15 +2906,16 @@ pub(crate) struct RenameInputState {
 /// on [`Stoat::pending_prepare_rename`] and applied by
 /// [`pump_lsp_prepare_rename`] on the next render tick.
 ///
-/// No-op when the focused pane is not an editor, the buffer has no
-/// path, or the server does not advertise
-/// [`LanguageServerFeature::RenameSymbol`].
+/// No-op when the focused pane is not an editor or the buffer has no
+/// path. When the server does not advertise
+/// [`LanguageServerFeature::RenameSymbol`], reports the language-server
+/// state to the status bar instead.
 pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
         .lsp_host
         .supports_feature(LanguageServerFeature::RenameSymbol)
     {
-        return UpdateEffect::None;
+        return report_lsp_unavailable(stoat, "rename");
     }
 
     let encoding = stoat.lsp_host.offset_encoding();
@@ -3099,15 +3143,16 @@ pub(crate) struct SymbolPicker {
 /// [`Stoat::pending_symbol_picker_request`] and applied by
 /// [`pump_lsp_symbol_picker`] on the next render tick.
 ///
-/// No-op when the focused pane is not an editor, the buffer has no
-/// path, or the server does not advertise
-/// [`LanguageServerFeature::DocumentSymbols`].
+/// No-op when the focused pane is not an editor or the buffer has no
+/// path. When the server does not advertise
+/// [`LanguageServerFeature::DocumentSymbols`], reports the
+/// language-server state to the status bar instead.
 pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
         .lsp_host
         .supports_feature(LanguageServerFeature::DocumentSymbols)
     {
-        return UpdateEffect::None;
+        return report_lsp_unavailable(stoat, "document symbols");
     }
 
     let (anchor_offset, buffer_id) = {
@@ -3322,9 +3367,10 @@ pub(crate) struct WorkspaceSymbolPicker {
     pub(crate) selected_idx: usize,
 }
 
-/// Open the workspace-symbol query input modal. Capability-gates on
-/// [`LanguageServerFeature::WorkspaceSymbols`]. The input is born in
-/// insert mode so typing routes through `handle_insert_key` into the
+/// Open the workspace-symbol query input modal. When the server does not
+/// advertise [`LanguageServerFeature::WorkspaceSymbols`], reports the
+/// language-server state to the status bar instead of opening. The input is
+/// born in insert mode so typing routes through `handle_insert_key` into the
 /// modal's [`crate::input_view::InputView`]. The modal seed is empty;
 /// submit fires the request, cancel disposes the input.
 pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
@@ -3332,7 +3378,7 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         .lsp_host
         .supports_feature(LanguageServerFeature::WorkspaceSymbols)
     {
-        return UpdateEffect::None;
+        return report_lsp_unavailable(stoat, "workspace symbols");
     }
 
     let anchor_offset = {
@@ -3525,15 +3571,16 @@ pub(crate) struct FormatResponse {
 /// [`Stoat::pending_format_request`] and applied by
 /// [`pump_lsp_format`] on the next render tick.
 ///
-/// No-op when the focused pane is not an editor, the buffer has no
-/// path, or the server does not advertise
-/// [`LanguageServerFeature::Format`].
+/// No-op when the focused pane is not an editor or the buffer has no
+/// path. When the server does not advertise
+/// [`LanguageServerFeature::Format`], reports the language-server state
+/// to the status bar instead.
 pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
         .lsp_host
         .supports_feature(LanguageServerFeature::Format)
     {
-        return UpdateEffect::None;
+        return report_lsp_unavailable(stoat, "format");
     }
 
     let encoding = stoat.lsp_host.offset_encoding();
@@ -3605,15 +3652,16 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
 /// on the next render tick, sharing the single-document apply path with
 /// [`format_selections`].
 ///
-/// No-op when the focused pane is not an editor, the buffer has no
-/// path, or the server does not advertise
-/// [`LanguageServerFeature::Format`].
+/// No-op when the focused pane is not an editor or the buffer has no
+/// path. When the server does not advertise
+/// [`LanguageServerFeature::Format`], reports the language-server state
+/// to the status bar instead.
 pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
         .lsp_host
         .supports_feature(LanguageServerFeature::Format)
     {
-        return UpdateEffect::None;
+        return report_lsp_unavailable(stoat, "format");
     }
 
     let Some(buffer_id) = crate::action_handlers::focused_editor_mut(stoat).map(|e| e.buffer_id)
@@ -4921,6 +4969,36 @@ mod tests {
         h.settle();
         assert!(h.stoat.pending_hover.is_none());
         assert!(h.stoat.pending_hover_request.is_none());
+    }
+
+    #[test]
+    fn hover_without_capability_reports_it_in_the_status() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: server does not support hover"),
+        );
+    }
+
+    #[test]
+    fn goto_definition_without_a_server_reports_no_server() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat
+            .set_lsp_host(std::sync::Arc::new(crate::host::NoopLsp));
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: no language server running"),
+        );
     }
 
     /// Populate a hover popup over `main.rs`, leaving the editor in normal mode.
@@ -6679,6 +6757,10 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Format);
         h.settle();
         assert_eq!(buffer_text(&h, &path), "fn  foo (){}\n");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: server does not support format"),
+        );
     }
 
     #[test]
