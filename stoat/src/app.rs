@@ -5616,6 +5616,10 @@ impl Stoat {
             None => return,
         };
 
+        let buffer_syntax_version = self.workspaces[ws_id]
+            .buffers
+            .syntax_version(buffer_id)
+            .unwrap_or(0);
         let (snapshot, diff_version, diag_version, severity_map) =
             match self.workspaces[ws_id].editors.get_mut(editor_id) {
                 Some(editor) => {
@@ -5645,6 +5649,12 @@ impl Stoat {
             diag_version.hash(&mut hasher);
             hasher.finish()
         };
+        let syntax_version = {
+            let mut hasher = DefaultHasher::new();
+            self.syntax_highlight.hash(&mut hasher);
+            buffer_syntax_version.hash(&mut hasher);
+            hasher.finish()
+        };
 
         let syntax_on = self.syntax_highlight;
         let class_table = &self.minimap_class_table;
@@ -5669,7 +5679,10 @@ impl Stoat {
             &rope,
             version,
             &edits,
-            decoration_version,
+            crate::minimap::SyncVersions {
+                decoration: decoration_version,
+                syntax: syntax_version,
+            },
             line_tokens,
             edge_of,
         );
@@ -8983,6 +8996,102 @@ mod tests {
             line0.first().map(|run| (run.start_col, run.class)),
             Some((4, expected_class)),
             "the run starts at the tab-expanded column in the syntax class, got {line0:?}"
+        );
+    }
+
+    #[test]
+    fn minimap_recolors_on_syntax_toggle() {
+        use crate::display_map::highlights::{
+            HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
+        };
+        use ratatui::style::Color;
+        use std::sync::Arc;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/minimap-toggle");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"foo\nbar\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (editor_id, buffer_id) = {
+            let ids = h.stoat.focused_editor_ids().expect("editor");
+            (ids.0, ids.1)
+        };
+
+        let [r, g, b] = h.stoat.minimap_class_table.palette()[1];
+        let color = Color::Rgb(r, g, b);
+        let colored_class = h.stoat.minimap_class_table.class_of_color(color);
+        assert_ne!(
+            colored_class, 0,
+            "the test color must map to a syntax class"
+        );
+
+        let mut interner = HighlightStyleInterner::default();
+        let style = interner.intern(HighlightStyle {
+            foreground: Some(color),
+            background: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            strikethrough: None,
+        });
+        let range = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let snap = shared.read().expect("poisoned").snapshot.clone();
+            snap.anchor_at(0, Bias::Right)..snap.anchor_at(3, Bias::Left)
+        };
+        let tokens: Arc<[SemanticTokenHighlight]> =
+            Arc::from(vec![SemanticTokenHighlight { range, style }]);
+        h.stoat.active_workspace_mut().editors[editor_id]
+            .display_map
+            .set_semantic_token_highlights(buffer_id, tokens, Arc::new(interner));
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 80, 24));
+
+        let line0_class = |cmds: &[Command]| {
+            cmds.iter().rev().find_map(|cmd| match cmd {
+                Command::MinimapLines(l) if l.start == 0 => l
+                    .lines
+                    .first()
+                    .and_then(|runs| runs.first())
+                    .map(|r| r.class),
+                _ => None,
+            })
+        };
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        h.stoat.emit_minimap();
+        let colored = drain_apc(&mut rx);
+        assert_eq!(
+            line0_class(&colored),
+            Some(colored_class),
+            "line 0 is colored under syntax highlighting, got {colored:?}"
+        );
+
+        // Toggling syntax off re-summarizes the built lines monochrome, with no
+        // buffer edit.
+        h.stoat.syntax_highlight = false;
+        let _ = h.stoat.render();
+        h.stoat.emit_minimap();
+        let mono = drain_apc(&mut rx);
+        assert_eq!(
+            line0_class(&mono),
+            Some(0),
+            "the toggle recolors line 0 monochrome, got {mono:?}"
         );
     }
 

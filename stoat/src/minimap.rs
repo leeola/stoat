@@ -90,6 +90,19 @@ pub struct Splice {
     pub lines: Vec<Vec<Run>>,
 }
 
+/// The decoration and syntax versions a [`MinimapContent::sync`] re-checks its
+/// built lines against, distinct from the buffer edit version.
+///
+/// Either changing without a buffer edit re-summarizes the affected built lines.
+#[derive(Clone, Copy)]
+pub struct SyncVersions {
+    /// Combined diff and diagnostic version. A change re-checks the edge marks.
+    pub decoration: u64,
+    /// Combined highlight-toggle and parse version. A change re-summarizes the
+    /// content runs.
+    pub syntax: u64,
+}
+
 /// The run summaries of one buffer, plus the incremental-sync bookkeeping.
 ///
 /// Mirrors the terminal's content store: one entry per line, spliced as the
@@ -109,6 +122,9 @@ pub struct MinimapContent {
     /// Combined diff and diagnostic version last synced. A change re-checks the
     /// built lines' edge marks without a buffer edit having occurred.
     synced_decoration_version: u64,
+    /// Syntax-coloring version (toggle plus parse) last synced. A change
+    /// re-summarizes the built lines' content without a buffer edit.
+    synced_syntax_version: u64,
     queued: Vec<Splice>,
 }
 
@@ -123,6 +139,7 @@ impl MinimapContent {
             built_upto: 0,
             disabled: false,
             synced_decoration_version: 0,
+            synced_syntax_version: 0,
             queued: Vec::new(),
         }
     }
@@ -146,8 +163,9 @@ impl MinimapContent {
     ///
     /// `edits` is the buffer's `edits_since(self.synced_version())`. `line_tokens`
     /// resolves a row's syntax tokens and `edge_of` its diff/diagnostic mark, both
-    /// for re-summarizing. `decoration_version` combines the diff and diagnostic
-    /// versions so a mark change without a buffer edit re-checks the built lines.
+    /// for re-summarizing. [`SyncVersions::decoration`] changing re-checks the
+    /// built lines' edge marks and [`SyncVersions::syntax`] changing re-summarizes
+    /// their content, each without a buffer edit.
     ///
     /// Edits within the already-built prefix queue splices. The unbuilt tail fills
     /// up to [`BUILD_CHUNK`] lines per call. A buffer over [`MAX_LINES`] disables
@@ -157,7 +175,7 @@ impl MinimapContent {
         new_rope: &Rope,
         version: u64,
         edits: &Patch<usize>,
-        decoration_version: u64,
+        versions: SyncVersions,
         line_tokens: impl Fn(u32, &str) -> Vec<LineToken>,
         edge_of: impl Fn(u32) -> Option<u8>,
     ) {
@@ -173,7 +191,8 @@ impl MinimapContent {
             self.queued.clear();
             self.built_upto = 0;
             self.synced_version = version;
-            self.synced_decoration_version = decoration_version;
+            self.synced_decoration_version = versions.decoration;
+            self.synced_syntax_version = versions.syntax;
             self.synced_rope = new_rope.clone();
             return;
         }
@@ -199,9 +218,45 @@ impl MinimapContent {
             self.built_upto = end;
         }
 
-        if decoration_version != self.synced_decoration_version {
+        // A recolor rewrites the content runs, so re-summarize every built line
+        // and compare. This subsumes the edge re-check, so run it instead of
+        // resync_edges and advance both versions.
+        if versions.syntax != self.synced_syntax_version {
+            self.resync_all(new_rope, &line_tokens, &edge_of);
+            self.synced_syntax_version = versions.syntax;
+            self.synced_decoration_version = versions.decoration;
+        } else if versions.decoration != self.synced_decoration_version {
             self.resync_edges(new_rope, &line_tokens, &edge_of);
-            self.synced_decoration_version = decoration_version;
+            self.synced_decoration_version = versions.decoration;
+        }
+    }
+
+    /// Re-summarize every built line and queue a one-line splice where its full
+    /// summary changed, for a recolor (highlight toggle or a completed parse)
+    /// that leaves the buffer text untouched.
+    ///
+    /// Costlier than [`Self::resync_edges`] since every line re-summarizes, but a
+    /// recolor is rare and can touch any line, unlike an edge change.
+    fn resync_all(
+        &mut self,
+        new_rope: &Rope,
+        line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
+        edge_of: &impl Fn(u32) -> Option<u8>,
+    ) {
+        for row in 0..self.built_upto {
+            let edge = edge_of(row);
+            let text = line_text(new_rope, row);
+            let summary = summarize_line(&text, &line_tokens(row, &text), edge);
+            if self.lines[row as usize] == summary {
+                continue;
+            }
+            self.lines[row as usize] = summary.clone();
+            self.edges[row as usize] = edge;
+            self.queued.push(Splice {
+                start: row,
+                removed: 1,
+                lines: vec![summary],
+            });
         }
     }
 
@@ -538,7 +593,10 @@ fn color_to_rgb(color: Color) -> [u8; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{summarize_line, LineToken, MinimapContent, Run, Splice, BUILD_CHUNK, MAX_LINES};
+    use super::{
+        summarize_line, LineToken, MinimapContent, Run, Splice, SyncVersions, BUILD_CHUNK,
+        MAX_LINES,
+    };
     use stoat_text::{patch::Patch, Rope};
 
     fn rope(text: &str) -> Rope {
@@ -551,6 +609,10 @@ mod tests {
 
     fn no_edges(_: u32) -> Option<u8> {
         None
+    }
+
+    fn versions(decoration: u64, syntax: u64) -> SyncVersions {
+        SyncVersions { decoration, syntax }
     }
 
     fn run(start_col: u8, len: u8, class: u8) -> Run {
@@ -625,7 +687,14 @@ mod tests {
     fn single_line_edit_queues_one_one_line_splice() {
         let before = rope("alpha\nbeta\ngamma\n");
         let mut content = MinimapContent::new(1);
-        content.sync(&before, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
         content.take_queued();
 
         // Replace "beta" (line 1) in place.
@@ -634,7 +703,7 @@ mod tests {
             old: 6..10,
             new: 6..11,
         }]);
-        content.sync(&after, 2, &edit, 0, no_tokens, no_edges);
+        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -647,7 +716,14 @@ mod tests {
     fn newline_insertion_inserts_one_more_than_removed() {
         let before = rope("alpha\nbeta\ngamma\n");
         let mut content = MinimapContent::new(1);
-        content.sync(&before, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
         content.take_queued();
 
         // Insert a newline inside "beta", splitting line 1 into two.
@@ -656,7 +732,7 @@ mod tests {
             old: 8..8,
             new: 8..9,
         }]);
-        content.sync(&after, 2, &edit, 0, no_tokens, no_edges);
+        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -671,7 +747,14 @@ mod tests {
     fn multi_line_replace_removes_the_old_span() {
         let before = rope("a\nb\nc\nd\ne\n");
         let mut content = MinimapContent::new(1);
-        content.sync(&before, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
         content.take_queued();
 
         // Replace lines 1..=3 ("b\nc\nd") with one line "X".
@@ -680,7 +763,7 @@ mod tests {
             old: 2..7,
             new: 2..3,
         }]);
-        content.sync(&after, 2, &edit, 0, no_tokens, no_edges);
+        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -698,7 +781,14 @@ mod tests {
         let rope = rope(&text);
         let mut content = MinimapContent::new(1);
 
-        content.sync(&rope, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
         let first = content.take_queued();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].start, 0);
@@ -708,7 +798,14 @@ mod tests {
             "first chunk is full"
         );
 
-        content.sync(&rope, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
         let second = content.take_queued();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].start, BUILD_CHUNK);
@@ -718,7 +815,14 @@ mod tests {
             "the remainder finishes the build",
         );
 
-        content.sync(&rope, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
         assert!(content.take_queued().is_empty(), "nothing left to build");
     }
 
@@ -767,7 +871,14 @@ mod tests {
         let mut content = MinimapContent::new(1);
         let edge_of = |row: u32| (row == 1).then_some(40);
 
-        content.sync(&text, 1, &Patch::empty(), 5, no_tokens, edge_of);
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(5, 0),
+            no_tokens,
+            edge_of,
+        );
 
         let built = &content.take_queued()[0].lines;
         assert_eq!(
@@ -787,12 +898,26 @@ mod tests {
         let text = rope("alpha\nbravo\ncharlie");
         let mut content = MinimapContent::new(1);
 
-        content.sync(&text, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
         let _ = content.take_queued();
 
         // The buffer is unchanged, but a diagnostic appears on line 1.
         let edge_of = |row: u32| (row == 1).then_some(40);
-        content.sync(&text, 1, &Patch::empty(), 1, no_tokens, edge_of);
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(1, 0),
+            no_tokens,
+            edge_of,
+        );
 
         let splices = content.take_queued();
         assert_eq!(splices.len(), 1, "only the newly marked line splices");
@@ -802,6 +927,46 @@ mod tests {
             splices[0].lines[0][0],
             run(0, 2, 40),
             "the mark leads the line"
+        );
+    }
+
+    #[test]
+    fn syntax_change_resummarizes_content() {
+        let text = rope("alpha\nbeta");
+        let mut content = MinimapContent::new(1);
+
+        // Build with line 0 colored class 5 across the whole word.
+        let colored = |row: u32, line: &str| {
+            if row == 0 {
+                vec![LineToken {
+                    range: 0..line.len(),
+                    class: 5,
+                }]
+            } else {
+                Vec::new()
+            }
+        };
+        content.sync(&text, 1, &Patch::empty(), versions(0, 1), colored, no_edges);
+        let _ = content.take_queued();
+
+        // The buffer is unchanged, but the syntax version bumps and the color is
+        // gone, so line 0 re-summarizes monochrome and line 1 stays put.
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(0, 2),
+            no_tokens,
+            no_edges,
+        );
+
+        let splices = content.take_queued();
+        assert_eq!(splices.len(), 1, "only the recolored line splices");
+        assert_eq!(splices[0].start, 0);
+        assert_eq!(
+            splices[0].lines[0],
+            vec![run(2, 5, 0)],
+            "line 0 goes monochrome"
         );
     }
 
@@ -879,7 +1044,14 @@ mod tests {
         let rope = rope(&text);
         let mut content = MinimapContent::new(1);
 
-        content.sync(&rope, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
 
         assert!(
             content.take_queued().is_empty(),
