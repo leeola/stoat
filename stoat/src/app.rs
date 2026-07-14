@@ -5793,6 +5793,15 @@ impl Stoat {
                 |_| Vec::new(),
             );
 
+            if editor.minimap_rect.is_some() {
+                self.smooth_scroll.emit_minimap_view(
+                    &mut out,
+                    region.pool,
+                    (scroll_offset * 256.0) as u32,
+                    region.height,
+                );
+            }
+
             if !entered.is_empty() {
                 let snapshot = editor.display_map.snapshot();
                 if let Some(view) = editor.review_view.as_ref() {
@@ -8533,6 +8542,61 @@ mod tests {
                 .iter()
                 .any(|cmd| matches!(cmd, Command::MinimapDrop(_))),
             "closing a buffer drops its minimap content, got {closed:?}"
+        );
+    }
+
+    #[test]
+    fn minimap_view_tracks_the_scroll_position() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/minimap-view");
+        let path = root.join("a.txt");
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+
+        let _ = h.stoat.render();
+        h.stoat.emit_smooth_scroll();
+        let first = drain_apc(&mut rx);
+        let top_at_origin = first.iter().find_map(|cmd| match cmd {
+            Command::MinimapView(v) => Some(v.top_256),
+            _ => None,
+        });
+        assert_eq!(
+            top_at_origin,
+            Some(0),
+            "the origin thumb sits at line 0, got {first:?}"
+        );
+
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            editor.scroll_row = 50;
+            editor.scroll_offset = 50.0;
+        }
+        let _ = h.stoat.render();
+        h.stoat.emit_smooth_scroll();
+        let scrolled = drain_apc(&mut rx);
+        let top_after_scroll = scrolled.iter().find_map(|cmd| match cmd {
+            Command::MinimapView(v) => Some(v.top_256),
+            _ => None,
+        });
+        assert_eq!(
+            top_after_scroll,
+            Some(50 * 256),
+            "the thumb tracks the scrolled top row, got {scrolled:?}"
         );
     }
 

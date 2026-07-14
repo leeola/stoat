@@ -51,8 +51,9 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{collections::BTreeMap, ops::Range};
 use stoat_action::registry::RegistryEntry;
 use stoatty_protocol::command::{
-    encode_fill_end_into, encode_fill_into, encode_pool_drop_into, encode_pool_region_into,
-    encode_reposition_into, encode_scroll_into, PoolRegionCommand, ScrollCommand,
+    encode_fill_end_into, encode_fill_into, encode_minimap_view_into, encode_pool_drop_into,
+    encode_pool_region_into, encode_reposition_into, encode_scroll_into, MinimapViewCommand,
+    PoolRegionCommand, ScrollCommand,
 };
 use stoatty_widgets::ApcScene;
 
@@ -132,6 +133,9 @@ struct PoolEmitState {
     /// different value the buffered pages are stale (the surface re-filtered or
     /// regenerated), so the window is refilled rather than composited as-is.
     content_version: u64,
+    /// `(top_256, visible_lines)` the most recent [`MinimapViewCommand`] carried,
+    /// so an unmoved viewport re-emits no thumb update. `None` until first sent.
+    last_minimap_view: Option<(u32, u16)>,
 }
 
 impl SmoothScrollState {
@@ -154,6 +158,34 @@ impl SmoothScrollState {
             encode_pool_drop_into(out, id);
             self.pools.remove(&id);
         }
+    }
+
+    /// Append a `minimap_view` frame positioning `pool`'s strip thumb to `out`,
+    /// but only when the viewport moved since the last emit.
+    ///
+    /// `top_256` is the fractional top document row in 1/256ths of a line and
+    /// `visible` the viewport height in lines. Deduped like the scroll target, so
+    /// a steady frame with an unmoved viewport emits nothing.
+    pub(crate) fn emit_minimap_view(
+        &mut self,
+        out: &mut Vec<u8>,
+        pool: u32,
+        top_256: u32,
+        visible: u16,
+    ) {
+        let entry = self.pools.entry(pool).or_default();
+        if entry.last_minimap_view == Some((top_256, visible)) {
+            return;
+        }
+        encode_minimap_view_into(
+            out,
+            &MinimapViewCommand {
+                strip_id: pool,
+                top_256,
+                visible_lines: visible,
+            },
+        );
+        entry.last_minimap_view = Some((top_256, visible));
     }
 }
 
