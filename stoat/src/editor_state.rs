@@ -5,6 +5,7 @@ use crate::{
     review_session::ReviewViewState,
     selection::SelectionsCollection,
 };
+use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 use stoat_scheduler::Executor;
@@ -108,6 +109,13 @@ pub(crate) struct EditorState {
     /// shifted by. Transient render state written by `render_editor`, not
     /// persisted.
     pub(crate) gutter_width: u16,
+    /// Screen rect of the right-edge minimap strip the last render reserved,
+    /// so pointer handlers can map a click inside it back to a buffer line.
+    ///
+    /// `None` whenever the strip is absent (not under stoatty, minimap
+    /// disabled, or the pane too narrow to inset). Transient render state
+    /// written by `render_editor`, not persisted.
+    pub(crate) minimap_rect: Option<Rect>,
     /// Absolute terminal cell `(col, row)` where the last render painted this
     /// editor's primary cursor, set only while running inside stoatty so the
     /// terminal cursor can be positioned there instead of a styled grid cell.
@@ -156,6 +164,7 @@ impl EditorState {
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_width: 0,
+            minimap_rect: None,
             cursor_screen_cell: None,
         }
     }
@@ -188,6 +197,7 @@ impl EditorState {
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
             gutter_width: 0,
+            minimap_rect: None,
             cursor_screen_cell: None,
         }
     }

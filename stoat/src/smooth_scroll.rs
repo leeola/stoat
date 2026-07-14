@@ -861,6 +861,7 @@ mod tests {
                 &mut expected,
                 false,
                 false,
+                false,
                 LineNumbers::Absolute,
                 false,
                 None,

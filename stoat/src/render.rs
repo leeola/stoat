@@ -111,6 +111,9 @@ pub(crate) struct FrameCtx<'a> {
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
     pub(crate) line_numbers: LineNumbers,
+    /// Whether editor panes reserve the right-edge minimap strip, resolved from
+    /// [`crate::app::Stoat::minimap_enabled`]. Only takes effect under stoatty.
+    pub(crate) minimap_enabled: bool,
     /// Terminal cell the mouse last rested over, or `None` when it has not
     /// moved over a pane. The focused editor resolves the diagnostic under it
     /// to raise a hover popover.
@@ -190,6 +193,7 @@ pub(crate) fn frame(
     let size = full;
 
     let mode = stoat.focused_mode().to_string();
+    let minimap_enabled = stoat.minimap_enabled();
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -234,6 +238,7 @@ pub(crate) fn frame(
             .settings
             .editor_line_numbers
             .unwrap_or(LineNumbers::Relative),
+        minimap_enabled,
         hover_cell: stoat.hover_cell,
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),

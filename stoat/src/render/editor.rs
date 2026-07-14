@@ -34,6 +34,14 @@ use stoatty_widgets::{
 /// body text.
 const NUMBER_SCALE: u16 = 160;
 
+/// Columns reserved on a pane's right edge for the minimap strip under stoatty,
+/// matching the width stoatty's GPU minimap pass paints there.
+const MINIMAP_STRIP_COLS: u16 = 8;
+
+/// Narrowest pane, in columns, that still reserves a minimap strip. Below this
+/// the strip would crowd the remaining text, so the pane keeps its full width.
+const MINIMAP_MIN_PANE_COLS: u16 = 60;
+
 pub(crate) fn render_editor(
     editor: &mut EditorState,
     inner: Rect,
@@ -49,6 +57,7 @@ pub(crate) fn render_editor(
         theme,
         buf,
         is_focused,
+        false,
         false,
         LineNumbers::Off,
         false,
@@ -70,6 +79,7 @@ pub(crate) fn render_editor_with_overlay(
     buf: &mut Buffer,
     is_focused: bool,
     stoatty: bool,
+    minimap_enabled: bool,
     line_numbers: LineNumbers,
     insert_mode: bool,
     hover_cell: Option<(u16, u16)>,
@@ -81,6 +91,7 @@ pub(crate) fn render_editor_with_overlay(
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
+    editor.minimap_rect = None;
 
     if editor.review_view.is_some() {
         let scene = if stoatty { scene } else { None };
@@ -217,6 +228,24 @@ pub(crate) fn render_editor_with_overlay(
         height: inner.height,
     };
     editor.gutter_width = gutter_w;
+
+    // Reserve the right-edge minimap strip under stoatty, recording its screen
+    // rect for pointer mapping. Only the text rect shrinks to clear the space.
+    // The reserved cells stay blank so stoatty's GPU minimap pass owns them.
+    let inner = if stoatty && minimap_enabled && inner.width >= MINIMAP_MIN_PANE_COLS {
+        editor.minimap_rect = Some(Rect {
+            x: inner.x + inner.width - MINIMAP_STRIP_COLS,
+            y: inner.y,
+            width: MINIMAP_STRIP_COLS,
+            height: inner.height,
+        });
+        Rect {
+            width: inner.width - MINIMAP_STRIP_COLS,
+            ..inner
+        }
+    } else {
+        inner
+    };
 
     let right = inner.x + inner.width;
     let bottom = inner.y + inner.height;
@@ -1655,6 +1684,7 @@ mod tests {
             &mut buf,
             is_focused,
             false,
+            false,
             line_numbers,
             insert_mode,
             None,
@@ -1674,6 +1704,101 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    /// Render the focused editor at `width` x `rows` under the given stoatty and
+    /// minimap flags, returning the recorded strip rect and, per row, the
+    /// symbols painted in the rightmost [`super::MINIMAP_STRIP_COLS`] columns.
+    fn render_minimap(
+        stoat: &mut Stoat,
+        stoatty: bool,
+        minimap_enabled: bool,
+        width: u16,
+        rows: u16,
+    ) -> (Option<Rect>, Vec<String>) {
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let area = Rect::new(0, 0, width, rows);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            true,
+            stoatty,
+            minimap_enabled,
+            LineNumbers::Off,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let rect = editor.minimap_rect;
+        let strip = (0..rows)
+            .map(|y| {
+                ((width - super::MINIMAP_STRIP_COLS)..width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        (rect, strip)
+    }
+
+    #[test]
+    fn minimap_strip_reserves_right_edge_under_stoatty() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/minimap");
+        let path = root.join("a.txt");
+        let line = "x".repeat(100);
+        let body = format!("{line}\n{line}\n{line}");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (rect, strip) = render_minimap(&mut h.stoat, true, true, 80, 3);
+        assert_eq!(
+            rect,
+            Some(Rect::new(72, 0, super::MINIMAP_STRIP_COLS, 3)),
+            "strip pins to the right edge at full width"
+        );
+        assert!(
+            strip.iter().all(|row| row.chars().all(|c| c == ' ')),
+            "text never paints into the reserved strip: {strip:?}"
+        );
+    }
+
+    #[test]
+    fn minimap_strip_absent_when_disabled_or_narrow() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/minimap-off");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"one\ntwo\nthree");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        assert_eq!(
+            render_minimap(&mut h.stoat, false, true, 80, 3).0,
+            None,
+            "no strip outside stoatty"
+        );
+        assert_eq!(
+            render_minimap(&mut h.stoat, true, false, 80, 3).0,
+            None,
+            "no strip when the minimap is disabled"
+        );
+        assert_eq!(
+            render_minimap(&mut h.stoat, true, true, 50, 3).0,
+            None,
+            "no strip below the minimum pane width"
+        );
     }
 
     #[test]
