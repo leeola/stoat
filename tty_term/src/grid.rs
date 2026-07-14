@@ -5,8 +5,11 @@
 //! renderer reads this grid to draw and the terminal driver writes it; colors
 //! are stored fully resolved, so the renderer needs no palette of its own.
 
-use std::ops::{BitOr, BitOrAssign};
-use stoatty_protocol::command::{BarCommand, TextRunCommand};
+use std::{
+    collections::HashMap,
+    ops::{BitOr, BitOrAssign},
+};
+use stoatty_protocol::command::{BarCommand, LineSummary, MinimapCommand, TextRunCommand};
 
 /// A rectangular grid of [`Cell`]s addressed by row and column.
 ///
@@ -24,6 +27,14 @@ pub struct Grid {
     icons: Vec<Icon>,
     text_runs: Vec<TextRun>,
     bars: Vec<Bar>,
+    /// Declared minimap strips, each joined with its viewport thumb. Kept apart
+    /// from [`Self::minimap_contents`] so a viewport-only change re-projects this
+    /// small list without re-cloning the line summaries.
+    minimaps: Vec<Minimap>,
+    /// Minimap line-summary stores keyed by content id, the whole-buffer run
+    /// blocks a strip renders. A strip finds its store via its
+    /// [`MinimapCommand::content_id`].
+    minimap_contents: HashMap<u32, Vec<LineSummary>>,
     /// Height in rows of each logical line, indexed from the top. A line absent
     /// from the vec is one row tall. The prefix sum gives a line's physical
     /// start row, so an inline expansion pushes later lines down.
@@ -43,6 +54,8 @@ impl Grid {
             icons: Vec::new(),
             text_runs: Vec::new(),
             bars: Vec::new(),
+            minimaps: Vec::new(),
+            minimap_contents: HashMap::new(),
             line_heights: Vec::new(),
         }
     }
@@ -109,6 +122,8 @@ impl Grid {
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
+        self.minimaps.clear();
+        self.minimap_contents.clear();
         self.line_heights.clear();
     }
 
@@ -124,6 +139,8 @@ impl Grid {
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
+        self.minimaps.clear();
+        self.minimap_contents.clear();
         self.line_heights.clear();
     }
 
@@ -206,6 +223,33 @@ impl Grid {
     /// untouched; the caller sets the full list each frame it changes.
     pub fn set_bars(&mut self, bars: Vec<Bar>) {
         self.bars = bars;
+    }
+
+    /// The declared minimap strips, each carrying its viewport thumb.
+    ///
+    /// Resolve a strip's line summaries with [`Self::minimap_content`] keyed by
+    /// its [`MinimapCommand::content_id`].
+    pub fn minimaps(&self) -> &[Minimap] {
+        &self.minimaps
+    }
+
+    /// The line summaries stored under `content_id`, or an empty slice when no
+    /// store exists for it.
+    pub fn minimap_content(&self, content_id: u32) -> &[LineSummary] {
+        self.minimap_contents
+            .get(&content_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Replace the declared minimap strips.
+    pub fn set_minimaps(&mut self, minimaps: Vec<Minimap>) {
+        self.minimaps = minimaps;
+    }
+
+    /// Replace the minimap line-summary stores.
+    pub fn set_minimap_contents(&mut self, contents: HashMap<u32, Vec<LineSummary>>) {
+        self.minimap_contents = contents;
     }
 
     /// Replace the per-logical-line heights, in rows, indexed from the top.
@@ -742,6 +786,32 @@ pub struct Bar {
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
+}
+
+/// A declared minimap strip joined with its viewport thumb.
+///
+/// [`Self::command`] carries the strip geometry, colors, and palette. The line
+/// summaries it renders live in the grid's content store, found by
+/// [`MinimapCommand::content_id`]. [`Self::view`] is the thumb position, absent
+/// until a viewport update arrives.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Minimap {
+    pub command: MinimapCommand,
+    /// Monotonic declaration-order index across all non-cell components. See
+    /// [`Panel::seq`].
+    pub seq: u32,
+    pub view: Option<MinimapView>,
+}
+
+/// A minimap's viewport thumb position.
+///
+/// [`Self::top_256`] is the fractional top buffer line in 1/256ths of a line and
+/// [`Self::visible`] the viewport height in lines, together sizing and placing
+/// the thumb over the strip.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MinimapView {
+    pub top_256: u32,
+    pub visible: u16,
 }
 
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no

@@ -9,7 +9,8 @@
 use crate::{
     grid::{
         Bar, Border, BorderStyle, Borders, Cell, DocumentOffset, Flags, Grid, Icon, IconKind,
-        Overlay, PagePool, Panel, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
+        Minimap, MinimapView, Overlay, PagePool, Panel, Rgb, Scale, ScrollRegion, TextRun,
+        UnderlineStyle,
     },
     theme::Theme,
 };
@@ -27,10 +28,16 @@ use alacritty_terminal::{
     Term,
 };
 use parking_lot::Mutex;
-use std::{collections::BTreeMap, mem, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    mem,
+    sync::Arc,
+    time::Instant,
+};
 use stoatty_protocol::command::{
-    self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PanelCommand,
-    PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
+    self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, LineSummary,
+    MinimapCommand, MinimapLinesCommand, PanelCommand, PoolRegionCommand, PopoverCommand,
+    ScaleCommand, ScrollRegionCommand, TextRunCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -118,6 +125,27 @@ pub struct Terminal {
     icon_seq: Vec<u32>,
     text_run_seq: Vec<u32>,
     bar_seq: Vec<u32>,
+    /// Declared minimap strips set by `Gstoatty;minimap` frames, applied to the
+    /// grid by [`Self::project`]. A decoration cleared by `Gstoatty;reset` like a
+    /// border, with a parallel [`Self::minimap_seq`] for z-order.
+    minimaps: Vec<MinimapCommand>,
+    minimap_seq: Vec<u32>,
+    /// Minimap line-summary stores keyed by content id, spliced by
+    /// `Gstoatty;minimap_lines`. Persistent and pool-like: untouched by
+    /// `Gstoatty;reset`, retired only by `Gstoatty;minimap_drop`, so incremental
+    /// splices need not resend the whole buffer.
+    minimap_contents: HashMap<u32, Vec<LineSummary>>,
+    /// Minimap viewport thumbs keyed by strip id, set by `Gstoatty;minimap_view`.
+    /// Persistent like [`Self::minimap_contents`], so a scroll rides a small
+    /// frame that moves the thumb without redeclaring the strip.
+    minimap_views: HashMap<u32, MinimapView>,
+    /// Whether a content-store splice or drop happened since the last
+    /// [`Self::project`], so the projection re-clones the stores into the grid
+    /// only when they changed rather than on every viewport frame.
+    minimap_content_dirty: bool,
+    /// Whether any minimap state changed since the renderer last drained it via
+    /// [`Self::take_minimap_damage`], the signal it rebuilds its instances on.
+    minimap_damage: bool,
     /// Next seq to stamp, incremented per decoration and reset by a
     /// `Gstoatty;reset` frame. Starts at 1 so pool-composited content (seq 0)
     /// sorts below every declared decoration.
@@ -220,6 +248,7 @@ struct DecorationDirty {
     line_layout: bool,
     text_runs: bool,
     bars: bool,
+    minimaps: bool,
 }
 
 impl DecorationDirty {
@@ -235,6 +264,7 @@ impl DecorationDirty {
             line_layout: true,
             text_runs: true,
             bars: true,
+            minimaps: true,
         }
     }
 }
@@ -431,6 +461,12 @@ impl Terminal {
             icon_seq: Vec::new(),
             text_run_seq: Vec::new(),
             bar_seq: Vec::new(),
+            minimaps: Vec::new(),
+            minimap_seq: Vec::new(),
+            minimap_contents: HashMap::new(),
+            minimap_views: HashMap::new(),
+            minimap_content_dirty: false,
+            minimap_damage: false,
             decoration_seq: 1,
             decorations_dirty: DecorationDirty::default(),
             last_decoration_footprint: Vec::new(),
@@ -564,9 +600,11 @@ impl Terminal {
                 // Fill and capture controls always act. A Bar and a TextRun's
                 // capture are page-targeted decorations the open fill stores on
                 // its slot (the Bar arm and commit_capture route them there), so
-                // they act too. Every other decoration is target-bound and would
-                // leak onto the live grid, so it is dropped while a page paints
-                // or a content capture runs.
+                // they act too. The minimap content, view, and drop commands are
+                // persistent state whose incremental splices must not be dropped
+                // mid-fill, so they act as well. Every other decoration is
+                // target-bound and would leak onto the live grid, so it is dropped
+                // while a page paints or a content capture runs.
                 let routed = matches!(
                     command,
                     Command::Fill(_)
@@ -577,6 +615,9 @@ impl Terminal {
                         | Command::TextRun(_)
                         | Command::TextRunEnd
                         | Command::Bar(_)
+                        | Command::MinimapLines(_)
+                        | Command::MinimapView(_)
+                        | Command::MinimapDrop(_)
                 );
                 if routed || (self.fill.is_none() && self.capture.is_none()) {
                     self.apply_command(command);
@@ -735,6 +776,14 @@ impl Terminal {
         Damage::Partial(mem::take(&mut self.decoration_damage))
     }
 
+    /// Whether any minimap state changed since the last drain, clearing the flag.
+    ///
+    /// A declaration, content splice, view move, drop, or reset sets it, so the
+    /// renderer rebuilds its minimap instances only when something changed.
+    pub fn take_minimap_damage(&mut self) -> bool {
+        mem::take(&mut self.minimap_damage)
+    }
+
     /// Apply a decoded stoatty command to the terminal.
     ///
     /// The seam every feature sub-code hooks into. Commands that steer stream
@@ -799,13 +848,26 @@ impl Terminal {
                     self.fill = None;
                 }
             },
-            // FIXME: minimap rendering state lands in the terminal minimap-state
-            // item. The terminal accepts these protocol commands and ignores them
-            // until then.
-            Command::Minimap(_)
-            | Command::MinimapLines(_)
-            | Command::MinimapView(_)
-            | Command::MinimapDrop(_) => {},
+            // A minimap declaration is a decoration cleared by reset, staged like
+            // a border. Its content store, views, and drop are persistent state
+            // that acts immediately, so an incremental splice is never lost.
+            Command::Minimap(_) => self.stage_or_apply(command),
+            Command::MinimapLines(lines) => self.splice_minimap_content(lines),
+            Command::MinimapView(view) => {
+                self.minimap_views.insert(
+                    view.strip_id,
+                    MinimapView {
+                        top_256: view.top_256,
+                        visible: view.visible_lines,
+                    },
+                );
+                self.minimap_damage = true;
+            },
+            Command::MinimapDrop(drop) => {
+                self.minimap_contents.remove(&drop.content_id);
+                self.minimap_content_dirty = true;
+                self.minimap_damage = true;
+            },
             // A reset is also a fill/capture close trigger. The fill and capture
             // commits must run at feed time, but the decoration clear stages so a
             // mid-update reset does not blank the live scene before the re-stamp.
@@ -815,6 +877,23 @@ impl Terminal {
                 self.stage_or_apply(Command::Reset);
             },
         }
+    }
+
+    /// Splice the command's lines into the content store `content_id`, replacing
+    /// `removed` lines from `start` with the inserted ones.
+    ///
+    /// Creates the store when absent, so a first splice populates it. `start` and
+    /// the removal end clamp to the store length, so an out-of-range splice
+    /// appends or truncates rather than panicking.
+    fn splice_minimap_content(&mut self, command: MinimapLinesCommand) {
+        let store = self.minimap_contents.entry(command.content_id).or_default();
+        let start = (command.start as usize).min(store.len());
+        let end = start
+            .saturating_add(command.removed as usize)
+            .min(store.len());
+        store.splice(start..end, command.lines);
+        self.minimap_content_dirty = true;
+        self.minimap_damage = true;
     }
 
     /// Route a decoration command to the live lists now, or defer it while a DEC
@@ -886,9 +965,17 @@ impl Terminal {
                 self.decoration_seq += 1;
                 self.decorations_dirty.text_runs = true;
             },
+            Command::Minimap(minimap) => {
+                self.minimaps.push(minimap);
+                self.minimap_seq.push(self.decoration_seq);
+                self.decoration_seq += 1;
+                self.decorations_dirty.minimaps = true;
+                self.minimap_damage = true;
+            },
             Command::Reset => self.clear_decorations(),
-            // None of these reach here. apply_command routes them at feed time,
-            // or, for minimaps, ignores them until the terminal minimap-state item.
+            // None of these reach here. apply_command routes them at feed time:
+            // the stream and pool controls, and the immediate minimap content,
+            // view, and drop commands.
             Command::Fill(_)
             | Command::FillEnd
             | Command::PopoverEnd
@@ -897,7 +984,6 @@ impl Terminal {
             | Command::Scroll(_)
             | Command::Reposition(_)
             | Command::PoolDrop(_)
-            | Command::Minimap(_)
             | Command::MinimapLines(_)
             | Command::MinimapView(_)
             | Command::MinimapDrop(_) => {},
@@ -1182,6 +1268,14 @@ impl Terminal {
         self.icon_seq.clear();
         self.text_run_seq.clear();
         self.bar_seq.clear();
+        // A minimap declaration is a decoration and clears here. Its content
+        // stores and views are persistent state and survive, retired only by
+        // their own drop.
+        if !self.minimaps.is_empty() {
+            self.minimap_damage = true;
+        }
+        self.minimaps.clear();
+        self.minimap_seq.clear();
         self.decoration_seq = 1;
         self.scroll_region = None;
         self.line_layout = None;
@@ -1429,6 +1523,16 @@ impl Terminal {
         }
         if self.decorations_dirty.bars || layout_changed {
             apply_bars(grid, &self.bars, &self.bar_seq);
+        }
+        if self.decorations_dirty.minimaps || resized {
+            apply_minimaps(grid, &self.minimaps, &self.minimap_seq, &self.minimap_views);
+        }
+        // The content stores re-clone into the grid only when a splice or drop
+        // changed them, so a viewport-only frame re-projects the small strip list
+        // above without touching the line summaries.
+        if self.minimap_content_dirty || resized {
+            grid.set_minimap_contents(self.minimap_contents.clone());
+            self.minimap_content_dirty = false;
         }
 
         // Accumulate renderer-facing decoration row-damage for the borders,
@@ -2407,6 +2511,29 @@ fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32]) {
     grid.set_bars(bars);
 }
 
+/// Project the declared minimap strips onto `grid`, each joined with its view.
+///
+/// The line summaries a strip renders are projected separately (see
+/// [`Grid::set_minimap_contents`]), so this small join runs on every strip or
+/// view change without re-cloning the content stores.
+fn apply_minimaps(
+    grid: &mut Grid,
+    commands: &[MinimapCommand],
+    seqs: &[u32],
+    views: &HashMap<u32, MinimapView>,
+) {
+    let minimaps = commands
+        .iter()
+        .zip(seqs)
+        .map(|(command, &seq)| Minimap {
+            command: command.clone(),
+            seq,
+            view: views.get(&command.strip_id).copied(),
+        })
+        .collect();
+    grid.set_minimaps(minimaps);
+}
+
 /// Resolve a component's declared logical row, in sixteenth-cell units, to the
 /// physical row it sits on by adding the whole-row expansion above its line.
 ///
@@ -2519,17 +2646,19 @@ mod tests {
     };
     use crate::{
         grid::{
-            Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Overlay,
-            Panel, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
+            Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Minimap,
+            MinimapView, Overlay, Panel, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
         },
         theme::Theme,
     };
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_line_layout,
+        encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
         encode_panel, encode_pool_region, encode_popover, encode_reposition, encode_reset,
         encode_scale, encode_scroll, encode_scroll_region, encode_text_run, BarCommand,
         BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, IconCommand,
-        IconKind as ProtoIconKind, LineLayoutCommand, PanelCommand, PoolRegionCommand,
+        IconKind as ProtoIconKind, LineLayoutCommand, MinimapCommand, MinimapDropCommand,
+        MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand, PoolRegionCommand,
         PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
         TextRunCommand,
     };
@@ -4493,6 +4622,177 @@ mod tests {
         assert!(
             !damage.is_dirty(5),
             "a row outside the selection stays clean"
+        );
+    }
+
+    fn minimap_cmd(strip_id: u32, content_id: u32) -> MinimapCommand {
+        MinimapCommand {
+            top: 0,
+            left: 72,
+            width: 8,
+            height: 40,
+            strip_id,
+            content_id,
+            lines_per_cell: 8,
+            max_columns: 120,
+            bg: [0, 0, 0, 0],
+            thumb: [200, 200, 200, 48],
+            thumb_border: [255, 255, 255],
+            palette: vec![[0, 0, 0], [1, 2, 3]],
+        }
+    }
+
+    fn run(start_col: u8, len: u8, class: u8) -> MinimapRun {
+        MinimapRun {
+            start_col,
+            len,
+            class,
+        }
+    }
+
+    fn splice(content_id: u32, start: u32, removed: u32, lines: Vec<Vec<MinimapRun>>) -> Vec<u8> {
+        encode_minimap_lines(&MinimapLinesCommand {
+            content_id,
+            start,
+            removed,
+            lines,
+        })
+    }
+
+    #[test]
+    fn minimap_lines_splices_at_boundaries() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+
+        terminal.advance(&splice(
+            9,
+            0,
+            0,
+            vec![vec![run(0, 2, 1)], vec![run(0, 3, 2)], vec![run(1, 1, 3)]],
+        ));
+        assert_eq!(
+            terminal.minimap_contents[&9].len(),
+            3,
+            "three lines inserted"
+        );
+
+        terminal.advance(&splice(9, 1, 1, vec![vec![run(2, 2, 4)]]));
+        assert_eq!(
+            terminal.minimap_contents[&9],
+            vec![vec![run(0, 2, 1)], vec![run(2, 2, 4)], vec![run(1, 1, 3)]],
+            "the middle line is replaced in place",
+        );
+
+        terminal.advance(&splice(9, 2, 1, vec![]));
+        assert_eq!(
+            terminal.minimap_contents[&9].len(),
+            2,
+            "a pure deletion removes the last line",
+        );
+
+        terminal.advance(&splice(9, 99, 5, vec![vec![run(0, 1, 0)]]));
+        assert_eq!(
+            terminal.minimap_contents[&9],
+            vec![vec![run(0, 2, 1)], vec![run(2, 2, 4)], vec![run(0, 1, 0)]],
+            "an out-of-range start clamps and appends",
+        );
+    }
+
+    #[test]
+    fn reset_clears_minimap_strips_but_keeps_content_and_view() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        terminal.advance(&encode_minimap(&minimap_cmd(5, 9)));
+        terminal.advance(&splice(9, 0, 0, vec![vec![run(0, 2, 1)]]));
+        terminal.advance(&encode_minimap_view(&MinimapViewCommand {
+            strip_id: 5,
+            top_256: 256,
+            visible_lines: 20,
+        }));
+        assert_eq!(terminal.minimaps.len(), 1, "the strip is declared");
+
+        terminal.advance(&encode_reset());
+
+        assert!(
+            terminal.minimaps.is_empty(),
+            "reset clears the strip declaration",
+        );
+        assert_eq!(
+            terminal.minimap_contents[&9].len(),
+            1,
+            "the content store survives reset",
+        );
+        assert!(
+            terminal.minimap_views.contains_key(&5),
+            "the view survives reset",
+        );
+    }
+
+    #[test]
+    fn minimap_drop_removes_content_store() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        terminal.advance(&splice(9, 0, 0, vec![vec![run(0, 2, 1)]]));
+        assert!(terminal.minimap_contents.contains_key(&9));
+
+        terminal.advance(&encode_minimap_drop(&MinimapDropCommand { content_id: 9 }));
+
+        assert!(
+            !terminal.minimap_contents.contains_key(&9),
+            "drop retires the content store",
+        );
+    }
+
+    #[test]
+    fn minimap_view_alone_marks_damage() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        terminal.take_minimap_damage();
+
+        terminal.advance(&encode_minimap_view(&MinimapViewCommand {
+            strip_id: 5,
+            top_256: 256,
+            visible_lines: 20,
+        }));
+
+        assert!(
+            terminal.take_minimap_damage(),
+            "a view update marks minimap damage",
+        );
+        assert!(
+            !terminal.take_minimap_damage(),
+            "damage clears once drained",
+        );
+    }
+
+    #[test]
+    fn minimap_projects_to_grid_joined_with_view_and_content() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        terminal.advance(&encode_minimap(&minimap_cmd(5, 9)));
+        terminal.advance(&encode_minimap_view(&MinimapViewCommand {
+            strip_id: 5,
+            top_256: 512,
+            visible_lines: 20,
+        }));
+        terminal.advance(&splice(
+            9,
+            0,
+            0,
+            vec![vec![run(0, 2, 1)], vec![run(1, 3, 2)]],
+        ));
+
+        let mut grid = Grid::new(4, 4);
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.minimaps().len(), 1);
+        let strip: &Minimap = &grid.minimaps()[0];
+        assert_eq!(strip.command.strip_id, 5);
+        assert_eq!(
+            strip.view,
+            Some(MinimapView {
+                top_256: 512,
+                visible: 20,
+            }),
+        );
+        assert_eq!(
+            grid.minimap_content(9),
+            &[vec![run(0, 2, 1)], vec![run(1, 3, 2)]],
         );
     }
 }
