@@ -48,8 +48,10 @@ before_logs="$(find "$log_dir" -maxdepth 1 -name 'stoat-*.log' -exec basename {}
 echo "verify_live_lsp: running a ${TIMEOUT_SECS}s live session..." >&2
 (
     CDPATH= cd -- "$fixture"
-    script -q /dev/null env STOAT_LOG="$LOG_FILTER" \
-        "$stoat_bin" --text-proto-log true --timeout "$TIMEOUT_SECS" src/main.rs
+    # util-linux script(1) reads args after the file as its own options, so the
+    # session command goes through -c, which BSD script accepts too. The path is
+    # single-quoted because -c re-parses the string through a shell.
+    script -q -c "env STOAT_LOG=$LOG_FILTER '$stoat_bin' --text-proto-log true --timeout $TIMEOUT_SECS src/main.rs" /dev/null
 ) >/dev/null 2>&1 || true
 
 after_logs="$(find "$log_dir" -maxdepth 1 -name 'stoat-*.log' -exec basename {} \; | sort || true)"
@@ -59,7 +61,9 @@ new_log="$(comm -13 <(printf '%s\n' "$before_logs") <(printf '%s\n' "$after_logs
 pid="${new_log#stoat-}"
 pid="${pid%.log}"
 log_file="$log_dir/$new_log"
-rx_file="$log_dir/lsp-$pid.rx.jsonl"
+# The transcript is named per server, lsp-<pid>-<server>.rx.jsonl, so resolve it
+# by glob rather than assuming a single unnamed file.
+rx_file="$(find "$log_dir" -maxdepth 1 -name "lsp-$pid-*.rx.jsonl" | tail -1)"
 
 grep -q 'language server initialized' "$log_file" \
     || fail "log missing 'language server initialized'" "$log_file"
@@ -67,7 +71,7 @@ grep -q 'language server initialized' "$log_file" \
 grep 'diagnostics applied' "$log_file" | grep 'main.rs' | grep -qE 'count=[1-9][0-9]*' \
     || fail "log missing 'diagnostics applied' for main.rs with count >= 1" "$log_file"
 
-[ -f "$rx_file" ] || fail "transcript missing: $rx_file"
+{ [ -n "$rx_file" ] && [ -f "$rx_file" ]; } || fail "transcript missing: lsp-$pid-*.rx.jsonl in $log_dir"
 grep 'textDocument/publishDiagnostics' "$rx_file" | grep -q '"diagnostics":\[{' \
     || fail "transcript missing a publishDiagnostics frame with a non-empty diagnostics array" "$rx_file"
 
