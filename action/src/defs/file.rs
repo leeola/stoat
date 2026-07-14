@@ -111,6 +111,56 @@ impl Action for OpenConfig {
     }
 }
 
+#[derive(Debug)]
+pub struct ToggleMinimapDef;
+
+impl ActionDef for ToggleMinimapDef {
+    fn name(&self) -> &'static str {
+        "ToggleMinimap"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ToggleMinimap
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "show or hide the minimap"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Toggle the right-edge minimap strip on editor panes under stoatty, overriding the editor.minimap setting for this session."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["minimap"]
+    }
+}
+
+#[derive(Debug)]
+pub struct ToggleMinimap;
+
+impl ToggleMinimap {
+    pub const DEF: &ToggleMinimapDef = &ToggleMinimapDef;
+}
+
+impl Action for ToggleMinimap {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 const OPEN_BUFFER_PARAMS: &[ParamDef] = &[ParamDef {
     name: "path",
     kind: ParamKind::String,

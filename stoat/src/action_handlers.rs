@@ -130,6 +130,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             file::open_config(stoat);
             UpdateEffect::Redraw
         },
+        ActionKind::ToggleMinimap => {
+            stoat.toggle_minimap();
+            UpdateEffect::Redraw
+        },
         ActionKind::OpenBuffer => {
             let open = action
                 .as_any()
@@ -2122,6 +2126,16 @@ mod tests {
             colored, restored,
             "toggling syntax highlighting back on restores the coloring",
         );
+    }
+
+    #[test]
+    fn toggle_minimap_flips_visibility() {
+        let mut h = Stoat::test();
+        assert!(h.stoat.minimap_enabled(), "enabled by default");
+        dispatch(&mut h.stoat, &stoat_action::ToggleMinimap);
+        assert!(!h.stoat.minimap_enabled(), "toggle hides the minimap");
+        dispatch(&mut h.stoat, &stoat_action::ToggleMinimap);
+        assert!(h.stoat.minimap_enabled(), "toggle shows it again");
     }
 
     fn version_badge_label(stoat: &Stoat) -> Option<String> {

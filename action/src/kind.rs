@@ -20,6 +20,7 @@ pub enum ActionKind {
     CloseOtherPanes,
     OpenFile,
     OpenConfig,
+    ToggleMinimap,
     OpenBuffer,
     OpenFileFinder,
     OpenFileFinderHSplit,

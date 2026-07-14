@@ -289,6 +289,10 @@ pub struct Stoat {
     /// editor at paint time. Not a [`crate::config::Settings`] field:
     /// persistence can come later. Defaults to on.
     pub(crate) syntax_highlight: bool,
+    /// Runtime override for the minimap strip's visibility, set by
+    /// `ToggleMinimap`. `None` follows the `editor.minimap` setting; `Some`
+    /// wins for the session. Not persisted.
+    pub(crate) minimap_override: Option<bool>,
     /// Whether LSP inlay hints are requested and rendered for the focused
     /// editor. Toggled by `ToggleInlayHints`, off by default. Not persisted.
     pub(crate) inlay_hints_enabled: bool,
@@ -1074,6 +1078,7 @@ impl Stoat {
             pending_diff_warm: None,
             modal_run: None,
             syntax_highlight: true,
+            minimap_override: None,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: None,
             last_inlay_hint_key: None,
@@ -1251,6 +1256,21 @@ impl Stoat {
     /// passes its build-stamped `VERSION_INFO`. Tests leave the default.
     pub fn set_version_info(&mut self, info: &'static str) {
         self.version_info = info;
+    }
+
+    /// Whether the minimap strip is currently shown.
+    ///
+    /// The runtime [`Self::minimap_override`] wins, else the `editor.minimap`
+    /// setting, else enabled.
+    pub(crate) fn minimap_enabled(&self) -> bool {
+        self.minimap_override
+            .or(self.settings.editor_minimap)
+            .unwrap_or(true)
+    }
+
+    /// Flip the minimap's visibility for the session, overriding the setting.
+    pub(crate) fn toggle_minimap(&mut self) {
+        self.minimap_override = Some(!self.minimap_enabled());
     }
 
     /// Swap in an alternative [`FsHost`]. The default is [`LocalFs`]; the

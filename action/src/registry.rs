@@ -48,7 +48,7 @@ use crate::{
             ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
             UnindentSelection, WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
         },
-        file::{AutoReload, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile},
+        file::{AutoReload, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ToggleMinimap},
         file_finder::{
             FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
             FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
@@ -411,6 +411,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
     add(ForceSaveBuffer::DEF, |_| Ok(Box::new(ForceSaveBuffer)));
     add(OpenConfig::DEF, |_| Ok(Box::new(OpenConfig)));
+    add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
@@ -1238,6 +1239,7 @@ mod tests {
         // + 1 ToggleDiff.
         // + 3 StageHunk, UnstageHunk, ToggleStageHunk.
         // + 1 OpenConfig.
+        // + 1 ToggleMinimap.
         // + 1 ToggleSyntaxHighlight.
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
@@ -1262,7 +1264,7 @@ mod tests {
         // + 2 JoinSelections / JoinSelectionsSpace.
         // + 1 AutoReload.
         // + 1 PaletteCompletePath.
-        assert_eq!(all().count(), 342);
+        assert_eq!(all().count(), 343);
     }
 
     #[test]
