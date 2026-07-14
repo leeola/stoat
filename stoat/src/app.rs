@@ -5616,10 +5616,20 @@ impl Stoat {
             None => return,
         };
 
-        let snapshot = match self.workspaces[ws_id].editors.get_mut(editor_id) {
-            Some(editor) => editor.display_map.snapshot(),
-            None => return,
-        };
+        let (snapshot, diff_version, diag_version, severity_map) =
+            match self.workspaces[ws_id].editors.get_mut(editor_id) {
+                Some(editor) => {
+                    let snapshot = editor.display_map.snapshot();
+                    let diff_version = editor.display_map.diff_version();
+                    let (diag_version, severity_map) = editor
+                        .gutter_severity_cache
+                        .as_ref()
+                        .map(|cache| (cache.version, cache.map.clone()))
+                        .unwrap_or_default();
+                    (snapshot, diff_version, diag_version, severity_map)
+                },
+                None => return,
+            };
         let (rope, version, edits) = {
             let buf_snap = snapshot.buffer_snapshot();
             (
@@ -5629,14 +5639,27 @@ impl Stoat {
             )
         };
 
+        let decoration_version = {
+            let mut hasher = DefaultHasher::new();
+            diff_version.hash(&mut hasher);
+            diag_version.hash(&mut hasher);
+            hasher.finish()
+        };
+
         let class_table = &self.minimap_class_table;
+        let edge_of = |row: u32| minimap_edge_class(&snapshot, &severity_map, class_table, row);
         let content = self
             .minimap_content
             .get_mut(&(ws_id, buffer_id))
             .expect("checked above");
-        content.sync(&rope, version, &edits, |row, _text| {
-            minimap_line_tokens(&snapshot, row, class_table)
-        });
+        content.sync(
+            &rope,
+            version,
+            &edits,
+            decoration_version,
+            |row, _text| minimap_line_tokens(&snapshot, row, class_table),
+            edge_of,
+        );
 
         for splice in content.take_queued() {
             stoatty_protocol::command::encode_minimap_lines_into(
@@ -6564,6 +6587,38 @@ fn minimap_line_tokens(
         byte += len;
     }
     tokens
+}
+
+/// The minimap edge-lane class for buffer `row`, or `None` when the line carries
+/// no diff or diagnostic mark.
+///
+/// A diagnostic on the row wins over its diff status, mirroring the gutter. The
+/// severity or diff status resolves to a class against `class_table`.
+fn minimap_edge_class(
+    snapshot: &crate::display_map::DisplaySnapshot,
+    severity_map: &std::collections::BTreeMap<u32, lsp_types::DiagnosticSeverity>,
+    class_table: &crate::minimap::ClassTable,
+    row: u32,
+) -> Option<u8> {
+    use crate::{host::DiffStatus, minimap::EdgeClass};
+    use lsp_types::DiagnosticSeverity;
+
+    if let Some(severity) = severity_map.get(&row) {
+        let kind = match *severity {
+            DiagnosticSeverity::ERROR => EdgeClass::Error,
+            DiagnosticSeverity::WARNING => EdgeClass::Warning,
+            _ => EdgeClass::Info,
+        };
+        return Some(class_table.edge_class(kind));
+    }
+
+    match snapshot.line_diff_status(row) {
+        DiffStatus::Added => Some(class_table.edge_class(EdgeClass::Added)),
+        DiffStatus::Modified | DiffStatus::Moved => {
+            Some(class_table.edge_class(EdgeClass::Modified))
+        },
+        DiffStatus::Unchanged => None,
+    }
 }
 
 /// Convert the engine's [`crate::minimap::Run`]s to their `minimap_lines` wire form.
@@ -8689,6 +8744,112 @@ mod tests {
             Some(50 * 256),
             "the thumb tracks the scrolled top row, got {scrolled:?}"
         );
+    }
+
+    #[test]
+    fn minimap_marks_diff_and_diagnostic_lines() {
+        use crate::minimap::EdgeClass;
+        use lsp_types::DiagnosticSeverity;
+        use stoatty_protocol::command::{Command, MinimapRun};
+
+        fn diag(line: u32, severity: DiagnosticSeverity) -> lsp_types::Diagnostic {
+            lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position { line, character: 0 },
+                    end: lsp_types::Position { line, character: 1 },
+                },
+                severity: Some(severity),
+                ..Default::default()
+            }
+        }
+
+        // The leading run of buffer line `n` in the most recent emit.
+        fn line_lead(cmds: &[Command], n: u32) -> Option<MinimapRun> {
+            cmds.iter().rev().find_map(|cmd| match cmd {
+                Command::MinimapLines(l) => {
+                    let idx = n.checked_sub(l.start)? as usize;
+                    l.lines.get(idx).and_then(|runs| runs.first().copied())
+                },
+                _ => None,
+            })
+        }
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/minimap-marks");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"keep\nnew\ntail\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        {
+            let base = "keep\nold\ntail\n";
+            let text = "keep\nnew\ntail\n";
+            let dm = crate::diff_map::DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(base, text),
+                base,
+                text,
+            );
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .diff_map = Some(dm);
+        }
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 80, 24));
+
+        let modified = h.stoat.minimap_class_table.edge_class(EdgeClass::Modified);
+        let error = h.stoat.minimap_class_table.edge_class(EdgeClass::Error);
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        h.stoat.emit_minimap();
+        let first = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&first, 1).map(|r| r.class),
+            Some(modified),
+            "the modified line leads with the modified edge class, got {first:?}"
+        );
+
+        h.stoat
+            .diagnostics
+            .replace_for_path(path.clone(), vec![diag(1, DiagnosticSeverity::ERROR)]);
+        let _ = h.stoat.render();
+        h.stoat.emit_minimap();
+        let errored = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&errored, 1).map(|r| r.class),
+            Some(error),
+            "an error overrides the diff mark, got {errored:?}"
+        );
+
+        h.stoat.diagnostics.replace_for_path(path, vec![]);
+        let _ = h.stoat.render();
+        h.stoat.emit_minimap();
+        let cleared = drain_apc(&mut rx);
+        assert_eq!(
+            line_lead(&cleared, 1).map(|r| r.class),
+            Some(modified),
+            "clearing the diagnostic reverts to the modified mark, got {cleared:?}"
+        );
+        let touched: Vec<u32> = cleared
+            .iter()
+            .filter_map(|c| match c {
+                Command::MinimapLines(l) => Some(l.start),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(touched, vec![1], "only the formerly-marked line re-splices");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 use crate::{
     display_map::{highlights::HighlightStyleId, syntax_theme::SyntaxStyles},
-    theme::Theme,
+    theme::{scope, Theme},
 };
 use ratatui::style::Color;
 use std::collections::HashMap;
@@ -41,6 +41,10 @@ const MAX_LINES: usize = 500_000;
 /// `lines_per_cell`. A pointer row therefore spans this many lines.
 pub const LINES_PER_CELL: u32 = 8;
 
+/// Columns reserved on a line's left edge for the diff/diagnostic mark lane, so
+/// a mark never overwrites the code silhouette. Content starts after it.
+const LANE_WIDTH: u32 = 2;
+
 /// A single colored run on one line, `len` display columns from `start_col`
 /// drawn in palette class `class`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,6 +52,23 @@ pub struct Run {
     pub start_col: u8,
     pub len: u8,
     pub class: u8,
+}
+
+/// A line's diff or diagnostic state, drawn as a colored run in the reserved
+/// left-edge lane.
+///
+/// The six kinds occupy palette classes appended after the syntax scopes,
+/// resolved to a class via [`ClassTable::edge_class`]. `Removed` is reserved for
+/// palette stability but not sourced per-line yet, since a deleted line has no
+/// buffer row to mark.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EdgeClass {
+    Added,
+    Removed,
+    Modified,
+    Error,
+    Warning,
+    Info,
 }
 
 /// A token's byte range within a line, already resolved to its palette class.
@@ -78,10 +99,16 @@ pub struct Splice {
 pub struct MinimapContent {
     content_id: u32,
     lines: Vec<Vec<Run>>,
+    /// Edge-lane class per built line, kept parallel to [`Self::lines`] so a diff
+    /// or diagnostic change re-summarizes only the lines whose mark changed.
+    edges: Vec<Option<u8>>,
     synced_version: u64,
     synced_rope: Rope,
     built_upto: u32,
     disabled: bool,
+    /// Combined diff and diagnostic version last synced. A change re-checks the
+    /// built lines' edge marks without a buffer edit having occurred.
+    synced_decoration_version: u64,
     queued: Vec<Splice>,
 }
 
@@ -90,10 +117,12 @@ impl MinimapContent {
         MinimapContent {
             content_id,
             lines: Vec::new(),
+            edges: Vec::new(),
             synced_version: 0,
             synced_rope: Rope::new(),
             built_upto: 0,
             disabled: false,
+            synced_decoration_version: 0,
             queued: Vec::new(),
         }
     }
@@ -115,17 +144,22 @@ impl MinimapContent {
 
     /// Bring the summaries up to date with `new_rope` at `version`.
     ///
-    /// `edits` is the buffer's `edits_since(self.synced_version())`; `line_tokens`
-    /// resolves a row's tokens (byte ranges within the line plus class) for
-    /// re-summarizing. Edits within the already-built prefix queue splices. The
-    /// unbuilt tail fills up to [`BUILD_CHUNK`] lines per call. A buffer over
-    /// [`MAX_LINES`] disables and queues nothing.
+    /// `edits` is the buffer's `edits_since(self.synced_version())`. `line_tokens`
+    /// resolves a row's syntax tokens and `edge_of` its diff/diagnostic mark, both
+    /// for re-summarizing. `decoration_version` combines the diff and diagnostic
+    /// versions so a mark change without a buffer edit re-checks the built lines.
+    ///
+    /// Edits within the already-built prefix queue splices. The unbuilt tail fills
+    /// up to [`BUILD_CHUNK`] lines per call. A buffer over [`MAX_LINES`] disables
+    /// and queues nothing.
     pub fn sync(
         &mut self,
         new_rope: &Rope,
         version: u64,
         edits: &Patch<usize>,
+        decoration_version: u64,
         line_tokens: impl Fn(u32, &str) -> Vec<LineToken>,
+        edge_of: impl Fn(u32) -> Option<u8>,
     ) {
         if self.disabled {
             return;
@@ -135,16 +169,18 @@ impl MinimapContent {
         if total as usize > MAX_LINES {
             self.disabled = true;
             self.lines.clear();
+            self.edges.clear();
             self.queued.clear();
             self.built_upto = 0;
             self.synced_version = version;
+            self.synced_decoration_version = decoration_version;
             self.synced_rope = new_rope.clone();
             return;
         }
 
         if version != self.synced_version {
             for edit in edits.edits() {
-                self.apply_edit(edit, new_rope, &line_tokens);
+                self.apply_edit(edit, new_rope, &line_tokens, &edge_of);
             }
             self.synced_version = version;
             self.synced_rope = new_rope.clone();
@@ -152,14 +188,48 @@ impl MinimapContent {
 
         if self.built_upto < total {
             let end = (self.built_upto + BUILD_CHUNK).min(total);
-            let lines = summarize_rows(new_rope, self.built_upto..end, &line_tokens);
+            let lines = summarize_rows(new_rope, self.built_upto..end, &line_tokens, &edge_of);
             self.queued.push(Splice {
                 start: self.built_upto,
                 removed: 0,
                 lines: lines.clone(),
             });
+            self.edges.extend((self.built_upto..end).map(&edge_of));
             self.lines.extend(lines);
             self.built_upto = end;
+        }
+
+        if decoration_version != self.synced_decoration_version {
+            self.resync_edges(new_rope, &line_tokens, &edge_of);
+            self.synced_decoration_version = decoration_version;
+        }
+    }
+
+    /// Re-check every built line's edge mark, re-summarizing and queueing a
+    /// one-line splice only where the mark changed.
+    ///
+    /// The syntax content is unaffected by a diff or diagnostic change, so only
+    /// the changed lines pay for a re-summarize.
+    fn resync_edges(
+        &mut self,
+        new_rope: &Rope,
+        line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
+        edge_of: &impl Fn(u32) -> Option<u8>,
+    ) {
+        for row in 0..self.built_upto {
+            let new_edge = edge_of(row);
+            if self.edges[row as usize] == new_edge {
+                continue;
+            }
+            let text = line_text(new_rope, row);
+            let summary = summarize_line(&text, &line_tokens(row, &text), new_edge);
+            self.lines[row as usize] = summary.clone();
+            self.edges[row as usize] = new_edge;
+            self.queued.push(Splice {
+                start: row,
+                removed: 1,
+                lines: vec![summary],
+            });
         }
     }
 
@@ -173,6 +243,7 @@ impl MinimapContent {
         edit: &Edit<usize>,
         new_rope: &Rope,
         line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
+        edge_of: &impl Fn(u32) -> Option<u8>,
     ) {
         let old_start_row = self.synced_rope.offset_to_point(edit.old.start).row;
         if old_start_row >= self.built_upto {
@@ -184,11 +255,20 @@ impl MinimapContent {
         let new_end_row = new_rope.offset_to_point(edit.new.end).row;
 
         let removed = (old_end_row + 1).min(self.built_upto) - old_start_row;
-        let inserted = summarize_rows(new_rope, new_start_row..new_end_row + 1, line_tokens);
+        let inserted = summarize_rows(
+            new_rope,
+            new_start_row..new_end_row + 1,
+            line_tokens,
+            edge_of,
+        );
+        let inserted_edges: Vec<Option<u8>> =
+            (new_start_row..new_end_row + 1).map(edge_of).collect();
 
         let start = old_start_row as usize;
         let end = (start + removed as usize).min(self.lines.len());
         self.lines.splice(start..end, inserted.iter().cloned());
+        let edge_end = end.min(self.edges.len());
+        self.edges.splice(start..edge_end, inserted_edges);
 
         let delta = inserted.len() as i64 - removed as i64;
         self.built_upto = (self.built_upto as i64 + delta).max(0) as u32;
@@ -201,15 +281,17 @@ impl MinimapContent {
     }
 }
 
-/// Summarize each row in `rows`, one [`LineToken`] set per row from `line_tokens`.
+/// Summarize each row in `rows`, one [`LineToken`] set per row from `line_tokens`
+/// and its edge mark from `edge_of`.
 fn summarize_rows(
     rope: &Rope,
     rows: std::ops::Range<u32>,
     line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
+    edge_of: &impl Fn(u32) -> Option<u8>,
 ) -> Vec<Vec<Run>> {
     rows.map(|row| {
         let text = line_text(rope, row);
-        summarize_line(&text, &line_tokens(row, &text))
+        summarize_line(&text, &line_tokens(row, &text), edge_of(row))
     })
     .collect()
 }
@@ -226,18 +308,29 @@ fn line_count(rope: &Rope) -> u32 {
     rope.max_point().row + 1
 }
 
-/// Compress `line` into colored run blocks.
+/// Compress `line` into colored run blocks, prefixed by an optional edge mark.
 ///
-/// Walks the line by display column, a tab advancing to the next multiple of
-/// [`TAB_WIDTH`] and other chars advancing one, capped at [`MAX_COLUMNS`]. A
+/// When `edge` is set, a run fills the reserved [`LANE_WIDTH`]-column lane at the
+/// left in that class, and the content summary starts after it so the mark never
+/// overwrites the code silhouette.
+///
+/// Content walks the line by display column, a tab advancing to the next multiple
+/// of [`TAB_WIDTH`] and other chars advancing one, capped at [`MAX_COLUMNS`]. A
 /// non-whitespace char extends the current run when it is contiguous and shares
 /// the covering token's class, otherwise opens a new run. Whitespace ends the
 /// current run, so a gap breaks the blocks. A char uncovered by any token is
 /// class 0. Once [`MAX_RUNS`] runs exist, the last run swallows the rest of the
 /// line.
-pub fn summarize_line(line: &str, tokens: &[LineToken]) -> Vec<Run> {
+pub fn summarize_line(line: &str, tokens: &[LineToken], edge: Option<u8>) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
-    let mut col: u32 = 0;
+    if let Some(class) = edge {
+        runs.push(Run {
+            start_col: 0,
+            len: LANE_WIDTH as u8,
+            class,
+        });
+    }
+    let mut col: u32 = LANE_WIDTH;
     let mut byte: usize = 0;
     let mut token_idx = 0;
     let mut overflowed = false;
@@ -338,6 +431,7 @@ pub struct ClassTable {
     palette: Vec<[u8; 3]>,
     by_style: HashMap<HighlightStyleId, u8>,
     by_color: HashMap<[u8; 3], u8>,
+    edge_base: u8,
 }
 
 impl ClassTable {
@@ -361,11 +455,35 @@ impl ClassTable {
             palette.push(rgb);
         }
 
+        // The six edge classes follow the syntax scopes, in EdgeClass order, so a
+        // run's class indexes its mark color directly.
+        let edge_base = palette.len() as u8;
+        for scope in [
+            scope::DIFF_ADDED,
+            scope::DIFF_DELETED,
+            scope::DIFF_MODIFIED,
+            scope::UI_DIAGNOSTIC_ERROR,
+            scope::UI_DIAGNOSTIC_WARNING,
+            scope::UI_DIAGNOSTIC_INFO,
+        ] {
+            palette.push(color_to_rgb(theme.get(scope).fg.unwrap_or(Color::White)));
+        }
+
         ClassTable {
             palette,
             by_style,
             by_color,
+            edge_base,
         }
+    }
+
+    /// The palette class the edge mark `kind` draws in.
+    ///
+    /// The six edge classes occupy the palette right after the syntax scopes, in
+    /// [`EdgeClass`] order, so the returned class indexes the mark's declared
+    /// color on the strip.
+    pub fn edge_class(&self, kind: EdgeClass) -> u8 {
+        self.edge_base + kind as u8
     }
 
     /// The class a token drawn in `style` maps to, or 0 when the style is not a
@@ -431,6 +549,10 @@ mod tests {
         Vec::new()
     }
 
+    fn no_edges(_: u32) -> Option<u8> {
+        None
+    }
+
     fn run(start_col: u8, len: u8, class: u8) -> Run {
         Run {
             start_col,
@@ -447,35 +569,40 @@ mod tests {
     fn summarize_line_coalesces_and_breaks_on_whitespace() {
         // "ab cd" with one token over "ab" and one over "cd": a run per word,
         // broken by the space, each carrying its token's class.
-        let runs = summarize_line("ab cd", &[tok(0..2, 1), tok(3..5, 2)]);
-        assert_eq!(runs, vec![run(0, 2, 1), run(3, 2, 2)]);
+        let runs = summarize_line("ab cd", &[tok(0..2, 1), tok(3..5, 2)], None);
+        assert_eq!(runs, vec![run(2, 2, 1), run(5, 2, 2)]);
     }
 
     #[test]
     fn summarize_line_coalesces_adjacent_same_class() {
         // Two tokens of the same class over contiguous chars merge into one run.
-        let runs = summarize_line("abcd", &[tok(0..2, 1), tok(2..4, 1)]);
-        assert_eq!(runs, vec![run(0, 4, 1)]);
+        let runs = summarize_line("abcd", &[tok(0..2, 1), tok(2..4, 1)], None);
+        assert_eq!(runs, vec![run(2, 4, 1)]);
     }
 
     #[test]
     fn summarize_line_uncovered_is_class_zero() {
-        let runs = summarize_line("ab", &[]);
-        assert_eq!(runs, vec![run(0, 2, 0)]);
+        let runs = summarize_line("ab", &[], None);
+        assert_eq!(runs, vec![run(2, 2, 0)]);
     }
 
     #[test]
     fn summarize_line_expands_tabs_to_stops() {
-        // A leading tab advances to column 4, so the word starts at column 4.
-        let runs = summarize_line("\tab", &[tok(1..3, 1)]);
+        // A leading tab from the col-2 lane edge still advances to the next tab
+        // stop at column 4, so the word starts at column 4.
+        let runs = summarize_line("\tab", &[tok(1..3, 1)], None);
         assert_eq!(runs, vec![run(4, 2, 1)]);
     }
 
     #[test]
     fn summarize_line_clamps_columns() {
         let line = "x".repeat(200);
-        let runs = summarize_line(&line, &[]);
-        assert_eq!(runs, vec![run(0, 120, 0)], "columns cap at 120");
+        let runs = summarize_line(&line, &[], None);
+        assert_eq!(
+            runs,
+            vec![run(2, 118, 0)],
+            "content fills the lane edge to the 120-column cap"
+        );
     }
 
     #[test]
@@ -486,19 +613,19 @@ mod tests {
         let tokens: Vec<LineToken> = (0..20)
             .map(|i| tok(i * 2..i * 2 + 1, (i % 3 + 1) as u8))
             .collect();
-        let runs = summarize_line(&line, &tokens);
+        let runs = summarize_line(&line, &tokens, None);
         assert_eq!(runs.len(), 12, "runs cap at twelve");
         let last = runs[11];
-        // The last char sits at display column 38 (x at even columns); run 12
-        // stretches to cover it.
-        assert_eq!(last.start_col as u32 + last.len as u32, 39);
+        // The last char sits at display column 40 (x at even columns, shifted
+        // past the 2-column lane); run 12 stretches to cover it.
+        assert_eq!(last.start_col as u32 + last.len as u32, 41);
     }
 
     #[test]
     fn single_line_edit_queues_one_one_line_splice() {
         let before = rope("alpha\nbeta\ngamma\n");
         let mut content = MinimapContent::new(1);
-        content.sync(&before, 1, &Patch::empty(), no_tokens);
+        content.sync(&before, 1, &Patch::empty(), 0, no_tokens, no_edges);
         content.take_queued();
 
         // Replace "beta" (line 1) in place.
@@ -507,7 +634,7 @@ mod tests {
             old: 6..10,
             new: 6..11,
         }]);
-        content.sync(&after, 2, &edit, no_tokens);
+        content.sync(&after, 2, &edit, 0, no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -520,7 +647,7 @@ mod tests {
     fn newline_insertion_inserts_one_more_than_removed() {
         let before = rope("alpha\nbeta\ngamma\n");
         let mut content = MinimapContent::new(1);
-        content.sync(&before, 1, &Patch::empty(), no_tokens);
+        content.sync(&before, 1, &Patch::empty(), 0, no_tokens, no_edges);
         content.take_queued();
 
         // Insert a newline inside "beta", splitting line 1 into two.
@@ -529,7 +656,7 @@ mod tests {
             old: 8..8,
             new: 8..9,
         }]);
-        content.sync(&after, 2, &edit, no_tokens);
+        content.sync(&after, 2, &edit, 0, no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -544,7 +671,7 @@ mod tests {
     fn multi_line_replace_removes_the_old_span() {
         let before = rope("a\nb\nc\nd\ne\n");
         let mut content = MinimapContent::new(1);
-        content.sync(&before, 1, &Patch::empty(), no_tokens);
+        content.sync(&before, 1, &Patch::empty(), 0, no_tokens, no_edges);
         content.take_queued();
 
         // Replace lines 1..=3 ("b\nc\nd") with one line "X".
@@ -553,7 +680,7 @@ mod tests {
             old: 2..7,
             new: 2..3,
         }]);
-        content.sync(&after, 2, &edit, no_tokens);
+        content.sync(&after, 2, &edit, 0, no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -571,7 +698,7 @@ mod tests {
         let rope = rope(&text);
         let mut content = MinimapContent::new(1);
 
-        content.sync(&rope, 1, &Patch::empty(), no_tokens);
+        content.sync(&rope, 1, &Patch::empty(), 0, no_tokens, no_edges);
         let first = content.take_queued();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].start, 0);
@@ -581,7 +708,7 @@ mod tests {
             "first chunk is full"
         );
 
-        content.sync(&rope, 1, &Patch::empty(), no_tokens);
+        content.sync(&rope, 1, &Patch::empty(), 0, no_tokens, no_edges);
         let second = content.take_queued();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].start, BUILD_CHUNK);
@@ -591,7 +718,7 @@ mod tests {
             "the remainder finishes the build",
         );
 
-        content.sync(&rope, 1, &Patch::empty(), no_tokens);
+        content.sync(&rope, 1, &Patch::empty(), 0, no_tokens, no_edges);
         assert!(content.take_queued().is_empty(), "nothing left to build");
     }
 
@@ -604,8 +731,77 @@ mod tests {
         let scopes = SyntaxStyles::from_theme(&Theme::empty()).theme_keys().len();
         assert_eq!(
             table.palette().len(),
+            scopes + 1 + 6,
+            "default foreground, one color per syntax scope, then six edge classes",
+        );
+    }
+
+    #[test]
+    fn summarize_line_prepends_the_edge_lane() {
+        // An edge fills the reserved cols 0-1 and content starts at col 2.
+        let runs = summarize_line("ab", &[tok(0..2, 1)], Some(40));
+        assert_eq!(runs, vec![run(0, 2, 40), run(2, 2, 1)]);
+    }
+
+    #[test]
+    fn edge_class_appends_after_the_syntax_scopes() {
+        use super::{ClassTable, EdgeClass};
+        use crate::{display_map::syntax_theme::SyntaxStyles, theme::Theme};
+
+        let table = ClassTable::from_theme(&Theme::empty());
+        let base = table.edge_class(EdgeClass::Added);
+        assert_eq!(table.edge_class(EdgeClass::Removed), base + 1);
+        assert_eq!(table.edge_class(EdgeClass::Info), base + 5);
+
+        let scopes = SyntaxStyles::from_theme(&Theme::empty()).theme_keys().len();
+        assert_eq!(
+            base as usize,
             scopes + 1,
-            "the default foreground plus one color per syntax scope",
+            "the base follows the syntax palette"
+        );
+    }
+
+    #[test]
+    fn build_carries_each_line_edge() {
+        let text = rope("alpha\nbravo");
+        let mut content = MinimapContent::new(1);
+        let edge_of = |row: u32| (row == 1).then_some(40);
+
+        content.sync(&text, 1, &Patch::empty(), 5, no_tokens, edge_of);
+
+        let built = &content.take_queued()[0].lines;
+        assert_eq!(
+            built[0][0],
+            run(2, 5, 0),
+            "an unmarked line starts past the lane"
+        );
+        assert_eq!(
+            built[1][0],
+            run(0, 2, 40),
+            "a marked line leads with its edge"
+        );
+    }
+
+    #[test]
+    fn decoration_change_splices_only_the_marked_line() {
+        let text = rope("alpha\nbravo\ncharlie");
+        let mut content = MinimapContent::new(1);
+
+        content.sync(&text, 1, &Patch::empty(), 0, no_tokens, no_edges);
+        let _ = content.take_queued();
+
+        // The buffer is unchanged, but a diagnostic appears on line 1.
+        let edge_of = |row: u32| (row == 1).then_some(40);
+        content.sync(&text, 1, &Patch::empty(), 1, no_tokens, edge_of);
+
+        let splices = content.take_queued();
+        assert_eq!(splices.len(), 1, "only the newly marked line splices");
+        assert_eq!(splices[0].start, 1);
+        assert_eq!(splices[0].removed, 1);
+        assert_eq!(
+            splices[0].lines[0][0],
+            run(0, 2, 40),
+            "the mark leads the line"
         );
     }
 
@@ -683,7 +879,7 @@ mod tests {
         let rope = rope(&text);
         let mut content = MinimapContent::new(1);
 
-        content.sync(&rope, 1, &Patch::empty(), no_tokens);
+        content.sync(&rope, 1, &Patch::empty(), 0, no_tokens, no_edges);
 
         assert!(
             content.take_queued().is_empty(),
