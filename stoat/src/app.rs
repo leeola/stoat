@@ -5646,8 +5646,21 @@ impl Stoat {
             hasher.finish()
         };
 
+        let syntax_on = self.syntax_highlight;
         let class_table = &self.minimap_class_table;
+
+        // Resolve the whole buffer's tokens once, on the first summarized row, so
+        // a steady frame that summarizes nothing pays nothing.
+        let line_bucket = std::cell::OnceCell::new();
+        let line_tokens = |row: u32, _text: &str| {
+            line_bucket
+                .get_or_init(|| minimap_line_tokens(&snapshot, buffer_id, syntax_on, class_table))
+                .get(&row)
+                .cloned()
+                .unwrap_or_default()
+        };
         let edge_of = |row: u32| minimap_edge_class(&snapshot, &severity_map, class_table, row);
+
         let content = self
             .minimap_content
             .get_mut(&(ws_id, buffer_id))
@@ -5657,7 +5670,7 @@ impl Stoat {
             version,
             &edits,
             decoration_version,
-            |row, _text| minimap_line_tokens(&snapshot, row, class_table),
+            line_tokens,
             edge_of,
         );
 
@@ -6553,40 +6566,74 @@ fn editor_page_content_version(
     hasher.finish()
 }
 
-/// Resolve buffer `row`'s syntax highlights into minimap line tokens, one per
-/// colored span, dropping default-foreground runs the summary treats as class 0.
+/// Resolve a buffer's syntax highlights into minimap line tokens bucketed by row.
 ///
-/// Byte offsets track the display chunk lengths, so a soft-wrapped line, tab
-/// expansion, or an inlay shifts the run boundaries. The mapping is exact for an
-/// unwrapped, tab-free line, which the coarse strip tolerates.
+/// Reads the tree-sitter and LSP semantic tokens, which are buffer-anchored, so
+/// the byte ranges are exact regardless of tab expansion, soft-wrap, or inlays --
+/// unlike display chunks. Each token splits across the buffer lines it spans, and
+/// the pieces bucket per row as line-relative [`crate::minimap::LineToken`]s
+/// carrying their foreground's palette class. Tokens resolving to class 0 drop,
+/// and `syntax_on` off yields an empty map.
 fn minimap_line_tokens(
     snapshot: &crate::display_map::DisplaySnapshot,
-    row: u32,
+    buffer_id: BufferId,
+    syntax_on: bool,
     class_table: &crate::minimap::ClassTable,
-) -> Vec<crate::minimap::LineToken> {
-    let mut tokens = Vec::new();
-    let mut byte = 0usize;
-    for chunk in snapshot.highlighted_chunks(row..row + 1) {
-        if chunk.is_inlay {
-            continue;
-        }
-        let len = chunk.text.trim_end_matches('\n').len();
-        if len == 0 {
-            continue;
-        }
-        let class = chunk
-            .highlight_style
-            .and_then(|style| style.foreground)
-            .map_or(0, |fg| class_table.class_of_color(fg));
-        if class != 0 {
-            tokens.push(crate::minimap::LineToken {
-                range: byte..byte + len,
-                class,
-            });
-        }
-        byte += len;
+) -> std::collections::HashMap<u32, Vec<crate::minimap::LineToken>> {
+    let mut by_row: std::collections::HashMap<u32, Vec<crate::minimap::LineToken>> =
+        std::collections::HashMap::new();
+    if !syntax_on {
+        return by_row;
     }
-    tokens
+
+    let buffer_snap = snapshot.buffer_snapshot();
+    let rope = buffer_snap.rope();
+
+    for highlights in [
+        snapshot.semantic_token_highlights(),
+        snapshot.lsp_token_highlights(),
+    ] {
+        let Some((spans, interner)) = highlights.get(&buffer_id) else {
+            continue;
+        };
+        for span in spans.iter() {
+            let class = interner[span.style]
+                .foreground
+                .map_or(0, |fg| class_table.class_of_color(fg));
+            if class == 0 {
+                continue;
+            }
+            let start = buffer_snap.resolve_anchor(&span.range.start);
+            let end = buffer_snap.resolve_anchor(&span.range.end);
+            if start >= end {
+                continue;
+            }
+
+            let start_row = rope.offset_to_point(start).row;
+            let end_row = rope.offset_to_point(end).row;
+            for row in start_row..=end_row {
+                let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+                let line_end =
+                    rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)));
+                let s = start.max(line_start);
+                let e = end.min(line_end);
+                if s < e {
+                    by_row
+                        .entry(row)
+                        .or_default()
+                        .push(crate::minimap::LineToken {
+                            range: (s - line_start)..(e - line_start),
+                            class,
+                        });
+                }
+            }
+        }
+    }
+
+    for tokens in by_row.values_mut() {
+        tokens.sort_by_key(|token| token.range.start);
+    }
+    by_row
 }
 
 /// The minimap edge-lane class for buffer `row`, or `None` when the line carries
@@ -8850,6 +8897,93 @@ mod tests {
             })
             .collect();
         assert_eq!(touched, vec![1], "only the formerly-marked line re-splices");
+    }
+
+    #[test]
+    fn minimap_colors_align_past_a_leading_tab() {
+        use crate::display_map::highlights::{
+            HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
+        };
+        use ratatui::style::Color;
+        use std::sync::Arc;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/minimap-tab");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"\tfoo\nbar\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (editor_id, buffer_id) = {
+            let ids = h.stoat.focused_editor_ids().expect("editor");
+            (ids.0, ids.1)
+        };
+
+        // Color the token a real syntax-scope color so it maps to a class.
+        let [r, g, b] = h.stoat.minimap_class_table.palette()[1];
+        let color = Color::Rgb(r, g, b);
+        let expected_class = h.stoat.minimap_class_table.class_of_color(color);
+        assert_ne!(
+            expected_class, 0,
+            "the test color must map to a syntax class"
+        );
+
+        let mut interner = HighlightStyleInterner::default();
+        let style = interner.intern(HighlightStyle {
+            foreground: Some(color),
+            background: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            strikethrough: None,
+        });
+        let range = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let snap = shared.read().expect("poisoned").snapshot.clone();
+            snap.anchor_at(1, Bias::Right)..snap.anchor_at(4, Bias::Left)
+        };
+        let tokens: Arc<[SemanticTokenHighlight]> =
+            Arc::from(vec![SemanticTokenHighlight { range, style }]);
+        h.stoat.active_workspace_mut().editors[editor_id]
+            .display_map
+            .set_semantic_token_highlights(buffer_id, tokens, Arc::new(interner));
+
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 80, 24));
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        h.stoat.emit_minimap();
+        let cmds = drain_apc(&mut rx);
+
+        let line0 = cmds
+            .iter()
+            .rev()
+            .find_map(|cmd| match cmd {
+                Command::MinimapLines(l) if l.start == 0 => l.lines.first().cloned(),
+                _ => None,
+            })
+            .expect("line 0 summary");
+
+        // The tab expands content to column 4, where the token's colored run
+        // begins. The old display-chunk mapping placed the token past the raw
+        // line's bytes, dropping the color.
+        assert_eq!(
+            line0.first().map(|run| (run.start_col, run.class)),
+            Some((4, expected_class)),
+            "the run starts at the tab-expanded column in the syntax class, got {line0:?}"
+        );
     }
 
     #[test]
