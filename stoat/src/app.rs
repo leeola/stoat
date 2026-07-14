@@ -2542,8 +2542,11 @@ impl Stoat {
                 } => {
                     if let Some(path) = lsp_uri_to_path(uri) {
                         let count = diagnostics.len();
-                        self.diagnostics
-                            .replace_for_path(path.clone(), diagnostics.clone());
+                        self.diagnostics.replace_from_server(
+                            path.clone(),
+                            server.to_string(),
+                            diagnostics.clone(),
+                        );
                         tracing::info!(
                             target: "stoat::lsp",
                             path = %path.display(),

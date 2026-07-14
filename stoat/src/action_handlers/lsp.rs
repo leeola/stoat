@@ -2172,7 +2172,15 @@ fn apply_pull_diagnostics(
             diagnostics,
             result_id,
         }) => {
-            stoat.diagnostics.replace_for_path(path, diagnostics);
+            let server = stoat
+                .feature_hosts(id, LanguageServerFeature::PullDiagnostics)
+                .into_iter()
+                .next()
+                .map(|(name, _)| name)
+                .unwrap_or_else(|| String::from("lsp"));
+            stoat
+                .diagnostics
+                .replace_from_server(path, server, diagnostics);
             match result_id {
                 Some(rid) => {
                     stoat.pull_diagnostic_result_ids.insert(id, rid);

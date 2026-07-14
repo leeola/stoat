@@ -2,24 +2,31 @@
 //! [`crate::host::LspNotification::Diagnostics`] and exposes a
 //! per-path summary that the status bar consumes.
 //!
-//! Single-server today: each path has at most one set of
-//! diagnostics. When [`crate::lsp`] gains an `LspManager` (TODO
-//! line 176) the key widens to `(PathBuf, LanguageServerId)` so
-//! parallel servers (rust-analyzer + clippy + custom linters) can
-//! contribute layered, independently-toggleable diagnostics.
+//! Each path's diagnostics are keyed by the reporting server, so several
+//! servers on one file (rust-analyzer plus a linter) contribute layered
+//! diagnostics that merge on read rather than clobbering each other.
 
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
 };
 
-/// Maps each known file path to its current diagnostic list. Replaces
-/// in place when the server publishes a new set; an empty `Vec` means
-/// the server cleared diagnostics for that file.
+/// A path's diagnostics grouped by the server that published them, plus their
+/// merged list cached so reads hand out a borrow without re-merging.
+#[derive(Debug, Default, Clone)]
+struct PathDiagnostics {
+    by_server: BTreeMap<String, Vec<Diagnostic>>,
+    merged: Vec<Diagnostic>,
+}
+
+/// Maps each known file path to its per-server diagnostics. Each server
+/// publishes a full snapshot per `textDocument/publishDiagnostics`, replacing
+/// only its own slice for the path. An empty slice clears that server's
+/// contribution.
 #[derive(Debug, Default, Clone)]
 pub struct DiagnosticSet {
-    by_path: HashMap<PathBuf, Vec<Diagnostic>>,
+    by_path: HashMap<PathBuf, PathDiagnostics>,
     /// Bumped on every mutation so render-side caches keyed off the set can
     /// detect a change without comparing the diagnostics themselves.
     version: u64,
@@ -49,25 +56,50 @@ impl DiagnosticSet {
         Self::default()
     }
 
-    /// Replaces the diagnostic list for `path`. The server publishes
-    /// a full snapshot per `textDocument/publishDiagnostics` call,
-    /// so prior entries for the same path are dropped.
-    pub fn replace_for_path(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>) {
+    /// Replaces `server`'s diagnostics for `path`, leaving other servers'
+    /// contributions intact.
+    ///
+    /// A server publishes a full snapshot per `textDocument/publishDiagnostics`,
+    /// so its prior slice for the path is dropped. An empty slice clears its
+    /// contribution. When the last server clears its slice, the path is
+    /// dropped.
+    pub fn replace_from_server(
+        &mut self,
+        path: PathBuf,
+        server: String,
+        diagnostics: Vec<Diagnostic>,
+    ) {
         self.version += 1;
+        let entry = self.by_path.entry(path.clone()).or_default();
         if diagnostics.is_empty() {
+            entry.by_server.remove(&server);
+        } else {
+            entry.by_server.insert(server, diagnostics);
+        }
+        if entry.by_server.is_empty() {
             self.by_path.remove(&path);
         } else {
-            self.by_path.insert(path, diagnostics);
+            entry.merged = entry.by_server.values().flatten().cloned().collect();
         }
     }
 
-    /// Returns the diagnostic list currently stored for `path`, or an
-    /// empty slice when the path is unknown.
-    pub fn get(&self, path: &Path) -> &[Diagnostic] {
-        self.by_path.get(path).map(|v| v.as_slice()).unwrap_or(&[])
+    /// Replaces the whole diagnostic list for `path` from a single unnamed
+    /// server, for tests that do not exercise multi-server merging.
+    #[cfg(test)]
+    pub fn replace_for_path(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>) {
+        self.replace_from_server(path, "lsp".to_string(), diagnostics);
     }
 
-    /// Monotonic counter bumped on every [`Self::replace_for_path`]. A
+    /// Returns the merged diagnostic list currently stored for `path` across
+    /// all servers, or an empty slice when the path is unknown.
+    pub fn get(&self, path: &Path) -> &[Diagnostic] {
+        self.by_path
+            .get(path)
+            .map(|entry| entry.merged.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Monotonic counter bumped on every [`Self::replace_from_server`]. A
     /// render-side cache keyed off this can skip recomputing while the
     /// diagnostics are unchanged.
     pub fn version(&self) -> u64 {
@@ -79,7 +111,7 @@ impl DiagnosticSet {
     pub fn iter(&self) -> impl Iterator<Item = (&Path, &[Diagnostic])> {
         self.by_path
             .iter()
-            .map(|(path, diags)| (path.as_path(), diags.as_slice()))
+            .map(|(path, entry)| (path.as_path(), entry.merged.as_slice()))
     }
 
     /// Returns severity counts plus the worst severity for `path`.
@@ -204,5 +236,34 @@ mod tests {
         let s = set.summarize(Path::new("/missing"));
         assert!(s.is_empty());
         assert_eq!(s.worst, None);
+    }
+
+    #[test]
+    fn diagnostics_from_several_servers_merge() {
+        let mut set = DiagnosticSet::new();
+        let path = PathBuf::from("/ws/a.rs");
+        set.replace_from_server(
+            path.clone(),
+            "ra".into(),
+            vec![diag(DiagnosticSeverity::ERROR, "ra")],
+        );
+        set.replace_from_server(
+            path.clone(),
+            "clippy".into(),
+            vec![diag(DiagnosticSeverity::WARNING, "clippy")],
+        );
+
+        // Merged in server-name order (a BTreeMap keys the contributions).
+        let messages: Vec<&str> = set.get(&path).iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages, ["clippy", "ra"], "both servers contribute");
+
+        // Clearing one server leaves the other's diagnostics.
+        set.replace_from_server(path.clone(), "ra".into(), vec![]);
+        let after: Vec<&str> = set.get(&path).iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(after, ["clippy"]);
+
+        // Clearing the last server drops the path entirely.
+        set.replace_from_server(path.clone(), "clippy".into(), vec![]);
+        assert!(set.get(&path).is_empty());
     }
 }
