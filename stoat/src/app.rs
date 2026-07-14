@@ -492,6 +492,11 @@ pub struct Stoat {
     /// `Drag(Left)` moves that boundary via `set_divider` and `Up(Left)` clears
     /// it. Takes over the pointer so pane handlers never see the drag.
     pub(crate) divider_drag: Option<(NodeId, usize)>,
+    /// Set on `MouseEventKind::Down(Left)` over a pane's minimap strip. While
+    /// `Some`, `Drag(Left)` scrubs the named editor's viewport to the pointer
+    /// position and `Up(Left)` clears it. Takes over the pointer so the press
+    /// never reaches the text-area cursor or selection handling.
+    pub(crate) minimap_drag: Option<EditorId>,
     /// Buffers for which `LspHost::did_open` has been dispatched.
     /// Dedupes re-opens of the same path: [`crate::buffer_registry::BufferRegistry::open`]
     /// returns the existing entry on second open, but the LSP
@@ -1136,6 +1141,7 @@ impl Stoat {
             hover_cell: None,
             hover_diag: None,
             divider_drag: None,
+            minimap_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
@@ -2892,6 +2898,12 @@ impl Stoat {
             return effect;
         }
 
+        // A press or drag over a pane's minimap strip scrubs that pane, ahead of
+        // focus_at and the text-area handlers so the strip owns the gesture.
+        if let Some(effect) = self.handle_minimap_mouse(mouse) {
+            return effect;
+        }
+
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             if let Some(hit) = self
                 .active_workspace()
@@ -2920,6 +2932,85 @@ impl Stoat {
             "mouse event routed to focused element"
         );
         UpdateEffect::None
+    }
+
+    /// Route a left press or drag over a pane's minimap strip to a viewport
+    /// scrub. Returns `Some` when the event is consumed, `None` when it should
+    /// fall through to focus and the text-area handlers.
+    ///
+    /// Once a press arms [`Self::minimap_drag`], every drag re-scrubs the named
+    /// editor and the release clears the field, so the strip owns the pointer for
+    /// the whole gesture and the text area never sees it.
+    fn handle_minimap_mouse(&mut self, mouse: MouseEvent) -> Option<UpdateEffect> {
+        if let Some(editor_id) = self.minimap_drag {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.scrub_minimap_editor(editor_id, mouse.row);
+                },
+                MouseEventKind::Up(MouseButton::Left) => self.minimap_drag = None,
+                _ => {},
+            }
+            return Some(UpdateEffect::Redraw);
+        }
+
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            let pos = Position::new(mouse.column, mouse.row);
+            let ws = self.active_workspace();
+            let hit = ws.panes.split_panes().find_map(|(_, pane)| {
+                let View::Editor(editor_id) = pane.view else {
+                    return None;
+                };
+                let strip = ws.editors.get(editor_id)?.minimap_rect?;
+                strip.contains(pos).then_some(editor_id)
+            });
+            if let Some(editor_id) = hit {
+                self.minimap_drag = Some(editor_id);
+                self.scrub_minimap_editor(editor_id, mouse.row);
+                return Some(UpdateEffect::Redraw);
+            }
+        }
+
+        None
+    }
+
+    /// Ease `editor_id`'s viewport onto the file line its minimap strip row under
+    /// `screen_row` points at, centered in the viewport.
+    ///
+    /// Maps the strip-local cell row to a line with the same proportional math
+    /// the strip renders with, then jumps `scroll_row` and glides the offset up
+    /// to it like a page motion. A no-op if the editor has no strip this frame.
+    fn scrub_minimap_editor(&mut self, editor_id: EditorId, screen_row: u16) {
+        let ws = &mut self.workspaces[self.active_workspace];
+        let Some(editor) = ws.editors.get_mut(editor_id) else {
+            return;
+        };
+        let Some(strip) = editor.minimap_rect else {
+            return;
+        };
+
+        let total = editor.display_map.snapshot().line_count();
+        let viewport = editor.viewport_rows.unwrap_or(strip.height as u32).max(1);
+        let strip_local_row = screen_row.saturating_sub(strip.y);
+        let target_line = crate::minimap::click_target_line(
+            strip.height,
+            strip_local_row,
+            total as f32,
+            editor.scroll_offset,
+            viewport as f32,
+        );
+
+        let max_scroll = total
+            .saturating_sub(1)
+            .saturating_sub(viewport.saturating_sub(1));
+        let target_row = target_line.saturating_sub(viewport / 2).min(max_scroll);
+
+        let prev = editor.scroll_row;
+        editor.scroll_row = target_row;
+        if editor.scroll_offset.floor() as u32 != prev {
+            editor.scroll_offset = prev as f32;
+        }
+        editor.scroll_velocity = 0.0;
+        editor.scroll_glide = true;
     }
 
     /// Route a left-button press over the open hover popup to its text
@@ -11254,6 +11345,100 @@ mod tests {
             Some(0),
             "a click left of the right column clamps to the buffer line start"
         );
+    }
+
+    fn open_with_minimap_strip(h: &mut crate::test_harness::TestHarness) -> EditorId {
+        let body: String = (0..60)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        open_scratch_file(h, &body);
+        let editor_id = h.stoat.focused_editor_ids().expect("editor").0;
+        let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
+        editor.minimap_rect = Some(Rect::new(72, 0, 8, 10));
+        editor.viewport_rows = Some(20);
+        editor_id
+    }
+
+    #[test]
+    fn minimap_click_scrolls_to_the_proportional_line() {
+        let mut h = Stoat::test();
+        let editor_id = open_with_minimap_strip(&mut h);
+
+        // Strip cell row 5 of a fits-file (60 <= 10*8) points at line 5*8+4 = 44,
+        // centered in the 20-row viewport -> scroll 34.
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 74, 5));
+
+        let editor = &h.stoat.active_workspace().editors[editor_id];
+        assert_eq!(
+            editor.scroll_row, 34,
+            "the click eases to the centered proportional row"
+        );
+        assert!(editor.scroll_glide, "the scrub glides like a page motion");
+        assert_eq!(
+            h.stoat.minimap_drag,
+            Some(editor_id),
+            "the press arms the scrub"
+        );
+    }
+
+    #[test]
+    fn minimap_leaves_text_clicks_to_the_cursor() {
+        let mut h = Stoat::test();
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .resize(Rect::new(0, 0, 80, 24));
+        let editor_id = open_with_minimap_strip(&mut h);
+
+        // A press in the text area, left of the strip, never arms the scrub.
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 4));
+
+        assert_eq!(
+            h.stoat.minimap_drag, None,
+            "a text press does not arm the scrub"
+        );
+        assert_eq!(
+            h.stoat.active_workspace().editors[editor_id].scroll_row,
+            0,
+            "a text press does not scroll the pane"
+        );
+        assert!(
+            h.stoat
+                .newest_cursor_offset(editor_id)
+                .is_some_and(|o| o > 0),
+            "the text press still moves the cursor off the buffer start"
+        );
+    }
+
+    #[test]
+    fn minimap_drag_scrolls_monotonically() {
+        let mut h = Stoat::test();
+        let editor_id = open_with_minimap_strip(&mut h);
+
+        let mut rows = Vec::new();
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 74, 1));
+        rows.push(h.stoat.active_workspace().editors[editor_id].scroll_row);
+        for row in [3u16, 5, 7, 9] {
+            h.stoat.update(mouse_event(
+                MouseEventKind::Drag(MouseButton::Left),
+                74,
+                row,
+            ));
+            rows.push(h.stoat.active_workspace().editors[editor_id].scroll_row);
+        }
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 74, 9));
+
+        assert!(
+            rows.windows(2).all(|w| w[1] >= w[0]),
+            "dragging down the strip scrolls monotonically down: {rows:?}"
+        );
+        assert!(rows[4] > rows[0], "the drag moved the viewport: {rows:?}");
+        assert_eq!(h.stoat.minimap_drag, None, "releasing clears the scrub");
     }
 
     #[test]
