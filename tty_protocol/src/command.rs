@@ -69,6 +69,31 @@ pub enum Command {
     /// buffer rather than holding them for a pool that will never scroll again. A
     /// later [`Command::PoolRegion`] with the same id starts a fresh pool.
     PoolDrop(PoolDropCommand),
+    /// Declare a minimap strip, a right-edge region rendering a whole buffer as
+    /// colored per-line run blocks with a viewport thumb.
+    ///
+    /// A per-frame decoration cleared by [`Command::Reset`], like a border or a
+    /// bar. The line run summaries it renders live in a persistent content store
+    /// keyed by [`MinimapCommand::content_id`] and updated out of band by
+    /// [`Command::MinimapLines`], so a redeclared strip keeps its content.
+    Minimap(MinimapCommand),
+    /// Splice per-line run summaries into a minimap content store.
+    ///
+    /// Persistent, unlike the [`Command::Minimap`] declaration: it survives
+    /// [`Command::Reset`] and is retired only by [`Command::MinimapDrop`], so the
+    /// program streams incremental line updates without resending the whole file.
+    MinimapLines(MinimapLinesCommand),
+    /// Update a minimap strip's viewport thumb position.
+    ///
+    /// Persistent state carrying only where the thumb sits, so a scroll moves the
+    /// thumb with a small frame rather than re-declaring the strip.
+    MinimapView(MinimapViewCommand),
+    /// Retire a minimap content store, freeing the line summaries it held.
+    ///
+    /// Sent when the buffer backing [`MinimapDropCommand::content_id`] closes, so
+    /// the terminal need not hold summaries for a minimap that will never render
+    /// again.
+    MinimapDrop(MinimapDropCommand),
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
@@ -355,6 +380,86 @@ pub struct RepositionCommand {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PoolDropCommand {
     pub pool: u32,
+}
+
+/// A single colored run on one minimap line, `len` columns wide starting at
+/// `start_col`, drawn in palette entry `class`.
+///
+/// Columns and lengths are minimap columns (0 to `max_columns`), and `class`
+/// indexes the strip's declared palette, so a run names color by class rather
+/// than carrying an rgb triple per run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MinimapRun {
+    pub start_col: u8,
+    pub len: u8,
+    pub class: u8,
+}
+
+/// The run summary of one buffer line, its runs left to right.
+///
+/// Empty for a blank line. The emitter caps the run count per line, and the wire
+/// format bounds it to 255.
+pub type LineSummary = Vec<MinimapRun>;
+
+/// Declare a minimap strip and its rendering parameters.
+///
+/// The payload of [`Command::Minimap`]. The strip occupies a `width` by `height`
+/// cell region at (`top`, `left`); [`Self::strip_id`] names this declaration and
+/// [`Self::content_id`] the line-summary store it renders (see
+/// [`MinimapLinesCommand`]). Each summarized line is drawn `lines_per_cell` to a
+/// cell, up to `max_columns` wide. [`Self::bg`] and [`Self::thumb`] are rgba, the
+/// thumb being the viewport overlay; [`Self::thumb_border`] is its rgb outline.
+/// [`Self::palette`] holds up to 64 rgb entries a run's class indexes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MinimapCommand {
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
+    pub strip_id: u32,
+    pub content_id: u32,
+    pub lines_per_cell: u8,
+    pub max_columns: u8,
+    pub bg: [u8; 4],
+    pub thumb: [u8; 4],
+    pub thumb_border: [u8; 3],
+    pub palette: Vec<[u8; 3]>,
+}
+
+/// Splice line summaries into the content store [`Self::content_id`].
+///
+/// The payload of [`Command::MinimapLines`]. Starting at line [`Self::start`], it
+/// replaces [`Self::removed`] existing lines with [`Self::lines`]. A pure
+/// deletion carries an empty [`Self::lines`]. A pure insertion carries a zero
+/// [`Self::removed`]. The wire count of inserted lines is `lines.len()`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MinimapLinesCommand {
+    pub content_id: u32,
+    pub start: u32,
+    pub removed: u32,
+    pub lines: Vec<LineSummary>,
+}
+
+/// Position a minimap strip's viewport thumb.
+///
+/// The payload of [`Command::MinimapView`]. [`Self::strip_id`] selects the strip;
+/// [`Self::top_256`] is the fractional top buffer line in 1/256ths of a line, and
+/// [`Self::visible_lines`] the viewport height in lines, together sizing and
+/// placing the thumb.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MinimapViewCommand {
+    pub strip_id: u32,
+    pub top_256: u32,
+    pub visible_lines: u16,
+}
+
+/// Retire the minimap content store [`Self::content_id`].
+///
+/// The payload of [`Command::MinimapDrop`]: a single content-store id, dropped
+/// when its backing buffer closes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MinimapDropCommand {
+    pub content_id: u32,
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -788,6 +893,103 @@ pub fn encode_pool_drop_into(out: &mut Vec<u8>, pool: u32) {
     frame::end(out);
 }
 
+/// Encode a [`MinimapCommand`] as a full `Gstoatty;minimap` frame for an emitter.
+///
+/// The fixed head rides in a 29-byte first argument and the palette in a second
+/// argument of consecutive rgb triples.
+pub fn encode_minimap(command: &MinimapCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_minimap_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;minimap` frame for `command` to `out`.
+pub fn encode_minimap_into(out: &mut Vec<u8>, command: &MinimapCommand) {
+    frame::begin(out, "minimap");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.top.to_be_bytes())?;
+        w.write_all(&command.left.to_be_bytes())?;
+        w.write_all(&command.width.to_be_bytes())?;
+        w.write_all(&command.height.to_be_bytes())?;
+        w.write_all(&command.strip_id.to_be_bytes())?;
+        w.write_all(&command.content_id.to_be_bytes())?;
+        w.write_all(&[command.lines_per_cell, command.max_columns])?;
+        w.write_all(&command.bg)?;
+        w.write_all(&command.thumb)?;
+        w.write_all(&command.thumb_border)
+    });
+    frame::push_arg(out, |w| {
+        for entry in &command.palette {
+            w.write_all(entry)?;
+        }
+        Ok(())
+    });
+    frame::end(out);
+}
+
+/// Encode a [`MinimapLinesCommand`] as a full `Gstoatty;minimap_lines` frame.
+///
+/// The splice header and every inserted line's runs ride in a single argument.
+pub fn encode_minimap_lines(command: &MinimapLinesCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_minimap_lines_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;minimap_lines` frame for `command` to `out`.
+pub fn encode_minimap_lines_into(out: &mut Vec<u8>, command: &MinimapLinesCommand) {
+    frame::begin(out, "minimap_lines");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.content_id.to_be_bytes())?;
+        w.write_all(&command.start.to_be_bytes())?;
+        w.write_all(&command.removed.to_be_bytes())?;
+        w.write_all(&(command.lines.len() as u32).to_be_bytes())?;
+        for line in &command.lines {
+            w.write_all(&[line.len() as u8])?;
+            for run in line {
+                w.write_all(&[run.start_col, run.len, run.class])?;
+            }
+        }
+        Ok(())
+    });
+    frame::end(out);
+}
+
+/// Encode a [`MinimapViewCommand`] as a full `Gstoatty;minimap_view` frame.
+///
+/// The strip id, fractional top, and viewport height ride in a fixed 10-byte
+/// argument.
+pub fn encode_minimap_view(command: &MinimapViewCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_minimap_view_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;minimap_view` frame for `command` to `out`.
+pub fn encode_minimap_view_into(out: &mut Vec<u8>, command: &MinimapViewCommand) {
+    frame::begin(out, "minimap_view");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.strip_id.to_be_bytes())?;
+        w.write_all(&command.top_256.to_be_bytes())?;
+        w.write_all(&command.visible_lines.to_be_bytes())
+    });
+    frame::end(out);
+}
+
+/// Encode a [`MinimapDropCommand`] as a full `Gstoatty;minimap_drop` frame.
+pub fn encode_minimap_drop(command: &MinimapDropCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_minimap_drop_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;minimap_drop` frame retiring content store `content_id`.
+pub fn encode_minimap_drop_into(out: &mut Vec<u8>, command: &MinimapDropCommand) {
+    frame::begin(out, "minimap_drop");
+    frame::push_arg(out, |w| w.write_all(&command.content_id.to_be_bytes()));
+    frame::end(out);
+}
+
 /// Encode a [`Command::Reset`] as a full `Gstoatty;reset` frame for an emitter.
 ///
 /// The frame carries no arguments; receiving it clears all accumulated stoatty
@@ -842,6 +1044,10 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Scroll(c) => encode_scroll_into(out, c),
         Command::Reposition(c) => encode_reposition_into(out, c.pool, c.page),
         Command::PoolDrop(c) => encode_pool_drop_into(out, c.pool),
+        Command::Minimap(c) => encode_minimap_into(out, c),
+        Command::MinimapLines(c) => encode_minimap_lines_into(out, c),
+        Command::MinimapView(c) => encode_minimap_view_into(out, c),
+        Command::MinimapDrop(c) => encode_minimap_drop_into(out, c),
         Command::Reset => encode_reset_into(out),
     }
 }
@@ -869,6 +1075,10 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "scroll" => decode_scroll(&frame.args).map(Command::Scroll),
         "reposition" => decode_reposition(&frame.args).map(Command::Reposition),
         "pool_drop" => decode_pool_drop(&frame.args).map(Command::PoolDrop),
+        "minimap" => decode_minimap(&frame.args).map(Command::Minimap),
+        "minimap_lines" => decode_minimap_lines(&frame.args).map(Command::MinimapLines),
+        "minimap_view" => decode_minimap_view(&frame.args).map(Command::MinimapView),
+        "minimap_drop" => decode_minimap_drop(&frame.args).map(Command::MinimapDrop),
         "reset" => Some(Command::Reset),
         _ => None,
     }
@@ -1083,6 +1293,93 @@ fn decode_pool_drop(args: &[Vec<u8>]) -> Option<PoolDropCommand> {
     })
 }
 
+fn decode_minimap(args: &[Vec<u8>]) -> Option<MinimapCommand> {
+    let head: &[u8; 29] = args.first()?.as_slice().try_into().ok()?;
+    let palette_bytes = args.get(1)?;
+    if palette_bytes.len() % 3 != 0 || palette_bytes.len() / 3 > 64 {
+        return None;
+    }
+
+    let palette = palette_bytes
+        .chunks_exact(3)
+        .map(|entry| [entry[0], entry[1], entry[2]])
+        .collect();
+
+    Some(MinimapCommand {
+        top: u16::from_be_bytes([head[0], head[1]]),
+        left: u16::from_be_bytes([head[2], head[3]]),
+        width: u16::from_be_bytes([head[4], head[5]]),
+        height: u16::from_be_bytes([head[6], head[7]]),
+        strip_id: u32::from_be_bytes([head[8], head[9], head[10], head[11]]),
+        content_id: u32::from_be_bytes([head[12], head[13], head[14], head[15]]),
+        lines_per_cell: head[16],
+        max_columns: head[17],
+        bg: [head[18], head[19], head[20], head[21]],
+        thumb: [head[22], head[23], head[24], head[25]],
+        thumb_border: [head[26], head[27], head[28]],
+        palette,
+    })
+}
+
+fn decode_minimap_lines(args: &[Vec<u8>]) -> Option<MinimapLinesCommand> {
+    let arg = args.first()?;
+    let header: &[u8; 16] = arg.get(..16)?.try_into().ok()?;
+    let content_id = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    let start = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    let removed = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+    let inserted = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);
+
+    // Grown by push rather than pre-allocated, so an inflated `inserted` cannot
+    // force a huge allocation before the run bytes prove short.
+    let mut lines = Vec::new();
+    let mut cursor = 16;
+    for _ in 0..inserted {
+        let run_count = *arg.get(cursor)? as usize;
+        cursor += 1;
+        let end = cursor.checked_add(run_count.checked_mul(3)?)?;
+        let run_bytes = arg.get(cursor..end)?;
+        let runs = run_bytes
+            .chunks_exact(3)
+            .map(|run| MinimapRun {
+                start_col: run[0],
+                len: run[1],
+                class: run[2],
+            })
+            .collect();
+        lines.push(runs);
+        cursor = end;
+    }
+
+    if cursor != arg.len() {
+        return None;
+    }
+
+    Some(MinimapLinesCommand {
+        content_id,
+        start,
+        removed,
+        lines,
+    })
+}
+
+fn decode_minimap_view(args: &[Vec<u8>]) -> Option<MinimapViewCommand> {
+    let arg: &[u8; 10] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(MinimapViewCommand {
+        strip_id: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        top_256: u32::from_be_bytes([arg[4], arg[5], arg[6], arg[7]]),
+        visible_lines: u16::from_be_bytes([arg[8], arg[9]]),
+    })
+}
+
+fn decode_minimap_drop(args: &[Vec<u8>]) -> Option<MinimapDropCommand> {
+    let arg: &[u8; 4] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(MinimapDropCommand {
+        content_id: u32::from_be_bytes(*arg),
+    })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -1123,11 +1420,14 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
-        encode_line_layout, encode_panel, encode_pool_drop, encode_pool_region, encode_popover_end,
-        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-        encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
-        IconCommand, IconKind, LineLayoutCommand, PanelCommand, PoolDropCommand, PoolRegionCommand,
-        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
+        encode_minimap_view, encode_panel, encode_pool_drop, encode_pool_region,
+        encode_popover_end, encode_reposition, encode_reset, encode_scale, encode_scroll,
+        encode_scroll_region, encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command,
+        FillCommand, IconCommand, IconKind, LineLayoutCommand, MinimapCommand, MinimapDropCommand,
+        MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand, PoolDropCommand,
+        PoolRegionCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+        TextRunCommand,
     };
 
     #[test]
@@ -1528,6 +1828,207 @@ mod tests {
         assert!(decode(b"Gstoatty;pool_drop;YWJj").is_none());
     }
 
+    /// Assemble a frame for `sub` from raw (pre-base64) argument bytes, for
+    /// crafting the malformed payloads the rejection tests probe.
+    fn frame_bytes(sub: &str, args: Vec<Vec<u8>>) -> Vec<u8> {
+        crate::frame::encode(&crate::frame::Frame {
+            sub: sub.to_string(),
+            args,
+        })
+    }
+
+    #[test]
+    fn minimap_round_trips() {
+        let command = MinimapCommand {
+            top: 0,
+            left: 72,
+            width: 8,
+            height: 40,
+            strip_id: 5,
+            content_id: 9,
+            lines_per_cell: 8,
+            max_columns: 120,
+            bg: [10, 20, 30, 0],
+            thumb: [200, 200, 200, 48],
+            thumb_border: [255, 255, 255],
+            palette: vec![[0, 0, 0], [1, 2, 3]],
+        };
+
+        assert_eq!(
+            decode(&encode_minimap(&command)),
+            Some(Command::Minimap(command))
+        );
+    }
+
+    #[test]
+    fn minimap_accepts_empty_palette() {
+        let command = MinimapCommand {
+            top: 0,
+            left: 0,
+            width: 8,
+            height: 8,
+            strip_id: 1,
+            content_id: 1,
+            lines_per_cell: 8,
+            max_columns: 120,
+            bg: [0, 0, 0, 0],
+            thumb: [0, 0, 0, 0],
+            thumb_border: [0, 0, 0],
+            palette: vec![],
+        };
+
+        assert_eq!(
+            decode(&encode_minimap(&command)),
+            Some(Command::Minimap(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_minimap_head() {
+        // A 28-byte head is one short of the 29 a minimap declaration needs.
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 28], vec![0u8; 3]]);
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn rejects_oversized_minimap_palette() {
+        // 65 rgb entries (195 bytes) exceeds the 64-entry palette cap.
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], vec![0u8; 195]]);
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn rejects_misaligned_minimap_palette() {
+        // 4 palette bytes is not a whole number of rgb triples.
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], vec![0u8; 4]]);
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn minimap_lines_round_trips() {
+        let command = MinimapLinesCommand {
+            content_id: 9,
+            start: 3,
+            removed: 2,
+            lines: vec![
+                vec![
+                    MinimapRun {
+                        start_col: 0,
+                        len: 4,
+                        class: 2,
+                    },
+                    MinimapRun {
+                        start_col: 6,
+                        len: 3,
+                        class: 5,
+                    },
+                ],
+                vec![MinimapRun {
+                    start_col: 2,
+                    len: 8,
+                    class: 1,
+                }],
+            ],
+        };
+
+        assert_eq!(
+            decode(&encode_minimap_lines(&command)),
+            Some(Command::MinimapLines(command))
+        );
+    }
+
+    #[test]
+    fn minimap_lines_pure_deletion_round_trips() {
+        let command = MinimapLinesCommand {
+            content_id: 4,
+            start: 10,
+            removed: 3,
+            lines: vec![],
+        };
+
+        assert_eq!(
+            decode(&encode_minimap_lines(&command)),
+            Some(Command::MinimapLines(command))
+        );
+    }
+
+    #[test]
+    fn minimap_lines_blank_line_round_trips() {
+        let command = MinimapLinesCommand {
+            content_id: 4,
+            start: 0,
+            removed: 0,
+            lines: vec![vec![]],
+        };
+
+        assert_eq!(
+            decode(&encode_minimap_lines(&command)),
+            Some(Command::MinimapLines(command))
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_minimap_lines_runs() {
+        let mut arg = Vec::new();
+        arg.extend_from_slice(&9u32.to_be_bytes()); // content_id
+        arg.extend_from_slice(&0u32.to_be_bytes()); // start
+        arg.extend_from_slice(&0u32.to_be_bytes()); // removed
+        arg.extend_from_slice(&1u32.to_be_bytes()); // inserted = 1
+        arg.push(2); // the line claims 2 runs, but no run bytes follow
+
+        let bytes = frame_bytes("minimap_lines", vec![arg]);
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_minimap_lines() {
+        let mut arg = Vec::new();
+        arg.extend_from_slice(&9u32.to_be_bytes());
+        arg.extend_from_slice(&0u32.to_be_bytes());
+        arg.extend_from_slice(&0u32.to_be_bytes());
+        arg.extend_from_slice(&0u32.to_be_bytes()); // inserted = 0
+        arg.push(0); // a stray byte past the last declared line
+
+        let bytes = frame_bytes("minimap_lines", vec![arg]);
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn minimap_view_round_trips() {
+        let command = MinimapViewCommand {
+            strip_id: 5,
+            top_256: 1_280,
+            visible_lines: 40,
+        };
+
+        assert_eq!(
+            decode(&encode_minimap_view(&command)),
+            Some(Command::MinimapView(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_minimap_view_payload() {
+        // The single arg here decodes to 3 bytes, not the 10 a view needs.
+        assert!(decode(b"Gstoatty;minimap_view;YWJj").is_none());
+    }
+
+    #[test]
+    fn minimap_drop_round_trips() {
+        let command = MinimapDropCommand { content_id: 9 };
+
+        assert_eq!(
+            decode(&encode_minimap_drop(&command)),
+            Some(Command::MinimapDrop(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_minimap_drop_payload() {
+        // The single arg here decodes to 3 bytes, not the 4 a content id needs.
+        assert!(decode(b"Gstoatty;minimap_drop;YWJj").is_none());
+    }
+
     #[test]
     fn reset_round_trips() {
         assert_eq!(decode(&encode_reset()), Some(Command::Reset));
@@ -1606,6 +2107,39 @@ mod tests {
                 page: 1_000,
             }),
             Command::PoolDrop(PoolDropCommand { pool: 4 }),
+            Command::Minimap(MinimapCommand {
+                top: 1,
+                left: 72,
+                width: 8,
+                height: 40,
+                strip_id: 5,
+                content_id: 9,
+                lines_per_cell: 8,
+                max_columns: 120,
+                bg: [10, 20, 30, 0],
+                thumb: [200, 200, 200, 48],
+                thumb_border: [255, 255, 255],
+                palette: vec![[0, 0, 0], [1, 2, 3], [4, 5, 6]],
+            }),
+            Command::MinimapLines(MinimapLinesCommand {
+                content_id: 9,
+                start: 2,
+                removed: 1,
+                lines: vec![
+                    vec![MinimapRun {
+                        start_col: 0,
+                        len: 4,
+                        class: 2,
+                    }],
+                    vec![],
+                ],
+            }),
+            Command::MinimapView(MinimapViewCommand {
+                strip_id: 5,
+                top_256: 1_280,
+                visible_lines: 40,
+            }),
+            Command::MinimapDrop(MinimapDropCommand { content_id: 9 }),
             Command::Reset,
         ];
 

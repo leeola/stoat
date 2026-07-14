@@ -799,6 +799,13 @@ impl Terminal {
                     self.fill = None;
                 }
             },
+            // FIXME: minimap rendering state lands in the terminal minimap-state
+            // item. The terminal accepts these protocol commands and ignores them
+            // until then.
+            Command::Minimap(_)
+            | Command::MinimapLines(_)
+            | Command::MinimapView(_)
+            | Command::MinimapDrop(_) => {},
             // A reset is also a fill/capture close trigger. The fill and capture
             // commits must run at feed time, but the decoration clear stages so a
             // mid-update reset does not blank the live scene before the re-stamp.
@@ -880,6 +887,8 @@ impl Terminal {
                 self.decorations_dirty.text_runs = true;
             },
             Command::Reset => self.clear_decorations(),
+            // None of these reach here. apply_command routes them at feed time,
+            // or, for minimaps, ignores them until the terminal minimap-state item.
             Command::Fill(_)
             | Command::FillEnd
             | Command::PopoverEnd
@@ -887,7 +896,11 @@ impl Terminal {
             | Command::PoolRegion(_)
             | Command::Scroll(_)
             | Command::Reposition(_)
-            | Command::PoolDrop(_) => {},
+            | Command::PoolDrop(_)
+            | Command::Minimap(_)
+            | Command::MinimapLines(_)
+            | Command::MinimapView(_)
+            | Command::MinimapDrop(_) => {},
         }
     }
 
