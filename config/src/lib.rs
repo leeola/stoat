@@ -1,6 +1,7 @@
 mod ast;
 mod error;
 mod parser;
+mod schema;
 mod settings;
 
 pub use ast::{
@@ -8,6 +9,7 @@ pub use ast::{
     LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, ThemeBlock, Value,
 };
 pub use error::{format_errors, ParseError};
+pub use schema::{settings_schema, PathSeg, SettingDef, ValueShape};
 pub use settings::{LineNumbers, MouseCapturePolicy, Settings};
 
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
