@@ -18,14 +18,21 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::Text,
-    widgets::{Paragraph, Widget},
+    widgets::{Paragraph, StatefulWidget, Widget},
 };
 use slotmap::SlotMap;
 use std::path::Path;
 use stoatty_widgets::{
+    minimap::Minimap,
     status_bar::{StatusBar, StatusSegment},
     ApcScene,
 };
+
+/// Buffer lines the minimap strip draws per vertical cell.
+const MINIMAP_LINES_PER_CELL: u8 = 8;
+
+/// Widest line, in minimap columns, a strip renders before clipping.
+const MINIMAP_MAX_COLUMNS: u8 = 120;
 
 pub(crate) fn render_pane(
     pane: &Pane,
@@ -85,6 +92,23 @@ pub(crate) fn render_pane(
                     Some(&mut *scene),
                     Some(undercurls),
                 );
+
+                if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)
+                    && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
+                {
+                    let [tr, tg, tb, _] = chrome.thumb;
+                    Minimap {
+                        strip_id: pane.index,
+                        content_id: content.content_id(),
+                        lines_per_cell: MINIMAP_LINES_PER_CELL,
+                        max_columns: MINIMAP_MAX_COLUMNS,
+                        bg: [0, 0, 0, 0],
+                        thumb: chrome.thumb,
+                        thumb_border: [tr, tg, tb],
+                        palette: chrome.palette.to_vec(),
+                    }
+                    .render(strip, buf, scene);
+                }
             }
         },
         View::Run(run_id) => {

@@ -36,17 +36,20 @@ pub(crate) mod workspace_symbol_picker;
 use self::undercurl::UndercurlSpan;
 use crate::{
     app::Stoat,
+    buffer::BufferId,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
     keymap_state::{action_display_desc, Flags, StoatKeymapState},
+    minimap::MinimapContent,
     pane::{DockVisibility, FocusTarget},
     rebase::RebasePause,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
+    workspace::WorkspaceId,
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 use stoat_config::LineNumbers;
 use stoatty_widgets::ApcScene;
 
@@ -55,6 +58,23 @@ pub(crate) struct PaneCtx<'a> {
     pub(crate) buffers: &'a BufferRegistry,
     pub(crate) runs: &'a SlotMap<RunId, RunState>,
     pub(crate) terms: &'a SlotMap<TermId, TermSession>,
+}
+
+/// The lookup and colors a pane needs to declare its minimap strip.
+///
+/// Carried on [`FrameCtx`] so a pane resolves its strip's content-store id (via
+/// `(workspace, buffer)`) and the palette and thumb color stoatty paints it in,
+/// without the render path reaching back into [`Stoat`].
+#[derive(Clone, Copy)]
+pub(crate) struct MinimapChrome<'a> {
+    /// Active workspace, the first half of the [`Stoat::minimap_content`] key.
+    pub(crate) workspace: WorkspaceId,
+    /// Content stores this session declared, read for each strip's `content_id`.
+    pub(crate) content: &'a HashMap<(WorkspaceId, BufferId), MinimapContent>,
+    /// Syntax-scope palette the strip declares and its run summaries index.
+    pub(crate) palette: &'a [[u8; 3]],
+    /// Viewport-thumb fill color, rgba.
+    pub(crate) thumb: [u8; 4],
 }
 
 /// Ambient workspace and frame state shared across render functions. Bundled
@@ -114,6 +134,9 @@ pub(crate) struct FrameCtx<'a> {
     /// Whether editor panes reserve the right-edge minimap strip, resolved from
     /// [`crate::app::Stoat::minimap_enabled`]. Only takes effect under stoatty.
     pub(crate) minimap_enabled: bool,
+    /// The lookup and colors a pane needs to declare its minimap strip, `Some`
+    /// only when the strip is active (under stoatty with the minimap enabled).
+    pub(crate) minimap_chrome: Option<MinimapChrome<'a>>,
     /// Terminal cell the mouse last rested over, or `None` when it has not
     /// moved over a pane. The focused editor resolves the diagnostic under it
     /// to raise a hover popover.
@@ -194,6 +217,20 @@ pub(crate) fn frame(
 
     let mode = stoat.focused_mode().to_string();
     let minimap_enabled = stoat.minimap_enabled();
+    stoat.ensure_minimap_content_ids();
+    let minimap_chrome = (stoat.stoatty && minimap_enabled).then(|| {
+        let thumb = {
+            let sel = stoat.theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
+            let [r, g, b] = review::style_rgb(sel.bg).unwrap_or([90, 90, 110]);
+            [r, g, b, 96]
+        };
+        MinimapChrome {
+            workspace: stoat.active_workspace,
+            content: &stoat.minimap_content,
+            palette: stoat.minimap_class_table.palette(),
+            thumb,
+        }
+    });
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -239,6 +276,7 @@ pub(crate) fn frame(
             .editor_line_numbers
             .unwrap_or(LineNumbers::Relative),
         minimap_enabled,
+        minimap_chrome,
         hover_cell: stoat.hover_cell,
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),

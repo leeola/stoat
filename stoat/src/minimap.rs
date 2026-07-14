@@ -294,6 +294,7 @@ pub fn summarize_line(line: &str, tokens: &[LineToken]) -> Vec<Run> {
 pub struct ClassTable {
     palette: Vec<[u8; 3]>,
     by_style: HashMap<HighlightStyleId, u8>,
+    by_color: HashMap<[u8; 3], u8>,
 }
 
 impl ClassTable {
@@ -303,23 +304,44 @@ impl ClassTable {
 
         let mut palette = vec![default_fg];
         let mut by_style = HashMap::new();
+        let mut by_color = HashMap::new();
         for index in 0..styles.theme_keys().len() {
             let Some(style_id) = styles.id_for_highlight(HighlightId(index as u32)) else {
                 palette.push(default_fg);
                 continue;
             };
-            by_style.insert(style_id, (index + 1) as u8);
+            let class = (index + 1) as u8;
+            by_style.insert(style_id, class);
             let fg = styles.interner[style_id].foreground.unwrap_or(Color::White);
-            palette.push(color_to_rgb(fg));
+            let rgb = color_to_rgb(fg);
+            by_color.entry(rgb).or_insert(class);
+            palette.push(rgb);
         }
 
-        ClassTable { palette, by_style }
+        ClassTable {
+            palette,
+            by_style,
+            by_color,
+        }
     }
 
     /// The class a token drawn in `style` maps to, or 0 when the style is not a
     /// recognized syntax scope.
     pub fn class_of(&self, style: HighlightStyleId) -> u8 {
         self.by_style.get(&style).copied().unwrap_or(0)
+    }
+
+    /// The class a token whose resolved foreground is `color` maps to, or 0 when
+    /// no syntax scope draws in that color.
+    ///
+    /// The emission layer resolves highlights to [`Color`] rather than a
+    /// [`HighlightStyleId`], so this bridges a rendered token's foreground to its
+    /// palette class where [`Self::class_of`] would need the interned id.
+    pub fn class_of_color(&self, color: Color) -> u8 {
+        self.by_color
+            .get(&color_to_rgb(color))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The rgb color of each class, indexed by class.
@@ -542,6 +564,32 @@ mod tests {
             scopes + 1,
             "the default foreground plus one color per syntax scope",
         );
+    }
+
+    #[test]
+    fn class_of_color_bridges_foreground_to_class() {
+        use super::ClassTable;
+        use crate::theme::Theme;
+        use ratatui::style::Color;
+
+        let table = ClassTable::from_theme(&Theme::empty());
+        let palette = table.palette();
+
+        let [r, g, b] = palette[1];
+        let class = table.class_of_color(Color::Rgb(r, g, b));
+        assert!(class >= 1, "a scope foreground maps to a syntax class");
+        assert_eq!(
+            palette[class as usize], palette[1],
+            "the mapped class paints the queried color",
+        );
+
+        if !palette.contains(&[1, 2, 3]) {
+            assert_eq!(
+                table.class_of_color(Color::Rgb(1, 2, 3)),
+                0,
+                "a foreground no scope uses is the default class",
+            );
+        }
     }
 
     #[test]

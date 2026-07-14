@@ -888,6 +888,20 @@ pub struct Stoat {
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
     pub(crate) smooth_scroll: crate::smooth_scroll::SmoothScrollState,
+    /// Per-line minimap summaries for the strips declared this session, keyed by
+    /// `(workspace, buffer)` so a buffer id reused across workspaces never
+    /// aliases another workspace's content.
+    ///
+    /// [`Self::emit_minimap`] syncs each entry from its buffer's edits at the
+    /// frame seam and drains the resulting splices into `minimap_lines`.
+    pub(crate) minimap_content:
+        std::collections::HashMap<(WorkspaceId, BufferId), crate::minimap::MinimapContent>,
+    /// Monotonic source of the `content_id`s naming minimap content stores on the
+    /// terminal, global so ids stay unique across workspaces.
+    pub(crate) minimap_next_content_id: u32,
+    /// Syntax-scope palette the minimap strips declare and their run summaries
+    /// index, resolved from [`Self::theme`].
+    pub(crate) minimap_class_table: crate::minimap::ClassTable,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -1007,6 +1021,7 @@ impl Stoat {
         };
 
         let syntax_styles = SyntaxStyles::from_theme(&theme);
+        let minimap_class_table = crate::minimap::ClassTable::from_theme(&theme);
         let language_registry = Arc::new(LanguageRegistry::standard());
         let theme_keys = syntax_styles.theme_keys();
         for lang in language_registry.languages() {
@@ -1201,6 +1216,9 @@ impl Stoat {
             apc_scene: ApcScene::new(),
             pending_undercurls: Vec::new(),
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
+            minimap_content: std::collections::HashMap::new(),
+            minimap_next_content_id: 0,
+            minimap_class_table,
         };
 
         if let Some(message) = config_error {
@@ -1605,6 +1623,7 @@ impl Stoat {
                     }
                     self.emit_apc_scene();
                     self.emit_smooth_scroll();
+                    self.emit_minimap();
                     if render.is_closed() {
                         break;
                     }
@@ -5398,6 +5417,149 @@ impl Stoat {
         }
     }
 
+    /// Assign a `content_id` to each visible split-editor buffer a minimap strip
+    /// may render, so the declare widget can read the id while the frame paints.
+    ///
+    /// The summaries themselves sync afterward at the frame seam in
+    /// [`Self::emit_minimap`]. A no-op outside stoatty or with the minimap off.
+    pub(crate) fn ensure_minimap_content_ids(&mut self) {
+        if !self.stoatty || !self.minimap_enabled() {
+            return;
+        }
+        let ws_id = self.active_workspace;
+        let ws = &self.workspaces[ws_id];
+        let buffer_ids: Vec<BufferId> = ws
+            .panes
+            .split_panes()
+            .filter_map(|(_, pane)| {
+                let View::Editor(editor_id) = pane.view else {
+                    return None;
+                };
+                Some(ws.editors.get(editor_id)?.buffer_id)
+            })
+            .collect();
+
+        for buffer_id in buffer_ids {
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.minimap_content.entry((ws_id, buffer_id))
+            {
+                slot.insert(crate::minimap::MinimapContent::new(
+                    self.minimap_next_content_id,
+                ));
+                self.minimap_next_content_id += 1;
+            }
+        }
+    }
+
+    /// Sync each visible minimap strip's buffer and drain its summary changes to
+    /// the terminal as `minimap_lines`, retiring content for buffers that closed.
+    ///
+    /// Runs at the frame seam after [`Self::emit_smooth_scroll`], so each editor's
+    /// reserved strip rect from the paint is current. The strip declaration rides
+    /// the diffed scene from the paint. This sends only the persistent content
+    /// stores. A no-op outside stoatty.
+    fn emit_minimap(&mut self) {
+        if !self.stoatty {
+            return;
+        }
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+        let ws_id = self.active_workspace;
+
+        let strips: Vec<(BufferId, EditorId)> = {
+            let ws = &self.workspaces[ws_id];
+            ws.panes
+                .split_panes()
+                .filter_map(|(_, pane)| {
+                    let View::Editor(editor_id) = pane.view else {
+                        return None;
+                    };
+                    let editor = ws.editors.get(editor_id)?;
+                    editor.minimap_rect?;
+                    Some((editor.buffer_id, editor_id))
+                })
+                .collect()
+        };
+
+        let mut out = Vec::new();
+        for (buffer_id, editor_id) in strips {
+            self.sync_minimap_strip(ws_id, buffer_id, editor_id, &mut out);
+        }
+
+        let dropped: Vec<(WorkspaceId, BufferId)> = self
+            .minimap_content
+            .keys()
+            .filter(|(ws, buffer_id)| {
+                *ws == ws_id && self.workspaces[ws_id].buffers.get(*buffer_id).is_none()
+            })
+            .copied()
+            .collect();
+        for key in dropped {
+            if let Some(content) = self.minimap_content.remove(&key) {
+                stoatty_protocol::command::encode_minimap_drop_into(
+                    &mut out,
+                    &stoatty_protocol::command::MinimapDropCommand {
+                        content_id: content.content_id(),
+                    },
+                );
+            }
+        }
+
+        if !out.is_empty() {
+            let _ = apc_tx.send(out);
+        }
+    }
+
+    /// Sync one strip's [`crate::minimap::MinimapContent`] to its buffer and
+    /// append the drained splices to `out` as a `minimap_lines` frame.
+    fn sync_minimap_strip(
+        &mut self,
+        ws_id: WorkspaceId,
+        buffer_id: BufferId,
+        editor_id: EditorId,
+        out: &mut Vec<u8>,
+    ) {
+        let (content_id, synced_version) = match self.minimap_content.get(&(ws_id, buffer_id)) {
+            Some(content) => (content.content_id(), content.synced_version()),
+            None => return,
+        };
+
+        let snapshot = match self.workspaces[ws_id].editors.get_mut(editor_id) {
+            Some(editor) => editor.display_map.snapshot(),
+            None => return,
+        };
+        let (rope, version, edits) = {
+            let buf_snap = snapshot.buffer_snapshot();
+            (
+                buf_snap.rope().clone(),
+                buf_snap.version(),
+                buf_snap.edits_since(synced_version),
+            )
+        };
+
+        let class_table = &self.minimap_class_table;
+        let content = self
+            .minimap_content
+            .get_mut(&(ws_id, buffer_id))
+            .expect("checked above");
+        content.sync(&rope, version, &edits, |row, _text| {
+            minimap_line_tokens(&snapshot, row, class_table)
+        });
+
+        for splice in content.take_queued() {
+            stoatty_protocol::command::encode_minimap_lines_into(
+                out,
+                &stoatty_protocol::command::MinimapLinesCommand {
+                    content_id,
+                    start: splice.start,
+                    removed: splice.removed,
+                    lines: splice.lines.into_iter().map(convert_minimap_runs).collect(),
+                },
+            );
+        }
+    }
+
     /// Emit the stoatty smooth-scroll APC for every visible editor pane's current
     /// scroll position, pushing one byte batch onto the APC channel.
     ///
@@ -6266,6 +6428,55 @@ fn editor_page_content_version(
     diff_view.hash(&mut hasher);
     diff_version.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Resolve buffer `row`'s syntax highlights into minimap line tokens, one per
+/// colored span, dropping default-foreground runs the summary treats as class 0.
+///
+/// Byte offsets track the display chunk lengths, so a soft-wrapped line, tab
+/// expansion, or an inlay shifts the run boundaries. The mapping is exact for an
+/// unwrapped, tab-free line, which the coarse strip tolerates.
+fn minimap_line_tokens(
+    snapshot: &crate::display_map::DisplaySnapshot,
+    row: u32,
+    class_table: &crate::minimap::ClassTable,
+) -> Vec<crate::minimap::LineToken> {
+    let mut tokens = Vec::new();
+    let mut byte = 0usize;
+    for chunk in snapshot.highlighted_chunks(row..row + 1) {
+        if chunk.is_inlay {
+            continue;
+        }
+        let len = chunk.text.trim_end_matches('\n').len();
+        if len == 0 {
+            continue;
+        }
+        let class = chunk
+            .highlight_style
+            .and_then(|style| style.foreground)
+            .map_or(0, |fg| class_table.class_of_color(fg));
+        if class != 0 {
+            tokens.push(crate::minimap::LineToken {
+                range: byte..byte + len,
+                class,
+            });
+        }
+        byte += len;
+    }
+    tokens
+}
+
+/// Convert the engine's [`crate::minimap::Run`]s to their `minimap_lines` wire form.
+fn convert_minimap_runs(
+    runs: Vec<crate::minimap::Run>,
+) -> Vec<stoatty_protocol::command::MinimapRun> {
+    runs.into_iter()
+        .map(|run| stoatty_protocol::command::MinimapRun {
+            start_col: run.start_col,
+            len: run.len,
+            class: run.class,
+        })
+        .collect()
 }
 
 /// Convert an LSP `file:` URI to a [`PathBuf`]. Returns `None` for any
@@ -8245,6 +8456,87 @@ mod tests {
     }
 
     #[test]
+    fn minimap_emits_declare_and_line_summaries() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/minimap");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        h.stoat.emit_minimap();
+        let first = drain_apc(&mut rx);
+        assert!(
+            first.iter().any(|cmd| matches!(cmd, Command::Minimap(_))),
+            "the first frame declares the strip, got {first:?}"
+        );
+        assert!(
+            first
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
+            "the first frame sends the initial line summaries, got {first:?}"
+        );
+
+        h.type_keys("i z");
+        h.settle();
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        h.stoat.emit_minimap();
+        let edited = drain_apc(&mut rx);
+        assert!(
+            edited
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
+            "an edit splices the changed line, got {edited:?}"
+        );
+    }
+
+    #[test]
+    fn minimap_drops_content_when_the_buffer_closes() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/minimap-drop");
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        h.fake_fs().insert_file(&a, b"alpha\nbravo\n");
+        h.fake_fs().insert_file(&b, b"charlie\ndelta\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: a });
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: b });
+        h.settle();
+        h.resize(80, 24);
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        h.stoat.emit_minimap();
+        let _ = drain_apc(&mut rx);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer);
+        h.settle();
+        let _ = h.stoat.render();
+        h.stoat.emit_minimap();
+        let closed = drain_apc(&mut rx);
+        assert!(
+            closed
+                .iter()
+                .any(|cmd| matches!(cmd, Command::MinimapDrop(_))),
+            "closing a buffer drops its minimap content, got {closed:?}"
+        );
+    }
+
+    #[test]
     fn snapshot_initial_plain() {
         let mut h = Stoat::test();
         h.assert_snapshot("initial_plain");
@@ -8967,9 +9259,11 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
-        // Line numbers off so the paint carries no off-grid gutter and the
-        // scene stays genuinely widget-free.
+        // Line numbers off so the paint carries no off-grid gutter, and the
+        // minimap off so no strip declare rides the scene. Both keep the frame
+        // genuinely widget-free.
         h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
+        h.stoat.settings.editor_minimap = Some(false);
 
         let root = std::path::PathBuf::from("/scene");
         let path = root.join("a.txt");
