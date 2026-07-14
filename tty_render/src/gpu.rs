@@ -17,6 +17,7 @@ use crate::{
         bar::BarPass,
         decoration::DecorationPass,
         icon::IconPass,
+        minimap::MinimapPass,
         overlay::OverlayPass,
         panel::PanelPass,
         text::TextPass,
@@ -240,6 +241,7 @@ pub struct Renderer {
     overlay: OverlayPass,
     icon: IconPass,
     bar: BarPass,
+    minimap: MinimapPass,
     /// Perf HUD overlay pass, composited topmost. Present only under `perf`.
     #[cfg(feature = "perf")]
     hud: HudPass,
@@ -293,6 +295,7 @@ impl Renderer {
             overlay: OverlayPass::new(device, format, metrics),
             icon: IconPass::new(device, format, metrics),
             bar: BarPass::new(device, format, metrics),
+            minimap: MinimapPass::new(device, format, metrics),
             #[cfg(feature = "perf")]
             hud: HudPass::new(device, format),
             width: size[0],
@@ -332,6 +335,7 @@ impl Renderer {
         self.overlay.set_metrics(metrics);
         self.icon.set_metrics(metrics);
         self.bar.set_metrics(metrics);
+        self.minimap.set_metrics(metrics);
     }
 
     /// Draw a frame for `grid` into `view`: clear to the default background,
@@ -379,6 +383,7 @@ impl Renderer {
             .prepare(device, queue, grid.icons(), grid.panels(), resolution);
         self.bar
             .prepare(device, queue, grid.bars(), grid.panels(), resolution);
+        self.minimap.prepare(device, queue, grid, resolution);
 
         // Time this frame's GPU work when the timer's current slot is free.
         #[cfg(feature = "perf")]
@@ -424,6 +429,11 @@ impl Renderer {
             // below floating popovers and icons, like a gutter beneath a
             // tooltip; the bars fill behind the runs.
             self.bar.draw(&mut render_pass);
+            // The minimap strip sits over the bars and below the cursor. It
+            // scissors to each strip, so restore the full surface before the
+            // text runs and cursor that follow.
+            self.minimap.draw(&mut render_pass);
+            render_pass.set_scissor_rect(0, 0, self.width, self.height);
             self.text.draw_text_runs(&mut render_pass);
             self.background.draw_cursor(&mut render_pass);
             self.overlay.draw(&mut render_pass);

@@ -9,6 +9,7 @@ pub mod decoration;
 #[cfg(feature = "perf")]
 pub mod hud;
 pub mod icon;
+pub mod minimap;
 pub mod overlay;
 pub mod panel;
 pub mod text;

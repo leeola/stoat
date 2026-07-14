@@ -4117,6 +4117,7 @@ dependencies = [
  "lru 0.16.4",
  "raw-window-handle",
  "rustc-hash 2.1.2",
+ "stoatty_protocol",
  "stoatty_term",
  "swash",
  "wgpu",
