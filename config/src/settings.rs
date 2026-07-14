@@ -69,6 +69,10 @@ pub struct Settings {
     /// [`LineNumbers::Relative`]. Set `editor.line_numbers = relative | absolute
     /// | off;` in stcfg (`false` is accepted as `off`, `true` as `relative`).
     pub editor_line_numbers: Option<LineNumbers>,
+    /// Whether editor panes under stoatty show the right-edge minimap strip.
+    /// `None` falls back to enabled. Set `editor.minimap = false;` in stcfg to
+    /// hide it. The `:minimap` command toggles it at runtime.
+    pub editor_minimap: Option<bool>,
     /// How many hidden buffers keep their full highlight state (syntax tree,
     /// tokens) before the least-recently-shown are evicted. `None` falls back to
     /// 64. `0` drops a buffer's state as soon as it is hidden. Set via
@@ -159,6 +163,7 @@ impl Settings {
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             scrolloff: other.scrolloff.or(self.scrolloff),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
+            editor_minimap: other.editor_minimap.or(self.editor_minimap),
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
@@ -249,6 +254,11 @@ impl Settings {
                 };
                 if let Some(n) = numbers {
                     self.editor_line_numbers = Some(n);
+                }
+            },
+            ["editor", "minimap"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.editor_minimap = Some(b);
                 }
             },
             ["terminal", "shell"] => {
@@ -344,6 +354,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                editor_minimap: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -405,6 +416,14 @@ mod tests {
             ln("on init { editor.line_numbers = relative; }"),
             Some(LineNumbers::Relative)
         );
+    }
+
+    #[test]
+    fn from_config_extracts_editor_minimap() {
+        let minimap = |src: &str| Settings::from_config(&parse_ok(src)).editor_minimap;
+        assert_eq!(minimap("on init { editor.minimap = false; }"), Some(false));
+        assert_eq!(minimap("on init { editor.minimap = true; }"), Some(true));
+        assert_eq!(minimap("on init { }"), None, "absent falls back to enabled");
     }
 
     #[test]
@@ -484,6 +503,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                editor_minimap: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -513,6 +533,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                editor_minimap: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -551,6 +572,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            editor_minimap: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -572,6 +594,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            editor_minimap: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -595,6 +618,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                editor_minimap: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -621,6 +645,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            editor_minimap: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -645,6 +670,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                editor_minimap: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -682,6 +708,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                editor_minimap: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -711,6 +738,7 @@ mod tests {
                 mouse_capture: None,
                 scrolloff: None,
                 editor_line_numbers: None,
+                editor_minimap: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -737,6 +765,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            editor_minimap: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -758,6 +787,7 @@ mod tests {
             mouse_capture: None,
             scrolloff: None,
             editor_line_numbers: None,
+            editor_minimap: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,

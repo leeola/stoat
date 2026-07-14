@@ -124,6 +124,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "relative",
         },
         SettingDef {
+            path: &[Lit("editor"), Lit("minimap")],
+            shape: ValueShape::Bool,
+            doc: "Whether editor panes under stoatty show the right-edge minimap \
+                  strip.",
+            default: "true",
+        },
+        SettingDef {
             path: &[Lit("terminal"), Lit("shell")],
             shape: ValueShape::String,
             doc: "Program a terminal pane spawns as its subshell.",
