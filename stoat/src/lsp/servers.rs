@@ -6,15 +6,28 @@
 //! through, feeding the lazy-spawn path in
 //! [`crate::action_handlers::lsp::notify_buffer_opened`].
 
-use crate::{host::LanguageServerFeature, lsp::registry::ServerSelector};
-use std::collections::HashSet;
+use crate::{
+    host::{LanguageServerFeature, LspHost},
+    lsp::registry::ServerSelector,
+};
+use std::{collections::HashSet, sync::Arc};
 use stoat_config::Settings;
 
-/// A language server resolved for a language, carrying its registry name, spawn
-/// argv, and the feature filters that route requests to it.
+/// How a resolved server's host is obtained.
+///
+/// Most servers are external programs spawned as a subprocess. An in-process
+/// server is built directly in the editor by calling a constructor, skipping
+/// process spawn and the project environment entirely.
+pub(crate) enum ServerSource {
+    Command(Vec<String>),
+    InProcess(fn() -> Arc<dyn LspHost>),
+}
+
+/// A language server resolved for a language, carrying its registry name, how to
+/// obtain its host, and the feature filters that route requests to it.
 pub(crate) struct ResolvedServer {
     pub(crate) name: String,
-    pub(crate) argv: Vec<String>,
+    pub(crate) source: ServerSource,
     pub(crate) only: HashSet<LanguageServerFeature>,
     pub(crate) except: HashSet<LanguageServerFeature>,
 }
@@ -33,22 +46,51 @@ impl ResolvedServer {
 /// One entry in the builtin per-language server table.
 struct BuiltinServer {
     name: &'static str,
-    argv: &'static [&'static str],
+    source: BuiltinSource,
     only: &'static [LanguageServerFeature],
     except: &'static [LanguageServerFeature],
+}
+
+/// The static form of [`ServerSource`] used in the builtin table.
+enum BuiltinSource {
+    Command(&'static [&'static str]),
+    InProcess(fn() -> Arc<dyn LspHost>),
 }
 
 /// The builtin servers for `language`, primary first.
 fn builtin_servers(language: &str) -> &'static [BuiltinServer] {
     const RUST: &[BuiltinServer] = &[BuiltinServer {
         name: "rust-analyzer",
-        argv: &["rust-analyzer"],
+        source: BuiltinSource::Command(&["rust-analyzer"]),
+        only: &[],
+        except: &[],
+    }];
+    const STCFG: &[BuiltinServer] = &[BuiltinServer {
+        name: "stcfg-ls",
+        source: BuiltinSource::InProcess(stcfg_host),
         only: &[],
         except: &[],
     }];
     match language {
         "rust" => RUST,
+        "stcfg" => STCFG,
         _ => &[],
+    }
+}
+
+fn stcfg_host() -> Arc<dyn LspHost> {
+    Arc::new(crate::lsp::stcfg::StcfgLsp::new())
+}
+
+/// The LSP language name for a file `extension` that has no tree-sitter grammar.
+///
+/// A grammar-backed buffer resolves its language through the language registry.
+/// A `.stcfg` file has no grammar, so it has no registry language, yet still
+/// needs an LSP identity to route to the in-process stcfg server.
+pub(crate) fn lsp_language_for_extension(extension: &str) -> Option<&'static str> {
+    match extension {
+        "stcfg" => Some("stcfg"),
+        _ => None,
     }
 }
 
@@ -73,7 +115,7 @@ pub(crate) fn resolve_servers(settings: &Settings, language: &str) -> Vec<Resolv
             .unwrap_or_default();
         resolved.push(ResolvedServer {
             name: command.clone(),
-            argv: override_argv.clone(),
+            source: ServerSource::Command(override_argv.clone()),
             only,
             except,
         });
@@ -83,9 +125,15 @@ pub(crate) fn resolve_servers(settings: &Settings, language: &str) -> Vec<Resolv
 }
 
 fn resolve_builtin(server: &BuiltinServer) -> ResolvedServer {
+    let source = match server.source {
+        BuiltinSource::Command(argv) => {
+            ServerSource::Command(argv.iter().map(|arg| arg.to_string()).collect())
+        },
+        BuiltinSource::InProcess(construct) => ServerSource::InProcess(construct),
+    };
     ResolvedServer {
         name: server.name.to_string(),
-        argv: server.argv.iter().map(|arg| arg.to_string()).collect(),
+        source,
         only: feature_set(server.only),
         except: feature_set(server.except),
     }
@@ -97,13 +145,19 @@ fn feature_set(features: &[LanguageServerFeature]) -> HashSet<LanguageServerFeat
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_servers;
+    use super::{lsp_language_for_extension, resolve_servers, ServerSource};
     use stoat_config::Settings;
 
     fn names_and_argv(settings: &Settings, language: &str) -> Vec<(String, Vec<String>)> {
         resolve_servers(settings, language)
             .into_iter()
-            .map(|server| (server.name, server.argv))
+            .map(|server| {
+                let argv = match server.source {
+                    ServerSource::Command(argv) => argv,
+                    ServerSource::InProcess(_) => Vec::new(),
+                };
+                (server.name, argv)
+            })
             .collect()
     }
 
@@ -156,5 +210,19 @@ mod tests {
             names_and_argv(&settings, "python"),
             vec![("pyright".to_string(), vec!["pyright".to_string()])],
         );
+    }
+
+    #[test]
+    fn stcfg_maps_to_the_in_process_server() {
+        let servers = resolve_servers(&Settings::default(), "stcfg");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "stcfg-ls");
+        assert!(matches!(servers[0].source, ServerSource::InProcess(_)));
+    }
+
+    #[test]
+    fn stcfg_extension_resolves_to_the_stcfg_language() {
+        assert_eq!(lsp_language_for_extension("stcfg"), Some("stcfg"));
+        assert_eq!(lsp_language_for_extension("rs"), None);
     }
 }

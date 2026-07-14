@@ -13,6 +13,7 @@ use crate::{
     agent_ipc::AgentQuery,
     app::{PendingSpawn, Stoat, UpdateEffect},
     buffer::BufferId,
+    buffer_registry::BufferRegistry,
     display_map::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
         HighlightStyleInterner, InlayKind, SemanticTokenHighlight,
@@ -20,6 +21,7 @@ use crate::{
     editor_state::EditorId,
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
+    lsp::servers::ServerSource,
     theme::scope,
     workspace::WorkspaceUid,
 };
@@ -116,6 +118,21 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
     crate::action_handlers::movement::jump_to_offset(stoat, target)
 }
 
+/// The language name used to route LSP traffic for `buffer_id`.
+///
+/// A grammar-backed buffer uses its tree-sitter language's name. A buffer with
+/// no grammar (e.g. `.stcfg`) falls back to an extension-keyed LSP identity via
+/// [`crate::lsp::servers::lsp_language_for_extension`], so an in-process server
+/// can still serve it. `None` when neither resolves, leaving the buffer without
+/// a language server.
+pub(crate) fn lsp_language_name(buffers: &BufferRegistry, buffer_id: BufferId) -> Option<String> {
+    if let Some(language) = buffers.language_for(buffer_id) {
+        return Some(language.name.to_string());
+    }
+    let extension = buffers.path_for(buffer_id)?.extension()?.to_str()?;
+    crate::lsp::servers::lsp_language_for_extension(extension).map(str::to_string)
+}
+
 /// Notify the workspace's LSP host that `buffer_id` was just opened.
 /// No-op when `buffer_id` is already in [`Stoat::lsp_opened`]; that
 /// dedupes the second `OpenFile` of an already-loaded buffer (which
@@ -141,11 +158,7 @@ pub(crate) fn notify_buffer_opened(
     let Some(uri) = path_to_uri(path) else {
         return;
     };
-    let language_id = stoat
-        .active_workspace()
-        .buffers
-        .language_for(buffer_id)
-        .map(|lang| lang.name.to_string())
+    let language_id = lsp_language_name(&stoat.active_workspace().buffers, buffer_id)
         .unwrap_or_else(|| "plaintext".to_string());
     let buffer_version = stoat
         .active_workspace()
@@ -208,10 +221,10 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
     if stoat.lsp_registry.has_real_sole_client() {
         return;
     }
-    let Some(language) = stoat.active_workspace().buffers.language_for(buffer_id) else {
+    let Some(language_name) = lsp_language_name(&stoat.active_workspace().buffers, buffer_id)
+    else {
         return;
     };
-    let language_name = language.name.to_string();
 
     // Only the language's servers not already up and not already tried this
     // session. A failed spawn is never retried.
@@ -227,18 +240,23 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
         return;
     }
 
-    // The workspace's direnv environment is still loading. Park the spawns
-    // rather than race the load with the wrong PATH. install_pending re-fires
-    // them once the env lands, so servers start with the project (e.g. flake)
-    // toolchain.
-    if stoat.active_workspace().env.state == crate::project_env::EnvLoadState::Loading {
-        stoat.lsp_spawn_deferred = Some(buffer_id);
-        return;
-    }
-
+    // A subprocess server started before the direnv environment lands would run
+    // under the wrong PATH, so defer those until install_pending re-fires them.
+    // An in-process server has no process and no environment, so it starts now
+    // regardless.
+    let env_loading =
+        stoat.active_workspace().env.state == crate::project_env::EnvLoadState::Loading;
+    let mut deferred = false;
     for server in to_spawn {
+        if env_loading && matches!(server.source, ServerSource::Command(_)) {
+            deferred = true;
+            continue;
+        }
         stoat.lsp_registry.mark_spawn_attempted(server.name.clone());
         spawn_server(stoat, server, language_name.clone());
+    }
+    if deferred {
+        stoat.lsp_spawn_deferred = Some(buffer_id);
     }
 }
 
@@ -246,13 +264,25 @@ pub(crate) fn maybe_spawn_language_server(stoat: &mut Stoat, buffer_id: BufferId
 /// executor, parking the ready host or the failure in
 /// [`Stoat::pending_lsp_host`].
 fn spawn_server(stoat: &mut Stoat, server: crate::lsp::servers::ResolvedServer, language: String) {
+    let crate::lsp::servers::ResolvedServer { name, source, .. } = server;
+    match source {
+        ServerSource::Command(argv) => spawn_command_server(stoat, name, argv, language),
+        ServerSource::InProcess(construct) => {
+            spawn_in_process_server(stoat, name, construct, language)
+        },
+    }
+}
+
+/// Spawn a subprocess language server `command` with `argv`, initialize it under
+/// the workspace environment, and park the result.
+fn spawn_command_server(stoat: &mut Stoat, command: String, argv: Vec<String>, language: String) {
     let git_root = stoat.active_workspace().git_root.clone();
     let env = stoat.active_workspace().env.diff.clone();
     let root_uri = path_to_uri(&git_root);
     let slot = stoat.pending_lsp_host.clone();
     let wake = stoat.redraw_notify.clone();
     let transcript = if stoat.settings.text_proto_log == Some(true) {
-        match create_lsp_transcript(&server.name) {
+        match create_lsp_transcript(&command) {
             Ok(transcript) => Some(transcript),
             Err(err) => {
                 tracing::warn!(target: "stoat::lsp", ?err, "text_proto_log transcript disabled");
@@ -263,11 +293,6 @@ fn spawn_server(stoat: &mut Stoat, server: crate::lsp::servers::ResolvedServer, 
         None
     };
 
-    let crate::lsp::servers::ResolvedServer {
-        name: command,
-        argv,
-        ..
-    } = server;
     let args: Vec<String> = argv.into_iter().skip(1).collect();
 
     stoat
@@ -310,6 +335,45 @@ fn spawn_server(stoat: &mut Stoat, server: crate::lsp::servers::ResolvedServer, 
                 language,
                 result: Ok(host),
             });
+        })
+        .detach();
+}
+
+/// Build an in-process language server `name` for `language` on the workspace
+/// executor and park the result.
+///
+/// There is no subprocess and no environment overlay. An in-process host emits
+/// no server-initiated traffic, so once parked it wakes the redraw loop itself;
+/// otherwise nothing would drive [`Stoat::install_pending_lsp_host`].
+fn spawn_in_process_server(
+    stoat: &mut Stoat,
+    name: String,
+    construct: fn() -> Arc<dyn LspHost>,
+    language: String,
+) {
+    let slot = stoat.pending_lsp_host.clone();
+    let wake = stoat.redraw_notify.clone();
+
+    stoat
+        .executor
+        .spawn(async move {
+            let host = construct();
+            let result = match host.initialize(None).await {
+                Ok(_) => {
+                    tracing::info!(target: "stoat::lsp", %name, "in-process language server initialized");
+                    Ok(host)
+                },
+                Err(err) => {
+                    tracing::warn!(target: "stoat::lsp", ?err, %name, "in-process language server initialize failed");
+                    Err(format!("{name}: {err}"))
+                },
+            };
+            slot.lock().expect("pending lsp host mutex").push(PendingSpawn {
+                server: name,
+                language,
+                result,
+            });
+            wake.notify_one();
         })
         .detach();
 }
@@ -4016,6 +4080,81 @@ mod tests {
         assert_eq!(
             h.stoat.active_workspace().env.state,
             crate::project_env::EnvLoadState::Loaded,
+        );
+    }
+
+    /// Bring up the in-process stcfg server against an empty `config.stcfg`.
+    ///
+    /// Resets the registry so no injected sole host suppresses auto-spawn, opens
+    /// the file (queuing the in-process spawn), then drives one `update` so the
+    /// parked host installs. Returns the file path.
+    fn open_stcfg_with_server(h: &mut TestHarness) -> PathBuf {
+        h.stoat.lsp_registry = crate::lsp::registry::LspRegistry::new();
+        h.stoat.set_lsp_auto_spawn(true);
+
+        let root = PathBuf::from("/cfg");
+        let path = root.join("config.stcfg");
+        h.fake_fs()
+            .insert_files(std::iter::once((path.clone(), b"".as_slice())));
+        h.stoat.active_workspace_mut().git_root = root;
+
+        open_buffer(h, path.clone());
+        h.type_keys("i");
+        path
+    }
+
+    #[test]
+    fn stcfg_buffer_completes_settings_via_in_process_server() {
+        use crate::completion::{request::COMPLETION_DEBOUNCE, CompletionSource};
+
+        let mut h = TestHarness::with_size(80, 24);
+        open_stcfg_with_server(&mut h);
+
+        h.type_text("on init { form");
+
+        // did_change (50ms) syncs the buffer to the server before the completion
+        // request (150ms) reads it.
+        h.advance_clock(super::LSP_DID_CHANGE_DEBOUNCE);
+        h.advance_clock(COMPLETION_DEBOUNCE);
+
+        let popup = h
+            .stoat
+            .pending_completion
+            .clone()
+            .expect("completion popup armed");
+        let format_item = popup
+            .items
+            .iter()
+            .find(|item| item.label == "format_on_save")
+            .expect("in-process stcfg server offers format_on_save");
+        assert_eq!(format_item.source, CompletionSource::Lsp);
+    }
+
+    #[test]
+    fn stcfg_buffer_reports_syntax_error_diagnostics() {
+        use lsp_types::DiagnosticSeverity;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let path = open_stcfg_with_server(&mut h);
+
+        h.type_text("on init { format_on_save = ");
+
+        // did_change (50ms) syncs before the pull-diagnostics request (300ms).
+        h.advance_clock(super::LSP_DID_CHANGE_DEBOUNCE);
+        h.advance_clock(Duration::from_millis(300));
+
+        let diagnostics: Vec<_> = h
+            .stoat
+            .diagnostics
+            .iter()
+            .find(|(diag_path, _)| *diag_path == path)
+            .map(|(_, diags)| diags.to_vec())
+            .expect("diagnostics recorded for config.stcfg");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diag| diag.severity == Some(DiagnosticSeverity::ERROR)),
+            "expected a syntax-error diagnostic, got {diagnostics:?}",
         );
     }
 

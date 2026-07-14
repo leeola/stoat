@@ -1355,8 +1355,8 @@ impl Stoat {
     /// injected sole client, or a noop. A buffer with no language falls back
     /// to the sole client, or a noop.
     pub(crate) fn lsp_for(&self, buffer_id: BufferId) -> Arc<dyn LspHost> {
-        match self.active_workspace().buffers.language_for(buffer_id) {
-            Some(language) => self.lsp_registry.route(language.name),
+        match action_handlers::lsp::lsp_language_name(&self.active_workspace().buffers, buffer_id) {
+            Some(name) => self.lsp_registry.route(&name),
             None => self.lsp_registry.sole_or_noop(),
         }
     }
@@ -1367,12 +1367,10 @@ impl Stoat {
     /// Every running server for the buffer's language needs the document, so
     /// this returns all of them (or the injected sole client when none are up).
     pub(crate) fn hosts_for_buffer(&self, buffer_id: BufferId) -> Vec<Arc<dyn LspHost>> {
-        let language = self.active_workspace().buffers.language_for(buffer_id);
-        let name = language
-            .as_ref()
-            .map(|language| language.name)
-            .unwrap_or("");
-        self.lsp_registry.hosts_for_language(name)
+        let name =
+            action_handlers::lsp::lsp_language_name(&self.active_workspace().buffers, buffer_id)
+                .unwrap_or_default();
+        self.lsp_registry.hosts_for_language(&name)
     }
 
     /// The language server that should answer a single-target `feature` request
@@ -1403,12 +1401,10 @@ impl Stoat {
         buffer_id: BufferId,
         feature: LanguageServerFeature,
     ) -> Vec<(String, Arc<dyn LspHost>)> {
-        let language = self.active_workspace().buffers.language_for(buffer_id);
-        let name = language
-            .as_ref()
-            .map(|language| language.name)
-            .unwrap_or("");
-        self.lsp_registry.hosts_with_feature(name, feature)
+        let name =
+            action_handlers::lsp::lsp_language_name(&self.active_workspace().buffers, buffer_id)
+                .unwrap_or_default();
+        self.lsp_registry.hosts_with_feature(&name, feature)
     }
 
     /// Reap the language server on quit. Awaits [`LspHost::shutdown`]
@@ -2723,7 +2719,9 @@ impl Stoat {
                 .into_iter()
                 .filter_map(|path| {
                     let id = buffers.id_for_path(&path)?;
-                    if buffers.language_for(id)?.name != language.as_str() {
+                    if action_handlers::lsp::lsp_language_name(buffers, id).as_deref()
+                        != Some(language.as_str())
+                    {
                         return None;
                     }
                     let text = buffers
