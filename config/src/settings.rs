@@ -105,9 +105,10 @@ pub struct Settings {
     /// Per-language language-server command overrides, keyed by language
     /// name. Each value is an argv whose first element is the executable
     /// and the rest are arguments. Set via
-    /// `lsp.server.<language> = ["cmd", "arg"];` in stcfg. An entry wins
-    /// over the builtin table. An empty argv disables the server for that
-    /// language. A language with no entry falls back to the builtin.
+    /// `lsp.server.<language> = ["cmd", "arg"];` in stcfg. An entry replaces
+    /// the language's primary server, keeping any builtin secondary servers,
+    /// and disables the primary when the argv is empty. A language with no
+    /// entry falls back to the builtin.
     pub lsp_servers: BTreeMap<String, Vec<String>>,
     /// Named finder scopes, each a list of globs (relative to the workspace
     /// root) that scope lists. Set via `finder.scope.<name> = ["src/**"];` in
