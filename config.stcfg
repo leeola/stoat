@@ -747,6 +747,7 @@ on key {
         s -> [SplitRight(), SetMode(normal)];
         v -> [SplitDown(), SetMode(normal)];
         n -> SetMode(space_pane_nav_new);
+        e -> SetMode(space_pane_display);
         f -> OpenFileFinderHSplit();
         F -> OpenFileFinderVSplit();
         q -> [ClosePane(), SetMode(normal)];
@@ -765,5 +766,18 @@ on key {
         Escape -> SetMode(normal);
         s -> [SplitNewRight(), SetMode(normal)];
         v -> [SplitNewDown(), SetMode(normal)];
+    }
+    mode == space_pane_display {
+        Escape -> SetMode(normal);
+        1 -> [FocusPane(1), SetMode(normal)];
+        2 -> [FocusPane(2), SetMode(normal)];
+        3 -> [FocusPane(3), SetMode(normal)];
+        4 -> [FocusPane(4), SetMode(normal)];
+        5 -> [FocusPane(5), SetMode(normal)];
+        6 -> [FocusPane(6), SetMode(normal)];
+        7 -> [FocusPane(7), SetMode(normal)];
+        8 -> [FocusPane(8), SetMode(normal)];
+        9 -> [FocusPane(9), SetMode(normal)];
+        0 -> [FocusPane(10), SetMode(normal)];
     }
 }

@@ -1,4 +1,8 @@
-use crate::{action::define_action, ActionKind, ActionPriority};
+use crate::{
+    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    ValueSource,
+};
+use std::any::Any;
 
 define_action!(
     SplitRightDef,
@@ -84,6 +88,63 @@ define_action!(
     "focus previous pane",
     "Move focus to the previous pane in traversal order, wrapping around."
 );
+
+const FOCUS_PANE_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "index",
+    kind: ParamKind::Number,
+    value_source: ValueSource::None,
+    required: true,
+    description: "1-based pane position in layout order. 10 addresses the pane displayed as 0.",
+}];
+
+#[derive(Debug)]
+pub struct FocusPaneDef;
+
+impl ActionDef for FocusPaneDef {
+    fn name(&self) -> &'static str {
+        "FocusPane"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::FocusPane
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        FOCUS_PANE_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "focus pane by number"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Move focus to the pane at the given 1-based position in layout order, the same order pane-ID badges number panes. Out-of-range indices leave focus unchanged."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+#[derive(Debug)]
+pub struct FocusPane {
+    pub index: usize,
+}
+
+impl FocusPane {
+    pub const DEF: &FocusPaneDef = &FocusPaneDef;
+}
+
+impl Action for FocusPane {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 define_action!(
     ClosePaneDef,
     ClosePane,
@@ -153,5 +214,21 @@ mod tests {
     fn downcast() {
         let action: Box<dyn Action> = Box::new(SplitRight);
         assert!(action.as_any().downcast_ref::<SplitRight>().is_some());
+    }
+
+    #[test]
+    fn focus_pane_carries_index() {
+        let action = FocusPane { index: 3 };
+        assert_eq!(action.kind(), ActionKind::FocusPane);
+        assert_eq!(action.def().name(), "FocusPane");
+        assert_eq!(action.def().params().len(), 1);
+        assert_eq!(action.def().params()[0].name, "index");
+
+        let boxed: Box<dyn Action> = Box::new(FocusPane { index: 7 });
+        let recovered = boxed
+            .as_any()
+            .downcast_ref::<FocusPane>()
+            .expect("downcast");
+        assert_eq!(recovered.index, 7);
     }
 }

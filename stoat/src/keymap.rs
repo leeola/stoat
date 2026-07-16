@@ -960,6 +960,39 @@ mod tests {
     }
 
     #[test]
+    fn space_pane_display_binds_digits_to_focus_pane() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let nav = TestState::new().set("mode", StateValue::String("space_pane_nav".into()));
+        let enter = keymap
+            .lookup(&nav, &key_event(KeyCode::Char('e'), KeyModifiers::NONE))
+            .expect("e is bound in space_pane_nav");
+        assert_eq!(enter[0].name, "SetMode");
+        assert_eq!(
+            enter[0].args[0].value,
+            Value::Ident("space_pane_display".into())
+        );
+
+        let display = TestState::new().set("mode", StateValue::String("space_pane_display".into()));
+        let three = keymap
+            .lookup(&display, &key_event(KeyCode::Char('3'), KeyModifiers::NONE))
+            .expect("3 is bound in space_pane_display");
+        assert_eq!(three[0].name, "FocusPane");
+        assert_eq!(three[0].args[0].value, Value::Number(3.0));
+        assert_eq!(three[1].name, "SetMode");
+
+        let ten = keymap
+            .lookup(&display, &key_event(KeyCode::Char('0'), KeyModifiers::NONE))
+            .expect("0 is bound in space_pane_display");
+        assert_eq!(
+            ten[0].args[0].value,
+            Value::Number(10.0),
+            "0 focuses pane 10"
+        );
+    }
+
+    #[test]
     fn default_config_pins_every_setting_default() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         // The embedded config must actively set every fixed-default scalar, so

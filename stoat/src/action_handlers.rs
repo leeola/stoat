@@ -51,7 +51,7 @@ pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::path::Path;
 use stoat_action::{
-    Action, ActionKind, AutoReload, Dump, OpenBuffer, OpenFile, OpenReviewAgentEdits,
+    Action, ActionKind, AutoReload, Dump, FocusPane, OpenBuffer, OpenFile, OpenReviewAgentEdits,
     OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
 };
 use stoat_text::{Anchor, BufferId, Selection};
@@ -108,6 +108,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::FocusPrev => {
             stoat.active_workspace_mut().panes.focus_prev();
+            UpdateEffect::Redraw
+        },
+        ActionKind::FocusPane => {
+            let focus = action
+                .as_any()
+                .downcast_ref::<FocusPane>()
+                .expect("FocusPane action downcast");
+            pane::focus_pane_by_index(stoat, focus.index);
             UpdateEffect::Redraw
         },
         ActionKind::ClosePane => {
@@ -1141,9 +1149,9 @@ mod tests {
         AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
         ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
-        FlipSelections, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-        MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Quit, QuitAll,
-        RenameWorkspace, SaveSelection, SelectAll, SplitNewRight, SplitRight,
+        FlipSelections, FocusPane, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd,
+        MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
+        Quit, QuitAll, RenameWorkspace, SaveSelection, SelectAll, SplitNewRight, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -1180,6 +1188,30 @@ mod tests {
         dispatch(&mut stoat, &SplitRight);
         assert_eq!(stoat.active_workspace().panes.pane_count(), 3);
         assert_eq!(dispatch(&mut stoat, &QuitAll), UpdateEffect::Quit);
+    }
+
+    #[test]
+    fn dispatch_focus_pane_by_number() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+        dispatch(&mut stoat, &SplitRight);
+        let ids = stoat.active_workspace().panes.split_pane_ids();
+        assert_eq!(ids.len(), 3);
+
+        dispatch(&mut stoat, &FocusPane { index: 2 });
+        assert_eq!(
+            stoat.active_workspace().panes.focus(),
+            ids[1],
+            "FocusPane(2) focuses the second pane in layout order",
+        );
+
+        dispatch(&mut stoat, &FocusPane { index: 9 });
+        assert_eq!(
+            stoat.active_workspace().panes.focus(),
+            ids[1],
+            "an out-of-range index leaves focus unchanged",
+        );
+        assert_eq!(stoat.pending_message.as_deref(), Some("no pane 9"));
     }
 
     #[test]

@@ -66,9 +66,9 @@ use crate::{
         },
         palette::OpenCommandPalette,
         pane::{
-            CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight,
-            FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight, ToggleDockLeft,
-            ToggleDockRight,
+            CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPane, FocusPrev,
+            FocusRight, FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight,
+            ToggleDockLeft, ToggleDockRight,
         },
         picker::{
             DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
@@ -106,7 +106,7 @@ use crate::{
             WorkspacePickerPrev, WorkspacePickerSelect,
         },
     },
-    param::{MissingSnafu, WrongKindSnafu},
+    param::{MissingSnafu, ParseFailureSnafu, WrongKindSnafu},
     Action, ActionDef, ParamError, ParamKind, ParamValue,
 };
 use snafu::OptionExt;
@@ -143,6 +143,26 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(FocusDown::DEF, |_| Ok(Box::new(FocusDown)));
     add(FocusNext::DEF, |_| Ok(Box::new(FocusNext)));
     add(FocusPrev::DEF, |_| Ok(Box::new(FocusPrev)));
+    add(FocusPane::DEF, |params| {
+        let raw = params
+            .first()
+            .context(MissingSnafu { name: "index" })?
+            .as_number()
+            .context(WrongKindSnafu {
+                name: "index",
+                expected: ParamKind::Number,
+            })?;
+        if raw < 1.0 || raw.fract() != 0.0 {
+            return ParseFailureSnafu {
+                expected: ParamKind::Number,
+                input: raw.to_string(),
+            }
+            .fail();
+        }
+        Ok(Box::new(FocusPane {
+            index: raw as usize,
+        }))
+    });
     add(ClosePane::DEF, |_| Ok(Box::new(ClosePane)));
     add(CloseOtherPanes::DEF, |_| Ok(Box::new(CloseOtherPanes)));
     add(OpenCommandPalette::DEF, |_| {
@@ -1133,6 +1153,26 @@ mod tests {
     }
 
     #[test]
+    fn focus_pane_factory_rejects_fractional_and_nonpositive() {
+        let entry = lookup("FocusPane").expect("FocusPane");
+        for bad in [1.5, 0.0, -1.0] {
+            assert!(
+                matches!(
+                    (entry.create)(&[ParamValue::Number(bad)]),
+                    Err(ParamError::ParseFailure { .. })
+                ),
+                "{bad} must be rejected",
+            );
+        }
+        let action = (entry.create)(&[ParamValue::Number(2.0)]).expect("valid index");
+        let focus = action
+            .as_any()
+            .downcast_ref::<FocusPane>()
+            .expect("FocusPane");
+        assert_eq!(focus.index, 2);
+    }
+
+    #[test]
     fn all_returns_complete_list() {
         // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
         // + 4 workspace actions + 5 prompt-input plumbing actions
@@ -1266,7 +1306,8 @@ mod tests {
         // + 2 JoinSelections / JoinSelectionsSpace.
         // + 1 AutoReload.
         // + 1 PaletteCompletePath.
-        assert_eq!(all().count(), 344);
+        // + 1 FocusPane.
+        assert_eq!(all().count(), 345);
     }
 
     #[test]

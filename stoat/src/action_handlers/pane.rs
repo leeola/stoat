@@ -202,6 +202,19 @@ pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {
     }
 }
 
+/// Focus the pane at 1-based `index` in [`crate::pane::PaneTree::split_panes`]
+/// layout order, the same order pane-ID badges number panes.
+///
+/// An out-of-range index leaves focus unchanged and sets a status message, so a
+/// mistyped pane number is visible rather than a silent no-op.
+pub(super) fn focus_pane_by_index(stoat: &mut Stoat, index: usize) {
+    let ids = stoat.active_workspace().panes.split_pane_ids();
+    match index.checked_sub(1).and_then(|i| ids.get(i).copied()) {
+        Some(id) => stoat.active_workspace_mut().panes.set_focus(id),
+        None => stoat.set_status(format!("no pane {index}")),
+    }
+}
+
 pub(super) fn toggle_dock(stoat: &mut Stoat, side: DockSide) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     for (dock_id, dock) in &mut ws.docks {
