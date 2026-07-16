@@ -1,4 +1,5 @@
 use crate::{
+    diff_map::ChangeKind,
     display_map::{highlights::HighlightStyle, BlockRowKind, DisplaySnapshot},
     editor_state::EditorState,
     host::DiffStatus,
@@ -11,7 +12,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
-use stoat_text::cursor_offset;
+use stoat_text::{cursor_offset, Point};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
 /// Line-number glyph size in 256ths of a cell, so the number reads smaller than
@@ -120,6 +121,11 @@ pub(crate) fn paint_diff_rows(
     let dim_style = theme.get(s::DIFF_CONTEXT);
     let del_style = theme.get(s::DIFF_DELETED);
 
+    let base_underlines = snapshot
+        .diff_map()
+        .map(|dm| dm.base_underline_spans())
+        .unwrap_or_default();
+
     let mut base_line = base_line_at(snapshot, scroll_row);
 
     for display_row in scroll_row..end_row {
@@ -141,6 +147,10 @@ pub(crate) fn paint_diff_rows(
                     .diff_map()
                     .and_then(|dm| dm.base_highlights_for_line(base_line))
                     .unwrap_or(&[]);
+                let underlines = base_underlines
+                    .get(&base_line)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 paint_base_row(
                     buf,
                     left_text_x,
@@ -149,11 +159,13 @@ pub(crate) fn paint_diff_rows(
                     left_content_w,
                     token_spans,
                     del_style,
+                    underlines,
                 );
                 base_line += 1;
             },
             BlockRowKind::BufferRow { buffer_row } => {
                 render_side_num(buf, right_num_x, y, buffer_row + 1, dim_style);
+                let underlines = buffer_row_underlines(snapshot, buffer_row);
                 paint_highlighted_row(
                     snapshot,
                     display_row,
@@ -162,6 +174,7 @@ pub(crate) fn paint_diff_rows(
                     right_content_w,
                     buf,
                     fallback_style,
+                    &underlines,
                 );
                 if let Some(staged) = snapshot
                     .diff_map()
@@ -184,6 +197,7 @@ pub(crate) fn paint_diff_rows(
                         left_content_w,
                         token_spans,
                         dim_style,
+                        &[],
                     );
                     base_line += 1;
                 }
@@ -198,6 +212,11 @@ pub(crate) fn paint_diff_rows(
 /// A byte inside a token span takes that token's color. Bytes outside every
 /// span fall back to `fallback` (the deletion or context color), so the diff
 /// tint still fills the gaps between tokens.
+///
+/// `underlines` mark the changed chars of a modified base line, as line-local
+/// base byte ranges. A byte inside one gains [`Modifier::UNDERLINED`] over its
+/// color.
+#[allow(clippy::too_many_arguments)]
 fn paint_base_row(
     buf: &mut Buffer,
     start_x: u16,
@@ -206,6 +225,7 @@ fn paint_base_row(
     max_cols: usize,
     token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
     fallback: Style,
+    underlines: &[std::ops::Range<usize>],
 ) {
     for (col, (byte_idx, ch)) in text.char_indices().enumerate() {
         if col >= max_cols {
@@ -215,11 +235,14 @@ fn paint_base_row(
         if x >= buf.area.x + buf.area.width {
             break;
         }
-        let style = token_spans
+        let mut style = token_spans
             .iter()
             .find(|(range, _)| range.contains(&byte_idx))
             .map(|(_, hs)| hs.to_ratatui_style())
             .unwrap_or(fallback);
+        if underlines.iter().any(|range| range.contains(&byte_idx)) {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
         buf[(x, y)].set_char(ch).set_style(style);
     }
 }
@@ -263,6 +286,12 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 
 /// Paint one display row's syntax-highlighted chunks into a column starting at
 /// `start_x`, clamped to `max_cols` and the buffer's right edge.
+///
+/// `underlines` mark the changed chars of a modified row, as display-column
+/// ranges. A cell whose column falls in one gains [`Modifier::UNDERLINED`] over
+/// its token style. Columns, not byte offsets, are used because the chunks
+/// expand tabs, so the counter tracks display cells.
+#[allow(clippy::too_many_arguments)]
 fn paint_highlighted_row(
     snapshot: &DisplaySnapshot,
     display_row: u32,
@@ -271,6 +300,7 @@ fn paint_highlighted_row(
     max_cols: usize,
     buf: &mut Buffer,
     fallback_style: Style,
+    underlines: &[std::ops::Range<usize>],
 ) {
     let mut col = 0usize;
     for chunk in snapshot.highlighted_chunks(display_row..display_row + 1) {
@@ -287,10 +317,64 @@ fn paint_highlighted_row(
             if x >= buf.area.x + buf.area.width {
                 return;
             }
-            buf[(x, y)].set_char(ch).set_style(style);
+            let cell_style = if underlines.iter().any(|range| range.contains(&col)) {
+                style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                style
+            };
+            buf[(x, y)].set_char(ch).set_style(cell_style);
             col += 1;
         }
     }
+}
+
+/// Display-column ranges to underline on buffer `buffer_row` in the diff view's
+/// right column, from the [`ChangeKind::Replaced`] buffer spans of any hunk
+/// covering the row.
+///
+/// The token detail's byte ranges are absolute buffer offsets. Each is clamped
+/// to the row and mapped through [`DisplaySnapshot::buffer_to_display`], so tab
+/// expansion in the painted chunks stays aligned. Empty when no hunk refines the
+/// row.
+fn buffer_row_underlines(
+    snapshot: &DisplaySnapshot,
+    buffer_row: u32,
+) -> Vec<std::ops::Range<usize>> {
+    let Some(diff_map) = snapshot.diff_map() else {
+        return Vec::new();
+    };
+    let hunks = diff_map.hunks_in_range(buffer_row..buffer_row + 1);
+    if hunks.is_empty() {
+        return Vec::new();
+    }
+
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let line_start = rope.point_to_offset(Point::new(buffer_row, 0));
+    let line_end = line_start + rope.line_len(buffer_row) as usize;
+
+    let mut ranges = Vec::new();
+    for hunk in hunks {
+        let Some(detail) = &hunk.token_detail else {
+            continue;
+        };
+        for span in &detail.buffer_spans {
+            if span.kind != ChangeKind::Replaced {
+                continue;
+            }
+            let start = span.byte_range.start.max(line_start);
+            let end = span.byte_range.end.min(line_end);
+            if start >= end {
+                continue;
+            }
+            let start_col = snapshot
+                .buffer_to_display(rope.offset_to_point(start))
+                .column as usize;
+            let end_col = snapshot.buffer_to_display(rope.offset_to_point(end)).column as usize;
+            ranges.push(start_col..end_col);
+        }
+    }
+    ranges
 }
 
 /// Paint the clean-tree empty state as a centered dim line, so the diff view
@@ -1113,6 +1197,73 @@ mod tests {
             colors.len() >= 2,
             "the base column carries token colors plus the deletion fallback: {colors:?}"
         );
+    }
+
+    #[test]
+    fn diff_view_underlines_only_the_changed_word() {
+        use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
+
+        let mut h = TestHarness::with_size(60, 10);
+        // `main` becomes `other`, so only that one word changed on the line.
+        h.stage_review_scenario("/repo", &[("a.rs", "fn main() {}\n", "fn other() {}\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(std::path::Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        h.snapshot();
+
+        // Collect underlined glyphs per column half (the separator sits at col 29).
+        let buf = h.rendered_buffer();
+        let mut left = String::new();
+        let mut right = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.modifier.contains(Modifier::UNDERLINED) && !cell.symbol().trim().is_empty()
+                {
+                    if x < 30 {
+                        left.push_str(cell.symbol());
+                    } else {
+                        right.push_str(cell.symbol());
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            right, "other",
+            "right column underlines only the changed word"
+        );
+        assert_eq!(
+            left, "main",
+            "left column underlines only the changed base word"
+        );
+    }
+
+    #[test]
+    fn diff_view_added_line_carries_no_underline() {
+        use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
+
+        let mut h = TestHarness::with_size(60, 10);
+        // The second line is a pure insertion, so nothing is refined.
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.rs", "fn a() {}\n", "fn a() {}\nfn b() {}\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(std::path::Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        h.snapshot();
+
+        let buf = h.rendered_buffer();
+        let underlined = (0..buf.area.height).any(|y| {
+            (0..buf.area.width).any(|x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
+        });
+        assert!(!underlined, "a pure added line underlines nothing");
     }
 
     #[test]

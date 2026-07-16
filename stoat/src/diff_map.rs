@@ -4,6 +4,7 @@ use crate::{
 };
 use std::{
     cmp::Ordering,
+    collections::BTreeMap,
     ops::Range,
     sync::{
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
@@ -354,6 +355,32 @@ impl DiffMap {
         }
     }
 
+    /// Base-side change spans to underline in the diff view's left column, keyed
+    /// by base line with each range line-local within that line.
+    ///
+    /// Distributes every hunk's [`TokenDetail::base_spans`] of the
+    /// [`ChangeKind::Replaced`] kind -- absolute byte ranges in the base text --
+    /// across the base lines they cover, so a deleted or modified base block row
+    /// underlines only its changed chars. Empty when the map carries no base text.
+    pub(crate) fn base_underline_spans(&self) -> BTreeMap<u32, Vec<Range<usize>>> {
+        let Some(base_text) = &self.base_text else {
+            return BTreeMap::new();
+        };
+        let starts = line_starts(base_text);
+        let mut out: BTreeMap<u32, Vec<Range<usize>>> = BTreeMap::new();
+        for hunk in self.hunks.iter() {
+            let Some(detail) = &hunk.token_detail else {
+                continue;
+            };
+            for span in &detail.base_spans {
+                if span.kind == ChangeKind::Replaced {
+                    distribute_change_span(&mut out, &span.byte_range, &starts, base_text.len());
+                }
+            }
+        }
+        out
+    }
+
     pub fn total_deleted_lines(&self) -> u32 {
         let base_text = match &self.base_text {
             Some(t) => t,
@@ -660,6 +687,40 @@ fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -
         .collect()
 }
 
+/// Split an absolute base-text byte `range` into per-line-local ranges, pushing
+/// each onto `out` under its base line.
+///
+/// `line_starts` gives each base line's byte offset, and `text_len` closes the
+/// last line. A range spanning several lines contributes one clamped sub-range
+/// per line it covers, with the trailing newline excluded.
+fn distribute_change_span(
+    out: &mut BTreeMap<u32, Vec<Range<usize>>>,
+    range: &Range<usize>,
+    line_starts: &[usize],
+    text_len: usize,
+) {
+    let first = line_starts
+        .partition_point(|&start| start <= range.start)
+        .saturating_sub(1);
+    for line in first..line_starts.len() {
+        let line_start = line_starts[line];
+        if line_start >= range.end {
+            break;
+        }
+        let line_end = line_starts
+            .get(line + 1)
+            .map(|&next| next.saturating_sub(1))
+            .unwrap_or(text_len);
+        let start = range.start.max(line_start);
+        let end = range.end.min(line_end);
+        if start < end {
+            out.entry(line as u32)
+                .or_default()
+                .push((start - line_start)..(end - line_start));
+        }
+    }
+}
+
 fn byte_range_to_line_range(
     line_starts: &[usize],
     text_len: usize,
@@ -958,6 +1019,56 @@ mod tests {
             "base spans fall back to the whole replaced literal"
         );
         assert_eq!(&rhs_text[brave], "brave ");
+    }
+
+    #[test]
+    fn base_underline_spans_split_across_base_lines() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+        };
+        // A two-line base region replaced wholesale (no refinement) must
+        // distribute into one line-local span per base line, newline excluded.
+        let lhs_text = "alpha\nbeta\n";
+        let rhs_text = "ALPHA\nBETA\n";
+        let changes = vec![
+            DiffChange {
+                side: Side::Lhs,
+                byte_range: 0..10,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(0),
+                deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
+            },
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 0..10,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(0),
+                deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
+            },
+        ];
+        let dm = DiffMap::from_structural_changes(
+            DiffResult {
+                changes,
+                fell_back_to_line_diff: false,
+            },
+            lhs_text,
+            rhs_text,
+        );
+
+        let flat: Vec<(u32, usize, usize)> = dm
+            .base_underline_spans()
+            .iter()
+            .flat_map(|(&line, ranges)| ranges.iter().map(move |r| (line, r.start, r.end)))
+            .collect();
+        assert_eq!(
+            flat,
+            vec![(0, 0, 5), (1, 0, 4)],
+            "alpha on line 0, beta on line 1"
+        );
     }
 
     #[test]
