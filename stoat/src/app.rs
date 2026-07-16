@@ -1835,7 +1835,24 @@ impl Stoat {
             "index build starting",
         );
         if !self.persistence_disabled {
-            let _ = self.fs_watch_host.watch_recursive(&git_root);
+            // notify's inotify backend registers a recursive watch by walking
+            // every directory under the root synchronously, which blocks the
+            // runtime thread before the first frame on a large repo. Run it on
+            // the blocking pool so startup stays interactive.
+            let host = self.fs_watch_host.clone();
+            let root = git_root.clone();
+            self.executor
+                .spawn_blocking(move || {
+                    if let Err(err) = host.watch_recursive(&root) {
+                        tracing::warn!(
+                            target: "stoat::app",
+                            %err,
+                            root = %root.display(),
+                            "recursive fs-watch failed; external-edit tracking disabled for this workspace",
+                        );
+                    }
+                })
+                .detach();
         }
         let handles = crate::code_index::build::IndexBuild {
             fs: self.fs_host.clone(),
@@ -7663,6 +7680,67 @@ mod tests {
                 .symbol_at(crate::code_index::build::file_id("a.rs"), 5),
             None,
             "no symbol is indexed when the workspace root is not a repo",
+        );
+    }
+
+    #[test]
+    fn index_build_watches_the_repo_root_off_the_render_thread() {
+        use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
+        stoat.set_fs_host(fs);
+        let git = FakeGit::new();
+        git.add_repo("/repo");
+        stoat.set_git_host(Arc::new(git));
+        let watcher = Arc::new(FakeFsWatcher::new());
+        stoat.set_fs_watch_host(watcher.clone());
+
+        let git_root = stoat.active_workspace().git_root.clone();
+        stoat.start_index_build();
+        scheduler.run_until_parked();
+
+        assert!(
+            watcher.is_watching(&git_root),
+            "the repo root is watched once the blocking registration runs"
+        );
+    }
+
+    #[test]
+    fn persistence_disabled_index_build_registers_no_watch() {
+        use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
+        stoat.set_fs_host(fs);
+        let git = FakeGit::new();
+        git.add_repo("/repo");
+        stoat.set_git_host(Arc::new(git));
+        let watcher = Arc::new(FakeFsWatcher::new());
+        stoat.set_fs_watch_host(watcher.clone());
+
+        let git_root = stoat.active_workspace().git_root.clone();
+        stoat.start_index_build();
+        scheduler.run_until_parked();
+
+        assert!(
+            !watcher.is_watching(&git_root),
+            "a persistence-disabled build registers no fs-watch"
         );
     }
 
