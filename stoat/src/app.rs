@@ -11950,6 +11950,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn opening_diff_view_jumps_cursor_to_the_first_hunk() {
+        let mut h = Stoat::test();
+        open_scratch_file(&mut h, "keep\nnew\ntail\n");
+
+        let buffer_id = {
+            let ws = h.stoat.active_workspace();
+            match ws.panes.pane(ws.panes.focus()).view {
+                View::Editor(id) => ws.editors[id].buffer_id,
+                _ => panic!("focused pane is not an editor"),
+            }
+        };
+        {
+            let base = "keep\nold\ntail\n";
+            let text = "keep\nnew\ntail\n";
+            let dm = crate::diff_map::DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(base, text),
+                base,
+                text,
+            );
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .diff_map = Some(dm);
+        }
+
+        let cursor_row = |stoat: &mut Stoat| {
+            let (buffer_id, offset) = stoat.focused_cursor_pos().expect("focused cursor");
+            let ws = stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard.rope().offset_to_point(offset).row
+        };
+
+        assert_eq!(cursor_row(&mut h.stoat), 0, "cursor starts at the top");
+
+        h.stoat.toggle_diff_view();
+        assert_eq!(
+            cursor_row(&mut h.stoat),
+            1,
+            "opening the diff view lands the cursor on the first hunk",
+        );
+
+        h.stoat.toggle_diff_view();
+        assert_eq!(
+            cursor_row(&mut h.stoat),
+            1,
+            "toggling the view off leaves the cursor in place",
+        );
+    }
+
     fn open_with_minimap_strip(h: &mut crate::test_harness::TestHarness) -> EditorId {
         let body: String = (0..60)
             .map(|i| format!("line {i}"))

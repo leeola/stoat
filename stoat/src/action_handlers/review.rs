@@ -922,10 +922,77 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
 /// focused editor. Unlike the session review there is no scan, no session, and
 /// no scratch buffer -- the editor stays the real, editable file buffer, so
 /// re-pressing toggles the two columns off again.
+///
+/// Opening the view lands the cursor on the first change chunk (the hunk `n`
+/// reaches from the top of the file) and pushes the pre-jump position to the
+/// jumplist, so the usual jump-back returns. A file with no changes, or toggling
+/// the view off, leaves the cursor untouched.
 pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
-    if let Some(editor) = super::focused_editor_mut(stoat) {
+    let origin = super::jump::live_entry(stoat);
+    let Some(buffer_id) = super::focused_editor_mut(stoat).map(|editor| editor.buffer_id) else {
+        return;
+    };
+
+    let turned_on = {
+        let Some(editor) = super::focused_editor_mut(stoat) else {
+            return;
+        };
         let on = !editor.diff_view;
         editor.set_diff_view(on);
+        on
+    };
+    if !turned_on {
+        return;
+    }
+
+    // The background diff job usually has the map ready (it drives the gutter
+    // marks), so only compute it here when the fast path is empty.
+    let has_map = super::focused_editor_mut(stoat)
+        .map(|editor| editor.display_map.snapshot().diff_map().is_some())
+        .unwrap_or(false);
+    if !has_map {
+        let git_host = stoat.git_host.clone();
+        let language_registry = stoat.language_registry.clone();
+        let syntax_styles = stoat.syntax_styles.clone();
+        let base_cache = stoat.base_highlights_cache.clone();
+        stoat.active_workspace_mut().install_diff_map_now(
+            &git_host,
+            &language_registry,
+            &syntax_styles,
+            &base_cache,
+            buffer_id,
+        );
+    }
+
+    let jumped = super::focused_editor_mut(stoat).is_some_and(|editor| {
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let target_row = display_snapshot.diff_map().and_then(|diff_map| {
+            diff_map
+                .hunks_in_range(0..u32::MAX)
+                .first()
+                .map(|hunk| hunk.buffer_start_line)
+        });
+        let Some(target_row) = target_row else {
+            return false;
+        };
+        let target_offset = buffer_snapshot
+            .rope()
+            .point_to_offset(Point::new(target_row, 0));
+        editor.selections.transform(buffer_snapshot, |sel| {
+            super::movement::land_block_cursor(
+                sel.id,
+                target_offset,
+                SelectionGoal::None,
+                buffer_snapshot.rope(),
+                buffer_snapshot,
+            )
+        });
+        true
+    });
+
+    if jumped && let Some(entry) = origin {
+        super::jump::push_entry(stoat, entry);
     }
 }
 
