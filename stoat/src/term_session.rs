@@ -26,14 +26,22 @@ pub struct TermSession {
     pub term: TermScreen,
     pub session: Arc<dyn TerminalSession>,
     /// The pane's input mode. `"insert"` enables PTY passthrough so keys reach
-    /// the child. Other modes keep stoat's pane-level bindings live. Held
-    /// per-term so switching between terminal panes preserves each one's mode.
+    /// the child, while other modes keep stoat's pane-level bindings live.
+    ///
+    /// Held per-term, but a [`View::Terminal`](crate::pane::View::Terminal) pane
+    /// is forced to insert whenever focus arrives on it, so only a
+    /// [`View::Agent`](crate::pane::View::Agent) pane preserves a non-insert
+    /// mode across focus changes.
     pub mode: String,
 }
 
 impl TermSession {
-    /// Pair `term` with the `session` driving it, opening in `"normal"` mode so
-    /// the pane starts under stoat's bindings rather than PTY passthrough.
+    /// Pair `term` with the `session` driving it, opening in `"normal"` mode.
+    ///
+    /// A [`View::Terminal`](crate::pane::View::Terminal) pane is flipped to
+    /// insert when focus arrives, so this initial normal mode is what a
+    /// [`View::Agent`](crate::pane::View::Agent) pane holds until the user
+    /// presses `i`.
     pub fn new(term: TermScreen, session: Arc<dyn TerminalSession>) -> Self {
         Self {
             term,

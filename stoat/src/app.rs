@@ -2178,7 +2178,9 @@ impl Stoat {
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let before = self.focused_cursor_pos();
+                let term_before = self.focused_shell_term_id();
                 let effect = self.handle_key(key);
+                self.auto_insert_focused_terminal(term_before);
                 let cursor_moved = self.focused_cursor_pos() != before;
 
                 // Re-follow the cursor when a key moved it, pulling the view
@@ -2205,7 +2207,12 @@ impl Stoat {
                     effect
                 }
             },
-            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Mouse(mouse) => {
+                let term_before = self.focused_shell_term_id();
+                let effect = self.handle_mouse(mouse);
+                self.auto_insert_focused_terminal(term_before);
+                effect
+            },
             _ => UpdateEffect::None,
         };
         action_handlers::lsp::notify_buffer_changes_pending(self);
@@ -4127,9 +4134,12 @@ impl Stoat {
     /// `Some` only in insert mode with a focused `View::Agent` or
     /// `View::Terminal` split pane. This mirrors how insert mode sends typing
     /// to the focused editor, except the bytes go to the pane's PTY. Normal
-    /// mode keeps its editor and
-    /// pane-navigation bindings, so the user enters the agent with `i` and
-    /// leaves via the [`Self::route_key_to_term`] escape.
+    /// mode keeps its editor and pane-navigation bindings.
+    ///
+    /// A `View::Terminal` pane auto-enters insert when focus arrives
+    /// ([`Self::auto_insert_focused_terminal`]), so typing reaches the shell
+    /// with no `i`. A `View::Agent` pane is entered manually with `i`, and both
+    /// leave via the [`Self::route_key_to_term`] escape.
     fn term_input_target(&self) -> Option<TermId> {
         if self.focused_mode() != "insert" {
             return None;
@@ -4148,6 +4158,11 @@ impl Stoat {
     /// As a result, a literal `Esc` no longer reaches the agent during
     /// passthrough. The deferred per-agent normal-mode bindings would restore
     /// a way to send it.
+    ///
+    /// For a `View::Terminal` pane the normal mode is temporary. Refocusing it
+    /// re-enters insert ([`Self::auto_insert_focused_terminal`]), so `Esc` is a
+    /// drop to normal for pane navigation rather than a lasting exit. A
+    /// `View::Agent` pane stays in normal until the user presses `i`.
     fn route_key_to_term(&mut self, agent_id: TermId, key: KeyEvent) -> UpdateEffect {
         if key.code == KeyCode::Esc {
             self.transition_mode("normal".to_string());
@@ -4584,6 +4599,40 @@ impl Stoat {
             View::Agent(id) | View::Terminal(id) => Some(*id),
             _ => None,
         }
+    }
+
+    /// The focused pane's [`TermId`] only when it is a shell terminal
+    /// ([`View::Terminal`]), never an agent pane. Drives the focus-arrival
+    /// auto-insert, which applies to shell terminals alone -- agent panes keep
+    /// their manual `i` entry.
+    pub(crate) fn focused_shell_term_id(&self) -> Option<TermId> {
+        let ws = self.active_workspace();
+        let FocusTarget::SplitPane(_) = ws.focus else {
+            return None;
+        };
+        match &ws.panes.pane(ws.panes.focus()).view {
+            View::Terminal(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Enter insert on a shell terminal that focus has just arrived on, so
+    /// typing reaches the child without a manual `i`.
+    ///
+    /// `prev` is [`Self::focused_shell_term_id`] captured before the event was
+    /// handled. Insert is forced only when a terminal is focused now, it is a
+    /// different terminal than `prev` (so focus genuinely arrived), and its mode
+    /// is not already insert. Comparing ids means an in-place `Esc` -- the same
+    /// terminal focused before and after -- is left in normal for pane
+    /// navigation rather than being re-entered.
+    fn auto_insert_focused_terminal(&mut self, prev: Option<TermId>) {
+        let Some(term_id) = self.focused_shell_term_id() else {
+            return;
+        };
+        if prev == Some(term_id) || self.focused_mode() == "insert" {
+            return;
+        }
+        self.transition_mode("insert".to_string());
     }
 
     /// Switch the focused target's mode to `next`, opening or closing the
@@ -8495,6 +8544,154 @@ mod tests {
         assert!(
             fake.sent_bytes().is_empty(),
             "escape must not reach the agent"
+        );
+    }
+
+    #[test]
+    fn terminal_action_enters_insert_and_types_without_i() {
+        let mut h = Stoat::test();
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "opening a terminal focuses it in insert mode",
+        );
+
+        h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+        assert_eq!(
+            h.fake_terminal().sent_bytes(),
+            vec![b"x".to_vec()],
+            "the first keystroke reaches the shell without pressing i",
+        );
+    }
+
+    #[test]
+    fn refocusing_a_terminal_reenters_insert() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "the opened terminal is in insert"
+        );
+
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "Esc drops the focused terminal to normal",
+        );
+
+        h.type_action("FocusLeft()");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "the editor pane keeps normal mode",
+        );
+
+        h.type_action("FocusRight()");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "returning focus to the terminal re-enters insert",
+        );
+    }
+
+    #[test]
+    fn mouse_click_into_terminal_pane_enters_insert() {
+        use crossterm::event::MouseButton;
+
+        let mut h = Stoat::test();
+        let term_pane = {
+            let ws = h.stoat.active_workspace_mut();
+            let editor_pane = ws.panes.focus();
+            let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+            let term_id = insert_term_session(ws);
+            ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
+            ws.panes.set_focus(editor_pane);
+            ws.panes.pane_mut(editor_pane).area = Rect::new(0, 0, 40, 24);
+            ws.panes.pane_mut(term_pane).area = Rect::new(40, 0, 40, 24);
+            term_pane
+        };
+        assert_eq!(h.stoat.focused_mode(), "normal");
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 5));
+
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            term_pane,
+            "the click focuses the terminal pane",
+        );
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "focusing a terminal by mouse enters insert",
+        );
+    }
+
+    #[test]
+    fn mouse_click_into_agent_pane_stays_normal() {
+        use crossterm::event::MouseButton;
+
+        let mut h = Stoat::test();
+        let agent_pane = {
+            let ws = h.stoat.active_workspace_mut();
+            let editor_pane = ws.panes.focus();
+            let agent_pane = ws.panes.split(crate::pane::Axis::Vertical);
+            let term_id = insert_term_session(ws);
+            ws.panes.pane_mut(agent_pane).view = View::Agent(term_id);
+            ws.panes.set_focus(editor_pane);
+            ws.panes.pane_mut(editor_pane).area = Rect::new(0, 0, 40, 24);
+            ws.panes.pane_mut(agent_pane).area = Rect::new(40, 0, 40, 24);
+            agent_pane
+        };
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 5));
+
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            agent_pane,
+            "the click focuses the agent pane",
+        );
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "focusing an agent pane does not auto-enter insert",
+        );
+    }
+
+    #[test]
+    fn respawn_enters_insert_on_focused_terminal() {
+        let mut h = Stoat::test();
+        let pane = {
+            let ws = h.stoat.active_workspace_mut();
+            let pane = ws.panes.focus();
+            ws.panes.pane_mut(pane).view = View::Terminal(TermId::default());
+            pane
+        };
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "a dead terminal reads the fallback mode",
+        );
+
+        action_handlers::respawn_terminal_panes(&mut h.stoat);
+
+        let View::Terminal(new_id) = h.stoat.active_workspace().panes.pane(pane).view else {
+            panic!("the dead terminal pane is respawned as a terminal");
+        };
+        assert!(
+            h.stoat.active_workspace().terms.contains_key(new_id),
+            "respawned session is live",
+        );
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "a respawned focused terminal enters insert",
         );
     }
 

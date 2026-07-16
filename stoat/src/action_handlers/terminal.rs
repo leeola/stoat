@@ -20,15 +20,23 @@ const TERM_COLS: u16 = 80;
 /// recording the view it replaced in [`crate::pane::Pane::prev_view`] so it
 /// can be restored if the terminal later exits in the last split pane. A spawn
 /// failure leaves the focused pane unchanged.
+///
+/// The new pane enters insert mode so typing reaches the shell immediately.
+/// The focus-arrival hook in [`Stoat::update`] covers the same transition when
+/// the action is dispatched through the event loop, but the direct call here
+/// also readies a terminal opened off that seam.
 pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
     match spawn_terminal_view(stoat) {
         view @ View::Terminal(_) => {
-            let ws = stoat.active_workspace_mut();
-            let focused = ws.panes.focus();
-            let prev = ws.panes.pane(focused).view.clone();
-            let pane = ws.panes.pane_mut(focused);
-            pane.prev_view = Some(prev);
-            pane.view = view;
+            {
+                let ws = stoat.active_workspace_mut();
+                let focused = ws.panes.focus();
+                let prev = ws.panes.pane(focused).view.clone();
+                let pane = ws.panes.pane_mut(focused);
+                pane.prev_view = Some(prev);
+                pane.view = view;
+            }
+            stoat.transition_mode("insert".to_string());
             UpdateEffect::Redraw
         },
         _ => UpdateEffect::None,
@@ -43,6 +51,11 @@ pub(super) fn open_terminal_pane(stoat: &mut Stoat) -> UpdateEffect {
 /// restore or a workspace copy. Each dead pane and dock gets its own fresh
 /// shell. Runtime state (history, running processes) is intentionally lost, and
 /// a spawn failure leaves a `Terminal (closed)` label in place.
+///
+/// A focused terminal pane enters insert mode after the respawn, so a restore
+/// or copy that lands focus on a terminal is typing-ready like any other focus
+/// arrival ([`Stoat::auto_insert_focused_terminal`] covers the input-driven
+/// paths).
 pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
     let dead_panes = {
         let ws = stoat.active_workspace();
@@ -73,6 +86,10 @@ pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
         if let Some(dock) = stoat.active_workspace_mut().docks.get_mut(dock_id) {
             dock.view = view;
         }
+    }
+
+    if stoat.focused_shell_term_id().is_some() && stoat.focused_mode() != "insert" {
+        stoat.transition_mode("insert".to_string());
     }
 }
 
