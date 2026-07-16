@@ -31,9 +31,6 @@ const MAX_ENTRIES: usize = 100;
 impl InputHistory {
     /// Restore a history from persisted entries, oldest-first, with no active
     /// recall walk.
-    // Paired with `entries`, this is the persistence boundary that the
-    // per-workspace save/restore slice wires in. Unused until then.
-    #[allow(dead_code)]
     pub(crate) fn from_entries(entries: Vec<String>) -> Self {
         Self {
             entries,
@@ -44,7 +41,6 @@ impl InputHistory {
     }
 
     /// The retained entries, oldest-first, for persistence.
-    #[allow(dead_code)]
     pub(crate) fn entries(&self) -> &[String] {
         &self.entries
     }

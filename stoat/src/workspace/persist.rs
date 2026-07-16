@@ -21,6 +21,7 @@ use crate::{
     dump::snapshot::ActiveRebaseSnap,
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
     host::FsHost,
+    input_history::InputHistory,
     pane::{DockId, DockPanel, FocusTarget, PaneTree, View},
     rebase::RebaseState,
     workspace::{Workspace, WorkspaceUid},
@@ -65,6 +66,10 @@ pub(crate) struct WorkspaceStateV1 {
     /// closed here yet.
     #[serde(default)]
     pub last_finder_scope: Option<String>,
+    /// Canonical command lines the palette recalls, oldest first, so history
+    /// survives a restart. Empty on legacy files that predate the field.
+    #[serde(default)]
+    pub palette_history: Vec<String>,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -214,6 +219,7 @@ impl Workspace {
             rebase_active,
             name: self.name.clone(),
             last_finder_scope: self.last_finder_scope.clone(),
+            palette_history: self.palette_history.entries().to_vec(),
         }
     }
 
@@ -297,6 +303,7 @@ impl Workspace {
             state.name
         };
         self.last_finder_scope = state.last_finder_scope;
+        self.palette_history = InputHistory::from_entries(state.palette_history);
     }
 }
 
@@ -844,6 +851,44 @@ mod tests {
         );
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.last_finder_scope, Some("modified".to_string()));
+    }
+
+    #[test]
+    fn palette_history_round_trips_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.palette_history = InputHistory::from_entries(vec!["cd ~/work".into(), "w".into()]);
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        assert!(
+            fresh.palette_history.entries().is_empty(),
+            "fresh workspace remembers nothing"
+        );
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(fresh.palette_history.entries().to_vec(), ["cd ~/work", "w"]);
+    }
+
+    #[test]
+    fn legacy_state_without_palette_history_loads_empty() {
+        let exec = executor();
+        let ws = new_laid_out_workspace(PathBuf::from("/test"), &exec);
+
+        let body =
+            ron::ser::to_string_pretty(&ws.to_state(), ron::ser::PrettyConfig::default()).unwrap();
+        let legacy: String = body
+            .lines()
+            .filter(|line| !line.contains("palette_history"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let state: WorkspaceStateV1 =
+            ron::from_str(&legacy).expect("a file without palette_history still loads");
+        assert!(state.palette_history.is_empty());
     }
 
     #[test]
