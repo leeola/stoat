@@ -27,19 +27,36 @@ use tokio::time::{self, Instant};
 /// several seconds, and CI machines are slower, so budget generously.
 const LSP_DEADLINE: Duration = Duration::from_secs(90);
 
-const REVIEW_TIMEOUT: Duration = Duration::from_secs(10);
+const DIFF_TIMEOUT: Duration = Duration::from_secs(10);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[test]
-fn review_shows_fixture_diff() {
+fn diff_view_shows_fixture_change() {
     let (_dir, _root, mut harness) = fixture_harness("basic-diff");
     harness.run(|mut handle| async move {
-        handle.send_keys("<Space>d").await.expect("open review");
         handle
-            .await_frame(|text| text.contains("delta changed"), REVIEW_TIMEOUT)
+            .send_keys(":o staged.txt<Enter>")
             .await
-            .expect("review renders the fixture's changed line");
+            .expect("open staged.txt");
+        handle
+            .send_keys("<Space>d")
+            .await
+            .expect("toggle the diff view");
+
+        handle
+            .await_frame(
+                |text| {
+                    let shows_new = text.lines().any(|line| line.contains("4 delta changed"));
+                    let shows_base = text
+                        .lines()
+                        .any(|line| line.contains("delta") && !line.contains("changed"));
+                    shows_new && shows_base
+                },
+                DIFF_TIMEOUT,
+            )
+            .await
+            .expect("diff view renders the base line beside the changed buffer line");
     });
 }
 

@@ -166,6 +166,7 @@ impl LiveHarness {
 
         let mut stoat = Stoat::new(scheduler.executor(), settings, root.to_path_buf());
         stoat.set_lsp_auto_spawn(true);
+        stoat.set_diff_warm_auto(true);
         match LocalFsWatcher::new() {
             Ok(watcher) => stoat.set_fs_watch_host(Arc::new(watcher)),
             Err(err) => tracing::warn!(
