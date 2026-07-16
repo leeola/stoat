@@ -26,7 +26,7 @@ pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
         sources::lines_with_terminator(lhs),
         sources::lines_with_terminator(rhs),
     );
-    let changes = imara_diff::diff(
+    let mut changes = imara_diff::diff(
         Algorithm::Histogram,
         &input,
         ChangeSink {
@@ -36,6 +36,7 @@ pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
             next_pair_id: 0,
         },
     );
+    super::refine::refine_replaced_pairs(&mut changes, lhs, rhs);
 
     DiffResult {
         changes,
@@ -120,6 +121,7 @@ impl Sink for ChangeSink<'_> {
                 move_metadata: None,
                 pair_id,
                 deletion_rhs_anchor,
+                refined_spans: Vec::new(),
             });
         }
         if rhs_count > 0 {
@@ -130,6 +132,7 @@ impl Sink for ChangeSink<'_> {
                 move_metadata: None,
                 pair_id,
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             });
         }
     }

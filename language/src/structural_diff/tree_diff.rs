@@ -86,7 +86,7 @@ pub fn diff_with_language_cancellable(
 /// slices -- a borrow the arena type erases internally -- so the marker
 /// is what stops the retained value from outliving its sources.
 pub struct PreparedDiff<'a> {
-    prepared: PreparedFile,
+    prepared: PreparedFile<'a>,
     _marker: PhantomData<&'a str>,
 }
 
@@ -171,7 +171,7 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
             } = input;
             match language.as_ref() {
                 Some(lang) => match prepare_diff(lang, lhs_text, rhs_text, None) {
-                    Some(prepared) => ChangesetSlot::Prepared(buffer, prepared),
+                    Some(prepared) => ChangesetSlot::Prepared(buffer, Box::new(prepared)),
                     None => ChangesetSlot::LineDiff {
                         lhs: lhs_text,
                         rhs: rhs_text,
@@ -193,7 +193,7 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput<'_>>) -> Vec<DiffResult> {
 /// counterpart. A `LineDiff` slot falls back to a line diff and sits out
 /// move detection.
 pub enum ChangesetSlot<'a> {
-    Prepared(BufferRef, PreparedDiff<'a>),
+    Prepared(BufferRef, Box<PreparedDiff<'a>>),
     LineDiff { lhs: &'a str, rhs: &'a str },
 }
 
@@ -291,7 +291,7 @@ pub fn diff_changeset_from_slots(mut slots: Vec<ChangesetSlot<'_>>) -> Vec<DiffR
 /// [`finalize_per_file`] consumes to emit a [`DiffResult`]. The
 /// identifying [`BufferRef`] travels alongside in [`ChangesetSlot`]
 /// rather than here, since single-file diffs have no buffer.
-struct PreparedFile {
+struct PreparedFile<'a> {
     lhs_arena: SyntaxArena,
     rhs_arena: SyntaxArena,
     lhs_root: SyntaxId,
@@ -300,6 +300,10 @@ struct PreparedFile {
     rhs_changes: ChangeMap,
     lhs_lines: LineIndex,
     rhs_lines: LineIndex,
+    /// The source texts the change byte ranges index into, retained so
+    /// [`finalize_per_file`] can char-refine each `Replaced` pair.
+    lhs_text: &'a str,
+    rhs_text: &'a str,
 }
 
 /// Borrowed view of the arenas + line indices for one prepared file.
@@ -316,12 +320,12 @@ struct PreparedFileView<'a> {
 /// one file. Returns `None` if either side fails to parse, mirroring
 /// the existing [`diff_with_language`] fallback contract -- the caller
 /// then routes that file through [`super::diff_lines`].
-fn prepare_per_file(
+fn prepare_per_file<'a>(
     language: &Arc<Language>,
-    lhs: &str,
-    rhs: &str,
+    lhs: &'a str,
+    rhs: &'a str,
     cancel: Option<&AtomicBool>,
-) -> Option<PreparedFile> {
+) -> Option<PreparedFile<'a>> {
     let lhs_tree = parse(language, lhs, None)?;
     let rhs_tree = parse(language, rhs, None)?;
     let (mut lhs_arena, lhs_root) = lower_tree(&lhs_tree, lhs);
@@ -378,6 +382,8 @@ fn prepare_per_file(
         rhs_changes: preprocess.rhs_changes,
         lhs_lines: LineIndex::new(lhs),
         rhs_lines: LineIndex::new(rhs),
+        lhs_text: lhs,
+        rhs_text: rhs,
     })
 }
 
@@ -387,7 +393,7 @@ fn prepare_per_file(
 /// `rhs_target.0` or any `lhs_sources[*].0` equals `my_idx` contribute
 /// metadata for this file.
 fn finalize_per_file(
-    prepared: &PreparedFile,
+    prepared: &PreparedFile<'_>,
     lhs_changes: &ChangeMap,
     rhs_changes: &ChangeMap,
     my_idx: usize,
@@ -417,6 +423,7 @@ fn finalize_per_file(
     );
     changes.sort_by_key(|c| (c.byte_range.start, c.byte_range.end));
     pair_adjacent_replacements(&mut changes);
+    super::refine::refine_replaced_pairs(&mut changes, prepared.lhs_text, prepared.rhs_text);
 
     DiffResult {
         changes,
@@ -464,6 +471,7 @@ fn collect_changes(
                     move_metadata: cur_meta.clone(),
                     pair_id: None,
                     deletion_rhs_anchor: None,
+                    refined_spans: Vec::new(),
                 });
                 *cur_kind = kind;
                 *cur_meta = meta;
@@ -480,6 +488,7 @@ fn collect_changes(
             move_metadata: meta,
             pair_id: None,
             deletion_rhs_anchor: None,
+            refined_spans: Vec::new(),
         });
     }
 }

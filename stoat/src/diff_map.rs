@@ -808,6 +808,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
             DiffChange {
                 side: Side::Lhs,
@@ -816,6 +817,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(1),
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
             DiffChange {
                 side: Side::Rhs,
@@ -824,6 +826,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(0),
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
             DiffChange {
                 side: Side::Rhs,
@@ -832,6 +835,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: Some(1),
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
         ];
         let dm = DiffMap::from_structural_changes(
@@ -880,6 +884,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: Some(1),
+            refined_spans: Vec::new(),
         }];
         let dm = DiffMap::from_structural_changes(
             DiffResult {
@@ -914,6 +919,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: None,
+            refined_spans: Vec::new(),
         }];
         let dm = DiffMap::from_structural_changes(
             DiffResult {
@@ -1239,6 +1245,7 @@ mod tests {
                 move_metadata: Some(lhs_meta.clone()),
                 pair_id: None,
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
             DiffChange {
                 side: Side::Rhs,
@@ -1247,6 +1254,7 @@ mod tests {
                 move_metadata: Some(rhs_meta.clone()),
                 pair_id: None,
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
         ];
         let result = DiffResult {
@@ -1304,6 +1312,7 @@ mod tests {
                 move_metadata: None,
                 pair_id: None,
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
             DiffChange {
                 side: Side::Lhs,
@@ -1312,6 +1321,7 @@ mod tests {
                 move_metadata: Some(meta.clone()),
                 pair_id: None,
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
             DiffChange {
                 side: Side::Rhs,
@@ -1320,6 +1330,7 @@ mod tests {
                 move_metadata: Some(meta.clone()),
                 pair_id: None,
                 deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
             },
         ];
         let dm = DiffMap::from_structural_changes(

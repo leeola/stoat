@@ -35,6 +35,7 @@ mod graph;
 mod line_diff;
 mod lower;
 mod moves;
+mod refine;
 mod sliders;
 mod stack;
 mod tree_diff;
@@ -102,6 +103,15 @@ pub struct DiffChange {
     /// logically belongs; used to anchor deleted content at the right
     /// position in the buffer view. `None` for any other kind.
     pub deletion_rhs_anchor: Option<u32>,
+    /// For a [`ChangeKind::Replaced`] change, the sub-ranges of
+    /// [`byte_range`](Self::byte_range) whose characters actually differ from
+    /// the counterpart, so a one-word edit marks only the changed chars rather
+    /// than the whole token or line run. Empty means the whole `byte_range`
+    /// changed (a full rewrite, an unpaired line, or a non-`Replaced` change).
+    ///
+    /// This is supplementary display data only. It never alters `byte_range`,
+    /// the pair structure, or hunk extents.
+    pub refined_spans: Vec<Range<usize>>,
 }
 
 /// Provenance for a [`ChangeKind::Moved`] region. `sources` enumerates the

@@ -969,6 +969,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: None,
+            refined_spans: Vec::new(),
         }];
         assert_eq!(
             mark_changed_lines(&lines, &changes, Side::Lhs),
@@ -987,6 +988,7 @@ mod tests {
             move_metadata: None,
             pair_id: None,
             deletion_rhs_anchor: None,
+            refined_spans: Vec::new(),
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
         assert_eq!(spans, vec![vec![6..11]]);
