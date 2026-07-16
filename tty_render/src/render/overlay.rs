@@ -277,6 +277,7 @@ mod tests {
             content_fg: Rgb::new(0, 0, 255),
             scale: 1,
             offset: [-4, 6],
+            bold: false,
             content: "x".to_owned(),
         }];
 

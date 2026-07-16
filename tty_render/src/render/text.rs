@@ -261,7 +261,7 @@ pub struct TextPass {
     swash_cache: SwashCache,
     /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
     /// alongside the integer cell scales.
-    shape_cache: FxHashMap<(char, u32), Option<CacheKey>>,
+    shape_cache: FxHashMap<(char, u32, u16), Option<CacheKey>>,
     /// The shaped glyphs of each grid row from the previous frame, indexed by
     /// row, so an unchanged row reuses them instead of re-shaping. Rebuilt for
     /// damaged rows, the cursor's old and new rows, and (wholesale) on resize or
@@ -1141,7 +1141,7 @@ impl TextPass {
                 if ch == ' ' {
                     continue;
                 }
-                let Some(key) = self.glyph_key(ch, scale) else {
+                let Some(key) = self.glyph_key(ch, scale, Weight::NORMAL) else {
                     continue;
                 };
                 let Some(info) = self.atlas.get_or_insert(
@@ -1406,7 +1406,7 @@ impl TextPass {
                 if ch == ' ' {
                     continue;
                 }
-                let Some(key) = self.glyph_key(ch, scale) else {
+                let Some(key) = self.glyph_key(ch, scale, Weight::NORMAL) else {
                     continue;
                 };
                 let Some(info) = self.atlas.get_or_insert(
@@ -1807,7 +1807,7 @@ impl TextPass {
             });
         }
 
-        let key = self.glyph_key(cell.ch, scale)?;
+        let key = self.glyph_key(cell.ch, scale, Weight::NORMAL)?;
         self.atlas.get_or_insert(
             device,
             queue,
@@ -1843,6 +1843,11 @@ impl TextPass {
 
         for overlay in grid.overlays() {
             let scale = overlay.scale.max(1);
+            let weight = if overlay.bold {
+                Weight::BOLD
+            } else {
+                Weight::NORMAL
+            };
             let mut group = Vec::new();
 
             for (col, row, ch) in overlay_content_cells(overlay, scale as usize) {
@@ -1850,7 +1855,7 @@ impl TextPass {
                     continue;
                 }
 
-                let Some(key) = self.glyph_key(ch, f32::from(scale)) else {
+                let Some(key) = self.glyph_key(ch, f32::from(scale), weight) else {
                     continue;
                 };
 
@@ -1885,8 +1890,8 @@ impl TextPass {
     /// The cached glyph cache key for `ch` at `scale`, shaping it on first use.
     /// `None` for a character that produces no glyph. The key is distinct per
     /// scale, so the atlas rasterizes each scale of a character separately.
-    fn glyph_key(&mut self, ch: char, scale: f32) -> Option<CacheKey> {
-        let cache_key = (ch, scale.to_bits());
+    fn glyph_key(&mut self, ch: char, scale: f32, weight: Weight) -> Option<CacheKey> {
+        let cache_key = (ch, scale.to_bits(), weight.0);
         if let Some(key) = self.shape_cache.get(&cache_key) {
             return *key;
         }
@@ -1897,6 +1902,7 @@ impl TextPass {
             scale,
             self.metrics,
             shape_family(&self.family),
+            weight,
         );
         self.shape_cache.insert(cache_key, key);
         key
@@ -2202,6 +2208,7 @@ fn shape_char(
     scale: f32,
     metrics: CellMetrics,
     primary: Family<'_>,
+    weight: Weight,
 ) -> Option<CacheKey> {
     let family = glyph_family(font_system, ch, primary);
     let size = scale;
@@ -2214,7 +2221,7 @@ fn shape_char(
     buffer.set_text(
         font_system,
         text,
-        &Attrs::new().family(family),
+        &Attrs::new().family(family).weight(weight),
         Shaping::Advanced,
         None,
     );
@@ -2645,15 +2652,16 @@ mod tests {
     use super::{
         build_font_system, build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell,
         fill_cell_box, glyph_family, glyph_origin, is_cell_fill, load_bundled_fonts,
-        overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_family,
-        shape_run, text_run_origin, GlyphSource, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_char,
+        shape_family, shape_run, text_run_origin, GlyphSource, TextPass, STYLE_DOTTED,
+        SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
         render::{CellMetrics, Frame, Scroll},
     };
     use cosmic_text::{
-        fontdb::{Database, Query},
+        fontdb::{Database, Query, Weight},
         Family, FontSystem,
     };
     use stoatty_term::{
@@ -2830,6 +2838,7 @@ mod tests {
             content_fg: Rgb::new(255, 255, 255),
             scale: 1,
             offset: [0, 0],
+            bold: false,
             content: "Hello".to_owned(),
         };
 
@@ -2850,6 +2859,7 @@ mod tests {
             content_fg: Rgb::new(255, 255, 255),
             scale: 2,
             offset: [0, 0],
+            bold: false,
             content: "abcd\nef".to_owned(),
         };
 
@@ -2874,6 +2884,7 @@ mod tests {
             content_fg: Rgb::new(255, 255, 255),
             scale: 1,
             offset: [0, 0],
+            bold: false,
             content: "abcd\nef\nXY".to_owned(),
         };
 
@@ -2883,6 +2894,23 @@ mod tests {
         assert_eq!(
             overlay_content_cells(&overlay, 1),
             [(6, 3, 'a'), (6, 4, 'e'), (6, 5, 'X')]
+        );
+    }
+
+    #[test]
+    fn shape_char_bold_resolves_a_distinct_face() {
+        let mut font_system = build_font_system();
+        let metrics = CellMetrics::from_font_size(30, 1.0);
+        let family = Family::Name("JetBrains Mono");
+
+        let normal = shape_char(&mut font_system, 'A', 1.0, metrics, family, Weight::NORMAL)
+            .expect("normal glyph shapes");
+        let bold = shape_char(&mut font_system, 'A', 1.0, metrics, family, Weight::BOLD)
+            .expect("bold glyph shapes");
+
+        assert_ne!(
+            normal, bold,
+            "the bold weight resolves a distinct face, diverging the glyph cache key",
         );
     }
 

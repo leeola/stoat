@@ -2,7 +2,7 @@ use crate::{cells, ApcScene};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     symbols::border,
     widgets::StatefulWidget,
 };
@@ -21,12 +21,16 @@ use stoatty_protocol::command;
 /// nudge from the anchor. Both shape only the rich rendering, not the cell
 /// fallback. Rich content is inset one cell from the border, matching the cell
 /// fallback's inset.
+///
+/// `bold` shapes the content at bold weight in both the rich rendering and the
+/// cell fallback.
 pub struct Popover<'a> {
     pub fill: [u8; 3],
     pub border: [u8; 3],
     pub content_fg: [u8; 3],
     pub scale: u8,
     pub offset: [i16; 2],
+    pub bold: bool,
     pub content: &'a str,
 }
 
@@ -47,6 +51,7 @@ impl StatefulWidget for Popover<'_> {
             self.content_fg,
             self.scale,
             self.offset,
+            self.bold,
             self.content,
         );
     }
@@ -64,12 +69,16 @@ impl Popover<'_> {
         );
 
         if area.width > 2 && area.height > 2 {
+            let mut content_style = Style::default().fg(rgb(self.content_fg)).bg(fill);
+            if self.bold {
+                content_style = content_style.add_modifier(Modifier::BOLD);
+            }
             buf.set_stringn(
                 area.x + 1,
                 area.y + 1,
                 self.content,
                 (area.width - 2) as usize,
-                Style::default().fg(rgb(self.content_fg)).bg(fill),
+                content_style,
             );
         }
     }
@@ -102,6 +111,7 @@ mod tests {
             content_fg: [70, 80, 90],
             scale: 2,
             offset: [-3, 7],
+            bold: true,
             content: "hello",
         }
         .render(area, &mut buf, &mut scene);
@@ -116,6 +126,7 @@ mod tests {
             content_fg: [70, 80, 90],
             scale: 2,
             offset: [-3, 7],
+            bold: true,
             content: "hello".to_owned(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
@@ -133,6 +144,7 @@ mod tests {
             content_fg: [255, 255, 255],
             scale: 1,
             offset: [0, 0],
+            bold: false,
             content: "abcdefgh",
         }
         .render(area, &mut buf, &mut scene);

@@ -650,6 +650,9 @@ pub struct Overlay {
     /// at a sub-cell position. The box, its shadow, its content, and the content
     /// clip all shift by this offset.
     pub offset: [i16; 2],
+    /// Shape the content text at bold weight rather than the default. Only the
+    /// content is affected. The box chrome is unchanged.
+    pub bold: bool,
     pub content: String,
 }
 
@@ -999,6 +1002,7 @@ mod tests {
             content_fg: Rgb::new(70, 80, 90),
             scale: 1,
             offset: [0, 0],
+            bold: false,
             content: "hi".to_owned(),
         };
         grid.set_overlays(vec![overlay.clone()]);

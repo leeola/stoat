@@ -191,6 +191,9 @@ pub struct PopoverCommand {
     /// exactly under a span rather than snapping to the cell grid. The box, its
     /// shadow, its content, and the content clip all shift by this offset.
     pub offset: [i16; 2],
+    /// Shape the content text at bold weight rather than the default. Only the
+    /// content is affected. The box chrome is unchanged.
+    pub bold: bool,
     pub content: String,
 }
 
@@ -554,6 +557,7 @@ pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
         command.content_fg,
         command.scale,
         command.offset,
+        command.bold,
         &command.content,
     );
     out
@@ -578,6 +582,7 @@ pub fn encode_popover_into(
     content_fg: [u8; 3],
     scale: u8,
     offset: [i16; 2],
+    bold: bool,
     content: &str,
 ) {
     frame::begin(out, "popover");
@@ -591,7 +596,8 @@ pub fn encode_popover_into(
         w.write_all(&content_fg)?;
         w.write_all(&[scale])?;
         w.write_all(&offset[0].to_be_bytes())?;
-        w.write_all(&offset[1].to_be_bytes())
+        w.write_all(&offset[1].to_be_bytes())?;
+        w.write_all(&[bold as u8])
     });
     frame::end(out);
     out.extend_from_slice(content.as_bytes());
@@ -1027,6 +1033,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
             c.content_fg,
             c.scale,
             c.offset,
+            c.bold,
             &c.content,
         ),
         Command::PopoverEnd => encode_popover_end_into(out),
@@ -1130,7 +1137,7 @@ fn decode_scale(args: &[Vec<u8>]) -> Option<ScaleCommand> {
 /// bytes after this frame and is captured by the terminal between the open
 /// marker and [`Command::PopoverEnd`], so it is empty here.
 fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
-    let region: &[u8; 22] = args.first()?.as_slice().try_into().ok()?;
+    let region: &[u8; 23] = args.first()?.as_slice().try_into().ok()?;
 
     Some(PopoverCommand {
         top: u16::from_be_bytes([region[0], region[1]]),
@@ -1145,6 +1152,7 @@ fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
             i16::from_be_bytes([region[18], region[19]]),
             i16::from_be_bytes([region[20], region[21]]),
         ],
+        bold: region[22] != 0,
         content: String::new(),
     })
 }
@@ -1421,13 +1429,13 @@ mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
         encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
-        encode_minimap_view, encode_panel, encode_pool_drop, encode_pool_region,
+        encode_minimap_view, encode_panel, encode_pool_drop, encode_pool_region, encode_popover,
         encode_popover_end, encode_reposition, encode_reset, encode_scale, encode_scroll,
         encode_scroll_region, encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command,
         FillCommand, IconCommand, IconKind, LineLayoutCommand, MinimapCommand, MinimapDropCommand,
         MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand, PoolDropCommand,
-        PoolRegionCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
-        TextRunCommand,
+        PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
+        ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -1583,9 +1591,34 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_popover_payload() {
-        // The first arg here decodes to 3 bytes, not the 22 a popover region
+        // The first arg here decodes to 3 bytes, not the 23 a popover region
         // needs, and the content arg is absent.
         assert!(decode(b"Gstoatty;popover;YWJj").is_none());
+    }
+
+    #[test]
+    fn popover_head_round_trips_bold() {
+        for bold in [true, false] {
+            let command = PopoverCommand {
+                top: 1,
+                left: 2,
+                width: 4,
+                height: 3,
+                fill: [10, 20, 30],
+                border: [40, 50, 60],
+                content_fg: [70, 80, 90],
+                scale: 2,
+                offset: [4, -2],
+                bold,
+                content: String::new(),
+            };
+            // encode_popover emits the open marker, streamed content, then the
+            // close marker. Content is empty here, so slicing off the close
+            // marker leaves exactly the head frame to decode.
+            let full = encode_popover(&command);
+            let head = &full[..full.len() - encode_popover_end().len()];
+            assert_eq!(decode(head), Some(Command::Popover(command)));
+        }
     }
 
     #[test]

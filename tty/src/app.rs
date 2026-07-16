@@ -2359,6 +2359,7 @@ mod tests {
             content_fg: Rgb::new(0, 0, 0),
             scale,
             offset: [0, 0],
+            bold: false,
             content: content.to_owned(),
         }
     }

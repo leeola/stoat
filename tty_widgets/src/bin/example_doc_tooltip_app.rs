@@ -93,6 +93,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene, content: &str) {
             content_fg: [228, 232, 240],
             scale: 2,
             offset: [6, 4],
+            bold: false,
             content,
         },
         Rect::new(WORD_COL - 2, WORD_ROW + 1, 56, 12),

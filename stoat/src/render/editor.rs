@@ -1470,6 +1470,7 @@ fn render_diagnostic_popover(
         content_fg: color,
         scale: 1,
         offset: [3, 6],
+        bold: false,
         content: &content,
     }
     .render(rect, buf, scene);

@@ -111,6 +111,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
             content_fg: ERROR,
             scale: 1,
             offset: [3, 6],
+            bold: false,
             content: TOOLTIP_CONTENT,
         },
         Rect::new(ERROR_COL, ERROR_ROW + 1, 34, 4),

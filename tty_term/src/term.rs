@@ -2566,6 +2566,7 @@ fn popover_overlay(command: &PopoverCommand) -> Overlay {
         ),
         scale: command.scale,
         offset: command.offset,
+        bold: command.bold,
         content: command.content.clone(),
     }
 }
@@ -3602,6 +3603,7 @@ mod tests {
             content_fg: [70, 80, 90],
             scale: 2,
             offset: [4, -2],
+            bold: true,
             content: "ok".to_owned(),
         });
 
@@ -3622,6 +3624,7 @@ mod tests {
                 content_fg: Rgb::new(70, 80, 90),
                 scale: 2,
                 offset: [4, -2],
+                bold: true,
                 content: "ok".to_owned(),
             }]
         );
@@ -3639,6 +3642,7 @@ mod tests {
             content_fg: [70, 80, 90],
             scale: 1,
             offset: [0, 0],
+            bold: false,
             content: "streamed".to_owned(),
         });
 
@@ -3666,6 +3670,7 @@ mod tests {
                 content_fg: Rgb::new(70, 80, 90),
                 scale: 1,
                 offset: [0, 0],
+                bold: false,
                 content: "streamed".to_owned(),
             }]
         );
