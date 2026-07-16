@@ -117,11 +117,12 @@ fn is_word_or_path_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '/' | '.' | '-' | '~')
 }
 
-/// Stamp [`Stoat::last_completion_signature`] with the focused
-/// editor's current buffer signature. Used by the Esc-dismiss path
-/// in `handle_insert_key` so the very-next [`trigger`] sees an
-/// unchanged signature and returns early instead of re-arming the
-/// request that was just dismissed.
+/// Stamp [`Stoat::last_completion_signature`] with the focused editor's
+/// current buffer signature, so the very-next [`trigger`] sees an
+/// unchanged signature and returns early instead of re-arming a request.
+///
+/// Called after a completion is accepted, so the text the accept just
+/// inserted does not immediately reopen the popup on the next event.
 pub(crate) fn record_dismiss(stoat: &mut Stoat) {
     let Some((buffer_id, version)) = focused_buffer_signature(stoat) else {
         return;
@@ -794,7 +795,7 @@ mod harness_tests {
     }
 
     #[test]
-    fn esc_dismiss_does_not_reopen_popup_on_next_event() {
+    fn esc_dismisses_popup_and_leaves_insert_in_one_press() {
         let mut h = TestHarness::default();
         enable_completion(&h);
         open_scratch(&mut h, "");
@@ -806,20 +807,22 @@ mod harness_tests {
         assert!(h.stoat.pending_completion.is_some());
 
         h.type_keys("escape");
-        assert!(h.stoat.pending_completion.is_none());
-        assert!(h.stoat.pending_completion_request.is_none());
-
-        h.type_keys("left right");
         assert!(
-            h.stoat.pending_completion_request.is_none(),
-            "cursor-only motion should not re-arm the request after dismiss",
+            h.stoat.pending_completion.is_none(),
+            "one escape closes the popup"
+        );
+        assert!(h.stoat.pending_completion_request.is_none());
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "the same escape also leaves insert mode",
         );
 
-        h.fake_lsp().set_completions("/ws/buf.rs", 0, 4, &["foox"]);
+        h.type_keys("i");
         h.type_text("x");
         assert!(
             h.stoat.pending_completion_request.is_some(),
-            "buffer change must arm a fresh debounced request",
+            "typing after re-entering insert arms a fresh request",
         );
     }
 }

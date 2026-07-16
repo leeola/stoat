@@ -3675,8 +3675,10 @@ impl Stoat {
                 && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
             // handle_insert_key keeps priority for printable typing and for its
             // transient sub-modes (a completion popup, a pending insert
-            // register), whose keys it owns; otherwise a keymap binding for a
-            // non-printable key wins over the built-in defaults.
+            // register), whose keys it owns. Otherwise a keymap binding for a
+            // non-printable key wins over the built-in defaults. Esc with a
+            // completion popup open is the exception. handle_insert_key returns
+            // None for it, so it falls through to the keymap and leaves insert.
             let insert_first =
                 printable || self.pending_completion.is_some() || self.pending_insert_register;
             let keymap_binds = !insert_first && {
@@ -4435,12 +4437,6 @@ impl Stoat {
             },
             KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
                 self.editor_insert_newline(editor_id, buffer_id);
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Esc if self.pending_completion.is_some() => {
-                self.pending_completion = None;
-                self.pending_completion_request = None;
-                crate::completion::request::record_dismiss(self);
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Char(ch)
@@ -13250,7 +13246,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_in_insert_with_open_popup_clears_popup_and_keeps_mode() {
+    fn esc_in_insert_with_open_popup_clears_popup_and_exits_to_normal() {
         use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
         let mut h = Stoat::test();
         let _path = open_scratch_file(&mut h, "");
@@ -13275,7 +13271,11 @@ mod tests {
         });
         h.type_keys("escape");
         assert_eq!(h.stoat.pending_completion, None);
-        assert_eq!(h.stoat.focused_mode(), "insert");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "one escape closes the popup and leaves insert mode",
+        );
     }
 
     #[test]
