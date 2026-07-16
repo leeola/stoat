@@ -28,6 +28,12 @@ pub struct TextBuffer {
     /// Stack of edit groups undone and eligible for the next `redo()`. Pushed on
     /// `undo()`, popped on `redo()`, cleared on any new `edit()`.
     redo_history: Vec<UndoGroup>,
+    /// Count of leading [`Self::edit_history`] groups that seeded the buffer's
+    /// initial content rather than being user edits. [`Self::undo`] refuses to
+    /// pop below this floor, so undoing a freshly loaded file is a no-op instead
+    /// of reverting the whole load. Zero for a buffer created empty via
+    /// [`Self::new`], since it has no seed to protect.
+    undo_floor: usize,
     /// Whether [`Self::begin_group`] opened a group. While open, edits collapse
     /// into one logical undo step. The group is materialized lazily on its first
     /// edit, so a group that never edits leaves `edit_history` untouched -- which
@@ -93,6 +99,12 @@ pub struct BufferHistory {
     /// dirty once and self-heals on the next save.
     #[serde(default)]
     pub saved_marker: Option<u64>,
+    /// Persisted [`TextBuffer::undo_floor`], the count of leading seed groups
+    /// protected from undo. `#[serde(default)]` reads an older state file as 0,
+    /// so a restored buffer allows undoing its seed once and self-heals when the
+    /// file is next reopened via [`TextBuffer::with_text`].
+    #[serde(default)]
+    pub undo_floor: usize,
 }
 
 /// Stable identifier for a [`Checkpoint`] within a single [`TextBuffer`].
@@ -156,6 +168,7 @@ impl TextBuffer {
             buffer_id,
             edit_history: Vec::new(),
             redo_history: Vec::new(),
+            undo_floor: 0,
             open_group: false,
             open_group_started: false,
             open_group_before: Vec::new(),
@@ -171,6 +184,7 @@ impl TextBuffer {
         if !text.is_empty() {
             buf.edit(0..0, text);
             buf.mark_clean();
+            buf.undo_floor = buf.edit_history.len();
         }
         buf.detect_indent_style();
         buf
@@ -505,7 +519,14 @@ impl TextBuffer {
     /// Undo the top edit group, reverting all of its edits as one step. Returns
     /// the editor selections captured when the group opened, to restore the
     /// cursor to edit time, or `None` when there is nothing to undo.
+    ///
+    /// The content a buffer was loaded or seeded with is not an undo target, so
+    /// undoing a freshly opened file with no user edits returns `None` and
+    /// leaves the file intact rather than emptying it.
     pub fn undo(&mut self) -> Option<Vec<Selection<Anchor>>> {
+        if self.edit_history.len() <= self.undo_floor {
+            return None;
+        }
         let group = self.edit_history.pop()?;
         for &edit_timestamp in group.edits.iter().rev() {
             self.apply_undo_toggle(edit_timestamp, BufferOp::Undo);
@@ -647,6 +668,7 @@ impl TextBuffer {
         BufferHistory {
             ops: self.ops.clone(),
             saved_marker: self.saved_marker,
+            undo_floor: self.undo_floor,
         }
     }
 
@@ -667,6 +689,7 @@ impl TextBuffer {
             }
         }
         buf.saved_marker = history.saved_marker;
+        buf.undo_floor = history.undo_floor;
         buf.recompute_dirty();
         buf.detect_indent_style();
         buf
@@ -1357,6 +1380,34 @@ mod tests {
         assert!(!b.dirty, "undo back to saved content clears dirty");
         b.redo();
         assert!(b.dirty, "redo away from saved content sets dirty");
+    }
+
+    #[test]
+    fn undo_on_a_freshly_loaded_file_is_a_noop() {
+        let mut b = buf("hello");
+        assert!(b.undo().is_none(), "the seeded load is not an undo target");
+        assert_eq!(b.snapshot.visible_text.to_string(), "hello");
+    }
+
+    #[test]
+    fn undo_reverts_user_edits_then_stops_at_the_seed() {
+        let mut b = buf("hello");
+        b.edit(5..5, "!");
+        assert!(b.undo().is_some(), "the user edit undoes");
+        assert_eq!(b.snapshot.visible_text.to_string(), "hello");
+        assert!(b.undo().is_none(), "undo stops at the seeded baseline");
+        assert_eq!(b.snapshot.visible_text.to_string(), "hello");
+    }
+
+    #[test]
+    fn undo_floor_survives_a_history_round_trip() {
+        let history = buf("hello").history();
+        let mut restored = TextBuffer::from_history(BufferId::new(0), &history);
+        assert!(
+            restored.undo().is_none(),
+            "the restored seed stays protected"
+        );
+        assert_eq!(restored.snapshot.visible_text.to_string(), "hello");
     }
 
     #[test]
