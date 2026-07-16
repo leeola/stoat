@@ -1,6 +1,6 @@
 use crate::{
     buffer::BufferId,
-    editor_state::{EditorId, EditorState},
+    editor_state::{EditorId, EditorState, ScrollGlide},
     fuzzy,
     host::FsHost,
     paths,
@@ -496,8 +496,7 @@ fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: Buff
         });
         editor.scroll_row = 0;
         editor.scroll_offset = 0.0;
-        editor.scroll_velocity = 0.0;
-        editor.scroll_glide = false;
+        editor.scroll_glide = ScrollGlide::None;
     }
 }
 

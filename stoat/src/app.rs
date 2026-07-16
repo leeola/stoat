@@ -7,7 +7,7 @@ use crate::{
     code_index::build::IndexUpdate,
     command_palette::CommandPalette,
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
-    editor_state::EditorId,
+    editor_state::{EditorId, ScrollGlide},
     file_finder::FileFinder,
     help::Help,
     host::{
@@ -1692,79 +1692,55 @@ impl Stoat {
         self.active_workspace()
             .editors
             .values()
-            .any(|editor| editor.scroll_velocity != 0.0 || editor.scroll_glide)
+            .any(|editor| editor.scroll_glide != ScrollGlide::None)
     }
 
-    /// Advance every animating editor's inertial scroll by `dt` seconds, the
-    /// real time elapsed since the previous tick. Returns whether any editor is
-    /// still gliding after the step.
+    /// Advance every animating editor's scroll glide by `dt` seconds, the real
+    /// time elapsed since the previous tick. Returns whether any editor is still
+    /// gliding after the step.
     ///
-    /// A wheel coast (nonzero velocity) steps through
-    /// [`step_scroll_momentum`](action_handlers::movement::step_scroll_momentum),
-    /// writing back the decayed velocity and new offset and keeping `scroll_row`
-    /// at `floor(scroll_offset)` so the integer-row render and pool paths track
-    /// the coast. On settle it arms a page glide onto the rounded resting row
-    /// rather than snapping `scroll_offset` there, so the final sub-row fraction
-    /// eases in instead of jumping after the coast has slowed to a standstill.
-    ///
-    /// A keyboard page glide (`scroll_glide`, zero velocity) eases `scroll_offset`
-    /// toward the `scroll_row` target the jump already set, clearing the flag on
-    /// settle. It never writes `scroll_row` -- that is the fixed target the offset
-    /// glides up to. A gap wider than three viewports (a big count-jump or a jump
-    /// landing mid-glide) snaps instead so the offset never drags across the
-    /// pool's buffered window.
+    /// A glide eases `scroll_offset` toward the `scroll_row` target the wheel or
+    /// page motion already set, clearing [`ScrollGlide`] on settle. It never
+    /// writes `scroll_row` -- that is the fixed target the offset eases up to. A
+    /// wheel glide eases slower than a page glide, so a stream of reports at
+    /// wheel rates overlaps into continuous motion instead of pulsing. A gap
+    /// wider than three viewports (a big count-jump or a jump landing mid-glide)
+    /// snaps instead so the offset never drags across the pool's buffered window.
     fn tick_scroll_anim(&mut self, dt: f32) -> bool {
+        const PAGE_EASE: f32 = 0.35;
+        // Slow enough that >=10Hz wheel report trains overlap into continuous
+        // motion instead of pulse-stall-pulse, fast enough that a lone notch's
+        // three-row glide completes in about 200ms.
+        const WHEEL_EASE: f32 = 0.13;
+
         let mut animating = false;
-        // Resolved before the loop because its &mut borrow forbids reading
-        // settings inside. The default mirrors the post-key view-follow.
-        let scrolloff = self.settings.scrolloff.unwrap_or(3);
         for editor in self.active_workspace_mut().editors.values_mut() {
-            if editor.scroll_velocity != 0.0 {
-                let max_offset = action_handlers::movement::max_scroll_offset(editor);
-                let (offset, velocity, settled) = action_handlers::movement::step_scroll_momentum(
+            let ease = match editor.scroll_glide {
+                ScrollGlide::None => continue,
+                ScrollGlide::Page => PAGE_EASE,
+                ScrollGlide::Wheel => WHEEL_EASE,
+            };
+            let target = editor.scroll_row as f32;
+            let viewport = editor
+                .viewport_rows
+                .unwrap_or(action_handlers::movement::DEFAULT_VIEWPORT_ROWS)
+                .max(1);
+            if (target - editor.scroll_offset).abs() > viewport as f32 * 3.0 {
+                editor.scroll_offset = target;
+                editor.scroll_glide = ScrollGlide::None;
+            } else {
+                let (offset, settled) = action_handlers::movement::step_scroll_ease(
                     editor.scroll_offset,
-                    editor.scroll_velocity,
+                    target,
                     dt,
-                    max_offset,
+                    ease,
                 );
                 editor.scroll_offset = offset;
-                editor.scroll_velocity = velocity;
                 if settled {
-                    // A low settle speed can leave the offset up to half a row
-                    // from its resting row. Snapping scroll_offset onto the
-                    // rounded row jumps that remainder visibly, right as the
-                    // coast slows to a near standstill. Arm a page glide onto
-                    // the rounded row instead so the final fraction eases in.
-                    editor.scroll_row = offset.round().clamp(0.0, max_offset) as u32;
-                    action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
-                    editor.scroll_glide = true;
-                } else {
-                    editor.scroll_row = offset.floor() as u32;
-                    action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
+                    editor.scroll_glide = ScrollGlide::None;
                 }
-                animating = true;
-            } else if editor.scroll_glide {
-                let target = editor.scroll_row as f32;
-                let viewport = editor
-                    .viewport_rows
-                    .unwrap_or(action_handlers::movement::DEFAULT_VIEWPORT_ROWS)
-                    .max(1);
-                if (target - editor.scroll_offset).abs() > viewport as f32 * 3.0 {
-                    editor.scroll_offset = target;
-                    editor.scroll_glide = false;
-                } else {
-                    let (offset, settled) = action_handlers::movement::step_scroll_ease(
-                        editor.scroll_offset,
-                        target,
-                        dt,
-                    );
-                    editor.scroll_offset = offset;
-                    if settled {
-                        editor.scroll_glide = false;
-                    }
-                }
-                animating |= editor.scroll_glide;
             }
+            animating |= editor.scroll_glide != ScrollGlide::None;
         }
         animating
     }
@@ -3039,8 +3015,7 @@ impl Stoat {
         if editor.scroll_offset.floor() as u32 != prev {
             editor.scroll_offset = prev as f32;
         }
-        editor.scroll_velocity = 0.0;
-        editor.scroll_glide = true;
+        editor.scroll_glide = ScrollGlide::Page;
     }
 
     /// Route a left-button press over the open hover popup to its text
@@ -3144,6 +3119,11 @@ impl Stoat {
     /// plain stepped scrolling of its output, three rows per notch, clamped to
     /// the top. Anything else drops the event.
     fn handle_mouse_scroll(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        // Resolved before any workspace borrow so wheel_scroll can drag the
+        // cursor into the scrolloff band. The default mirrors the post-key
+        // view-follow.
+        let scrolloff = self.settings.scrolloff.unwrap_or(3);
+
         // A wheel while a finder or palette modal is open moves its selection
         // rather than scrolling the pane beneath, so the event never falls
         // through. The two modals are mutually exclusive, so two checks suffice.
@@ -3179,7 +3159,7 @@ impl Stoat {
                 && rect.contains(Position::new(mouse.column, mouse.row))
             {
                 if let Some(editor) = self.active_workspace_mut().editors.get_mut(editor_id) {
-                    action_handlers::movement::wheel_impulse(editor, down);
+                    action_handlers::movement::wheel_scroll(editor, down, scrolloff);
                 }
                 return UpdateEffect::None;
             }
@@ -3232,11 +3212,11 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
-                action_handlers::movement::wheel_impulse(editor, down);
-                // No repaint here. The wheel only imparts velocity, and the
-                // frame tick drives the glide and its renders. A trackpad sends
-                // ~100 events per flick, so repainting per event would saturate
-                // the loop with re-renders of an unscrolled view.
+                action_handlers::movement::wheel_scroll(editor, down, scrolloff);
+                // No repaint here. The wheel only advances the glide target, and
+                // the frame tick drives the ease and its renders. A trackpad
+                // sends ~100 events per flick, so repainting per event would
+                // saturate the loop with re-renders of an unscrolled view.
                 UpdateEffect::None
             },
             View::Run(id) => {
@@ -5953,7 +5933,7 @@ impl Stoat {
             // exception. scroll_row jumped to the target and the offset lags
             // behind easing up to it, so trust the fraction throughout the glide
             // and let the pool ease from the lagging offset to the target.
-            let scroll_offset = if editor.scroll_glide
+            let scroll_offset = if editor.scroll_glide != ScrollGlide::None
                 || editor.scroll_offset.floor() as u32 == editor.scroll_row
             {
                 editor.scroll_offset
@@ -7047,7 +7027,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn scroll_anim_tick_advances_offset_then_settles() {
+    fn scroll_anim_tick_eases_offset_then_settles() {
         use crate::test_harness::TestHarness;
 
         let mut h = TestHarness::with_size(40, 12);
@@ -7055,25 +7035,22 @@ mod tests {
         let path = h.write_file("glide.rs", &body);
         h.open_file(&path);
 
-        action_handlers::focused_editor_mut(&mut h.stoat)
-            .expect("focused editor")
-            .scroll_velocity = 200.0;
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            action_handlers::movement::wheel_scroll(editor, true, 3);
+        }
         assert!(
             h.stoat.is_animating(),
-            "seeded velocity makes the editor animate"
+            "an armed wheel glide makes the editor animate"
         );
 
         h.stoat.tick_scroll_anim(0.016);
         {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             assert!(
-                editor.scroll_offset > 0.0,
-                "tick advances the fractional offset"
-            );
-            assert_eq!(
-                editor.scroll_row,
-                editor.scroll_offset.floor() as u32,
-                "scroll_row tracks floor(scroll_offset)"
+                editor.scroll_offset > 0.0 && editor.scroll_offset < editor.scroll_row as f32,
+                "the tick eases the offset up toward the fixed target"
             );
         }
 
@@ -7087,9 +7064,9 @@ mod tests {
         assert_eq!(
             action_handlers::focused_editor_mut(&mut h.stoat)
                 .expect("focused editor")
-                .scroll_velocity,
-            0.0,
-            "settled velocity is zero"
+                .scroll_offset,
+            3.0,
+            "the offset settles on the wheel target"
         );
     }
 
@@ -7108,7 +7085,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
             for _ in 0..4 {
-                action_handlers::movement::wheel_impulse(editor, true);
+                action_handlers::movement::wheel_scroll(editor, true, 3);
             }
         }
         for _ in 0..1000 {
@@ -7149,7 +7126,7 @@ mod tests {
 
     fn pane_scroll_state(h: &mut crate::test_harness::TestHarness) -> (u32, f32) {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-        (editor.scroll_row, editor.scroll_velocity)
+        (editor.scroll_row, editor.scroll_offset)
     }
 
     #[test]
@@ -7262,8 +7239,11 @@ mod tests {
         h.open_file(&doc);
 
         let root = std::path::PathBuf::from("/click-finder");
+        // Each file previews long enough to scroll, so a wheel over the preview
+        // has an observable effect whichever entry is selected.
+        let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
         for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
-            h.fake_fs().insert_file(root.join(name), b"x\n");
+            h.fake_fs().insert_file(root.join(name), long.as_bytes());
         }
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
@@ -7371,6 +7351,8 @@ mod tests {
     fn wheel_over_finder_preview_scrolls_it_not_the_list() {
         let mut h = crate::test_harness::TestHarness::with_size(100, 30);
         open_finder_with_four(&mut h);
+        action_handlers::sync_file_finder_preview(&mut h.stoat);
+        h.settle();
 
         let preview = crate::render::file_finder::file_finder_layout(h.stoat.size())
             .and_then(|layout| layout.preview)
@@ -7388,24 +7370,23 @@ mod tests {
             0,
             "a wheel over the preview leaves the list selection put"
         );
-        let velocity = h
+        let scroll_row = h
             .stoat
             .active_workspace()
             .editors
             .get(preview_id)
             .expect("preview editor")
-            .scroll_velocity;
-        assert!(
-            velocity > 0.0,
-            "the wheel imparts downward scroll to the preview"
-        );
+            .scroll_row;
+        assert!(scroll_row > 0, "the wheel scrolls the preview down");
     }
 
     #[test]
     fn wheel_over_palette_arg_preview_scrolls_it_not_the_list() {
         let mut h = crate::test_harness::TestHarness::with_size(100, 30);
         let root = std::path::PathBuf::from("/arg-preview");
-        for name in ["a.rs", "b.rs", "c.rs"] {
+        let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(root.join("a.rs"), long.as_bytes());
+        for name in ["b.rs", "c.rs"] {
             h.fake_fs().insert_file(root.join(name), b"x\n");
         }
         h.stoat.active_workspace_mut().git_root = root;
@@ -7448,17 +7429,14 @@ mod tests {
             selected, 0,
             "a wheel over the preview leaves the arg selection put"
         );
-        let velocity = h
+        let scroll_row = h
             .stoat
             .active_workspace()
             .editors
             .get(preview_id)
             .expect("preview editor")
-            .scroll_velocity;
-        assert!(
-            velocity > 0.0,
-            "the wheel imparts downward scroll to the preview"
-        );
+            .scroll_row;
+        assert!(scroll_row > 0, "the wheel scrolls the preview down");
     }
 
     #[test]
@@ -7476,9 +7454,8 @@ mod tests {
                 .get_mut(preview_id)
                 .expect("preview editor");
             editor.scroll_offset = 5.0;
-            editor.scroll_velocity = 100.0;
             editor.scroll_row = 5;
-            editor.scroll_glide = true;
+            editor.scroll_glide = ScrollGlide::Wheel;
         }
 
         action_handlers::file_finder_move_selection(&mut h.stoat, 1);
@@ -7491,13 +7468,8 @@ mod tests {
             .get(preview_id)
             .expect("preview editor");
         assert_eq!(
-            (
-                editor.scroll_row,
-                editor.scroll_offset,
-                editor.scroll_velocity,
-                editor.scroll_glide,
-            ),
-            (0, 0.0, 0.0, false),
+            (editor.scroll_row, editor.scroll_offset, editor.scroll_glide,),
+            (0, 0.0, ScrollGlide::None),
             "a new selection resets the preview scroll to the top",
         );
     }
@@ -7515,7 +7487,7 @@ mod tests {
             editor.viewport_rows = Some(10);
             editor.scroll_row = 10;
             editor.scroll_offset = 0.0;
-            editor.scroll_glide = true;
+            editor.scroll_glide = ScrollGlide::Page;
         }
         assert!(h.stoat.is_animating(), "a page glide animates");
 
@@ -7536,7 +7508,11 @@ mod tests {
             h.stoat.tick_scroll_anim(0.016);
         }
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-        assert!(!editor.scroll_glide, "the glide clears on settle");
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::None,
+            "the glide clears on settle"
+        );
         assert_eq!(
             editor.scroll_offset, 10.0,
             "the offset settles on the target"
@@ -7556,7 +7532,7 @@ mod tests {
             editor.viewport_rows = Some(10);
             editor.scroll_row = 100;
             editor.scroll_offset = 0.0;
-            editor.scroll_glide = true;
+            editor.scroll_glide = ScrollGlide::Page;
         }
 
         h.stoat.tick_scroll_anim(0.016);
@@ -7566,41 +7542,10 @@ mod tests {
             editor.scroll_offset, 100.0,
             "a gap wider than three viewports snaps straight to the target"
         );
-        assert!(!editor.scroll_glide, "and clears the glide");
-    }
-
-    #[test]
-    fn momentum_settle_arms_a_glide_instead_of_snapping() {
-        use crate::test_harness::TestHarness;
-
-        let mut h = TestHarness::with_size(40, 12);
-        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
-        let path = h.write_file("glide.rs", &body);
-        h.open_file(&path);
-        {
-            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-            editor.viewport_rows = Some(10);
-            editor.scroll_row = 42;
-            editor.scroll_offset = 42.4;
-            editor.scroll_velocity = 1.0;
-        }
-
-        h.stoat.tick_scroll_anim(0.016);
-
-        assert!(
-            h.stoat.is_animating(),
-            "the coast eases onto the row instead of stopping dead"
-        );
-        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-        assert_eq!(editor.scroll_velocity, 0.0, "the coast has settled");
-        assert!(editor.scroll_glide, "settle arms an ease glide");
         assert_eq!(
-            editor.scroll_row, 42,
-            "the glide targets the rounded resting row"
-        );
-        assert!(
-            editor.scroll_offset > 42.0 && editor.scroll_offset < 43.0,
-            "the offset keeps its fraction for the glide to ease in, not a snapped integer"
+            editor.scroll_glide,
+            ScrollGlide::None,
+            "and clears the glide"
         );
     }
 
@@ -11258,7 +11203,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.scroll_row = 50;
             editor.scroll_offset = 1.0;
-            editor.scroll_glide = true;
+            editor.scroll_glide = ScrollGlide::Page;
         }
 
         h.stoat.emit_smooth_scroll();
@@ -12182,7 +12127,11 @@ mod tests {
             editor.scroll_row, 34,
             "the click eases to the centered proportional row"
         );
-        assert!(editor.scroll_glide, "the scrub glides like a page motion");
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::Page,
+            "the scrub glides like a page motion"
+        );
         assert_eq!(
             h.stoat.minimap_drag,
             Some(editor_id),

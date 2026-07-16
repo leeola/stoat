@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     diff_cache::{DiffCache, DiffCacheKey},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
-    editor_state::{EditorId, EditorState},
+    editor_state::{EditorId, EditorState, ScrollGlide},
     host::{GitHost, WatchToken},
     pane::View,
     review::{MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
@@ -554,12 +554,11 @@ fn sync_review_view_and_scroll(
         view.refresh_from_session(session);
     }
     // A refresh that lands mid-motion must not yank scroll_row out from under
-    // the animation. During a wheel coast the next momentum tick would
-    // overwrite it from the eased offset, and during a page glide it is the
-    // fixed target the offset eases toward, so re-targeting it here jerks the
-    // view to the chunk and back. Re-scroll only after the motion settles. The
+    // the animation. scroll_row is the fixed target the offset eases toward
+    // during any glide, so re-targeting it to the chunk here would jerk the view
+    // to the chunk and back. Re-scroll only after the motion settles. The
     // view-state refresh above still runs regardless.
-    let mid_motion = editor.scroll_velocity != 0.0 || editor.scroll_glide;
+    let mid_motion = editor.scroll_glide != ScrollGlide::None;
     if let Some(chunk_id) = scroll_to_chunk
         && !mid_motion
         && let Some(buffer_row) = view.row_of_chunk(chunk_id)
@@ -1949,8 +1948,8 @@ fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<B
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::REVIEW_EXTERNAL_EDIT_DEBOUNCE, diff_cache::DiffCacheKey, host::FsEventKind,
-        review_session::ChunkStatus, test_harness::TestHarness,
+        app::REVIEW_EXTERNAL_EDIT_DEBOUNCE, diff_cache::DiffCacheKey, editor_state::ScrollGlide,
+        host::FsEventKind, review_session::ChunkStatus, test_harness::TestHarness,
     };
     use std::path::PathBuf;
 
@@ -2090,7 +2089,7 @@ mod tests {
             {
                 let editor = ws.editors.get_mut(editor_id).expect("editor");
                 editor.scroll_row = 0;
-                editor.scroll_velocity = 50.0;
+                editor.scroll_glide = ScrollGlide::Wheel;
             }
             sync_review_view_and_scroll(ws, Some(editor_id), Some(chunk));
         }
@@ -2104,7 +2103,7 @@ mod tests {
             let ws = h.stoat.active_workspace_mut();
             {
                 let editor = ws.editors.get_mut(editor_id).expect("editor");
-                editor.scroll_velocity = 0.0;
+                editor.scroll_glide = ScrollGlide::None;
             }
             sync_review_view_and_scroll(ws, Some(editor_id), Some(chunk));
         }

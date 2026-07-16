@@ -2,7 +2,7 @@ use crate::{
     action_handlers::focused_editor_mut,
     app::{Stoat, UpdateEffect},
     display_map::{DisplayPoint, DisplaySnapshot},
-    editor_state::EditorState,
+    editor_state::{EditorState, ScrollGlide},
     multi_buffer::MultiBufferSnapshot,
     pane::View,
 };
@@ -3861,8 +3861,7 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     if editor.scroll_offset.floor() as u32 != prev {
         editor.scroll_offset = prev as f32;
     }
-    editor.scroll_velocity = 0.0;
-    editor.scroll_glide = true;
+    editor.scroll_glide = ScrollGlide::Page;
     UpdateEffect::Redraw
 }
 
@@ -3903,9 +3902,8 @@ pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
 /// Returns whether `scroll_row` changed.
 ///
 /// When `scroll_row` changes, resets `scroll_offset` to the new integer row and
-/// zeroes `scroll_velocity` and `scroll_glide`, so a keyboard line scroll cancels
-/// any in-flight momentum or page glide and keeps the fractional position in step
-/// with the integer row.
+/// clears any in-flight glide, so a keyboard line scroll cancels a page or wheel
+/// glide and keeps the fractional position in step with the integer row.
 pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) -> bool {
     let max_scroll = max_scroll_offset(editor) as u32;
 
@@ -3919,30 +3917,43 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
     }
     editor.scroll_row = new_scroll;
     editor.scroll_offset = new_scroll as f32;
-    editor.scroll_velocity = 0.0;
-    editor.scroll_glide = false;
+    editor.scroll_glide = ScrollGlide::None;
     true
 }
 
-/// Impart an inertial scroll impulse to `editor` from one wheel notch, down
-/// when `down` and up otherwise.
+/// Advance `editor`'s wheel scroll one report, down when `down` and up
+/// otherwise, arming a [`ScrollGlide::Wheel`] ease toward the new target.
 ///
-/// Adds a fixed impulse to `scroll_velocity` (clamped), so rapid notches
-/// accumulate into a faster glide that the per-frame tick integrates. Re-seeds
-/// `scroll_offset` from `scroll_row` first when another path moved the integer
-/// row out from under the fraction, so the glide starts from the visible
-/// position. Only the velocity changes here. The tick that integrates it
-/// advances `scroll_row` and drags the cursor along via
-/// [`clamp_cursor_to_view`], so the view and selection never decouple.
-pub(crate) fn wheel_impulse(editor: &mut EditorState, down: bool) {
-    const IMPULSE: f32 = 60.0;
-    const MAX_VEL: f32 = 240.0;
+/// Each report moves `scroll_row` a fixed three rows -- matching the scrollback
+/// and run-pane wheel steps -- toward the document bound, and the tick eases
+/// `scroll_offset` up to it, so steady wheel input yields steady speed. The
+/// cursor is dragged into the scrolloff band here, once per report, so the view
+/// and selection never decouple.
+///
+/// Reseeds `scroll_offset` from `scroll_row` only when no glide is in flight and
+/// another path moved the integer row out from under the fraction. Mid-glide the
+/// offset legitimately lags the target, so it must not be reseeded.
+pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool, scrolloff: u32) {
+    const STEP: u32 = 3;
 
-    if editor.scroll_offset.floor() as u32 != editor.scroll_row {
+    let max_scroll = max_scroll_offset(editor) as u32;
+    let target = if down {
+        editor.scroll_row.saturating_add(STEP).min(max_scroll)
+    } else {
+        editor.scroll_row.saturating_sub(STEP)
+    };
+    if target == editor.scroll_row && editor.scroll_glide == ScrollGlide::None {
+        return;
+    }
+
+    if editor.scroll_glide == ScrollGlide::None
+        && editor.scroll_offset.floor() as u32 != editor.scroll_row
+    {
         editor.scroll_offset = editor.scroll_row as f32;
     }
-    let delta = if down { IMPULSE } else { -IMPULSE };
-    editor.scroll_velocity = (editor.scroll_velocity + delta).clamp(-MAX_VEL, MAX_VEL);
+    editor.scroll_row = target;
+    editor.scroll_glide = ScrollGlide::Wheel;
+    clamp_cursor_to_view(editor, scrolloff);
 }
 
 /// Largest `scroll_row` (a display row) that keeps the last display row in
@@ -3967,53 +3978,26 @@ pub(crate) fn max_scroll_offset(editor: &mut EditorState) -> f32 {
     max_scroll_row(display_snapshot.line_count(), viewport) as f32
 }
 
-/// Advance an inertial scroll by `dt` seconds, integrating `offset` by
-/// `velocity * dt` clamped to `[0, max_offset]`, then decaying `velocity`.
+/// Ease `offset` toward `target` by `dt` seconds, closing `ease_per_nominal` of
+/// the remaining gap per `NOMINAL_DT`. Returns the new offset and whether it
+/// settled onto the target.
 ///
-/// The decay is frame-rate-independent. `FRICTION` is the fraction of velocity
-/// kept per `NOMINAL_DT`, raised to `dt / NOMINAL_DT`, so a long frame decays
-/// proportionally more and a glide lasts the same wall-clock time however often
-/// it ticks. Decaying by a fixed amount per tick instead runs the glide in slow
-/// motion whenever the real frame interval overruns `NOMINAL_DT`.
-///
-/// Returns the new offset, the new velocity (zero once the glide has settled),
-/// and whether it settled. Settled is true when the decayed speed falls below
-/// the minimum or the offset reaches a bound, so the caller can stop ticking.
-pub(crate) fn step_scroll_momentum(
+/// A glide jumps `scroll_row` to its target and lets `scroll_offset` ease up to
+/// it. `ease_per_nominal` is raised to `dt / NOMINAL_DT` so the glide lasts the
+/// same wall-clock time however often it ticks. A page motion closes the gap
+/// fast. A wheel glide eases slower, so a stream of reports overlaps into
+/// continuous motion. Within `EPSILON` of the target it snaps exactly onto it
+/// and reports settled, so the caller can stop ticking.
+pub(crate) fn step_scroll_ease(
     offset: f32,
-    velocity: f32,
+    target: f32,
     dt: f32,
-    max_offset: f32,
-) -> (f32, f32, bool) {
-    const FRICTION: f32 = 0.85;
-    // Below ~2 rows/s the coast is visually stationary. Ending it here hands the
-    // last sub-row fraction to the ease glide rather than dribbling to a stop.
-    const MIN_VEL: f32 = 2.0;
-    const NOMINAL_DT: f32 = 0.008;
-
-    let next = (offset + velocity * dt).clamp(0.0, max_offset);
-    let at_bound = next <= 0.0 || next >= max_offset;
-    let velocity = velocity * FRICTION.powf(dt / NOMINAL_DT);
-    let settled = velocity.abs() < MIN_VEL || at_bound;
-
-    (next, if settled { 0.0 } else { velocity }, settled)
-}
-
-/// Ease `offset` toward `target` by `dt` seconds, returning the new offset and
-/// whether it settled onto the target.
-///
-/// A keyboard page motion jumps `scroll_row` to the destination and lets
-/// `scroll_offset` glide up to it. Each `NOMINAL_DT` closes `EASE_PER_NOMINAL`
-/// of the remaining gap, raised to `dt / NOMINAL_DT` so the glide lasts the same
-/// wall-clock time however often it ticks (the frame-rate independence
-/// [`step_scroll_momentum`] uses for its decay). Within `EPSILON` of the target
-/// it snaps exactly onto it and reports settled, so the caller can stop ticking.
-pub(crate) fn step_scroll_ease(offset: f32, target: f32, dt: f32) -> (f32, bool) {
-    const EASE_PER_NOMINAL: f32 = 0.35;
+    ease_per_nominal: f32,
+) -> (f32, bool) {
     const NOMINAL_DT: f32 = 0.008;
     const EPSILON: f32 = 0.01;
 
-    let kept = (1.0 - EASE_PER_NOMINAL).powf(dt / NOMINAL_DT);
+    let kept = (1.0 - ease_per_nominal).powf(dt / NOMINAL_DT);
     let next = target - (target - offset) * kept;
     if (target - next).abs() < EPSILON {
         (target, true)
@@ -4918,53 +4902,13 @@ mod tests {
     }
 
     #[test]
-    fn momentum_from_rest_advances_and_decays_to_settled_rest() {
-        let (mut offset, mut velocity) = (0.0_f32, 20.0_f32);
-        let mut last_speed = f32::INFINITY;
-        loop {
-            let (next, vel, settled) = step_scroll_momentum(offset, velocity, 0.05, 1000.0);
-            assert!(next > offset, "offset advances under positive velocity");
-            assert!(
-                vel.abs() < last_speed,
-                "velocity magnitude decays each step"
-            );
-            offset = next;
-            velocity = vel;
-            last_speed = vel.abs();
-            if settled {
-                break;
-            }
-        }
-        assert_eq!(velocity, 0.0, "settled state has zero velocity");
-    }
-
-    #[test]
-    fn momentum_into_bound_clamps_offset_and_settles() {
-        assert_eq!(
-            step_scroll_momentum(95.0, 50.0, 1.0, 100.0),
-            (100.0, 0.0, true)
-        );
-    }
-
-    #[test]
-    fn momentum_decay_is_frame_rate_independent() {
-        let (_, one_step, _) = step_scroll_momentum(0.0, 100.0, 0.016, 1000.0);
-        let (_, half, _) = step_scroll_momentum(0.0, 100.0, 0.008, 1000.0);
-        let (_, two_steps, _) = step_scroll_momentum(0.0, half, 0.008, 1000.0);
-        assert!(
-            (one_step - two_steps).abs() < 0.01,
-            "one 16ms decay {one_step} should equal two 8ms decays {two_steps}"
-        );
-    }
-
-    #[test]
     fn ease_advances_toward_target_and_settles() {
         let mut offset = 0.0_f32;
         let target = 10.0_f32;
         let mut last_gap = f32::INFINITY;
         let mut settled = false;
         for _ in 0..1000 {
-            let (next, done) = step_scroll_ease(offset, target, 0.016);
+            let (next, done) = step_scroll_ease(offset, target, 0.016, 0.35);
             let gap = (target - next).abs();
             assert!(gap < last_gap, "each ease step closes the gap");
             offset = next;
@@ -4980,9 +4924,9 @@ mod tests {
 
     #[test]
     fn ease_is_frame_rate_independent() {
-        let (one_step, _) = step_scroll_ease(0.0, 10.0, 0.016);
-        let (half, _) = step_scroll_ease(0.0, 10.0, 0.008);
-        let (two_steps, _) = step_scroll_ease(half, 10.0, 0.008);
+        let (one_step, _) = step_scroll_ease(0.0, 10.0, 0.016, 0.35);
+        let (half, _) = step_scroll_ease(0.0, 10.0, 0.008, 0.35);
+        let (two_steps, _) = step_scroll_ease(half, 10.0, 0.008, 0.35);
         assert!(
             (one_step - two_steps).abs() < 0.01,
             "one 16ms ease {one_step} should equal two 8ms eases {two_steps}"
@@ -4998,62 +4942,100 @@ mod tests {
     }
 
     #[test]
-    fn wheel_impulse_builds_clamped_velocity() {
+    fn wheel_scroll_advances_the_target_and_clamps_at_the_tail() {
         let mut h = harness_with_long_buffer();
         let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
 
-        wheel_impulse(editor, true);
-        let v1 = editor.scroll_velocity;
-        assert!(v1 > 0.0, "a down notch imparts positive velocity");
-
-        wheel_impulse(editor, true);
-        assert!(editor.scroll_velocity > v1, "rapid notches accumulate");
-
-        for _ in 0..50 {
-            wheel_impulse(editor, true);
-        }
-        let saturated = editor.scroll_velocity;
-        wheel_impulse(editor, true);
-        assert!(
-            editor.scroll_velocity <= saturated,
-            "velocity saturates at the clamp"
+        wheel_scroll(editor, true, 3);
+        assert_eq!(
+            editor.scroll_row, 3,
+            "a down report advances the target three rows"
+        );
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::Wheel,
+            "and arms a wheel glide"
+        );
+        assert_eq!(
+            editor.scroll_offset, 0.0,
+            "the offset lags at the pre-report row for the tick to ease up"
         );
 
-        editor.scroll_velocity = 0.0;
-        wheel_impulse(editor, false);
-        assert!(
-            editor.scroll_velocity < 0.0,
-            "an up notch imparts negative velocity"
+        wheel_scroll(editor, true, 3);
+        assert_eq!(
+            editor.scroll_row, 6,
+            "repeated reports accumulate the target"
+        );
+
+        let max = max_scroll_offset(editor) as u32;
+        editor.scroll_row = max;
+        wheel_scroll(editor, true, 3);
+        assert_eq!(
+            editor.scroll_row, max,
+            "a report cannot advance past the document tail"
+        );
+
+        wheel_scroll(editor, false, 3);
+        assert_eq!(
+            editor.scroll_row,
+            max - 3,
+            "an up report retreats the target"
         );
     }
 
     #[test]
-    fn wheel_impulse_reseeds_offset_when_scroll_row_drifted() {
+    fn wheel_scroll_drags_the_cursor_into_the_scrolloff_band() {
+        let mut h = harness_with_long_buffer();
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            wheel_scroll(editor, true, 3);
+        }
+        assert_eq!(
+            focused_head_row(&mut h),
+            6,
+            "the report drags the cursor down into the scrolloff band"
+        );
+    }
+
+    #[test]
+    fn wheel_scroll_reseeds_a_drifted_offset_only_off_glide() {
         let mut h = harness_with_long_buffer();
         let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
 
         editor.scroll_row = 10;
         editor.scroll_offset = 0.0;
-        wheel_impulse(editor, true);
+        wheel_scroll(editor, true, 3);
         assert_eq!(
             editor.scroll_offset as u32, 10,
-            "a drifted offset reseeds from scroll_row before gliding"
+            "off-glide, a drifted offset reseeds from scroll_row before gliding"
+        );
+
+        editor.scroll_offset = 0.0;
+        wheel_scroll(editor, true, 3);
+        assert_eq!(
+            editor.scroll_offset, 0.0,
+            "mid-glide the lagging offset is left alone"
         );
     }
 
     #[test]
-    fn keyboard_scroll_syncs_offset_and_clears_momentum() {
+    fn keyboard_scroll_syncs_offset_and_clears_glide() {
         let mut h = harness_with_long_buffer();
         let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
 
-        editor.scroll_velocity = 50.0;
+        editor.scroll_glide = ScrollGlide::Wheel;
+        editor.scroll_offset = 4.2;
         assert!(
             scroll_editor(editor, true, 3),
             "scrolling down moves scroll_row"
         );
         assert_eq!(
-            editor.scroll_velocity, 0.0,
-            "keyboard scroll clears momentum"
+            editor.scroll_glide,
+            ScrollGlide::None,
+            "keyboard scroll cancels the glide"
         );
         assert_eq!(
             editor.scroll_offset as u32, editor.scroll_row,

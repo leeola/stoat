@@ -34,6 +34,20 @@ pub(crate) struct SearchMatchCache {
     pub(crate) window: String,
 }
 
+/// Which scroll glide, if any, is easing an editor's `scroll_offset` toward its
+/// `scroll_row` target.
+///
+/// The two glides ease at different rates. A keyboard page motion jumps to a
+/// distant target and closes it quickly. A wheel report nudges the target a few
+/// rows and eases slower, so a stream of reports at wheel rates overlaps into
+/// continuous motion instead of pulsing.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum ScrollGlide {
+    None,
+    Page,
+    Wheel,
+}
+
 pub(crate) struct EditorState {
     pub(crate) buffer_id: BufferId,
     /// This editor's input mode (`normal`, `insert`, `select`, ...). Held
@@ -46,15 +60,12 @@ pub(crate) struct EditorState {
     /// equal to `scroll_offset.floor()` and drives the integer-row render and
     /// pool paths. The fraction carries sub-row glide between animation frames.
     pub(crate) scroll_offset: f32,
-    /// Inertial scroll velocity in rows per second. Nonzero only while a wheel
-    /// flick is coasting. The momentum step decays it to zero at rest.
-    pub(crate) scroll_velocity: f32,
-    /// Set while a keyboard page motion eases `scroll_offset` toward the
-    /// `scroll_row` target it jumped to. The animation tick eases the offset up
-    /// and clears this on settle, and the pool emit trusts the fractional offset
-    /// while it is set so the glide reaches the terminal. Transient, not
+    /// Which glide, if any, is easing `scroll_offset` toward the `scroll_row`
+    /// target. The animation tick eases the offset up and clears this to
+    /// [`ScrollGlide::None`] on settle, and the pool emit trusts the fractional
+    /// offset while a glide is active so it reaches the terminal. Transient, not
     /// persisted.
-    pub(crate) scroll_glide: bool,
+    pub(crate) scroll_glide: ScrollGlide,
     /// Last-rendered viewport height in rows. Page-motion handlers read
     /// this to compute scroll distance without taking a dependency on
     /// the render pipeline's layout `Rect`. `None` until the editor has
@@ -150,8 +161,7 @@ impl EditorState {
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
             scroll_offset: 0.0,
-            scroll_velocity: 0.0,
-            scroll_glide: false,
+            scroll_glide: ScrollGlide::None,
             viewport_rows: None,
             review_view: None,
             diff_view: false,
@@ -183,8 +193,7 @@ impl EditorState {
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
             scroll_offset: 0.0,
-            scroll_velocity: 0.0,
-            scroll_glide: false,
+            scroll_glide: ScrollGlide::None,
             viewport_rows: None,
             review_view: None,
             diff_view: false,

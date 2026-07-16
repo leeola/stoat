@@ -1148,7 +1148,10 @@ pub(crate) fn read_string_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_harness::{editor, keys};
+    use crate::{
+        editor_state::ScrollGlide,
+        test_harness::{editor, keys},
+    };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::{sync::Arc, time::Duration};
     use stoat_action::{
@@ -2682,7 +2685,11 @@ mod tests {
             editor.scroll_offset, 0.0,
             "scroll_offset lags at the pre-jump row so the pool eases up to it"
         );
-        assert!(editor.scroll_glide, "a page glide is armed");
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::Page,
+            "a page glide is armed"
+        );
     }
 
     #[test]
