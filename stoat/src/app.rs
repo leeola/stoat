@@ -10275,6 +10275,66 @@ mod tests {
     }
 
     #[test]
+    fn pane_display_mode_renders_a_bold_digit_badge_per_pane() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        h.type_keys("space a s");
+        assert_eq!(h.stoat.active_workspace().panes.pane_count(), 2);
+
+        h.type_keys("space a e");
+        let mut buf = Buffer::empty(h.stoat.size());
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        let popovers: Vec<_> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                Command::Popover(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(popovers.len(), 2, "each pane gets a badge, got {cmds:?}");
+        assert!(popovers.iter().all(|p| p.bold), "badges shape bold");
+        let digits: Vec<&str> = popovers
+            .iter()
+            .map(|p| buf[(p.left + 1, p.top + 1)].symbol())
+            .collect();
+        assert!(
+            digits.contains(&"1") && digits.contains(&"2"),
+            "the pane centers carry the digits 1 and 2, got {digits:?}"
+        );
+
+        // Selecting a pane focuses it and returns to normal, so the next frame
+        // draws no badges.
+        h.type_keys("2");
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+        assert!(
+            !drain_apc(&mut rx)
+                .iter()
+                .any(|c| matches!(c, Command::Popover(_))),
+            "selecting a pane clears the badges"
+        );
+
+        // Escape from the chord mode also clears the badges.
+        h.type_keys("space a e");
+        h.type_keys("escape");
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+        assert!(
+            !drain_apc(&mut rx)
+                .iter()
+                .any(|c| matches!(c, Command::Popover(_))),
+            "escape clears the badges"
+        );
+    }
+
+    #[test]
     fn diagnostic_popover_dodges_a_cursor_under_the_below_placement() {
         use stoatty_protocol::command::Command;
 

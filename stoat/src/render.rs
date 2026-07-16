@@ -45,13 +45,13 @@ use crate::{
     rebase::RebasePause,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
-    workspace::WorkspaceId,
+    workspace::{Workspace, WorkspaceId},
 };
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use slotmap::SlotMap;
 use std::{collections::HashMap, path::Path};
 use stoat_config::LineNumbers;
-use stoatty_widgets::ApcScene;
+use stoatty_widgets::{popover::Popover, ApcScene};
 
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
@@ -710,6 +710,67 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
+    }
+
+    if mode == "space_pane_display" {
+        render_pane_id_badges(&stoat.theme, ws, buf, scene);
+    }
+}
+
+/// Paint a large digit badge centered on each split pane while the
+/// `space_pane_display` chord is active, so a pane can be focused by its number.
+///
+/// Panes are numbered 1-9 then 0 for the tenth in `split_panes` layout order,
+/// and panes past the tenth get no badge. The focused pane's badge is inverted
+/// (fill and mark swapped) so the current pane reads highlighted. Each badge is
+/// a bold [`Popover`], so a plain terminal draws the cell-fallback box and
+/// stoatty floats the scaled bold glyph.
+fn render_pane_id_badges(
+    theme: &crate::theme::Theme,
+    ws: &Workspace,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let accent = review::style_rgb(theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg)
+        .unwrap_or([90, 90, 110]);
+    let background =
+        review::style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).unwrap_or([40, 44, 52]);
+    let focused = ws.panes.focus();
+
+    for (i, (pane_id, pane)) in ws.panes.split_panes().enumerate().take(10) {
+        let Some(digit) = char::from_digit((i as u32 + 1) % 10, 10) else {
+            continue;
+        };
+        let scale = pane
+            .area
+            .width
+            .saturating_sub(2)
+            .min(pane.area.height.saturating_sub(2))
+            .clamp(1, 4);
+        let side = scale + 2;
+        let rect = Rect::new(
+            pane.area.x + pane.area.width.saturating_sub(side) / 2,
+            pane.area.y + pane.area.height.saturating_sub(side) / 2,
+            side,
+            side,
+        );
+
+        let (fill, mark) = if pane_id == focused {
+            (accent, background)
+        } else {
+            (background, accent)
+        };
+        let digit = digit.to_string();
+        Popover {
+            fill,
+            border: mark,
+            content_fg: mark,
+            scale: scale as u8,
+            offset: [0, 0],
+            bold: true,
+            content: &digit,
+        }
+        .render(rect, buf, scene);
     }
 }
 
