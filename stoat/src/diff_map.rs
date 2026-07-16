@@ -586,7 +586,10 @@ fn changes_to_hunks(
             buffer_line_range: line_range,
             base_byte_range: lhs_change.byte_range.clone(),
             anchor_range: None,
-            token_detail: None,
+            token_detail: Some(Arc::new(TokenDetail {
+                buffer_spans: replaced_change_spans(rhs_change),
+                base_spans: replaced_change_spans(lhs_change),
+            })),
         });
         consumed[lhs_idx] = true;
         consumed[rhs_idx] = true;
@@ -632,6 +635,29 @@ fn changes_to_hunks(
     }
     hunks.sort_by_key(|h| h.buffer_start_line);
     hunks
+}
+
+/// The changed sub-ranges of one side of a `Replaced` pair, as
+/// [`ChangeKind::Replaced`] [`ChangeSpan`]s.
+///
+/// Prefers the structural diff's `refined_spans` -- the char ranges that
+/// actually differ -- so a one-word edit records only that word. An empty
+/// `refined_spans` means the whole token changed, so the whole `byte_range`
+/// becomes the single span and a full rewrite still marks completely.
+fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -> Vec<ChangeSpan> {
+    let ranges = if change.refined_spans.is_empty() {
+        std::slice::from_ref(&change.byte_range)
+    } else {
+        change.refined_spans.as_slice()
+    };
+    ranges
+        .iter()
+        .map(|range| ChangeSpan {
+            byte_range: range.clone(),
+            kind: ChangeKind::Replaced,
+            move_metadata: None,
+        })
+        .collect()
 }
 
 fn byte_range_to_line_range(
@@ -868,6 +894,70 @@ mod tests {
             .find(|h| h.buffer_start_line == 2)
             .expect("pair 1 hunk");
         assert_eq!(p1.base_byte_range, 11..16);
+    }
+
+    #[test]
+    fn modified_hunk_carries_refined_token_spans() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+        };
+        let lhs_text = "let s = \"hello world\";\n";
+        let rhs_text = "let s = \"hello brave world\";\n";
+        // The buffer inserts "brave " (bytes 15..21) into the string literal.
+        // The Rhs change refines to just that word. The Lhs change has no
+        // refinement, so its base span falls back to the whole literal.
+        let brave = 15..21;
+        let changes = vec![
+            DiffChange {
+                side: Side::Lhs,
+                byte_range: 8..21,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(0),
+                deletion_rhs_anchor: None,
+                refined_spans: Vec::new(),
+            },
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 8..27,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(0),
+                deletion_rhs_anchor: None,
+                refined_spans: vec![brave.clone()],
+            },
+        ];
+        let dm = DiffMap::from_structural_changes(
+            DiffResult {
+                changes,
+                fell_back_to_line_diff: false,
+            },
+            lhs_text,
+            rhs_text,
+        );
+
+        let td = dm
+            .token_detail_for_line(0)
+            .expect("modified hunk carries token detail");
+        assert_eq!(
+            td.buffer_spans,
+            vec![ChangeSpan {
+                byte_range: brave.clone(),
+                kind: ChangeKind::Replaced,
+                move_metadata: None,
+            }],
+            "buffer spans narrow to the inserted word"
+        );
+        assert_eq!(
+            td.base_spans,
+            vec![ChangeSpan {
+                byte_range: 8..21,
+                kind: ChangeKind::Replaced,
+                move_metadata: None,
+            }],
+            "base spans fall back to the whole replaced literal"
+        );
+        assert_eq!(&rhs_text[brave], "brave ");
     }
 
     #[test]
