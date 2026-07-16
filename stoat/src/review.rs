@@ -427,16 +427,29 @@ fn collect_spans_by(
         {
             continue;
         }
-        let cr = &change.byte_range;
-        let first = offsets.partition_point(|&(_, end)| end < cr.start);
-        for (i, &(line_start, line_end)) in offsets[first..].iter().enumerate() {
-            if line_start >= cr.end {
-                break;
+        // A Replaced change carries char-refined sub-ranges. Project those so
+        // the underline narrows to the changed chars. Everything else (and a
+        // full rewrite, whose refined spans come back empty) projects its whole
+        // byte range.
+        let ranges: &[Range<usize>] = if change.refined_spans.is_empty() {
+            std::slice::from_ref(&change.byte_range)
+        } else {
+            &change.refined_spans
+        };
+        for cr in ranges {
+            if cr.start >= cr.end {
+                continue;
             }
-            let span_start = cr.start.max(line_start) - line_start;
-            let span_end = cr.end.min(line_end) - line_start;
-            if span_start < span_end {
-                spans[first + i].push(span_start..span_end);
+            let first = offsets.partition_point(|&(_, end)| end < cr.start);
+            for (i, &(line_start, line_end)) in offsets[first..].iter().enumerate() {
+                if line_start >= cr.end {
+                    break;
+                }
+                let span_start = cr.start.max(line_start) - line_start;
+                let span_end = cr.end.min(line_end) - line_start;
+                if span_start < span_end {
+                    spans[first + i].push(span_start..span_end);
+                }
             }
         }
     }
@@ -992,6 +1005,27 @@ mod tests {
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
         assert_eq!(spans, vec![vec![6..11]]);
+    }
+
+    #[test]
+    fn collect_spans_projects_refined_spans_when_present() {
+        let text = "one two three\n";
+        let lines = split_lines(text);
+        let changes = vec![DiffChange {
+            side: Side::Rhs,
+            byte_range: 0..13,
+            kind: structural_diff::ChangeKind::Replaced,
+            move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
+            refined_spans: vec![0..3, 8..13],
+        }];
+        let spans = collect_line_spans(&lines, &changes, Side::Rhs);
+        assert_eq!(
+            spans,
+            vec![vec![0..3, 8..13]],
+            "each refined span narrows the underline instead of the whole byte range",
+        );
     }
 
     use crate::test_harness::TestHarness;
