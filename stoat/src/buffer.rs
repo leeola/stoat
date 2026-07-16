@@ -13,10 +13,17 @@ pub struct TextBuffer {
     pub dirty: bool,
     /// Edit-frontier timestamp (the `edit_history` top) captured at the last
     /// clean point, whether a save or the seeded/pristine baseline. `None` is
-    /// the pristine empty state. [`Self::dirty`] caches
-    /// `edit_history.last() != saved_marker`, so undo/redo back to this
-    /// frontier reads as clean again while moving off it reads as modified.
+    /// the pristine empty state. Reaching this frontier again via undo/redo
+    /// reads as clean; [`Self::saved_text`] adds the content-based path that
+    /// also clears [`Self::dirty`] when an edit restores the saved bytes off a
+    /// diverged frontier.
     saved_marker: Option<u64>,
+    /// Visible text captured at the last [`Self::mark_clean`], or `None` before
+    /// the first clean point. Lets [`Self::recompute_dirty`] clear
+    /// [`Self::dirty`] whenever content returns to the saved bytes even though
+    /// the edit frontier has moved past [`Self::saved_marker`] -- the
+    /// type-a-char-then-delete-it case the frontier comparison alone misses.
+    saved_text: Option<Rope>,
     pub diff_map: Option<DiffMap>,
     next_timestamp: u64,
     buffer_id: BufferId,
@@ -164,6 +171,7 @@ impl TextBuffer {
             },
             dirty: false,
             saved_marker: None,
+            saved_text: None,
             diff_map: None,
             next_timestamp: 1,
             buffer_id,
@@ -440,8 +448,8 @@ impl TextBuffer {
         self.snapshot.fragments = new_fragments;
         self.snapshot.insertions = all_insertions;
         self.snapshot.version = timestamp;
-        self.dirty = true;
         self.record_edit(timestamp);
+        self.recompute_dirty();
     }
 
     /// Record `timestamp` in the open group, or as its own singleton group when
@@ -511,16 +519,39 @@ impl TextBuffer {
             .copied()
     }
 
-    /// Record the current edit frontier as the clean baseline, marking the
-    /// buffer unmodified. Call at every clean point (save, seeded content) so a
-    /// later undo/redo back to this frontier clears [`Self::dirty`] again.
+    /// Record the current edit frontier and visible text as the clean baseline,
+    /// marking the buffer unmodified. Call at every clean point (save, seeded
+    /// content) so a later undo/redo back to this frontier -- or any edit that
+    /// restores the saved bytes -- clears [`Self::dirty`] again.
     pub(crate) fn mark_clean(&mut self) {
         self.saved_marker = self.frontier();
+        self.saved_text = Some(self.snapshot.visible_text.clone());
         self.dirty = false;
     }
 
+    /// Modified when the edit frontier has moved off [`Self::saved_marker`] and
+    /// the visible text differs from the saved bytes. The content check clears
+    /// dirty for a round-trip edit -- type a char then delete it, or undo to a
+    /// diverged frontier -- that the frontier comparison alone reports modified.
     fn recompute_dirty(&mut self) {
-        self.dirty = self.frontier() != self.saved_marker;
+        self.dirty = self.frontier() != self.saved_marker && !self.matches_saved_text();
+    }
+
+    /// Whether the visible text is byte-identical to the content captured at the
+    /// last [`Self::mark_clean`]. Compares lengths first -- O(1), and always
+    /// different for an insert or delete -- then streams bytes across chunk
+    /// boundaries, so the O(n) walk runs only for a length-preserving edit.
+    /// Always false before the first clean point, when no saved text exists.
+    fn matches_saved_text(&self) -> bool {
+        let Some(saved) = &self.saved_text else {
+            return false;
+        };
+        let current = &self.snapshot.visible_text;
+        saved.len() == current.len()
+            && saved
+                .chunks()
+                .flat_map(str::bytes)
+                .eq(current.chunks().flat_map(str::bytes))
     }
 
     /// Undo the top edit group, reverting all of its edits as one step. Returns
@@ -1459,6 +1490,46 @@ mod tests {
         assert!(!b.dirty, "undo back to saved content clears dirty");
         b.redo();
         assert!(b.dirty, "redo away from saved content sets dirty");
+    }
+
+    #[test]
+    fn deleting_a_typed_char_reads_clean() {
+        let mut b = buf("hello");
+        b.edit(5..5, "x");
+        assert!(b.dirty);
+        b.edit(5..6, "");
+        assert!(
+            !b.dirty,
+            "content back on the saved bytes reads clean despite a moved frontier"
+        );
+    }
+
+    #[test]
+    fn edit_leaving_changed_content_reads_dirty() {
+        let mut b = buf("hello");
+        b.edit(5..5, "x");
+        b.edit(0..1, "");
+        assert_eq!(b.snapshot.visible_text.to_string(), "ellox");
+        assert!(b.dirty, "same length but different bytes stays modified");
+    }
+
+    #[test]
+    fn restored_buffer_stays_dirty_until_mark_clean() {
+        let mut b = buf("hello");
+        b.edit(5..5, "x");
+        b.edit(5..6, "");
+        assert!(!b.dirty, "the live buffer is clean via the content match");
+
+        let mut restored = TextBuffer::from_history(BufferId::new(0), &b.history());
+        assert!(
+            restored.dirty,
+            "a restored buffer has no saved text so the diverged frontier reads dirty"
+        );
+        restored.mark_clean();
+        assert!(
+            !restored.dirty,
+            "mark_clean recaptures saved text and clears dirty"
+        );
     }
 
     #[test]
