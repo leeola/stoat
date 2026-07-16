@@ -233,6 +233,7 @@ impl<'a> FakeRepoBuilder<'a> {
             state.changed.push(ChangedFile {
                 path: abs.clone(),
                 staged: false,
+                untracked: false,
             });
         });
         if let Some(fs) = self.fs {
@@ -251,6 +252,7 @@ impl<'a> FakeRepoBuilder<'a> {
             state.changed.push(ChangedFile {
                 path: abs.clone(),
                 staged: true,
+                untracked: false,
             });
         });
         if let Some(fs) = self.fs {
@@ -293,6 +295,7 @@ impl<'a> FakeRepoBuilder<'a> {
             state.changed.push(ChangedFile {
                 path: abs,
                 staged: false,
+                untracked: false,
             });
         });
         self
@@ -560,6 +563,7 @@ impl GitRepo for FakeGitRepo {
         unstaged.extend(state.untracked.iter().map(|path| ChangedFile {
             path: path.clone(),
             staged: false,
+            untracked: true,
         }));
         staged.sort_by(|a, b| a.path.cmp(&b.path));
         unstaged.sort_by(|a, b| a.path.cmp(&b.path));
@@ -989,6 +993,7 @@ mod tests {
         assert_eq!(changed.len(), 1, "untracked file still reported as changed");
         assert!(changed[0].path.ends_with("u.rs"));
         assert!(!changed[0].staged);
+        assert!(changed[0].untracked, "untracked file carries the flag");
     }
 
     #[test]

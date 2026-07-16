@@ -115,11 +115,13 @@ impl GitRepo for LocalGitRepo {
                 staged.push(ChangedFile {
                     path: abs,
                     staged: true,
+                    untracked: false,
                 });
             } else if status.intersects(UNSTAGED) && !staged_paths.contains(&abs) {
                 unstaged.push(ChangedFile {
                     path: abs,
                     staged: false,
+                    untracked: status.intersects(Status::WT_NEW),
                 });
             }
         }

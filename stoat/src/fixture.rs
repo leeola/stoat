@@ -323,6 +323,8 @@ fn emphasize(text: &str) -> String {
 }
 "#;
 
+const RUST_DIFF_GITIGNORE: &str = "/target\n";
+
 /// Failure materializing a fixture repository.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -512,6 +514,7 @@ fn materialize_rust_diff(dest: &Path) -> Result<(), FixtureError> {
     repo.commit(
         "initial commit",
         &[
+            (".gitignore", RUST_DIFF_GITIGNORE),
             ("Cargo.toml", RUST_LSP_CARGO),
             ("src/main.rs", RUST_DIFF_MAIN_HEAD),
             ("src/util.rs", RUST_DIFF_UTIL_HEAD),

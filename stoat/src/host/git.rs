@@ -32,6 +32,15 @@ pub struct ChangedFile {
     /// True when the change is present in the index (staged), false when
     /// it only exists in the working tree.
     pub staged: bool,
+    /// True when the path is untracked, meaning it is present in the working
+    /// tree but never staged and so has no HEAD blob to diff against. Tracked
+    /// modifications, deletions, and staged additions are all `false`.
+    ///
+    /// Distinguishes an untracked file from an unstaged modification, which
+    /// otherwise look identical (`staged == false` for both). Cross-file diff
+    /// navigation relies on this to skip untracked files, which carry no diff
+    /// to show.
+    pub untracked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Snafu)]

@@ -3340,6 +3340,10 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
 /// lands the cursor on its first (Next) or last (Prev) hunk after computing its
 /// diff synchronously. Wraps past the repo ends with a "wrapped" status, and
 /// reports "no more changes" when no other file has changes.
+///
+/// Only tracked changed files (modifications, deletions, staged additions) are
+/// visited. Untracked working-tree files are excluded because they have no HEAD
+/// content, and so no diff to render.
 fn goto_change_across_files(
     stoat: &mut Stoat,
     dir: ChangeDir,
@@ -3351,7 +3355,12 @@ fn goto_change_across_files(
     let Some(repo) = stoat.git_host.discover(&git_root) else {
         return UpdateEffect::None;
     };
-    let changed: Vec<PathBuf> = repo.changed_files().into_iter().map(|f| f.path).collect();
+    let changed: Vec<PathBuf> = repo
+        .changed_files()
+        .into_iter()
+        .filter(|f| !f.untracked)
+        .map(|f| f.path)
+        .collect();
     if changed.len() < 2 {
         stoat.set_status("no more changes");
         return UpdateEffect::Redraw;
@@ -4444,6 +4453,27 @@ mod tests {
             focused_buffer_path(&h),
             workdir.join("a.rs"),
             "stayed on a.rs"
+        );
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("no more changes"));
+    }
+
+    #[test]
+    fn next_change_skips_untracked_files() {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = PathBuf::from("/repo");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nX\nc\n")]);
+        h.fake_git().add_repo(&workdir).untracked("u.rs");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        h.settle_diff_jobs();
+        set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+        goto_change(&mut h.stoat, ChangeDir::Next);
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            workdir.join("a.rs"),
+            "stayed on a.rs; untracked u.rs is not a nav target",
         );
         assert_eq!(h.stoat.pending_message.as_deref(), Some("no more changes"));
     }
