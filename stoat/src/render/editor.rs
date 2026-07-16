@@ -1,6 +1,8 @@
 use crate::{
+    diff_map::DiffHunkStatus,
     display_map::{tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
+    minimap::color_to_rgb,
     render::{
         review::{render_diff_view, render_review, style_rgb},
         undercurl::UndercurlSpan,
@@ -24,7 +26,7 @@ use stoat_text::{cursor_offset, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
     bar::Bar,
-    gutter::{Diagnostic, Gutter, GutterLine},
+    gutter::{Diagnostic, GitMark, Gutter, GutterLine},
     icon::Icon,
     popover::Popover,
     ApcScene,
@@ -631,10 +633,56 @@ fn severity_color(sev: DiagnosticSeverity, colors: &SeverityColors) -> [u8; 3] {
     }
 }
 
+/// The four diff-status colors the gutter mark uses, resolved the way the
+/// minimap edge lane resolves them. Each is `theme.get(diff.*)` under
+/// [`crate::theme::Theme::get`]'s progressive scope-broadening fallback, so a
+/// theme omitting `diff.modified` or `diff.moved` still yields a color that
+/// agrees with the minimap lane.
+#[derive(Clone, Copy)]
+pub(crate) struct DiffMarkColors {
+    added: [u8; 3],
+    modified: [u8; 3],
+    moved: [u8; 3],
+    deleted: [u8; 3],
+}
+
+impl DiffMarkColors {
+    fn resolve(theme: &crate::theme::Theme) -> Self {
+        use crate::theme::scope as s;
+        let get = |scope| color_to_rgb(theme.get(scope).fg.unwrap_or(Color::White));
+        Self {
+            added: get(s::DIFF_ADDED),
+            modified: get(s::DIFF_MODIFIED),
+            moved: get(s::DIFF_MOVED),
+            deleted: get(s::DIFF_DELETED),
+        }
+    }
+
+    fn for_status(&self, status: DiffHunkStatus) -> [u8; 3] {
+        match status {
+            DiffHunkStatus::Added => self.added,
+            DiffHunkStatus::Modified => self.modified,
+            DiffHunkStatus::Moved => self.moved,
+            DiffHunkStatus::Deleted => self.deleted,
+        }
+    }
+}
+
+/// Blend `color` halfway toward `bg`, dimming a staged mark so it stays legible
+/// without owning the full status color a live hunk mark shows.
+fn dim_toward(color: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+    [
+        ((color[0] as u16 + bg[0] as u16) / 2) as u8,
+        ((color[1] as u16 + bg[1] as u16) / 2) as u8,
+        ((color[2] as u16 + bg[2] as u16) / 2) as u8,
+    ]
+}
+
 /// The resolved colors the rich sub-cell page gutter needs.
 #[derive(Clone)]
 pub(crate) struct RichGutterColors {
     pub(crate) colors: SeverityColors,
+    pub(crate) diff: DiffMarkColors,
     pub(crate) number_fg: [u8; 3],
     pub(crate) bg: [u8; 3],
 }
@@ -654,6 +702,7 @@ pub(crate) fn resolve_rich_gutter(
         return None;
     }
     let colors = severity_colors(theme)?;
+    let diff = DiffMarkColors::resolve(theme);
     let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
     let bg = style_rgb(
         fallback_style
@@ -662,6 +711,7 @@ pub(crate) fn resolve_rich_gutter(
     )?;
     Some(RichGutterColors {
         colors,
+        diff,
         number_fg,
         bg,
     })
@@ -809,12 +859,12 @@ pub(crate) fn gutter_display_number(absolute: u32, current_line: Option<u32>) ->
 ///
 /// `current_line` selects relative numbering per [`gutter_display_number`]. The
 /// diagnostic mark stays keyed to the absolute buffer line.
-/// Map each folded row lying in a diff hunk to its staged flag, for the
-/// gutter's git mark. Rows outside any hunk are absent from the result.
-pub(crate) fn gutter_staged_marks(
+/// Map each folded row a diff hunk marks to its `(status, staged)` pair, for the
+/// gutter's git bar. Rows outside any hunk are absent from the result.
+pub(crate) fn gutter_diff_marks(
     snapshot: &DisplaySnapshot,
     folded: &[(u32, u16)],
-) -> BTreeMap<u32, bool> {
+) -> BTreeMap<u32, (DiffHunkStatus, bool)> {
     let Some(diff_map) = snapshot.diff_map() else {
         return BTreeMap::new();
     };
@@ -822,7 +872,7 @@ pub(crate) fn gutter_staged_marks(
         .iter()
         .filter_map(|&(number, _)| {
             let row = number - 1;
-            diff_map.staged_for_line(row).map(|staged| (row, staged))
+            diff_map.gutter_mark_for_line(row).map(|mark| (row, mark))
         })
         .collect()
 }
@@ -830,9 +880,9 @@ pub(crate) fn gutter_staged_marks(
 pub(crate) fn gutter_component_lines(
     folded: &[(u32, u16)],
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
-    staged_marks: &BTreeMap<u32, bool>,
-    staged_rgb: Option<[u8; 3]>,
-    unstaged_rgb: Option<[u8; 3]>,
+    diff_marks: &BTreeMap<u32, (DiffHunkStatus, bool)>,
+    diff_colors: &DiffMarkColors,
+    bg: [u8; 3],
     colors: &SeverityColors,
     current_line: Option<u32>,
 ) -> Vec<GutterLine> {
@@ -841,11 +891,11 @@ pub(crate) fn gutter_component_lines(
         .map(|&(number, height)| GutterLine {
             number: gutter_display_number(number, current_line),
             height,
-            git: staged_marks.get(&(number - 1)).and_then(|&staged| {
-                if staged {
-                    staged_rgb
-                } else {
-                    unstaged_rgb
+            git: diff_marks.get(&(number - 1)).map(|&(status, staged)| {
+                let base = diff_colors.for_status(status);
+                GitMark {
+                    color: if staged { dim_toward(base, bg) } else { base },
+                    seam: status == DiffHunkStatus::Deleted,
                 }
             }),
             diagnostic: row_severity.get(&(number - 1)).map(|sev| Diagnostic {
@@ -903,9 +953,8 @@ fn draw_line_number_gutter(
     let visible = end_row.saturating_sub(scroll_row).min(inner.height as u32);
     let (folded, width_digits) = gutter_geometry(snapshot, scroll_row, visible);
 
-    let staged_marks = gutter_staged_marks(snapshot, &folded);
-    let staged_rgb = style_rgb(theme.get(s::DIFF_ADDED).fg);
-    let unstaged_rgb = style_rgb(theme.get(s::DIFF_DELETED).fg);
+    let diff_marks = gutter_diff_marks(snapshot, &folded);
+    let diff_colors = DiffMarkColors::resolve(theme);
 
     // Rich mode needs stoatty, a scene, and every gutter color as RGB.
     let rich = scene.filter(|_| stoatty).and_then(|scene| {
@@ -924,9 +973,9 @@ fn draw_line_number_gutter(
             let lines = gutter_component_lines(
                 &folded,
                 row_severity,
-                &staged_marks,
-                staged_rgb,
-                unstaged_rgb,
+                &diff_marks,
+                &diff_colors,
+                bg,
                 colors,
                 current_line,
             );
@@ -938,7 +987,7 @@ fn draw_line_number_gutter(
             &folded,
             width_digits,
             row_severity,
-            &staged_marks,
+            &diff_marks,
             current_line,
             inner,
             theme,
@@ -954,16 +1003,17 @@ pub(crate) fn draw_fallback_line_numbers(
     folded: &[(u32, u16)],
     width_digits: u16,
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
-    staged_marks: &BTreeMap<u32, bool>,
+    diff_marks: &BTreeMap<u32, (DiffHunkStatus, bool)>,
     current_line: Option<u32>,
     inner: Rect,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) -> u16 {
+    use crate::theme::scope as s;
     let mark_w = 1u16;
     let gap = 1u16;
     let width = mark_w + width_digits + gap;
-    let number_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let number_style = theme.get(s::UI_TEXT_MUTED);
 
     let mut top = 0u16;
     for &(number, height) in folded {
@@ -975,13 +1025,18 @@ pub(crate) fn draw_fallback_line_numbers(
             buf[(inner.x, y)]
                 .set_char(severity_mark(*sev))
                 .set_style(theme.get(severity_scope(*sev)));
-        } else if let Some(&staged) = staged_marks.get(&(number - 1)) {
-            let (mark, scope) = if staged {
-                ('+', crate::theme::scope::DIFF_ADDED)
-            } else {
-                ('-', crate::theme::scope::DIFF_DELETED)
+        } else if let Some(&(status, staged)) = diff_marks.get(&(number - 1)) {
+            let (mark, scope) = match status {
+                DiffHunkStatus::Deleted => ('▔', s::DIFF_DELETED),
+                DiffHunkStatus::Added => ('▎', s::DIFF_ADDED),
+                DiffHunkStatus::Modified => ('▎', s::DIFF_MODIFIED),
+                DiffHunkStatus::Moved => ('▎', s::DIFF_MOVED),
             };
-            buf[(inner.x, y)].set_char(mark).set_style(theme.get(scope));
+            let mut style = theme.get(scope);
+            if staged {
+                style = style.add_modifier(Modifier::DIM);
+            }
+            buf[(inner.x, y)].set_char(mark).set_style(style);
         }
         let text = format!("{}", gutter_display_number(number, current_line));
         let start = inner.x + mark_w + width_digits.saturating_sub(text.len() as u16);
@@ -1822,8 +1877,46 @@ mod tests {
         );
     }
 
+    /// Render the focused editor's gutter in fallback mode and return each
+    /// visible row's leftmost mark glyph paired with whether it is dimmed.
+    fn gutter_mark_cells(stoat: &mut Stoat, rows: u16) -> Vec<(String, bool)> {
+        use ratatui::style::Modifier;
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 12, rows);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            true,
+            false,
+            false,
+            LineNumbers::Absolute,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        (0..rows)
+            .map(|y| {
+                let cell = &buf[(area.x, y)];
+                (
+                    cell.symbol().to_string(),
+                    cell.modifier.contains(Modifier::DIM),
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn gutter_marks_staged_and_unstaged_hunks() {
+    fn gutter_marks_modified_lines_and_dims_when_staged() {
         let mut h = Stoat::test();
         h.stage_index_scenario(
             "/repo",
@@ -1833,16 +1926,78 @@ mod tests {
         h.open_file(std::path::Path::new("/repo/f.txt"));
         h.settle_diff_jobs();
 
-        let gutter = rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 6);
-        let joined = gutter.join("|");
-        assert!(
-            joined.contains('+'),
-            "the staged hunk shows + in the gutter mark column: {gutter:?}"
+        let cells = gutter_mark_cells(&mut h.stoat, 6);
+        // Line 2 (b -> B) is staged in the index; line 4 (d -> D) is unstaged.
+        assert_eq!(
+            cells[1],
+            ("▎".to_string(), true),
+            "a staged modified line is a dimmed change mark: {cells:?}",
         );
-        assert!(
-            joined.contains('-'),
-            "the unstaged hunk shows - in the gutter mark column: {gutter:?}"
+        assert_eq!(
+            cells[3],
+            ("▎".to_string(), false),
+            "an unstaged modified line is a bright change mark: {cells:?}",
         );
+    }
+
+    #[test]
+    fn gutter_marks_a_deletion_seam() {
+        let mut h = Stoat::test();
+        h.stage_index_scenario(
+            "/repo",
+            &[("f.txt", "a\nb\nc\nd\n", "a\nb\nc\nd\n", "a\nb\nd\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(std::path::Path::new("/repo/f.txt"));
+        h.settle_diff_jobs();
+
+        let cells = gutter_mark_cells(&mut h.stoat, 6);
+        assert!(
+            cells.iter().any(|(mark, _)| mark == "▔"),
+            "the row below the deleted line carries the seam mark: {cells:?}",
+        );
+    }
+
+    #[test]
+    fn rich_gutter_marks_color_by_status_and_dim_when_staged() {
+        use crate::diff_map::DiffHunkStatus;
+        let folded = [(1u32, 1u16), (2, 1), (3, 1)];
+        let diff_colors = super::DiffMarkColors {
+            added: [10, 20, 30],
+            modified: [40, 50, 60],
+            moved: [70, 80, 90],
+            deleted: [100, 110, 120],
+        };
+        let severity = super::SeverityColors {
+            error: [0, 0, 0],
+            warning: [0, 0, 0],
+            info: [0, 0, 0],
+            hint: [0, 0, 0],
+        };
+        let mut diff_marks = std::collections::BTreeMap::new();
+        diff_marks.insert(0, (DiffHunkStatus::Modified, false));
+        diff_marks.insert(1, (DiffHunkStatus::Modified, true));
+        diff_marks.insert(2, (DiffHunkStatus::Deleted, false));
+
+        let lines = super::gutter_component_lines(
+            &folded,
+            &std::collections::BTreeMap::new(),
+            &diff_marks,
+            &diff_colors,
+            [0, 0, 0],
+            &severity,
+            None,
+        );
+
+        let git = |i: usize| lines[i].git.expect("a marked row has a git mark");
+        assert_eq!(git(0).color, [40, 50, 60], "modified takes diff.modified");
+        assert!(!git(0).seam);
+        assert_eq!(
+            git(1).color,
+            [20, 25, 30],
+            "a staged mark blends halfway toward the gutter bg",
+        );
+        assert!(git(2).seam, "a deletion is a seam mark");
     }
 
     #[test]

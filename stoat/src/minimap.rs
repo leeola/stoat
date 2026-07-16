@@ -568,7 +568,7 @@ impl ClassTable {
 
 /// Resolve a terminal color to rgb, falling back to a mid gray for indexed or
 /// reset colors a minimap has no palette for.
-fn color_to_rgb(color: Color) -> [u8; 3] {
+pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
     match color {
         Color::Rgb(r, g, b) => [r, g, b],
         Color::Black => [0, 0, 0],

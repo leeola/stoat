@@ -34,7 +34,7 @@ use std::{
 use stoatty_protocol::command::BorderStyle;
 use stoatty_widgets::{
     border::Border,
-    gutter::{Diagnostic, Gutter, GutterLine},
+    gutter::{Diagnostic, GitMark, Gutter, GutterLine},
     text_run::TextRun,
     ApcScene,
 };
@@ -326,7 +326,10 @@ fn gutter_lines() -> Vec<GutterLine> {
         .map(|(index, line)| GutterLine {
             number: index as u32 + 1,
             height: line_height(line),
-            git: line.git.map(git_color),
+            git: line.git.map(|g| GitMark {
+                color: git_color(g),
+                seam: false,
+            }),
             diagnostic: line.diag.map(|diag| Diagnostic {
                 color: diag_color(diag),
                 mark: diag_mark(diag),

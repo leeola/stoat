@@ -36,14 +36,25 @@ pub struct Gutter<'a> {
     pub bg: [u8; 3],
 }
 
+/// A line's git-diff mark: the bar color and whether it is a deletion seam.
+///
+/// A seam renders as a short top-aligned bar, since a deletion occupies no line
+/// of its own and marks the row that now sits below the removed content. A
+/// normal change renders as the full-height bar.
+#[derive(Clone, Copy)]
+pub struct GitMark {
+    pub color: [u8; 3],
+    pub seam: bool,
+}
+
 /// One gutter line: its number, the rows it occupies, and its status marks.
 #[derive(Clone, Copy)]
 pub struct GutterLine {
     pub number: u32,
     /// Rows the line occupies: one, plus any inline-expansion rows beneath it.
     pub height: u16,
-    /// Git-status bar color, or `None` for an unchanged line.
-    pub git: Option<[u8; 3]>,
+    /// Git-diff mark, or `None` for an unchanged line.
+    pub git: Option<GitMark>,
     /// Diagnostic severity bar spanning the line's full [`Self::height`], or
     /// `None` for a line without one.
     pub diagnostic: Option<Diagnostic>,
@@ -133,8 +144,8 @@ impl Gutter<'_> {
                     x: git_x,
                     y,
                     width: self.bar_width,
-                    height: 16,
-                    color: git,
+                    height: if git.seam { 6 } else { 16 },
+                    color: git.color,
                 }
                 .render(area, buf, scene);
             }
@@ -216,7 +227,7 @@ fn rgb([r, g, b]: [u8; 3]) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{Diagnostic, Gutter, GutterLine};
+    use super::{Diagnostic, GitMark, Gutter, GutterLine};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{encode_bar, BarCommand};
@@ -310,7 +321,10 @@ mod tests {
         let lines = [GutterLine {
             number: 1,
             height: 2,
-            git: Some([152, 195, 121]),
+            git: Some(GitMark {
+                color: [152, 195, 121],
+                seam: false,
+            }),
             diagnostic: Some(Diagnostic {
                 color: [224, 108, 117],
                 mark: 'E',
@@ -344,6 +358,37 @@ mod tests {
         assert!(
             contains(scene.buffer(), &git_bar),
             "git bar marks only the code row"
+        );
+    }
+
+    #[test]
+    fn seam_git_mark_draws_a_short_top_aligned_bar() {
+        let lines = [GutterLine {
+            number: 4,
+            height: 1,
+            git: Some(GitMark {
+                color: [224, 108, 117],
+                seam: true,
+            }),
+            diagnostic: None,
+        }];
+        let gutter = config(&lines);
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        gutter.render(area, &mut buf, &mut scene);
+
+        let seam_bar = encode_bar(&BarCommand {
+            x: 7,
+            y: 0,
+            width: 5,
+            height: 6,
+            color: [224, 108, 117],
+        });
+        assert!(
+            contains(scene.buffer(), &seam_bar),
+            "a deletion seam is a short top-aligned bar"
         );
     }
 }
