@@ -867,16 +867,12 @@ impl GpuContext {
         // sRGB a second time on top of the shader.
         let caps = surface.get_capabilities(&adapter);
 
-        // Mailbox shows the newest frame at each vsync without queuing or
-        // tearing, cutting input-to-pixel latency below Fifo. Immediate would
-        // cut it further but uncaps the frame rate, and the cursor and scroll
-        // easings advance a fixed fraction per frame, so their speed would then
-        // track the display; Mailbox keeps refresh-rate pacing.
-        let present_mode = if caps.present_modes.contains(&PresentMode::Mailbox) {
-            PresentMode::Mailbox
-        } else {
-            PresentMode::Fifo
-        };
+        // Fifo blocks the present until the display consumes a frame, which is
+        // what paces the redraw-requested animation loop at the refresh rate.
+        // Mailbox never blocks, so the loop would spin unthrottled, burning a
+        // core to render frames the display drops. With a frame latency of 1
+        // the Fifo latency cost over Mailbox is at most one refresh.
+        let present_mode = PresentMode::Fifo;
 
         let (surface_format, view_format) = surface_formats(&caps.formats);
         let view_formats = if view_format == surface_format {

@@ -386,6 +386,10 @@ struct State {
     /// True while a stoatty-native grid selection is being dragged, so
     /// `CursorMoved` extends it and the left release copies and clears it.
     native_drag: bool,
+    /// When the previous `RedrawRequested` ran, so each frame's easing advances
+    /// by the wall time actually elapsed rather than a fixed per-frame step.
+    /// `None` until the first frame.
+    last_redraw: Option<Instant>,
     /// Whether the perf HUD overlay is shown, toggled by the platform modifier
     /// plus Shift+P. Drives both the HUD composite and the redraw keep-alive.
     #[cfg(feature = "perf")]
@@ -401,13 +405,13 @@ struct PoolAnim {
     /// that changed it scrolled the document, so the change feeds the cursor
     /// sweep. Seeded to the creation target so a fresh pool does not sweep.
     last_scroll_target: f32,
-    /// Frames since [`Self::last_scroll_target`] last changed. The follower
+    /// Wall time since [`Self::last_scroll_target`] last changed. The follower
     /// converges to a still-moving target every frame in the momentum tail, so
     /// convergence alone cannot separate an active glide from a settled pool.
-    /// Once this reaches [`HANDOFF_STABLE_FRAMES`] the target has held steady
+    /// Once this reaches [`HANDOFF_STABLE_TIME`] the target has held steady
     /// and the region hands back to the live grid. A target still moving holds
     /// the pool composited. Seeded so a fresh at-rest pool hands off at once.
-    frames_since_target_change: u32,
+    target_stable_for: Duration,
     /// The region's pooled rows composed at [`Self::scroll`], sized to the
     /// region plus one straddle row. Reused across frames.
     document_grid: Grid,
@@ -446,7 +450,7 @@ impl PoolAnim {
         PoolAnim {
             scroll,
             last_scroll_target: scroll,
-            frames_since_target_change: HANDOFF_STABLE_FRAMES,
+            target_stable_for: HANDOFF_STABLE_TIME,
             document_grid: Grid::new(0, 0),
             pool_grid: Grid::new(0, 0),
             last_top: None,
@@ -599,6 +603,7 @@ impl ApplicationHandler<PtyEvent> for App {
             pressed_button: None,
             pointer_side_right: false,
             native_drag: false,
+            last_redraw: None,
             #[cfg(feature = "perf")]
             show_perf_hud: false,
         });
@@ -740,6 +745,20 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
+                // Each frame's easing advances by the wall time since the
+                // previous frame, so animation speed stays refresh-rate
+                // independent. The cap bounds the step after an idle gap, when
+                // the elapsed time spans the whole idle period.
+                let dt = {
+                    let now = Instant::now();
+                    let dt = state
+                        .last_redraw
+                        .map(|prev| now.duration_since(prev).min(MAX_EASE_DT))
+                        .unwrap_or(EASE_BASELINE_FRAME);
+                    state.last_redraw = Some(now);
+                    dt
+                };
+
                 let (
                     cursor,
                     scroll_delta,
@@ -789,10 +808,9 @@ impl ApplicationHandler<PtyEvent> for App {
                         let jump_rows = (target_pages - anim.last_scroll_target) * page_rows;
                         anim.last_scroll_target = target_pages;
                         if jump_rows == 0.0 {
-                            anim.frames_since_target_change =
-                                anim.frames_since_target_change.saturating_add(1);
+                            anim.target_stable_for = anim.target_stable_for.saturating_add(dt);
                         } else {
-                            anim.frames_since_target_change = 0;
+                            anim.target_stable_for = Duration::ZERO;
                         }
                         if jump_rows.abs() >= CURSOR_SWEEP_MIN_ROWS
                             && cursor_in_region(cursor, pool.region)
@@ -819,9 +837,9 @@ impl ApplicationHandler<PtyEvent> for App {
                             anim.scroll,
                             pool.scroll_target.pages(),
                             page_rows,
+                            dt,
                         );
-                        let scroll_settled =
-                            anim.frames_since_target_change >= HANDOFF_STABLE_FRAMES;
+                        let scroll_settled = anim.target_stable_for >= HANDOFF_STABLE_TIME;
                         anim.scroll = scroll;
                         if !easing && scroll_settled {
                             // The live grid owns the region once it hands off.
@@ -925,6 +943,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 state.popover_scrolls[index],
                                 state.popover_scroll_downs[index],
                                 max,
+                                dt,
                             );
                             state.popover_scrolls[index] = next;
                             state.popover_scroll_downs[index] = down;
@@ -935,7 +954,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
 
                 let (grid_scroll, grid_scrolling) =
-                    step_grid_scroll(state.grid_scroll, scroll_delta);
+                    step_grid_scroll(state.grid_scroll, scroll_delta, dt);
                 state.grid_scroll = grid_scroll;
 
                 // Fold any auto-pin the terminal applied as live output grew into
@@ -948,7 +967,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.scrollback_visual += pin;
 
                 let (scrollback_visual, scrollback_scrolling) =
-                    step_scrollback_scroll(state.scrollback_visual, state.scrollback_target);
+                    step_scrollback_scroll(state.scrollback_visual, state.scrollback_target, dt);
                 state.scrollback_visual = scrollback_visual;
 
                 let (region_scroll, region_scrolling) = match state.grid.scroll_region() {
@@ -956,7 +975,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         let offset = region.offset as f32;
                         let delta = offset - state.last_region_offset;
                         state.last_region_offset = offset;
-                        step_region_scroll(state.region_scroll, delta)
+                        step_region_scroll(state.region_scroll, delta, dt)
                     },
                     None => {
                         state.last_region_offset = 0.0;
@@ -1019,6 +1038,7 @@ impl ApplicationHandler<PtyEvent> for App {
                                 &mut state.cursor_anim,
                                 &mut state.cursor_corner_anim,
                                 cursor_position(cursor),
+                                dt,
                             );
                             state.gpu.render(
                                 &state.grid,
@@ -1098,6 +1118,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         &mut state.cursor_anim,
                         &mut state.cursor_corner_anim,
                         cursor_position(cursor),
+                        dt,
                     );
 
                     // The pool composites paint over the cursor's cell, so the
@@ -1809,13 +1830,41 @@ fn cell_at(x: f64, y: f64, cell_size: [f32; 2], rows: usize, cols: usize) -> (us
     (col, row)
 }
 
-/// Step the animated cursor toward `target`, returning the new position and
-/// whether it has reached the target.
+/// The reference frame duration the easing factors are expressed against. A
+/// factor closes that fraction of the remaining distance per baseline frame,
+/// and [`ease_alpha`] rescales it to the frame time actually elapsed, so the
+/// motion traces the same curve at any refresh rate.
+const EASE_BASELINE_FRAME: Duration = Duration::from_micros(16_667);
+
+/// Cap on the per-frame easing step. The first frame after an idle gap sees an
+/// elapsed time spanning the whole gap, which would otherwise snap every ease
+/// to its target in one step.
+const MAX_EASE_DT: Duration = Duration::from_millis(40);
+
+/// Rescale a per-baseline-frame easing factor to the elapsed frame time `dt`.
 ///
-/// Each frame closes a fixed fraction of the remaining distance, the
-/// exponential ease-out that reads as smooth cursor motion. Within a small
-/// epsilon it snaps onto the target so the animation terminates.
-fn ease(current: [f32; 2], target: [f32; 2]) -> ([f32; 2], bool) {
+/// Compounds the per-frame decay continuously, so two half-length frames
+/// advance an ease exactly as far as one baseline frame. At `dt` equal to
+/// [`EASE_BASELINE_FRAME`] this returns `factor` unchanged.
+fn ease_alpha(factor: f32, dt: Duration) -> f32 {
+    let frames = dt.as_secs_f32() / EASE_BASELINE_FRAME.as_secs_f32();
+    1.0 - (1.0 - factor).powf(frames)
+}
+
+/// Scale a per-baseline-frame minimum step to the elapsed frame time `dt`, so
+/// an ease's floor speed is a velocity rather than a per-frame distance.
+fn min_step(step: f32, dt: Duration) -> f32 {
+    step * dt.as_secs_f32() / EASE_BASELINE_FRAME.as_secs_f32()
+}
+
+/// Step the animated cursor toward `target` by the elapsed frame time `dt`,
+/// returning the new position and whether it has reached the target.
+///
+/// Closes a fixed fraction of the remaining distance per baseline frame,
+/// rescaled to `dt`, the exponential ease-out that reads as smooth cursor
+/// motion. Within a small epsilon it snaps onto the target so the animation
+/// terminates.
+fn ease(current: [f32; 2], target: [f32; 2], dt: Duration) -> ([f32; 2], bool) {
     const FACTOR: f32 = 0.35;
     const EPSILON: f32 = 0.01;
 
@@ -1825,11 +1874,13 @@ fn ease(current: [f32; 2], target: [f32; 2]) -> ([f32; 2], bool) {
         return (target, true);
     }
 
-    ([current[0] + dx * FACTOR, current[1] + dy * FACTOR], false)
+    let alpha = ease_alpha(FACTOR, dt);
+    ([current[0] + dx * alpha, current[1] + dy * alpha], false)
 }
 
-/// Step the warp cursor's four corners one frame toward the block at
-/// `target_cell`, returning the new corners and whether they have settled.
+/// Step the warp cursor's four corners toward the block at `target_cell` by
+/// the elapsed frame time `dt`, returning the new corners and whether they
+/// have settled.
 ///
 /// Each corner eases toward the corresponding corner of the target cell's
 /// block. A corner on the leading side of travel, its offset from the current
@@ -1837,7 +1888,11 @@ fn ease(current: [f32; 2], target: [f32; 2]) -> ([f32; 2], bool) {
 /// a larger fraction of its gap than a trailing one, so the quad stretches along
 /// the motion path and collapses back to a square as it arrives. Snaps onto the
 /// exact target block and reports settled once every corner is within `EPSILON`.
-fn ease_corners(current: [[f32; 2]; 4], target_cell: [f32; 2]) -> ([[f32; 2]; 4], bool) {
+fn ease_corners(
+    current: [[f32; 2]; 4],
+    target_cell: [f32; 2],
+    dt: Duration,
+) -> ([[f32; 2]; 4], bool) {
     const LEADING: f32 = 0.45;
     const TRAILING: f32 = 0.22;
     const EPSILON: f32 = 0.01;
@@ -1865,10 +1920,10 @@ fn ease_corners(current: [[f32; 2]; 4], target_cell: [f32; 2]) -> ([[f32; 2]; 4]
             current[i][1] - cur_centroid[1],
         ];
         let leading = offset[0] * travel[0] + offset[1] * travel[1] > 0.0;
-        let factor = if leading { LEADING } else { TRAILING };
+        let alpha = ease_alpha(if leading { LEADING } else { TRAILING }, dt);
         next[i] = [
-            current[i][0] + (target[i][0] - current[i][0]) * factor,
-            current[i][1] + (target[i][1] - current[i][1]) * factor,
+            current[i][0] + (target[i][0] - current[i][0]) * alpha,
+            current[i][1] + (target[i][1] - current[i][1]) * alpha,
         ];
     }
     (next, false)
@@ -1879,9 +1934,10 @@ fn ease_corners(current: [[f32; 2]; 4], target_cell: [f32; 2]) -> ([[f32; 2]; 4]
 /// animation is still moving, all absent when the cursor is hidden.
 type CursorStep = (Option<[f32; 2]>, Option<[[f32; 2]; 4]>, bool);
 
-/// Advance the cursor animation one frame toward `target` (the cursor's cell
-/// origin, or `None` when hidden), returning the cell for the ligature break,
-/// the cursor block's four corners, and whether the animation is still moving.
+/// Advance the cursor animation by the elapsed frame time `dt` toward `target`
+/// (the cursor's cell origin, or `None` when hidden), returning the cell for
+/// the ligature break, the cursor block's four corners, and whether the
+/// animation is still moving.
 ///
 /// [`CursorAnimation::Block`] eases the single point `point` and derives a rigid
 /// one-cell quad from it. [`CursorAnimation::Warp`] eases the four `corners`
@@ -1893,18 +1949,19 @@ fn step_cursor(
     point: &mut [f32; 2],
     corners: &mut [[f32; 2]; 4],
     target: Option<[f32; 2]>,
+    dt: Duration,
 ) -> CursorStep {
     let Some(target) = target else {
         return (None, None, false);
     };
     match animation {
         CursorAnimation::Block => {
-            let (next, settled) = ease(*point, target);
+            let (next, settled) = ease(*point, target, dt);
             *point = next;
             (Some(next), Some(block_corners(next)), !settled)
         },
         CursorAnimation::Warp => {
-            let (next, settled) = ease_corners(*corners, target);
+            let (next, settled) = ease_corners(*corners, target, dt);
             *corners = next;
             (Some(centroid(next)), Some(next), !settled)
         },
@@ -1923,47 +1980,48 @@ fn popover_overflow(overlay: &Overlay) -> Option<f32> {
     (content_rows > height).then(|| (content_rows - height) as f32)
 }
 
-/// Advance the ping-pong popover scroll one frame toward its current end,
-/// reversing direction when it settles.
+/// Advance the ping-pong popover scroll by the elapsed frame time `dt` toward
+/// its current end, reversing direction when it settles.
 ///
 /// `down` eases the offset toward `max` (the overflow bottom); once settled it
 /// flips, easing back toward the top, so the content glides up and down while
 /// the popover is visible.
-fn step_popover_scroll(scroll: f32, down: bool, max: f32) -> (f32, bool) {
+fn step_popover_scroll(scroll: f32, down: bool, max: f32, dt: Duration) -> (f32, bool) {
     let target = if down { max } else { 0.0 };
-    let (next, settled) = ease([scroll, 0.0], [target, 0.0]);
+    let (next, settled) = ease([scroll, 0.0], [target, 0.0], dt);
     let down = if settled { !down } else { down };
     (next[0], down)
 }
 
-/// Advance the grid's eased vertical scroll one frame.
+/// Advance the grid's eased vertical scroll by the elapsed frame time `dt`.
 ///
 /// The new `delta` (rows the content scrolled up) is added to the offset, so the
 /// content starts that many rows lower, then the offset eases toward zero so it
 /// glides up into place. Returns the new offset and whether it is still easing.
-fn step_grid_scroll(scroll: f32, delta: usize) -> (f32, bool) {
+fn step_grid_scroll(scroll: f32, delta: usize, dt: Duration) -> (f32, bool) {
     let seeded = scroll + delta as f32;
-    let (next, settled) = ease([seeded, 0.0], [0.0, 0.0]);
+    let (next, settled) = ease([seeded, 0.0], [0.0, 0.0], dt);
     (next[0], !settled)
 }
 
-/// Floor on the scrollback ease's per-frame step, in rows, so the exponential
-/// tail locks in with a quick, even glide instead of crawling the last
-/// sub-pixels into the target. A few pixels per frame at a typical cell height;
-/// raise for a snappier lock-in, lower for a softer one.
+/// Floor on the scrollback ease's per-baseline-frame step, in rows, so the
+/// exponential tail locks in with a quick, even glide instead of crawling the
+/// last sub-pixels into the target. A few pixels per frame at a typical cell
+/// height; raise for a snappier lock-in, lower for a softer one.
 const SCROLLBACK_MIN_STEP: f32 = 0.15;
 
-/// Advance the eased scrollback position one frame toward `target`.
+/// Advance the eased scrollback position toward `target` by the elapsed frame
+/// time `dt`.
 ///
 /// `scroll` and `target` are positions in rows back from the live bottom: the
 /// wheel advances `target` and this eases `scroll` toward it, so the history
 /// window scrolls through each row and settles cell-aligned on the target.
 ///
-/// Closes a fixed fraction of the remaining distance each frame for an
-/// exponential ease-out, but never moves slower than [`SCROLLBACK_MIN_STEP`], so
+/// Closes a fixed fraction of the remaining distance per baseline frame,
+/// rescaled to `dt`, but never moves slower than [`SCROLLBACK_MIN_STEP`], so
 /// the tail finishes crisply instead of crawling sub-pixel-by-sub-pixel into the
 /// target. Returns the new position and whether it is still easing.
-fn step_scrollback_scroll(scroll: f32, target: f32) -> (f32, bool) {
+fn step_scrollback_scroll(scroll: f32, target: f32, dt: Duration) -> (f32, bool) {
     const FACTOR: f32 = 0.35;
     const EPSILON: f32 = 0.01;
 
@@ -1972,22 +2030,23 @@ fn step_scrollback_scroll(scroll: f32, target: f32) -> (f32, bool) {
         return (target, false);
     }
 
-    let step = (remaining.abs() * FACTOR)
-        .max(SCROLLBACK_MIN_STEP)
+    let step = (remaining.abs() * ease_alpha(FACTOR, dt))
+        .max(min_step(SCROLLBACK_MIN_STEP, dt))
         .min(remaining.abs());
     (scroll + step.copysign(remaining), true)
 }
 
-/// Advance the scroll region's eased vertical offset one frame.
+/// Advance the scroll region's eased vertical offset by the elapsed frame time
+/// `dt`.
 ///
 /// `delta` is the change in the region's declared scroll offset since the last
 /// frame, signed: positive when the program scrolled the region's content down,
 /// negative when up. It seeds the offset, which then eases toward zero so the
 /// region's content glides into place. Returns the new offset and whether it is
 /// still easing.
-fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
+fn step_region_scroll(scroll: f32, delta: f32, dt: Duration) -> (f32, bool) {
     let seeded = scroll + delta;
-    let (next, settled) = ease([seeded, 0.0], [0.0, 0.0]);
+    let (next, settled) = ease([seeded, 0.0], [0.0, 0.0], dt);
     (next[0], !settled)
 }
 
@@ -2002,29 +2061,30 @@ const REPOSITION_LAND_PAGES: f32 = 1.0;
 /// real jump (a page, `G`, a multi-line motion) launches it.
 const CURSOR_SWEEP_MIN_ROWS: f32 = 2.0;
 
-/// Frames the scroll target must hold steady before the pool hands its region
-/// back to the live grid.
+/// Wall time the scroll target must hold steady before the pool hands its
+/// region back to the live grid.
 ///
 /// The follower catches a still-moving target every frame through the momentum
 /// tail, so a bare convergence test reads as "settled" mid-glide. The live grid
 /// stays frozen at its pre-scroll row until the app repaints at the true settle,
 /// so handing off then snaps the view back to that stale row. Waiting for the
-/// target to hold steady a few frames lets the settle repaint arrive first, so
-/// the region only returns to a live grid that already matches the pool.
-const HANDOFF_STABLE_FRAMES: u32 = 3;
+/// target to hold steady lets the settle repaint arrive first, so the region
+/// only returns to a live grid that already matches the pool.
+const HANDOFF_STABLE_TIME: Duration = Duration::from_millis(50);
 
-/// Advance the document's eased smooth-scroll offset one frame toward `target`.
+/// Advance the document's eased smooth-scroll offset toward `target` by the
+/// elapsed frame time `dt`.
 ///
 /// `scroll` and `target` are app-declared absolute positions in document pages;
 /// `page_rows` is the rows per page, so the snap epsilon and step floor are
 /// expressed in on-screen rows rather than pages. Mirrors
 /// [`step_scrollback_scroll`]: closes a fixed fraction of the remaining distance
-/// each frame but never less than a row-sized floor, capped at the remaining
-/// distance, so the tail lands exactly on the (whole-row) target. A page-unit
-/// epsilon would snap a visible fraction of a row when handing back to the live
-/// grid, reading as a one-line jump at the end of the glide. Returns the new
-/// offset and whether it is still easing.
-fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool) {
+/// per baseline frame, rescaled to `dt`, but never less than a row-sized floor,
+/// capped at the remaining distance, so the tail lands exactly on the
+/// (whole-row) target. A page-unit epsilon would snap a visible fraction of a
+/// row when handing back to the live grid, reading as a one-line jump at the
+/// end of the glide. Returns the new offset and whether it is still easing.
+fn step_document_scroll(scroll: f32, target: f32, page_rows: f32, dt: Duration) -> (f32, bool) {
     const FACTOR: f32 = 0.7;
     const EPSILON_ROWS: f32 = 0.01;
     const MIN_STEP_ROWS: f32 = 0.15;
@@ -2034,8 +2094,8 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32) -> (f32, bool)
         return (target, false);
     }
 
-    let step = (remaining.abs() * FACTOR)
-        .max(MIN_STEP_ROWS / page_rows)
+    let step = (remaining.abs() * ease_alpha(FACTOR, dt))
+        .max(min_step(MIN_STEP_ROWS, dt) / page_rows)
         .min(remaining.abs());
     (scroll + step.copysign(remaining), true)
 }
@@ -2048,7 +2108,7 @@ mod tests {
         selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes,
         step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
         step_scrollback_scroll, swallow_super_combo, sweep_launch_shift, wheel_lines,
-        SCROLLBACK_MIN_STEP,
+        EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     use alacritty_terminal::sync::FairMutex;
     use std::time::{Duration, Instant};
@@ -2307,19 +2367,38 @@ mod tests {
 
     #[test]
     fn ease_steps_toward_then_settles() {
-        let (next, settled) = ease([0.0, 0.0], [4.0, 0.0]);
+        let (next, settled) = ease([0.0, 0.0], [4.0, 0.0], EASE_BASELINE_FRAME);
         assert!(next[0] > 0.0 && next[0] < 4.0);
         assert!(!settled);
 
-        let (next, settled) = ease([3.999, 2.0], [4.0, 2.0]);
+        let (next, settled) = ease([3.999, 2.0], [4.0, 2.0], EASE_BASELINE_FRAME);
         assert_eq!(next, [4.0, 2.0]);
         assert!(settled);
+    }
+
+    /// Two half-length frames must advance an ease as far as one baseline
+    /// frame, so animation speed is refresh-rate independent.
+    #[test]
+    fn ease_is_frame_rate_invariant() {
+        let half = EASE_BASELINE_FRAME / 2;
+
+        let (whole, _) = ease([0.0, 0.0], [4.0, 0.0], EASE_BASELINE_FRAME);
+        let (halfway, _) = ease([0.0, 0.0], [4.0, 0.0], half);
+        let (twice, _) = ease(halfway, [4.0, 0.0], half);
+
+        assert!(
+            (twice[0] - whole[0]).abs() < 1e-4,
+            "two half frames ({}) land where one whole frame does ({})",
+            twice[0],
+            whole[0]
+        );
+        assert!(halfway[0] < whole[0], "a half frame advances less");
     }
 
     #[test]
     fn ease_corners_leading_edge_outruns_trailing() {
         let rest = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
-        let (stepped, settled) = ease_corners(rest, [5.0, 0.0]);
+        let (stepped, settled) = ease_corners(rest, [5.0, 0.0], EASE_BASELINE_FRAME);
 
         assert!(!settled, "a step toward a distant cell has not settled");
 
@@ -2338,7 +2417,7 @@ mod tests {
     #[test]
     fn ease_corners_snaps_onto_the_target_block() {
         let near = [[3.0, 2.0], [4.0, 2.0], [3.0, 3.0], [4.0, 2.995]];
-        let (snapped, settled) = ease_corners(near, [3.0, 2.0]);
+        let (snapped, settled) = ease_corners(near, [3.0, 2.0], EASE_BASELINE_FRAME);
 
         assert!(settled, "within epsilon of the target reports settled");
         assert_eq!(
@@ -2401,15 +2480,15 @@ mod tests {
 
     #[test]
     fn popover_scroll_ping_pongs_between_ends() {
-        let (next, down) = step_popover_scroll(0.0, true, 2.0);
+        let (next, down) = step_popover_scroll(0.0, true, 2.0, EASE_BASELINE_FRAME);
         assert!(next > 0.0 && next < 2.0, "eases down from the top");
         assert!(down);
 
-        let (next, down) = step_popover_scroll(1.999, true, 2.0);
+        let (next, down) = step_popover_scroll(1.999, true, 2.0, EASE_BASELINE_FRAME);
         assert_eq!(next, 2.0, "snaps onto the bottom");
         assert!(!down, "reverses at the bottom");
 
-        let (next, down) = step_popover_scroll(0.001, false, 2.0);
+        let (next, down) = step_popover_scroll(0.001, false, 2.0, EASE_BASELINE_FRAME);
         assert_eq!(next, 0.0, "snaps onto the top");
         assert!(down, "reverses at the top");
     }
@@ -2681,12 +2760,12 @@ mod tests {
     #[test]
     fn grid_scroll_eases_a_delta_to_zero() {
         // A new delta seeds the offset and starts easing down toward zero.
-        let (next, easing) = step_grid_scroll(0.0, 3);
+        let (next, easing) = step_grid_scroll(0.0, 3, EASE_BASELINE_FRAME);
         assert!(next > 0.0 && next < 3.0, "eases from the seed");
         assert!(easing);
 
         // No new delta, within the snap epsilon: settles at zero.
-        let (next, easing) = step_grid_scroll(0.005, 0);
+        let (next, easing) = step_grid_scroll(0.005, 0, EASE_BASELINE_FRAME);
         assert_eq!(next, 0.0, "snaps onto zero");
         assert!(!easing);
     }
@@ -2694,19 +2773,20 @@ mod tests {
     #[test]
     fn scrollback_scroll_eases_toward_a_target() {
         // A target deeper in history eases toward it without overshooting.
-        let (next, easing) = step_scrollback_scroll(0.0, 4.0);
+        let (next, easing) = step_scrollback_scroll(0.0, 4.0, EASE_BASELINE_FRAME);
         assert!(next > 0.0 && next < 4.0, "eases toward the target");
         assert!(easing);
 
         // Within the snap epsilon of the target: settles on it.
-        let (next, easing) = step_scrollback_scroll(3.999, 4.0);
+        let (next, easing) = step_scrollback_scroll(3.999, 4.0, EASE_BASELINE_FRAME);
         assert_eq!(next, 4.0, "snaps onto the target");
         assert!(!easing);
 
         // Near the target the per-frame step is floored so the tail does not
         // crawl: from twice the floor out it advances by the floor itself, not
         // the smaller geometric step.
-        let (next, easing) = step_scrollback_scroll(0.0, SCROLLBACK_MIN_STEP * 2.0);
+        let (next, easing) =
+            step_scrollback_scroll(0.0, SCROLLBACK_MIN_STEP * 2.0, EASE_BASELINE_FRAME);
         assert!(
             (next - SCROLLBACK_MIN_STEP).abs() < 1e-5,
             "tail advances by the floor"
@@ -2717,17 +2797,17 @@ mod tests {
     #[test]
     fn region_scroll_eases_a_signed_delta_to_zero() {
         // A positive delta (content scrolled down) seeds and eases toward zero.
-        let (next, easing) = step_region_scroll(0.0, 3.0);
+        let (next, easing) = step_region_scroll(0.0, 3.0, EASE_BASELINE_FRAME);
         assert!(next > 0.0 && next < 3.0, "eases from the positive seed");
         assert!(easing);
 
         // A negative delta (content scrolled up) eases up from below zero.
-        let (next, easing) = step_region_scroll(0.0, -3.0);
+        let (next, easing) = step_region_scroll(0.0, -3.0, EASE_BASELINE_FRAME);
         assert!(next < 0.0 && next > -3.0, "eases from the negative seed");
         assert!(easing);
 
         // No new delta, within the snap epsilon: settles at zero.
-        let (next, easing) = step_region_scroll(0.005, 0.0);
+        let (next, easing) = step_region_scroll(0.005, 0.0, EASE_BASELINE_FRAME);
         assert_eq!(next, 0.0, "snaps onto zero");
         assert!(!easing);
     }
@@ -2735,19 +2815,19 @@ mod tests {
     #[test]
     fn document_scroll_eases_toward_a_target() {
         // A target ahead of the live offset eases toward it without overshooting.
-        let (next, easing) = step_document_scroll(0.0, 4.0, 20.0);
+        let (next, easing) = step_document_scroll(0.0, 4.0, 20.0, EASE_BASELINE_FRAME);
         assert!(next > 0.0 && next < 4.0, "eases toward the target");
         assert!(easing);
 
         // The row-sized min-step floor, capped at the remaining distance, lands
         // exactly on the whole-row target instead of snapping a visible fraction
         // of a row; the next frame then settles cleanly.
-        let (next, easing) = step_document_scroll(4.0 - 0.001, 4.0, 20.0);
+        let (next, easing) = step_document_scroll(4.0 - 0.001, 4.0, 20.0, EASE_BASELINE_FRAME);
         assert_eq!(next, 4.0, "min-step lands exactly on the target");
         assert!(easing);
 
         // Already within a sub-pixel (in rows) of the target: settles on it.
-        let (next, easing) = step_document_scroll(4.0 - 0.0001, 4.0, 20.0);
+        let (next, easing) = step_document_scroll(4.0 - 0.0001, 4.0, 20.0, EASE_BASELINE_FRAME);
         assert_eq!(next, 4.0, "snaps onto the target");
         assert!(!easing);
     }
