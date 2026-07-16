@@ -646,10 +646,16 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-    } else if !PRIMARY_MODES.contains(&mode.as_str())
-        || screen == Some("review")
-        || stoat.key_hints_visible
+    } else if mode != "space_pane_display"
+        && (!PRIMARY_MODES.contains(&mode.as_str())
+            || screen == Some("review")
+            || stoat.key_hints_visible)
     {
+        // The space_pane_display chord paints its own digit badges below, and
+        // the auto-shown hint box would only stack an eleven-row overlay over
+        // them. The guard above keeps it suppressed even when the `?` key-hints
+        // toggle is on.
+        //
         // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
         // mutable borrow of the active workspace, so read the flags directly.
         let state = StoatKeymapState::with_flags(

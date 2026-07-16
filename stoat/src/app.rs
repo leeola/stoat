@@ -10387,6 +10387,17 @@ mod tests {
             "the pane centers carry the digits 1 and 2, got {digits:?}"
         );
 
+        let hint_box_shown = (buf.area.y..buf.area.y + buf.area.height).any(|y| {
+            let row: String = (buf.area.x..buf.area.x + buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            row.contains(" space_pane_display ")
+        });
+        assert!(
+            !hint_box_shown,
+            "the chord suppresses the keybinding-hints box, leaving only the badges"
+        );
+
         // Selecting a pane focuses it and returns to normal, so the next frame
         // draws no badges.
         h.type_keys("2");

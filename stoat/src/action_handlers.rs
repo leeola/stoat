@@ -2195,31 +2195,49 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(160, 60);
 
         assert!(
-            !normal_hint_box_visible(&mut h.stoat),
+            !hint_box_visible(&mut h.stoat, "normal"),
             "normal mode shows no hint box by default",
         );
         dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
         assert!(
-            normal_hint_box_visible(&mut h.stoat),
+            hint_box_visible(&mut h.stoat, "normal"),
             "toggling on paints the normal-mode hint box",
         );
         dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
         assert!(
-            !normal_hint_box_visible(&mut h.stoat),
+            !hint_box_visible(&mut h.stoat, "normal"),
             "a second toggle hides it again",
         );
     }
 
-    /// Whether a rendered frame carries the ` normal ` hint-box title, which the
+    #[test]
+    fn space_pane_display_chord_suppresses_the_hint_box() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 60);
+
+        h.type_keys("space a");
+        assert!(
+            hint_box_visible(&mut h.stoat, "space_pane_nav"),
+            "the parent chord mode auto-shows its hint box",
+        );
+
+        h.type_keys("e");
+        assert!(
+            !hint_box_visible(&mut h.stoat, "space_pane_display"),
+            "the display chord suppresses the hint box so only the badges show",
+        );
+    }
+
+    /// Whether a rendered frame carries the ` {title} ` hint-box title, which the
     /// non-stoatty frame paints into the cell buffer.
-    fn normal_hint_box_visible(stoat: &mut Stoat) -> bool {
+    fn hint_box_visible(stoat: &mut Stoat, title: &str) -> bool {
+        let needle = format!(" {title} ");
         let buf = stoat.render();
         let area = buf.area;
         (area.y..area.y + area.height).any(|y| {
             let row: String = (area.x..area.x + area.width)
                 .map(|x| buf[(x, y)].symbol())
                 .collect();
-            row.contains(" normal ")
+            row.contains(&needle)
         })
     }
 
