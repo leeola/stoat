@@ -929,6 +929,37 @@ mod tests {
     }
 
     #[test]
+    fn question_mark_rebinds_across_modes() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let question = key_event(KeyCode::Char('?'), KeyModifiers::NONE);
+        let name_in = |mode: &str| {
+            let state = TestState::new().set("mode", StateValue::String(mode.into()));
+            keymap
+                .lookup(&state, &question)
+                .unwrap_or_else(|| panic!("? is unbound in {mode}"))[0]
+                .name
+                .clone()
+        };
+
+        assert_eq!(
+            name_in("normal"),
+            "ToggleKeyHints",
+            "? toggles the hints overlay in normal mode",
+        );
+        assert_eq!(
+            name_in("goto"),
+            "OpenReverseSearchInput",
+            "reverse search relocated to g ?",
+        );
+        assert_eq!(
+            name_in("space"),
+            "OpenHelp",
+            "? still opens help in other sub-modes",
+        );
+    }
+
+    #[test]
     fn default_config_pins_every_setting_default() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         // The embedded config must actively set every fixed-default scalar, so

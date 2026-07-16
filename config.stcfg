@@ -220,7 +220,7 @@ on init {
 }
 
 on key {
-    mode != normal {
+    mode != normal && mode != goto {
         ? -> OpenHelp();
     }
     modal == help && mode == normal {
@@ -290,7 +290,6 @@ on key {
     }
     mode == normal {
         Enter -> RunSubmit();
-        ? -> ToggleKeyHints();
         q -> ReplayMacro();
         Space -> SetMode(space);
         : -> OpenCommandPalette();
@@ -388,7 +387,7 @@ on key {
         m -> SetMode(match);
         R -> ReplaceWithYanked();
         / -> OpenSearchInput();
-        ? -> OpenReverseSearchInput();
+        ? -> ToggleKeyHints();
         n -> SearchNext();
         N -> SearchPrev();
         y -> Yank();
@@ -398,6 +397,7 @@ on key {
     }
     mode == goto {
         Escape -> SetMode(normal);
+        ? -> [OpenReverseSearchInput(), SetMode(normal)];
         i -> [GotoFirstNonwhitespace(), SetMode(normal)];
         s -> [GotoImplementation(), SetMode(normal)];
         j -> [GotoLastLine(), SetMode(normal)];
