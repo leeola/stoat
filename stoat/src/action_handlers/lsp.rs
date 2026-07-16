@@ -4426,6 +4426,41 @@ mod tests {
     }
 
     #[test]
+    fn did_change_incremental_reverts_typed_text_after_undo() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+
+        edit_buffer(&mut h, 0..0, "X");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+
+        let changes = h.fake_lsp().observed_changes();
+        assert_eq!(
+            changes.len(),
+            2,
+            "the undo sends its own incremental change"
+        );
+        let cc = &changes[1].content_changes;
+        assert_eq!(cc.len(), 1, "reverting the insertion is one deletion");
+        assert_eq!(cc[0].text, "");
+        assert_eq!(
+            cc[0].range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, 0),
+                lsp_types::Position::new(0, 1),
+            )),
+            "the deletion covers the typed X",
+        );
+    }
+
+    #[test]
     fn did_change_incremental_subsequent_dispatch_starts_from_last_delivered() {
         let mut h = TestHarness::with_size(80, 24);
         h.fake_lsp()

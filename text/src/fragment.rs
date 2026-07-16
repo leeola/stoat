@@ -12,6 +12,12 @@ pub struct Fragment {
     pub len: u32,
     pub visible: bool,
     pub deletions: SmallVec<[u64; 2]>,
+    /// Version at which an undo or redo last toggled this fragment's
+    /// visibility, or 0 if none ever did. Folded into
+    /// [`FragmentSummary::max_version`] so a visibility flip counts as a change
+    /// for `edits_since`. Without it a toggled fragment carries no newer
+    /// timestamp, so the incremental-diff filter would skip it.
+    pub max_undos: u64,
 }
 
 impl Fragment {
@@ -103,7 +109,8 @@ impl Item for Fragment {
                 .deletions
                 .iter()
                 .copied()
-                .fold(self.timestamp, u64::max),
+                .fold(self.timestamp, u64::max)
+                .max(self.max_undos),
         }
     }
 }
@@ -200,6 +207,7 @@ mod tests {
             len: 10,
             visible: true,
             deletions: SmallVec::new(),
+            max_undos: 0,
         };
         assert_eq!(f.visible_len(), 10);
         assert_eq!(f.deleted_len(), 0);
@@ -214,6 +222,7 @@ mod tests {
             len: 10,
             visible: false,
             deletions: SmallVec::new(),
+            max_undos: 0,
         };
         assert_eq!(f.visible_len(), 0);
         assert_eq!(f.deleted_len(), 10);

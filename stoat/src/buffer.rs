@@ -147,6 +147,7 @@ impl TextBuffer {
                 len: 0,
                 visible: false,
                 deletions: Default::default(),
+                max_undos: 0,
             },
             cx,
         );
@@ -234,6 +235,7 @@ impl TextBuffer {
                     len: overshoot as u32,
                     visible: true,
                     deletions: fragment.deletions.clone(),
+                    max_undos: fragment.max_undos,
                 };
                 push_insertion(&mut new_insertions, &prefix);
                 new_fragments.push(prefix, cx);
@@ -278,6 +280,7 @@ impl TextBuffer {
                             len: text.len() as u32,
                             visible: true,
                             deletions: Default::default(),
+                            max_undos: 0,
                         };
                         new_insertions.push(InsertionFragment {
                             timestamp,
@@ -300,6 +303,7 @@ impl TextBuffer {
                         len: suffix_len as u32,
                         visible: true,
                         deletions: fragment.deletions.clone(),
+                        max_undos: fragment.max_undos,
                     };
                     new_insertions.push(InsertionFragment {
                         timestamp: suffix.timestamp,
@@ -349,6 +353,7 @@ impl TextBuffer {
                                 len: text.len() as u32,
                                 visible: true,
                                 deletions: Default::default(),
+                                max_undos: 0,
                             };
                             new_insertions.push(InsertionFragment {
                                 timestamp,
@@ -371,6 +376,7 @@ impl TextBuffer {
                             len: (frag_len - delete_remaining) as u32,
                             visible: true,
                             deletions: fragment.deletions.clone(),
+                            max_undos: fragment.max_undos,
                         };
                         new_insertions.push(InsertionFragment {
                             timestamp: remaining.timestamp,
@@ -402,6 +408,7 @@ impl TextBuffer {
                 len: text.len() as u32,
                 visible: true,
                 deletions: Default::default(),
+                max_undos: 0,
             };
             new_insertions.push(InsertionFragment {
                 timestamp,
@@ -599,6 +606,9 @@ impl TextBuffer {
 
             let mut new_frag = fragment.clone();
             new_frag.visible = is_visible;
+            if was_visible != is_visible {
+                new_frag.max_undos = undo_timestamp;
+            }
 
             if was_visible {
                 let text_slice = self
@@ -868,8 +878,7 @@ impl TextBufferSnapshot {
             new_offset += skipped_visible;
 
             let len = fragment.len as usize;
-            let was_visible = fragment.timestamp <= since_version
-                && !fragment.deletions.iter().any(|&d| d <= since_version);
+            let was_visible = fragment.was_visible(since_version, &self.undo_map);
 
             if fragment.visible && !was_visible {
                 let edit = Edit {
@@ -1089,6 +1098,76 @@ mod tests {
         let b = buf("hello");
         let patch = b.snapshot.edits_since(b.version());
         assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn edits_since_reflects_an_undone_insert() {
+        let mut b = buf("hello");
+        b.edit(5..5, " world");
+        let v_after_insert = b.version();
+        b.undo();
+        let patch = b.snapshot.edits_since(v_after_insert);
+        let edits = patch.edits();
+        assert_eq!(edits.len(), 1, "the reverted insert appears as a deletion");
+        assert_eq!(edits[0].old, 5..11);
+        assert_eq!(edits[0].new, 5..5);
+    }
+
+    #[test]
+    fn edits_since_reflects_an_undone_delete() {
+        let mut b = buf("hello world");
+        b.edit(5..11, "");
+        let v_after_delete = b.version();
+        b.undo();
+        let patch = b.snapshot.edits_since(v_after_delete);
+        let edits = patch.edits();
+        assert_eq!(
+            edits.len(),
+            1,
+            "the reverted delete appears as an insertion"
+        );
+        assert_eq!(edits[0].old, 5..5);
+        assert_eq!(edits[0].new, 5..11);
+    }
+
+    #[test]
+    fn edits_since_after_undo_then_redo_is_empty() {
+        let mut b = buf("hello");
+        b.edit(5..5, " world");
+        let v_after_insert = b.version();
+        b.undo();
+        b.redo();
+        let patch = b.snapshot.edits_since(v_after_insert);
+        assert!(
+            patch.is_empty(),
+            "undo then redo returns to the same content: {:?}",
+            patch.edits()
+        );
+    }
+
+    #[test]
+    fn edits_since_spans_an_undo_then_a_splitting_edit() {
+        // Undoing the delete restores the "AB" fragment. Inserting inside it
+        // splits it, and the split halves must inherit the restored fragment's
+        // undo version, or edits_since from the post-delete version filters them
+        // out and drops the restored text.
+        let mut b = buf("AB");
+        b.edit(0..2, "");
+        let v_after_delete = b.version();
+        b.undo();
+        b.edit(1..1, "X");
+        let new_text = b.snapshot.visible_text.to_string();
+        assert_eq!(new_text, "AXB");
+
+        let patch = b.snapshot.edits_since(v_after_delete);
+        let mut reconstructed = String::new();
+        for edit in patch.edits().iter().rev() {
+            reconstructed.replace_range(edit.old.clone(), &new_text[edit.new.clone()]);
+        }
+        assert_eq!(
+            reconstructed, new_text,
+            "patch from the post-delete version rebuilds the split content",
+        );
     }
 
     #[test]
