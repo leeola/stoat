@@ -318,8 +318,9 @@ pub(crate) enum PaletteOutcome {
     #[allow(dead_code)]
     Close,
     /// An action is ready to dispatch, with any inline argument parsed into
-    /// its parameter list.
-    Dispatch(&'static registry::RegistryEntry, Vec<ParamValue>),
+    /// its parameter list. The third field is the canonical, re-executable
+    /// command line to record in palette history.
+    Dispatch(&'static registry::RegistryEntry, Vec<ParamValue>, String),
 }
 
 impl CommandPalette {
@@ -523,7 +524,8 @@ impl CommandPalette {
             return match ParamValue::parse(param.kind, &chosen) {
                 Ok(value) => {
                     self.input.dispose(ws);
-                    PaletteOutcome::Dispatch(entry, vec![value])
+                    let line = format!("{} {}", history_head(entry), chosen);
+                    PaletteOutcome::Dispatch(entry, vec![value], line)
                 },
                 Err(_) => PaletteOutcome::None,
             };
@@ -541,7 +543,11 @@ impl CommandPalette {
         {
             if entry.def.params().is_empty() {
                 self.input.dispose(ws);
-                return PaletteOutcome::Dispatch(entry, Vec::new());
+                return PaletteOutcome::Dispatch(
+                    entry,
+                    Vec::new(),
+                    history_head(entry).to_string(),
+                );
             }
             self.input
                 .replace_text(ws, &format!("{} ", entry.def.name()));
@@ -551,7 +557,7 @@ impl CommandPalette {
         match self.filtered.get(self.selected).copied() {
             Some(entry) if entry.def.params().is_empty() => {
                 self.input.dispose(ws);
-                PaletteOutcome::Dispatch(entry, Vec::new())
+                PaletteOutcome::Dispatch(entry, Vec::new(), history_head(entry).to_string())
             },
             Some(entry) => {
                 self.input
@@ -576,6 +582,21 @@ fn parse_command(text: &str) -> Option<(&'static registry::RegistryEntry, &str)>
     let (head, arg) = text.split_once(' ')?;
     let entry = registry::lookup_alias(head)?;
     (!entry.def.params().is_empty()).then_some((entry, arg))
+}
+
+/// The head token to record for `entry` in palette history. It is the first
+/// alias when one exists, else the name.
+///
+/// Both re-resolve through [`parse_command`]'s [`registry::lookup_alias`], so a
+/// recalled `head [arg]` line replays. The alias is preferred because it reads
+/// like the short form a user types (`cd`, not `SetCwd`).
+fn history_head(entry: &registry::RegistryEntry) -> &'static str {
+    entry
+        .def
+        .aliases()
+        .first()
+        .copied()
+        .unwrap_or_else(|| entry.def.name())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -664,7 +685,7 @@ pub(crate) fn refilter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_harness::TestHarness;
+    use crate::{input_history::InputHistory, test_harness::TestHarness};
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
     /// point the active workspace at it, so the palette's inline file picker
@@ -1068,6 +1089,113 @@ mod tests {
         h.type_text(":Focus");
         h.type_keys("down enter");
         assert!(h.stoat.command_palette.is_none());
+    }
+
+    #[test]
+    fn palette_up_recalls_and_reexecutes_a_recorded_command() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/hist");
+        let sub = root.join("sub");
+        h.fake_fs().insert_dir(&sub);
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        h.type_text(&format!(":cd {}", sub.display()));
+        h.type_keys("enter");
+        assert_eq!(h.stoat.active_workspace().git_root, sub);
+
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_text(":");
+        h.type_keys("up enter");
+        assert_eq!(
+            h.stoat.active_workspace().git_root,
+            sub,
+            "Up recalls the recorded cd line and Enter re-runs it"
+        );
+    }
+
+    #[test]
+    fn palette_needle_recalls_the_matching_history_entry() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/hist");
+        let sub = root.join("sub");
+        h.fake_fs().insert_dir(&sub);
+        h.stoat.active_workspace_mut().git_root = root;
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec![format!("cd {}", sub.display()), "w".to_string()]);
+
+        h.type_text(":sub");
+        h.type_keys("up enter");
+        assert_eq!(
+            h.stoat.active_workspace().git_root,
+            sub,
+            "the needle skips w and recalls the cd line"
+        );
+    }
+
+    #[test]
+    fn typing_after_a_recall_recaptures_the_needle() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["cd /alpha".to_string(), "cd /beta".to_string()]);
+
+        h.type_text(":");
+        h.type_keys("up");
+        assert_eq!(
+            palette_text(&h),
+            "cd /beta",
+            "an empty needle recalls the newest"
+        );
+
+        h.type_text("x");
+        h.stoat.drive_background();
+        h.type_keys("up");
+        assert_eq!(
+            palette_text(&h),
+            "cd /betax",
+            "the edit ends the walk, so Up captures the new needle (which matches nothing)"
+        );
+    }
+
+    #[test]
+    fn palette_ctrl_keys_move_the_list_not_history() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["w".to_string()]);
+
+        h.type_text(":");
+        h.type_keys("ctrl-n");
+        assert_eq!(
+            h.stoat.command_palette.as_ref().expect("open").selected,
+            1,
+            "Ctrl-N moves the list selection down"
+        );
+        h.type_keys("ctrl-p");
+        assert_eq!(
+            h.stoat.command_palette.as_ref().expect("open").selected,
+            0,
+            "Ctrl-P moves the list selection up"
+        );
+        assert_eq!(palette_text(&h), "", "the Ctrl keys never recall history");
+    }
+
+    #[test]
+    fn a_fuzzy_list_submit_records_the_entry_head() {
+        let mut h = Stoat::test();
+        h.type_text(":Focus");
+        h.type_keys("down enter");
+
+        let history = h
+            .stoat
+            .active_workspace()
+            .palette_history
+            .entries()
+            .to_vec();
+        assert_eq!(history.len(), 1, "the submitted entry is recorded");
+        assert!(
+            registry::lookup_alias(&history[0]).is_some(),
+            "the recorded head re-resolves through lookup_alias, got {:?}",
+            history[0]
+        );
     }
 
     #[test]
@@ -1618,7 +1746,7 @@ mod tests {
         let mut palette = h.stoat.command_palette.take().expect("palette open");
         let ws = h.stoat.active_workspace_mut();
         match palette.handle_submit(ws) {
-            PaletteOutcome::Dispatch(entry, _) => Some(entry.def.name()),
+            PaletteOutcome::Dispatch(entry, _, _) => Some(entry.def.name()),
             _ => None,
         }
     }
@@ -1652,7 +1780,7 @@ mod tests {
         let expected = palette.filtered[palette.selected].def.name();
         let ws = h.stoat.active_workspace_mut();
         match palette.handle_submit(ws) {
-            PaletteOutcome::Dispatch(entry, _) => assert_eq!(entry.def.name(), expected),
+            PaletteOutcome::Dispatch(entry, _, _) => assert_eq!(entry.def.name(), expected),
             _ => panic!("partial fuzzy text should dispatch the top candidate"),
         }
     }
@@ -1674,7 +1802,7 @@ mod tests {
         );
         let ws = h.stoat.active_workspace_mut();
         match palette.handle_submit(ws) {
-            PaletteOutcome::Dispatch(entry, _) => assert_eq!(entry.def.name(), expected),
+            PaletteOutcome::Dispatch(entry, _, _) => assert_eq!(entry.def.name(), expected),
             _ => panic!("an arrowed-to selection should dispatch that entry"),
         }
     }
@@ -1926,14 +2054,15 @@ mod tests {
     }
 
     #[test]
-    fn arg_picker_arrow_moves_selection() {
+    fn arg_picker_ctrl_n_moves_selection() {
         let mut h = Stoat::test();
         seed_palette_workspace(&mut h, &[("a.rs", ""), ("b.rs", ""), ("c.rs", "")]);
         h.type_text(":o ");
         h.snapshot();
         assert_eq!(arg_picker(&h).core.picklist.selected, 0);
 
-        h.type_keys("down");
+        // Arg-picker navigation rides Ctrl-p/Ctrl-n. Bare Up/Down recall history.
+        h.type_keys("ctrl-n");
         h.snapshot();
         assert_eq!(arg_picker(&h).core.picklist.selected, 1);
     }

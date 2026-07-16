@@ -1,9 +1,3 @@
-// The command-palette consumers -- the Workspace field, the palette Up/Down
-// handlers, and per-workspace persistence -- land in follow-up items, so until
-// then this module is exercised only by its own tests. Remove this allow once
-// those wire it in.
-#![allow(dead_code)]
-
 /// Fish-style recall history for a single-line input, such as the command
 /// palette.
 ///
@@ -37,6 +31,9 @@ const MAX_ENTRIES: usize = 100;
 impl InputHistory {
     /// Restore a history from persisted entries, oldest-first, with no active
     /// recall walk.
+    // Paired with `entries`, this is the persistence boundary that the
+    // per-workspace save/restore slice wires in. Unused until then.
+    #[allow(dead_code)]
     pub(crate) fn from_entries(entries: Vec<String>) -> Self {
         Self {
             entries,
@@ -47,6 +44,7 @@ impl InputHistory {
     }
 
     /// The retained entries, oldest-first, for persistence.
+    #[allow(dead_code)]
     pub(crate) fn entries(&self) -> &[String] {
         &self.entries
     }

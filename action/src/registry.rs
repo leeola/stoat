@@ -78,9 +78,9 @@ use crate::{
             LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
         },
         prompt::{
-            CancelPromptInput, PaletteCompletePath, PalettePageDown, PalettePageUp,
-            PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline,
-            SubmitPromptInput,
+            CancelPromptInput, PaletteCompletePath, PaletteHistoryNext, PaletteHistoryPrev,
+            PalettePageDown, PalettePageUp, PaletteScopeToggle, PaletteSelectNext,
+            PaletteSelectPrev, PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
             AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
@@ -798,6 +798,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(PaletteSelectPrev::DEF, |_| Ok(Box::new(PaletteSelectPrev)));
     add(PaletteSelectNext::DEF, |_| Ok(Box::new(PaletteSelectNext)));
+    add(PaletteHistoryPrev::DEF, |_| {
+        Ok(Box::new(PaletteHistoryPrev))
+    });
+    add(PaletteHistoryNext::DEF, |_| {
+        Ok(Box::new(PaletteHistoryNext))
+    });
     add(PalettePageUp::DEF, |_| Ok(Box::new(PalettePageUp)));
     add(PalettePageDown::DEF, |_| Ok(Box::new(PalettePageDown)));
     add(PaletteScopeToggle::DEF, |_| {
@@ -1307,7 +1313,8 @@ mod tests {
         // + 1 AutoReload.
         // + 1 PaletteCompletePath.
         // + 1 FocusPane.
-        assert_eq!(all().count(), 345);
+        // + 2 PaletteHistoryPrev/Next.
+        assert_eq!(all().count(), 347);
     }
 
     #[test]

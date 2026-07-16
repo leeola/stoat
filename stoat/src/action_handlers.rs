@@ -729,6 +729,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),
         ActionKind::PaletteSelectPrev => prompt::palette_select_prev(stoat),
         ActionKind::PaletteSelectNext => prompt::palette_select_next(stoat),
+        ActionKind::PaletteHistoryPrev => {
+            palette::palette_history_prev(stoat).unwrap_or(UpdateEffect::None)
+        },
+        ActionKind::PaletteHistoryNext => {
+            palette::palette_history_next(stoat).unwrap_or(UpdateEffect::None)
+        },
         ActionKind::PalettePageUp => palette::palette_page(stoat, -1),
         ActionKind::PalettePageDown => palette::palette_page(stoat, 1),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),

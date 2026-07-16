@@ -18,6 +18,7 @@ use crate::{
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::{FsHost, GitHost},
+    input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::layout::split_pane_status,
@@ -120,6 +121,9 @@ pub struct Workspace {
     /// to a scope at open time and validated against the current config, so a
     /// name whose scope has since been removed falls back to the default.
     pub(crate) last_finder_scope: Option<String>,
+    /// Fish-style recall history of executed command-palette lines, walked by
+    /// bare Up/Down in the palette. Persisted per workspace.
+    pub(crate) palette_history: InputHistory,
     pub panes: PaneTree,
     pub(crate) docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
@@ -242,6 +246,7 @@ impl Workspace {
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,
             last_finder_scope: None,
+            palette_history: InputHistory::default(),
             panes,
             docks: SlotMap::with_key(),
             focus: FocusTarget::SplitPane(initial_focus),

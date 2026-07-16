@@ -71,6 +71,10 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     let resolved = {
         let ws = &mut stoat.workspaces[active_idx];
         let palette = stoat.command_palette.as_mut().expect("palette present");
+        // Typing after a recall ends the walk, so the next Up captures the
+        // edited text as a fresh needle.
+        let current = palette.input.text(ws);
+        ws.palette_history.reset_if_edited(&current);
         palette.refilter_from_input(ws);
         palette.arg_source().zip(palette.arg_tail(ws))
     };
@@ -296,6 +300,37 @@ pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
     Some(UpdateEffect::Redraw)
 }
 
+/// Recall the previous palette-history command into the input, fish-style.
+/// Returns `None` when the palette is closed.
+///
+/// The already-typed text is the substring needle. A saturated or empty walk
+/// leaves the input unchanged. The every-frame refilter re-parses the recalled
+/// line into command or argument mode, so no extra wiring is needed here.
+pub(crate) fn palette_history_prev(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    let active_idx = stoat.active_workspace;
+    let palette = stoat.command_palette.as_mut()?;
+    let ws = &mut stoat.workspaces[active_idx];
+    let current = palette.input.text(ws);
+    if let Some(recalled) = ws.palette_history.prev(&current) {
+        palette.input.replace_text(ws, &recalled);
+    }
+    Some(UpdateEffect::Redraw)
+}
+
+/// Recall the next palette-history command toward the newest, restoring the
+/// originally-typed text past the newest match. Returns `None` when the palette
+/// is closed.
+pub(crate) fn palette_history_next(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    let active_idx = stoat.active_workspace;
+    let palette = stoat.command_palette.as_mut()?;
+    let ws = &mut stoat.workspaces[active_idx];
+    let current = palette.input.text(ws);
+    if let Some(recalled) = ws.palette_history.next(&current) {
+        palette.input.replace_text(ws, &recalled);
+    }
+    Some(UpdateEffect::Redraw)
+}
+
 /// Page the action-list selection by half its rendered list height in `dir`
 /// (-1 up, 1 down). Before the first render the viewport is unset and the step
 /// falls back to a single row. Delegates to [`palette_move_selection`].
@@ -387,7 +422,8 @@ fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
             close_palette(stoat);
             UpdateEffect::Redraw
         },
-        PaletteOutcome::Dispatch(entry, params) => {
+        PaletteOutcome::Dispatch(entry, params, line) => {
+            stoat.active_workspace_mut().palette_history.push(line);
             close_palette(stoat);
             match (entry.create)(&params) {
                 Ok(action) => super::dispatch(stoat, &*action),
@@ -410,6 +446,7 @@ fn close_palette(stoat: &mut Stoat) -> bool {
         let active_idx = stoat.active_workspace;
         let workspaces = &mut stoat.workspaces;
         palette.dispose(&mut workspaces[active_idx]);
+        workspaces[active_idx].palette_history.reset();
     }
     true
 }

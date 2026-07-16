@@ -638,8 +638,8 @@ on key {
         BackTab -> FileFinderScopeToggle();
     }
     modal == palette && mode == insert {
-        Up -> PaletteSelectPrev();
-        Down -> PaletteSelectNext();
+        Up -> PaletteHistoryPrev();
+        Down -> PaletteHistoryNext();
         Ctrl-p -> PaletteSelectPrev();
         Ctrl-n -> PaletteSelectNext();
         Ctrl-f -> PalettePageDown();

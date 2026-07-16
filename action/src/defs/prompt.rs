@@ -238,6 +238,103 @@ impl Action for PaletteSelectNext {
 }
 
 #[derive(Debug)]
+pub struct PaletteHistoryPrevDef;
+
+impl ActionDef for PaletteHistoryPrevDef {
+    fn name(&self) -> &'static str {
+        "PaletteHistoryPrev"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::PaletteHistoryPrev
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "recall older palette history"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Recall the previous command from palette history, fish-style: the \
+         already-typed text is a substring needle that filters matches. Bound \
+         by default to Up while the command palette is open."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct PaletteHistoryPrev;
+
+impl PaletteHistoryPrev {
+    pub const DEF: &PaletteHistoryPrevDef = &PaletteHistoryPrevDef;
+}
+
+impl Action for PaletteHistoryPrev {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct PaletteHistoryNextDef;
+
+impl ActionDef for PaletteHistoryNextDef {
+    fn name(&self) -> &'static str {
+        "PaletteHistoryNext"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::PaletteHistoryNext
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "recall newer palette history"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Recall the next command toward the newest in palette history, under \
+         the same substring needle. Stepping past the newest restores the \
+         originally-typed text. Bound by default to Down while the command \
+         palette is open."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct PaletteHistoryNext;
+
+impl PaletteHistoryNext {
+    pub const DEF: &PaletteHistoryNextDef = &PaletteHistoryNextDef;
+}
+
+impl Action for PaletteHistoryNext {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct PaletteCompletePathDef;
 
 impl ActionDef for PaletteCompletePathDef {
