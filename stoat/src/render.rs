@@ -646,7 +646,10 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-    } else if !PRIMARY_MODES.contains(&mode.as_str()) || screen == Some("review") {
+    } else if !PRIMARY_MODES.contains(&mode.as_str())
+        || screen == Some("review")
+        || stoat.key_hints_visible
+    {
         // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
         // mutable borrow of the active workspace, so read the flags directly.
         let state = StoatKeymapState::with_flags(

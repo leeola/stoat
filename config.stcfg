@@ -290,6 +290,7 @@ on key {
     }
     mode == normal {
         Enter -> RunSubmit();
+        ? -> ToggleKeyHints();
         q -> ReplayMacro();
         Space -> SetMode(space);
         : -> OpenCommandPalette();

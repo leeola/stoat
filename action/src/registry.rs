@@ -56,7 +56,7 @@ use crate::{
         },
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
-            HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
+            HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp, ToggleKeyHints,
         },
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
@@ -412,6 +412,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ForceSaveBuffer::DEF, |_| Ok(Box::new(ForceSaveBuffer)));
     add(OpenConfig::DEF, |_| Ok(Box::new(OpenConfig)));
     add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
+    add(ToggleKeyHints::DEF, |_| Ok(Box::new(ToggleKeyHints)));
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
@@ -1240,6 +1241,7 @@ mod tests {
         // + 3 StageHunk, UnstageHunk, ToggleStageHunk.
         // + 1 OpenConfig.
         // + 1 ToggleMinimap.
+        // + 1 ToggleKeyHints.
         // + 1 ToggleSyntaxHighlight.
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
@@ -1264,7 +1266,7 @@ mod tests {
         // + 2 JoinSelections / JoinSelectionsSpace.
         // + 1 AutoReload.
         // + 1 PaletteCompletePath.
-        assert_eq!(all().count(), 343);
+        assert_eq!(all().count(), 344);
     }
 
     #[test]

@@ -293,6 +293,11 @@ pub struct Stoat {
     /// `ToggleMinimap`. `None` follows the `editor.minimap` setting; `Some`
     /// wins for the session. Not persisted.
     pub(crate) minimap_override: Option<bool>,
+    /// Whether the keybinding hints overlay is force-shown in a primary mode,
+    /// toggled by `ToggleKeyHints`, off by default. A runtime session flag like
+    /// [`Self::syntax_highlight`], not persisted. Contexts that already
+    /// auto-show the overlay are unaffected.
+    pub(crate) key_hints_visible: bool,
     /// Whether LSP inlay hints are requested and rendered for the focused
     /// editor. Toggled by `ToggleInlayHints`, off by default. Not persisted.
     pub(crate) inlay_hints_enabled: bool,
@@ -1099,6 +1104,7 @@ impl Stoat {
             modal_run: None,
             syntax_highlight: true,
             minimap_override: None,
+            key_hints_visible: false,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: None,
             last_inlay_hint_key: None,

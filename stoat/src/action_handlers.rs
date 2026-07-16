@@ -134,6 +134,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.toggle_minimap();
             UpdateEffect::Redraw
         },
+        ActionKind::ToggleKeyHints => {
+            stoat.key_hints_visible = !stoat.key_hints_visible;
+            UpdateEffect::Redraw
+        },
         ActionKind::OpenBuffer => {
             let open = action
                 .as_any()
@@ -2136,6 +2140,49 @@ mod tests {
         assert!(!h.stoat.minimap_enabled(), "toggle hides the minimap");
         dispatch(&mut h.stoat, &stoat_action::ToggleMinimap);
         assert!(h.stoat.minimap_enabled(), "toggle shows it again");
+    }
+
+    #[test]
+    fn toggle_key_hints_flips_visibility() {
+        let mut h = Stoat::test();
+        assert!(!h.stoat.key_hints_visible, "hidden by default");
+        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        assert!(h.stoat.key_hints_visible, "first toggle shows the hints");
+        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        assert!(!h.stoat.key_hints_visible, "second toggle hides them");
+    }
+
+    #[test]
+    fn toggle_key_hints_paints_the_overlay_in_normal_mode() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 60);
+
+        assert!(
+            !normal_hint_box_visible(&mut h.stoat),
+            "normal mode shows no hint box by default",
+        );
+        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        assert!(
+            normal_hint_box_visible(&mut h.stoat),
+            "toggling on paints the normal-mode hint box",
+        );
+        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        assert!(
+            !normal_hint_box_visible(&mut h.stoat),
+            "a second toggle hides it again",
+        );
+    }
+
+    /// Whether a rendered frame carries the ` normal ` hint-box title, which the
+    /// non-stoatty frame paints into the cell buffer.
+    fn normal_hint_box_visible(stoat: &mut Stoat) -> bool {
+        let buf = stoat.render();
+        let area = buf.area;
+        (area.y..area.y + area.height).any(|y| {
+            let row: String = (area.x..area.x + area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            row.contains(" normal ")
+        })
     }
 
     fn version_badge_label(stoat: &Stoat) -> Option<String> {

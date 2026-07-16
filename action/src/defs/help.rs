@@ -1,4 +1,4 @@
-use crate::{Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -42,6 +42,58 @@ impl OpenHelp {
 }
 
 impl Action for OpenHelp {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct ToggleKeyHintsDef;
+
+impl ActionDef for ToggleKeyHintsDef {
+    fn name(&self) -> &'static str {
+        "ToggleKeyHints"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ToggleKeyHints
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "toggle the keybinding hints overlay"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Show or hide the compact keybinding hints overlay for the current \
+         mode. Normal mode shows it on nothing else, so this is how to bring up \
+         its active-binding list. Invoke it again to dismiss."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["hints"]
+    }
+}
+
+#[derive(Debug)]
+pub struct ToggleKeyHints;
+
+impl ToggleKeyHints {
+    pub const DEF: &ToggleKeyHintsDef = &ToggleKeyHintsDef;
+}
+
+impl Action for ToggleKeyHints {
     fn def(&self) -> &'static dyn ActionDef {
         Self::DEF
     }
