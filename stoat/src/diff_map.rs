@@ -225,6 +225,28 @@ impl DiffMap {
         }
     }
 
+    /// The diff mark to paint in the gutter for buffer `line`, or `None` when no
+    /// hunk touches it.
+    ///
+    /// A row inside a hunk's `buffer_line_range` reports that hunk's status. A
+    /// row a [`DiffHunkStatus::Deleted`] hunk anchors -- its removed content
+    /// rendered just above -- reports `Deleted`, the deletion seam. The bool is
+    /// the hunk's git-index staged state.
+    pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
+        let target = HunkKeyRef(Some(&line));
+        let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
+        cursor.seek(&target, Bias::Right);
+        cursor.prev();
+        let hunk = cursor.item()?;
+        if hunk.buffer_line_range.contains(&line) {
+            return Some((hunk.status, hunk.staged));
+        }
+        if hunk.status == DiffHunkStatus::Deleted && hunk.buffer_start_line == line {
+            return Some((DiffHunkStatus::Deleted, hunk.staged));
+        }
+        None
+    }
+
     /// The git-index staged state of the hunk containing `line`, or `None`
     /// when no hunk covers it.
     ///
@@ -731,6 +753,41 @@ mod tests {
             anchor_range: None,
             token_detail: None,
         }
+    }
+
+    #[test]
+    fn gutter_mark_reports_status_and_deletion_seam() {
+        let mut a = added_hunk(1..3);
+        a.staged = true;
+        let m = modified_hunk(5..6, 10..14);
+        let mut d = deleted_hunk(8, 20..30);
+        d.staged = true;
+
+        let dm = DiffMap::from_hunks([a, m, d], None);
+
+        assert_eq!(
+            dm.gutter_mark_for_line(1),
+            Some((DiffHunkStatus::Added, true)),
+        );
+        assert_eq!(
+            dm.gutter_mark_for_line(2),
+            Some((DiffHunkStatus::Added, true)),
+        );
+        assert_eq!(
+            dm.gutter_mark_for_line(3),
+            None,
+            "a row past the added range is unmarked",
+        );
+        assert_eq!(
+            dm.gutter_mark_for_line(5),
+            Some((DiffHunkStatus::Modified, false)),
+        );
+        assert_eq!(
+            dm.gutter_mark_for_line(9),
+            Some((DiffHunkStatus::Deleted, true)),
+            "the deletion seam anchors on the row below the removed lines",
+        );
+        assert_eq!(dm.gutter_mark_for_line(0), None);
     }
 
     #[test]
