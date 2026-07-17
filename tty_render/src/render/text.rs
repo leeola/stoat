@@ -189,6 +189,12 @@ pub struct TextPass {
     /// matches this. A grow or eviction since means their UVs moved, so the pool
     /// must be reshaped even though its grid content held steady.
     composite_epoch: u64,
+    /// The [`Grid::text_runs_epoch`] and [`Atlas::content_epoch`] the live text
+    /// runs and rects were last built against. `prepare` reuses those instances
+    /// while both still match, since the runs are unchanged and their atlas UVs
+    /// have not moved.
+    last_text_run_epoch: u64,
+    last_atlas_epoch: u64,
     overlay_instances: Buffer,
     overlay_capacity: usize,
     overlay_count: u32,
@@ -522,6 +528,8 @@ impl TextPass {
             composite_capacity: INITIAL_CAPACITY,
             composite_count: 0,
             composite_epoch: 0,
+            last_text_run_epoch: 0,
+            last_atlas_epoch: 0,
             overlay_instances,
             overlay_capacity: INITIAL_CAPACITY,
             overlay_count: 0,
@@ -712,8 +720,24 @@ impl TextPass {
         // offset is applied, so they sit at their declared position. They pack
         // here, before atlas_grew, so a text-run atlas grow is reflected in the
         // grid-instance build below instead of invalidating its UVs.
-        let text_run_instances = self.build_text_run_instances(device, queue, grid);
-        let run_rects = self.build_run_rects(grid);
+        //
+        // The chrome the runs back changes rarely, so reuse the instances built
+        // on an earlier frame while the run content and their atlas UVs both
+        // held. Such a frame skips the build and upload and keeps the counts. A
+        // skip packs no run glyphs, so it cannot grow the atlas and the grid UVs
+        // are unaffected.
+        let text_runs_epoch = grid.text_runs_epoch();
+        let runs_unchanged = text_runs_epoch == self.last_text_run_epoch
+            && self.atlas.content_epoch() == self.last_atlas_epoch;
+        let (text_run_instances, run_rects) = if runs_unchanged {
+            (None, None)
+        } else {
+            let instances = self.build_text_run_instances(device, queue, grid);
+            let rects = self.build_run_rects(grid);
+            self.last_text_run_epoch = text_runs_epoch;
+            self.last_atlas_epoch = self.atlas.content_epoch();
+            (Some(instances), Some(rects))
+        };
 
         let region = grid.scroll_region();
 
@@ -825,10 +849,9 @@ impl TextPass {
         }
 
         // The plain and region grid glyphs are built and uploaded above, only
-        // when changed. Overlays and text runs change independently, so they
-        // rebuild every frame.
+        // when changed. Overlays rebuild every frame, while the text runs and
+        // their rects reuse last frame's buffers on a skip.
         self.overlay_count = overlay_instances.len() as u32;
-        self.text_run_count = text_run_instances.len() as u32;
         upload_instances(
             device,
             queue,
@@ -837,23 +860,28 @@ impl TextPass {
             &mut self.overlay_capacity,
             "overlay text instances",
         );
-        upload_instances(
-            device,
-            queue,
-            &text_run_instances,
-            &mut self.text_run_instances,
-            &mut self.text_run_capacity,
-            "text run instances",
-        );
-        self.rect_count = run_rects.len() as u32;
-        upload_instances(
-            device,
-            queue,
-            &run_rects,
-            &mut self.rect_instances,
-            &mut self.rect_capacity,
-            "text run rect instances",
-        );
+        if let Some(text_run_instances) = &text_run_instances {
+            self.text_run_count = text_run_instances.len() as u32;
+            upload_instances(
+                device,
+                queue,
+                text_run_instances,
+                &mut self.text_run_instances,
+                &mut self.text_run_capacity,
+                "text run instances",
+            );
+        }
+        if let Some(run_rects) = &run_rects {
+            self.rect_count = run_rects.len() as u32;
+            upload_instances(
+                device,
+                queue,
+                run_rects,
+                &mut self.rect_instances,
+                &mut self.rect_capacity,
+                "text run rect instances",
+            );
+        }
 
         // The bind group references only the atlas texture views, which are
         // recreated solely when an atlas grows. Reuse last frame's group unless
