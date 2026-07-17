@@ -90,6 +90,11 @@ pub struct MinimapPass {
     occluders: Buffer,
     occluder_capacity: usize,
     metrics: CellMetrics,
+    /// The grid minimap epoch and resolution the current [`Self::strips`] and
+    /// instance buffer were built against. While both hold, the strips are
+    /// unchanged, so the rebuild and upload are skipped. `None` forces a rebuild,
+    /// set at construction and whenever the cell metrics change.
+    last_build: Option<(u64, [f32; 2])>,
 }
 
 impl MinimapPass {
@@ -189,12 +194,17 @@ impl MinimapPass {
             occluders,
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
+            last_build: None,
         }
     }
 
     /// Replace the cell metrics so the next frame lays strips out at the new size.
+    ///
+    /// Invalidates the rebuild cache, since the strip layout is derived from the
+    /// metrics and every cached instance now sits at the wrong pixel size.
     pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
         self.metrics = metrics;
+        self.last_build = None;
     }
 
     /// Upload the frame's uniform, panel occluders, and one instance per strip
@@ -204,11 +214,12 @@ impl MinimapPass {
     /// each strip's visible line slice. Reallocates a buffer only when its count
     /// outgrows the current capacity.
     ///
-    /// Rebuilds every frame. The per-frame cost is already bounded by the visible
-    /// slice, never the file size, so this is correct and cheap.
-    // FIXME: gating the rebuild on the terminal's minimap-damage flag would skip
-    // unchanged frames, but that flag is not yet threaded from the terminal to the
-    // renderer across the crate boundary.
+    /// The panel occluders and the globals uniform are rewritten every frame,
+    /// since panels move independently of the strips. The strip instances rebuild
+    /// only when the grid's minimap epoch or the resolution changed. The epoch
+    /// bumps whenever the projection re-applies the strip list or their content
+    /// ([`Grid::minimap_epoch`]), so an unchanged epoch means the strips would
+    /// build byte-for-byte identically, and the reused buffer still holds.
     pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
         let occluders = build_occluders(grid.panels());
         self.upload_occluders(device, queue, &occluders);
@@ -221,6 +232,11 @@ impl MinimapPass {
             _pad: [0; 2],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+
+        if self.last_build == Some((grid.minimap_epoch(), resolution)) {
+            return;
+        }
+        self.last_build = Some((grid.minimap_epoch(), resolution));
 
         let mut instances = Vec::new();
         self.strips.clear();
@@ -481,13 +497,17 @@ fn rgb_opaque_f32(color: [u8; 3]) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_strip, minimap_top, thumb_geometry, MIN_THUMB_PX};
-    use crate::render::CellMetrics;
+    use super::{build_strip, minimap_top, thumb_geometry, MinimapPass, MIN_THUMB_PX};
+    use crate::{gpu::headless_device, render::CellMetrics};
+    use std::collections::HashMap;
     use stoatty_protocol::command::{MinimapCommand, MinimapRun};
-    use stoatty_term::grid::{Minimap, MinimapView};
-    use wgpu::naga::{
-        front::wgsl,
-        valid::{Capabilities, ValidationFlags, Validator},
+    use stoatty_term::grid::{Grid, Minimap, MinimapView};
+    use wgpu::{
+        naga::{
+            front::wgsl,
+            valid::{Capabilities, ValidationFlags, Validator},
+        },
+        TextureFormat,
     };
 
     fn metrics() -> CellMetrics {
@@ -620,5 +640,44 @@ mod tests {
         // Background + one run (the single line) + thumb, nothing for the missing
         // lines the strip window covers.
         assert_eq!(instances.len(), 3);
+    }
+
+    #[test]
+    fn strips_rebuild_only_when_the_epoch_or_resolution_changes() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let mut pass = MinimapPass::new(&device, TextureFormat::Rgba8Unorm, metrics());
+
+        let mut grid = Grid::new(12, 24);
+        grid.set_minimaps(vec![strip(None)]);
+        grid.set_minimap_contents(HashMap::from([(
+            1,
+            vec![vec![MinimapRun {
+                start_col: 0,
+                len: 4,
+                class: 1,
+            }]],
+        )]));
+
+        let resolution = [640.0, 480.0];
+        pass.prepare(&device, &queue, &grid, resolution);
+        assert_eq!(pass.strips.len(), 1, "the declared strip builds one draw");
+
+        // set_minimaps outside projection does not bump the epoch, so a grid
+        // change the epoch does not reflect is skipped and the prior strips stay.
+        grid.set_minimaps(Vec::new());
+        pass.prepare(&device, &queue, &grid, resolution);
+        assert_eq!(
+            pass.strips.len(),
+            1,
+            "an unchanged epoch skips the rebuild and keeps the prior strips"
+        );
+
+        pass.prepare(&device, &queue, &grid, [800.0, 600.0]);
+        assert!(
+            pass.strips.is_empty(),
+            "a resolution change rebuilds the strips against the current grid"
+        );
     }
 }
