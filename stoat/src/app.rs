@@ -6011,7 +6011,7 @@ impl Stoat {
                     let severity = editor
                         .gutter_severity_cache
                         .as_ref()
-                        .map(|cache| cache.map.clone())
+                        .map(|cache| cache.map.as_ref().clone())
                         .unwrap_or_default();
                     let rich =
                         crate::render::editor::resolve_rich_gutter(theme, fallback_style, stoatty);

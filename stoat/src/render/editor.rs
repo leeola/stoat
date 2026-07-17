@@ -20,6 +20,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     ops::Range,
     path::Path,
+    sync::Arc,
 };
 use stoat_config::LineNumbers;
 use stoat_text::{cursor_offset, Bias, Point, Rope};
@@ -125,7 +126,7 @@ pub(crate) fn render_editor_with_overlay(
             if stale {
                 editor.gutter_severity_cache = Some(GutterSeverityCache {
                     version,
-                    map: compute_row_severity(set, path),
+                    map: Arc::new(compute_row_severity(set, path)),
                 });
             }
             &editor
@@ -549,7 +550,7 @@ pub(crate) fn render_editor_with_overlay(
 /// full diagnostic list every frame.
 pub(crate) struct GutterSeverityCache {
     pub(crate) version: u64,
-    pub(crate) map: BTreeMap<u32, DiagnosticSeverity>,
+    pub(crate) map: Arc<BTreeMap<u32, DiagnosticSeverity>>,
 }
 
 /// Build a per-buffer-row map from `path`'s diagnostics, picking the
