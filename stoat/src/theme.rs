@@ -57,11 +57,16 @@ impl Theme {
     /// Build a theme from `theme NAME` blocks that all carry `name`, already
     /// filtered out of one or more [`Config`]s.
     ///
-    /// Blocks are processed in slice order and later statements override
-    /// earlier per-field entries, so a built-in theme's blocks followed by a
-    /// user's layer the user's overrides field-by-field over the base without
-    /// restating the whole theme. Fails when `blocks` is empty -- the named
-    /// theme is defined nowhere.
+    /// Resolution runs in two phases across every block in slice order. First
+    /// the palette `let`s build the palette. Later same-name lets win, and each
+    /// let resolves against the palette so far, so a let-to-let alias binds to
+    /// its referent's meaning at that point. Then the scope settings resolve
+    /// against the finished palette, so a palette override in any block
+    /// recolors every scope referencing that name, wherever it sits.
+    ///
+    /// Passing a built-in theme's blocks followed by a user's therefore lets
+    /// the user retheme by redefining one semantic palette color. Fails when
+    /// `blocks` is empty -- the named theme is defined nowhere.
     pub fn from_blocks(name: &str, blocks: &[&Spanned<ThemeBlock>]) -> Result<Theme, ThemeError> {
         if blocks.is_empty() {
             return ThemeNotFoundSnafu {
@@ -77,15 +82,17 @@ impl Theme {
 
         for block in blocks {
             for stmt in &block.node.statements {
-                match &stmt.node {
-                    Statement::Let(l) => {
-                        let color = resolve_color_from_expr(&l.value.node, &palette)?;
-                        palette.insert(l.name.node.clone(), color);
-                    },
-                    Statement::Setting(s) => {
-                        apply_setting(s, &palette, &mut fg, &mut bg, &mut mods)?;
-                    },
-                    _ => {},
+                if let Statement::Let(l) = &stmt.node {
+                    let color = resolve_color_from_expr(&l.value.node, &palette)?;
+                    palette.insert(l.name.node.clone(), color);
+                }
+            }
+        }
+
+        for block in blocks {
+            for stmt in &block.node.statements {
+                if let Statement::Setting(s) = &stmt.node {
+                    apply_setting(s, &palette, &mut fg, &mut bg, &mut mods)?;
                 }
             }
         }
@@ -682,6 +689,25 @@ mod tests {
         assert_eq!(
             theme.try_get("ui.cursor"),
             Some(Style::default().fg(Color::Rgb(0xff, 0xff, 0xff)))
+        );
+    }
+
+    #[test]
+    fn later_palette_let_recolors_earlier_scope() {
+        let src = r##"
+            theme t {
+                let accent = "#000000";
+                ui.cursor.fg = accent;
+            }
+            theme t {
+                let accent = "#ffffff";
+            }
+        "##;
+        let theme = load(src, "t");
+        assert_eq!(
+            theme.try_get("ui.cursor").and_then(|s| s.fg),
+            Some(Color::Rgb(0xff, 0xff, 0xff)),
+            "a later block redefining accent recolors the scope that referenced it",
         );
     }
 
