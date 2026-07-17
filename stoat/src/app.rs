@@ -140,6 +140,22 @@ pub(crate) struct PendingSpawn {
     pub(crate) result: Result<Arc<dyn LspHost>, String>,
 }
 
+/// A finished off-thread `--continue` restore, produced by the blocking task and
+/// drained by [`Stoat::install_pending_workspace_restore`].
+///
+/// `outcome` carries the replayed buffer registry and the remaining workspace
+/// state, or the read/parse error. `path` is retained for the log line, and
+/// `workspace` identifies the restore target so the install can confirm it is
+/// still fresh before clobbering it.
+pub(crate) struct PendingWorkspaceRestore {
+    workspace: WorkspaceId,
+    path: PathBuf,
+    outcome: io::Result<(
+        crate::buffer_registry::BufferRegistry,
+        crate::workspace::persist::WorkspaceStateV1,
+    )>,
+}
+
 pub struct Stoat {
     size: Rect,
     /// Fallback mode store, read and written only when the focused target has
@@ -677,6 +693,11 @@ pub struct Stoat {
     /// Shared rather than returned because the load runs detached on
     /// [`Self::executor`] and cannot borrow `self`.
     pub(crate) pending_env: Arc<std::sync::Mutex<Option<crate::project_env::PendingEnvLoad>>>,
+    /// Landing slot for a finished `--continue` session restore, drained by
+    /// [`Self::install_pending_workspace_restore`] in [`Self::drive_background`].
+    /// Shared rather than returned because the restore runs detached on
+    /// [`Self::executor`] and cannot borrow `self`, like [`Self::pending_env`].
+    pub(crate) pending_workspace_restore: Arc<std::sync::Mutex<Option<PendingWorkspaceRestore>>>,
     /// System-clipboard writes route through this trait. Defaults to
     /// [`NoopClipboard`] so headless or display-less environments do
     /// not error on the first clipboard event; tests install
@@ -1226,6 +1247,7 @@ impl Stoat {
             env_auto_load: false,
             diff_warm_auto: false,
             pending_env: Arc::new(std::sync::Mutex::new(None)),
+            pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
@@ -2145,23 +2167,111 @@ impl Stoat {
         let Some(path) = files.into_iter().next() else {
             return;
         };
+        let workspace = self.active_workspace;
+        self.spawn_workspace_restore(workspace, path);
+    }
+
+    /// Kick off an off-thread restore of `workspace` from `path`.
+    ///
+    /// Shows a "restoring session" badge and replays the persisted buffers on
+    /// the blocking pool. [`Self::install_pending_workspace_restore`] installs
+    /// the result on the next [`Self::drive_background`], or drops it if the
+    /// workspace stopped being fresh while the restore ran. Keeping the read and
+    /// op-log replay off the main thread lets the first frame paint immediately.
+    pub(crate) fn spawn_workspace_restore(&mut self, workspace: WorkspaceId, path: PathBuf) {
+        if let Some(ws) = self.workspaces.get_mut(workspace) {
+            ws.badges
+                .remove_by_source(crate::badge::BadgeSource::SessionRestore);
+            ws.badges.insert(crate::badge::Badge {
+                source: crate::badge::BadgeSource::SessionRestore,
+                anchor: crate::badge::Anchor::BottomRight,
+                state: crate::badge::BadgeState::Active,
+                label: "restoring session".to_string(),
+                detail: None,
+            });
+        }
+
         let executor = self.executor.clone();
         let fs_host = self.fs_host.clone();
-        let registry = self.language_registry.clone();
-        match self
-            .active_workspace_mut()
-            .restore_state(&path, &*fs_host, &executor)
-        {
-            Ok(()) => {
-                self.active_workspace_mut()
-                    .assign_languages_from_paths(&registry);
-                action_handlers::respawn_terminal_panes(self);
+        let pending = self.pending_workspace_restore.clone();
+        self.spawn_woken(async move {
+            let outcome = executor
+                .spawn_blocking({
+                    let path = path.clone();
+                    move || crate::workspace::persist::read_restore_parts(&path, &*fs_host)
+                })
+                .await;
+            *pending.lock().expect("pending workspace restore mutex") =
+                Some(PendingWorkspaceRestore {
+                    workspace,
+                    path,
+                    outcome,
+                });
+        })
+        .detach();
+    }
+
+    /// Install a finished workspace restore, or drop it.
+    ///
+    /// Drains [`Self::pending_workspace_restore`], a no-op when nothing
+    /// finished. The "restoring session" badge clears regardless of outcome. A
+    /// read or parse error logs and leaves the fresh workspace in place. A
+    /// target the user edited while the restore ran, no longer
+    /// [`Workspace::is_fresh`], is left untouched so live state is never
+    /// clobbered. Otherwise the buffers and panes install and, when the target
+    /// is still active, terminals respawn.
+    fn install_pending_workspace_restore(&mut self) {
+        let pending = self
+            .pending_workspace_restore
+            .lock()
+            .expect("pending workspace restore mutex")
+            .take();
+        let Some(PendingWorkspaceRestore {
+            workspace,
+            path,
+            outcome,
+        }) = pending
+        else {
+            return;
+        };
+
+        if let Some(ws) = self.workspaces.get_mut(workspace) {
+            ws.badges
+                .remove_by_source(crate::badge::BadgeSource::SessionRestore);
+        }
+
+        let (buffers, state) = match outcome {
+            Ok(parts) => parts,
+            Err(err) => {
+                tracing::warn!(
+                    ?path,
+                    ?err,
+                    "failed to restore workspace state; starting fresh"
+                );
+                return;
             },
-            Err(err) => tracing::warn!(
+        };
+
+        if !self
+            .workspaces
+            .get(workspace)
+            .is_some_and(|ws| ws.is_fresh())
+        {
+            tracing::warn!(
                 ?path,
-                ?err,
-                "failed to restore workspace state; starting fresh"
-            ),
+                "workspace changed before session restore landed; dropping restore"
+            );
+            return;
+        }
+
+        let registry = self.language_registry.clone();
+        let executor = self.executor.clone();
+        if let Some(ws) = self.workspaces.get_mut(workspace) {
+            ws.install_restored(buffers, state, &executor);
+            ws.assign_languages_from_paths(&registry);
+        }
+        if self.active_workspace == workspace {
+            action_handlers::respawn_terminal_panes(self);
         }
     }
 
@@ -6542,6 +6652,7 @@ impl Stoat {
         self.install_pending_lsp_host();
         crate::project_env::ensure_loaded(self);
         crate::project_env::install_pending(self);
+        self.install_pending_workspace_restore();
         crate::diff_warm::ensure_diff_warm(self);
         crate::diff_warm::install_finished(self);
         action_handlers::file::install_pending_opens(self);
@@ -8099,6 +8210,93 @@ mod tests {
             h.fake_clipboard().writes(),
             vec!["hi".to_string()],
             "an OSC 52 write from a term pane reaches the system clipboard"
+        );
+    }
+
+    #[test]
+    fn async_session_restore_installs_into_a_fresh_workspace() {
+        let mut h = Stoat::test();
+        let file = h.write_file("restored.txt", "alpha\nbeta\n");
+        h.open_file(&file);
+        h.settle();
+
+        let state_path = PathBuf::from("/state/session.ron");
+        h.stoat
+            .active_workspace()
+            .save_state(&state_path, &*h.stoat.fs_host)
+            .expect("save state");
+
+        let target = h.create_workspace();
+        h.set_active_workspace(target);
+        assert!(h.stoat.active_workspace().is_fresh());
+
+        h.stoat.spawn_workspace_restore(target, state_path);
+        h.settle();
+        h.stoat.drive_background();
+
+        let restored: Vec<PathBuf> = {
+            let ws = h.stoat.active_workspace();
+            ws.editors
+                .values()
+                .filter_map(|e| ws.buffers.path_for(e.buffer_id).map(|p| p.to_path_buf()))
+                .collect()
+        };
+        assert!(
+            restored.contains(&file),
+            "the restore installs the saved file buffer: {restored:?}"
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .badges
+                .find_by_source(crate::badge::BadgeSource::SessionRestore)
+                .is_none(),
+            "the restoring-session badge clears after the restore installs"
+        );
+    }
+
+    #[test]
+    fn async_session_restore_drops_when_the_target_was_edited() {
+        let mut h = Stoat::test();
+        let file = h.write_file("restored.txt", "alpha\n");
+        h.open_file(&file);
+        h.settle();
+
+        let state_path = PathBuf::from("/state/session.ron");
+        h.stoat
+            .active_workspace()
+            .save_state(&state_path, &*h.stoat.fs_host)
+            .expect("save state");
+
+        let target = h.create_workspace();
+        h.set_active_workspace(target);
+        let other = h.write_file("other.txt", "live\n");
+        h.open_file(&other);
+        assert!(!h.stoat.active_workspace().is_fresh());
+
+        h.stoat.spawn_workspace_restore(target, state_path);
+        h.settle();
+        h.stoat.drive_background();
+
+        let paths: Vec<PathBuf> = {
+            let ws = h.stoat.active_workspace();
+            ws.editors
+                .values()
+                .filter_map(|e| ws.buffers.path_for(e.buffer_id).map(|p| p.to_path_buf()))
+                .collect()
+        };
+        assert!(paths.contains(&other), "keeps the live buffer: {paths:?}");
+        assert!(
+            !paths.contains(&file),
+            "does not clobber the live workspace with the saved restore"
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .badges
+                .find_by_source(crate::badge::BadgeSource::SessionRestore)
+                .is_none(),
+            "the badge clears even when the restore is dropped"
         );
     }
 

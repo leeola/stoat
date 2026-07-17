@@ -661,7 +661,7 @@ impl BufferRegistry {
 /// [`BufferHistory`] (the replayable op log) so restoration reconstructs the
 /// fragment tree, anchors, undo stack, and dirty state exactly. Syntax and
 /// diff caches are regenerable and deliberately not persisted.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct BufferRegistrySnapshot {
     pub entries: Vec<BufferEntrySnap>,
     pub next_id: u64,

@@ -57,6 +57,9 @@ pub enum BadgeSource {
     /// A large file reading on the blocking pool before it opens. Dropped once
     /// every pending open installs.
     FileOpen,
+    /// A `--continue` session restore replaying its buffers on the blocking
+    /// pool. Dropped once the restore installs or is abandoned.
+    SessionRestore,
 }
 
 #[derive(Debug, Clone)]

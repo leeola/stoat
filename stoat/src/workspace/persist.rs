@@ -17,7 +17,7 @@
 //! by design.
 
 use crate::{
-    buffer_registry::BufferRegistrySnapshot,
+    buffer_registry::{BufferRegistry, BufferRegistrySnapshot},
     dump::snapshot::ActiveRebaseSnap,
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
     host::FsHost,
@@ -239,8 +239,13 @@ impl Workspace {
     }
 
     /// Replace `self` with the persisted state at `path`. Returns an error if
-    /// the file cannot be read or parsed; the caller is expected to log and
-    /// continue with the default state rather than abort startup.
+    /// the file cannot be read or parsed.
+    ///
+    /// The synchronous reference used by the persistence tests. Production
+    /// `--continue` restores run off the main thread through
+    /// [`read_restore_parts`] and [`Self::install_restored`], so this stays
+    /// test-only.
+    #[cfg(test)]
     pub(crate) fn restore_state(
         &mut self,
         path: &Path,
@@ -257,9 +262,32 @@ impl Workspace {
         Ok(())
     }
 
-    pub(crate) fn apply_state(&mut self, state: WorkspaceStateV1, executor: &Executor) {
-        self.buffers.restore_from(state.buffers);
+    pub(crate) fn apply_state(&mut self, mut state: WorkspaceStateV1, executor: &Executor) {
+        self.buffers
+            .restore_from(std::mem::take(&mut state.buffers));
+        self.install_restored_parts(state, executor);
+    }
 
+    /// Install a pre-built buffer `registry` and the remaining restored `state`.
+    ///
+    /// The async `--continue` path builds the registry off the main thread with
+    /// [`read_restore_parts`] and hands it here, where only the cheap remainder
+    /// runs. `state.buffers` is ignored in favor of `registry`.
+    pub(crate) fn install_restored(
+        &mut self,
+        registry: BufferRegistry,
+        state: WorkspaceStateV1,
+        executor: &Executor,
+    ) {
+        self.buffers = registry;
+        self.install_restored_parts(state, executor);
+    }
+
+    /// Rehydrate editors against the already-restored buffers, remap pane and
+    /// dock editor views to the fresh editor ids, and set the workspace fields.
+    ///
+    /// Requires `self.buffers` to already hold the restored registry.
+    fn install_restored_parts(&mut self, state: WorkspaceStateV1, executor: &Executor) {
         let mut editors: SlotMap<EditorId, EditorState> = SlotMap::with_key();
         let mut editor_id_map: HashMap<EditorId, EditorId> = HashMap::new();
         for (old_id, snap) in state.editors {
@@ -305,6 +333,28 @@ impl Workspace {
         self.last_finder_scope = state.last_finder_scope;
         self.palette_history = InputHistory::from_entries(state.palette_history);
     }
+}
+
+/// Read and parse a persisted workspace state, replaying every buffer's op log
+/// into a standalone [`BufferRegistry`].
+///
+/// The heavy half of a restore, split from [`Workspace::restore_state`] so the
+/// async `--continue` path can run it on the blocking pool. Returns the built
+/// registry and the remaining state, whose `buffers` field is consumed. Pair it
+/// with [`Workspace::install_restored`] to finish the restore.
+pub(crate) fn read_restore_parts(
+    path: &Path,
+    fs: &dyn FsHost,
+) -> io::Result<(BufferRegistry, WorkspaceStateV1)> {
+    let mut buf = Vec::new();
+    fs.read(path, &mut buf)?;
+    let body = String::from_utf8(buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let mut state: WorkspaceStateV1 = ron::from_str(&body)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let mut registry = BufferRegistry::new();
+    registry.restore_from(std::mem::take(&mut state.buffers));
+    Ok((registry, state))
 }
 
 fn remap_editor_views_in_panes(panes: &mut PaneTree, remap: &HashMap<EditorId, EditorId>) {

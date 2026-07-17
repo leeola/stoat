@@ -1,5 +1,5 @@
 mod name;
-mod persist;
+pub(crate) mod persist;
 
 use crate::{
     agent_status::AgentStatus,
