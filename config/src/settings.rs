@@ -73,6 +73,11 @@ pub struct Settings {
     /// `None` falls back to enabled. Set `editor.minimap = false;` in stcfg to
     /// hide it. The `:minimap` command toggles it at runtime.
     pub editor_minimap: Option<bool>,
+    /// Fraction an unfocused pane's colors blend toward the theme background,
+    /// so an inactive split reads as dimmed. `None` falls back to 0.25; `0`
+    /// disables dimming. Set `ui.inactive_dim = 0.4;` in stcfg. The raw value
+    /// is stored here and clamped to 0.0..=1.0 at the consumer.
+    pub ui_inactive_dim: Option<f64>,
     /// How many hidden buffers keep their full highlight state (syntax tree,
     /// tokens) before the least-recently-shown are evicted. `None` falls back to
     /// 64. `0` drops a buffer's state as soon as it is hidden. Set via
@@ -164,6 +169,7 @@ impl Settings {
             scrolloff: other.scrolloff.or(self.scrolloff),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             editor_minimap: other.editor_minimap.or(self.editor_minimap),
+            ui_inactive_dim: other.ui_inactive_dim.or(self.ui_inactive_dim),
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
@@ -261,6 +267,11 @@ impl Settings {
                     self.editor_minimap = Some(b);
                 }
             },
+            ["ui", "inactive_dim"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.ui_inactive_dim = Some(n);
+                }
+            },
             ["terminal", "shell"] => {
                 if let Value::Ident(s) | Value::String(s) = &setting.value.node {
                     self.terminal_shell = Some(s.clone());
@@ -355,6 +366,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -424,6 +436,14 @@ mod tests {
         assert_eq!(minimap("on init { editor.minimap = false; }"), Some(false));
         assert_eq!(minimap("on init { editor.minimap = true; }"), Some(true));
         assert_eq!(minimap("on init { }"), None, "absent falls back to enabled");
+    }
+
+    #[test]
+    fn from_config_extracts_ui_inactive_dim() {
+        let dim = |src: &str| Settings::from_config(&parse_ok(src)).ui_inactive_dim;
+        assert_eq!(dim("on init { ui.inactive_dim = 0.4; }"), Some(0.4));
+        assert_eq!(dim("on init { ui.inactive_dim = 0; }"), Some(0.0));
+        assert_eq!(dim("on init { }"), None, "absent falls back at consumer");
     }
 
     #[test]
@@ -504,6 +524,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -534,6 +555,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -573,6 +595,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -595,6 +618,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -619,6 +643,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -646,6 +671,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -671,6 +697,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -709,6 +736,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -739,6 +767,7 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
                 terminal_args: None,
@@ -766,6 +795,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,
@@ -788,6 +818,7 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
             terminal_args: None,

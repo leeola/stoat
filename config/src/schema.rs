@@ -132,6 +132,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "true",
         },
         SettingDef {
+            path: &[Lit("ui"), Lit("inactive_dim")],
+            shape: ValueShape::Number,
+            doc: "Fraction an unfocused pane's colors blend toward the background \
+                  (0 disables).",
+            default: "0.25",
+        },
+        SettingDef {
             path: &[Lit("terminal"), Lit("shell")],
             shape: ValueShape::String,
             doc: "Program a terminal pane spawns as its subshell.",

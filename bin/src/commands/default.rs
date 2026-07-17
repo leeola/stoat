@@ -226,6 +226,7 @@ fn run_tui(
         scrolloff: None,
         editor_line_numbers: None,
         editor_minimap: None,
+        ui_inactive_dim: None,
         highlight_retention: None,
         terminal_shell: None,
         terminal_args: None,

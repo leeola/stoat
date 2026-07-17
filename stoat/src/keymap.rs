@@ -1011,6 +1011,7 @@ mod tests {
                 scrolloff: Some(3),
                 editor_line_numbers: Some(LineNumbers::Relative),
                 editor_minimap: None,
+                ui_inactive_dim: None,
                 highlight_retention: Some(64),
                 terminal_shell: None,
                 terminal_args: None,
