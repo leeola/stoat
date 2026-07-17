@@ -7,7 +7,7 @@ use crate::{
     },
     editor_state::EditorState,
     host::DiffStatus,
-    review::{MoveProvenance, ReviewRow},
+    review::ReviewRow,
     review_session::{ChunkStatus, ReviewViewState},
 };
 use ratatui::{
@@ -214,6 +214,22 @@ pub(crate) fn paint_diff_rows(
                     tints.as_ref().map(|t| t.moved_span),
                     &row_endpoints,
                 );
+                if snapshot.line_diff_status(buffer_row) == DiffStatus::Moved
+                    && let Some((path, line)) = move_chip_source(snapshot, buffer_row)
+                {
+                    line_buf.clear();
+                    snapshot.write_display_line(&mut line_buf, display_row);
+                    render_move_chip(
+                        buf,
+                        right_text_x,
+                        y,
+                        line_buf.chars().count(),
+                        right_content_w,
+                        path.as_deref(),
+                        line,
+                        theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC),
+                    );
+                }
                 if let Some(staged) = snapshot
                     .diff_map()
                     .and_then(|dm| dm.staged_for_line(buffer_row))
@@ -521,6 +537,38 @@ fn buffer_row_change_spans(
     ranges
 }
 
+/// The origin of a moved buffer row, for the diff view's move chip.
+///
+/// Scans the hunks covering `buffer_row` for the first move span and returns its
+/// first counterpart source as `(file name, 0-based line)`. The file name is
+/// `None` for an intra-file move (no counterpart buffer), so the chip omits the
+/// path. Returns `None` when the row is not part of a move.
+fn move_chip_source(snapshot: &DisplaySnapshot, buffer_row: u32) -> Option<(Option<String>, u32)> {
+    let diff_map = snapshot.diff_map()?;
+    for hunk in diff_map.hunks_in_range(buffer_row..buffer_row + 1) {
+        let Some(detail) = &hunk.token_detail else {
+            continue;
+        };
+        for span in &detail.buffer_spans {
+            let Some(meta) = &span.move_metadata else {
+                continue;
+            };
+            let Some(source) = meta.sources.first() else {
+                continue;
+            };
+            let path = source.buffer.as_ref().map(|b| {
+                b.path
+                    .file_name()
+                    .unwrap_or(b.path.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            return Some((path, source.line_range.start));
+        }
+    }
+    None
+}
+
 /// Paint the clean-tree empty state as a centered dim line, so the diff view
 /// reads as intentionally open and waiting rather than broken. The watching
 /// clause is dropped when `review_follow` will not auto-refresh the view.
@@ -759,7 +807,8 @@ pub(crate) fn render_review_rows(
                                     y,
                                     l.text.chars().count(),
                                     left_content_w,
-                                    prov,
+                                    (!prov.intra_file).then_some(prov.rel_path.as_str()),
+                                    prov.line,
                                     move_hl,
                                 );
                             }
@@ -795,7 +844,8 @@ pub(crate) fn render_review_rows(
                                     y,
                                     r.text.chars().count(),
                                     right_content_w,
-                                    prov,
+                                    (!prov.intra_file).then_some(prov.rel_path.as_str()),
+                                    prov.line,
                                     move_hl,
                                 );
                             }
@@ -1034,29 +1084,30 @@ pub(crate) fn render_empty_num(buf: &mut Buffer, x: u16, y: u16, style: Style) {
 /// Paint a move-origin chip after the rendered side text to surface where
 /// the moved hunk's counterpart lives.
 ///
-/// A cross-file move paints `<- {rel_path}:{line+1}`. An intra-file move
-/// paints a path-less `<- {line+1}`, since repeating the row's own file name
-/// is noise. `text_cols` is the column count already consumed by
-/// [`render_side_text`]; the chip starts two columns later (so the gap is
-/// visually obvious) and truncates if fewer columns remain. No-op when
+/// A cross-file move (`path` is `Some`) paints `<- {path}:{line+1}`. An
+/// intra-file move (`path` is `None`) paints a path-less `<- {line+1}`, since
+/// repeating the row's own file name is noise. `text_cols` is the column count
+/// already consumed by the row's text; the chip starts two columns later (so the
+/// gap is visually obvious) and truncates if fewer columns remain. No-op when
 /// `text_cols + 2 >= max_cols`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_move_chip(
     buf: &mut Buffer,
     start_x: u16,
     y: u16,
     text_cols: usize,
     max_cols: usize,
-    prov: &MoveProvenance,
+    path: Option<&str>,
+    line: u32,
     style: Style,
 ) {
     let chip_start_col = text_cols.saturating_add(2);
     if chip_start_col >= max_cols {
         return;
     }
-    let chip = if prov.intra_file {
-        format!("<- {}", prov.line + 1)
-    } else {
-        format!("<- {}:{}", prov.rel_path, prov.line + 1)
+    let chip = match path {
+        Some(path) => format!("<- {}:{}", path, line + 1),
+        None => format!("<- {}", line + 1),
     };
     let available = max_cols - chip_start_col;
     for (i, ch) in chip.chars().take(available).enumerate() {
@@ -1650,6 +1701,93 @@ mod tests {
         );
     }
 
+    /// A diff editor whose buffer line 1 ("bb") is a move whose counterpart is
+    /// `source`, for exercising the move-origin chip.
+    fn moved_editor(source: structural_diff::MoveSource) -> EditorState {
+        let detail = Arc::new(TokenDetail {
+            buffer_spans: vec![ChangeSpan {
+                byte_range: 3..5,
+                kind: ChangeKind::Moved,
+                move_metadata: Some(Arc::new(structural_diff::MoveMetadata {
+                    sources: vec![source],
+                })),
+            }],
+            base_spans: Vec::new(),
+        });
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Moved,
+                staged: false,
+                buffer_start_line: 1,
+                buffer_line_range: 1..2,
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail: Some(detail),
+            }],
+            None,
+        );
+        diff_editor_with_map("aa\nbb\ncc\n", dm)
+    }
+
+    #[test]
+    fn diff_view_moved_row_shows_a_cross_file_origin_chip() {
+        use structural_diff::{BufferRef, MoveSource, Side};
+
+        let mut editor = moved_editor(MoveSource {
+            buffer: Some(BufferRef {
+                path: std::path::PathBuf::from("src/b.rs"),
+                fingerprint: [0u8; 32],
+            }),
+            side: Side::Lhs,
+            byte_range: 0..0,
+            line_range: 3..4,
+        });
+        let area = Rect::new(0, 0, 60, 5);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            false,
+        );
+
+        let row = buffer_text(&buf, 1);
+        assert!(
+            row.contains("<- b.rs:4"),
+            "a cross-file moved row shows the origin file:line chip; got {row:?}"
+        );
+    }
+
+    #[test]
+    fn diff_view_moved_row_shows_an_intra_file_origin_chip() {
+        use structural_diff::{MoveSource, Side};
+
+        let mut editor = moved_editor(MoveSource {
+            buffer: None,
+            side: Side::Lhs,
+            byte_range: 0..0,
+            line_range: 4..5,
+        });
+        let area = Rect::new(0, 0, 60, 5);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            false,
+        );
+
+        let row = buffer_text(&buf, 1);
+        assert!(
+            row.contains("<- 5") && !row.contains(':'),
+            "an intra-file moved row shows a path-less chip; got {row:?}"
+        );
+    }
+
     #[test]
     fn paint_base_row_washes_replaced_and_moved_spans_by_kind() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
@@ -1730,12 +1868,7 @@ mod tests {
     fn move_chip_paints_text_after_two_col_gap() {
         let area = Rect::new(0, 0, 50, 1);
         let mut buf = Buffer::empty(area);
-        let prov = MoveProvenance {
-            rel_path: "a.rs".to_string(),
-            line: 0,
-            intra_file: false,
-        };
-        render_move_chip(&mut buf, 0, 0, 5, 50, &prov, Style::default());
+        render_move_chip(&mut buf, 0, 0, 5, 50, Some("a.rs"), 0, Style::default());
         let text = buffer_text(&buf, 0);
         assert_eq!(&text[..7], "       ", "5-col text + 2-col gap before chip");
         assert_eq!(&text[7..16], "<- a.rs:1", "chip text follows the gap");
@@ -1745,12 +1878,16 @@ mod tests {
     fn move_chip_no_op_when_text_fills_max_cols() {
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
-        let prov = MoveProvenance {
-            rel_path: "long_name.rs".to_string(),
-            line: 100,
-            intra_file: false,
-        };
-        render_move_chip(&mut buf, 0, 0, 19, 20, &prov, Style::default());
+        render_move_chip(
+            &mut buf,
+            0,
+            0,
+            19,
+            20,
+            Some("long_name.rs"),
+            100,
+            Style::default(),
+        );
         let text = buffer_text(&buf, 0);
         assert!(
             !text.contains("<-"),
@@ -1762,12 +1899,16 @@ mod tests {
     fn move_chip_truncates_when_room_runs_out() {
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
-        let prov = MoveProvenance {
-            rel_path: "long_name.rs".to_string(),
-            line: 99,
-            intra_file: false,
-        };
-        render_move_chip(&mut buf, 0, 0, 5, 20, &prov, Style::default());
+        render_move_chip(
+            &mut buf,
+            0,
+            0,
+            5,
+            20,
+            Some("long_name.rs"),
+            99,
+            Style::default(),
+        );
         let text = buffer_text(&buf, 0);
         // text_cols=5 + 2-col gap = chip starts at col 7; max_cols=20 leaves 13 cols.
         // "<- long_name.rs:100" is 19 chars; truncated to 13: "<- long_name.".
@@ -1778,12 +1919,7 @@ mod tests {
     fn move_chip_uses_one_based_line_number() {
         let area = Rect::new(0, 0, 30, 1);
         let mut buf = Buffer::empty(area);
-        let prov = MoveProvenance {
-            rel_path: "x.rs".to_string(),
-            line: 41,
-            intra_file: false,
-        };
-        render_move_chip(&mut buf, 0, 0, 0, 30, &prov, Style::default());
+        render_move_chip(&mut buf, 0, 0, 0, 30, Some("x.rs"), 41, Style::default());
         let text = buffer_text(&buf, 0);
         assert!(
             text.contains("<- x.rs:42"),
@@ -1795,12 +1931,7 @@ mod tests {
     fn move_chip_intra_file_omits_the_path() {
         let area = Rect::new(0, 0, 30, 1);
         let mut buf = Buffer::empty(area);
-        let prov = MoveProvenance {
-            rel_path: String::new(),
-            line: 41,
-            intra_file: true,
-        };
-        render_move_chip(&mut buf, 0, 0, 0, 30, &prov, Style::default());
+        render_move_chip(&mut buf, 0, 0, 0, 30, None, 41, Style::default());
         let text = buffer_text(&buf, 0);
         assert!(
             text.contains("<- 42") && !text.contains(':'),
