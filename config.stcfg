@@ -65,11 +65,15 @@ theme default_dark {
 
     ui.statusline.normal.fg   = primary;
     ui.statusline.insert.fg   = success;
+    ui.statusline.select.fg   = warning;
+    ui.statusline.prompt.fg   = success;
+    ui.statusline.run.fg      = special;
     ui.statusline.commits.fg  = warning;
     ui.statusline.rebase.fg   = danger;
     ui.statusline.reword.fg   = danger;
     ui.statusline.conflict.fg = light_red;
     ui.statusline.review.fg   = info;
+    ui.statusline.submode.fg  = muted;
     ui.statusline.default.fg  = dim;
 
     diff.added.fg        = success;
