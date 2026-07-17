@@ -6101,7 +6101,7 @@ impl Stoat {
                     .map(|browse| browse.typed_dir.as_str())
                     .unwrap_or_default()
                     .hash(&mut hasher);
-                core.picklist.filtered.hash(&mut hasher);
+                core.picklist.filter_generation.hash(&mut hasher);
                 hasher.finish()
             };
             crate::smooth_scroll::emit_into(
@@ -6199,7 +6199,7 @@ impl Stoat {
                     .map(|browse| browse.typed_dir.as_str())
                     .unwrap_or_default()
                     .hash(&mut hasher);
-                core.picklist.filtered.hash(&mut hasher);
+                core.picklist.filter_generation.hash(&mut hasher);
                 hasher.finish()
             };
             crate::smooth_scroll::emit_into(

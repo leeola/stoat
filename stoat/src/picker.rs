@@ -7,7 +7,10 @@ use crate::{
     render::sanitize,
     workspace::Workspace,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{Bias, SelectionGoal};
@@ -17,13 +20,20 @@ use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 /// file never stalls the render thread.
 pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 
+/// Source of process-unique [`PickList::filter_generation`] stamps.
+static NEXT_FILTER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Next process-unique filter generation, bumped past every prior stamp.
+fn next_filter_generation() -> u64 {
+    NEXT_FILTER_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Query-driven fuzzy result list over a fixed `base` set of paths, decoupled
 /// from any input widget.
 ///
 /// The file finder and the palette's inline pickers drive the same list from a
 /// query string. The owner sets `base`, calls [`PickList::refilter`] with the
 /// query, and reads `filtered`/`match_indices`/`selected` to render.
-#[derive(Default)]
 pub(crate) struct PickList {
     /// Candidate paths the query filters over.
     pub(crate) base: Vec<PathBuf>,
@@ -39,6 +49,23 @@ pub(crate) struct PickList {
     /// so [`PickList::page`] can size its half-page step. `None` before the
     /// first render, where the step falls back to a single row.
     pub(crate) viewport_rows: Option<usize>,
+    /// Process-monotonic stamp bumped on construction and every refilter, so a
+    /// render pool versions the filter state in O(1) instead of hashing the
+    /// whole filtered index.
+    pub(crate) filter_generation: u64,
+}
+
+impl Default for PickList {
+    fn default() -> Self {
+        Self {
+            base: Vec::new(),
+            filtered: Vec::new(),
+            match_indices: Vec::new(),
+            selected: 0,
+            viewport_rows: None,
+            filter_generation: next_filter_generation(),
+        }
+    }
 }
 
 impl PickList {
@@ -126,6 +153,7 @@ impl PickList {
                 .push(prepend_anchor(anchor_len, m.matched_indices));
         }
         self.clamp_selected();
+        self.filter_generation = next_filter_generation();
     }
 
     fn clamp_selected(&mut self) {
@@ -568,6 +596,26 @@ mod tests {
         let git_root = p("/r");
         let base = vec![p("/r/b.rs"), p("/r/a.rs"), p("/r/sub/c.rs")];
         assert_eq!(names("", base, &git_root), vec!["a.rs", "b.rs", "sub/c.rs"]);
+    }
+
+    #[test]
+    fn refilter_and_construction_bump_the_filter_generation() {
+        let git_root = p("/r");
+        let mut list = PickList {
+            base: vec![p("/r/a.rs"), p("/r/b.rs")],
+            ..PickList::default()
+        };
+        let before = list.filter_generation;
+        list.refilter("a", &git_root);
+        assert_ne!(
+            list.filter_generation, before,
+            "a refilter stamps a fresh generation",
+        );
+        assert_ne!(
+            PickList::default().filter_generation,
+            list.filter_generation,
+            "a freshly constructed list gets a distinct generation",
+        );
     }
 
     #[test]
