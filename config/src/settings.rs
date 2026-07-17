@@ -81,9 +81,10 @@ pub struct Settings {
     /// | off;` in stcfg (`false` is accepted as `off`, `true` as `relative`).
     pub editor_line_numbers: Option<LineNumbers>,
     /// The minimap strip mode for editor panes under stoatty, one of `off`,
-    /// `per_pane`, or `single`. `None` falls back to [`MinimapMode::PerPane`].
-    /// Set `editor.minimap = single;` in stcfg (`false` means `off`, `true`
-    /// means `per_pane`). The `:minimap` command toggles visibility at runtime.
+    /// `per_pane`, or `single`. `None` falls back to [`MinimapMode::Single`].
+    /// Set `editor.minimap = per_pane;` in stcfg to opt back (`false` means
+    /// `off`, `true` means `single`). The `:minimap` command toggles visibility
+    /// at runtime.
     pub editor_minimap: Option<MinimapMode>,
     /// Fraction an unfocused pane's colors blend toward the theme background,
     /// so an inactive split reads as dimmed. `None` falls back to 0.25; `0`
@@ -277,7 +278,7 @@ impl Settings {
             ["editor", "minimap"] => {
                 let mode = match &setting.value.node {
                     Value::Bool(false) => Some(MinimapMode::Off),
-                    Value::Bool(true) => Some(MinimapMode::PerPane),
+                    Value::Bool(true) => Some(MinimapMode::Single),
                     Value::String(s) | Value::Ident(s) => match s.as_str() {
                         "off" => Some(MinimapMode::Off),
                         "per_pane" => Some(MinimapMode::PerPane),
@@ -475,8 +476,8 @@ mod tests {
         );
         assert_eq!(
             mode("on init { editor.minimap = true; }"),
-            Some(MinimapMode::PerPane),
-            "true is an alias for per_pane"
+            Some(MinimapMode::Single),
+            "true is an alias for the default single"
         );
         assert_eq!(
             mode("on init { }"),

@@ -129,8 +129,8 @@ pub fn settings_schema() -> &'static [SettingDef] {
             shape: ValueShape::Enum(&["off", "per_pane", "single"]),
             doc: "Minimap strip mode for editor panes under stoatty (off, \
                   per_pane, or single window-right strip). `false` means off, \
-                  `true` means per_pane.",
-            default: "per_pane",
+                  `true` means single.",
+            default: "single",
         },
         SettingDef {
             path: &[Lit("ui"), Lit("inactive_dim")],

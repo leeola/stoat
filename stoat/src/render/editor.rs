@@ -2878,6 +2878,7 @@ mod tests {
     #[test]
     fn snapshot_stoatty_delegates_only_primary_cursor() {
         let mut h = Stoat::test();
+        h.stoat.settings.editor_minimap = Some(stoat_config::MinimapMode::PerPane);
         let root = PathBuf::from("/cursor-stoatty");
         let path = root.join("a.txt");
         h.fake_fs().insert_file(&path, b"alpha bravo charlie\n");

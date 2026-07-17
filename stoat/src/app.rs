@@ -1360,13 +1360,13 @@ impl Stoat {
     ///
     /// [`Self::minimap_override`] `Some(false)` forces [`MinimapMode::Off`].
     /// `Some(true)` shows the setting's mode, falling back to
-    /// [`MinimapMode::PerPane`] when the setting itself is `Off`. With no
-    /// override the setting wins, defaulting to [`MinimapMode::PerPane`].
+    /// [`MinimapMode::Single`] when the setting itself is `Off`. With no
+    /// override the setting wins, defaulting to [`MinimapMode::Single`].
     pub(crate) fn minimap_mode(&self) -> MinimapMode {
-        let setting = self.settings.editor_minimap.unwrap_or(MinimapMode::PerPane);
+        let setting = self.settings.editor_minimap.unwrap_or(MinimapMode::Single);
         match self.minimap_override {
             Some(false) => MinimapMode::Off,
-            Some(true) if setting == MinimapMode::Off => MinimapMode::PerPane,
+            Some(true) if setting == MinimapMode::Off => MinimapMode::Single,
             _ => setting,
         }
     }
@@ -9278,6 +9278,7 @@ mod tests {
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         // Wide enough that each vertical split clears the minimap min-width gate.
         h.resize(200, 24);
 
@@ -11133,6 +11134,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         h.stoat.theme = rgb_modal_theme();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
@@ -11167,6 +11169,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -11201,6 +11204,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         h.stoat.theme = rgb_modal_theme();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
@@ -12890,6 +12894,7 @@ mod tests {
     }
 
     fn open_with_minimap_strip(h: &mut crate::test_harness::TestHarness) -> EditorId {
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         let body: String = (0..60)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()

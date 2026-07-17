@@ -2416,6 +2416,18 @@ mod tests {
     }
 
     #[test]
+    fn unset_editor_minimap_defaults_to_single() {
+        use stoat_config::MinimapMode;
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_minimap = None;
+        assert_eq!(
+            h.stoat.minimap_mode(),
+            MinimapMode::Single,
+            "an unset editor.minimap defaults to the single strip"
+        );
+    }
+
+    #[test]
     fn toggle_key_hints_flips_visibility() {
         let mut h = Stoat::test();
         assert!(!h.stoat.key_hints_visible, "hidden by default");
