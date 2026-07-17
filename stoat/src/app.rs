@@ -5949,15 +5949,26 @@ impl Stoat {
             // for the syntax-highlight toggle (recolors every row), a diagnostics
             // change (restyles the gutter), and a gutter-width change (reflows the
             // inset), so a buffered page must refill when any of those move.
-            // Relative numbers reference the cursor's buffer line, so a page
-            // stays valid across a wheel glide (cursor fixed) and must refill
-            // when the cursor line moves. Folding current_line into the content
-            // version below does exactly that.
-            let current_line = (line_numbers == LineNumbers::Relative
-                && !focused_insert
-                && focused_editor == Some(*editor_id))
-            .then(|| crate::render::editor::editor_cursor_position(editor).map(|(line, _)| line))
-            .flatten();
+            //
+            // Relative numbers reference the cursor's buffer line, which the
+            // wheel glide's cursor-follow drags every row. Holding the baked line
+            // steady through the glide keeps the content version stable so the
+            // window does not refill per dragged row. The settle emit recomputes
+            // the live line and refills the window once to match the repainted
+            // grid.
+            let current_line = if editor.scroll_glide != ScrollGlide::None {
+                editor.pool_current_line
+            } else {
+                let line = (line_numbers == LineNumbers::Relative
+                    && !focused_insert
+                    && focused_editor == Some(*editor_id))
+                .then(|| {
+                    crate::render::editor::editor_cursor_position(editor).map(|(line, _)| line)
+                })
+                .flatten();
+                editor.pool_current_line = line;
+                line
+            };
 
             let content_version = match editor.review_view.as_ref() {
                 Some(view) => view.session_version,
@@ -11223,6 +11234,76 @@ mod tests {
         assert_eq!(
             scroll.page, 0,
             "a glide emits the eased offset's page (1.0 -> page 0), not scroll_row 50's page"
+        );
+    }
+
+    #[test]
+    fn wheel_glide_defers_the_relative_line_refill_to_settle() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/glide");
+        let path = root.join("a.txt");
+        let body: String = (0..400).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        // Relative numbering is the default. Bake the resting window so the pool
+        // holds its pages and pool_current_line records the resting cursor line.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+        }
+        h.stoat.emit_smooth_scroll();
+        h.settle();
+        let _ = drain_apc(&mut rx);
+
+        // Arm a wheel glide. wheel_scroll advances the target and drags the
+        // cursor's buffer line into the scrolloff band, the drag that would churn
+        // the relative-number content version every tick without the held line.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            action_handlers::movement::wheel_scroll(editor, true, 3);
+        }
+        h.stoat.tick_scroll_anim(0.016);
+        assert!(h.stoat.is_animating(), "the wheel glide is still easing");
+
+        // Mid-glide the held line keeps the content version stable, so the
+        // buffered window does not refill. At most one edge page enters.
+        h.stoat.emit_smooth_scroll();
+        h.settle();
+        let mid = drain_apc(&mut rx);
+        let mid_fills = mid.iter().filter(|c| matches!(c, Command::Fill(_))).count();
+        assert!(
+            mid_fills <= 1,
+            "a held-line glide refills at most one edge page, got {mid_fills}: {mid:?}"
+        );
+
+        // Settling the glide releases the held line. The fresh cursor line bumps
+        // the content version once, refilling the whole window to match the grid.
+        for _ in 0..1000 {
+            if !h.stoat.is_animating() {
+                break;
+            }
+            h.stoat.tick_scroll_anim(0.016);
+        }
+        h.stoat.emit_smooth_scroll();
+        h.settle();
+        let settled = drain_apc(&mut rx);
+        let settled_fills = settled
+            .iter()
+            .filter(|c| matches!(c, Command::Fill(_)))
+            .count();
+        assert!(
+            settled_fills > 1,
+            "the settle emit refills the whole window once, got {settled_fills}: {settled:?}"
         );
     }
 

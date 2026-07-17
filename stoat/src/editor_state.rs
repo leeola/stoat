@@ -66,6 +66,14 @@ pub(crate) struct EditorState {
     /// offset while a glide is active so it reaches the terminal. Transient, not
     /// persisted.
     pub(crate) scroll_glide: ScrollGlide,
+    /// Cursor buffer line last baked into pooled relative-number gutters.
+    ///
+    /// Under relative numbering the pooled pages' content version folds in the
+    /// cursor's line, but a wheel glide's cursor-follow drags that line every
+    /// tick. Holding this value steady while [`Self::scroll_glide`] is active
+    /// keeps the content version stable so the buffered window does not refill
+    /// per dragged row. The settle emit refreshes it. Transient, not persisted.
+    pub(crate) pool_current_line: Option<u32>,
     /// Last-rendered viewport height in rows. Page-motion handlers read
     /// this to compute scroll distance without taking a dependency on
     /// the render pipeline's layout `Rect`. `None` until the editor has
@@ -166,6 +174,7 @@ impl EditorState {
             scroll_row: 0,
             scroll_offset: 0.0,
             scroll_glide: ScrollGlide::None,
+            pool_current_line: None,
             viewport_rows: None,
             review_view: None,
             diff_view: false,
@@ -199,6 +208,7 @@ impl EditorState {
             scroll_row: 0,
             scroll_offset: 0.0,
             scroll_glide: ScrollGlide::None,
+            pool_current_line: None,
             viewport_rows: None,
             review_view: None,
             diff_view: false,
