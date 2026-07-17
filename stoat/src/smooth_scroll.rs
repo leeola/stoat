@@ -350,6 +350,7 @@ pub(crate) fn render_page_fill(
     region_height: u16,
     gutter: &PageGutter,
     diff_view: bool,
+    dim: f32,
 ) -> Vec<u8> {
     let top_row = index
         .saturating_mul(region_height as u64)
@@ -362,6 +363,7 @@ pub(crate) fn render_page_fill(
         region_height,
         gutter,
         diff_view,
+        dim,
     );
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
@@ -388,6 +390,7 @@ pub(crate) fn render_page_fill(
 /// Inside stoatty the rich gutter's sub-cell components ride as APC frames
 /// appended after the serialized cells, so the terminal captures them onto the
 /// page slot. Every other terminal gets degraded cell numbers in the buffer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page_from_snapshot(
     snapshot: &DisplaySnapshot,
     top_row: u32,
@@ -396,6 +399,7 @@ pub(crate) fn render_page_from_snapshot(
     region_height: u16,
     gutter: &PageGutter,
     diff_view: bool,
+    dim: f32,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
     let mut buf = Buffer::empty(area);
@@ -412,6 +416,7 @@ pub(crate) fn render_page_from_snapshot(
             gutter.theme(),
             &mut buf,
         );
+        dim_page(&mut buf, area, gutter.theme(), dim);
         return serialize_buffer(&buf);
     }
 
@@ -451,9 +456,25 @@ pub(crate) fn render_page_from_snapshot(
         }
     }
 
+    dim_page(&mut buf, area, gutter.theme(), dim);
     let mut bytes = serialize_buffer(&buf);
     bytes.extend_from_slice(&apc);
     bytes
+}
+
+/// Blend the page's cells toward the theme background, dimming a pooled page for
+/// an unfocused pane the same way the live grid dims. A no-op when `dim` is zero
+/// or the theme background is not RGB.
+fn dim_page(buf: &mut Buffer, area: Rect, theme: &crate::theme::Theme, dim: f32) {
+    if dim > 0.0
+        && let Some(bg) = crate::render::review::style_rgb(
+            theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+    {
+        crate::render::pane::dim_pane_content(buf, area, bg, dim);
+    }
 }
 
 /// The gutter inputs an off-run-loop editor page render needs to paint the
@@ -911,10 +932,62 @@ mod tests {
 
             let snapshot = editor.display_map.snapshot();
             let got =
-                render_page_from_snapshot(&snapshot, top_row, fallback, 12, 4, &gutter, false);
+                render_page_from_snapshot(&snapshot, top_row, fallback, 12, 4, &gutter, false, 0.0);
 
             assert_eq!(got, expected, "page at top_row {top_row}");
         }
+    }
+
+    /// A pooled page for an unfocused pane must dim exactly as the live grid does:
+    /// threading `dim` changes the page bytes, and the change is precisely the
+    /// shared cell blend, so a glide over an inactive pane shows no undimmed flash.
+    #[test]
+    fn a_dimmed_page_is_the_undimmed_page_with_the_cell_blend() {
+        use super::{dim_page, render_page_from_snapshot, Buffer, PageGutter, Rect};
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::{pane::dim_pane_content, review::style_rgb},
+            theme::scope,
+            Stoat,
+        };
+        use ratatui::style::{Color, Style};
+        use std::{collections::BTreeMap, path::PathBuf};
+        use stoat_action::OpenFile;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-dim");
+        let path = root.join("doc.txt");
+        h.fake_fs()
+            .insert_file(&path, b"alpha\nbravo\ncharlie\ndelta\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let bg = style_rgb(theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg))
+            .expect("default theme has an rgb background");
+        let fallback = theme.get(scope::UI_TEXT);
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None, None);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+
+        let undimmed =
+            render_page_from_snapshot(&snapshot, 0, fallback, 12, 4, &gutter, false, 0.0);
+        let dimmed = render_page_from_snapshot(&snapshot, 0, fallback, 12, 4, &gutter, false, 0.5);
+        assert_ne!(undimmed, dimmed, "threading dim changes the page bytes");
+
+        let area = Rect::new(0, 0, 12, 4);
+        let mut via_page = Buffer::empty(area);
+        via_page[(0, 0)]
+            .set_char('x')
+            .set_style(Style::default().fg(Color::Rgb(200, 100, 40)));
+        let mut via_helper = via_page.clone();
+        dim_page(&mut via_page, area, &theme, 0.5);
+        dim_pane_content(&mut via_helper, area, bg, 0.5);
+        assert_eq!(
+            via_page, via_helper,
+            "a page dims by exactly the live grid's cell blend"
+        );
     }
 
     /// A diff-view page must paint the same two columns as the live grid, so
@@ -962,7 +1035,7 @@ mod tests {
         paint_diff_rows(&snapshot, 0, area, fallback, &theme, &mut expected);
         let expected = serialize_buffer(&expected);
 
-        let got = render_page_from_snapshot(&snapshot, 0, fallback, 40, 8, &gutter, true);
+        let got = render_page_from_snapshot(&snapshot, 0, fallback, 40, 8, &gutter, true, 0.0);
         assert_eq!(
             got, expected,
             "the diff-view page paints the two-column body, not the single-column path"
@@ -1173,7 +1246,7 @@ mod tests {
         let snapshot = editor.display_map.snapshot();
         let gutter = PageGutter::new(false, BTreeMap::new(), Theme::empty(), None, None);
 
-        let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3, &gutter, false);
+        let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3, &gutter, false, 0.0);
 
         let cmds = commands(&frame);
         assert!(
@@ -1185,7 +1258,8 @@ mod tests {
             "frame closes the fill, got {cmds:?}"
         );
 
-        let page = render_page_from_snapshot(&snapshot, 2 * 3, fallback, 12, 3, &gutter, false);
+        let page =
+            render_page_from_snapshot(&snapshot, 2 * 3, fallback, 12, 3, &gutter, false, 0.0);
         assert!(
             find(&frame, &page).is_some(),
             "the page bytes ride between the fill markers"
@@ -1222,7 +1296,7 @@ mod tests {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
 
-        let frame = render_page_fill(&snapshot, 3, 0, fallback, 12, 4, &gutter, false);
+        let frame = render_page_fill(&snapshot, 3, 0, fallback, 12, 4, &gutter, false, 0.0);
         let cmds = commands(&frame);
 
         assert!(

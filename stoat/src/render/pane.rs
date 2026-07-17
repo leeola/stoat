@@ -163,7 +163,7 @@ pub(crate) fn render_pane(
 /// pane's live grid. A cell with a non-RGB color (an indexed-color terminal) is
 /// left unchanged, so such terminals simply do not dim. `amount` is expected in
 /// `0.0..=1.0`.
-fn dim_pane_content(buf: &mut Buffer, area: Rect, bg: [u8; 3], amount: f32) {
+pub(crate) fn dim_pane_content(buf: &mut Buffer, area: Rect, bg: [u8; 3], amount: f32) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];

@@ -6048,6 +6048,7 @@ impl Stoat {
                 height: u16,
                 gutter: crate::smooth_scroll::PageGutter,
                 diff_view: bool,
+                dim: f32,
             },
             Review {
                 snapshot: crate::display_map::DisplaySnapshot,
@@ -6064,6 +6065,11 @@ impl Stoat {
             .settings
             .editor_line_numbers
             .unwrap_or(LineNumbers::Relative);
+        let inactive_dim = self
+            .settings
+            .ui_inactive_dim
+            .unwrap_or(0.25)
+            .clamp(0.0, 1.0) as f32;
         let stoatty = self.stoatty;
         // Relative numbering follows the same pane the live render calls focused:
         // the focused split editor outside insert mode. Resolved before the ws
@@ -6077,6 +6083,13 @@ impl Stoat {
             let region = *region;
             let Some(editor) = ws.editors.get_mut(*editor_id) else {
                 continue;
+            };
+            // A pooled page for an unfocused pane carries the same dim as its
+            // live grid, so a wheel glide over it never flashes bright content.
+            let dim = if focused_editor == Some(*editor_id) {
+                0.0
+            } else {
+                inactive_dim
             };
             // scroll_row is the source of truth for the pool page. The wheel
             // glide refines it sub-row through scroll_offset, but cursor-follow
@@ -6131,6 +6144,7 @@ impl Stoat {
                         .map_or(0, |cache| cache.version),
                     editor.diff_view,
                     editor.display_map.diff_version(),
+                    dim,
                 ),
             };
             let entered = crate::smooth_scroll::emit_into(
@@ -6174,7 +6188,8 @@ impl Stoat {
                         .map(|cache| cache.map.as_ref().clone())
                         .unwrap_or_default();
                     let rich =
-                        crate::render::editor::resolve_rich_gutter(theme, fallback_style, stoatty);
+                        crate::render::editor::resolve_rich_gutter(theme, fallback_style, stoatty)
+                            .map(|r| r.dim(dim));
                     async_jobs.push(PoolFill::Editor {
                         snapshot,
                         pages: entered,
@@ -6189,6 +6204,7 @@ impl Stoat {
                             current_line,
                         ),
                         diff_view: editor.diff_view,
+                        dim,
                     });
                 }
             }
@@ -6539,6 +6555,7 @@ impl Stoat {
                     height,
                     gutter,
                     diff_view,
+                    dim,
                 } => {
                     for index in pages {
                         let snapshot = snapshot.clone();
@@ -6555,6 +6572,7 @@ impl Stoat {
                                     height,
                                     &gutter,
                                     diff_view,
+                                    dim,
                                 );
                                 let _ = apc_tx.send(fill);
                             })
@@ -6787,6 +6805,7 @@ fn editor_page_content_version(
     severity_version: u64,
     diff_view: bool,
     diff_version: usize,
+    dim: f32,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
@@ -6795,6 +6814,7 @@ fn editor_page_content_version(
     severity_version.hash(&mut hasher);
     diff_view.hash(&mut hasher);
     diff_version.hash(&mut hasher);
+    ((dim * 1000.0) as u32).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -14197,26 +14217,31 @@ mod tests {
 
     #[test]
     fn editor_page_content_version_tracks_the_cursor_line() {
-        let base = editor_page_content_version(true, 3, Some(10), 0, false, 0);
+        let base = editor_page_content_version(true, 3, Some(10), 0, false, 0, 0.0);
         assert_eq!(
             base,
-            editor_page_content_version(true, 3, Some(10), 0, false, 0),
+            editor_page_content_version(true, 3, Some(10), 0, false, 0, 0.0),
             "identical inputs keep a buffered page cached"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(11), 0, false, 0),
+            editor_page_content_version(true, 3, Some(11), 0, false, 0, 0.0),
             "a cursor-line move refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, 0, false, 0),
+            editor_page_content_version(true, 3, None, 0, false, 0, 0.0),
             "switching to absolute numbering refills"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(10), 0, true, 7),
+            editor_page_content_version(true, 3, Some(10), 0, true, 7, 0.0),
             "a diff-view hunk change refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(true, 3, Some(10), 0, false, 0, 0.25),
+            "a focus change to a dimmed pane refills buffered pages"
         );
     }
 

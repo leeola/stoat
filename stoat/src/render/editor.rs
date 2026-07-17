@@ -850,6 +850,20 @@ pub(crate) struct RichGutterColors {
     pub(crate) bg: [u8; 3],
 }
 
+impl RichGutterColors {
+    /// Blend every foreground color toward the gutter background by `amount`
+    /// (`0.0` is identity), dimming a pooled page's gutter for an unfocused pane.
+    pub(crate) fn dim(&self, amount: f32) -> RichGutterColors {
+        RichGutterColors {
+            colors: self.colors.dim(self.bg, amount),
+            diff: self.diff.dim(self.bg, amount),
+            number_fg: dim_rgb(self.number_fg, self.bg, amount),
+            separator: dim_rgb(self.separator, self.bg, amount),
+            bg: self.bg,
+        }
+    }
+}
+
 /// Resolve the rich page-gutter colors, or `None` outside stoatty or when a
 /// gutter color is not RGB.
 ///
