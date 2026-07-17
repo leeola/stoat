@@ -621,6 +621,8 @@ on key {
     view == diff && mode == normal {
         n -> GotoNextChange();
         p -> GotoPrevChange();
+        m -> JumpToMoveSource();
+        M -> JumpToMoveTarget();
         s -> StageHunk();
         u -> UnstageHunk();
         Space -> ToggleStageHunk();

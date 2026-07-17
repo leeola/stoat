@@ -993,6 +993,24 @@ mod tests {
     }
 
     #[test]
+    fn diff_view_binds_m_and_shift_m_to_the_move_jumps() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let diff = TestState::new()
+            .set("view", StateValue::String("diff".into()))
+            .set("mode", StateValue::String("normal".into()));
+        let m = keymap
+            .lookup(&diff, &key_event(KeyCode::Char('m'), KeyModifiers::NONE))
+            .expect("m is bound in the diff view");
+        assert_eq!(m[0].name, "JumpToMoveSource");
+        let shift_m = keymap
+            .lookup(&diff, &key_event(KeyCode::Char('M'), KeyModifiers::NONE))
+            .expect("M is bound in the diff view");
+        assert_eq!(shift_m[0].name, "JumpToMoveTarget");
+    }
+
+    #[test]
     fn default_config_pins_every_setting_default() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         // The embedded config must actively set every fixed-default scalar, so
