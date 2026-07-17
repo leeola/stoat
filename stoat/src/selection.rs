@@ -130,6 +130,18 @@ impl SelectionsCollection {
         }];
     }
 
+    /// Replace the collection with a single 1-wide block cursor over the
+    /// character at `offset`, widened against `snapshot`.
+    ///
+    /// Mouse clicks land here so the cursor covers a character like the keyboard
+    /// landing paths, rather than the zero-width selection that would render on
+    /// the trailing phantom row when a click clips to the rope end.
+    pub(crate) fn set_block_cursor(&mut self, offset: usize, snapshot: &MultiBufferSnapshot) {
+        let id = self.next_selection_id;
+        self.next_selection_id += 1;
+        self.disjoint = vec![block_cursor_at(offset, SelectionGoal::None, id, snapshot)];
+    }
+
     /// Replace the selection set with a saved `snapshot`, e.g. the selections an
     /// undo group captured before its edits. Bumps the id allocator past the
     /// snapshot so later insertions never reuse a restored id. An empty snapshot

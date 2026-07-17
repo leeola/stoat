@@ -480,10 +480,13 @@ pub struct Stoat {
     /// that register's content is inserted at the cursor and the
     /// flag clears. Non-char keypresses also clear the flag.
     pub(crate) pending_insert_register: bool,
-    /// Set on `MouseEventKind::Down(Left)` over a focused editor pane.
-    /// While `Some`, `Drag(Left)` events extend the matching editor's
-    /// primary selection head; `Up(Left)` clears the field.
-    pub(crate) editor_drag: Option<(EditorId, BufferId)>,
+    /// Set on `MouseEventKind::Down(Left)` over a focused editor pane, as
+    /// `(editor, buffer, moved)`. While `Some`, `Drag(Left)` events extend the
+    /// matching editor's primary selection head and set `moved`. `Up(Left)`
+    /// copies the selection to the clipboard only when `moved`, then clears the
+    /// field. The flag keeps a plain click, now a 1-wide block cursor, from
+    /// copying a character.
+    pub(crate) editor_drag: Option<(EditorId, BufferId, bool)>,
     /// Terminal cell the mouse last rested over a focused editor pane, or
     /// `None` before any motion. The render resolves the diagnostic under it
     /// to raise a hover popover. Motion events only arrive with mouse capture
@@ -3319,13 +3322,13 @@ impl Stoat {
     }
 
     /// Handles left-button Down/Drag/Up events on a focused editor
-    /// pane. `Down(Left)` collapses the primary selection at the
-    /// clicked offset and arms `editor_drag`; `Drag(Left)` extends
-    /// the head of the dragged editor's primary selection;
-    /// `Up(Left)` writes any non-empty primary-selection text to
-    /// the clipboard (and conditionally OSC 52 emits) before
-    /// clearing `editor_drag`. Clicks outside the pane's rendered
-    /// text area saturate to the nearest valid offset via
+    /// pane. `Down(Left)` lands a 1-wide block cursor at the clicked
+    /// offset and arms `editor_drag`. `Drag(Left)` extends the head
+    /// of the dragged editor's primary selection and marks the drag
+    /// moved. `Up(Left)` writes the primary-selection text to the
+    /// clipboard (and conditionally OSC 52 emits) only when the drag
+    /// moved, then clears `editor_drag`. Clicks outside the pane's
+    /// rendered text area saturate to the nearest valid offset via
     /// `clip_point` (Bias::Left). Returns `true` when the event
     /// mutated state.
     /// The focused pane's editor id and area, or `None` when the focus is not
@@ -3405,19 +3408,14 @@ impl Stoat {
                     let editor = ws.editors.get_mut(editor_id).expect("editor exists");
                     let snapshot = editor.display_map.snapshot();
                     let buf_snap = snapshot.buffer_snapshot();
-                    let anchor = buf_snap.anchor_at(offset, Bias::Right);
-                    editor.selections.set_single_range(
-                        anchor,
-                        anchor,
-                        stoat_text::SelectionGoal::None,
-                    );
+                    editor.selections.set_block_cursor(offset, buf_snap);
                     editor.buffer_id
                 };
-                self.editor_drag = Some((editor_id, buffer_id));
+                self.editor_drag = Some((editor_id, buffer_id, false));
                 true
             },
             MouseEventKind::Drag(MouseButton::Left) => {
-                let Some((drag_editor, _)) = self.editor_drag else {
+                let Some((drag_editor, drag_buffer, _)) = self.editor_drag else {
                     return false;
                 };
                 if drag_editor != editor_id {
@@ -3426,6 +3424,7 @@ impl Stoat {
                 let Some(offset) = self.editor_screen_to_offset(editor_id, area, col, row) else {
                     return false;
                 };
+                self.editor_drag = Some((drag_editor, drag_buffer, true));
                 let ws = self.active_workspace_mut();
                 let editor = ws.editors.get_mut(editor_id).expect("editor exists");
                 let snapshot = editor.display_map.snapshot();
@@ -3450,7 +3449,11 @@ impl Stoat {
                 true
             },
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.editor_drag.is_none() {
+                let Some((_, _, moved)) = self.editor_drag else {
+                    return false;
+                };
+                self.editor_drag = None;
+                if !moved {
                     return false;
                 }
                 let text = {
@@ -3467,7 +3470,6 @@ impl Stoat {
                         buf_snap.rope().slice(start..end).to_string()
                     }
                 };
-                self.editor_drag = None;
                 if text.is_empty() {
                     return false;
                 }
@@ -13830,7 +13832,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_mouse_down_collapses_cursor_at_clicked_offset() {
+    fn editor_mouse_down_lands_block_cursor_at_clicked_offset() {
         let mut h = Stoat::test();
         let _ = open_scratch_file(&mut h, "abcdef\nghi");
         let area = focused_editor_pane_area(&h);
@@ -13839,14 +13841,30 @@ mod tests {
             area.x + 3,
             area.y,
         ));
-        assert_eq!(focused_primary_offsets(&mut h), (3, 3));
+        assert_eq!(focused_primary_offsets(&mut h), (3, 4));
         assert!(h.stoat.editor_drag.is_some(), "drag state armed");
+    }
+
+    #[test]
+    fn editor_mouse_down_below_last_line_lands_on_row_zero() {
+        let mut h = Stoat::test();
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x,
+            area.y + 3,
+        ));
+        assert_eq!(
+            focused_primary_offsets(&mut h),
+            (0, 1),
+            "a click below the seeded scratch's one line covers the newline on row 0"
+        );
     }
 
     #[test]
     fn editor_click_excludes_the_diagnostic_gutter() {
         // The no-gutter path (no render leaves gutter_width zero) is covered by
-        // editor_mouse_down_collapses_cursor_at_clicked_offset above.
+        // editor_mouse_down_lands_block_cursor_at_clicked_offset above.
         let mut h = Stoat::test();
         let root = PathBuf::from("/gutter-click");
         let path = root.join("a.txt");
@@ -13883,7 +13901,7 @@ mod tests {
         ));
         assert_eq!(
             focused_primary_offsets(&mut h),
-            (2, 2),
+            (2, 3),
             "the line-number gutter shifts text right, so the click excludes it"
         );
     }
