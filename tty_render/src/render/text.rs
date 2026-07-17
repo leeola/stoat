@@ -202,6 +202,32 @@ pub struct TextPass {
     /// overlay order, so each popover's content is clipped to its own box and
     /// several can scroll independently.
     overlay_draws: Vec<OverlayDraw>,
+    /// The shaped overlay glyphs per overlay, reused while
+    /// [`Self::last_popovers_epoch`] holds so an unchanged frame skips the
+    /// content walk and shape-cache lookups. They are still re-touched against
+    /// the atlas every frame to keep the glyphs resident, since the packing
+    /// phase evicts anything not marked in use this frame.
+    overlay_pending: Vec<Vec<PendingGlyph>>,
+    /// The overlay instances before the per-frame anchor and scroll shift,
+    /// embedding the atlas UVs. Reused while [`Self::last_popovers_epoch`] and
+    /// [`Self::last_overlay_atlas_epoch`] both hold, so a scroll-only frame
+    /// re-shifts these instead of rebuilding them.
+    overlay_bases: Vec<Vec<TextInstance>>,
+    /// The scissor box per overlay, cached alongside [`Self::overlay_bases`]
+    /// since it depends only on the overlay geometry, not the scroll offset.
+    overlay_base_scissors: Vec<Option<[u32; 4]>>,
+    /// The [`Grid::popovers_epoch`] the pending groups and bases were built
+    /// against. A change means overlay content or geometry moved, so both are
+    /// rebuilt.
+    last_popovers_epoch: u64,
+    /// The [`Atlas::content_epoch`] [`Self::overlay_bases`] were built against.
+    /// A change means a grow or eviction moved the UVs, so the bases are
+    /// rebuilt even when the content held.
+    last_overlay_atlas_epoch: u64,
+    /// The popover scroll offsets the uploaded overlay instances carry. While
+    /// the bases are reused and these still match, the shift and upload are
+    /// skipped entirely.
+    last_popover_scrolls: Vec<f32>,
     region_instances: Buffer,
     region_capacity: usize,
     region_count: u32,
@@ -534,6 +560,12 @@ impl TextPass {
             overlay_capacity: INITIAL_CAPACITY,
             overlay_count: 0,
             overlay_draws: Vec::new(),
+            overlay_pending: Vec::new(),
+            overlay_bases: Vec::new(),
+            overlay_base_scissors: Vec::new(),
+            last_popovers_epoch: 0,
+            last_overlay_atlas_epoch: 0,
+            last_popover_scrolls: Vec::new(),
             region_instances,
             region_capacity: INITIAL_CAPACITY,
             region_count: 0,
@@ -714,7 +746,27 @@ impl TextPass {
             damage,
             decoration_damage,
         );
-        let overlay_groups = self.rasterize_overlays(device, queue, grid);
+        // Overlay glyphs are shaped and packed here, in the same packing phase
+        // as the grid and run glyphs. While the popovers epoch holds, the shaped
+        // groups are reused, but each glyph is still re-touched against the atlas
+        // so it stays marked in use this frame. The run packing below and the
+        // next frame's grid packing evict anything not touched this frame, which
+        // would otherwise move a reused overlay's UV out from under it.
+        let popovers_epoch = grid.popovers_epoch();
+        let pending_reused = popovers_epoch == self.last_popovers_epoch
+            && self.overlay_pending.len() == grid.overlays().len();
+        if pending_reused {
+            let pending = mem::take(&mut self.overlay_pending);
+            for group in &pending {
+                for glyph in group {
+                    self.resolve_glyph(device, queue, glyph.source);
+                }
+            }
+            self.overlay_pending = pending;
+        } else {
+            self.overlay_pending = self.rasterize_overlays(device, queue, grid);
+            self.last_popovers_epoch = popovers_epoch;
+        }
 
         // Off-grid text runs are screen-anchored. No grid or region scroll
         // offset is applied, so they sit at their declared position. They pack
@@ -812,31 +864,26 @@ impl TextPass {
             )
         });
 
-        // Each overlay's content is concatenated into one buffer but recorded as
-        // its own draw range, shifted by its own scroll offset and scissored to
-        // its own box, so several popovers scroll and clip independently.
+        // The base instances (positions before the anchor and scroll shift, with
+        // final atlas UVs) are reused while the overlay content and the atlas UVs
+        // both held. A grow or eviction anywhere this frame bumps the content
+        // epoch, so the check also catches an overlay glyph re-inserted by the
+        // touch above. Each overlay's scissor depends only on its geometry, so it
+        // rides the same cache.
         let metrics = self.metrics;
-        let mut overlay_instances = Vec::new();
-        self.overlay_draws = Vec::with_capacity(overlay_groups.len());
-        for (index, (overlay, group)) in grid.overlays().iter().zip(overlay_groups).enumerate() {
-            let start = overlay_instances.len() as u32;
-            let mut group_instances = self.build_text_instances(device, queue, &group);
-
-            // The sub-cell pixel offset shifts the content with the box, and the
-            // scroll offset slides it within the box.
-            let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
-            let scroll_px = scroll.popovers.get(index).copied().unwrap_or(0.0) * metrics.height;
-            for instance in &mut group_instances {
-                instance.pos[0] += anchor[0];
-                instance.pos[1] += anchor[1] - scroll_px;
-            }
-
-            let count = group_instances.len() as u32;
-            overlay_instances.extend(group_instances);
-            self.overlay_draws.push(OverlayDraw {
-                start,
-                count,
-                scissor: cell_rect_scissor(
+        let overlays = grid.overlays();
+        let content_epoch = self.atlas.content_epoch();
+        let bases_reused = pending_reused
+            && content_epoch == self.last_overlay_atlas_epoch
+            && self.overlay_bases.len() == overlays.len();
+        if !bases_reused {
+            let pending = mem::take(&mut self.overlay_pending);
+            let mut bases = Vec::with_capacity(pending.len());
+            let mut scissors = Vec::with_capacity(pending.len());
+            for (overlay, group) in overlays.iter().zip(&pending) {
+                bases.push(self.build_text_instances(device, queue, group));
+                let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
+                scissors.push(cell_rect_scissor(
                     overlay.top,
                     overlay.left,
                     overlay.width,
@@ -844,22 +891,53 @@ impl TextPass {
                     anchor,
                     resolution,
                     metrics,
-                ),
-            });
+                ));
+            }
+            self.overlay_pending = pending;
+            self.overlay_bases = bases;
+            self.overlay_base_scissors = scissors;
+            self.last_overlay_atlas_epoch = content_epoch;
         }
 
-        // The plain and region grid glyphs are built and uploaded above, only
-        // when changed. Overlays rebuild every frame, while the text runs and
-        // their rects reuse last frame's buffers on a skip.
-        self.overlay_count = overlay_instances.len() as u32;
-        upload_instances(
-            device,
-            queue,
-            &overlay_instances,
-            &mut self.overlay_instances,
-            &mut self.overlay_capacity,
-            "overlay text instances",
-        );
+        // A scroll-only frame only slides each overlay's content within its box,
+        // so re-add the anchor and the current scroll offset to the cached bases
+        // rather than rebuilding them. When the scroll offsets also match the
+        // uploaded ones, the buffer and draws already hold and nothing is redone.
+        let scrolls: Vec<f32> = (0..overlays.len())
+            .map(|index| scroll.popovers.get(index).copied().unwrap_or(0.0))
+            .collect();
+        if !bases_reused || scrolls != self.last_popover_scrolls {
+            let mut overlay_instances = Vec::new();
+            let mut draws = Vec::with_capacity(self.overlay_bases.len());
+            for (index, (overlay, base)) in overlays.iter().zip(&self.overlay_bases).enumerate() {
+                let start = overlay_instances.len() as u32;
+                let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
+                let scroll_px = scrolls[index] * metrics.height;
+                overlay_instances.extend(base.iter().map(|instance| {
+                    let mut instance = *instance;
+                    instance.pos[0] += anchor[0];
+                    instance.pos[1] += anchor[1] - scroll_px;
+                    instance
+                }));
+                draws.push(OverlayDraw {
+                    start,
+                    count: overlay_instances.len() as u32 - start,
+                    scissor: self.overlay_base_scissors[index],
+                });
+            }
+
+            self.overlay_count = overlay_instances.len() as u32;
+            self.overlay_draws = draws;
+            upload_instances(
+                device,
+                queue,
+                &overlay_instances,
+                &mut self.overlay_instances,
+                &mut self.overlay_capacity,
+                "overlay text instances",
+            );
+            self.last_popover_scrolls = scrolls;
+        }
         if let Some(text_run_instances) = &text_run_instances {
             self.text_run_count = text_run_instances.len() as u32;
             upload_instances(
@@ -3297,6 +3375,94 @@ mod tests {
         assert!(
             matches!(glyph(2).source, GlyphSource::Font(_)) && glyph(2).cell_fill,
             "box-drawing stays on the font path and scales its glyph to the cell"
+        );
+    }
+
+    #[test]
+    fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(6, 20);
+        let overlay = |left| Overlay {
+            top: 0,
+            left,
+            width: 6,
+            height: 3,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: "ab".to_owned(),
+        };
+        grid.set_overlays(vec![overlay(0)]);
+
+        let resolution = [640.0, 480.0];
+        let idle = Damage::Partial(vec![false; 6]);
+        fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
+            Frame {
+                cursor: None,
+                cursor_corners: None,
+                scroll: Scroll {
+                    grid: 0.0,
+                    document: 0.0,
+                    scrollback: 0.0,
+                    region: 0.0,
+                    popovers,
+                },
+                damage: idle,
+                decoration_damage: idle,
+            }
+        }
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[0.0]));
+        assert_eq!(
+            pass.overlay_count, 2,
+            "one two-glyph overlay builds two instances"
+        );
+        assert_eq!(
+            pass.overlay_draws.len(),
+            1,
+            "one overlay records one draw range"
+        );
+        let scissor = pass.overlay_draws[0].scissor;
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[0.0]));
+        assert_eq!(
+            pass.overlay_count, 2,
+            "an unchanged frame reuses the cached bases"
+        );
+        assert_eq!(pass.overlay_draws.len(), 1);
+
+        pass.prepare(&device, &queue, &grid, resolution, &frame(&idle, &[5.0]));
+        assert_eq!(
+            pass.overlay_count, 2,
+            "a scroll-only frame re-shifts rather than rebuilds"
+        );
+        assert_eq!(pass.overlay_draws.len(), 1);
+        assert_eq!(
+            pass.overlay_draws[0].scissor, scissor,
+            "the scissor is derived from geometry, so scrolling leaves it unchanged"
+        );
+
+        grid.set_overlays(vec![overlay(0), overlay(10)]);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame(&idle, &[0.0, 0.0]),
+        );
+        assert_eq!(
+            pass.overlay_count, 4,
+            "the added overlay rebuilds to four instances"
+        );
+        assert_eq!(
+            pass.overlay_draws.len(),
+            2,
+            "each overlay records its own draw range"
         );
     }
 
