@@ -151,6 +151,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.key_hints_visible = !stoat.key_hints_visible;
             UpdateEffect::Redraw
         },
+        ActionKind::DismissKeyHints => {
+            if stoat.key_hints_visible {
+                stoat.key_hints_visible = false;
+                UpdateEffect::Redraw
+            } else {
+                UpdateEffect::None
+            }
+        },
         ActionKind::OpenBuffer => {
             let open = action
                 .as_any()
@@ -2383,6 +2391,25 @@ mod tests {
         assert!(h.stoat.key_hints_visible, "first toggle shows the hints");
         dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
         assert!(!h.stoat.key_hints_visible, "second toggle hides them");
+    }
+
+    #[test]
+    fn dismiss_key_hints_hides_a_shown_box_and_no_ops_when_clear() {
+        let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        assert!(h.stoat.key_hints_visible, "toggle shows the hints");
+
+        let effect = dispatch(&mut h.stoat, &stoat_action::DismissKeyHints);
+        assert!(!h.stoat.key_hints_visible, "dismiss hides the hints");
+        assert_eq!(effect, UpdateEffect::Redraw, "hiding the box redraws");
+
+        let effect = dispatch(&mut h.stoat, &stoat_action::DismissKeyHints);
+        assert!(!h.stoat.key_hints_visible, "dismiss again stays hidden");
+        assert_eq!(
+            effect,
+            UpdateEffect::None,
+            "an already-hidden box schedules no frame"
+        );
     }
 
     #[test]

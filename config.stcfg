@@ -392,6 +392,7 @@ on key {
         R -> ReplaceWithYanked();
         / -> OpenSearchInput();
         ? -> ToggleKeyHints();
+        Escape -> DismissKeyHints();
         n -> SearchNext();
         N -> SearchPrev();
         y -> Yank();
@@ -670,7 +671,7 @@ on key {
         Up -> MoveUp();
         Down -> MoveDown();
     }
-    modal == run {
+    modal == run && mode == normal {
         Escape -> RunModalDismiss();
     }
     pane == run && mode == insert {

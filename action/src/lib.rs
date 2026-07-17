@@ -54,8 +54,9 @@ pub use defs::{
         OpenFileFinderHSplit, OpenFileFinderVSplit,
     },
     help::{
-        CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
-        HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp, ToggleKeyHints,
+        CloseHelp, DismissKeyHints, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
+        HelpScrollDetailDown, HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
+        ToggleKeyHints,
     },
     lsp::{
         CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition, GotoImplementation,

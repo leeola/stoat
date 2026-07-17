@@ -23,6 +23,7 @@ pub enum ActionKind {
     OpenConfig,
     ToggleMinimap,
     ToggleKeyHints,
+    DismissKeyHints,
     OpenBuffer,
     OpenFileFinder,
     OpenFileFinderHSplit,

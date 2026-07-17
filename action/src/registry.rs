@@ -55,8 +55,9 @@ use crate::{
             OpenFileFinderHSplit, OpenFileFinderVSplit,
         },
         help::{
-            CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
-            HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp, ToggleKeyHints,
+            CloseHelp, DismissKeyHints, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
+            HelpScrollDetailDown, HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
+            ToggleKeyHints,
         },
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
@@ -434,6 +435,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenConfig::DEF, |_| Ok(Box::new(OpenConfig)));
     add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
     add(ToggleKeyHints::DEF, |_| Ok(Box::new(ToggleKeyHints)));
+    add(DismissKeyHints::DEF, |_| Ok(Box::new(DismissKeyHints)));
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
@@ -1302,6 +1304,7 @@ mod tests {
         // + 1 OpenConfig.
         // + 1 ToggleMinimap.
         // + 1 ToggleKeyHints.
+        // + 1 DismissKeyHints.
         // + 1 ToggleSyntaxHighlight.
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
@@ -1329,7 +1332,7 @@ mod tests {
         // + 1 FocusPane.
         // + 2 PaletteHistoryPrev/Next.
         // + 1 SetTheme.
-        assert_eq!(all().count(), 348);
+        assert_eq!(all().count(), 349);
     }
 
     #[test]

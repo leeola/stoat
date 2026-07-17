@@ -103,6 +103,54 @@ impl Action for ToggleKeyHints {
     }
 }
 
+#[derive(Debug)]
+pub struct DismissKeyHintsDef;
+
+impl ActionDef for DismissKeyHintsDef {
+    fn name(&self) -> &'static str {
+        "DismissKeyHints"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::DismissKeyHints
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "dismiss the keybinding hints overlay"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Hide the keybinding hints overlay when it is showing. Bound to Escape \
+         in normal mode as a dedicated close for the hints, and a no-op when \
+         they are already hidden."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct DismissKeyHints;
+
+impl DismissKeyHints {
+    pub const DEF: &DismissKeyHintsDef = &DismissKeyHintsDef;
+}
+
+impl Action for DismissKeyHints {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 macro_rules! plumbing_action {
     ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021) => {
         #[derive(Debug)]
