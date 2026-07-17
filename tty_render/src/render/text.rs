@@ -323,6 +323,14 @@ pub struct TextPass {
     plain_pending_scratch: Vec<PendingGlyph>,
     /// Region-side half of the [`Self::plain_pending_scratch`] split.
     region_pending_scratch: Vec<PendingGlyph>,
+    /// Scratch reused across `prepare_composite` calls for a pool's shaped glyphs,
+    /// its glyph instances, its text-run instances, and its run rects, so a pool
+    /// re-composite allocates no per-frame temporary. Dedicated to the composite
+    /// path rather than shared with the live scratch above.
+    composite_pending_scratch: Vec<PendingGlyph>,
+    composite_upload_scratch: Vec<TextInstance>,
+    composite_run_scratch: Vec<TextInstance>,
+    composite_rect_scratch: Vec<RectInstance>,
     /// The grid width [`Self::glyph_row_cache`] was built at; a change invalidates
     /// every cached row since columns shift.
     glyph_cache_cols: usize,
@@ -610,6 +618,10 @@ impl TextPass {
             underline_upload_scratch: Vec::new(),
             plain_pending_scratch: Vec::new(),
             region_pending_scratch: Vec::new(),
+            composite_pending_scratch: Vec::new(),
+            composite_upload_scratch: Vec::new(),
+            composite_run_scratch: Vec::new(),
+            composite_rect_scratch: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
             baseline,
@@ -1064,7 +1076,8 @@ impl TextPass {
         // through the composite globals, so they glide with the page cells.
         let atlas_dims = self.atlas.texture_dims();
 
-        let run_instances = self.build_text_run_instances(device, queue, grid);
+        let mut run_instances = mem::take(&mut self.composite_run_scratch);
+        self.build_text_run_instances_into(device, queue, grid, &mut run_instances);
         self.composite_text_run_count = run_instances.len() as u32;
         upload_instances(
             device,
@@ -1074,8 +1087,10 @@ impl TextPass {
             &mut self.composite_text_run_capacity,
             "composite text run instances",
         );
+        self.composite_run_scratch = run_instances;
 
-        let run_rects = self.build_run_rects(grid);
+        let mut run_rects = mem::take(&mut self.composite_rect_scratch);
+        self.build_run_rects_into(grid, &mut run_rects);
         self.composite_rect_count = run_rects.len() as u32;
         upload_instances(
             device,
@@ -1085,13 +1100,16 @@ impl TextPass {
             &mut self.composite_rect_capacity,
             "composite text run rect instances",
         );
+        self.composite_rect_scratch = run_rects;
 
         // Shape every pool row fresh through the same per-row primitive
-        // rasterize_visible uses, but into a local vec, so glyph_row_cache and
+        // rasterize_visible uses, but into reused scratch, so glyph_row_cache and
         // its sibling shaping state stay the live frame's. rasterize_row inserts
         // each glyph into the shared atlas, so build_text_instances below reads
         // final UVs once the atlas has reached its size for this pool.
-        let pending = {
+        let mut pending = mem::take(&mut self.composite_pending_scratch);
+        pending.clear();
+        {
             let primary_name = self.family.clone();
             let primary = shape_family(&primary_name);
             let primary_font = self.primary_font.clone();
@@ -1106,14 +1124,13 @@ impl TextPass {
                 cursor_cell: None,
             };
 
-            let mut pending = Vec::new();
             for row in 0..grid.rows() {
                 self.rasterize_row(device, queue, grid, row, &shaping, &mut pending);
             }
-            pending
-        };
+        }
 
-        let instances = self.build_text_instances(device, queue, &pending);
+        let mut instances = mem::take(&mut self.composite_upload_scratch);
+        self.build_text_instances_into(device, queue, &pending, &mut instances);
         self.composite_count = instances.len() as u32;
         upload_instances(
             device,
@@ -1123,6 +1140,8 @@ impl TextPass {
             &mut self.composite_capacity,
             "composite text instances",
         );
+        self.composite_pending_scratch = pending;
+        self.composite_upload_scratch = instances;
 
         if self.atlas.texture_dims() != atlas_dims {
             self.atlas_bind_group = create_atlas_bind_group(
@@ -1147,7 +1166,22 @@ impl TextPass {
         queue: &Queue,
         pending: &[PendingGlyph],
     ) -> Vec<TextInstance> {
-        let mut instances = Vec::with_capacity(pending.len());
+        let mut instances = Vec::new();
+        self.build_text_instances_into(device, queue, pending, &mut instances);
+        instances
+    }
+
+    /// Build the glyph instances for `pending` into `out`, clearing it first so a
+    /// reused scratch buffer holds only this frame's instances.
+    fn build_text_instances_into(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        pending: &[PendingGlyph],
+        out: &mut Vec<TextInstance>,
+    ) {
+        out.clear();
+        out.reserve(pending.len());
         for glyph in pending {
             let Some(info) = self.resolve_glyph(device, queue, glyph.source) else {
                 continue;
@@ -1184,7 +1218,7 @@ impl TextPass {
                 },
             };
 
-            instances.push(TextInstance {
+            out.push(TextInstance {
                 pos,
                 dim,
                 uv: info.uv,
@@ -1193,7 +1227,6 @@ impl TextPass {
                 seq: UNOCCLUDED_SEQ,
             });
         }
-        instances
     }
 
     /// Resolve a pending glyph's final atlas placement, re-rasterizing only on a
@@ -1235,6 +1268,20 @@ impl TextPass {
         grid: &Grid,
     ) -> Vec<TextInstance> {
         let mut instances = Vec::new();
+        self.build_text_run_instances_into(device, queue, grid, &mut instances);
+        instances
+    }
+
+    /// Build the off-grid text-run glyph instances into `out`, clearing it first
+    /// so a reused scratch buffer holds only this frame's instances.
+    fn build_text_run_instances_into(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        out: &mut Vec<TextInstance>,
+    ) {
+        out.clear();
         for run in grid.text_runs() {
             let scale = f32::from(run.scale) / 256.0;
             if scale <= 0.0 {
@@ -1260,7 +1307,7 @@ impl TextPass {
                     continue;
                 };
 
-                instances.push(TextInstance {
+                out.push(TextInstance {
                     pos: text_run_origin(
                         col,
                         row,
@@ -1278,7 +1325,6 @@ impl TextPass {
                 });
             }
         }
-        instances
     }
 
     /// One opaque background rect per scaled text run that carries a background,
@@ -1291,6 +1337,14 @@ impl TextPass {
     /// a run needs one.
     fn build_run_rects(&self, grid: &Grid) -> Vec<RectInstance> {
         let mut rects = Vec::new();
+        self.build_run_rects_into(grid, &mut rects);
+        rects
+    }
+
+    /// Build the text-run background rects into `out`, clearing it first so a
+    /// reused scratch buffer holds only this frame's rects.
+    fn build_run_rects_into(&self, grid: &Grid, out: &mut Vec<RectInstance>) {
+        out.clear();
         for run in grid.text_runs() {
             let Some(bg) = run.bg else {
                 continue;
@@ -1305,14 +1359,13 @@ impl TextPass {
             }
             let col = f32::from(run.col) / 16.0;
             let row = f32::from(run.row) / 16.0;
-            rects.push(RectInstance {
+            out.push(RectInstance {
                 pos: [col * self.metrics.width, row * self.metrics.height],
                 dim: [width, self.metrics.height],
                 color: rgb_f32(bg),
                 seq: run.seq,
             });
         }
-        rects
     }
 
     /// Rebuild and re-upload only the damaged rows' underline instances.
@@ -2759,8 +2812,8 @@ mod tests {
         build_font_system, build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell,
         fill_cell_box, glyph_family, glyph_origin, is_cell_fill, load_bundled_fonts,
         overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_char,
-        shape_family, shape_run, text_run_origin, GlyphSource, TextPass, STYLE_DOTTED,
-        SYMBOLS_FAMILY,
+        shape_family, shape_run, text_run_origin, GlyphSource, RectInstance, TextPass,
+        STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
@@ -3250,6 +3303,38 @@ mod tests {
         assert!(
             pass.build_run_rects(&grid).is_empty(),
             "a run with no background paints no backing rect"
+        );
+    }
+
+    #[test]
+    fn build_run_rects_into_clears_prior_scratch() {
+        let Some((_device, _queue, pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(2, 12);
+        grid.set_text_runs(vec![TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(1, 2, 3),
+            bg: Some(Rgb::new(4, 5, 6)),
+            text: "42".to_owned(),
+            seq: 7,
+        }]);
+
+        let fresh = pass.build_run_rects(&grid);
+        assert_eq!(fresh.len(), 1, "the one backed run builds one rect");
+
+        // A scratch buffer carrying stale rects is cleared before the rebuild, so
+        // reuse yields exactly the fresh result rather than accumulating.
+        let mut scratch = pass.build_run_rects(&grid);
+        scratch.extend(pass.build_run_rects(&grid));
+        pass.build_run_rects_into(&grid, &mut scratch);
+
+        assert_eq!(
+            bytemuck::cast_slice::<RectInstance, u8>(&scratch),
+            bytemuck::cast_slice::<RectInstance, u8>(&fresh),
+            "reuse clears the stale rects and rebuilds only the run's rect"
         );
     }
 
