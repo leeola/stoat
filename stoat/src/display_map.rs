@@ -34,7 +34,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
-        Arc,
+        Arc, LazyLock,
     },
 };
 use stoat_scheduler::Executor;
@@ -42,6 +42,12 @@ use stoat_text::{patch::Patch, Anchor, Bias, CharsAt, Point, ReversedCharsAt, Ro
 pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
 use unicode_width::UnicodeWidthChar;
 pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
+
+/// Shared empty text-highlight map, used as the `unwrap_or` fallback when an
+/// endpoint build carries no text highlights. Every live caller passes its own
+/// highlights, so this only spares the per-frame chunk path a throwaway
+/// `Arc<HashMap>` allocation on the rare `None` case.
+static EMPTY_TEXT_HIGHLIGHTS: LazyLock<TextHighlights> = LazyLock::new(|| Arc::new(HashMap::new()));
 
 pub(crate) fn display_width(ch: char) -> u32 {
     ch.width().unwrap_or(0) as u32
@@ -821,8 +827,7 @@ impl DisplaySnapshot {
         range: std::ops::Range<usize>,
     ) -> Arc<[highlights::HighlightEndpoint]> {
         let buffer = self.buffer_snapshot();
-        let empty: TextHighlights = Arc::new(HashMap::new());
-        let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
+        let text_highlights_ref = highlights.text_highlights.unwrap_or(&EMPTY_TEXT_HIGHLIGHTS);
         let semantic_ref = highlights.semantic_token_highlights;
         let lsp_ref = highlights.lsp_token_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
@@ -845,8 +850,7 @@ impl DisplaySnapshot {
         cache: &mut Option<CachedHighlightEndpoints>,
     ) -> Arc<[highlights::HighlightEndpoint]> {
         let buffer = self.buffer_snapshot();
-        let empty: TextHighlights = Arc::new(HashMap::new());
-        let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
+        let text_highlights_ref = highlights.text_highlights.unwrap_or(&EMPTY_TEXT_HIGHLIGHTS);
         let semantic_ref = highlights.semantic_token_highlights;
         let lsp_ref = highlights.lsp_token_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
