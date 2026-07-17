@@ -129,6 +129,7 @@ pub(crate) fn paint_diff_rows(
 
     let mut base_line = base_line_at(snapshot, scroll_row);
     let row_endpoints = snapshot.highlighted_endpoints(scroll_row..end_row);
+    let mut line_buf = String::new();
 
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;
@@ -143,7 +144,8 @@ pub(crate) fn paint_diff_rows(
 
         match snapshot.classify_row(display_row) {
             BlockRowKind::Block { .. } => {
-                let text = snapshot.display_line(display_row);
+                line_buf.clear();
+                snapshot.write_display_line(&mut line_buf, display_row);
                 render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
                 let token_spans = snapshot
                     .diff_map()
@@ -157,7 +159,7 @@ pub(crate) fn paint_diff_rows(
                     buf,
                     left_text_x,
                     y,
-                    &text,
+                    &line_buf,
                     left_content_w,
                     token_spans,
                     del_style,
@@ -186,7 +188,8 @@ pub(crate) fn paint_diff_rows(
                     paint_staged_glyph(buf, right_start, y, staged, theme);
                 }
                 if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
-                    let text = snapshot.display_line(display_row);
+                    line_buf.clear();
+                    snapshot.write_display_line(&mut line_buf, display_row);
                     render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
                     let token_spans = snapshot
                         .diff_map()
@@ -196,7 +199,7 @@ pub(crate) fn paint_diff_rows(
                         buf,
                         left_text_x,
                         y,
-                        &text,
+                        &line_buf,
                         left_content_w,
                         token_spans,
                         dim_style,
