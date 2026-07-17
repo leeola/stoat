@@ -742,6 +742,20 @@ impl DisplaySnapshot {
         &self,
         display_rows: std::ops::Range<u32>,
     ) -> block_map::BlockChunks<'_> {
+        let endpoints = self.highlighted_endpoints(display_rows.clone());
+        self.highlighted_chunks_with_endpoints(display_rows, endpoints)
+    }
+
+    /// Resolve the syntax-highlight endpoints spanning `display_rows` in one
+    /// pass.
+    ///
+    /// A caller painting a range row by row builds these once and hands each row
+    /// the shared set through [`Self::highlighted_chunks_with_endpoints`],
+    /// rather than rebuilding them per row.
+    pub fn highlighted_endpoints(
+        &self,
+        display_rows: std::ops::Range<u32>,
+    ) -> Arc<[highlights::HighlightEndpoint]> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(&self.inlay_highlights),
@@ -750,8 +764,21 @@ impl DisplaySnapshot {
         };
         let byte_range = self
             .block_snapshot
-            .row_range_to_buffer_byte_range(display_rows.clone());
-        let endpoints = self.build_endpoints(highlights, byte_range);
+            .row_range_to_buffer_byte_range(display_rows);
+        self.build_endpoints(highlights, byte_range)
+    }
+
+    /// Chunk `display_rows` using endpoints already resolved by
+    /// [`Self::highlighted_endpoints`], skipping the per-call endpoint build.
+    ///
+    /// Endpoints spanning a wider range than `display_rows` are valid because
+    /// the returned [`block_map::BlockChunks`] seeks the endpoints intersecting
+    /// each row, so one set built for a viewport paints any single row within it.
+    pub fn highlighted_chunks_with_endpoints(
+        &self,
+        display_rows: std::ops::Range<u32>,
+        endpoints: Arc<[highlights::HighlightEndpoint]>,
+    ) -> block_map::BlockChunks<'_> {
         self.block_snapshot.chunks(display_rows, endpoints)
     }
 

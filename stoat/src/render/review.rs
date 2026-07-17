@@ -1,6 +1,9 @@
 use crate::{
     diff_map::ChangeKind,
-    display_map::{highlights::HighlightStyle, BlockRowKind, DisplaySnapshot},
+    display_map::{
+        highlights::{HighlightEndpoint, HighlightStyle},
+        BlockRowKind, DisplaySnapshot,
+    },
     editor_state::EditorState,
     host::DiffStatus,
     review::{MoveProvenance, ReviewRow},
@@ -12,6 +15,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
+use std::sync::Arc;
 use stoat_text::{cursor_offset, Point};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
@@ -127,6 +131,7 @@ pub(crate) fn paint_diff_rows(
         .unwrap_or_default();
 
     let mut base_line = base_line_at(snapshot, scroll_row);
+    let row_endpoints = snapshot.highlighted_endpoints(scroll_row..end_row);
 
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;
@@ -175,6 +180,7 @@ pub(crate) fn paint_diff_rows(
                     buf,
                     fallback_style,
                     &underlines,
+                    &row_endpoints,
                 );
                 if let Some(staged) = snapshot
                     .diff_map()
@@ -301,9 +307,12 @@ fn paint_highlighted_row(
     buf: &mut Buffer,
     fallback_style: Style,
     underlines: &[std::ops::Range<usize>],
+    endpoints: &Arc<[HighlightEndpoint]>,
 ) {
     let mut col = 0usize;
-    for chunk in snapshot.highlighted_chunks(display_row..display_row + 1) {
+    for chunk in
+        snapshot.highlighted_chunks_with_endpoints(display_row..display_row + 1, endpoints.clone())
+    {
         let style = chunk
             .highlight_style
             .as_ref()
