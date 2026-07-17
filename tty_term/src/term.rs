@@ -143,9 +143,6 @@ pub struct Terminal {
     /// [`Self::project`], so the projection re-clones the stores into the grid
     /// only when they changed rather than on every viewport frame.
     minimap_content_dirty: bool,
-    /// Whether any minimap state changed since the renderer last drained it via
-    /// [`Self::take_minimap_damage`], the signal it rebuilds its instances on.
-    minimap_damage: bool,
     /// Next seq to stamp, incremented per decoration and reset by a
     /// `Gstoatty;reset` frame. Starts at 1 so pool-composited content (seq 0)
     /// sorts below every declared decoration.
@@ -480,7 +477,6 @@ impl Terminal {
             minimap_contents: HashMap::new(),
             minimap_views: HashMap::new(),
             minimap_content_dirty: false,
-            minimap_damage: false,
             decoration_seq: 1,
             decorations_dirty: DecorationDirty::default(),
             last_decoration_footprint: Vec::new(),
@@ -790,14 +786,6 @@ impl Terminal {
         Damage::Partial(mem::take(&mut self.decoration_damage))
     }
 
-    /// Whether any minimap state changed since the last drain, clearing the flag.
-    ///
-    /// A declaration, content splice, view move, drop, or reset sets it, so the
-    /// renderer rebuilds its minimap instances only when something changed.
-    pub fn take_minimap_damage(&mut self) -> bool {
-        mem::take(&mut self.minimap_damage)
-    }
-
     /// Apply a decoded stoatty command to the terminal.
     ///
     /// The seam every feature sub-code hooks into. Commands that steer stream
@@ -880,12 +868,14 @@ impl Terminal {
                         visible: view.visible_lines,
                     },
                 );
-                self.minimap_damage = true;
+                // A view-only advance still marks the strip dirty so the next
+                // projection re-stamps the thumb. Otherwise it freezes at its
+                // last position until a re-declare or resize marks it.
+                self.decorations_dirty.minimaps = true;
             },
             Command::MinimapDrop(drop) => {
                 self.minimap_contents.remove(&drop.content_id);
                 self.minimap_content_dirty = true;
-                self.minimap_damage = true;
             },
             // A reset is also a fill/capture close trigger. The fill and capture
             // commits must run at feed time, but the decoration clear stages so a
@@ -912,7 +902,6 @@ impl Terminal {
             .min(store.len());
         store.splice(start..end, command.lines);
         self.minimap_content_dirty = true;
-        self.minimap_damage = true;
     }
 
     /// Route a decoration command to the live lists now, or defer it while a DEC
@@ -989,7 +978,6 @@ impl Terminal {
                 self.minimap_seq.push(self.decoration_seq);
                 self.decoration_seq += 1;
                 self.decorations_dirty.minimaps = true;
-                self.minimap_damage = true;
             },
             Command::Reset => self.clear_decorations(),
             // None of these reach here. apply_command routes them at feed time:
@@ -1299,9 +1287,6 @@ impl Terminal {
         // A minimap declaration is a decoration and clears here. Its content
         // stores and views are persistent state and survive, retired only by
         // their own drop.
-        if !self.minimaps.is_empty() {
-            self.minimap_damage = true;
-        }
         self.minimaps.clear();
         self.minimap_seq.clear();
         self.decoration_seq = 1;
@@ -4957,23 +4942,35 @@ mod tests {
     }
 
     #[test]
-    fn minimap_view_alone_marks_damage() {
+    fn minimap_view_advance_reprojects_the_thumb() {
         let mut terminal = Terminal::new(4, 4, Theme::default());
-        terminal.take_minimap_damage();
-
+        terminal.advance(&encode_minimap(&minimap_cmd(5, 9)));
         terminal.advance(&encode_minimap_view(&MinimapViewCommand {
             strip_id: 5,
             top_256: 256,
             visible_lines: 20,
         }));
 
-        assert!(
-            terminal.take_minimap_damage(),
-            "a view update marks minimap damage",
+        let mut grid = Grid::new(4, 4);
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.minimaps()[0].view.as_ref().map(|v| v.top_256),
+            Some(256),
+            "the first projection stamps the initial thumb position",
         );
-        assert!(
-            !terminal.take_minimap_damage(),
-            "damage clears once drained",
+
+        // A view-only advance re-projects the strip so the thumb tracks the
+        // scroll instead of freezing at its first position until a settle.
+        terminal.advance(&encode_minimap_view(&MinimapViewCommand {
+            strip_id: 5,
+            top_256: 768,
+            visible_lines: 20,
+        }));
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.minimaps()[0].view.as_ref().map(|v| v.top_256),
+            Some(768),
+            "the advanced view re-stamps the thumb at its new position",
         );
     }
 
