@@ -9196,6 +9196,70 @@ mod tests {
     }
 
     #[test]
+    fn unfocused_pane_dims_its_minimap_declaration() {
+        use crate::render::review::{dim_rgb, style_rgb};
+        use stoatty_protocol::command::{Command, MinimapCommand};
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        // Wide enough that each vertical split clears the minimap min-width gate.
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+
+        // 0.25 is the default ui.inactive_dim the test harness resolves.
+        let dim = 0.25_f32;
+        let bg = style_rgb(
+            h.stoat
+                .theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+        .expect("test theme has an rgb background");
+        let raw: Vec<[u8; 3]> = h.stoat.minimap_class_table.palette().to_vec();
+        let dimmed: Vec<[u8; 3]> = raw.iter().map(|&c| dim_rgb(c, bg, dim)).collect();
+        assert_ne!(raw, dimmed, "dim must actually change the palette");
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        let minimaps: Vec<MinimapCommand> = drain_apc(&mut rx)
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Minimap(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+
+        let focused = minimaps
+            .iter()
+            .find(|m| m.palette == raw)
+            .expect("the focused pane keeps the raw palette");
+        let unfocused = minimaps
+            .iter()
+            .find(|m| m.palette == dimmed)
+            .expect("the unfocused pane dims the palette");
+
+        let [tr, tg, tb, ta] = focused.thumb;
+        let [dr, dg, db] = dim_rgb([tr, tg, tb], bg, dim);
+        assert_eq!(
+            unfocused.thumb,
+            [dr, dg, db, ta],
+            "the unfocused thumb dims its rgb and keeps its alpha"
+        );
+        assert_eq!(
+            unfocused.thumb_border,
+            [dr, dg, db],
+            "the unfocused thumb border dims"
+        );
+    }
+
+    #[test]
     fn minimap_drops_content_when_the_buffer_closes() {
         use stoatty_protocol::command::Command;
 

@@ -93,16 +93,32 @@ pub(crate) fn render_pane(
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)
                     && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
                 {
-                    let [tr, tg, tb, _] = chrome.thumb;
+                    let dim = if is_focused { 0.0 } else { frame.inactive_dim };
+                    let dim_bg = (dim > 0.0)
+                        .then(|| {
+                            style_rgb(
+                                theme
+                                    .try_get(crate::theme::scope::UI_BACKGROUND)
+                                    .and_then(|s| s.bg),
+                            )
+                        })
+                        .flatten();
+                    let blend = |c: [u8; 3]| match dim_bg {
+                        Some(bg) => dim_rgb(c, bg, dim),
+                        None => c,
+                    };
+
+                    let [tr, tg, tb, ta] = chrome.thumb;
+                    let [tr, tg, tb] = blend([tr, tg, tb]);
                     Minimap {
                         strip_id: pane.index,
                         content_id: content.content_id(),
                         lines_per_cell: MINIMAP_LINES_PER_CELL,
                         max_columns: MINIMAP_MAX_COLUMNS,
                         bg: [0, 0, 0, 0],
-                        thumb: chrome.thumb,
+                        thumb: [tr, tg, tb, ta],
                         thumb_border: [tr, tg, tb],
-                        palette: chrome.palette.to_vec(),
+                        palette: chrome.palette.iter().map(|&c| blend(c)).collect(),
                     }
                     .render(strip, buf, scene);
                 }
