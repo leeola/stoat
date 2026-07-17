@@ -6,6 +6,17 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 
+/// Sixteenths between the line number's right edge and the separator hairline.
+///
+/// A quarter cell, twice the inter-bar pad, so every gutter gap stays a clean
+/// division of the cell regardless of digit count.
+const NUMBER_GAP: u16 = 4;
+
+/// Sixteenths between the separator hairline and the editor body text.
+///
+/// Matches [`NUMBER_GAP`] so the hairline reads centered in balanced gaps.
+const TEXT_GAP: u16 = 4;
+
 /// An editor gutter composed of sub-cell line numbers, status bars, and a
 /// separator.
 ///
@@ -78,8 +89,20 @@ impl StatefulWidget for Gutter<'_> {
 
 impl Gutter<'_> {
     /// The whole-cell columns the gutter reserves, from its sixteenth layout.
+    ///
+    /// Sized to fit the bars, number column, and a fixed quarter-cell gap on
+    /// each side of the hairline. [`Self::separator_x`] and
+    /// [`Self::number_right_edge`] derive backward from this, so the rounding
+    /// slack lands in the blank field left of the right-aligned numbers rather
+    /// than around the hairline.
     pub fn cell_width(&self) -> u16 {
-        (self.separator_x() + 1).div_ceil(16)
+        (2 * self.bar_width
+            + 2 * self.pad
+            + self.number_advance(self.width_digits)
+            + NUMBER_GAP
+            + 1
+            + TEXT_GAP)
+            .div_ceil(16)
     }
 
     fn git_x(&self) -> u16 {
@@ -92,11 +115,11 @@ impl Gutter<'_> {
     }
 
     fn number_right_edge(&self) -> u16 {
-        2 * self.bar_width + 2 * self.pad + self.number_advance(self.width_digits)
+        self.separator_x() - NUMBER_GAP
     }
 
     fn separator_x(&self) -> u16 {
-        self.number_right_edge() + self.pad
+        self.cell_width() * 16 - 1 - TEXT_GAP
     }
 
     fn total_rows(&self) -> u16 {
@@ -253,8 +276,9 @@ mod tests {
 
     #[test]
     fn cell_width_derives_from_the_sixteenth_layout() {
-        // number_advance(2) = 2*160/16 = 20; right_edge = 10 + 4 + 20 = 34;
-        // separator_x = 36; cell_width = ceil(37/16) = 3.
+        // number_advance(2) = 2*160/16 = 20; content = 10 + 4 + 20 + 4 + 1 + 4 = 43
+        // (2*bar + 2*pad + number + NUMBER_GAP + separator + TEXT_GAP);
+        // cell_width = ceil(43/16) = 3.
         assert_eq!(config(&[]).cell_width(), 3);
     }
 
@@ -299,7 +323,7 @@ mod tests {
         gutter.render(area, &mut buf, &mut scene);
 
         let separator = encode_bar(&BarCommand {
-            x: 36,
+            x: 43,
             y: 0,
             width: 1,
             height: 16,
