@@ -148,7 +148,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::ToggleKeyHints => {
-            stoat.key_hints_visible = !stoat.key_hints_visible;
+            if stoat.key_hints_visible {
+                stoat.key_hints_visible = false;
+                if stoat.help.is_none() {
+                    open_help(stoat);
+                }
+            } else {
+                stoat.key_hints_visible = true;
+            }
             UpdateEffect::Redraw
         },
         ActionKind::DismissKeyHints => {
@@ -199,11 +206,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::OpenHelp => {
-            let active = stoat.active_bindings_for_current_mode();
-            let mode = stoat.focused_mode().to_string();
-            let executor = stoat.executor.clone();
-            let ws = stoat.active_workspace_mut();
-            stoat.help = Some(Help::new(&mode, active, ws, executor));
+            open_help(stoat);
             UpdateEffect::Redraw
         },
         ActionKind::Diff => {
@@ -1259,6 +1262,17 @@ fn show_version(stoat: &mut Stoat) -> UpdateEffect {
         detail: None,
     });
     UpdateEffect::Redraw
+}
+
+/// Open the full help modal, snapshotting the bindings active for the focused
+/// mode. Shared between the `OpenHelp` action and the second `ToggleKeyHints`
+/// in normal mode.
+pub(crate) fn open_help(stoat: &mut Stoat) {
+    let active = stoat.active_bindings_for_current_mode();
+    let mode = stoat.focused_mode().to_string();
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    stoat.help = Some(Help::new(&mode, active, ws, executor));
 }
 
 /// Close the help modal, disposing its scratch editor and restoring the
@@ -2390,7 +2404,8 @@ mod tests {
         dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
         assert!(h.stoat.key_hints_visible, "first toggle shows the hints");
         dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
-        assert!(!h.stoat.key_hints_visible, "second toggle hides them");
+        assert!(!h.stoat.key_hints_visible, "second toggle hides the hints");
+        assert!(h.stoat.help.is_some(), "second toggle opens the full help");
     }
 
     #[test]
@@ -2425,10 +2440,29 @@ mod tests {
             hint_box_visible(&mut h.stoat, "normal"),
             "toggling on paints the normal-mode hint box",
         );
-        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        dispatch(&mut h.stoat, &stoat_action::DismissKeyHints);
         assert!(
             !hint_box_visible(&mut h.stoat, "normal"),
-            "a second toggle hides it again",
+            "dismissing hides it again",
+        );
+    }
+
+    #[test]
+    fn second_toggle_key_hints_opens_the_normal_mode_help() {
+        let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+
+        assert!(
+            !h.stoat.key_hints_visible,
+            "the second toggle clears the hints"
+        );
+        let help = h.stoat.help.as_ref().expect("the second toggle opens help");
+        assert_eq!(help.snapshot_mode(), "normal", "help snapshots normal mode");
+        assert_eq!(
+            help.scope(),
+            crate::help::HelpScope::Active,
+            "help opens scoped to the active bindings"
         );
     }
 
