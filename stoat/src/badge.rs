@@ -54,6 +54,9 @@ pub enum BadgeSource {
     /// uses [`BadgeSource::Review`] instead, so a warm and a scan never
     /// collide on one badge.
     DiffWarm,
+    /// A large file reading on the blocking pool before it opens. Dropped once
+    /// every pending open installs.
+    FileOpen,
 }
 
 #[derive(Debug, Clone)]

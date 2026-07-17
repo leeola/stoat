@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::read_string_via_host,
     app::{Stoat, UpdateEffect},
+    badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
     editor_state::{EditorId, EditorState},
     host::LanguageServerFeature,
@@ -17,10 +18,11 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
-use stoat_scheduler::Executor;
+use stoat_scheduler::{Executor, Task};
 use stoat_text::{Bias, SelectionGoal};
 
 /// Write the focused buffer to its backing file via
@@ -681,6 +683,27 @@ pub(crate) fn open_config_at(stoat: &mut Stoat, path: &Path) {
     open_file(stoat, path);
 }
 
+/// Largest file opened synchronously on the main thread.
+///
+/// Files over this size read on the blocking pool and install once the read
+/// finishes (see [`install_pending_opens`]), so a huge file or slow mount does
+/// not stall input before first paint.
+const OPEN_SYNC_MAX_BYTES: u64 = 1 << 20;
+
+/// A large file reading on the blocking pool, awaiting install.
+///
+/// The task fills `result` with the read outcome and wakes the run loop;
+/// [`install_pending_opens`] then finishes the open on the main thread. Held in
+/// [`Stoat::pending_file_opens`] so the task is not dropped, which would cancel
+/// the read, before it lands.
+pub(crate) struct PendingFileOpen {
+    path: PathBuf,
+    target: PaneId,
+    disk_mtime: Option<SystemTime>,
+    _task: Task<()>,
+    result: Arc<Mutex<Option<std::io::Result<String>>>>,
+}
+
 pub(crate) fn open_file_in_pane(
     stoat: &mut Stoat,
     target: PaneId,
@@ -691,6 +714,14 @@ pub(crate) fn open_file_in_pane(
     } else {
         stoat.active_workspace().git_root.join(path)
     };
+
+    let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
+    let disk_mtime = meta.map(|m| m.modified);
+    if meta.map_or(0, |m| m.len) > OPEN_SYNC_MAX_BYTES {
+        spawn_pending_open(stoat, target, absolute, disk_mtime);
+        return None;
+    }
+
     let content = match read_string_via_host(&*stoat.fs_host, &absolute) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => "\n".to_string(),
@@ -699,19 +730,123 @@ pub(crate) fn open_file_in_pane(
             return None;
         },
     };
-    let disk_mtime = stoat
-        .fs_host
-        .metadata(&absolute)
-        .ok()
-        .flatten()
-        .map(|m| m.modified);
+    finish_open(stoat, target, &absolute, &content, disk_mtime)
+}
 
-    let lang = stoat.language_registry.for_path(&absolute);
+/// Read `absolute` on the blocking pool and queue it for install.
+///
+/// A no-op if an open for the same path is already pending, so repeated opens of
+/// one large file spawn a single read.
+fn spawn_pending_open(
+    stoat: &mut Stoat,
+    target: PaneId,
+    absolute: PathBuf,
+    disk_mtime: Option<SystemTime>,
+) {
+    if stoat.pending_file_opens.iter().any(|p| p.path == absolute) {
+        return;
+    }
+
+    let result: Arc<Mutex<Option<std::io::Result<String>>>> = Arc::new(Mutex::new(None));
+    let task = {
+        let result = result.clone();
+        let fs_host = stoat.fs_host.clone();
+        let redraw = stoat.redraw_notify.clone();
+        let path = absolute.clone();
+        stoat.executor.spawn_blocking(move || {
+            let content = read_string_via_host(&*fs_host, &path);
+            *result.lock().expect("pending open mutex") = Some(content);
+            redraw.notify_one();
+        })
+    };
+    stoat.pending_file_opens.push(PendingFileOpen {
+        path: absolute,
+        target,
+        disk_mtime,
+        _task: task,
+        result,
+    });
+
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::FileOpen);
+    ws.badges.insert(Badge {
+        source: BadgeSource::FileOpen,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Active,
+        label: "opening file".to_string(),
+        detail: None,
+    });
+}
+
+/// Install every pending open whose read has finished.
+///
+/// Called from [`Stoat::drive_background`]. Drops an open whose target pane
+/// vanished while it read, and clears the [`BadgeSource::FileOpen`] badge once
+/// none remain.
+pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
+    let mut ready = Vec::new();
+    let mut i = 0;
+    while i < stoat.pending_file_opens.len() {
+        let done = stoat.pending_file_opens[i]
+            .result
+            .lock()
+            .expect("pending open mutex")
+            .is_some();
+        if done {
+            ready.push(stoat.pending_file_opens.remove(i));
+        } else {
+            i += 1;
+        }
+    }
+
+    for pending in ready {
+        let content = match pending.result.lock().expect("pending open mutex").take() {
+            Some(Ok(c)) => c,
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => "\n".to_string(),
+            Some(Err(e)) => {
+                tracing::error!("failed to read {}: {}", pending.path.display(), e);
+                continue;
+            },
+            None => continue,
+        };
+        if !stoat.active_workspace().panes.contains(pending.target) {
+            continue;
+        }
+        finish_open(
+            stoat,
+            pending.target,
+            &pending.path,
+            &content,
+            pending.disk_mtime,
+        );
+    }
+
+    if stoat.pending_file_opens.is_empty() {
+        stoat
+            .active_workspace_mut()
+            .badges
+            .remove_by_source(BadgeSource::FileOpen);
+    }
+}
+
+/// Open `content` as the buffer for `absolute` and show it in `target`.
+///
+/// The shared tail of the sync and background open paths. It registers the
+/// buffer (deduping on path), applies mtime and language, notifies LSP, records
+/// the pane switch, and installs the editor.
+fn finish_open(
+    stoat: &mut Stoat,
+    target: PaneId,
+    absolute: &Path,
+    content: &str,
+    disk_mtime: Option<SystemTime>,
+) -> Option<BufferId> {
+    let lang = stoat.language_registry.for_path(absolute);
     let executor = stoat.executor.clone();
 
     let (buffer_id, buffer) = {
         let ws = stoat.active_workspace_mut();
-        let (buffer_id, buffer) = ws.buffers.open(&absolute, &content);
+        let (buffer_id, buffer) = ws.buffers.open(absolute, content);
         if let Some(mtime) = disk_mtime {
             ws.buffers.set_disk_mtime(buffer_id, mtime);
         }
@@ -723,7 +858,7 @@ pub(crate) fn open_file_in_pane(
         (buffer_id, buffer)
     };
 
-    super::lsp::notify_buffer_opened(stoat, buffer_id, &absolute, &content);
+    super::lsp::notify_buffer_opened(stoat, buffer_id, absolute, content);
 
     super::jump::record_pane_switch(stoat, target, buffer_id);
     show_buffer_in_pane(stoat, target, buffer_id, buffer, executor)
@@ -825,6 +960,88 @@ mod tests {
             .expect("buffer");
         let guard = buffer.read().expect("buffer poisoned");
         guard.dirty
+    }
+
+    #[test]
+    fn large_file_opens_on_the_background_pool() {
+        use crate::badge::BadgeSource;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/big");
+        let path = root.join("huge.txt");
+        let big = vec![b'x'; super::OPEN_SYNC_MAX_BYTES as usize + 16];
+        h.fake_fs().insert_file(&path, &big);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(&path)
+                .is_none(),
+            "a large open defers past the synchronous dispatch"
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .badges
+                .find_by_source(BadgeSource::FileOpen)
+                .is_some(),
+            "the pending badge shows while the read runs"
+        );
+
+        h.settle();
+        super::install_pending_opens(&mut h.stoat);
+
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(&path)
+            .expect("the buffer installs once the read finishes");
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .read()
+                .expect("poisoned")
+                .rope()
+                .len(),
+            big.len(),
+            "the full file content lands in the buffer"
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .badges
+                .find_by_source(BadgeSource::FileOpen)
+                .is_none(),
+            "the badge clears once no open is pending"
+        );
+    }
+
+    #[test]
+    fn small_file_opens_synchronously() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/small");
+        let path = root.join("tiny.txt");
+        h.fake_fs().insert_file(&path, b"hello\n");
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(&path)
+                .is_some(),
+            "a small file opens on the dispatch with no background read"
+        );
     }
 
     /// Open `name` (seeded with `seed`) under `root`, flag it auto-reload, and

@@ -601,6 +601,11 @@ pub struct Stoat {
     /// one finishes; [`crate::diff_warm::install_finished`] drops the completed
     /// ones.
     pub(crate) diff_warm_files: Vec<crate::diff_warm::PendingFileWarm>,
+    /// Large files reading on the blocking pool, awaiting install by
+    /// [`crate::action_handlers::file::install_pending_opens`] in
+    /// [`Self::drive_background`]. Holding the task here keeps the read alive;
+    /// dropping it (on quit) cancels it.
+    pub(crate) pending_file_opens: Vec<action_handlers::file::PendingFileOpen>,
     /// Per-path debounce tasks for reindexing files changed outside the
     /// editor, mirroring [`Self::review_pending_external_edits`] but
     /// feeding the code graph instead of the review session.
@@ -1173,6 +1178,7 @@ impl Stoat {
             diff_warm_file_tx,
             diff_warm_file_rx,
             diff_warm_files: Vec::new(),
+            pending_file_opens: Vec::new(),
             index_pending_external_edits: std::collections::HashMap::new(),
             index_external_edit_tx,
             index_external_edit_rx,
@@ -6511,6 +6517,7 @@ impl Stoat {
         crate::project_env::install_pending(self);
         crate::diff_warm::ensure_diff_warm(self);
         crate::diff_warm::install_finished(self);
+        action_handlers::file::install_pending_opens(self);
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
         action_handlers::file::pump_auto_reload(self);

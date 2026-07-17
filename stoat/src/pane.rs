@@ -233,6 +233,12 @@ impl PaneTree {
         self.panes.len()
     }
 
+    /// Whether `id` still names a live pane, for callers holding a `PaneId`
+    /// across an await that a split or close could invalidate.
+    pub fn contains(&self, id: PaneId) -> bool {
+        self.panes.contains_key(id)
+    }
+
     /// Splits the focused pane along `axis`, creating a new pane.
     ///
     /// If the parent split has the same axis, the new pane is inserted adjacent.
