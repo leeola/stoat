@@ -324,15 +324,22 @@ pub enum TermEvent {
 
 /// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
 ///
-/// Carries the pool's id, its latest declared region, and its scroll target.
-/// The renderer steps an eased offset toward [`Self::scroll_target`] and
-/// composites [`Self::region`]; pools compose in ascending [`Self::id`] order,
-/// which is their z-order.
+/// Carries the pool's id, its latest declared region, its scroll target, and the
+/// primary cursor's glide anchor. The renderer steps an eased offset toward
+/// [`Self::scroll_target`] and composites [`Self::region`]. Pools compose in
+/// ascending [`Self::id`] order, which is their z-order.
 #[derive(Clone, Copy, Debug)]
 pub struct PoolView {
     pub id: u32,
     pub region: PoolRegionCommand,
     pub scroll_target: DocumentOffset,
+    /// The primary cursor's glide anchor as `(row, col)`, or `None` to ease the
+    /// cursor normally.
+    ///
+    /// `Some` names the document display row and grid-absolute column the cursor
+    /// rides while this pool glides, so the renderer draws it at the eased
+    /// content offset instead of the VT cursor cell.
+    pub cursor_anchor: Option<(u64, u16)>,
 }
 
 /// One smooth-scroll surface the document pool tracks.
@@ -352,6 +359,12 @@ struct Pool {
     /// across frames to tell a pure glide, where only the fraction moved and the
     /// composed rows are identical, from a frame whose content actually changed.
     content_version: u64,
+    /// The primary cursor's anchor for the active glide, set by
+    /// `Gstoatty;pool_cursor`. `Some((row, col))` names the document display row
+    /// and grid-absolute column the cursor rides, so a renderer draws it at the
+    /// eased content offset rather than the VT cursor cell. `None` when no anchor
+    /// has arrived. Cleared when the pool is dropped, since the pool is removed.
+    cursor_anchor: Option<(u64, u16)>,
 }
 
 impl Pool {
@@ -367,6 +380,7 @@ impl Pool {
             scroll_target: DocumentOffset::default(),
             reposition: None,
             content_version: 0,
+            cursor_anchor: None,
         }
     }
 }
@@ -833,8 +847,11 @@ impl Terminal {
                     };
                 }
             },
-            // FIXME: ignored until Pool gains a cursor_anchor field to store this into.
-            Command::PoolCursor(_) => {},
+            Command::PoolCursor(cursor) => {
+                if let Some(pool) = self.pools.get_mut(&cursor.pool) {
+                    pool.cursor_anchor = Some((cursor.row, cursor.col));
+                }
+            },
             Command::Reposition(reposition) => {
                 if let Some(pool) = self.pools.get_mut(&reposition.pool) {
                     pool.scroll_target = DocumentOffset {
@@ -1034,6 +1051,7 @@ impl Terminal {
             id: pool.region.pool,
             region: pool.region,
             scroll_target: pool.scroll_target,
+            cursor_anchor: pool.cursor_anchor,
         }));
     }
 
@@ -2677,13 +2695,13 @@ mod tests {
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_line_layout,
         encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
-        encode_panel, encode_pool_region, encode_popover, encode_reposition, encode_reset,
-        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, BarCommand,
-        BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, IconCommand,
-        IconKind as ProtoIconKind, LineLayoutCommand, MinimapCommand, MinimapDropCommand,
-        MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand, PoolRegionCommand,
-        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
-        TextRunCommand,
+        encode_panel, encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
+        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
+        encode_text_run, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand,
+        IconCommand, IconKind as ProtoIconKind, LineLayoutCommand, MinimapCommand,
+        MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
+        PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand,
+        ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -4471,6 +4489,56 @@ mod tests {
             buf.len(),
             1,
             "reuse clears the prior view rather than appending"
+        );
+    }
+
+    #[test]
+    fn pool_cursor_exposes_the_anchor_through_pools_into() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 0, 4, 8);
+        terminal.advance(&encode_pool_cursor(&PoolCursorCommand {
+            pool: 0,
+            row: 42,
+            col: 7,
+        }));
+
+        assert_eq!(
+            terminal.pools().first().map(|pool| pool.cursor_anchor),
+            Some(Some((42, 7))),
+        );
+    }
+
+    #[test]
+    fn pool_drop_clears_the_cursor_anchor() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 0, 4, 8);
+        terminal.advance(&encode_pool_cursor(&PoolCursorCommand {
+            pool: 0,
+            row: 42,
+            col: 7,
+        }));
+        terminal.advance(&encode_pool_drop(&PoolDropCommand { pool: 0 }));
+
+        declare_pool(&mut terminal, 0, 4, 8);
+        assert_eq!(
+            terminal.pools().first().map(|pool| pool.cursor_anchor),
+            Some(None),
+            "a re-declared pool does not inherit the dropped pool's anchor",
+        );
+    }
+
+    #[test]
+    fn pool_cursor_for_an_undeclared_pool_is_ignored() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.advance(&encode_pool_cursor(&PoolCursorCommand {
+            pool: 9,
+            row: 1,
+            col: 2,
+        }));
+
+        assert!(
+            terminal.pools().is_empty(),
+            "a stray anchor creates no pool"
         );
     }
 
