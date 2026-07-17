@@ -115,6 +115,10 @@ pub(crate) struct EditorState {
     /// Cached diagnostic gutter severity map, keyed by the diagnostic-set
     /// version. Transient render state, not persisted.
     pub(crate) gutter_severity_cache: Option<crate::render::editor::GutterSeverityCache>,
+    /// Diagnostic spans resolved to byte offsets, keyed by the diagnostic-set
+    /// and buffer versions, so the per-frame render paths reuse one resolution.
+    /// Transient render state, not persisted.
+    pub(crate) diagnostic_span_cache: Option<crate::render::editor::DiagnosticSpanCache>,
     /// Cells the last render reserved on the left for the diagnostic gutter (0
     /// or 1), so click-to-offset can subtract the same inset the text rect was
     /// shifted by. Transient render state written by `render_editor`, not
@@ -173,6 +177,7 @@ impl EditorState {
             highlight_endpoint_cache: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
+            diagnostic_span_cache: None,
             gutter_width: 0,
             minimap_rect: None,
             cursor_screen_cell: None,
@@ -205,6 +210,7 @@ impl EditorState {
             highlight_endpoint_cache: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
+            diagnostic_span_cache: None,
             gutter_width: 0,
             minimap_rect: None,
             cursor_screen_cell: None,

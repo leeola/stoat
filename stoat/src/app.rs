@@ -3363,7 +3363,10 @@ impl Stoat {
             ws.editors.get_mut(editor_id)?.display_map.snapshot()
         };
         let rope = snapshot.buffer_snapshot().rope();
-        crate::render::editor::diagnostic_at_offset(&self.diagnostics, &path, rope, offset)
+        // This runs per mouse-motion (deduped in handle_hover), not per frame,
+        // so it resolves a local span list rather than the render-side cache.
+        let spans = crate::render::editor::resolve_diagnostic_spans(&self.diagnostics, &path, rope);
+        crate::render::editor::diagnostic_at_offset(&spans, offset)
     }
 
     /// Track the hovered cell and redraw only when the diagnostic under it

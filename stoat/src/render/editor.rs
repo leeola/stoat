@@ -285,10 +285,17 @@ pub(crate) fn render_editor_with_overlay(
     let buffer_snapshot = snapshot.buffer_snapshot();
 
     if let Some((path, set)) = diagnostic_info {
+        let rope = buffer_snapshot.rope();
+        build_diagnostic_span_cache(editor, set, path, rope, buffer_snapshot.version());
+        let spans: &[ResolvedDiag] = editor
+            .diagnostic_span_cache
+            .as_ref()
+            .map_or(&[], |c| c.spans.as_slice());
+        let visible = visible_byte_range(&snapshot, rope, editor.scroll_row, end_row);
         paint_diagnostic_spans(
-            set,
-            path,
-            buffer_snapshot.rope(),
+            spans,
+            visible,
+            rope,
             &snapshot,
             theme,
             fallback_style,
@@ -429,11 +436,16 @@ pub(crate) fn render_editor_with_overlay(
     editor.cursor_screen_cell = primary_cell;
 
     if let Some((path, set)) = diagnostic_info {
+        build_diagnostic_span_cache(editor, set, path, rope, buffer_snapshot.version());
+        let spans: &[ResolvedDiag] = editor
+            .diagnostic_span_cache
+            .as_ref()
+            .map_or(&[], |c| c.spans.as_slice());
         let sel = editor.selections.newest_anchor();
         let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
         let head_off = buffer_snapshot.resolve_anchor(&sel.head());
         let cursor = cursor_offset(rope, tail_off, head_off);
-        let cursor_diag = diagnostic_at_offset(set, path, rope, cursor);
+        let cursor_diag = diagnostic_at_offset(spans, cursor);
         let hover_diag = hover_cell.and_then(|(hx, hy)| {
             let col = hx.checked_sub(content_area.x)?;
             let row = hy.checked_sub(content_area.y)?;
@@ -441,7 +453,7 @@ pub(crate) fn render_editor_with_overlay(
                 return None;
             }
             let offset = display_cell_to_offset(&snapshot, editor.scroll_row, gutter_w, col, row)?;
-            diagnostic_at_offset(set, path, rope, offset)
+            diagnostic_at_offset(spans, offset)
         });
 
         // The mouse hover wins over the cursor when both land in a span. The
@@ -490,6 +502,7 @@ pub(crate) fn render_editor_with_overlay(
         }
 
         paint_cursor_line_diagnostic(
+            spans,
             set,
             path,
             rope,
@@ -562,6 +575,96 @@ fn compute_row_severity(
         }
     }
     out
+}
+
+/// A diagnostic resolved to byte offsets once per (set, buffer) version, so the
+/// per-frame render paths binary-search a cached slice instead of re-resolving
+/// and re-scanning the whole list every frame.
+///
+/// `index` is the position in `set.get(path)`, so a consumer can recover the
+/// original diagnostic (its message, tags) after locating a span. `start_line`/
+/// `end_line` are the diagnostic's LSP rows, kept so the cursor-line query stays
+/// line-based rather than reinterpreting byte ranges at line boundaries.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResolvedDiag {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) severity: DiagnosticSeverity,
+    pub(crate) unnecessary: bool,
+    pub(crate) start_line: u32,
+    pub(crate) end_line: u32,
+    pub(crate) index: usize,
+}
+
+/// Per-editor cache of [`ResolvedDiag`]s, rebuilt when the diagnostic set or the
+/// buffer version changes. Transient render state, not persisted.
+pub(crate) struct DiagnosticSpanCache {
+    set_version: u64,
+    buffer_version: u64,
+    spans: Vec<ResolvedDiag>,
+}
+
+/// Resolve every diagnostic for `path` to byte offsets, sorted by start.
+///
+/// Each LSP range is resolved with the same clamping the render paths applied
+/// inline, and its index into `set.get(path)` is retained so callers can recover
+/// the source diagnostic.
+pub(crate) fn resolve_diagnostic_spans(
+    set: &crate::diagnostics::DiagnosticSet,
+    path: &Path,
+    rope: &Rope,
+) -> Vec<ResolvedDiag> {
+    let rope_len = rope.len();
+    let mut spans: Vec<ResolvedDiag> = set
+        .get(path)
+        .iter()
+        .enumerate()
+        .map(|(index, diag)| {
+            let start = rope
+                .point_to_offset(Point::new(
+                    diag.range.start.line,
+                    diag.range.start.character,
+                ))
+                .min(rope_len);
+            let end = rope
+                .point_to_offset(Point::new(diag.range.end.line, diag.range.end.character))
+                .min(rope_len);
+            ResolvedDiag {
+                start,
+                end,
+                severity: diag.severity.unwrap_or(DiagnosticSeverity::ERROR),
+                unnecessary: is_unnecessary(diag),
+                start_line: diag.range.start.line,
+                end_line: diag.range.end.line,
+                index,
+            }
+        })
+        .collect();
+    spans.sort_by_key(|s| s.start);
+    spans
+}
+
+/// Rebuild `editor.diagnostic_span_cache` when the diagnostic set or buffer
+/// version has moved since it was last resolved.
+fn build_diagnostic_span_cache(
+    editor: &mut EditorState,
+    set: &crate::diagnostics::DiagnosticSet,
+    path: &Path,
+    rope: &Rope,
+    buffer_version: u64,
+) {
+    let set_version = set.version();
+    let stale = match &editor.diagnostic_span_cache {
+        Some(cache) => cache.set_version != set_version || cache.buffer_version != buffer_version,
+        None => true,
+    };
+    if stale {
+        editor.diagnostic_span_cache = Some(DiagnosticSpanCache {
+            set_version,
+            buffer_version,
+            spans: resolve_diagnostic_spans(set, path, rope),
+        });
+    }
 }
 
 fn severity_rank(sev: DiagnosticSeverity) -> u8 {
@@ -1054,8 +1157,8 @@ pub(crate) fn draw_fallback_line_numbers(
 /// nothing.
 #[allow(clippy::too_many_arguments)]
 fn paint_diagnostic_spans(
-    set: &crate::diagnostics::DiagnosticSet,
-    path: &Path,
+    spans: &[ResolvedDiag],
+    visible: Range<usize>,
     rope: &Rope,
     snapshot: &DisplaySnapshot,
     theme: &crate::theme::Theme,
@@ -1069,8 +1172,6 @@ fn paint_diagnostic_spans(
     mut undercurls: Option<&mut Vec<UndercurlSpan>>,
     colors: Option<&SeverityColors>,
 ) {
-    let rope_len = rope.len();
-
     // An Unnecessary-tagged hint/info span blends the cell's syntax fg toward
     // this background rather than overwriting it. It resolves once, and the
     // dedup set keeps overlapping muted spans from double-blending a shared cell.
@@ -1080,31 +1181,31 @@ fn paint_diagnostic_spans(
             .and_then(|s| s.bg)
     }));
     let mut muted_cells: HashSet<(u16, u16)> = HashSet::new();
-    // Paint least-severe first so the worst severity lands last, on top, for
-    // both the cell foreground and the collected undercurl spans. rust-analyzer
-    // can publish overlapping diagnostics (a WARNING and a HINT over `unused`)
-    // in any order, and publish order alone would let the hint's grey win.
-    let mut ordered: Vec<_> = set.get(path).iter().collect();
-    ordered.sort_by_key(|d| {
-        Reverse(severity_rank(
-            d.severity.unwrap_or(DiagnosticSeverity::ERROR),
-        ))
-    });
+
+    // Only spans overlapping the viewport can paint a cell, so the start-sorted
+    // cache bounds the upper end with a partition_point. Paint the visible
+    // subset least-severe first so the worst severity lands last, on top, for
+    // both the cell foreground and the collected undercurl spans -- rust-analyzer
+    // can publish a WARNING and a HINT over the same `unused` in any order, and
+    // publish order alone would let the hint's grey win.
+    let hi = spans.partition_point(|s| s.start < visible.end);
+    let mut ordered: Vec<&ResolvedDiag> = spans[..hi]
+        .iter()
+        .filter(|s| s.start < s.end && s.end > visible.start)
+        .collect();
+    ordered.sort_by_key(|s| Reverse(severity_rank(s.severity)));
+
     for diag in ordered {
-        let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
-        let start = rope
-            .point_to_offset(Point::new(
-                diag.range.start.line,
-                diag.range.start.character,
-            ))
-            .min(rope_len);
-        let end = rope
-            .point_to_offset(Point::new(diag.range.end.line, diag.range.end.character))
-            .min(rope_len);
+        let sev = diag.severity;
+        // Clip to the visible bytes so offscreen columns are never walked. The
+        // clamped range paints exactly the on-screen cells `paint_offset_range`
+        // would have kept anyway.
+        let start = diag.start.max(visible.start);
+        let end = diag.end.min(visible.end);
         if start >= end {
             continue;
         }
-        if is_unnecessary(diag)
+        if diag.unnecessary
             && matches!(
                 sev,
                 DiagnosticSeverity::HINT | DiagnosticSeverity::INFORMATION
@@ -1189,6 +1290,7 @@ fn paint_diagnostic_spans(
 /// cursor row is scrolled off, no diagnostic covers it, or the message is empty.
 #[allow(clippy::too_many_arguments)]
 fn paint_cursor_line_diagnostic(
+    spans: &[ResolvedDiag],
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
     rope: &Rope,
@@ -1208,27 +1310,28 @@ fn paint_cursor_line_diagnostic(
         return;
     }
 
+    // Line-based containment, matching the pre-cache scan: the winning span is
+    // the worst-severity one whose LSP rows straddle the cursor line.
     let cursor_line = cursor_point.row;
-    let Some((index, diag)) = set
-        .get(path)
+    let Some(resolved) = spans
         .iter()
-        .enumerate()
-        .filter(|(_, d)| d.range.start.line <= cursor_line && cursor_line <= d.range.end.line)
-        .min_by_key(|(_, d)| severity_rank(d.severity.unwrap_or(DiagnosticSeverity::ERROR)))
+        .filter(|s| s.start_line <= cursor_line && cursor_line <= s.end_line)
+        .min_by_key(|s| severity_rank(s.severity))
     else {
         return;
     };
+    let index = resolved.index;
     // The popover already shows this diagnostic, so skip the redundant EOL text.
     if Some(index) == suppress {
         return;
     }
 
-    let message = diag.message.lines().next().unwrap_or("");
+    let message = set.get(path)[index].message.lines().next().unwrap_or("");
     if message.is_empty() {
         return;
     }
 
-    let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+    let sev = resolved.severity;
     let style = theme.get(severity_scope(sev)).add_modifier(Modifier::DIM);
     let y = inner.y + (display.row - scroll_row) as u16;
     let base_x = inner.x as u32 + snapshot.line_len(display.row) + 2;
@@ -1265,31 +1368,16 @@ pub(crate) fn display_cell_to_offset(
 /// Index into `set.get(path)` of the highest-severity diagnostic whose byte
 /// range contains `offset`, or `None` when none do.
 ///
+/// `spans` is [`resolve_diagnostic_spans`] output, sorted by start. A
+/// `partition_point` bounds the scan to spans starting at or before `offset`.
 /// The worst severity wins a tie, matching the gutter and the EOL message.
-pub(crate) fn diagnostic_at_offset(
-    set: &crate::diagnostics::DiagnosticSet,
-    path: &Path,
-    rope: &Rope,
-    offset: usize,
-) -> Option<usize> {
-    let rope_len = rope.len();
-    set.get(path)
+pub(crate) fn diagnostic_at_offset(spans: &[ResolvedDiag], offset: usize) -> Option<usize> {
+    let hi = spans.partition_point(|s| s.start <= offset);
+    spans[..hi]
         .iter()
-        .enumerate()
-        .filter(|(_, diag)| {
-            let start = rope
-                .point_to_offset(Point::new(
-                    diag.range.start.line,
-                    diag.range.start.character,
-                ))
-                .min(rope_len);
-            let end = rope
-                .point_to_offset(Point::new(diag.range.end.line, diag.range.end.character))
-                .min(rope_len);
-            start < end && start <= offset && offset < end
-        })
-        .min_by_key(|(_, diag)| severity_rank(diag.severity.unwrap_or(DiagnosticSeverity::ERROR)))
-        .map(|(index, _)| index)
+        .filter(|s| s.start < s.end && offset < s.end)
+        .min_by_key(|s| severity_rank(s.severity))
+        .map(|s| s.index)
 }
 
 /// Place a `w`x`h` popover for a span whose start sits at cell `(anchor_col,
@@ -2119,12 +2207,13 @@ mod tests {
             ],
         );
 
+        let spans = super::resolve_diagnostic_spans(&set, &path, &rope);
         // Offset 4 is in both, so the worse severity (the error) wins.
-        assert_eq!(super::diagnostic_at_offset(&set, &path, &rope, 4), Some(1));
+        assert_eq!(super::diagnostic_at_offset(&spans, 4), Some(1));
         // Offset 7 is inside only the error span.
-        assert_eq!(super::diagnostic_at_offset(&set, &path, &rope, 7), Some(1));
+        assert_eq!(super::diagnostic_at_offset(&spans, 7), Some(1));
         // Offset 0 is outside both.
-        assert_eq!(super::diagnostic_at_offset(&set, &path, &rope, 0), None);
+        assert_eq!(super::diagnostic_at_offset(&spans, 0), None);
     }
 
     #[test]
