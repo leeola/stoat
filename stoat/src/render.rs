@@ -141,6 +141,11 @@ pub(crate) struct FrameCtx<'a> {
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
     pub(crate) line_numbers: LineNumbers,
+    /// Fraction an unfocused pane's colors blend toward the theme background,
+    /// resolved from `ui.inactive_dim` (default 0.25, clamped to `0.0..=1.0`).
+    /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
+    /// to unfocused panes only.
+    pub(crate) inactive_dim: f32,
     /// Whether editor panes reserve the right-edge minimap strip, resolved from
     /// [`crate::app::Stoat::minimap_enabled`]. Only takes effect under stoatty.
     pub(crate) minimap_enabled: bool,
@@ -285,6 +290,11 @@ pub(crate) fn frame(
             .settings
             .editor_line_numbers
             .unwrap_or(LineNumbers::Relative),
+        inactive_dim: stoat
+            .settings
+            .ui_inactive_dim
+            .unwrap_or(0.25)
+            .clamp(0.0, 1.0) as f32,
         minimap_enabled,
         minimap_chrome,
         hover_cell: stoat.hover_cell,

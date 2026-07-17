@@ -5,7 +5,7 @@ use crate::{
     editor_state::{EditorState, SearchMatchCache},
     minimap::color_to_rgb,
     render::{
-        review::{render_diff_view, render_review, style_rgb},
+        review::{dim_rgb, render_diff_view, render_review, style_rgb},
         undercurl::UndercurlSpan,
     },
 };
@@ -68,6 +68,7 @@ pub(crate) fn render_editor(
         None,
         None,
         None,
+        0.0,
     );
 }
 
@@ -89,6 +90,7 @@ pub(crate) fn render_editor_with_overlay(
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
     mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut Vec<UndercurlSpan>>,
+    dim: f32,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -174,6 +176,7 @@ pub(crate) fn render_editor_with_overlay(
             &mut editor.gutter_geometry_cache,
             scene.as_deref_mut(),
             buf,
+            dim,
         )
     } else if row_severity.is_empty() {
         0
@@ -192,6 +195,11 @@ pub(crate) fn render_editor_with_overlay(
                     width: 1,
                     height: inner.height,
                 };
+                let bar_bg = style_rgb(fallback_style.bg.or_else(|| {
+                    theme
+                        .try_get(crate::theme::scope::UI_BACKGROUND)
+                        .and_then(|st| st.bg)
+                }));
                 for display_row in editor.scroll_row..end_row {
                     let row_offset = (display_row - editor.scroll_row) as u16;
                     if row_offset >= inner.height {
@@ -200,12 +208,16 @@ pub(crate) fn render_editor_with_overlay(
                     let Some(sev) = row_severity.get(&display_row) else {
                         continue;
                     };
+                    let color = match bar_bg {
+                        Some(bg) if dim > 0.0 => dim_rgb(severity_color(*sev, colors), bg, dim),
+                        _ => severity_color(*sev, colors),
+                    };
                     Bar {
                         x: 0,
                         y: row_offset * 16,
                         width: 6,
                         height: 16,
-                        color: severity_color(*sev, colors),
+                        color,
                     }
                     .render(area, buf, &mut *scene);
                 }
@@ -315,6 +327,7 @@ pub(crate) fn render_editor_with_overlay(
             buf,
             if stoatty { undercurls } else { None },
             severity.as_ref(),
+            dim,
         );
     }
 
@@ -735,6 +748,19 @@ pub(crate) struct SeverityColors {
     hint: [u8; 3],
 }
 
+impl SeverityColors {
+    /// Blend every severity color toward `bg` by `amount` (`0.0` is identity),
+    /// dimming the gutter's diagnostic marks with an unfocused pane.
+    fn dim(&self, bg: [u8; 3], amount: f32) -> SeverityColors {
+        SeverityColors {
+            error: dim_rgb(self.error, bg, amount),
+            warning: dim_rgb(self.warning, bg, amount),
+            info: dim_rgb(self.info, bg, amount),
+            hint: dim_rgb(self.hint, bg, amount),
+        }
+    }
+}
+
 /// Extract every diagnostic-severity color as RGB, or `None` if any is missing
 /// or not an RGB color. A `None` here disables the sub-cell gutter for the whole
 /// frame, so it falls back to the ASCII glyphs rather than mixing the two.
@@ -789,6 +815,17 @@ impl DiffMarkColors {
             DiffHunkStatus::Modified => self.modified,
             DiffHunkStatus::Moved => self.moved,
             DiffHunkStatus::Deleted => self.deleted,
+        }
+    }
+
+    /// Blend every diff-mark color toward `bg` by `amount` (`0.0` is identity),
+    /// dimming the gutter's diff marks with an unfocused pane.
+    fn dim(&self, bg: [u8; 3], amount: f32) -> DiffMarkColors {
+        DiffMarkColors {
+            added: dim_rgb(self.added, bg, amount),
+            modified: dim_rgb(self.modified, bg, amount),
+            moved: dim_rgb(self.moved, bg, amount),
+            deleted: dim_rgb(self.deleted, bg, amount),
         }
     }
 }
@@ -1109,26 +1146,49 @@ fn draw_line_number_gutter(
     cache: &mut Option<GutterGeometryCache>,
     scene: Option<&mut ApcScene>,
     buf: &mut Buffer,
+    dim: f32,
 ) -> u16 {
     use crate::theme::scope as s;
 
     let visible = end_row.saturating_sub(scroll_row).min(inner.height as u32);
-    let diff_colors = DiffMarkColors::resolve(theme);
+
+    // Background the rich gutter fills, and the target its foregrounds dim toward
+    // so an unfocused pane's gutter fades with its text (`dim == 0.0` is identity).
+    let rich_bg = style_rgb(
+        fallback_style
+            .bg
+            .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg)),
+    );
+
+    // Dimmed owned gutter colors, borrowed by the Copy `gutter_rgb` tuple and the
+    // geometry key below. The key hashes them, so a dim change refills the cache.
+    let diff_colors = {
+        let base = DiffMarkColors::resolve(theme);
+        match rich_bg {
+            Some(bg) if stoatty => base.dim(bg, dim),
+            _ => base,
+        }
+    };
+    let dimmed_severity = match (stoatty, severity, rich_bg) {
+        (true, Some(colors), Some(bg)) => Some(colors.dim(bg, dim)),
+        _ => None,
+    };
 
     // Rich mode needs stoatty, a scene, and every gutter color as RGB. The
     // colors resolve here, ahead of the scene, so the same values feed both the
     // cache key and the component-line rebuild.
     let gutter_rgb = stoatty
         .then(|| {
-            let colors = severity?;
+            let colors = dimmed_severity.as_ref()?;
             let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
             let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
-            let bg = style_rgb(
-                fallback_style
-                    .bg
-                    .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg)),
-            )?;
-            Some((colors, number_fg, separator, bg))
+            let bg = rich_bg?;
+            Some((
+                colors,
+                dim_rgb(number_fg, bg, dim),
+                dim_rgb(separator, bg, dim),
+                bg,
+            ))
         })
         .flatten();
     let rich = scene.filter(|_| stoatty).zip(gutter_rgb);
@@ -1268,6 +1328,7 @@ fn paint_diagnostic_spans(
     buf: &mut Buffer,
     mut undercurls: Option<&mut Vec<UndercurlSpan>>,
     colors: Option<&SeverityColors>,
+    dim: f32,
 ) {
     // An Unnecessary-tagged hint/info span blends the cell's syntax fg toward
     // this background rather than overwriting it. It resolves once, and the
@@ -1367,7 +1428,11 @@ fn paint_diagnostic_spans(
             collect.then_some(&mut runs),
         );
         if let (Some(undercurls), Some(colors)) = (undercurls.as_deref_mut(), colors) {
-            let color = severity_color(sev, colors);
+            let base = severity_color(sev, colors);
+            let color = match mute_bg {
+                Some(bg) if dim > 0.0 => dim_rgb(base, bg, dim),
+                _ => base,
+            };
             undercurls.extend(runs.into_iter().map(|(x, y, len)| UndercurlSpan {
                 x,
                 y,
@@ -1928,6 +1993,7 @@ mod tests {
             None,
             None,
             None,
+            0.0,
         );
         editor
             .gutter_geometry_cache
@@ -2020,6 +2086,7 @@ mod tests {
             None,
             None,
             None,
+            0.0,
         );
         let gutter_w = editor.gutter_width;
         (0..rows)
@@ -2065,6 +2132,7 @@ mod tests {
             None,
             None,
             None,
+            0.0,
         );
         let rect = editor.minimap_rect;
         let strip = (0..rows)
@@ -2175,6 +2243,7 @@ mod tests {
             None,
             None,
             None,
+            0.0,
         );
         (0..rows)
             .map(|y| {

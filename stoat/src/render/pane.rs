@@ -5,7 +5,7 @@ use crate::{
     render::{
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
-        review::style_rgb,
+        review::{dim_rgb, style_rgb},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
         undercurl::UndercurlSpan,
@@ -44,11 +44,7 @@ pub(crate) fn render_pane(
     undercurls: &mut Vec<UndercurlSpan>,
 ) {
     let theme = frame.theme;
-    let text_style = if is_focused {
-        theme.get(crate::theme::scope::UI_TEXT)
-    } else {
-        theme.get(crate::theme::scope::UI_TEXT_MUTED)
-    };
+    let text_style = theme.get(crate::theme::scope::UI_TEXT);
     let (content_area, status_area) = split_pane_status(pane.area);
 
     let PaneCtx {
@@ -91,6 +87,7 @@ pub(crate) fn render_pane(
                     diagnostic_info,
                     Some(&mut *scene),
                     Some(undercurls),
+                    if is_focused { 0.0 } else { frame.inactive_dim },
                 );
 
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)
@@ -123,6 +120,17 @@ pub(crate) fn render_pane(
         },
     }
 
+    if !is_focused
+        && frame.inactive_dim > 0.0
+        && let Some(bg) = style_rgb(
+            theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+    {
+        dim_pane_content(buf, content_area, bg, frame.inactive_dim);
+    }
+
     render_pane_status(
         &pane.view,
         is_focused,
@@ -133,6 +141,26 @@ pub(crate) fn render_pane(
         buf,
         Some(scene),
     );
+}
+
+/// Blend every RGB cell in `area` toward `bg` by `amount`, dimming an unfocused
+/// pane's live grid. A cell with a non-RGB color (an indexed-color terminal) is
+/// left unchanged, so such terminals simply do not dim. `amount` is expected in
+/// `0.0..=1.0`.
+fn dim_pane_content(buf: &mut Buffer, area: Rect, bg: [u8; 3], amount: f32) {
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buf[(x, y)];
+            if let Color::Rgb(r, g, b) = cell.fg {
+                let [r, g, b] = dim_rgb([r, g, b], bg, amount);
+                cell.set_fg(Color::Rgb(r, g, b));
+            }
+            if let Color::Rgb(r, g, b) = cell.bg {
+                let [r, g, b] = dim_rgb([r, g, b], bg, amount);
+                cell.set_bg(Color::Rgb(r, g, b));
+            }
+        }
+    }
 }
 
 /// Minimal status bar for overlay panes (commits/rebase/reword/conflict).
@@ -809,5 +837,63 @@ mod tests {
             rendered.contains("1 staged / 1 unstaged"),
             "statusline reports the hunk counts:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn dim_pane_content_blends_rgb_and_skips_indexed() {
+        use super::dim_pane_content;
+        use crate::render::review::dim_rgb;
+        use ratatui::{
+            buffer::Buffer,
+            layout::Rect,
+            style::{Color, Style},
+        };
+
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        buf[(0, 0)].set_style(
+            Style::default()
+                .fg(Color::Rgb(200, 100, 40))
+                .bg(Color::Rgb(10, 20, 30)),
+        );
+        buf[(1, 0)].set_style(Style::default().fg(Color::Blue));
+
+        let bg = [0, 0, 0];
+        dim_pane_content(&mut buf, area, bg, 0.5);
+
+        let [fr, fg_, fb] = dim_rgb([200, 100, 40], bg, 0.5);
+        assert_eq!(
+            buf[(0, 0)].fg,
+            Color::Rgb(fr, fg_, fb),
+            "rgb fg dims toward bg"
+        );
+        let [br, bgc, bb] = dim_rgb([10, 20, 30], bg, 0.5);
+        assert_eq!(
+            buf[(0, 0)].bg,
+            Color::Rgb(br, bgc, bb),
+            "rgb bg dims toward bg"
+        );
+        assert_eq!(buf[(1, 0)].fg, Color::Blue, "indexed color left unchanged");
+    }
+
+    #[test]
+    fn dim_pane_content_zero_amount_is_identity() {
+        use super::dim_pane_content;
+        use ratatui::{
+            buffer::Buffer,
+            layout::Rect,
+            style::{Color, Style},
+        };
+
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        buf[(0, 0)].set_style(
+            Style::default()
+                .fg(Color::Rgb(200, 100, 40))
+                .bg(Color::Rgb(10, 20, 30)),
+        );
+        let before = buf.clone();
+        dim_pane_content(&mut buf, area, [0, 0, 0], 0.0);
+        assert_eq!(buf, before, "amount 0 leaves the pane byte-identical");
     }
 }

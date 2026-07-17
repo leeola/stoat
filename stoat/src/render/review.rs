@@ -852,6 +852,21 @@ pub(crate) fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
     }
 }
 
+/// Blend `fg` toward `bg` by `amount`, where `0.0` returns `fg` unchanged and
+/// `1.0` returns `bg`.
+///
+/// Dims an unfocused pane's colors toward the theme background by a configurable
+/// fraction. `amount` is clamped to `0.0..=1.0`.
+pub(crate) fn dim_rgb(fg: [u8; 3], bg: [u8; 3], amount: f32) -> [u8; 3] {
+    let amount = amount.clamp(0.0, 1.0);
+    let blend = |f: u8, b: u8| (f as f32 * (1.0 - amount) + b as f32 * amount).round() as u8;
+    [
+        blend(fg[0], bg[0]),
+        blend(fg[1], bg[1]),
+        blend(fg[2], bg[2]),
+    ]
+}
+
 pub(crate) fn render_side_num(buf: &mut Buffer, x: u16, y: u16, num: u32, style: Style) {
     let s = format!("{num:>4} ");
     for (i, ch) in s.chars().enumerate() {
@@ -1440,6 +1455,27 @@ mod tests {
         assert!(
             text.contains("<- 42") && !text.contains(':'),
             "intra-file chip shows the 1-based line without a path; got {text:?}"
+        );
+    }
+
+    #[test]
+    fn dim_rgb_blends_between_fg_and_bg() {
+        let fg = [200, 100, 40];
+        assert_eq!(dim_rgb(fg, [0, 0, 0], 0.0), fg, "amount 0 keeps fg");
+        assert_eq!(
+            dim_rgb(fg, [0, 0, 0], 1.0),
+            [0, 0, 0],
+            "amount 1 reaches bg"
+        );
+        assert_eq!(
+            dim_rgb(fg, [50, 50, 50], 0.5),
+            [125, 75, 45],
+            "midpoint blend"
+        );
+        assert_eq!(
+            dim_rgb(fg, [0, 0, 0], 2.0),
+            [0, 0, 0],
+            "amount clamps above 1"
         );
     }
 }

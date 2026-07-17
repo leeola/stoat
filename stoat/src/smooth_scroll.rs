@@ -904,6 +904,7 @@ mod tests {
                 None,
                 None,
                 None,
+                0.0,
             );
             editor.scroll_row = saved;
             let expected = serialize_buffer(&expected);
