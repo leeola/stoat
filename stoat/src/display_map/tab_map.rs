@@ -314,6 +314,7 @@ impl TabSnapshot {
         TabChunks {
             fold_chunks: self.fold_snapshot.chunks(range, endpoints),
             pending: None,
+            pending_offset: 0,
             display_column: start_column,
             tab_size: self.tab_size,
             max_expansion_column: self.max_expansion_column,
@@ -327,6 +328,10 @@ impl TabSnapshot {
 pub struct TabChunks<'a> {
     fold_chunks: FoldChunks<'a>,
     pending: Option<Chunk<'a>>,
+    /// Byte cursor into [`Self::pending`]'s text for a borrowed chunk being
+    /// split across successive tabs, so each split emits a subslice rather than
+    /// reallocating the remainder. Always `0` for owned (block-row) pending.
+    pending_offset: usize,
     display_column: u32,
     tab_size: u32,
     max_expansion_column: u32,
@@ -336,26 +341,91 @@ impl<'a> Iterator for TabChunks<'a> {
     type Item = Chunk<'a>;
 
     fn next(&mut self) -> Option<Chunk<'a>> {
-        // Refill pending if needed.
         if self.pending.is_none() {
             self.pending = self.fold_chunks.next();
             self.pending.as_ref()?;
+            self.pending_offset = 0;
         }
-        // Take ownership of pending so we can mutate self freely.
-        let pending = self.pending.take().expect("refilled above");
+
+        // A borrowed chunk's text points into the rope data (lifetime `'a`), so
+        // subslices stay valid after `pending` is cleared and the tab split emits
+        // them without copying. An owned block-row chunk's text is held by
+        // `pending`, so subslices would borrow `self`, not `'a`. It keeps the
+        // allocating path.
+        let borrowed = match &self.pending.as_ref().expect("refilled above").text {
+            Cow::Borrowed(text) => Some(*text),
+            Cow::Owned(_) => None,
+        };
+        match borrowed {
+            Some(text) => self.next_borrowed(text),
+            None => self.next_owned(),
+        }
+    }
+}
+
+impl<'a> TabChunks<'a> {
+    /// Emit the next chunk from a borrowed pending whose full text is `text`,
+    /// splitting at the tab under [`Self::pending_offset`].
+    ///
+    /// The whole remainder, the run before a tab, and the tab's spaces are all
+    /// borrowed slices, so a chunk with several tabs never recopies its tail.
+    fn next_borrowed(&mut self, text: &'a str) -> Option<Chunk<'a>> {
+        let remaining = &text[self.pending_offset..];
+        match remaining.find('\t') {
+            Some(0) => {
+                let spaces = self.tab_width();
+                self.display_column += spaces;
+                self.pending_offset += 1;
+                if self.pending_offset >= text.len() {
+                    self.pending = None;
+                    self.pending_offset = 0;
+                }
+                Some(Chunk {
+                    text: Cow::Borrowed(tab_spaces_slice(spaces)),
+                    is_tab: true,
+                    highlight_style: None,
+                    ..Default::default()
+                })
+            },
+            Some(idx) => {
+                let metadata =
+                    clone_chunk_metadata(self.pending.as_ref().expect("borrowed pending"));
+                let prefix = &remaining[..idx];
+                advance_display_column(prefix, &mut self.display_column);
+                self.pending_offset += idx;
+                Some(Chunk {
+                    text: Cow::Borrowed(prefix),
+                    ..metadata
+                })
+            },
+            None => {
+                let metadata =
+                    clone_chunk_metadata(self.pending.as_ref().expect("borrowed pending"));
+                advance_display_column(remaining, &mut self.display_column);
+                self.pending = None;
+                self.pending_offset = 0;
+                Some(Chunk {
+                    text: Cow::Borrowed(remaining),
+                    ..metadata
+                })
+            },
+        }
+    }
+
+    /// Emit the next chunk from an owned pending (a block row), reallocating the
+    /// remainder around each tab. Owned text is held by `pending` and cannot be
+    /// borrowed for `'a`.
+    fn next_owned(&mut self) -> Option<Chunk<'a>> {
+        let pending = self.pending.take().expect("owned pending");
+        self.pending_offset = 0;
 
         let text: &str = pending.text.as_ref();
-        let tab_idx = text.find('\t');
-
-        match tab_idx {
+        match text.find('\t') {
             None => {
-                // No tab in this chunk. Emit whole chunk, advance column.
                 advance_display_column(&pending.text, &mut self.display_column);
                 Some(pending)
             },
             Some(0) => {
-                // Chunk starts with a tab. Emit the expansion chunk and push
-                // the remainder back into pending.
                 let spaces = self.tab_width();
                 self.display_column += spaces;
                 let rest = text[1..].to_string();
@@ -374,8 +444,6 @@ impl<'a> Iterator for TabChunks<'a> {
                 })
             },
             Some(idx) => {
-                // Emit prefix before the tab; push the tab-plus-suffix back
-                // into pending so the next call processes them.
                 let prefix = text[..idx].to_string();
                 let rest = text[idx..].to_string();
                 let metadata = clone_chunk_metadata(&pending);
