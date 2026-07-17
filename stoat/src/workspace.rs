@@ -54,6 +54,14 @@ new_key_type! {
     pub struct WorkspaceId;
 }
 
+/// Largest buffer, in bytes, that [`Workspace::drive_parse_jobs`] parses
+/// synchronously on the event-loop thread.
+///
+/// Only the tree-sitter step honors the 1ms deadline. The full reparse and
+/// captures walk that follow it are unbounded O(file), so past this cap a
+/// buffer is parsed on the background pool instead of blocking a keystroke.
+const SYNC_PARSE_MAX_BYTES: usize = 256 * 1024;
+
 /// Stable-across-restart workspace identifier. [`WorkspaceId`] is a SlotMap
 /// key whose generation is recycled each run, so it can't serve as an on-disk
 /// filename. [`WorkspaceUid`] is assigned once at construction time from the
@@ -498,16 +506,25 @@ impl Workspace {
             let mut prior = self.buffers.take_syntax(buffer_id);
             let mut prior_map = self.buffers.take_syntax_map(buffer_id);
 
-            let deadline = executor.now() + std::time::Duration::from_millis(1);
-            if let Some(out) = parse_buffer_step(
-                buffer_id,
-                snapshot.clone(),
-                &lang,
-                &mut prior,
-                &mut prior_map,
-                syntax_styles,
-                Some((deadline, executor)),
-            ) {
+            // Only the tree-sitter step honors the deadline. The full reparse
+            // and captures walk that follow it are unbounded O(file), so a
+            // large buffer skips the synchronous fast path and parses on the
+            // background pool instead of blocking the keystroke.
+            let sync_out = (snapshot.len() <= SYNC_PARSE_MAX_BYTES)
+                .then(|| {
+                    let deadline = executor.now() + std::time::Duration::from_millis(1);
+                    parse_buffer_step(
+                        buffer_id,
+                        snapshot.clone(),
+                        &lang,
+                        &mut prior,
+                        &mut prior_map,
+                        syntax_styles,
+                        Some((deadline, executor)),
+                    )
+                })
+                .flatten();
+            if let Some(out) = sync_out {
                 self.buffers.store_syntax(out.buffer_id, out.syntax);
                 self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
                 self.buffers.store_tokens(
@@ -991,7 +1008,7 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{changed_byte_ranges, ParseJob, Workspace};
+    use super::{changed_byte_ranges, ParseJob, Workspace, SYNC_PARSE_MAX_BYTES};
     use crate::{host::DiffStatus, pane::View, review::ReviewFileInput, test_harness::TestHarness};
     use std::{
         path::{Path, PathBuf},
@@ -1244,6 +1261,42 @@ mod tests {
         assert!(
             !ws.parse_jobs.contains_key(&id),
             "swapping preview content drops the prior file's parse job"
+        );
+    }
+
+    #[test]
+    fn oversized_buffer_parses_off_the_main_thread() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::OpenFile;
+
+        let mut h = TestHarness::with_size(24, 4);
+        let root = PathBuf::from("/big");
+        let big: String = "fn f() {}\n".repeat(SYNC_PARSE_MAX_BYTES / 10 + 100);
+        h.fake_fs().insert_file(root.join("big.rs"), big.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root.clone();
+
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("big.rs"),
+            },
+        );
+        // Drive parse jobs once without ticking the scheduler, so the spawned
+        // background job stays pending and observable.
+        h.stoat.drive_background();
+
+        let ws = h.stoat.active_workspace();
+        let id = ws
+            .buffers
+            .id_for_path(&root.join("big.rs"))
+            .expect("the big buffer opened");
+        assert!(
+            ws.parse_jobs.contains_key(&id),
+            "a buffer past the sync-parse cap spawns a background parse job"
+        );
+        assert!(
+            ws.buffers.syntax_version(id).is_none(),
+            "and is not parsed inline on the main thread"
         );
     }
 
