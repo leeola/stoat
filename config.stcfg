@@ -41,11 +41,11 @@ theme default_dark {
     ui.border.focused.fg = accent;
     ui.border.inactive.fg = muted;
 
-    ui.modal.help.fg = accent;
-    ui.modal.hints.fg = warning;
-    ui.modal.palette.fg = special;
-    ui.modal.picker.fg = special;
-    ui.modal.run.fg = warning;
+    ui.modal.help.fg = muted;
+    ui.modal.hints.fg = muted;
+    ui.modal.palette.fg = muted;
+    ui.modal.picker.fg = muted;
+    ui.modal.run.fg = muted;
 
     ui.prompt.fg = warning;
     ui.key_label.fg = accent;
