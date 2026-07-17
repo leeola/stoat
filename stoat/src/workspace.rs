@@ -633,12 +633,9 @@ impl Workspace {
             let Some(shared) = self.buffers.get(buffer_id) else {
                 continue;
             };
-            let (cur_version, buffer_text) = {
+            let (cur_version, buffer_rope) = {
                 let guard = shared.read().expect("buffer poisoned");
-                (
-                    guard.snapshot.version,
-                    guard.snapshot.visible_text.to_string(),
-                )
+                (guard.snapshot.version, guard.snapshot.visible_text.clone())
             };
 
             if self.diff_versions.get(&buffer_id) == Some(&cur_version) {
@@ -660,6 +657,9 @@ impl Workspace {
                 let syntax_styles = syntax_styles.clone();
                 let base_cache = base_cache.clone();
                 move || {
+                    // Materialize the rope only now that the diff is confirmed
+                    // stale and a job is committed, off the event-loop thread.
+                    let buffer_text = buffer_rope.to_string();
                     let diff_map = compute_diff_map(
                         &*git_host,
                         &git_root,
@@ -1054,6 +1054,23 @@ mod tests {
             dm.status_for_line(0),
             DiffStatus::Unchanged,
             "the unchanged first line reads unchanged"
+        );
+    }
+
+    #[test]
+    fn drive_diff_jobs_skips_an_already_current_buffer() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        // The buffer's diff is now current. Another event-loop turn must not
+        // respawn a job for the unchanged version.
+        h.stoat.drive_background();
+        assert!(
+            h.stoat.active_workspace().diff_jobs.is_empty(),
+            "a drive over an already-diffed buffer spawns no new job",
         );
     }
 
