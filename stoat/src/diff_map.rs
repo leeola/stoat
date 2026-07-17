@@ -124,6 +124,10 @@ pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
     base_text: Option<Arc<String>>,
     base_highlights: Option<Arc<BaseHighlights>>,
+    /// Base-side underline spans, resolved once at construction from `hunks` and
+    /// `base_text` since both are immutable after it. Shared behind `Arc` so the
+    /// per-frame accessor hands out a handle instead of rebuilding the map.
+    base_underlines: Arc<BTreeMap<u32, Vec<Range<usize>>>>,
     version: usize,
 }
 
@@ -136,10 +140,13 @@ impl DiffMap {
         hunks: impl IntoIterator<Item = DiffHunk>,
         base_text: Option<Arc<String>>,
     ) -> Self {
+        let hunks = SumTree::from_iter(hunks, ());
+        let base_underlines = Arc::new(compute_base_underline_spans(&hunks, base_text.as_ref()));
         Self {
-            hunks: SumTree::from_iter(hunks, ()),
+            hunks,
             base_text,
             base_highlights: None,
+            base_underlines,
             version: Self::next_version(),
         }
     }
@@ -362,23 +369,8 @@ impl DiffMap {
     /// [`ChangeKind::Replaced`] kind -- absolute byte ranges in the base text --
     /// across the base lines they cover, so a deleted or modified base block row
     /// underlines only its changed chars. Empty when the map carries no base text.
-    pub(crate) fn base_underline_spans(&self) -> BTreeMap<u32, Vec<Range<usize>>> {
-        let Some(base_text) = &self.base_text else {
-            return BTreeMap::new();
-        };
-        let starts = line_starts(base_text);
-        let mut out: BTreeMap<u32, Vec<Range<usize>>> = BTreeMap::new();
-        for hunk in self.hunks.iter() {
-            let Some(detail) = &hunk.token_detail else {
-                continue;
-            };
-            for span in &detail.base_spans {
-                if span.kind == ChangeKind::Replaced {
-                    distribute_change_span(&mut out, &span.byte_range, &starts, base_text.len());
-                }
-            }
-        }
-        out
+    pub(crate) fn base_underline_spans(&self) -> Arc<BTreeMap<u32, Vec<Range<usize>>>> {
+        self.base_underlines.clone()
     }
 
     pub fn total_deleted_lines(&self) -> u32 {
@@ -402,12 +394,20 @@ impl DiffMap {
     #[cfg(test)]
     pub fn set_base_text(&mut self, text: Arc<String>) {
         self.base_text = Some(text);
+        self.base_underlines = Arc::new(compute_base_underline_spans(
+            &self.hunks,
+            self.base_text.as_ref(),
+        ));
         self.version = Self::next_version();
     }
 
     #[cfg(test)]
     pub fn push_hunk(&mut self, hunk: DiffHunk) {
         self.hunks.push(hunk, ());
+        self.base_underlines = Arc::new(compute_base_underline_spans(
+            &self.hunks,
+            self.base_text.as_ref(),
+        ));
         self.version = Self::next_version();
     }
 }
@@ -685,6 +685,33 @@ fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -
             move_metadata: None,
         })
         .collect()
+}
+
+/// Distribute every hunk's [`ChangeKind::Replaced`] base spans across the base
+/// lines they cover, keyed by base line with each range line-local within it.
+///
+/// Resolved once by [`DiffMap::from_hunks`] because `hunks` and `base_text` are
+/// immutable after construction. Empty when there is no base text.
+fn compute_base_underline_spans(
+    hunks: &SumTree<DiffHunk>,
+    base_text: Option<&Arc<String>>,
+) -> BTreeMap<u32, Vec<Range<usize>>> {
+    let Some(base_text) = base_text else {
+        return BTreeMap::new();
+    };
+    let starts = line_starts(base_text);
+    let mut out: BTreeMap<u32, Vec<Range<usize>>> = BTreeMap::new();
+    for hunk in hunks.iter() {
+        let Some(detail) = &hunk.token_detail else {
+            continue;
+        };
+        for span in &detail.base_spans {
+            if span.kind == ChangeKind::Replaced {
+                distribute_change_span(&mut out, &span.byte_range, &starts, base_text.len());
+            }
+        }
+    }
+    out
 }
 
 /// Split an absolute base-text byte `range` into per-line-local ranges, pushing
