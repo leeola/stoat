@@ -1237,24 +1237,13 @@ impl FoldSnapshot {
         let buffer_offset = rope.point_to_offset(buffer_point);
         let chars = rope.chars_at(buffer_offset);
 
-        // Collect folds from current position forward into a Vec for iteration
-        let remaining_folds: Vec<Fold> = {
-            let mut cursor = self.folds.cursor::<FoldStart>(());
-            cursor.seek(&FoldStart(InlayPoint::default()), Bias::Left);
-            let mut folds = Vec::new();
-            while let Some(fold) = cursor.item() {
-                let end = self.inlay_snapshot.to_buffer_point(fold.range.end);
-                if rope.point_to_offset(end) > buffer_offset {
-                    folds.push(fold.clone());
-                }
-                cursor.next();
-            }
-            folds
-        };
-
-        let next_fold_start_offset = remaining_folds.first().map_or(usize::MAX, |f| {
-            let start = self.inlay_snapshot.to_buffer_point(f.range.start);
-            rope.point_to_offset(start)
+        // The position never lands inside a fold, so every fold ending past
+        // `buffer_offset` also starts at or after it. Seek there once and read
+        // folds from the cursor lazily instead of cloning the whole tail.
+        let mut folds = self.folds.cursor::<FoldStart>(());
+        folds.seek(&FoldStart(inlay_point), Bias::Left);
+        let next_fold_start_offset = folds.item().map_or(usize::MAX, |f| {
+            rope.point_to_offset(self.inlay_snapshot.to_buffer_point(f.range.start))
         });
 
         FoldChars {
@@ -1262,8 +1251,7 @@ impl FoldSnapshot {
             rope,
             chars,
             buffer_offset,
-            remaining_folds,
-            fold_idx: 0,
+            folds,
             next_fold_start_offset,
             placeholder_iter: None,
         }
@@ -1276,25 +1264,14 @@ impl FoldSnapshot {
         let buffer_offset = rope.point_to_offset(buffer_point);
         let chars = rope.reversed_chars_at(buffer_offset);
 
-        // Collect folds before current position into a Vec for reverse iteration
-        let preceding_folds: Vec<Fold> = {
-            let mut cursor = self.folds.cursor::<FoldStart>(());
-            cursor.seek(&FoldStart(InlayPoint::default()), Bias::Left);
-            let mut folds = Vec::new();
-            while let Some(fold) = cursor.item() {
-                let start = self.inlay_snapshot.to_buffer_point(fold.range.start);
-                if rope.point_to_offset(start) < buffer_offset {
-                    folds.push(fold.clone());
-                }
-                cursor.next();
-            }
-            folds
-        };
-
-        let fold_idx = preceding_folds.len();
-        let next_fold_end_offset = preceding_folds.last().map_or(0, |f| {
-            let end = self.inlay_snapshot.to_buffer_point(f.range.end);
-            rope.point_to_offset(end)
+        // Seek to the first fold at or after the position, then step back to the
+        // closest preceding fold. Its predecessors are reached lazily with
+        // `prev()`, sparing the up-front clone of every preceding fold.
+        let mut folds = self.folds.cursor::<FoldStart>(());
+        folds.seek(&FoldStart(inlay_point), Bias::Left);
+        folds.prev();
+        let next_fold_end_offset = folds.item().map_or(0, |f| {
+            rope.point_to_offset(self.inlay_snapshot.to_buffer_point(f.range.end))
         });
 
         ReversedFoldChars {
@@ -1302,8 +1279,7 @@ impl FoldSnapshot {
             rope,
             chars,
             buffer_offset,
-            preceding_folds,
-            fold_idx,
+            folds,
             next_fold_end_offset,
             placeholder_iter: None,
         }
@@ -1449,8 +1425,7 @@ pub struct FoldChars<'a> {
     rope: &'a Rope,
     chars: CharsAt<'a>,
     buffer_offset: usize,
-    remaining_folds: Vec<Fold>,
-    fold_idx: usize,
+    folds: Cursor<'a, 'a, Fold, FoldStart>,
     next_fold_start_offset: usize,
     placeholder_iter: Option<std::vec::IntoIter<char>>,
 }
@@ -1467,19 +1442,15 @@ impl Iterator for FoldChars<'_> {
         }
 
         if self.buffer_offset >= self.next_fold_start_offset {
-            let fold = &self.remaining_folds[self.fold_idx];
+            let fold = self.folds.item().expect("fold present at its start offset");
             let end = self.inlay_snapshot.to_buffer_point(fold.range.end);
             let end_off = self.rope.point_to_offset(end);
             let placeholder_chars: Vec<char> = fold.placeholder.text.chars().collect();
-            self.fold_idx += 1;
-            self.next_fold_start_offset = if self.fold_idx < self.remaining_folds.len() {
-                let start = self
-                    .inlay_snapshot
-                    .to_buffer_point(self.remaining_folds[self.fold_idx].range.start);
-                self.rope.point_to_offset(start)
-            } else {
-                usize::MAX
-            };
+            self.folds.next();
+            self.next_fold_start_offset = self.folds.item().map_or(usize::MAX, |f| {
+                self.rope
+                    .point_to_offset(self.inlay_snapshot.to_buffer_point(f.range.start))
+            });
             self.placeholder_iter = Some(placeholder_chars.into_iter());
             self.chars = self.rope.chars_at(end_off);
             self.buffer_offset = end_off;
@@ -1497,8 +1468,7 @@ pub struct ReversedFoldChars<'a> {
     rope: &'a Rope,
     chars: ReversedCharsAt<'a>,
     buffer_offset: usize,
-    preceding_folds: Vec<Fold>,
-    fold_idx: usize,
+    folds: Cursor<'a, 'a, Fold, FoldStart>,
     next_fold_end_offset: usize,
     placeholder_iter: Option<std::vec::IntoIter<char>>,
 }
@@ -1514,20 +1484,16 @@ impl Iterator for ReversedFoldChars<'_> {
             self.placeholder_iter = None;
         }
 
-        if self.fold_idx > 0 && self.buffer_offset <= self.next_fold_end_offset {
-            let fold = &self.preceding_folds[self.fold_idx - 1];
+        if self.folds.item().is_some() && self.buffer_offset <= self.next_fold_end_offset {
+            let fold = self.folds.item().expect("fold present at its end offset");
             let start = self.inlay_snapshot.to_buffer_point(fold.range.start);
             let start_off = self.rope.point_to_offset(start);
             let placeholder_chars: Vec<char> = fold.placeholder.text.chars().rev().collect();
-            self.fold_idx -= 1;
-            self.next_fold_end_offset = if self.fold_idx > 0 {
-                let end = self
-                    .inlay_snapshot
-                    .to_buffer_point(self.preceding_folds[self.fold_idx - 1].range.end);
-                self.rope.point_to_offset(end)
-            } else {
-                0
-            };
+            self.folds.prev();
+            self.next_fold_end_offset = self.folds.item().map_or(0, |f| {
+                self.rope
+                    .point_to_offset(self.inlay_snapshot.to_buffer_point(f.range.end))
+            });
             self.placeholder_iter = Some(placeholder_chars.into_iter());
             self.chars = self.rope.reversed_chars_at(start_off);
             self.buffer_offset = start_off;
@@ -1710,6 +1676,40 @@ mod tests {
         assert_eq!(
             snap.to_fold_point(InlayPoint::new(0, 11), Bias::Right),
             FoldPoint::new(0, 8)
+        );
+    }
+
+    #[test]
+    fn chars_at_lazily_substitutes_folds() {
+        // "hello world foo" folds cols 5..11 -> "hello... foo".
+        let snap = make_snapshot_with_folds(
+            "hello world foo",
+            vec![(InlayPoint::new(0, 5), InlayPoint::new(0, 11))],
+        );
+
+        let forward: String = snap.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(
+            forward, "hello... foo",
+            "placeholder substituted, folded range skipped"
+        );
+
+        let after_fold: String = snap.chars_at(FoldPoint::new(0, 8)).collect();
+        assert_eq!(
+            after_fold, " foo",
+            "a start past the fold seeks the cursor correctly"
+        );
+
+        let reversed: String = snap.reversed_chars_at(FoldPoint::new(0, 12)).collect();
+        assert_eq!(
+            reversed,
+            forward.chars().rev().collect::<String>(),
+            "the reverse walk mirrors the forward stream"
+        );
+
+        let before_fold: String = snap.reversed_chars_at(FoldPoint::new(0, 5)).collect();
+        assert_eq!(
+            before_fold, "olleh",
+            "a reverse start before the fold yields the prefix"
         );
     }
 
