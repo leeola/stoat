@@ -3117,7 +3117,9 @@ impl Stoat {
         if let Some(editor_id) = self.minimap_drag {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    self.scrub_minimap_editor(editor_id, mouse.row);
+                    if let Some(strip) = self.minimap_strip_for(editor_id) {
+                        self.scrub_minimap_editor(editor_id, strip, mouse.row);
+                    }
                 },
                 MouseEventKind::Up(MouseButton::Left) => self.minimap_drag = None,
                 _ => {},
@@ -3127,17 +3129,27 @@ impl Stoat {
 
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             let pos = Position::new(mouse.column, mouse.row);
-            let ws = self.active_workspace();
-            let hit = ws.panes.split_panes().find_map(|(_, pane)| {
-                let View::Editor(editor_id) = pane.view else {
-                    return None;
-                };
-                let strip = ws.editors.get(editor_id)?.minimap_rect?;
-                strip.contains(pos).then_some(editor_id)
-            });
-            if let Some(editor_id) = hit {
+            // Single mode has one shared band that scrubs the focused editor.
+            // Per-pane mode walks the panes to find the strip under the click.
+            let hit = if self.minimap_mode() == MinimapMode::Single {
+                self.single_minimap_rect
+                    .filter(|band| band.contains(pos))
+                    .and_then(|_| self.focused_editor_ids().map(|(id, _)| id))
+            } else {
+                let ws = self.active_workspace();
+                ws.panes.split_panes().find_map(|(_, pane)| {
+                    let View::Editor(editor_id) = pane.view else {
+                        return None;
+                    };
+                    let strip = ws.editors.get(editor_id)?.minimap_rect?;
+                    strip.contains(pos).then_some(editor_id)
+                })
+            };
+            if let Some(editor_id) = hit
+                && let Some(strip) = self.minimap_strip_for(editor_id)
+            {
                 self.minimap_drag = Some(editor_id);
-                self.scrub_minimap_editor(editor_id, mouse.row);
+                self.scrub_minimap_editor(editor_id, strip, mouse.row);
                 return Some(UpdateEffect::Redraw);
             }
         }
@@ -3145,18 +3157,27 @@ impl Stoat {
         None
     }
 
-    /// Ease `editor_id`'s viewport onto the file line its minimap strip row under
+    /// Resolve the minimap band `editor_id` scrubs against. In single mode this
+    /// is the shared window-right band, otherwise the editor's own per-pane strip
+    /// rect.
+    fn minimap_strip_for(&self, editor_id: EditorId) -> Option<Rect> {
+        if self.minimap_mode() == MinimapMode::Single {
+            self.single_minimap_rect
+        } else {
+            self.active_workspace().editors.get(editor_id)?.minimap_rect
+        }
+    }
+
+    /// Ease `editor_id`'s viewport onto the file line the `strip` row under
     /// `screen_row` points at, centered in the viewport.
     ///
     /// Maps the strip-local cell row to a line with the same proportional math
     /// the strip renders with, then jumps `scroll_row` and glides the offset up
-    /// to it like a page motion. A no-op if the editor has no strip this frame.
-    fn scrub_minimap_editor(&mut self, editor_id: EditorId, screen_row: u16) {
+    /// to it like a page motion. `strip` is the caller-resolved band the editor
+    /// scrubs against (a per-pane rect or the shared single-mode band).
+    fn scrub_minimap_editor(&mut self, editor_id: EditorId, strip: Rect, screen_row: u16) {
         let ws = &mut self.workspaces[self.active_workspace];
         let Some(editor) = ws.editors.get_mut(editor_id) else {
-            return;
-        };
-        let Some(strip) = editor.minimap_rect else {
             return;
         };
 
@@ -12964,6 +12985,94 @@ mod tests {
         );
         assert!(rows[4] > rows[0], "the drag moved the viewport: {rows:?}");
         assert_eq!(h.stoat.minimap_drag, None, "releasing clears the scrub");
+    }
+
+    #[test]
+    fn single_band_click_scrubs_the_focused_editor_not_the_pane_under_it() {
+        use stoat_config::MinimapMode;
+
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let long: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let a = h.write_file("a.txt", &long);
+        let b = h.write_file("b.txt", "short\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        // Focus the left pane (the long buffer) while the band overlays the right.
+        h.type_action("FocusLeft()");
+        h.settle();
+        let _ = h.stoat.render();
+
+        let focused = h.stoat.focused_editor_ids().expect("focused editor").0;
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        let col = band.x + band.width / 2;
+        let row = band.y + band.height / 2;
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            row,
+        ));
+        assert_eq!(
+            h.stoat.minimap_drag,
+            Some(focused),
+            "the band press arms a scrub of the focused editor"
+        );
+        let after_click = h.stoat.active_workspace().editors[focused].scroll_row;
+        assert!(
+            after_click > 0,
+            "the band click scrolls the focused editor toward the clicked line"
+        );
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            col,
+            row + 2,
+        ));
+        let after_drag = h.stoat.active_workspace().editors[focused].scroll_row;
+        assert!(
+            after_drag >= after_click,
+            "dragging down the band re-scrubs monotonically: {after_click} -> {after_drag}"
+        );
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            col,
+            row + 2,
+        ));
+        assert_eq!(h.stoat.minimap_drag, None, "releasing clears the scrub");
+
+        // In per-pane mode the same right-edge coordinates belong to the right
+        // pane, so they never scrub the focused-left editor.
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+        {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(focused)
+                .expect("focused editor");
+            editor.scroll_row = 0;
+            editor.scroll_offset = 0.0;
+        }
+        let _ = h.stoat.render();
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            row,
+        ));
+        assert_eq!(
+            h.stoat.active_workspace().editors[focused].scroll_row,
+            0,
+            "in per-pane mode the right-edge click leaves the focused-left editor"
+        );
     }
 
     #[test]
