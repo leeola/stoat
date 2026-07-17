@@ -48,7 +48,10 @@ use crate::{
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::Range,
+};
 use stoat_action::registry::RegistryEntry;
 use stoatty_protocol::command::{
     encode_fill_end_into, encode_fill_into, encode_minimap_view_into, encode_pool_drop_into,
@@ -106,6 +109,12 @@ pub(crate) mod non_pane_pool {
 #[derive(Default)]
 pub(crate) struct SmoothScrollState {
     pools: BTreeMap<u32, PoolEmitState>,
+    /// `(pool, top_256, visible_lines)` the most recent [`MinimapViewCommand`]
+    /// carried per strip id, so an unmoved viewport re-emits no thumb update.
+    /// The pool is part of the value because single-minimap mode feeds one strip
+    /// from different pools as focus moves, so a same-offset view from a new pool
+    /// must still re-emit.
+    minimap_views: HashMap<u32, (u32, u32, u16)>,
 }
 
 /// What has been declared to the terminal for one pool, so a frame re-emits only
@@ -133,9 +142,6 @@ struct PoolEmitState {
     /// different value the buffered pages are stale (the surface re-filtered or
     /// regenerated), so the window is refilled rather than composited as-is.
     content_version: u64,
-    /// `(top_256, visible_lines)` the most recent [`MinimapViewCommand`] carried,
-    /// so an unmoved viewport re-emits no thumb update. `None` until first sent.
-    last_minimap_view: Option<(u32, u16)>,
 }
 
 impl SmoothScrollState {
@@ -160,32 +166,35 @@ impl SmoothScrollState {
         }
     }
 
-    /// Append a `minimap_view` frame positioning `pool`'s strip thumb to `out`,
-    /// but only when the viewport moved since the last emit.
+    /// Append a `minimap_view` frame positioning `strip_id`'s thumb to `out`, but
+    /// only when the viewport moved since the last emit for that strip.
     ///
-    /// `top_256` is the fractional top document row in 1/256ths of a line and
-    /// `visible` the viewport height in lines. Deduped like the scroll target, so
-    /// a steady frame with an unmoved viewport emits nothing.
+    /// `pool` is the scroll pool feeding the strip this frame. `top_256` is the
+    /// fractional top document row in 1/256ths of a line, and `visible` the
+    /// viewport height in lines. The dedup keys on `strip_id` and includes `pool`
+    /// in the stored value, so a strip fed by a new pool re-emits even at an
+    /// unchanged offset.
     pub(crate) fn emit_minimap_view(
         &mut self,
         out: &mut Vec<u8>,
+        strip_id: u32,
         pool: u32,
         top_256: u32,
         visible: u16,
     ) {
-        let entry = self.pools.entry(pool).or_default();
-        if entry.last_minimap_view == Some((top_256, visible)) {
+        if self.minimap_views.get(&strip_id) == Some(&(pool, top_256, visible)) {
             return;
         }
         encode_minimap_view_into(
             out,
             &MinimapViewCommand {
-                strip_id: pool,
+                strip_id,
                 top_256,
                 visible_lines: visible,
             },
         );
-        entry.last_minimap_view = Some((top_256, visible));
+        self.minimap_views
+            .insert(strip_id, (pool, top_256, visible));
     }
 }
 

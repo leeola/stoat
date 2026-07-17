@@ -5774,6 +5774,10 @@ impl Stoat {
         };
         let ws_id = self.active_workspace;
 
+        // Per-pane mode syncs a strip only where one is reserved (minimap_rect).
+        // Single mode has no per-pane rects, so it syncs every visible plain
+        // editor's buffer, keeping all of them warm for instant focus switches.
+        let single = self.minimap_mode() == MinimapMode::Single;
         let strips: Vec<(BufferId, EditorId)> = {
             let ws = &self.workspaces[ws_id];
             ws.panes
@@ -5783,8 +5787,12 @@ impl Stoat {
                         return None;
                     };
                     let editor = ws.editors.get(editor_id)?;
-                    editor.minimap_rect?;
-                    Some((editor.buffer_id, editor_id))
+                    let included = if single {
+                        editor.review_view.is_none() && !editor.diff_view
+                    } else {
+                        editor.minimap_rect.is_some()
+                    };
+                    included.then_some((editor.buffer_id, editor_id))
                 })
                 .collect()
         };
@@ -6092,6 +6100,7 @@ impl Stoat {
         // borrow so the per-pane loop can gate on it.
         let focused_editor = self.focused_editor_ids().map(|(id, _)| id);
         let focused_insert = self.focused_mode() == "insert";
+        let single_minimap = self.single_minimap_rect.is_some();
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -6174,9 +6183,18 @@ impl Stoat {
                 |_| Vec::new(),
             );
 
-            if editor.minimap_rect.is_some() {
+            // Per-pane mode feeds each pane's own strip, keyed by its pool. Single
+            // mode feeds one shared strip (u32::MAX) for the focused pane only.
+            let view_strip = if single_minimap {
+                (focused_editor == Some(*editor_id))
+                    .then_some(crate::render::SINGLE_MINIMAP_STRIP_ID)
+            } else {
+                editor.minimap_rect.is_some().then_some(region.pool)
+            };
+            if let Some(strip_id) = view_strip {
                 self.smooth_scroll.emit_minimap_view(
                     &mut out,
+                    strip_id,
                     region.pool,
                     (scroll_offset * 256.0) as u32,
                     region.height,
@@ -9499,6 +9517,119 @@ mod tests {
             top_after_scroll,
             Some(50 * 256),
             "the thumb tracks the scrolled top row, got {scrolled:?}"
+        );
+    }
+
+    #[test]
+    fn single_minimap_mode_syncs_content_for_every_visible_buffer() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+        let _ = h.stoat.render();
+
+        let buffer_ids: Vec<BufferId> = {
+            let ws = h.stoat.active_workspace();
+            ws.panes
+                .split_panes()
+                .filter_map(|(_, pane)| match pane.view {
+                    View::Editor(editor_id) => Some(ws.editors.get(editor_id)?.buffer_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(buffer_ids.len(), 2, "two visible editor buffers");
+        let content_ids: Vec<u32> = buffer_ids
+            .iter()
+            .map(|&buffer_id| {
+                h.stoat
+                    .minimap_content
+                    .get(&(h.stoat.active_workspace, buffer_id))
+                    .expect("content for a visible buffer")
+                    .content_id()
+            })
+            .collect();
+
+        h.stoat.emit_minimap();
+        let synced: std::collections::HashSet<u32> = drain_apc(&mut rx)
+            .iter()
+            .filter_map(|c| match c {
+                Command::MinimapLines(l) => Some(l.content_id),
+                _ => None,
+            })
+            .collect();
+        for id in content_ids {
+            assert!(
+                synced.contains(&id),
+                "single mode syncs minimap_lines for every visible buffer; missing {id}, got {synced:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_minimap_view_follows_focus_and_rekeys_by_strip() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let single_views = |cmds: &[Command]| -> Vec<u32> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    Command::MinimapView(v) if v.strip_id == u32::MAX => Some(v.top_256),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+
+        let _ = h.stoat.render();
+        h.stoat.emit_smooth_scroll();
+        let cmds = drain_apc(&mut rx);
+        assert_eq!(
+            single_views(&cmds).last().copied(),
+            Some(0),
+            "single mode emits a view frame for strip u32::MAX at the origin"
+        );
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, Command::MinimapView(v) if v.strip_id != u32::MAX)),
+            "single mode emits no per-pane view frames, got {cmds:?}"
+        );
+
+        // Focus the other pane, also at offset 0. Without keying the dedup by
+        // strip and storing the pool, the shared strip would skip this frame as
+        // an unmoved viewport. The pool change forces the re-emit.
+        h.type_action("FocusNext()");
+        h.settle();
+        let _ = h.stoat.render();
+        h.stoat.emit_smooth_scroll();
+        let cmds = drain_apc(&mut rx);
+        assert_eq!(
+            single_views(&cmds).last().copied(),
+            Some(0),
+            "focusing another pane at the same offset re-emits the strip view"
         );
     }
 
