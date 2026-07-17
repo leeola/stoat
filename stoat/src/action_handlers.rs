@@ -2398,6 +2398,24 @@ mod tests {
     }
 
     #[test]
+    fn single_minimap_mode_resolves_and_survives_toggle() {
+        use stoat_config::MinimapMode;
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        assert_eq!(h.stoat.minimap_mode(), MinimapMode::Single);
+        assert!(h.stoat.minimap_enabled(), "single mode shows the minimap");
+        dispatch(&mut h.stoat, &stoat_action::ToggleMinimap);
+        assert!(!h.stoat.minimap_enabled(), "toggle hides it in single mode");
+        dispatch(&mut h.stoat, &stoat_action::ToggleMinimap);
+        assert!(h.stoat.minimap_enabled(), "toggle shows it again");
+        assert_eq!(
+            h.stoat.minimap_mode(),
+            MinimapMode::Single,
+            "and it returns to single, not per-pane"
+        );
+    }
+
+    #[test]
     fn toggle_key_hints_flips_visibility() {
         let mut h = Stoat::test();
         assert!(!h.stoat.key_hints_visible, "hidden by default");

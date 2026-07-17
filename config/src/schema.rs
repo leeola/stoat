@@ -126,10 +126,11 @@ pub fn settings_schema() -> &'static [SettingDef] {
         },
         SettingDef {
             path: &[Lit("editor"), Lit("minimap")],
-            shape: ValueShape::Bool,
-            doc: "Whether editor panes under stoatty show the right-edge minimap \
-                  strip.",
-            default: "true",
+            shape: ValueShape::Enum(&["off", "per_pane", "single"]),
+            doc: "Minimap strip mode for editor panes under stoatty (off, \
+                  per_pane, or single window-right strip). `false` means off, \
+                  `true` means per_pane.",
+            default: "per_pane",
         },
         SettingDef {
             path: &[Lit("ui"), Lit("inactive_dim")],

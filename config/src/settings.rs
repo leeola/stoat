@@ -31,6 +31,17 @@ pub enum LineNumbers {
     Relative,
 }
 
+/// Which minimap strips editor panes show under stoatty. `Off` hides them.
+/// `PerPane` gives each split pane its own right-edge strip. `Single` shows one
+/// window-right strip that follows the focused pane. `None` on the setting falls
+/// back to `PerPane`, and `false`/`true` are accepted as `Off`/`PerPane`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinimapMode {
+    Off,
+    PerPane,
+    Single,
+}
+
 /// Top-level resolved settings struct.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Settings {
@@ -69,10 +80,11 @@ pub struct Settings {
     /// [`LineNumbers::Relative`]. Set `editor.line_numbers = relative | absolute
     /// | off;` in stcfg (`false` is accepted as `off`, `true` as `relative`).
     pub editor_line_numbers: Option<LineNumbers>,
-    /// Whether editor panes under stoatty show the right-edge minimap strip.
-    /// `None` falls back to enabled. Set `editor.minimap = false;` in stcfg to
-    /// hide it. The `:minimap` command toggles it at runtime.
-    pub editor_minimap: Option<bool>,
+    /// The minimap strip mode for editor panes under stoatty, one of `off`,
+    /// `per_pane`, or `single`. `None` falls back to [`MinimapMode::PerPane`].
+    /// Set `editor.minimap = single;` in stcfg (`false` means `off`, `true`
+    /// means `per_pane`). The `:minimap` command toggles visibility at runtime.
+    pub editor_minimap: Option<MinimapMode>,
     /// Fraction an unfocused pane's colors blend toward the theme background,
     /// so an inactive split reads as dimmed. `None` falls back to 0.25; `0`
     /// disables dimming. Set `ui.inactive_dim = 0.4;` in stcfg. The raw value
@@ -263,8 +275,19 @@ impl Settings {
                 }
             },
             ["editor", "minimap"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.editor_minimap = Some(b);
+                let mode = match &setting.value.node {
+                    Value::Bool(false) => Some(MinimapMode::Off),
+                    Value::Bool(true) => Some(MinimapMode::PerPane),
+                    Value::String(s) | Value::Ident(s) => match s.as_str() {
+                        "off" => Some(MinimapMode::Off),
+                        "per_pane" => Some(MinimapMode::PerPane),
+                        "single" => Some(MinimapMode::Single),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(m) = mode {
+                    self.editor_minimap = Some(m);
                 }
             },
             ["ui", "inactive_dim"] => {
@@ -432,10 +455,34 @@ mod tests {
 
     #[test]
     fn from_config_extracts_editor_minimap() {
-        let minimap = |src: &str| Settings::from_config(&parse_ok(src)).editor_minimap;
-        assert_eq!(minimap("on init { editor.minimap = false; }"), Some(false));
-        assert_eq!(minimap("on init { editor.minimap = true; }"), Some(true));
-        assert_eq!(minimap("on init { }"), None, "absent falls back to enabled");
+        let mode = |src: &str| Settings::from_config(&parse_ok(src)).editor_minimap;
+        assert_eq!(
+            mode("on init { editor.minimap = off; }"),
+            Some(MinimapMode::Off)
+        );
+        assert_eq!(
+            mode("on init { editor.minimap = per_pane; }"),
+            Some(MinimapMode::PerPane)
+        );
+        assert_eq!(
+            mode("on init { editor.minimap = single; }"),
+            Some(MinimapMode::Single)
+        );
+        assert_eq!(
+            mode("on init { editor.minimap = false; }"),
+            Some(MinimapMode::Off),
+            "false is an alias for off"
+        );
+        assert_eq!(
+            mode("on init { editor.minimap = true; }"),
+            Some(MinimapMode::PerPane),
+            "true is an alias for per_pane"
+        );
+        assert_eq!(
+            mode("on init { }"),
+            None,
+            "absent falls back at the consumer"
+        );
     }
 
     #[test]

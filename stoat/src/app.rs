@@ -45,7 +45,7 @@ use std::{
     sync::Arc,
 };
 use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
-use stoat_config::{LineNumbers, Settings, Spanned, ThemeBlock};
+use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::{Anchor, Bias, IndentStyle, Selection};
@@ -1350,14 +1350,25 @@ impl Stoat {
         self.version_info = info;
     }
 
-    /// Whether the minimap strip is currently shown.
+    /// The active minimap mode, resolving the runtime visibility override
+    /// against the `editor.minimap` setting.
     ///
-    /// The runtime [`Self::minimap_override`] wins, else the `editor.minimap`
-    /// setting, else enabled.
+    /// [`Self::minimap_override`] `Some(false)` forces [`MinimapMode::Off`].
+    /// `Some(true)` shows the setting's mode, falling back to
+    /// [`MinimapMode::PerPane`] when the setting itself is `Off`. With no
+    /// override the setting wins, defaulting to [`MinimapMode::PerPane`].
+    pub(crate) fn minimap_mode(&self) -> MinimapMode {
+        let setting = self.settings.editor_minimap.unwrap_or(MinimapMode::PerPane);
+        match self.minimap_override {
+            Some(false) => MinimapMode::Off,
+            Some(true) if setting == MinimapMode::Off => MinimapMode::PerPane,
+            _ => setting,
+        }
+    }
+
+    /// Whether any minimap strip is currently shown.
     pub(crate) fn minimap_enabled(&self) -> bool {
-        self.minimap_override
-            .or(self.settings.editor_minimap)
-            .unwrap_or(true)
+        self.minimap_mode() != MinimapMode::Off
     }
 
     /// Flip the minimap's visibility for the session, overriding the setting.
@@ -10416,7 +10427,7 @@ mod tests {
         // minimap off so no strip declare rides the scene. Both keep the frame
         // genuinely widget-free.
         h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
-        h.stoat.settings.editor_minimap = Some(false);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
 
         let root = std::path::PathBuf::from("/scene");
         let path = root.join("a.txt");
