@@ -54,7 +54,7 @@ pub(crate) fn render_global_search(
 
     let path_w = 30u16;
     let pos_w = 12u16;
-    let path_x = inner.x;
+    let path_x = inner.x + 1;
     let pos_x = path_x + path_w + 1;
     let snippet_x = pos_x + pos_w + 1;
     let snippet_w = inner.width.saturating_sub(snippet_x - inner.x);

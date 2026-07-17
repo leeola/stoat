@@ -32,6 +32,7 @@ pub(crate) fn render_hints(
     let gap = 3;
     let inter_col_gap = 3;
     let border_pad = 2;
+    let content_pad = 2;
     let extra_rows = footer.map(|_| 2).unwrap_or(0);
 
     // Rows that fit vertically inside the box. The layout grows into extra
@@ -63,7 +64,7 @@ pub(crate) fn render_hints(
     let title_width = mode.len() + 4;
     let footer_width = footer.map(|f| f.text.len()).unwrap_or(0);
     let content_width = columns_width.max(title_width).max(footer_width);
-    let box_width = (content_width + border_pad) as u16;
+    let box_width = (content_width + border_pad + content_pad) as u16;
     let box_height = (max_col_rows + border_pad + extra_rows) as u16;
 
     if box_width > area.width || box_height > area.height {
@@ -95,7 +96,7 @@ pub(crate) fn render_hints(
             .and_then(|s| s.bg),
     );
 
-    let mut col_x = inner.x;
+    let mut col_x = inner.x + 1;
     for &(chunk, key_width, action_width) in &columns {
         for (i, (key, action)) in chunk.iter().enumerate() {
             let row = inner.y + i as u16;
@@ -148,7 +149,7 @@ pub(crate) fn render_hints(
         if text_row < inner.y + inner.height {
             crate::render::chrome::text(
                 buf,
-                inner.x,
+                inner.x + 1,
                 text_row,
                 end_x,
                 &footer.text,

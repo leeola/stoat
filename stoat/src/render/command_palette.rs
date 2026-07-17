@@ -256,7 +256,7 @@ fn render_palette_free_arg(
         let hint = format!("{}  {}", param.name, param.description);
         write_str_clipped(
             buf,
-            inner.x,
+            inner.x + 1,
             body_top,
             &hint,
             text_style,
@@ -267,13 +267,16 @@ fn render_palette_free_arg(
     let doc_top = body_top + 2;
     if doc_top < body_bottom {
         let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
-        let doc_lines = wrap_text(entry.def.long_desc(), inner.width as usize);
+        let doc_lines = wrap_text(
+            entry.def.long_desc(),
+            inner.width.saturating_sub(1) as usize,
+        );
         for (i, line) in doc_lines
             .iter()
             .take((body_bottom - doc_top) as usize)
             .enumerate()
         {
-            write_str(buf, inner.x, doc_top + i as u16, line, doc_style);
+            write_str(buf, inner.x + 1, doc_top + i as u16, line, doc_style);
         }
     }
 }
@@ -418,11 +421,11 @@ fn render_palette_filter(
         );
         let doc_lines = filtered
             .get(selected)
-            .map(|e| wrap_text(e.def.long_desc(), inner.width as usize))
+            .map(|e| wrap_text(e.def.long_desc(), inner.width.saturating_sub(1) as usize))
             .unwrap_or_default();
         let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
         for (i, line) in doc_lines.iter().take(doc.height as usize).enumerate() {
-            write_str(buf, doc.x, doc.y + i as u16, line, doc_style);
+            write_str(buf, doc.x + 1, doc.y + i as u16, line, doc_style);
         }
     }
 }
