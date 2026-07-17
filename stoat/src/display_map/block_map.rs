@@ -17,7 +17,7 @@ use std::{
     ops::Deref,
     sync::{
         atomic::{AtomicUsize, Ordering::SeqCst},
-        Arc,
+        Arc, OnceLock,
     },
 };
 use stoat_text::{
@@ -213,6 +213,13 @@ pub struct CustomBlock {
     pub diff_status: Option<DiffHunkStatus>,
     pub style: BlockStyle,
     pub priority: usize,
+    /// Memoized default-context render, filled on first line access.
+    ///
+    /// The per-row line accessors render with the constant
+    /// [`Block::default_ctx`], and this block's closure is pure over the data it
+    /// captured at construction (the diff and text blocks ignore the context),
+    /// so the render is invariant and cached once instead of re-run per line.
+    rendered: OnceLock<Arc<Vec<Line<'static>>>>,
 }
 
 impl std::fmt::Debug for CustomBlock {
@@ -294,16 +301,32 @@ impl Block {
         }
     }
 
+    /// Rendered lines for this block, memoized on custom blocks.
+    ///
+    /// Custom blocks render with the constant [`Self::default_ctx`], so the
+    /// output never varies between calls. The diff and text block closures these
+    /// serve are pure over the lines captured at construction and ignore the
+    /// block context, so caching the first render is exact. Per-row callers
+    /// (`get_line`, `line_len`, `write_line`, `longest_block_line`) then reuse one
+    /// render instead of re-running the closure for every line. Non-custom blocks
+    /// carry no rendered content here.
+    fn rendered_lines_memo(&self) -> Arc<Vec<Line<'static>>> {
+        match self {
+            Block::Custom(b) => b
+                .rendered
+                .get_or_init(|| Arc::new((b.render)(&self.default_ctx())))
+                .clone(),
+            _ => Arc::new(Vec::new()),
+        }
+    }
+
     pub fn get_line(&self, index: u32) -> String {
         match self {
-            Block::Custom(b) => {
-                let ctx = self.default_ctx();
-                let lines = (b.render)(&ctx);
-                lines
-                    .get(index as usize)
-                    .map(|l| l.to_string())
-                    .unwrap_or_default()
-            },
+            Block::Custom(_) => self
+                .rendered_lines_memo()
+                .get(index as usize)
+                .map(|l| l.to_string())
+                .unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -561,6 +584,7 @@ impl BlockMap {
                 diff_status: props.diff_status,
                 style: props.style,
                 priority: props.priority,
+                rendered: OnceLock::new(),
             });
             let ix = self
                 .custom_blocks
@@ -1715,10 +1739,10 @@ pub fn balancing_block(
 fn longest_block_line(block: &Block) -> (u32, u32) {
     let mut best_row = 0u32;
     let mut best_chars = 0u32;
-    for i in 0..block.height() {
-        let len = block.line_len(i);
+    for (i, line) in block.rendered_lines_memo().iter().enumerate() {
+        let len = line.to_string().len() as u32;
         if len > best_chars {
-            best_row = i;
+            best_row = i as u32;
             best_chars = len;
         }
     }
@@ -1807,6 +1831,47 @@ mod tests {
             content.lines().map(String::from).collect(),
             BlockStyle::Fixed,
         )
+    }
+
+    #[test]
+    fn custom_block_render_memoized() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let props = BlockProperties::from_lines_fn(
+            BlockPlacement::Below(0),
+            3,
+            {
+                let calls = calls.clone();
+                Arc::new(move |i| {
+                    calls.fetch_add(1, SeqCst);
+                    format!("line {i}")
+                })
+            },
+            BlockStyle::Fixed,
+        );
+        let block = super::Block::Custom(Arc::new(super::CustomBlock {
+            id: super::CustomBlockId(0),
+            placement: props.placement,
+            height: props.height,
+            render: props.render,
+            diff_status: props.diff_status,
+            style: props.style,
+            priority: props.priority,
+            rendered: std::sync::OnceLock::new(),
+        }));
+
+        for _ in 0..3 {
+            assert_eq!(block.get_line(0), "line 0");
+            assert_eq!(block.get_line(2), "line 2");
+            assert_eq!(block.line_len(1), "line 1".len() as u32);
+        }
+
+        assert_eq!(
+            calls.load(SeqCst),
+            3,
+            "the render closure must run once, not per line access"
+        );
     }
 
     #[test]
