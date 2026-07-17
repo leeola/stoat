@@ -6654,11 +6654,11 @@ fn minimap_line_tokens(
         snapshot.semantic_token_highlights(),
         snapshot.lsp_token_highlights(),
     ] {
-        let Some((spans, interner)) = highlights.get(&buffer_id) else {
+        let Some(channel) = highlights.get(&buffer_id) else {
             continue;
         };
-        for span in spans.iter() {
-            let class = interner[span.style]
+        for span in channel.tokens.iter() {
+            let class = channel.interner[span.style]
                 .foreground
                 .map_or(0, |fg| class_table.class_of_color(fg));
             if class == 0 {

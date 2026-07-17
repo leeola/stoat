@@ -24,10 +24,10 @@ pub use crease_map::{
 };
 pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
 pub use highlights::{
-    CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId, ChunkReplacement,
-    HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId, HighlightStyleInterner,
-    HighlightedChunk, Highlights, InlayHighlight, InlayHighlights, SemanticTokenHighlight,
-    SemanticTokensHighlights, TextHighlights,
+    BufferSemanticTokens, CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId,
+    ChunkReplacement, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
+    HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight, InlayHighlights,
+    SemanticTokenHighlight, SemanticTokensHighlights, TextHighlights,
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
@@ -428,7 +428,11 @@ impl DisplayMap {
         tokens: Arc<[SemanticTokenHighlight]>,
         interner: Arc<HighlightStyleInterner>,
     ) {
-        Arc::make_mut(&mut self.semantic_token_highlights).insert(buffer_id, (tokens, interner));
+        let channel = {
+            let snapshot = self.multi_buffer.snapshot();
+            BufferSemanticTokens::new(tokens, interner, |a| snapshot.resolve_anchor(a))
+        };
+        Arc::make_mut(&mut self.semantic_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;
     }
 
@@ -446,7 +450,11 @@ impl DisplayMap {
         tokens: Arc<[SemanticTokenHighlight]>,
         interner: Arc<HighlightStyleInterner>,
     ) {
-        Arc::make_mut(&mut self.lsp_token_highlights).insert(buffer_id, (tokens, interner));
+        let channel = {
+            let snapshot = self.multi_buffer.snapshot();
+            BufferSemanticTokens::new(tokens, interner, |a| snapshot.resolve_anchor(a))
+        };
+        Arc::make_mut(&mut self.lsp_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;
     }
 

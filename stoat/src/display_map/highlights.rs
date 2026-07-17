@@ -152,8 +152,50 @@ pub struct SemanticTokenHighlight {
     pub style: HighlightStyleId,
 }
 
-pub type SemanticTokensHighlights =
-    Arc<HashMap<BufferId, (Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)>>;
+/// One buffer's semantic tokens for a highlight channel, plus a search index
+/// that bounds the per-frame endpoint build to the viewport.
+///
+/// `tokens` is sorted by `range.start`. `prefix_max_end[i]` is the index of the
+/// token with the greatest resolved end among `0..=i`. Because anchor
+/// resolution preserves relative order across edits, that argmax never changes
+/// once computed, so it stays valid for every later frame without a rebuild.
+#[derive(Debug, Clone)]
+pub struct BufferSemanticTokens {
+    pub tokens: Arc<[SemanticTokenHighlight]>,
+    pub interner: Arc<HighlightStyleInterner>,
+    prefix_max_end: Arc<[u32]>,
+}
+
+impl BufferSemanticTokens {
+    /// Build the channel, resolving each token's end once to fill
+    /// `prefix_max_end`. `resolve` need only be order-consistent with the
+    /// resolver used at query time. Any buffer snapshot satisfies that, since
+    /// resolution preserves relative order.
+    pub fn new(
+        tokens: Arc<[SemanticTokenHighlight]>,
+        interner: Arc<HighlightStyleInterner>,
+        resolve: impl Fn(&Anchor) -> usize,
+    ) -> Self {
+        let mut prefix_max_end = Vec::with_capacity(tokens.len());
+        let mut max_end = 0;
+        let mut max_idx = 0;
+        for (i, token) in tokens.iter().enumerate() {
+            let end = resolve(&token.range.end);
+            if i == 0 || end > max_end {
+                max_end = end;
+                max_idx = i as u32;
+            }
+            prefix_max_end.push(max_idx);
+        }
+        Self {
+            tokens,
+            interner,
+            prefix_max_end: Arc::from(prefix_max_end),
+        }
+    }
+}
+
+pub type SemanticTokensHighlights = Arc<HashMap<BufferId, BufferSemanticTokens>>;
 
 pub type InlayHighlights =
     BTreeMap<HighlightKey, BTreeMap<InlayId, (HighlightStyle, InlayHighlight)>>;
@@ -390,14 +432,16 @@ pub fn create_highlight_endpoints(
     endpoints
 }
 
-/// Emit start/end endpoints for one semantic-token channel at `layer`.
+/// Emit start/end endpoints for one semantic-token channel at `layer`, bounding
+/// the walk to the tokens that can overlap `range`.
 ///
-/// Tokens are sorted by `range.start`, not `range.end`, so an end-keyed binary
-/// search would drop enclosing tokens whose nested children end before the
-/// viewport. Walk the whole slice and skip tokens that end at or before it. The
-/// `s >= range.end` break still holds because `start` is the sort key. Each token
-/// gets a unique slot so nested captures (e.g. an escape inside a string) occupy
-/// distinct entries of the merger's active map.
+/// Tokens are start-sorted, so a `partition_point` caps the walk at the first
+/// token starting past the viewport. The lower bound reads the channel's
+/// `prefix_max_end` index, so an enclosing token whose nested children end
+/// before the viewport is still emitted while tokens that end before it are
+/// skipped without resolving them. Each token keeps a unique slot so nested
+/// captures (e.g. an escape inside a string) occupy distinct entries of the
+/// merger's active map.
 fn push_semantic_endpoints(
     endpoints: &mut Vec<HighlightEndpoint>,
     semantic: &SemanticTokensHighlights,
@@ -405,25 +449,45 @@ fn push_semantic_endpoints(
     range: &Range<usize>,
     resolve: &impl Fn(&Anchor) -> usize,
 ) {
-    for (_buffer_id, (tokens, interner)) in semantic.iter() {
-        for (i, token) in tokens.iter().enumerate() {
+    for (_buffer_id, channel) in semantic.iter() {
+        let tokens = &channel.tokens;
+        let prefix_max_end = &channel.prefix_max_end;
+
+        let hi = tokens.partition_point(|token| resolve(&token.range.start) < range.end);
+
+        // prefix_max_end[i] indexes the greatest-end token in 0..=i, and that
+        // end is non-decreasing in i, so the first i whose max end passes
+        // range.start is the earliest token that can reach the viewport. Every
+        // token before it ends at or before range.start.
+        let lo = {
+            let (mut left, mut right) = (0, hi);
+            while left < right {
+                let mid = left + (right - left) / 2;
+                let max_end = resolve(&tokens[prefix_max_end[mid] as usize].range.end);
+                if max_end > range.start {
+                    right = mid;
+                } else {
+                    left = mid + 1;
+                }
+            }
+            left
+        };
+
+        for (offset, token) in tokens[lo..hi].iter().enumerate() {
             let s = resolve(&token.range.start);
             let e = resolve(&token.range.end);
-            if s >= range.end {
-                break;
-            }
             if s == e {
                 continue;
             }
             if e <= range.start {
                 continue;
             }
-            let key = HighlightKey::new(layer, i as u32);
+            let key = HighlightKey::new(layer, (lo + offset) as u32);
             endpoints.push(HighlightEndpoint {
                 offset: s,
                 is_start: true,
                 key,
-                style: Some(interner[token.style].clone()),
+                style: Some(channel.interner[token.style].clone()),
             });
             endpoints.push(HighlightEndpoint {
                 offset: e,
@@ -765,7 +829,10 @@ mod tests {
 
     #[test]
     fn nested_semantic_tokens_stack_per_slot() {
-        use super::{HighlightStyleInterner, SemanticTokenHighlight, SemanticTokensHighlights};
+        use super::{
+            BufferSemanticTokens, HighlightStyleInterner, SemanticTokenHighlight,
+            SemanticTokensHighlights,
+        };
         use crate::buffer::BufferId;
 
         let text = "abcdefghij";
@@ -794,7 +861,10 @@ mod tests {
         ]);
 
         let mut semantic_map = HashMap::new();
-        semantic_map.insert(BufferId::new(0), (tokens, Arc::new(interner)));
+        semantic_map.insert(
+            BufferId::new(0),
+            BufferSemanticTokens::new(tokens, Arc::new(interner), |a: &Anchor| a.offset as usize),
+        );
         let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
         let text_hl: TextHighlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
@@ -831,8 +901,8 @@ mod tests {
     #[test]
     fn enclosing_semantic_token_styles_scrolled_viewport() {
         use super::{
-            BufferChunks, HighlightEndpoint, HighlightStyleInterner, SemanticTokenHighlight,
-            SemanticTokensHighlights,
+            BufferChunks, BufferSemanticTokens, HighlightEndpoint, HighlightStyleInterner,
+            SemanticTokenHighlight, SemanticTokensHighlights,
         };
         use crate::buffer::BufferId;
         use stoat_text::Rope;
@@ -875,7 +945,10 @@ mod tests {
         ]);
 
         let mut semantic_map = HashMap::new();
-        semantic_map.insert(BufferId::new(0), (tokens, Arc::new(interner)));
+        semantic_map.insert(
+            BufferId::new(0),
+            BufferSemanticTokens::new(tokens, Arc::new(interner), |a: &Anchor| a.offset as usize),
+        );
         let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
         let text_hl: TextHighlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
@@ -891,6 +964,52 @@ mod tests {
             .expect("enclosing token must style the scrolled viewport");
         assert_eq!(style.foreground, Some(Color::Blue));
         assert_eq!(style.bold, Some(true));
+    }
+
+    #[test]
+    fn bottom_viewport_emits_only_overlapping_endpoints() {
+        use super::{
+            BufferSemanticTokens, HighlightStyleInterner, SemanticTokenHighlight,
+            SemanticTokensHighlights,
+        };
+        use crate::buffer::BufferId;
+
+        let style = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let mut interner = HighlightStyleInterner::default();
+        let id = interner.intern(style);
+
+        // Ten disjoint 4-wide tokens marching down a 100-byte file.
+        let tokens: Arc<[SemanticTokenHighlight]> = Arc::from(
+            (0..10)
+                .map(|k| SemanticTokenHighlight {
+                    range: anchor(k * 10)..anchor(k * 10 + 4),
+                    style: id,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let mut semantic_map = HashMap::new();
+        semantic_map.insert(
+            BufferId::new(0),
+            BufferSemanticTokens::new(tokens, Arc::new(interner), |a: &Anchor| a.offset as usize),
+        );
+        let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
+        let text_hl: TextHighlights = Arc::new(HashMap::new());
+        let resolve = |a: &Anchor| a.offset as usize;
+
+        // A viewport over the last token only. Every earlier token ends at or
+        // before byte 84, so none may contribute an endpoint.
+        let eps = create_highlight_endpoints(&(92..100), &text_hl, Some(&semantic), None, &resolve);
+
+        let offsets: Vec<usize> = eps.iter().map(|e| e.offset).collect();
+        assert_eq!(
+            offsets,
+            vec![90, 94],
+            "only the token overlapping the bottom viewport is emitted"
+        );
     }
 
     #[test]

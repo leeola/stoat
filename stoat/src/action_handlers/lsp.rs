@@ -7445,7 +7445,7 @@ mod tests {
         snapshot
             .lsp_token_highlights()
             .values()
-            .map(|(tokens, _)| tokens.len())
+            .map(|channel| channel.tokens.len())
             .sum()
     }
 
@@ -7483,7 +7483,7 @@ mod tests {
         snapshot
             .semantic_token_highlights()
             .values()
-            .map(|(tokens, _)| tokens.len())
+            .map(|channel| channel.tokens.len())
             .sum()
     }
 
