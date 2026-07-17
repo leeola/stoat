@@ -20,6 +20,16 @@ use std::sync::Arc;
 use stoat_text::{cursor_offset, Point};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
+/// Fraction a changed line's background wash blends toward the editor
+/// background, leaving 10% of the diff color. Light enough that code stays
+/// readable through the wash that marks the whole line.
+const LINE_TINT: f32 = 0.90;
+
+/// Fraction an intraline change span's wash blends toward the background,
+/// leaving 28% of the diff color. Stronger than [`LINE_TINT`] so the exact
+/// changed chars stand out within an already-washed line.
+const SPAN_TINT: f32 = 0.72;
+
 pub(crate) fn render_review(
     editor: &mut EditorState,
     inner: Rect,
@@ -122,9 +132,10 @@ pub(crate) fn paint_diff_rows(
     let dim_style = theme.get(s::DIFF_CONTEXT);
     let del_style = theme.get(s::DIFF_DELETED);
 
-    let base_underlines = snapshot
+    let tints = resolve_diff_tints(theme);
+    let base_changes = snapshot
         .diff_map()
-        .map(|dm| dm.base_underline_spans())
+        .map(|dm| dm.base_change_spans())
         .unwrap_or_default();
 
     let mut base_line = base_line_at(snapshot, scroll_row);
@@ -151,10 +162,18 @@ pub(crate) fn paint_diff_rows(
                     .diff_map()
                     .and_then(|dm| dm.base_highlights_for_line(base_line))
                     .unwrap_or(&[]);
-                let underlines = base_underlines
+                let changes = base_changes
                     .get(&base_line)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
+                if let Some(t) = tints.as_ref() {
+                    let line_tint = if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Moved)) {
+                        t.moved_line
+                    } else {
+                        t.removed_line
+                    };
+                    fill_line_tint(buf, left_text_x, y, left_content_w, line_tint);
+                }
                 paint_base_row(
                     buf,
                     left_text_x,
@@ -163,13 +182,25 @@ pub(crate) fn paint_diff_rows(
                     left_content_w,
                     token_spans,
                     del_style,
-                    underlines,
+                    changes,
+                    tints.as_ref().map(|t| t.removed_span),
+                    tints.as_ref().map(|t| t.moved_span),
                 );
                 base_line += 1;
             },
             BlockRowKind::BufferRow { buffer_row } => {
                 render_side_num(buf, right_num_x, y, buffer_row + 1, dim_style);
-                let underlines = buffer_row_underlines(snapshot, buffer_row);
+                let changes = buffer_row_change_spans(snapshot, buffer_row);
+                if let Some(t) = tints.as_ref() {
+                    let line_tint = match snapshot.line_diff_status(buffer_row) {
+                        DiffStatus::Added | DiffStatus::Modified => Some(t.added_line),
+                        DiffStatus::Moved => Some(t.moved_line),
+                        DiffStatus::Unchanged => None,
+                    };
+                    if let Some(tint) = line_tint {
+                        fill_line_tint(buf, right_text_x, y, right_content_w, tint);
+                    }
+                }
                 paint_highlighted_row(
                     snapshot,
                     display_row,
@@ -178,7 +209,9 @@ pub(crate) fn paint_diff_rows(
                     right_content_w,
                     buf,
                     fallback_style,
-                    &underlines,
+                    &changes,
+                    tints.as_ref().map(|t| t.added_span),
+                    tints.as_ref().map(|t| t.moved_span),
                     &row_endpoints,
                 );
                 if let Some(staged) = snapshot
@@ -204,11 +237,87 @@ pub(crate) fn paint_diff_rows(
                         token_spans,
                         dim_style,
                         &[],
+                        None,
+                        None,
                     );
                     base_line += 1;
                 }
             },
         }
+    }
+}
+
+/// Background washes marking diff changes across [`paint_diff_rows`]' two
+/// columns, resolved once per paint from the theme's diff colors blended toward
+/// the editor background.
+///
+/// A line-level wash ([`LINE_TINT`]) fills a changed line and a stronger
+/// span-level wash ([`SPAN_TINT`]) marks the exact changed chars within it.
+/// `added` and `removed` key the buffer (right) and base (left) sides. `moved`
+/// keys relocated content on either side.
+struct DiffTints {
+    added_line: [u8; 3],
+    removed_line: [u8; 3],
+    moved_line: [u8; 3],
+    added_span: [u8; 3],
+    removed_span: [u8; 3],
+    moved_span: [u8; 3],
+}
+
+/// Resolve the six diff-change washes from the theme, or `None` when the
+/// background or any diff color is not an RGB color.
+///
+/// A `None` disables tinting for the whole frame, so the diff view falls back to
+/// [`Modifier::UNDERLINED`] on change spans and skips line washes, keeping
+/// indexed-color themes marking changes.
+fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
+    use crate::theme::scope as s;
+    let bg = style_rgb(theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg))?;
+    let added = style_rgb(theme.get(s::DIFF_ADDED).fg)?;
+    let removed = style_rgb(theme.get(s::DIFF_DELETED).fg)?;
+    let moved = style_rgb(theme.get(s::DIFF_MOVED).fg)?;
+    Some(DiffTints {
+        added_line: dim_rgb(added, bg, LINE_TINT),
+        removed_line: dim_rgb(removed, bg, LINE_TINT),
+        moved_line: dim_rgb(moved, bg, LINE_TINT),
+        added_span: dim_rgb(added, bg, SPAN_TINT),
+        removed_span: dim_rgb(removed, bg, SPAN_TINT),
+        moved_span: dim_rgb(moved, bg, SPAN_TINT),
+    })
+}
+
+/// Fill `cols` content cells from `start_x` with a background wash, leaving each
+/// symbol untouched so text painted afterward keeps the wash. Ratatui's
+/// `set_style` patches only the fields a style sets, and token styles set no
+/// background.
+fn fill_line_tint(buf: &mut Buffer, start_x: u16, y: u16, cols: usize, tint: [u8; 3]) {
+    let color = Color::Rgb(tint[0], tint[1], tint[2]);
+    for i in 0..cols {
+        let x = start_x + i as u16;
+        if x >= buf.area.x + buf.area.width {
+            break;
+        }
+        buf[(x, y)].set_bg(color);
+    }
+}
+
+/// Wash a cell `style` for a change span of `kind`. A moved span takes
+/// `moved_span_tint` and any other kind takes the side wash `side_span_tint`. A
+/// `None` tint falls back to [`Modifier::UNDERLINED`] so non-RGB themes still
+/// mark the span.
+fn apply_span_tint(
+    style: Style,
+    kind: &ChangeKind,
+    side_span_tint: Option<[u8; 3]>,
+    moved_span_tint: Option<[u8; 3]>,
+) -> Style {
+    let tint = match kind {
+        ChangeKind::Moved => moved_span_tint,
+        _ => side_span_tint,
+    };
+    match tint {
+        Some([r, g, b]) => style.bg(Color::Rgb(r, g, b)),
+        None => style.add_modifier(Modifier::UNDERLINED),
     }
 }
 
@@ -219,9 +328,11 @@ pub(crate) fn paint_diff_rows(
 /// span fall back to `fallback` (the deletion or context color), so the diff
 /// tint still fills the gaps between tokens.
 ///
-/// `underlines` mark the changed chars of a modified base line, as line-local
-/// base byte ranges. A byte inside one gains [`Modifier::UNDERLINED`] over its
-/// color.
+/// `change_spans` mark the changed chars of a modified or moved base line, as
+/// line-local base byte ranges tagged by [`ChangeKind`]. A byte inside one takes
+/// the span wash as its background. A replaced span takes `side_span_tint` (the
+/// removed color on this base side) and a moved span takes `moved_span_tint`. A
+/// `None` tint (a non-RGB theme) falls back to [`Modifier::UNDERLINED`].
 #[allow(clippy::too_many_arguments)]
 fn paint_base_row(
     buf: &mut Buffer,
@@ -231,19 +342,21 @@ fn paint_base_row(
     max_cols: usize,
     token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
     fallback: Style,
-    underlines: &[std::ops::Range<usize>],
+    change_spans: &[(std::ops::Range<usize>, ChangeKind)],
+    side_span_tint: Option<[u8; 3]>,
+    moved_span_tint: Option<[u8; 3]>,
 ) {
     debug_assert!(
         token_spans.is_sorted_by_key(|(range, _)| range.start),
         "token_spans must be start-sorted for the monotonic cursor"
     );
     debug_assert!(
-        underlines.is_sorted_by_key(|range| range.start),
-        "underlines must be start-sorted for the monotonic cursor"
+        change_spans.is_sorted_by_key(|(range, _)| range.start),
+        "change_spans must be start-sorted for the monotonic cursor"
     );
 
     let mut token_cursor = 0;
-    let mut underline_cursor = 0;
+    let mut span_cursor = 0;
     for (col, (byte_idx, ch)) in text.char_indices().enumerate() {
         if col >= max_cols {
             break;
@@ -264,14 +377,16 @@ fn paint_base_row(
             _ => fallback,
         };
 
-        while underlines
-            .get(underline_cursor)
-            .is_some_and(|r| r.end <= byte_idx)
+        while change_spans
+            .get(span_cursor)
+            .is_some_and(|(r, _)| r.end <= byte_idx)
         {
-            underline_cursor += 1;
+            span_cursor += 1;
         }
-        if matches!(underlines.get(underline_cursor), Some(range) if range.start <= byte_idx) {
-            style = style.add_modifier(Modifier::UNDERLINED);
+        if let Some((range, kind)) = change_spans.get(span_cursor)
+            && range.start <= byte_idx
+        {
+            style = apply_span_tint(style, kind, side_span_tint, moved_span_tint);
         }
 
         buf[(x, y)].set_char(ch).set_style(style);
@@ -312,10 +427,13 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// Paint one display row's syntax-highlighted chunks into a column starting at
 /// `start_x`, clamped to `max_cols` and the buffer's right edge.
 ///
-/// `underlines` mark the changed chars of a modified row, as display-column
-/// ranges. A cell whose column falls in one gains [`Modifier::UNDERLINED`] over
-/// its token style. Columns, not byte offsets, are used because the chunks
-/// expand tabs, so the counter tracks display cells.
+/// `change_spans` mark the changed chars of a modified or moved row, as
+/// display-column ranges tagged by [`ChangeKind`]. A cell whose column falls in
+/// one takes the span wash as its background. A replaced span takes
+/// `side_span_tint` (the added color on this buffer side) and a moved span takes
+/// `moved_span_tint`; a `None` tint (a non-RGB theme) falls back to
+/// [`Modifier::UNDERLINED`]. Columns, not byte offsets, are used because the
+/// chunks expand tabs, so the counter tracks display cells.
 #[allow(clippy::too_many_arguments)]
 fn paint_highlighted_row(
     snapshot: &DisplaySnapshot,
@@ -325,7 +443,9 @@ fn paint_highlighted_row(
     max_cols: usize,
     buf: &mut Buffer,
     fallback_style: Style,
-    underlines: &[std::ops::Range<usize>],
+    change_spans: &[(std::ops::Range<usize>, ChangeKind)],
+    side_span_tint: Option<[u8; 3]>,
+    moved_span_tint: Option<[u8; 3]>,
     endpoints: &Arc<[HighlightEndpoint]>,
 ) {
     let mut col = 0usize;
@@ -345,10 +465,9 @@ fn paint_highlighted_row(
             if x >= buf.area.x + buf.area.width {
                 return;
             }
-            let cell_style = if underlines.iter().any(|range| range.contains(&col)) {
-                style.add_modifier(Modifier::UNDERLINED)
-            } else {
-                style
+            let cell_style = match change_spans.iter().find(|(range, _)| range.contains(&col)) {
+                Some((_, kind)) => apply_span_tint(style, kind, side_span_tint, moved_span_tint),
+                None => style,
             };
             buf[(x, y)].set_char(ch).set_style(cell_style);
             col += 1;
@@ -356,18 +475,18 @@ fn paint_highlighted_row(
     }
 }
 
-/// Display-column ranges to underline on buffer `buffer_row` in the diff view's
-/// right column, from the [`ChangeKind::Replaced`] buffer spans of any hunk
-/// covering the row.
+/// Display-column ranges, each tagged with its [`ChangeKind`], to wash on buffer
+/// `buffer_row` in the diff view's right column, from the buffer spans of any
+/// hunk covering the row.
 ///
 /// The token detail's byte ranges are absolute buffer offsets. Each is clamped
 /// to the row and mapped through [`DisplaySnapshot::buffer_to_display`], so tab
 /// expansion in the painted chunks stays aligned. Empty when no hunk refines the
 /// row.
-fn buffer_row_underlines(
+fn buffer_row_change_spans(
     snapshot: &DisplaySnapshot,
     buffer_row: u32,
-) -> Vec<std::ops::Range<usize>> {
+) -> Vec<(std::ops::Range<usize>, ChangeKind)> {
     let Some(diff_map) = snapshot.diff_map() else {
         return Vec::new();
     };
@@ -387,9 +506,6 @@ fn buffer_row_underlines(
             continue;
         };
         for span in &detail.buffer_spans {
-            if span.kind != ChangeKind::Replaced {
-                continue;
-            }
             let start = span.byte_range.start.max(line_start);
             let end = span.byte_range.end.min(line_end);
             if start >= end {
@@ -399,7 +515,7 @@ fn buffer_row_underlines(
                 .buffer_to_display(rope.offset_to_point(start))
                 .column as usize;
             let end_col = snapshot.buffer_to_display(rope.offset_to_point(end)).column as usize;
-            ranges.push(start_col..end_col);
+            ranges.push((start_col..end_col, span.kind.clone()));
         }
     }
     ranges
@@ -1023,7 +1139,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::{BufferId, TextBuffer},
-        diff_map::DiffMap,
+        diff_map::{ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         theme::Theme,
     };
     use std::sync::{Arc, RwLock};
@@ -1098,6 +1214,33 @@ mod tests {
         let mut editor = EditorState::new(BufferId::new(0), shared, executor);
         editor.set_diff_view(true);
         editor
+    }
+
+    /// A diff-view editor over `text` with a hand-built diff map, for hunk shapes
+    /// the structural differ will not synthesize from plain text (e.g. moves).
+    fn diff_editor_with_map(text: &str, dm: DiffMap) -> EditorState {
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut tb = TextBuffer::with_text(BufferId::new(0), text);
+        tb.diff_map = Some(dm);
+        let shared = Arc::new(RwLock::new(tb));
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor);
+        editor.set_diff_view(true);
+        editor
+    }
+
+    /// A minimal theme whose diff colors resolve to RGB, so the change washes
+    /// engage when rendering a hand-built diff editor off the harness.
+    fn rgb_diff_theme() -> Theme {
+        let src = r##"theme rgbtest {
+            diff.context.fg = "#808080";
+            diff.added.fg   = "#00ff00";
+            diff.deleted.fg = "#ff0000";
+            diff.moved.fg   = "#0000ff";
+            ui.background.bg = "#282c34";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme config parses"), "rgbtest")
+            .expect("rgb theme builds")
     }
 
     fn diff_editor_staged(base: &str, index: &str, text: &str) -> EditorState {
@@ -1309,13 +1452,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn diff_view_underlines_only_the_changed_word() {
+    /// A width-60 diff-view harness over one `.rs` file diffed `base` -> `buffer`,
+    /// rendered once. The default theme resolves diff colors to RGB, so the change
+    /// washes engage. Column layout: left content cols 6..29, separator col 29,
+    /// right content cols 36..60.
+    fn diff_harness(base: &str, buffer: &str) -> crate::test_harness::TestHarness {
         use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
 
         let mut h = TestHarness::with_size(60, 10);
-        // `main` becomes `other`, so only that one word changed on the line.
-        h.stage_review_scenario("/repo", &[("a.rs", "fn main() {}\n", "fn other() {}\n")]);
+        h.stage_review_scenario("/repo", &[("a.rs", base, buffer)]);
         h.stoat.set_diff_warm_auto(true);
         h.open_file(std::path::Path::new("/repo/a.rs"));
         h.settle_diff_jobs();
@@ -1323,57 +1468,262 @@ mod tests {
             .expect("editor")
             .set_diff_view(true);
         h.snapshot();
+        h
+    }
 
-        // Collect underlined glyphs per column half (the separator sits at col 29).
-        let buf = h.rendered_buffer();
-        let mut left = String::new();
-        let mut right = String::new();
+    /// The RGB wash a diff `scope` blends to at `amount`, as the cell background
+    /// the render paints.
+    fn tint(theme: &Theme, scope: &str, amount: f32) -> Color {
+        let bg = style_rgb(
+            theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg),
+        )
+        .expect("rgb background");
+        let [r, g, b] = dim_rgb(
+            style_rgb(theme.get(scope).fg).expect("rgb diff color"),
+            bg,
+            amount,
+        );
+        Color::Rgb(r, g, b)
+    }
+
+    /// Non-blank glyphs in `cols` whose cell background is exactly `bg`, in row
+    /// order.
+    fn chars_with_bg(buf: &Buffer, bg: Color, cols: std::ops::Range<u16>) -> String {
+        let mut out = String::new();
         for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
+            for x in cols.clone() {
                 let cell = &buf[(x, y)];
-                if cell.modifier.contains(Modifier::UNDERLINED) && !cell.symbol().trim().is_empty()
-                {
-                    if x < 30 {
-                        left.push_str(cell.symbol());
-                    } else {
-                        right.push_str(cell.symbol());
-                    }
+                if cell.bg == bg && !cell.symbol().trim().is_empty() {
+                    out.push_str(cell.symbol());
                 }
             }
         }
+        out
+    }
+
+    /// The glyphs of row `y` across `cols`, for locating a rendered line.
+    fn line_text(buf: &Buffer, y: u16, cols: std::ops::Range<u16>) -> String {
+        cols.map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect()
+    }
+
+    #[test]
+    fn diff_view_washes_only_the_changed_word() {
+        // `main` becomes `other`, so only that one word changed on the line.
+        let h = diff_harness("fn main() {}\n", "fn other() {}\n");
+
+        use crate::theme::scope as sc;
+        let added_span = tint(&h.stoat.theme, sc::DIFF_ADDED, SPAN_TINT);
+        let removed_span = tint(&h.stoat.theme, sc::DIFF_DELETED, SPAN_TINT);
+        let buf = h.rendered_buffer();
+
         assert_eq!(
-            right, "other",
-            "right column underlines only the changed word"
+            chars_with_bg(buf, added_span, 30..buf.area.width),
+            "other",
+            "the right column washes only the changed word with the added span tint"
         );
         assert_eq!(
-            left, "main",
-            "left column underlines only the changed base word"
+            chars_with_bg(buf, removed_span, 0..30),
+            "main",
+            "the left column washes only the changed base word with the removed span tint"
         );
     }
 
     #[test]
-    fn diff_view_added_line_carries_no_underline() {
-        use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
-
-        let mut h = TestHarness::with_size(60, 10);
+    fn diff_view_added_line_carries_the_added_wash() {
         // The second line is a pure insertion, so nothing is refined.
-        h.stage_review_scenario(
-            "/repo",
-            &[("a.rs", "fn a() {}\n", "fn a() {}\nfn b() {}\n")],
-        );
-        h.stoat.set_diff_warm_auto(true);
-        h.open_file(std::path::Path::new("/repo/a.rs"));
-        h.settle_diff_jobs();
-        focused_editor_mut(&mut h.stoat)
-            .expect("editor")
-            .set_diff_view(true);
-        h.snapshot();
+        let h = diff_harness("fn a() {}\n", "fn a() {}\nfn b() {}\n");
 
+        let added_line = tint(&h.stoat.theme, crate::theme::scope::DIFF_ADDED, LINE_TINT);
         let buf = h.rendered_buffer();
+
         let underlined = (0..buf.area.height).any(|y| {
             (0..buf.area.width).any(|x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
         });
         assert!(!underlined, "a pure added line underlines nothing");
+
+        let row = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 36..60).contains("fn b"))
+            .expect("added line rendered on the right");
+        assert!(
+            (36..60).all(|x| buf[(x, row)].bg == added_line),
+            "the added line's right-column cells all carry the added line wash"
+        );
+    }
+
+    #[test]
+    fn diff_view_deleted_line_carries_the_removed_wash() {
+        // `old` is deleted, so it renders as a base-only block row on the left.
+        let h = diff_harness("keep\nold\ntail\n", "keep\ntail\n");
+
+        let removed_line = tint(&h.stoat.theme, crate::theme::scope::DIFF_DELETED, LINE_TINT);
+        let buf = h.rendered_buffer();
+
+        let row = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 6..29).contains("old"))
+            .expect("deleted base line rendered on the left");
+        assert!(
+            (6..29).all(|x| buf[(x, row)].bg == removed_line),
+            "the deleted base line's left-column cells all carry the removed line wash"
+        );
+    }
+
+    #[test]
+    fn diff_view_unchanged_mirrored_base_row_stays_untinted() {
+        // `keep` is unchanged and mirrored into the left column untinted.
+        let h = diff_harness("keep\nold\ntail\n", "keep\ntail\n");
+
+        use crate::theme::scope as sc;
+        let removed_line = tint(&h.stoat.theme, sc::DIFF_DELETED, LINE_TINT);
+        let removed_span = tint(&h.stoat.theme, sc::DIFF_DELETED, SPAN_TINT);
+        let buf = h.rendered_buffer();
+
+        let row = (0..buf.area.height)
+            .find(|&y| line_text(buf, y, 6..29).contains("keep"))
+            .expect("unchanged base line mirrored on the left");
+        assert!(
+            (6..29).all(|x| buf[(x, row)].bg != removed_line && buf[(x, row)].bg != removed_span),
+            "an unchanged mirrored base row carries no removed wash"
+        );
+    }
+
+    #[test]
+    fn diff_view_moved_line_carries_the_moved_wash() {
+        // A Moved hunk covering buffer line 1 ("bb", bytes 3..5); no base bytes,
+        // so the line stays in place on the right rather than splicing a block.
+        let dm = {
+            let detail = Arc::new(TokenDetail {
+                buffer_spans: vec![ChangeSpan {
+                    byte_range: 3..5,
+                    kind: ChangeKind::Moved,
+                    move_metadata: None,
+                }],
+                base_spans: Vec::new(),
+            });
+            DiffMap::from_hunks(
+                [DiffHunk {
+                    status: DiffHunkStatus::Moved,
+                    staged: false,
+                    buffer_start_line: 1,
+                    buffer_line_range: 1..2,
+                    base_byte_range: 0..0,
+                    anchor_range: None,
+                    token_detail: Some(detail),
+                }],
+                None,
+            )
+        };
+        let mut editor = diff_editor_with_map("aa\nbb\ncc\n", dm);
+        let theme = rgb_diff_theme();
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        render_diff_view(&mut editor, area, fallback, &theme, &mut buf, false);
+
+        use crate::theme::scope as sc;
+        let moved_line = tint(&theme, sc::DIFF_MOVED, LINE_TINT);
+        let moved_span = tint(&theme, sc::DIFF_MOVED, SPAN_TINT);
+
+        // "bb" sits on display row 1; the right text starts at right_text_x(area).
+        let rx = right_text_x(area);
+        assert_eq!(
+            buf[(rx, 1)].symbol(),
+            "b",
+            "the moved line renders on the right"
+        );
+        assert_eq!(
+            buf[(rx, 1)].bg,
+            moved_span,
+            "moved word takes the moved span wash"
+        );
+        assert_eq!(
+            buf[(rx + 1, 1)].bg,
+            moved_span,
+            "moved word takes the moved span wash"
+        );
+        assert_eq!(
+            buf[(rx + 3, 1)].bg,
+            moved_line,
+            "the rest of the moved line takes the moved line wash"
+        );
+    }
+
+    #[test]
+    fn paint_base_row_washes_replaced_and_moved_spans_by_kind() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+        let change_spans = vec![(0..3, ChangeKind::Replaced), (3..6, ChangeKind::Moved)];
+        paint_base_row(
+            &mut buf,
+            0,
+            0,
+            "abcdefgh",
+            8,
+            &[],
+            Style::default(),
+            &change_spans,
+            Some([10, 20, 30]),
+            Some([40, 50, 60]),
+        );
+
+        for x in 0..3 {
+            assert_eq!(
+                buf[(x, 0)].bg,
+                Color::Rgb(10, 20, 30),
+                "replaced span takes the side wash"
+            );
+        }
+        for x in 3..6 {
+            assert_eq!(
+                buf[(x, 0)].bg,
+                Color::Rgb(40, 50, 60),
+                "moved span takes the moved wash"
+            );
+        }
+        assert_eq!(
+            buf[(6, 0)].bg,
+            Color::Reset,
+            "chars outside every span keep the default bg"
+        );
+        assert!(
+            !buf[(0, 0)].modifier.contains(Modifier::UNDERLINED),
+            "a washed cell is not also underlined"
+        );
+    }
+
+    #[test]
+    fn paint_base_row_underlines_change_spans_without_tints() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+        let change_spans = vec![(0..3, ChangeKind::Replaced), (3..6, ChangeKind::Moved)];
+        paint_base_row(
+            &mut buf,
+            0,
+            0,
+            "abcdefgh",
+            8,
+            &[],
+            Style::default(),
+            &change_spans,
+            None,
+            None,
+        );
+
+        for x in 0..6 {
+            assert!(
+                buf[(x, 0)].modifier.contains(Modifier::UNDERLINED),
+                "col {x} underlines when tints are absent"
+            );
+            assert_eq!(
+                buf[(x, 0)].bg,
+                Color::Reset,
+                "no wash bg when tints are absent"
+            );
+        }
+        assert!(
+            !buf[(6, 0)].modifier.contains(Modifier::UNDERLINED),
+            "a char outside every span is not underlined"
+        );
     }
 
     #[test]

@@ -148,15 +148,21 @@ impl Item for DiffHunk {
 /// text with tree-sitter token colors.
 pub type BaseHighlights = Vec<Vec<(Range<usize>, HighlightStyle)>>;
 
+/// Base-side change spans keyed by 0-based base line, each range line-local
+/// within its line and tagged with its [`ChangeKind`], so the diff view's left
+/// column can wash each span by kind.
+pub(crate) type BaseChangeSpans = BTreeMap<u32, Vec<(Range<usize>, ChangeKind)>>;
+
 #[derive(Clone, Debug, Default)]
 pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
     base_text: Option<Arc<String>>,
     base_highlights: Option<Arc<BaseHighlights>>,
-    /// Base-side underline spans, resolved once at construction from `hunks` and
-    /// `base_text` since both are immutable after it. Shared behind `Arc` so the
-    /// per-frame accessor hands out a handle instead of rebuilding the map.
-    base_underlines: Arc<BTreeMap<u32, Vec<Range<usize>>>>,
+    /// Base-side change spans keyed by base line, resolved once at construction
+    /// from `hunks` and `base_text` since both are immutable after it. Shared
+    /// behind `Arc` so the per-frame accessor hands out a handle instead of
+    /// rebuilding the map.
+    base_changes: Arc<BaseChangeSpans>,
     version: usize,
 }
 
@@ -170,12 +176,12 @@ impl DiffMap {
         base_text: Option<Arc<String>>,
     ) -> Self {
         let hunks = SumTree::from_iter(hunks, ());
-        let base_underlines = Arc::new(compute_base_underline_spans(&hunks, base_text.as_ref()));
+        let base_changes = Arc::new(compute_base_change_spans(&hunks, base_text.as_ref()));
         Self {
             hunks,
             base_text,
             base_highlights: None,
-            base_underlines,
+            base_changes,
             version: Self::next_version(),
         }
     }
@@ -416,15 +422,16 @@ impl DiffMap {
         }
     }
 
-    /// Base-side change spans to underline in the diff view's left column, keyed
-    /// by base line with each range line-local within that line.
+    /// Base-side change spans to wash in the diff view's left column, keyed by
+    /// base line with each range line-local within that line and tagged with its
+    /// [`ChangeKind`].
     ///
-    /// Distributes every hunk's [`TokenDetail::base_spans`] of the
-    /// [`ChangeKind::Replaced`] kind -- absolute byte ranges in the base text --
-    /// across the base lines they cover, so a deleted or modified base block row
-    /// underlines only its changed chars. Empty when the map carries no base text.
-    pub(crate) fn base_underline_spans(&self) -> Arc<BTreeMap<u32, Vec<Range<usize>>>> {
-        self.base_underlines.clone()
+    /// Distributes every hunk's [`TokenDetail::base_spans`] -- absolute byte
+    /// ranges in the base text -- across the base lines they cover, so a deleted
+    /// or modified base block row washes only its changed chars, keyed added /
+    /// removed / moved by kind. Empty when the map carries no base text.
+    pub(crate) fn base_change_spans(&self) -> Arc<BaseChangeSpans> {
+        self.base_changes.clone()
     }
 
     pub fn total_deleted_lines(&self) -> u32 {
@@ -448,7 +455,7 @@ impl DiffMap {
     #[cfg(test)]
     pub fn set_base_text(&mut self, text: Arc<String>) {
         self.base_text = Some(text);
-        self.base_underlines = Arc::new(compute_base_underline_spans(
+        self.base_changes = Arc::new(compute_base_change_spans(
             &self.hunks,
             self.base_text.as_ref(),
         ));
@@ -458,7 +465,7 @@ impl DiffMap {
     #[cfg(test)]
     pub fn push_hunk(&mut self, hunk: DiffHunk) {
         self.hunks.push(hunk, ());
-        self.base_underlines = Arc::new(compute_base_underline_spans(
+        self.base_changes = Arc::new(compute_base_change_spans(
             &self.hunks,
             self.base_text.as_ref(),
         ));
@@ -741,28 +748,33 @@ fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -
         .collect()
 }
 
-/// Distribute every hunk's [`ChangeKind::Replaced`] base spans across the base
-/// lines they cover, keyed by base line with each range line-local within it.
+/// Distribute every hunk's base change spans across the base lines they cover,
+/// keyed by base line with each range line-local within it and tagged with its
+/// [`ChangeKind`], so the diff view's left column can wash each span by kind.
 ///
 /// Resolved once by [`DiffMap::from_hunks`] because `hunks` and `base_text` are
 /// immutable after construction. Empty when there is no base text.
-fn compute_base_underline_spans(
+fn compute_base_change_spans(
     hunks: &SumTree<DiffHunk>,
     base_text: Option<&Arc<String>>,
-) -> BTreeMap<u32, Vec<Range<usize>>> {
+) -> BaseChangeSpans {
     let Some(base_text) = base_text else {
         return BTreeMap::new();
     };
     let starts = line_starts(base_text);
-    let mut out: BTreeMap<u32, Vec<Range<usize>>> = BTreeMap::new();
+    let mut out: BaseChangeSpans = BTreeMap::new();
     for hunk in hunks.iter() {
         let Some(detail) = &hunk.token_detail else {
             continue;
         };
         for span in &detail.base_spans {
-            if span.kind == ChangeKind::Replaced {
-                distribute_change_span(&mut out, &span.byte_range, &starts, base_text.len());
-            }
+            distribute_change_span(
+                &mut out,
+                &span.byte_range,
+                span.kind.clone(),
+                &starts,
+                base_text.len(),
+            );
         }
     }
     out
@@ -775,8 +787,9 @@ fn compute_base_underline_spans(
 /// last line. A range spanning several lines contributes one clamped sub-range
 /// per line it covers, with the trailing newline excluded.
 fn distribute_change_span(
-    out: &mut BTreeMap<u32, Vec<Range<usize>>>,
+    out: &mut BaseChangeSpans,
     range: &Range<usize>,
+    kind: ChangeKind,
     line_starts: &[usize],
     text_len: usize,
 ) {
@@ -797,7 +810,7 @@ fn distribute_change_span(
         if start < end {
             out.entry(line as u32)
                 .or_default()
-                .push((start - line_start)..(end - line_start));
+                .push(((start - line_start)..(end - line_start), kind.clone()));
         }
     }
 }
@@ -1103,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn base_underline_spans_split_across_base_lines() {
+    fn base_change_spans_split_across_base_lines() {
         use stoat_language::structural_diff::{
             ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
         };
@@ -1140,14 +1153,21 @@ mod tests {
             rhs_text,
         );
 
-        let flat: Vec<(u32, usize, usize)> = dm
-            .base_underline_spans()
+        let flat: Vec<(u32, usize, usize, ChangeKind)> = dm
+            .base_change_spans()
             .iter()
-            .flat_map(|(&line, ranges)| ranges.iter().map(move |r| (line, r.start, r.end)))
+            .flat_map(|(&line, ranges)| {
+                ranges
+                    .iter()
+                    .map(move |(r, kind)| (line, r.start, r.end, kind.clone()))
+            })
             .collect();
         assert_eq!(
             flat,
-            vec![(0, 0, 5), (1, 0, 4)],
+            vec![
+                (0, 0, 5, ChangeKind::Replaced),
+                (1, 0, 4, ChangeKind::Replaced)
+            ],
             "alpha on line 0, beta on line 1"
         );
     }
