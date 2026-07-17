@@ -253,14 +253,7 @@ pub(crate) fn frame(
             height: full.height,
         });
     let single_minimap_rect = stoat.single_minimap_rect;
-    let size = if single_minimap_rect.is_some() {
-        Rect {
-            width: full.width - editor::MINIMAP_STRIP_COLS,
-            ..full
-        }
-    } else {
-        full
-    };
+    let size = stoat.layout_size();
     let minimap_chrome = (stoat.stoatty && minimap_enabled).then(|| {
         let thumb = {
             let sel = stoat.theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
