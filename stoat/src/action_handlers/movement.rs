@@ -3927,13 +3927,14 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
 /// Each report moves `scroll_row` a fixed three rows -- matching the scrollback
 /// and run-pane wheel steps -- toward the document bound, and the tick eases
 /// `scroll_offset` up to it, so steady wheel input yields steady speed. The
-/// cursor is dragged into the scrolloff band here, once per report, so the view
-/// and selection never decouple.
+/// selection stays anchored to its buffer line for the whole glide, sliding out
+/// of view with the content. The cursor is clamped into the scrolloff band only
+/// when the glide settles.
 ///
 /// Reseeds `scroll_offset` from `scroll_row` only when no glide is in flight and
 /// another path moved the integer row out from under the fraction. Mid-glide the
 /// offset legitimately lags the target, so it must not be reseeded.
-pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool, scrolloff: u32) {
+pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool) {
     const STEP: u32 = 3;
 
     let max_scroll = max_scroll_offset(editor) as u32;
@@ -3953,7 +3954,6 @@ pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool, scrolloff: u32)
     }
     editor.scroll_row = target;
     editor.scroll_glide = ScrollGlide::Wheel;
-    clamp_cursor_to_view(editor, scrolloff);
 }
 
 /// Largest `scroll_row` (a display row) that keeps the last display row in
@@ -4947,7 +4947,7 @@ mod tests {
         let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
         editor.viewport_rows = Some(10);
 
-        wheel_scroll(editor, true, 3);
+        wheel_scroll(editor, true);
         assert_eq!(
             editor.scroll_row, 3,
             "a down report advances the target three rows"
@@ -4962,7 +4962,7 @@ mod tests {
             "the offset lags at the pre-report row for the tick to ease up"
         );
 
-        wheel_scroll(editor, true, 3);
+        wheel_scroll(editor, true);
         assert_eq!(
             editor.scroll_row, 6,
             "repeated reports accumulate the target"
@@ -4970,13 +4970,13 @@ mod tests {
 
         let max = max_scroll_offset(editor) as u32;
         editor.scroll_row = max;
-        wheel_scroll(editor, true, 3);
+        wheel_scroll(editor, true);
         assert_eq!(
             editor.scroll_row, max,
             "a report cannot advance past the document tail"
         );
 
-        wheel_scroll(editor, false, 3);
+        wheel_scroll(editor, false);
         assert_eq!(
             editor.scroll_row,
             max - 3,
@@ -4985,17 +4985,22 @@ mod tests {
     }
 
     #[test]
-    fn wheel_scroll_drags_the_cursor_into_the_scrolloff_band() {
+    fn wheel_scroll_leaves_the_cursor_anchored() {
         let mut h = harness_with_long_buffer();
+        let before = focused_head_row(&mut h);
         {
             let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
-            wheel_scroll(editor, true, 3);
+            wheel_scroll(editor, true);
+            assert_eq!(
+                editor.scroll_row, 3,
+                "the report advances the view three rows"
+            );
         }
         assert_eq!(
             focused_head_row(&mut h),
-            6,
-            "the report drags the cursor down into the scrolloff band"
+            before,
+            "but the selection stays anchored to its line until the glide settles"
         );
     }
 
@@ -5007,14 +5012,14 @@ mod tests {
 
         editor.scroll_row = 10;
         editor.scroll_offset = 0.0;
-        wheel_scroll(editor, true, 3);
+        wheel_scroll(editor, true);
         assert_eq!(
             editor.scroll_offset as u32, 10,
             "off-glide, a drifted offset reseeds from scroll_row before gliding"
         );
 
         editor.scroll_offset = 0.0;
-        wheel_scroll(editor, true, 3);
+        wheel_scroll(editor, true);
         assert_eq!(
             editor.scroll_offset, 0.0,
             "mid-glide the lagging offset is left alone"

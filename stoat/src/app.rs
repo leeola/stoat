@@ -1791,6 +1791,8 @@ impl Stoat {
         // three-row glide completes in about 200ms.
         const WHEEL_EASE: f32 = 0.13;
 
+        // Read before the workspace borrow so the settle clamp below can use it.
+        let scrolloff = self.settings.scrolloff.unwrap_or(3);
         let mut animating = false;
         for editor in self.active_workspace_mut().editors.values_mut() {
             let ease = match editor.scroll_glide {
@@ -1798,6 +1800,7 @@ impl Stoat {
                 ScrollGlide::Page => PAGE_EASE,
                 ScrollGlide::Wheel => WHEEL_EASE,
             };
+            let was = editor.scroll_glide;
             let target = editor.scroll_row as f32;
             let viewport = editor
                 .viewport_rows
@@ -1817,6 +1820,11 @@ impl Stoat {
                 if settled {
                     editor.scroll_glide = ScrollGlide::None;
                 }
+            }
+            // A wheel glide defers its cursor follow to the settle, so when it
+            // just cleared, clamp the anchored cursor into the landing band.
+            if was == ScrollGlide::Wheel && editor.scroll_glide == ScrollGlide::None {
+                action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
             }
             animating |= editor.scroll_glide != ScrollGlide::None;
         }
@@ -2342,6 +2350,18 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let scrolloff = self.settings.scrolloff.unwrap_or(3);
+
+                // A key pressed mid wheel-glide first clamps the anchored cursor
+                // into the landing scrolloff band, so the deferred follow cannot
+                // strand it off-screen and `ensure_cursor_in_view` cannot snap
+                // the view backward to where the cursor used to be.
+                if let Some(editor) = action_handlers::focused_editor_mut(self)
+                    && editor.scroll_glide == ScrollGlide::Wheel
+                {
+                    action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
+                }
+
                 let before = self.focused_cursor_pos();
                 let term_before = self.focused_shell_term_id();
                 let effect = self.handle_key(key);
@@ -2351,9 +2371,7 @@ impl Stoat {
                 // Re-follow the cursor when a key moved it, pulling the view
                 // along so a count jump past the margin lands the view on the
                 // cursor rather than stranding it on the edge. A keyboard scroll
-                // (z j / z k) never moves the cursor, so its view stays put, and
-                // a wheel coast already drags the cursor into view as it scrolls.
-                let scrolloff = self.settings.scrolloff.unwrap_or(3);
+                // (z j / z k) never moves the cursor, so its view stays put.
                 let scrolled = match action_handlers::focused_editor_mut(self) {
                     Some(editor) => {
                         cursor_moved
@@ -3306,11 +3324,6 @@ impl Stoat {
     /// plain stepped scrolling of its output, three rows per notch, clamped to
     /// the top. Anything else drops the event.
     fn handle_mouse_scroll(&mut self, mouse: MouseEvent) -> UpdateEffect {
-        // Resolved before any workspace borrow so wheel_scroll can drag the
-        // cursor into the scrolloff band. The default mirrors the post-key
-        // view-follow.
-        let scrolloff = self.settings.scrolloff.unwrap_or(3);
-
         // A wheel while a finder or palette modal is open moves its selection
         // rather than scrolling the pane beneath, so the event never falls
         // through. The two modals are mutually exclusive, so two checks suffice.
@@ -3346,7 +3359,7 @@ impl Stoat {
                 && rect.contains(Position::new(mouse.column, mouse.row))
             {
                 if let Some(editor) = self.active_workspace_mut().editors.get_mut(editor_id) {
-                    action_handlers::movement::wheel_scroll(editor, down, scrolloff);
+                    action_handlers::movement::wheel_scroll(editor, down);
                 }
                 return UpdateEffect::None;
             }
@@ -3399,7 +3412,7 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
-                action_handlers::movement::wheel_scroll(editor, down, scrolloff);
+                action_handlers::movement::wheel_scroll(editor, down);
                 // No repaint here. The wheel only advances the glide target, and
                 // the frame tick drives the ease and its renders. A trackpad
                 // sends ~100 events per flick, so repainting per event would
@@ -7284,7 +7297,7 @@ mod tests {
         {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
-            action_handlers::movement::wheel_scroll(editor, true, 3);
+            action_handlers::movement::wheel_scroll(editor, true);
         }
         assert!(
             h.stoat.is_animating(),
@@ -7331,7 +7344,7 @@ mod tests {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
             editor.viewport_rows = Some(10);
             for _ in 0..4 {
-                action_handlers::movement::wheel_scroll(editor, true, 3);
+                action_handlers::movement::wheel_scroll(editor, true);
             }
         }
         for _ in 0..1000 {
@@ -7367,6 +7380,61 @@ mod tests {
             after + 2 >= coasted,
             "the view stays at the coasted position rather than snapping back \
              (coasted {coasted}, after {after})",
+        );
+    }
+
+    #[test]
+    fn wheel_glide_keeps_cursor_planted_then_a_mid_glide_key_clamps_it() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let head_row = |h: &mut TestHarness| -> u32 {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            let snapshot = editor.display_map.snapshot();
+            let buffer_snapshot = snapshot.buffer_snapshot();
+            let head = editor.selections.newest_anchor().head();
+            let offset = buffer_snapshot.resolve_anchor(&head);
+            buffer_snapshot.rope().offset_to_point(offset).row
+        };
+
+        let cursor_before = head_row(&mut h);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            for _ in 0..4 {
+                action_handlers::movement::wheel_scroll(editor, true);
+            }
+        }
+        // One tick keeps the glide in flight. The selection has not moved.
+        h.stoat.tick_scroll_anim(0.016);
+        assert!(h.stoat.is_animating(), "the wheel glide is still in flight");
+        assert_eq!(
+            head_row(&mut h),
+            cursor_before,
+            "mid-glide the selection stays anchored to its original line"
+        );
+
+        // A key pressed mid-glide clamps the cursor into the landing band without
+        // snapping the view back up to the stranded cursor.
+        let scroll_before = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .scroll_row;
+        h.type_keys("k");
+        let scroll_after = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .scroll_row;
+        assert!(
+            scroll_after + 2 >= scroll_before,
+            "the mid-glide key does not snap the view backward \
+             (before {scroll_before}, after {scroll_after})",
+        );
+        assert!(
+            head_row(&mut h) > cursor_before,
+            "the mid-glide key clamped the cursor down into the landing viewport"
         );
     }
 
@@ -11922,7 +11990,7 @@ mod tests {
         // the relative-number content version every tick without the held line.
         {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-            action_handlers::movement::wheel_scroll(editor, true, 3);
+            action_handlers::movement::wheel_scroll(editor, true);
         }
         h.stoat.tick_scroll_anim(0.016);
         assert!(h.stoat.is_animating(), "the wheel glide is still easing");
