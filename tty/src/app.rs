@@ -1642,20 +1642,20 @@ fn ctrl_byte(s: &str) -> Option<Vec<u8>> {
 /// Resolve a wheel `delta` to whole lines of scrollback to move, positive
 /// scrolling up into history.
 ///
-/// A `LineDelta` is already in lines. A high-resolution `PixelDelta` accrues in
-/// `pixels` against `cell_height` and yields whole lines once a cell's worth has
-/// built up, carrying the sub-line remainder so successive small deltas are not
-/// lost. `LineDelta` leaves the accumulator untouched.
+/// Both delta kinds accrue in `pixels` against `cell_height` and yield whole
+/// lines once a cell's worth has built up, carrying the sub-line remainder so a
+/// stream of small deltas is not lost. A `LineDelta` scales its line count by
+/// `cell_height` into the same accumulator, so a whole-notch mouse (`y = 1.0`)
+/// still moves one line per event while a hi-res wheel's fractional line deltas
+/// carry across events instead of rounding to zero.
 fn wheel_lines(delta: MouseScrollDelta, pixels: &mut f64, cell_height: f64) -> i32 {
     match delta {
-        MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
-        MouseScrollDelta::PixelDelta(position) => {
-            *pixels += position.y;
-            let lines = (*pixels / cell_height) as i32;
-            *pixels -= f64::from(lines) * cell_height;
-            lines
-        },
+        MouseScrollDelta::LineDelta(_, y) => *pixels += f64::from(y) * cell_height,
+        MouseScrollDelta::PixelDelta(position) => *pixels += position.y,
     }
+    let lines = (*pixels / cell_height) as i32;
+    *pixels -= f64::from(lines) * cell_height;
+    lines
 }
 
 /// Encode `lines` of wheel scroll as the application-cursor arrow keys an
@@ -2516,15 +2516,29 @@ mod tests {
 
     #[test]
     fn wheel_lines_resolves_line_and_pixel_deltas() {
-        // A LineDelta is lines directly and does not touch the accumulator.
+        // A whole-notch LineDelta scrolls its lines directly and, being whole,
+        // leaves no sub-line remainder behind.
         let mut pixels = 0.0;
         assert_eq!(
             wheel_lines(MouseScrollDelta::LineDelta(0.0, 3.0), &mut pixels, 20.0),
             3
         );
+        assert_eq!(pixels, 0.0, "a whole-line delta leaves no remainder");
+
+        // A hi-res wheel's fractional line deltas accrue instead of rounding to
+        // zero. Five 0.4-line deltas over a 20px cell yield two whole lines.
+        let mut pixels = 0.0;
+        let frac = |y| MouseScrollDelta::LineDelta(0.0, y);
         assert_eq!(
-            pixels, 0.0,
-            "LineDelta leaves the pixel accumulator untouched"
+            [
+                wheel_lines(frac(0.4), &mut pixels, 20.0),
+                wheel_lines(frac(0.4), &mut pixels, 20.0),
+                wheel_lines(frac(0.4), &mut pixels, 20.0),
+                wheel_lines(frac(0.4), &mut pixels, 20.0),
+                wheel_lines(frac(0.4), &mut pixels, 20.0),
+            ],
+            [0, 0, 1, 0, 1],
+            "fractional line deltas carry across events"
         );
 
         // A PixelDelta steps whole lines once a cell's worth accrues, carrying
