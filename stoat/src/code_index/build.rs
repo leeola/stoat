@@ -196,7 +196,7 @@ pub(crate) struct ReindexTarget {
     pub(crate) workspace: WorkspaceId,
     pub(crate) language: Arc<Language>,
     pub(crate) path: PathBuf,
-    pub(crate) text: String,
+    pub(crate) text: Rope,
 }
 
 /// Spawn a job to re-extract one edited buffer and deliver its
@@ -219,6 +219,8 @@ pub(crate) fn reindex_buffer(
             path,
             text,
         } = target;
+        // Materialize the rope off the main thread, right before extraction.
+        let text = text.to_string();
         if let Some((rel_path, shard)) = extract_shard(&language, &git_root, &path, &text) {
             let file = file_id(&rel_path);
             let _ = tx.send(IndexUpdate::Reindex {

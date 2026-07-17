@@ -457,7 +457,7 @@ impl Workspace {
                     .expect("buffer poisoned")
                     .snapshot
                     .visible_text
-                    .to_string()
+                    .clone()
             });
             if let Some(text) = text {
                 self.enqueue_reindex(
@@ -529,7 +529,7 @@ impl Workspace {
                     index_update_tx,
                     redraw_notify,
                     buffer_id,
-                    snapshot.visible_text.to_string(),
+                    snapshot.visible_text.clone(),
                 );
                 continue;
             }
@@ -715,7 +715,7 @@ impl Workspace {
         index_update_tx: &UnboundedSender<IndexUpdate>,
         redraw_notify: &Arc<Notify>,
         buffer_id: BufferId,
-        text: String,
+        text: Rope,
     ) {
         let Some(path) = self.buffers.path_for(buffer_id).map(|p| p.to_path_buf()) else {
             return;
