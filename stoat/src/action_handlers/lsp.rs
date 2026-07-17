@@ -168,26 +168,26 @@ pub(crate) fn notify_buffer_opened(
         .unwrap_or(0);
     stoat.lsp_buffer_versions.insert(buffer_id, buffer_version);
     stoat.lsp_doc_versions.insert(buffer_id, 0);
+    let text_arc = Arc::new(text.to_string());
     stoat
         .lsp_last_delivered_text
         .lock()
         .expect("lsp text mutex")
-        .insert(buffer_id, Arc::new(text.to_string()));
+        .insert(buffer_id, Arc::clone(&text_arc));
     stoat
         .lsp_last_delivered_buffer_version
         .lock()
         .expect("lsp version mutex")
         .insert(buffer_id, buffer_version);
-    let params = DidOpenTextDocumentParams {
-        text_document: TextDocumentItem {
-            uri,
-            language_id,
-            version: 0,
-            text: text.to_string(),
-        },
-    };
     for lsp in stoat.hosts_for_buffer(buffer_id) {
-        let params = params.clone();
+        let params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: language_id.clone(),
+                version: 0,
+                text: text_arc.as_ref().clone(),
+            },
+        };
         stoat
             .executor
             .spawn(async move {
