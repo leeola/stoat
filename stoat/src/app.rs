@@ -6141,9 +6141,7 @@ impl Stoat {
             let content_version = {
                 let mut hasher = DefaultHasher::new();
                 0u8.hash(&mut hasher);
-                for entry in filtered {
-                    entry.def.name().hash(&mut hasher);
-                }
+                palette.generation.hash(&mut hasher);
                 hasher.finish()
             };
             crate::smooth_scroll::emit_into(
@@ -6309,7 +6307,7 @@ impl Stoat {
             // hash is the list pool's content version.
             let list_version = {
                 let mut hasher = DefaultHasher::new();
-                help.filtered().hash(&mut hasher);
+                help.generation.hash(&mut hasher);
                 hasher.finish()
             };
             crate::smooth_scroll::emit_into(
@@ -6385,11 +6383,7 @@ impl Stoat {
             // of the line texts is the pool's content version.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
-                for line in &popup.lines {
-                    for (text, _) in line {
-                        text.hash(&mut hasher);
-                    }
-                }
+                popup.generation.hash(&mut hasher);
                 hasher.finish()
             };
             crate::smooth_scroll::emit_into(
@@ -9549,6 +9543,7 @@ mod tests {
             area: Rect::default(),
             inner: Rect::default(),
             selection: None,
+            generation: 0,
         });
         h.stoat.emit_smooth_scroll();
         let opened = drain_apc(&mut rx);
@@ -9601,6 +9596,7 @@ mod tests {
             area: Rect::default(),
             inner: Rect::default(),
             selection: None,
+            generation: 0,
         });
         crate::render::hover::hover_popup_layout(&mut h.stoat).expect("hover layout")
     }
@@ -9660,6 +9656,7 @@ mod tests {
             area: Rect::default(),
             inner: Rect::default(),
             selection: None,
+            generation: 0,
         });
 
         let (popup, _) = crate::render::hover::hover_popup_layout(&mut h.stoat).expect("layout");
@@ -9713,6 +9710,7 @@ mod tests {
             area: Rect::default(),
             inner: Rect::default(),
             selection: None,
+            generation: 0,
         });
 
         let (popup, _) = crate::render::hover::hover_popup_layout(&mut h.stoat).expect("layout");
@@ -9757,6 +9755,7 @@ mod tests {
                 height: 5,
             },
             selection: None,
+            generation: 0,
         }
     }
 
@@ -9801,6 +9800,7 @@ mod tests {
             area: Rect::default(),
             inner: Rect::default(),
             selection: None,
+            generation: 0,
         });
 
         // The first render stamps the popup's real screen rect.
@@ -9890,6 +9890,7 @@ mod tests {
                 height: 3,
             },
             selection: None,
+            generation: 0,
         };
         for cell in 0..40u16 {
             let (line, col) = crate::render::hover::hover_hit_test(&popup, true, cell, 0);
@@ -9929,6 +9930,7 @@ mod tests {
                 head: (0, 4),
                 dragging: false,
             }),
+            generation: 0,
         });
 
         let buf = h.stoat.render();
@@ -10047,6 +10049,7 @@ mod tests {
             area: Rect::default(),
             inner: Rect::default(),
             selection: None,
+            generation: 0,
         });
         h.stoat.emit_smooth_scroll();
         let opened = drain_apc(&mut rx);
@@ -12455,6 +12458,7 @@ mod tests {
             area: Rect::default(),
             inner: Rect::default(),
             selection: None,
+            generation: 0,
         });
 
         // A left-button Down over the other pane moves focus and closes it.

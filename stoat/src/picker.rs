@@ -20,12 +20,13 @@ use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 /// file never stalls the render thread.
 pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 
-/// Source of process-unique [`PickList::filter_generation`] stamps.
-static NEXT_FILTER_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Source of process-unique content-version stamps, shared by every pool that
+/// versions its content by a monotonic generation instead of a content hash.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Next process-unique filter generation, bumped past every prior stamp.
-fn next_filter_generation() -> u64 {
-    NEXT_FILTER_GENERATION.fetch_add(1, Ordering::Relaxed)
+/// Next process-unique generation, bumped past every prior stamp.
+pub(crate) fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Query-driven fuzzy result list over a fixed `base` set of paths, decoupled
@@ -63,7 +64,7 @@ impl Default for PickList {
             match_indices: Vec::new(),
             selected: 0,
             viewport_rows: None,
-            filter_generation: next_filter_generation(),
+            filter_generation: next_generation(),
         }
     }
 }
@@ -153,7 +154,7 @@ impl PickList {
                 .push(prepend_anchor(anchor_len, m.matched_indices));
         }
         self.clamp_selected();
-        self.filter_generation = next_filter_generation();
+        self.filter_generation = next_generation();
     }
 
     fn clamp_selected(&mut self) {

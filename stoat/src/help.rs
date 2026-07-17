@@ -3,6 +3,10 @@ use crate::{
     keymap::{ResolvedAction, ResolvedArg},
     workspace::Workspace,
 };
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 use stoat_action::{registry, ActionDef, ActionKind, ParamDef, ParamValue};
 use stoat_config::Value;
 use stoat_scheduler::Executor;
@@ -61,6 +65,15 @@ pub struct Help {
     filtered: Vec<usize>,
     selected: usize,
     detail_scroll: u16,
+    /// Content-version stamp for the help-list pool, from the shared generation
+    /// counter. Bumped when [`Self::last_filter_key`] shows the search inputs
+    /// changed, so the per-frame version is O(1) instead of a walk of the whole
+    /// filtered list.
+    pub(crate) generation: u64,
+    /// Hash of the last-refiltered search inputs (needle plus scope). Gates
+    /// [`Self::generation`] so it bumps only on a real filter change, not on
+    /// every per-frame refilter.
+    last_filter_key: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +94,7 @@ pub fn help_input_mode(stoat_mode: &str) -> HelpInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HelpScope {
     Active,
     All,
@@ -116,6 +129,8 @@ impl Help {
             filtered: Vec::new(),
             selected: 0,
             detail_scroll: 0,
+            generation: crate::picker::next_generation(),
+            last_filter_key: 0,
         };
         help.rebuild_entries();
         help
@@ -265,6 +280,17 @@ impl Help {
 
     fn refilter(&mut self, ws: &Workspace) {
         let needle = self.input.text(ws).to_lowercase();
+
+        let key = {
+            let mut hasher = DefaultHasher::new();
+            needle.hash(&mut hasher);
+            self.scope.hash(&mut hasher);
+            hasher.finish()
+        };
+        if key != self.last_filter_key {
+            self.last_filter_key = key;
+            self.generation = crate::picker::next_generation();
+        }
 
         if needle.is_empty() {
             // Preserve entries order (sorted by key label for Active, by name
@@ -497,6 +523,19 @@ mod tests {
         assert!(names.contains(&"Quit"));
         assert!(names.contains(&"MoveDown"));
         assert_eq!(names.len(), 5);
+    }
+
+    #[test]
+    fn generation_bumps_on_a_search_change() {
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        let before = help_ref(&h).generation;
+        type_str(&mut h, "quit");
+        assert_ne!(
+            help_ref(&h).generation,
+            before,
+            "typing a search bumps the help generation",
+        );
     }
 
     #[test]

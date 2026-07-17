@@ -9,7 +9,11 @@ use crate::{
     rebase::RebasePause,
     workspace::Workspace,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+};
 use stoat_action::{registry, ActionKind, ParamValue, ValueSource};
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
@@ -49,6 +53,15 @@ pub struct CommandPalette {
     /// where it is disposed. `None` while listing commands or collecting a
     /// free-typed argument.
     pub(crate) arg_picker: Option<ArgPicker>,
+    /// Content-version stamp for the command-list pool, from the shared
+    /// generation counter. Bumped when [`Self::last_filter_key`] shows the
+    /// filter inputs changed, so the per-frame version is O(1) instead of a
+    /// walk of every filtered command name.
+    pub(crate) generation: u64,
+    /// Hash of the last-refiltered filter inputs (text plus scope). Gates
+    /// [`Self::generation`] so it bumps only on a real filter change, not on
+    /// every per-frame refilter.
+    last_filter_key: u64,
 }
 
 /// The inline value-picker the palette shows while collecting a
@@ -198,7 +211,7 @@ impl ArgPicker {
 }
 
 /// Palette listing mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PaletteScope {
     /// Only actions applicable to the captured [`Availability`] snapshot.
     Active,
@@ -348,6 +361,8 @@ impl CommandPalette {
             availability,
             viewport_rows: None,
             arg_picker: None,
+            generation: crate::picker::next_generation(),
+            last_filter_key: 0,
         }
     }
 
@@ -484,6 +499,17 @@ impl CommandPalette {
                 &mut self.match_indices,
                 &mut self.selected,
             );
+        }
+
+        let key = {
+            let mut hasher = DefaultHasher::new();
+            text.hash(&mut hasher);
+            self.scope.hash(&mut hasher);
+            hasher.finish()
+        };
+        if key != self.last_filter_key {
+            self.last_filter_key = key;
+            self.generation = crate::picker::next_generation();
         }
     }
 
@@ -1065,6 +1091,40 @@ mod tests {
             "buffer not visible in frame:\n{}",
             frame.content
         );
+    }
+
+    #[test]
+    fn palette_generation_gates_on_filter_change() {
+        let mut h = Stoat::test();
+        h.type_text(":");
+        h.snapshot();
+        let g1 = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .generation;
+        h.snapshot();
+        let g2 = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .generation;
+        assert_eq!(
+            g1, g2,
+            "an identical re-sync leaves the generation unchanged"
+        );
+
+        h.type_text("quit");
+        h.snapshot();
+        let g3 = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .generation;
+        assert_ne!(g2, g3, "a changed query bumps the generation");
     }
 
     #[test]

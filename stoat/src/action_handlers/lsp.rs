@@ -1122,6 +1122,11 @@ pub(crate) struct HoverPopup {
     pub(crate) inner: Rect,
     /// The live mouse selection over the body, if any.
     pub(crate) selection: Option<HoverSelection>,
+    /// Content-version stamp for the hover pool, from the shared generation
+    /// counter, set once at construction. A popup's body is immutable once
+    /// built, so a new hover gets a new stamp and the per-frame version is O(1)
+    /// instead of a walk of every line's text.
+    pub(crate) generation: u64,
 }
 
 /// Issue a `textDocument/hover` request for the symbol under the
@@ -1372,6 +1377,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
                 area: Rect::default(),
                 inner: Rect::default(),
                 selection: None,
+                generation: crate::picker::next_generation(),
             });
             true
         },
