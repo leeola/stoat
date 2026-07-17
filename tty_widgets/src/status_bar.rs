@@ -2,7 +2,7 @@ use crate::{bar::Bar, text_run::TextRun, ApcScene};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 
 /// A status bar composed of left- and right-anchored scaled text segments and a
-/// top hairline separator.
+/// top hairline separator that reads unbroken across the segment backgrounds.
 ///
 /// Components-only, like [`TextRun`] and [`Bar`]: it emits off-grid APC frames
 /// and writes no cell fallback, so the caller paints its own degraded cells for
@@ -24,11 +24,12 @@ pub struct StatusBar<'a> {
     pub separator: [u8; 3],
 }
 
-/// A single segment of a [`StatusBar`], drawn as one scaled text run.
+/// A single segment of a [`StatusBar`], drawn as a full-row background bar with
+/// a box-less scaled text run over it.
 ///
-/// The text carries its own surrounding padding (a segment reads ` label `).
-/// Because a scaled run's background paints as a full-row-height rect, those
-/// padding spaces carry the segment background with no extra bars.
+/// The text carries its own surrounding padding (a segment reads ` label `),
+/// and that padded width sizes the background bar. The run stays box-less so the
+/// bar carries the background and the top hairline reads unbroken above it.
 pub struct StatusSegment<'a> {
     pub text: &'a str,
     pub fg: [u8; 3],
@@ -43,33 +44,19 @@ impl StatusBar<'_> {
     pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
         let mut cursor = 0u16;
         for seg in self.left {
-            TextRun {
-                col: cursor,
-                row: 0,
-                scale: self.scale,
-                color: seg.fg,
-                bg: Some(seg.bg),
-                text: seg.text,
-            }
-            .render(area, buf, scene);
-            cursor += self.segment_advance(seg.text);
+            let advance = self.segment_advance(seg.text);
+            self.draw_segment(cursor, advance, seg, area, buf, scene);
+            cursor += advance;
         }
 
         let mut anchor = area.width * 16;
         for seg in self.right {
-            let start = anchor.saturating_sub(self.segment_advance(seg.text));
+            let advance = self.segment_advance(seg.text);
+            let start = anchor.saturating_sub(advance);
             if start < cursor {
                 continue;
             }
-            TextRun {
-                col: start,
-                row: 0,
-                scale: self.scale,
-                color: seg.fg,
-                bg: Some(seg.bg),
-                text: seg.text,
-            }
-            .render(area, buf, scene);
+            self.draw_segment(start, advance, seg, area, buf, scene);
             anchor = start;
         }
 
@@ -79,6 +66,40 @@ impl StatusBar<'_> {
             width: area.width * 16,
             height: 1,
             color: self.separator,
+        }
+        .render(area, buf, scene);
+    }
+
+    /// Draw one segment as a full-row background bar with a box-less text run
+    /// over it.
+    ///
+    /// The bar carries the segment background so the top hairline, emitted after
+    /// every segment bar, overwrites its top sliver and reads unbroken. A box on
+    /// the run instead would paint from the later text pass and bury the line.
+    fn draw_segment(
+        &self,
+        x: u16,
+        advance: u16,
+        seg: &StatusSegment<'_>,
+        area: Rect,
+        buf: &mut Buffer,
+        scene: &mut ApcScene,
+    ) {
+        Bar {
+            x,
+            y: 0,
+            width: advance,
+            height: 16,
+            color: seg.bg,
+        }
+        .render(area, buf, scene);
+        TextRun {
+            col: x,
+            row: 0,
+            scale: self.scale,
+            color: seg.fg,
+            bg: None,
+            text: seg.text,
         }
         .render(area, buf, scene);
     }
@@ -128,27 +149,52 @@ mod tests {
 
         status.draw_components(area, &mut buf, &mut scene);
 
+        // advance("ab") = 2 * 160 / 16 = 20, advance("c") = 1 * 160 / 16 = 10.
+        let first_bar = encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 16,
+            color: [4, 5, 6],
+        });
         let first = encode_text_run(&TextRunCommand {
             col: 0,
             row: 0,
             scale: 160,
             color: [1, 2, 3],
-            bg: Some([4, 5, 6]),
+            bg: None,
             text: "ab".to_owned(),
         });
-        // advance("ab") = 2 * 160 / 16 = 20
+        let second_bar = encode_bar(&BarCommand {
+            x: 20,
+            y: 0,
+            width: 10,
+            height: 16,
+            color: [10, 11, 12],
+        });
         let second = encode_text_run(&TextRunCommand {
             col: 20,
             row: 0,
             scale: 160,
             color: [7, 8, 9],
-            bg: Some([10, 11, 12]),
+            bg: None,
             text: "c".to_owned(),
         });
-        assert!(contains(scene.buffer(), &first), "first segment at col 0");
+        assert!(
+            contains(scene.buffer(), &first_bar),
+            "first segment background bar at col 0"
+        );
+        assert!(
+            contains(scene.buffer(), &first),
+            "first box-less run at col 0"
+        );
+        assert!(
+            contains(scene.buffer(), &second_bar),
+            "second segment background bar at the first's advance"
+        );
         assert!(
             contains(scene.buffer(), &second),
-            "second segment at the first's advance"
+            "second box-less run at the first's advance"
         );
     }
 
@@ -172,17 +218,28 @@ mod tests {
         status.draw_components(area, &mut buf, &mut scene);
 
         // width*16 = 320; advance("xy") = 20; start = 300
+        let bar = encode_bar(&BarCommand {
+            x: 300,
+            y: 0,
+            width: 20,
+            height: 16,
+            color: [4, 5, 6],
+        });
         let run = encode_text_run(&TextRunCommand {
             col: 300,
             row: 0,
             scale: 160,
             color: [1, 2, 3],
-            bg: Some([4, 5, 6]),
+            bg: None,
             text: "xy".to_owned(),
         });
         assert!(
+            contains(scene.buffer(), &bar),
+            "right segment background bar at width*16 - advance"
+        );
+        assert!(
             contains(scene.buffer(), &run),
-            "right segment lands at width*16 - advance"
+            "right box-less run at width*16 - advance"
         );
     }
 
@@ -212,17 +269,28 @@ mod tests {
 
         // cursor after "LEFT" = 4 * 160 / 16 = 40; width*16 = 48; advance("R") = 10;
         // start = 38 < 40, so the right segment is skipped.
-        let dropped = encode_text_run(&TextRunCommand {
+        let dropped_run = encode_text_run(&TextRunCommand {
             col: 38,
             row: 0,
             scale: 160,
             color: [3, 3, 3],
-            bg: Some([4, 4, 4]),
+            bg: None,
             text: "R".to_owned(),
         });
+        let dropped_bar = encode_bar(&BarCommand {
+            x: 38,
+            y: 0,
+            width: 10,
+            height: 16,
+            color: [4, 4, 4],
+        });
         assert!(
-            !contains(scene.buffer(), &dropped),
-            "the colliding right segment emits nothing"
+            !contains(scene.buffer(), &dropped_run),
+            "the colliding right segment emits no run"
+        );
+        assert!(
+            !contains(scene.buffer(), &dropped_bar),
+            "the colliding right segment emits no bar"
         );
     }
 

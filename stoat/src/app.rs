@@ -10167,8 +10167,13 @@ mod tests {
         let cmds = drain_apc(&mut rx);
         assert!(
             cmds.iter()
-                .any(|c| matches!(c, Command::TextRun(t) if t.col == 0)),
-            "the mode segment emits as a text run at col 0, got {cmds:?}"
+                .any(|c| matches!(c, Command::TextRun(t) if t.col == 0 && t.bg.is_none())),
+            "the mode segment emits as a box-less text run at col 0, got {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::Bar(b) if b.height == 16)),
+            "the mode segment background emits as a full-row bar, got {cmds:?}"
         );
         assert!(
             cmds.iter()
