@@ -29,6 +29,10 @@ pub struct EventBlock {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThemeBlock {
     pub name: Spanned<String>,
+    /// The theme named by `inherits PARENT`, whose blocks resolve before this
+    /// one so this block's statements override the parent's. [`None`] for a
+    /// standalone theme.
+    pub parent: Option<Spanned<String>>,
     pub statements: Vec<Spanned<Statement>>,
 }
 

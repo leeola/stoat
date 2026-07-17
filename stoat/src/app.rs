@@ -1018,21 +1018,22 @@ impl Stoat {
             let name = settings.theme.as_deref().unwrap_or("default_dark");
 
             // The embedded theme blocks sit under the user's so a clean user
-            // config can override a built-in theme field-by-field without
+            // config can override or inherit a built-in theme without
             // restating it. theme_base is None when config already is the
-            // embedded default, avoiding a redundant self-layering.
-            let mut blocks = Vec::new();
+            // embedded default. The whole pool is passed, not just the named
+            // theme's blocks, so an `inherits PARENT` can resolve its parent.
+            let mut all = Vec::new();
             if let Some(base) = theme_base.as_ref() {
-                blocks.extend(base.themes.iter().filter(|t| t.node.name.node == name));
+                all.extend(base.themes.iter());
             }
             if let Some(c) = config.as_ref() {
-                blocks.extend(c.themes.iter().filter(|t| t.node.name.node == name));
+                all.extend(c.themes.iter());
             }
 
-            if blocks.is_empty() {
+            if all.is_empty() {
                 crate::theme::Theme::empty()
             } else {
-                crate::theme::Theme::from_blocks(name, &blocks).unwrap_or_else(|e| {
+                crate::theme::Theme::from_blocks(name, &all).unwrap_or_else(|e| {
                     tracing::error!("theme '{name}' load failed: {e}");
                     crate::theme::Theme::empty()
                 })

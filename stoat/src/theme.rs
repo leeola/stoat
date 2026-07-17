@@ -41,46 +41,45 @@ impl Theme {
         self.palette.get(name).copied()
     }
 
-    /// Build a theme from every `theme NAME` block in `config` matching `name`.
+    /// Build the theme named `name` from all `theme` blocks in `config`.
     ///
-    /// A thin wrapper over [`Self::from_blocks`] that filters `config.themes`
-    /// by name. See it for the layering contract.
+    /// A thin wrapper over [`Self::from_blocks`] passing `config.themes` as the
+    /// pool. See it for the inheritance and layering contract.
     pub fn from_config(config: &Config, name: &str) -> Result<Theme, ThemeError> {
-        let blocks: Vec<&Spanned<ThemeBlock>> = config
-            .themes
-            .iter()
-            .filter(|t| t.node.name.node == name)
-            .collect();
-        Self::from_blocks(name, &blocks)
+        let all: Vec<&Spanned<ThemeBlock>> = config.themes.iter().collect();
+        Self::from_blocks(name, &all)
     }
 
-    /// Build a theme from `theme NAME` blocks that all carry `name`, already
-    /// filtered out of one or more [`Config`]s.
+    /// Build the theme named `name` from a pool of `theme` blocks gathered from
+    /// one or more [`Config`]s.
     ///
-    /// Resolution runs in two phases across every block in slice order. First
-    /// the palette `let`s build the palette. Later same-name lets win, and each
-    /// let resolves against the palette so far, so a let-to-let alias binds to
-    /// its referent's meaning at that point. Then the scope settings resolve
-    /// against the finished palette, so a palette override in any block
-    /// recolors every scope referencing that name, wherever it sits.
+    /// The named theme's blocks are taken from the pool in pool order, so
+    /// same-name blocks layer. A built-in theme's blocks followed by a user's
+    /// therefore give the user field-by-field overrides. If a block declares
+    /// `inherits PARENT`, the parent theme is resolved the same way and its
+    /// blocks are prepended, so the child overrides the parent.
     ///
-    /// Passing a built-in theme's blocks followed by a user's therefore lets
-    /// the user retheme by redefining one semantic palette color. Fails when
-    /// `blocks` is empty -- the named theme is defined nowhere.
-    pub fn from_blocks(name: &str, blocks: &[&Spanned<ThemeBlock>]) -> Result<Theme, ThemeError> {
-        if blocks.is_empty() {
-            return ThemeNotFoundSnafu {
-                name: name.to_string(),
-            }
-            .fail();
-        }
+    /// Resolution then runs in two phases over the assembled blocks. First the
+    /// palette `let`s build the palette, later same-name lets winning and each
+    /// resolving against the palette so far. Then the scope settings resolve
+    /// against the finished palette, so a palette override anywhere recolors
+    /// every scope referencing that name.
+    ///
+    /// Fails with [`ThemeError::ThemeNotFound`] when `name` or a named parent
+    /// has no block in the pool, or [`ThemeError::InheritanceCycle`] when the
+    /// `inherits` chain loops.
+    pub fn from_blocks(
+        name: &str,
+        all_themes: &[&Spanned<ThemeBlock>],
+    ) -> Result<Theme, ThemeError> {
+        let blocks = collect_theme_blocks(name, all_themes, &mut Vec::new())?;
 
         let mut palette: HashMap<String, Color> = HashMap::new();
         let mut fg: HashMap<String, Color> = HashMap::new();
         let mut bg: HashMap<String, Color> = HashMap::new();
         let mut mods: HashMap<String, Modifier> = HashMap::new();
 
-        for block in blocks {
+        for block in &blocks {
             for stmt in &block.node.statements {
                 if let Statement::Let(l) = &stmt.node {
                     let color = resolve_color_from_expr(&l.value.node, &palette)?;
@@ -89,7 +88,7 @@ impl Theme {
             }
         }
 
-        for block in blocks {
+        for block in &blocks {
             for stmt in &block.node.statements {
                 if let Statement::Setting(s) = &stmt.node {
                     apply_setting(s, &palette, &mut fg, &mut bg, &mut mods)?;
@@ -125,6 +124,47 @@ impl Theme {
             styles,
         })
     }
+}
+
+/// Flatten a theme's inheritance chain into the blocks to resolve, parent
+/// first so a child's statements override.
+///
+/// Collects every block in `all_themes` named `name`, preserving pool order so
+/// same-name blocks still layer, then prepends the parent chain when a block
+/// declares `inherits PARENT`. `visiting` carries the names currently being
+/// resolved so a loop is caught instead of recursing forever.
+fn collect_theme_blocks<'a>(
+    name: &str,
+    all_themes: &[&'a Spanned<ThemeBlock>],
+    visiting: &mut Vec<String>,
+) -> Result<Vec<&'a Spanned<ThemeBlock>>, ThemeError> {
+    if visiting.iter().any(|n| n == name) {
+        return InheritanceCycleSnafu {
+            name: name.to_string(),
+        }
+        .fail();
+    }
+
+    let own: Vec<&'a Spanned<ThemeBlock>> = all_themes
+        .iter()
+        .copied()
+        .filter(|t| t.node.name.node == name)
+        .collect();
+    if own.is_empty() {
+        return ThemeNotFoundSnafu {
+            name: name.to_string(),
+        }
+        .fail();
+    }
+
+    let mut blocks = Vec::new();
+    if let Some(parent) = own.iter().find_map(|b| b.node.parent.as_ref()) {
+        visiting.push(name.to_string());
+        blocks.extend(collect_theme_blocks(&parent.node, all_themes, visiting)?);
+        visiting.pop();
+    }
+    blocks.extend(own);
+    Ok(blocks)
 }
 
 fn apply_setting(
@@ -345,6 +385,12 @@ fn named_modifier(s: &str) -> Result<Modifier, ThemeError> {
 pub enum ThemeError {
     #[snafu(display("theme '{name}' not found in config"))]
     ThemeNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("theme inheritance cycle through '{name}'"))]
+    InheritanceCycle {
         name: String,
         #[snafu(implicit)]
         location: snafu::Location,
@@ -725,6 +771,71 @@ mod tests {
         let style = theme.try_get("ui.cursor").unwrap();
         assert_eq!(style.fg, Some(Color::Red));
         assert_eq!(style.bg, Some(Color::Green));
+    }
+
+    #[test]
+    fn inherited_theme_recolors_via_overridden_let() {
+        let src = r##"
+            theme base {
+                let accent = "#000000";
+                ui.cursor.fg = accent;
+                ui.border.fg = accent;
+            }
+            theme variant inherits base {
+                let accent = "#ffffff";
+            }
+        "##;
+        let theme = load(src, "variant");
+        let white = Some(Color::Rgb(0xff, 0xff, 0xff));
+        assert_eq!(theme.try_get("ui.cursor").and_then(|s| s.fg), white);
+        assert_eq!(
+            theme.try_get("ui.border").and_then(|s| s.fg),
+            white,
+            "the parent's scopes are inherited and recolored by the override",
+        );
+    }
+
+    #[test]
+    fn two_level_inheritance_chain_resolves() {
+        let src = r##"
+            theme grand { ui.cursor.fg = red; }
+            theme mid inherits grand { ui.border.fg = green; }
+            theme child inherits mid { ui.text.fg = blue; }
+        "##;
+        let theme = load(src, "child");
+        assert_eq!(
+            theme.try_get("ui.cursor").and_then(|s| s.fg),
+            Some(Color::Red)
+        );
+        assert_eq!(
+            theme.try_get("ui.border").and_then(|s| s.fg),
+            Some(Color::Green)
+        );
+        assert_eq!(
+            theme.try_get("ui.text").and_then(|s| s.fg),
+            Some(Color::Blue)
+        );
+    }
+
+    #[test]
+    fn inheritance_loop_errors_cycle() {
+        let src = r##"
+            theme a inherits b { }
+            theme b inherits a { }
+        "##;
+        assert!(matches!(
+            load_err(src, "a"),
+            ThemeError::InheritanceCycle { .. }
+        ));
+    }
+
+    #[test]
+    fn missing_parent_errors_not_found() {
+        let src = r##"theme child inherits nope { ui.cursor.fg = red; }"##;
+        assert!(matches!(
+            load_err(src, "child"),
+            ThemeError::ThemeNotFound { name, .. } if name == "nope"
+        ));
     }
 
     #[test]

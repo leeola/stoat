@@ -770,7 +770,20 @@ mod tests {
         assert_eq!(config.blocks.len(), 0);
         assert_eq!(config.themes.len(), 1);
         assert_eq!(config.themes[0].node.name.node, "default_dark");
+        assert_eq!(config.themes[0].node.parent, None);
         assert_eq!(config.themes[0].node.statements.len(), 0);
+    }
+
+    #[test]
+    fn theme_block_with_inherits() {
+        let config = parse_ok("theme mine inherits default_dark { ui.cursor.fg = red; }");
+        let theme = &config.themes[0].node;
+        assert_eq!(theme.name.node, "mine");
+        assert_eq!(
+            theme.parent.as_ref().map(|p| p.node.as_str()),
+            Some("default_dark")
+        );
+        assert_eq!(theme.statements.len(), 1);
     }
 
     #[test]

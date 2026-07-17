@@ -557,12 +557,23 @@ fn theme_block<'src>() -> impl Parser<'src, &'src str, Spanned<ThemeBlock>, Extr
         .ignore_then(required_ws())
         .ignore_then(spanned_ident())
         .then_ignore(ws())
+        .then(
+            just("inherits")
+                .ignore_then(required_ws())
+                .ignore_then(spanned_ident())
+                .then_ignore(ws())
+                .or_not(),
+        )
         .then_ignore(just('{'))
         .then_ignore(ws())
         .then(statement().repeated().collect::<Vec<_>>())
         .then_ignore(ws())
         .then_ignore(just('}'))
-        .map(|(name, statements)| ThemeBlock { name, statements })
+        .map(|((name, parent), statements)| ThemeBlock {
+            name,
+            parent,
+            statements,
+        })
         .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 

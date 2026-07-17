@@ -87,7 +87,8 @@ pub fn settings_schema() -> &'static [SettingDef] {
             path: &[Lit("theme")],
             shape: ValueShape::String,
             doc: "Name of the active theme block, resolved against `theme NAME \
-                  { ... }` blocks in the config.",
+                  { ... }` blocks in the config. A theme may extend another with \
+                  `theme NAME inherits PARENT { ... }`.",
             default: "built-in",
         },
         SettingDef {
