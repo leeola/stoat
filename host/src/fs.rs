@@ -47,6 +47,19 @@ pub trait FsHost: Send + Sync {
     /// Clears `buf` and fills it with the file's contents.
     fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()>;
 
+    /// Clears `buf` and fills it with up to `limit` bytes from the start of the
+    /// file at `path`. A file shorter than `limit` yields all of it.
+    ///
+    /// The default reads the whole file via [`Self::read`] and truncates. A host
+    /// backed by a real filesystem should override this to stop reading once
+    /// `limit` bytes are in hand, so previewing a huge file never pulls it fully
+    /// into memory.
+    fn read_prefix(&self, path: &Path, limit: usize, buf: &mut Vec<u8>) -> io::Result<()> {
+        self.read(path, buf)?;
+        buf.truncate(limit);
+        Ok(())
+    }
+
     /// Writes `data` to `path`, creating or truncating the file.
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
 
@@ -295,6 +308,14 @@ impl FsHost for LocalFs {
         buf.clear();
         let mut file = std::fs::File::open(path)?;
         file.read_to_end(buf)?;
+        Ok(())
+    }
+
+    fn read_prefix(&self, path: &Path, limit: usize, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.clear();
+        std::fs::File::open(path)?
+            .take(limit as u64)
+            .read_to_end(buf)?;
         Ok(())
     }
 

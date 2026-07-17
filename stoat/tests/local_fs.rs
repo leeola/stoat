@@ -13,6 +13,25 @@ fn read_file() {
 }
 
 #[test]
+fn read_prefix_caps_at_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = dir.path().join("big.txt");
+    std::fs::write(&big, b"0123456789").unwrap();
+    let small = dir.path().join("small.txt");
+    std::fs::write(&small, b"hi").unwrap();
+
+    let fs = LocalFs;
+    let mut buf = Vec::new();
+    fs.read_prefix(&big, 4, &mut buf).unwrap();
+    assert_eq!(buf, b"0123", "reads only the first `limit` bytes");
+    fs.read_prefix(&small, 128, &mut buf).unwrap();
+    assert_eq!(
+        buf, b"hi",
+        "a shorter file yields all of it and clears prior bytes"
+    );
+}
+
+#[test]
 fn write_read_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("data.bin");

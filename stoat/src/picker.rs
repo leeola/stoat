@@ -486,7 +486,10 @@ impl Preview {
 /// rope.
 fn read_preview(fs_host: &dyn FsHost, path: &Path) -> String {
     let mut buf = Vec::new();
-    if fs_host.read(path, &mut buf).is_err() {
+    if fs_host
+        .read_prefix(path, PREVIEW_BYTE_LIMIT, &mut buf)
+        .is_err()
+    {
         return "<unreadable>".to_string();
     }
     let limit = PREVIEW_BYTE_LIMIT.min(buf.len());
