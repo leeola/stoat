@@ -1073,48 +1073,31 @@ impl FoldSnapshot {
         }
         // With no folds, fold space mirrors inlay space one-to-one, so the inlay
         // layer resolves the row's offset in O(log n) through its rope cursor.
-        // This is the hot path for deep scrolling. The folded path below instead
-        // walks every preceding row's characters, an O(bytes) cost that is
-        // tolerable only because folds collapse the text they cover.
         if self.fold_count() == 0 {
             return FoldOffset(self.inlay_snapshot.inlay_offset_at_row(fold_row).0);
         }
 
+        // With folds, seek the transform tree to the row and convert the
+        // isomorphic overshoot through the inlay layer, resolving the offset in
+        // O(log n) rather than walking every preceding row's characters. Bias
+        // right so a row start on a transform boundary lands on the transform
+        // beginning there, with zero overshoot.
         let target = FoldPoint::new(fold_row, 0);
-        let mut cursor = self
+        let (start, _, item) = self
             .transforms
-            .cursor::<Dimensions<FoldPoint, FoldOffset>>(());
-        cursor.seek(&target, Bias::Left);
-        let Dimensions(transform_start_point, transform_start_offset, _) = *cursor.start();
-        // Within an isomorphic transform, rows in the output map directly to
-        // bytes in the input. Sum the bytes of preceding rows within the
-        // transform to get the exact offset.
-        let rows_into_transform = fold_row - transform_start_point.row();
-        if rows_into_transform == 0 {
-            return transform_start_offset;
+            .find::<Dimensions<FoldPoint, TransformSummary>, _>((), &target, Bias::Right);
+        let overshoot = point_overshoot(start.0 .0, target.0);
+        let mut offset = start.1.output.len;
+        if overshoot != Point::zero() {
+            let transform = item.expect("a fold row within range sits in a transform");
+            assert!(
+                transform.placeholder.is_none(),
+                "a column-0 fold point with row overshoot cannot fall inside a placeholder",
+            );
+            let inlay_point = InlayPoint(start.1.input.lines + overshoot);
+            offset += self.inlay_snapshot.inlay_point_to_offset(inlay_point).0 - start.1.input.len;
         }
-        let Some(transform) = cursor.item() else {
-            return transform_start_offset;
-        };
-        if transform.placeholder.is_some() {
-            // Folded transforms span 0 or 1 output row, so multi-row advance
-            // isn't possible here. Return transform start.
-            return transform_start_offset;
-        }
-        // For isomorphic transforms, output.len == input.len and the text
-        // mirrors the inlay bytes. Walk the characters of the transform's
-        // fold-line chars until we've crossed `rows_into_transform` newlines.
-        let mut byte_offset = 0u32;
-        let first_tab_row = transform_start_point.row();
-        for row_within in 0..rows_into_transform {
-            let absolute_row = first_tab_row + row_within;
-            for ch in self.fold_line_chars(absolute_row) {
-                byte_offset += ch.len_utf8() as u32;
-            }
-            // Account for the newline separating rows.
-            byte_offset += 1;
-        }
-        FoldOffset(transform_start_offset.0 + byte_offset as usize)
+        FoldOffset(offset)
     }
 
     /// Stream [`Chunk`]s covering `range` in fold-offset space.
@@ -1609,6 +1592,30 @@ mod tests {
             new_len,
             "the transform tree covers the full new text",
         );
+    }
+
+    #[test]
+    fn row_start_offset_matches_char_walk_across_shared_fold_row() {
+        // A fold inside the first line leaves the following isomorphic transform
+        // starting mid-inlay-row, the case a prior row-count formula mishandled.
+        let snap = make_snapshot_with_folds(
+            "hello world foo\nsecond line\nthird line\n",
+            vec![(InlayPoint::new(0, 5), InlayPoint::new(0, 11))],
+        );
+
+        let char_walk = |row: u32| -> usize {
+            (0..row)
+                .map(|r| snap.fold_line_chars(r).map(|c| c.len_utf8()).sum::<usize>() + 1)
+                .sum()
+        };
+
+        for row in 0..snap.line_count() {
+            assert_eq!(
+                snap.row_start_offset(row).0,
+                char_walk(row),
+                "fold row {row} start offset must match the char-walk oracle",
+            );
+        }
     }
 
     #[test]
