@@ -53,6 +53,16 @@ use std::{collections::HashMap, path::Path};
 use stoat_config::LineNumbers;
 use stoatty_widgets::{popover::Popover, ApcScene};
 
+/// Full-cell text scale under stoatty, in 256ths of a cell, for grid-size modal
+/// titles.
+pub(crate) const TEXT_SCALE_FULL: u16 = 256;
+/// Popup body text scale under stoatty, 0.85x a cell, for hint rows and hover
+/// bodies.
+pub(crate) const TEXT_SCALE_POPUP: u16 = 218;
+/// Compact chrome text scale under stoatty, 0.625x a cell, for line numbers and
+/// the status bar.
+pub(crate) const TEXT_SCALE_COMPACT: u16 = 160;
+
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,

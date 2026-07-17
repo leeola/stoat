@@ -1,3 +1,4 @@
+use super::TEXT_SCALE_COMPACT;
 use crate::{
     diff_map::DiffHunkStatus,
     display_map::{tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
@@ -32,10 +33,6 @@ use stoatty_widgets::{
     popover::Popover,
     ApcScene,
 };
-
-/// Line-number glyph size in 256ths of a cell, so numbers read smaller than the
-/// body text.
-const NUMBER_SCALE: u16 = 160;
 
 /// Columns reserved on a pane's right edge for the minimap strip under stoatty,
 /// matching the width stoatty's GPU minimap pass paints there.
@@ -1022,7 +1019,7 @@ pub(crate) fn rich_gutter(
         lines,
         bar_width: 5,
         pad: 2,
-        number_scale: NUMBER_SCALE,
+        number_scale: TEXT_SCALE_COMPACT,
         width_digits,
         number_fg,
         separator: number_fg,

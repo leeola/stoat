@@ -1,3 +1,4 @@
+use super::TEXT_SCALE_POPUP;
 use crate::{
     action_handlers::lsp::{HoverPopup, HoverSelection},
     app::Stoat,
@@ -11,10 +12,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, StatefulWidget, Widget},
 };
 use stoatty_widgets::{text_run::TextRun, ApcScene};
-
-/// Hover-body text size under stoatty, in 256ths of a cell (0.85x), matching
-/// the hints overlay so popovers and hint rows share one scale.
-const HOVER_TEXT_SCALE: u16 = 218;
 
 /// Rows that must remain below the cursor for the popup to open there. With
 /// fewer, placement flips above the cursor. Matches Helix's popup bias
@@ -122,8 +119,8 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
                 // band spans full cell height. Chars map to cells through the
                 // scale, floored at the start and ceiled at the end.
                 if let Some((c0, c1, rgb)) = selection {
-                    let cell0 = c0 * HOVER_TEXT_SCALE as usize / 256;
-                    let cell1 = (c1 * HOVER_TEXT_SCALE as usize).div_ceil(256);
+                    let cell0 = c0 * TEXT_SCALE_POPUP as usize / 256;
+                    let cell1 = (c1 * TEXT_SCALE_POPUP as usize).div_ceil(256);
                     let x0 = inner.x + (cell0 as u16).min(inner.width);
                     let x1 = inner.x + (cell1 as u16).min(inner.width);
                     let color = Color::Rgb(rgb[0], rgb[1], rgb[2]);
@@ -160,7 +157,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
                             [(seg_start - chars_before)..(seg_end - chars_before)]
                             .iter()
                             .collect();
-                        let col = (seg_start as u16 * HOVER_TEXT_SCALE + 8) / 16;
+                        let col = (seg_start as u16 * TEXT_SCALE_POPUP + 8) / 16;
                         let bg = if selected {
                             selection.map_or(run_bg, |(_, _, rgb)| rgb)
                         } else {
@@ -169,7 +166,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
                         TextRun {
                             col,
                             row: 0,
-                            scale: HOVER_TEXT_SCALE,
+                            scale: TEXT_SCALE_POPUP,
                             color,
                             bg: Some(bg),
                             text: &seg_text,
@@ -261,7 +258,7 @@ fn highlight_grid_selection(
 /// position, clamped to the popup interior and the target line's length.
 ///
 /// Replays [`render_hover`]'s scroll clamp to resolve the line. Under stoatty it
-/// inverts the 0.85x popover scale (256ths of a cell over [`HOVER_TEXT_SCALE`])
+/// inverts the 0.85x popover scale (256ths of a cell over [`TEXT_SCALE_POPUP`])
 /// to resolve the column. The grid path maps a cell to a column 1:1.
 pub(crate) fn hover_hit_test(
     popup: &HoverPopup,
@@ -284,7 +281,7 @@ pub(crate) fn hover_hit_test(
 
     let cell = (clamped_col - inner.x) as usize;
     let char_col = if stoatty {
-        (cell * 256 + 128) / HOVER_TEXT_SCALE as usize
+        (cell * 256 + 128) / TEXT_SCALE_POPUP as usize
     } else {
         cell
     };
@@ -453,12 +450,12 @@ pub(crate) fn render_hover_page(
         let line = truncate_line(line, region_width as usize);
         let mut chars_before = 0u16;
         for (text, style) in &line {
-            let col = (chars_before * HOVER_TEXT_SCALE + 8) / 16;
+            let col = (chars_before * TEXT_SCALE_POPUP + 8) / 16;
             let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
             TextRun {
                 col,
                 row: 0,
-                scale: HOVER_TEXT_SCALE,
+                scale: TEXT_SCALE_POPUP,
                 color,
                 bg: Some(run_bg),
                 text,

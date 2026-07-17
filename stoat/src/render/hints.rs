@@ -1,3 +1,4 @@
+use super::TEXT_SCALE_POPUP;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -5,9 +6,6 @@ use ratatui::{
     widgets::{Clear, Widget},
 };
 use std::collections::HashMap;
-
-/// Hint-row and footer text size under stoatty, in 256ths of a cell (0.85x).
-const HINT_TEXT_SCALE: u16 = 218;
 
 pub(crate) struct HintsFooter {
     pub(crate) text: String,
@@ -112,7 +110,7 @@ pub(crate) fn render_hints(
                 &padded_key,
                 key_style,
                 run_bg,
-                HINT_TEXT_SCALE,
+                TEXT_SCALE_POPUP,
                 scene.as_deref_mut(),
             );
 
@@ -125,7 +123,7 @@ pub(crate) fn render_hints(
                 &action_text,
                 action_style,
                 run_bg,
-                HINT_TEXT_SCALE,
+                TEXT_SCALE_POPUP,
                 scene.as_deref_mut(),
             );
         }
@@ -155,7 +153,7 @@ pub(crate) fn render_hints(
                 &footer.text,
                 footer.style,
                 run_bg,
-                HINT_TEXT_SCALE,
+                TEXT_SCALE_POPUP,
                 scene,
             );
         }

@@ -9,7 +9,7 @@ use crate::{
         run_pane::render_run_pane,
         term_pane::render_term_pane,
         undercurl::UndercurlSpan,
-        FrameCtx, PaneCtx,
+        FrameCtx, PaneCtx, TEXT_SCALE_COMPACT,
     },
 };
 use lsp_types::DiagnosticSeverity;
@@ -309,7 +309,7 @@ fn render_status_segments(
             StatusBar {
                 left: &left_rich,
                 right: &right_rich,
-                scale: 160,
+                scale: TEXT_SCALE_COMPACT,
                 separator,
             }
             .draw_components(area, buf, scene);

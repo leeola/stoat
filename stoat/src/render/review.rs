@@ -1,3 +1,4 @@
+use super::TEXT_SCALE_COMPACT;
 use crate::{
     diff_map::ChangeKind,
     display_map::{
@@ -18,10 +19,6 @@ use ratatui::{
 use std::sync::Arc;
 use stoat_text::{cursor_offset, Point};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
-
-/// Line-number glyph size in 256ths of a cell, so the number reads smaller than
-/// the body text. Matches the gutter demo's `NUMBER_SCALE`.
-const NUMBER_SCALE: u16 = 160;
 
 pub(crate) fn render_review(
     editor: &mut EditorState,
@@ -743,9 +740,9 @@ fn draw_side_num(
             let digits = text.len() as u16;
             let right_edge = (num_x - inner.x + 4) * 16;
             TextRun {
-                col: right_edge.saturating_sub(digits * NUMBER_SCALE / 16),
+                col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16),
                 row: (y - inner.y) * 16,
-                scale: NUMBER_SCALE,
+                scale: TEXT_SCALE_COMPACT,
                 color: rg.colors.dim,
                 bg: Some(rg.colors.bg),
                 text: &text,

@@ -1,3 +1,4 @@
+use super::TEXT_SCALE_FULL;
 use crate::{render::review::style_rgb, theme::Theme};
 use ratatui::{
     buffer::Buffer,
@@ -66,7 +67,7 @@ pub(crate) fn modal_frame(
                 TextRun {
                     col: 16,
                     row: 0,
-                    scale: 256,
+                    scale: TEXT_SCALE_FULL,
                     color: border,
                     bg: None,
                     text: title,
