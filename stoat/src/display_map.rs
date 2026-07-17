@@ -217,6 +217,14 @@ pub struct DisplayMap {
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
     last_buffer_version: u64,
+    /// Buffer content version the crease map was last resolved against.
+    ///
+    /// The crease sync in [`Self::snapshot_with_companion`] is skipped while
+    /// this matches the live buffer version. Anchor offsets move only on a
+    /// buffer edit, and `insert`/`remove` resolve creases eagerly at the
+    /// current version, so an unchanged version guarantees every crease is
+    /// already resolved and a re-sync would reproduce the same offsets.
+    last_crease_sync_version: u64,
     inserted_diff_block_ids: Vec<CustomBlockId>,
     last_diff_version: usize,
     /// When false, `Deleted`/`Modified` diff hunks do not splice inline
@@ -266,6 +274,7 @@ impl DisplayMap {
             clip_at_line_ends: false,
             diagnostics_max_severity: None,
             last_buffer_version: version,
+            last_crease_sync_version: version,
             inserted_diff_block_ids: Vec::new(),
             last_diff_version: 0,
             show_deleted_blocks: false,
@@ -599,9 +608,12 @@ impl DisplayMap {
             .block_map
             .sync(wrap_snapshot, &wrap_edits, companion_view);
 
-        let buffer_snapshot_for_crease = self.multi_buffer.snapshot();
-        self.crease_map
-            .sync(&|a| buffer_snapshot_for_crease.resolve_anchor(a));
+        if buffer_version != self.last_crease_sync_version {
+            let buffer_snapshot_for_crease = self.multi_buffer.snapshot();
+            self.crease_map
+                .sync(&|anchors| buffer_snapshot_for_crease.resolve_anchors_batch(anchors));
+            self.last_crease_sync_version = buffer_version;
+        }
 
         let snapshot = DisplaySnapshot {
             companion_display_snapshot: None,
@@ -1130,6 +1142,40 @@ mod tests {
         let v1 = dm.snapshot().version();
         let v2 = dm.snapshot().version();
         assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn crease_sync_tracks_only_buffer_edits() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\n");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut dm = DisplayMap::new(multi_buffer, test_executor());
+
+        let range = {
+            let snap = dm.multi_buffer.snapshot();
+            snap.anchor_at(0, stoat_text::Bias::Right)..snap.anchor_at(5, stoat_text::Bias::Left)
+        };
+        dm.set_lsp_folding_ranges(BufferId::new(0), vec![(range, None)]);
+
+        dm.snapshot();
+        let synced_at = dm.last_crease_sync_version;
+
+        dm.insert_blocks(Vec::new());
+        dm.snapshot();
+        assert_eq!(
+            dm.last_crease_sync_version, synced_at,
+            "a rebuild with an unchanged buffer version does not re-sync creases",
+        );
+
+        {
+            let mut buf = shared.write().unwrap();
+            buf.edit(0..0, "x");
+        }
+        dm.snapshot();
+        assert!(
+            dm.last_crease_sync_version > synced_at,
+            "a buffer edit re-syncs the crease map",
+        );
     }
 
     #[test]

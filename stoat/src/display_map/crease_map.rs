@@ -286,17 +286,24 @@ impl CreaseMap {
         removed
     }
 
-    pub fn sync(&mut self, resolve: &impl Fn(&Anchor) -> usize) {
-        let mut items: Vec<CreaseItem> = self
-            .creases
+    pub fn sync(&mut self, resolve_batch: &impl Fn(&[Anchor]) -> Vec<usize>) {
+        if self.creases.is_empty() {
+            return;
+        }
+
+        let mut items: Vec<CreaseItem> = self.creases.iter().cloned().collect();
+
+        let anchors: Vec<Anchor> = items
             .iter()
-            .cloned()
-            .map(|mut item| {
-                item.resolved_start = resolve(&item.crease.range().start);
-                item.resolved_end = resolve(&item.crease.range().end);
-                item
-            })
+            .flat_map(|item| [item.crease.range().start, item.crease.range().end])
             .collect();
+        let resolved = resolve_batch(&anchors);
+
+        for (item, pair) in items.iter_mut().zip(resolved.chunks_exact(2)) {
+            item.resolved_start = pair[0];
+            item.resolved_end = pair[1];
+        }
+
         items.sort_by_key(|c| c.resolved_start);
         self.creases = SumTree::from_iter(items, ());
     }
@@ -445,14 +452,19 @@ mod tests {
             &resolve_initial,
         );
 
-        let resolve_after = |a: &Anchor| {
-            if a.offset == 20 {
-                2
-            } else if a.offset == 25 {
-                7
-            } else {
-                a.offset as usize
-            }
+        let resolve_after = |anchors: &[Anchor]| {
+            anchors
+                .iter()
+                .map(|a| {
+                    if a.offset == 20 {
+                        2
+                    } else if a.offset == 25 {
+                        7
+                    } else {
+                        a.offset as usize
+                    }
+                })
+                .collect::<Vec<usize>>()
         };
         map.sync(&resolve_after);
 
