@@ -18,7 +18,8 @@ use ratatui::{
 };
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, HashSet},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashSet},
+    hash::{Hash, Hasher},
     ops::Range,
     path::Path,
     sync::Arc,
@@ -155,6 +156,8 @@ pub(crate) fn render_editor_with_overlay(
             rope.offset_to_point(cursor).row + 1
         });
 
+    let severity_version = diagnostic_info.map_or(0, |(_, set)| set.version());
+
     let gutter_w = if line_numbers != LineNumbers::Off {
         draw_line_number_gutter(
             &snapshot,
@@ -167,6 +170,8 @@ pub(crate) fn render_editor_with_overlay(
             theme,
             stoatty,
             current_line,
+            severity_version,
+            &mut editor.gutter_geometry_cache,
             scene.as_deref_mut(),
             buf,
         )
@@ -550,6 +555,22 @@ pub(crate) struct GutterSeverityCache {
     pub(crate) map: Arc<BTreeMap<u32, DiagnosticSeverity>>,
 }
 
+/// Cached gutter geometry for one set of drawn-gutter inputs.
+///
+/// Holds the folded gutter lines, digit width, per-row diff marks, and the rich
+/// component lines, rebuilt only when [`Self::key`] changes. The key hashes
+/// every input that changes the drawn gutter -- the viewport window, the buffer,
+/// fold, diff, and diagnostic-severity versions, the relative-numbering line,
+/// and the resolved colors baked into the lines -- so a repaint that changes
+/// none of them reuses the collections instead of rebuilding them each frame.
+pub(crate) struct GutterGeometryCache {
+    key: u64,
+    folded: Vec<(u32, u16)>,
+    width_digits: u16,
+    marks: BTreeMap<u32, (DiffHunkStatus, bool)>,
+    lines: Vec<GutterLine>,
+}
+
 /// Build a per-buffer-row map from `path`'s diagnostics, picking the
 /// worst severity (lowest LSP code) when multiple diagnostics overlap
 /// the same row.
@@ -703,7 +724,7 @@ fn severity_scope(sev: DiagnosticSeverity) -> &'static str {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub(crate) struct SeverityColors {
     error: [u8; 3],
     warning: [u8; 3],
@@ -739,7 +760,7 @@ fn severity_color(sev: DiagnosticSeverity, colors: &SeverityColors) -> [u8; 3] {
 /// [`crate::theme::Theme::get`]'s progressive scope-broadening fallback, so a
 /// theme omitting `diff.modified` or `diff.moved` still yields a color that
 /// agrees with the minimap lane.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Hash)]
 pub(crate) struct DiffMarkColors {
     added: [u8; 3],
     modified: [u8; 3],
@@ -1031,6 +1052,37 @@ pub(crate) fn rich_gutter(
     }
 }
 
+/// Hash the inputs that change the drawn line-number gutter into a cache key.
+///
+/// Any change here misses [`GutterGeometryCache`] and rebuilds the geometry;
+/// otherwise a repaint reuses it. `colors` is `Some` only in rich mode, where
+/// the component lines bake the diff and severity colors in, so a theme change
+/// shows up as a different key.
+#[allow(clippy::too_many_arguments)]
+fn gutter_geometry_key(
+    scroll_row: u32,
+    width: u16,
+    visible: u32,
+    buffer_version: u64,
+    fold_version: usize,
+    diff_version: usize,
+    severity_version: u64,
+    current_line: Option<u32>,
+    colors: Option<([u8; 3], DiffMarkColors, &SeverityColors)>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    scroll_row.hash(&mut hasher);
+    width.hash(&mut hasher);
+    visible.hash(&mut hasher);
+    buffer_version.hash(&mut hasher);
+    fold_version.hash(&mut hasher);
+    diff_version.hash(&mut hasher);
+    severity_version.hash(&mut hasher);
+    current_line.hash(&mut hasher);
+    colors.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Draw the absolute-line-number gutter and return the cell columns it reserves.
 ///
 /// Inside stoatty with every gutter color resolved to RGB, draws the rich
@@ -1050,50 +1102,89 @@ fn draw_line_number_gutter(
     theme: &crate::theme::Theme,
     stoatty: bool,
     current_line: Option<u32>,
+    severity_version: u64,
+    cache: &mut Option<GutterGeometryCache>,
     scene: Option<&mut ApcScene>,
     buf: &mut Buffer,
 ) -> u16 {
     use crate::theme::scope as s;
 
     let visible = end_row.saturating_sub(scroll_row).min(inner.height as u32);
-    let (folded, width_digits) = gutter_geometry(snapshot, scroll_row, visible);
-
-    let diff_marks = gutter_diff_marks(snapshot, &folded);
     let diff_colors = DiffMarkColors::resolve(theme);
 
-    // Rich mode needs stoatty, a scene, and every gutter color as RGB.
-    let rich = scene.filter(|_| stoatty).and_then(|scene| {
-        let colors = severity?;
-        let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
-        let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
-        let bg = style_rgb(
-            fallback_style
-                .bg
-                .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg)),
-        )?;
-        Some((scene, colors, number_fg, separator, bg))
-    });
+    // Rich mode needs stoatty, a scene, and every gutter color as RGB. The
+    // colors resolve here, ahead of the scene, so the same values feed both the
+    // cache key and the component-line rebuild.
+    let gutter_rgb = stoatty
+        .then(|| {
+            let colors = severity?;
+            let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
+            let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
+            let bg = style_rgb(
+                fallback_style
+                    .bg
+                    .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg)),
+            )?;
+            Some((colors, number_fg, separator, bg))
+        })
+        .flatten();
+    let rich = scene.filter(|_| stoatty).zip(gutter_rgb);
 
-    match rich {
-        Some((scene, colors, number_fg, separator, bg)) => {
-            let lines = gutter_component_lines(
+    let key = gutter_geometry_key(
+        scroll_row,
+        inner.width,
+        visible,
+        snapshot.buffer_snapshot().version(),
+        snapshot.version(),
+        snapshot.diff_map().map_or(0, |dm| dm.version()),
+        severity_version,
+        current_line,
+        gutter_rgb.map(|(colors, _, _, bg)| (bg, diff_colors, colors)),
+    );
+
+    let stale = cache.as_ref().is_none_or(|c| c.key != key);
+    if stale {
+        let (folded, width_digits) = gutter_geometry(snapshot, scroll_row, visible);
+        let marks = gutter_diff_marks(snapshot, &folded);
+        let lines = match gutter_rgb {
+            Some((colors, _, _, bg)) => gutter_component_lines(
                 &folded,
                 row_severity,
-                &diff_marks,
+                &marks,
                 &diff_colors,
                 bg,
                 colors,
                 current_line,
+            ),
+            None => Vec::new(),
+        };
+        *cache = Some(GutterGeometryCache {
+            key,
+            folded,
+            width_digits,
+            marks,
+            lines,
+        });
+    }
+    let geometry = cache.as_ref().expect("set above");
+
+    match rich {
+        Some((scene, (_colors, number_fg, separator, bg))) => {
+            let gutter = rich_gutter(
+                &geometry.lines,
+                geometry.width_digits,
+                number_fg,
+                separator,
+                bg,
             );
-            let gutter = rich_gutter(&lines, width_digits, number_fg, separator, bg);
             gutter.draw_components(inner, buf, scene);
             gutter.cell_width()
         },
         None => draw_fallback_line_numbers(
-            &folded,
-            width_digits,
+            &geometry.folded,
+            geometry.width_digits,
             row_severity,
-            &diff_marks,
+            &geometry.marks,
             current_line,
             inner,
             theme,
@@ -1806,6 +1897,92 @@ mod tests {
         assert_eq!(
             [0, 9, 10, 99, 100, 1000].map(super::decimal_digits),
             [1, 1, 2, 2, 3, 4]
+        );
+    }
+
+    /// Paint the focused editor's line-number gutter and return its
+    /// geometry-cache key.
+    fn paint_gutter_key(stoat: &mut Stoat, rows: u16) -> u64 {
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 12, rows);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            true,
+            false,
+            false,
+            LineNumbers::Absolute,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        editor
+            .gutter_geometry_cache
+            .as_ref()
+            .expect("gutter cache set")
+            .key
+    }
+
+    /// The focused editor's cached folded gutter lines.
+    ///
+    /// Clearing them is a rebuild sentinel. The next paint either reuses the
+    /// cache and leaves them empty, or rebuilds the geometry and repopulates
+    /// them.
+    fn cached_folded(stoat: &mut Stoat) -> &mut Vec<(u32, u16)> {
+        &mut action_handlers::focused_editor_mut(stoat)
+            .unwrap()
+            .gutter_geometry_cache
+            .as_mut()
+            .unwrap()
+            .folded
+    }
+
+    #[test]
+    fn gutter_geometry_cache_reuses_until_an_input_changes() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/gutter-cache");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"one\ntwo\nthree\nfour\nfive");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let key = paint_gutter_key(&mut h.stoat, 5);
+        cached_folded(&mut h.stoat).clear();
+
+        assert_eq!(
+            paint_gutter_key(&mut h.stoat, 5),
+            key,
+            "an identical paint keeps the cache key"
+        );
+        assert!(
+            cached_folded(&mut h.stoat).is_empty(),
+            "an identical paint reuses the cached geometry instead of rebuilding it"
+        );
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .unwrap()
+            .scroll_row = 1;
+
+        assert_ne!(
+            paint_gutter_key(&mut h.stoat, 5),
+            key,
+            "a scroll changes the cache key"
+        );
+        assert!(
+            !cached_folded(&mut h.stoat).is_empty(),
+            "an invalidated cache rebuilds the geometry"
         );
     }
 
