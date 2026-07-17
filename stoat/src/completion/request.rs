@@ -426,7 +426,17 @@ async fn run_request(
                 }
             },
             CompletionSource::Word => {
-                items.extend(crate::completion::word::fetch(&ctx, &rope));
+                let words = executor
+                    .spawn_blocking({
+                        let owned = owned.clone();
+                        let rope = rope.clone();
+                        move || {
+                            let ctx = owned.as_borrowed();
+                            crate::completion::word::fetch(&ctx, &rope)
+                        }
+                    })
+                    .await;
+                items.extend(words);
             },
         }
     }
