@@ -50,6 +50,71 @@ pub fn lsp_pos_to_byte_offset(rope: &Rope, pos: Position, encoding: OffsetEncodi
     }
 }
 
+/// Convert LSP [`Position`]s to byte offsets in `rope` in one forward pass.
+///
+/// Equivalent to [`lsp_pos_to_byte_offset`] on each position, but walks a single
+/// [`Rope::chars_at`] cursor forward over the positions sorted by
+/// `(line, character)` rather than seeking from the root per position, so a whole
+/// token stream costs O(file) instead of O(tokens * log n). Results are returned
+/// in the input order.
+///
+/// Clips a character past the line end to the line end and a line past EOF to
+/// EOF, matching [`lsp_pos_to_byte_offset`].
+pub fn lsp_positions_to_byte_offsets_batch(
+    rope: &Rope,
+    positions: &[Position],
+    encoding: OffsetEncoding,
+) -> Vec<usize> {
+    let mut indexed: Vec<(usize, Position)> = positions.iter().copied().enumerate().collect();
+    indexed.sort_unstable_by_key(|(_, p)| (p.line, p.character));
+
+    let mut results = vec![0usize; positions.len()];
+    let mut chars = rope.chars_at(0).peekable();
+    let mut line = 0u32;
+    let mut col = 0u32;
+    let mut offset = 0usize;
+
+    for (original_idx, pos) in indexed {
+        while line < pos.line {
+            match chars.next() {
+                Some(ch) => {
+                    offset += ch.len_utf8();
+                    if ch == '\n' {
+                        line += 1;
+                        col = 0;
+                    }
+                },
+                None => break,
+            }
+        }
+        while col < pos.character {
+            match chars.peek() {
+                Some(&ch) if ch != '\n' => {
+                    let width = encoding_width(ch, encoding);
+                    if col + width > pos.character {
+                        break;
+                    }
+                    col += width;
+                    offset += ch.len_utf8();
+                    chars.next();
+                },
+                _ => break,
+            }
+        }
+        results[original_idx] = offset;
+    }
+    results
+}
+
+/// The `character` units one `ch` spans in `encoding`.
+fn encoding_width(ch: char, encoding: OffsetEncoding) -> u32 {
+    match encoding {
+        OffsetEncoding::Utf8 => ch.len_utf8() as u32,
+        OffsetEncoding::Utf16 => ch.len_utf16() as u32,
+        OffsetEncoding::Utf32 => 1,
+    }
+}
+
 /// Converts a byte offset in `rope` to an LSP [`Position`] per
 /// `encoding`. Offsets past `rope.len()` clip to EOF.
 pub fn byte_offset_to_lsp_pos(rope: &Rope, offset: usize, encoding: OffsetEncoding) -> Position {
@@ -275,6 +340,34 @@ mod tests {
         for enc in ENCODINGS {
             assert_eq!(lsp_pos_to_byte_offset(&r, pos(1, 0), enc), 3);
             assert_eq!(lsp_pos_to_byte_offset(&r, pos(99, 99), enc), 3);
+        }
+    }
+
+    #[test]
+    fn positions_batch_matches_per_token() {
+        let text = "h\u{00e9}llo\nw\u{00f6}rld\n\u{1F600} tail\nlast line";
+        let r = rope(text);
+        for enc in ENCODINGS {
+            // Positions a server emits sit on character boundaries, so derive
+            // them from each char-boundary offset. Add out-of-range and
+            // past-EOF positions (which clip identically both ways) and reverse
+            // the order to exercise the internal sort and scatter.
+            let mut positions: Vec<Position> = std::iter::once(0)
+                .chain(text.char_indices().map(|(i, ch)| i + ch.len_utf8()))
+                .map(|off| byte_offset_to_lsp_pos(&r, off, enc))
+                .collect();
+            positions.push(Position::new(0, 999));
+            positions.push(Position::new(99, 0));
+            positions.reverse();
+
+            let batch = lsp_positions_to_byte_offsets_batch(&r, &positions, enc);
+            for (i, p) in positions.iter().enumerate() {
+                assert_eq!(
+                    batch[i],
+                    lsp_pos_to_byte_offset(&r, *p, enc),
+                    "batch disagrees at {i} = {p:?} encoding {enc:?}"
+                );
+            }
         }
     }
 }

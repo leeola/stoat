@@ -1776,12 +1776,12 @@ fn convert_inlay_hints(
     rope: &Rope,
     encoding: OffsetEncoding,
 ) -> Vec<InlayHintItem> {
+    let positions: Vec<Position> = hints.iter().map(|hint| hint.position).collect();
+    let offsets = crate::lsp::util::lsp_positions_to_byte_offsets_batch(rope, &positions, encoding);
     hints
         .into_iter()
-        .map(|hint| {
-            let offset = crate::lsp::util::lsp_pos_to_byte_offset(rope, hint.position, encoding);
-            (offset, inlay_hint_text(&hint), InlayKind::Hint)
-        })
+        .zip(offsets)
+        .map(|(hint, offset)| (offset, inlay_hint_text(&hint), InlayKind::Hint))
         .collect()
 }
 
@@ -2401,21 +2401,21 @@ fn convert_semantic_tokens(
     let SemanticTokensResult::Tokens(tokens) = result else {
         return Vec::new();
     };
-    decode_semantic_tokens(&tokens.data, legend)
-        .into_iter()
-        .map(|t| {
-            let start = crate::lsp::util::lsp_pos_to_byte_offset(
-                rope,
+    let decoded = decode_semantic_tokens(&tokens.data, legend);
+    let positions: Vec<Position> = decoded
+        .iter()
+        .flat_map(|t| {
+            [
                 Position::new(t.line, t.start),
-                encoding,
-            );
-            let end = crate::lsp::util::lsp_pos_to_byte_offset(
-                rope,
                 Position::new(t.line, t.start + t.length),
-                encoding,
-            );
-            (start..end, t.scope)
+            ]
         })
+        .collect();
+    let offsets = crate::lsp::util::lsp_positions_to_byte_offsets_batch(rope, &positions, encoding);
+    decoded
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (offsets[2 * i]..offsets[2 * i + 1], t.scope))
         .collect()
 }
 
@@ -2522,11 +2522,16 @@ fn apply_semantic_tokens(
     // has since moved to another buffer.
     let tokens: Arc<[SemanticTokenHighlight]> = {
         let buf_snap = shared.read().expect("buffer poisoned").snapshot.clone();
+        let starts: Vec<usize> = styled.iter().map(|(range, _)| range.start).collect();
+        let ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
+        let start_anchors = buf_snap.anchors_at_batch(&starts, Bias::Right);
+        let end_anchors = buf_snap.anchors_at_batch(&ends, Bias::Left);
         styled
             .into_iter()
-            .map(|(range, style)| SemanticTokenHighlight {
-                range: buf_snap.anchor_at(range.start, Bias::Right)
-                    ..buf_snap.anchor_at(range.end, Bias::Left),
+            .zip(start_anchors)
+            .zip(end_anchors)
+            .map(|(((_range, style), start), end)| SemanticTokenHighlight {
+                range: start..end,
                 style,
             })
             .collect()

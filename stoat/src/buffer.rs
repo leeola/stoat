@@ -793,6 +793,46 @@ impl TextBufferSnapshot {
         }
     }
 
+    /// Anchor a batch of byte offsets in one forward pass over the fragment tree.
+    ///
+    /// Equivalent to [`Self::anchor_at`] on each offset with the same `bias`, but
+    /// advances a single cursor over the offsets sorted ascending rather than
+    /// seeking from the root per offset, so a whole token stream costs O(file)
+    /// instead of O(tokens * log n). Results are returned in the input order.
+    /// Callers pass one bias per batch (token starts use [`Bias::Right`], ends
+    /// [`Bias::Left`]).
+    pub fn anchors_at_batch(&self, offsets: &[usize], bias: Bias) -> Vec<Anchor> {
+        let len = self.visible_text.len();
+        let mut indexed: Vec<(usize, usize)> =
+            offsets.iter().map(|&o| o.min(len)).enumerate().collect();
+        indexed.sort_unstable_by_key(|&(_, o)| o);
+
+        let mut results = vec![Anchor::min_for_buffer(self.buffer_id); offsets.len()];
+        let cx = &None;
+        let mut cursor = self.fragments.cursor::<usize>(cx);
+        for (original_idx, offset) in indexed {
+            results[original_idx] = if bias == Bias::Left && offset == 0 {
+                Anchor::min_for_buffer(self.buffer_id)
+            } else if bias == Bias::Right && offset == len {
+                Anchor::max_for_buffer(self.buffer_id)
+            } else {
+                cursor.seek_forward(&offset, bias);
+                let start = *cursor.start();
+                match cursor.item() {
+                    Some(fragment) if fragment.visible => Anchor {
+                        timestamp: fragment.timestamp,
+                        offset: fragment.insertion_offset + (offset - start) as u32,
+                        bias,
+                        buffer_id: Some(self.buffer_id),
+                    },
+                    _ if bias == Bias::Left => Anchor::min_for_buffer(self.buffer_id),
+                    _ => Anchor::max_for_buffer(self.buffer_id),
+                }
+            };
+        }
+        results
+    }
+
     pub fn resolve_anchor(&self, anchor: &Anchor) -> usize {
         if anchor.is_min() {
             return 0;
@@ -970,6 +1010,29 @@ mod tests {
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
+    }
+
+    #[test]
+    fn anchors_at_batch_matches_anchor_at() {
+        let mut b = buf("hello world\nsecond line\nthird line\n");
+        // Fragment the tree so anchors resolve across several fragments.
+        b.edit(6..6, "brave ");
+        b.edit(0..0, "prefix ");
+        b.edit(10..14, "");
+        let snap = b.snapshot.clone();
+
+        let len = snap.visible_text.len();
+        let offsets: Vec<usize> = (0..=len).collect();
+        for bias in [Bias::Left, Bias::Right] {
+            let batch = snap.anchors_at_batch(&offsets, bias);
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    batch[i],
+                    snap.anchor_at(off, bias),
+                    "anchors_at_batch disagrees at offset {off} bias {bias:?}"
+                );
+            }
+        }
     }
 
     #[test]
