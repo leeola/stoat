@@ -1466,21 +1466,29 @@ impl Terminal {
         }
         self.last_selection_span = span;
 
-        for indexed in content.display_iter {
-            let row = indexed.point.line.0 + offset;
-            if row < 0 {
+        // Visit only the rows damage marked, and read their cells straight from
+        // the terminal grid rather than filtering the whole viewport per cell.
+        // `display_iter` maps grid `line + offset` to viewport `row`. Inverting
+        // it as `line = row - offset` yields the same cells and points.
+        let term_grid = self.term.grid();
+        for row in 0..rows {
+            if !dirty.is_dirty(row) {
                 continue;
             }
-
-            let (row, col) = (row as usize, indexed.point.column.0);
-            if row >= rows || col >= cols || !dirty.is_dirty(row) {
-                continue;
-            }
-
-            let cell = grid.get_mut(row, col);
-            *cell = project_cell(indexed.cell, content.colors, &self.theme, &self.palette);
-            if selection.is_some_and(|s| s.contains(indexed.point)) {
-                cell.flags = cell.flags.toggle(Flags::INVERSE);
+            let line = Line(row as i32 - offset);
+            let source = &term_grid[line];
+            for col in 0..cols {
+                let point = Point::new(line, Column(col));
+                let cell = grid.get_mut(row, col);
+                *cell = project_cell(
+                    &source[Column(col)],
+                    content.colors,
+                    &self.theme,
+                    &self.palette,
+                );
+                if selection.is_some_and(|s| s.contains(point)) {
+                    cell.flags = cell.flags.toggle(Flags::INVERSE);
+                }
             }
         }
 
@@ -2690,6 +2698,64 @@ mod tests {
                 shape: CursorShape::Block
             }
         );
+    }
+
+    #[test]
+    fn idle_frame_leaves_clean_rows_untouched() {
+        let mut terminal = Terminal::new(3, 4, Theme::default());
+        let mut grid = Grid::new(3, 4);
+        terminal.advance(b"hi");
+        terminal.project(&mut grid);
+
+        // An idle frame with no new input damages only the cursor's line (row
+        // 0), so the rows below it stay out of the projection. Sentinel them and
+        // confirm the re-projection never touches a clean row.
+        grid.get_mut(1, 0).ch = 'Z';
+        grid.get_mut(2, 0).ch = 'Z';
+        let row1 = *grid.get(1, 0);
+        let row2 = *grid.get(2, 0);
+
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            *grid.get(1, 0),
+            row1,
+            "a clean row is untouched by an idle frame"
+        );
+        assert_eq!(
+            *grid.get(2, 0),
+            row2,
+            "a clean row is untouched by an idle frame"
+        );
+    }
+
+    #[test]
+    fn single_dirty_row_reprojects_only_that_row() {
+        let mut terminal = Terminal::new(3, 4, Theme::default());
+        let mut grid = Grid::new(3, 4);
+        terminal.advance(b"aa\r\nbb\r\ncc");
+        terminal.project(&mut grid);
+
+        // Sentinel each row's last cell, then damage only the cursor row (row 2,
+        // where "cc" left the cursor) by writing in place so the cursor never
+        // leaves it.
+        for r in 0..3 {
+            grid.get_mut(r, 3).ch = 'Z';
+        }
+        let row0 = *grid.get(0, 3);
+        let row1 = *grid.get(1, 3);
+
+        terminal.advance(b"d");
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.get(2, 2).ch, 'd', "the dirty row is re-projected");
+        assert_ne!(
+            grid.get(2, 3).ch,
+            'Z',
+            "the dirty row's sentinel is overwritten"
+        );
+        assert_eq!(*grid.get(0, 3), row0, "an unchanged row keeps its cells");
+        assert_eq!(*grid.get(1, 3), row1, "an unchanged row keeps its cells");
     }
 
     #[test]
