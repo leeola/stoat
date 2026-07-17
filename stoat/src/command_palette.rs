@@ -172,7 +172,7 @@ impl ArgPicker {
     ) {
         let policy = match self.source {
             ValueSource::Buffers => PreviewPolicy::LiveBufferThenFile,
-            ValueSource::Directories => PreviewPolicy::NoPreview,
+            ValueSource::Directories | ValueSource::Themes => PreviewPolicy::NoPreview,
             _ => PreviewPolicy::File,
         };
         self.active_core()
@@ -395,15 +395,17 @@ impl CommandPalette {
 
     /// The value source of the current command's first argument when it drives
     /// an inline picker ([`ValueSource::Files`], [`ValueSource::Directories`],
-    /// or [`ValueSource::Buffers`], e.g. `:o `, `:cd `, or `:b `), or `None`
-    /// otherwise. Gates rendering the picker and routing selection keys to it.
+    /// [`ValueSource::Buffers`], or [`ValueSource::Themes`], e.g. `:o `, `:cd `,
+    /// `:b `, or `:SetTheme `), or `None` otherwise. Gates rendering the picker
+    /// and routing selection keys to it.
     pub(crate) fn arg_source(&self) -> Option<ValueSource> {
         let param = self.command?.def.params().first()?;
         match param.value_source {
             ValueSource::None => None,
-            source @ (ValueSource::Files | ValueSource::Directories | ValueSource::Buffers) => {
-                Some(source)
-            },
+            source @ (ValueSource::Files
+            | ValueSource::Directories
+            | ValueSource::Buffers
+            | ValueSource::Themes) => Some(source),
         }
     }
 
@@ -1649,6 +1651,49 @@ mod tests {
             arg_picker(&h).core.picklist.filtered.len(),
             2,
             "lists src and docs; a root-level file contributes no directory",
+        );
+    }
+
+    #[test]
+    fn set_theme_arg_picker_lists_themes_and_switches() {
+        let mut h = Stoat::test();
+        let (cfg, errors) = stoat_config::parse("theme probe { ui.text.fg = \"#abcdef\"; }");
+        assert!(errors.is_empty(), "seed theme parses");
+        h.stoat
+            .theme_blocks
+            .extend(cfg.expect("parsed config").themes);
+
+        h.type_text(":SetTheme ");
+        h.snapshot();
+        let listed: Vec<String> = {
+            let picker = arg_picker(&h);
+            picker
+                .core
+                .picklist
+                .filtered
+                .iter()
+                .map(|&i| picker.core.picklist.base[i].to_string_lossy().into_owned())
+                .collect()
+        };
+        assert!(
+            listed.iter().any(|n| n == "default_dark"),
+            "lists the embedded theme: {listed:?}",
+        );
+        assert!(
+            listed.iter().any(|n| n == "probe"),
+            "lists the injected theme: {listed:?}",
+        );
+
+        h.type_text("probe");
+        h.snapshot();
+        h.type_keys("enter");
+        assert!(
+            h.stoat.command_palette.is_none(),
+            "submitting the theme closes the palette",
+        );
+        assert_eq!(
+            h.stoat.theme.name, "probe",
+            "selecting a theme switches to it"
         );
     }
 

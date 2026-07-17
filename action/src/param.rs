@@ -35,6 +35,8 @@ pub enum ValueSource {
     /// Workspace directories, derived from the file walk. A directory that
     /// contains no files never appears.
     Directories,
+    /// Names of the configured theme blocks, for the theme switcher.
+    Themes,
 }
 
 pub struct ParamDef {

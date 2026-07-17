@@ -4,7 +4,7 @@ use std::any::Any;
 const PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,
-    value_source: ValueSource::None,
+    value_source: ValueSource::Themes,
     required: true,
     description: "Name of the theme block to activate, resolved against the config's `theme NAME { ... }` blocks.",
 }];

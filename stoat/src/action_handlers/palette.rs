@@ -47,6 +47,17 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
         ValueSource::Buffers => Some(ArgCandidates::Paths(
             stoat.active_workspace().buffers.open_paths(),
         )),
+        ValueSource::Themes => {
+            let mut seen = std::collections::HashSet::new();
+            let names = stoat
+                .theme_blocks
+                .iter()
+                .map(|b| b.node.name.node.as_str())
+                .filter(|name| seen.insert(name.to_string()))
+                .map(PathBuf::from)
+                .collect();
+            Some(ArgCandidates::Paths(names))
+        },
     }
 }
 
