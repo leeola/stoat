@@ -56,6 +56,13 @@ pub enum Command {
     /// page-plus-fraction position over subsequent frames, so the program
     /// reports where it wants the viewport and the terminal owns the animation.
     Scroll(ScrollCommand),
+    /// Anchor the primary cursor to the content while a pool glides.
+    ///
+    /// Carries the cursor's document row and grid column for pool
+    /// [`PoolCursorCommand::pool`], so the terminal draws the cursor riding the
+    /// eased scroll offset instead of easing it toward its last VT cell. Sent
+    /// once per glide tick alongside the pool's [`Command::Scroll`] frame.
+    PoolCursor(PoolCursorCommand),
     /// Jump the smooth-scroll target to a document page across an unbuffered gap.
     ///
     /// Re-anchors the live offset to a local neighbour of [`RepositionCommand`]'s
@@ -359,6 +366,25 @@ pub struct ScrollCommand {
     pub pool: u32,
     pub page: u64,
     pub fraction: u16,
+}
+
+/// A pool's primary-cursor anchor, tracked for the duration of a glide.
+///
+/// While pool [`Self::pool`] eases toward a scroll target, the cursor rides the
+/// content rather than the VT grid. `row` is the document display row the cursor
+/// sits on, and `col` is its grid-absolute column. The terminal draws the cursor
+/// at region row `row` minus the pool's eased document offset, hiding it while
+/// that row lands outside the region, instead of easing the cursor toward its
+/// last VT cell.
+///
+/// Pairs with [`ScrollCommand`], which moves the same pool's viewport. The anchor
+/// ships once per glide tick, so the drawn cursor stays frame-locked to the eased
+/// content offset.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PoolCursorCommand {
+    pub pool: u32,
+    pub row: u64,
+    pub col: u16,
 }
 
 /// A discontinuous smooth-scroll jump to a document page.
@@ -863,6 +889,27 @@ pub fn encode_scroll_into(out: &mut Vec<u8>, command: &ScrollCommand) {
     frame::end(out);
 }
 
+/// Encode a [`PoolCursorCommand`] as a full `Gstoatty;pool_cursor` frame.
+///
+/// The cursor anchor rides one fixed 14-byte big-endian argument holding the
+/// pool, row, and column, the same shape as [`encode_scroll`]'s target.
+pub fn encode_pool_cursor(command: &PoolCursorCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_pool_cursor_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;pool_cursor` frame for `command` to `out` without allocating.
+pub fn encode_pool_cursor_into(out: &mut Vec<u8>, command: &PoolCursorCommand) {
+    frame::begin(out, "pool_cursor");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.pool.to_be_bytes())?;
+        w.write_all(&command.row.to_be_bytes())?;
+        w.write_all(&command.col.to_be_bytes())
+    });
+    frame::end(out);
+}
+
 /// Encode a [`RepositionCommand`] as a full `Gstoatty;reposition` frame.
 ///
 /// The destination page index rides in a single fixed 8-byte big-endian
@@ -1049,6 +1096,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Fill(c) => encode_fill_into(out, c.pool, c.index),
         Command::FillEnd => encode_fill_end_into(out),
         Command::Scroll(c) => encode_scroll_into(out, c),
+        Command::PoolCursor(c) => encode_pool_cursor_into(out, c),
         Command::Reposition(c) => encode_reposition_into(out, c.pool, c.page),
         Command::PoolDrop(c) => encode_pool_drop_into(out, c.pool),
         Command::Minimap(c) => encode_minimap_into(out, c),
@@ -1080,6 +1128,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "fill" => decode_fill(&frame.args).map(Command::Fill),
         "fill_end" => Some(Command::FillEnd),
         "scroll" => decode_scroll(&frame.args).map(Command::Scroll),
+        "pool_cursor" => decode_pool_cursor(&frame.args).map(Command::PoolCursor),
         "reposition" => decode_reposition(&frame.args).map(Command::Reposition),
         "pool_drop" => decode_pool_drop(&frame.args).map(Command::PoolDrop),
         "minimap" => decode_minimap(&frame.args).map(Command::Minimap),
@@ -1282,6 +1331,18 @@ fn decode_scroll(args: &[Vec<u8>]) -> Option<ScrollCommand> {
     })
 }
 
+fn decode_pool_cursor(args: &[Vec<u8>]) -> Option<PoolCursorCommand> {
+    let arg: &[u8; 14] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(PoolCursorCommand {
+        pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        row: u64::from_be_bytes([
+            arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11],
+        ]),
+        col: u16::from_be_bytes([arg[12], arg[13]]),
+    })
+}
+
 fn decode_reposition(args: &[Vec<u8>]) -> Option<RepositionCommand> {
     let arg: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
 
@@ -1429,13 +1490,13 @@ mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
         encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
-        encode_minimap_view, encode_panel, encode_pool_drop, encode_pool_region, encode_popover,
-        encode_popover_end, encode_reposition, encode_reset, encode_scale, encode_scroll,
-        encode_scroll_region, encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command,
-        FillCommand, IconCommand, IconKind, LineLayoutCommand, MinimapCommand, MinimapDropCommand,
-        MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand, PoolDropCommand,
-        PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
-        ScrollRegionCommand, TextRunCommand,
+        encode_minimap_view, encode_panel, encode_pool_cursor, encode_pool_drop,
+        encode_pool_region, encode_popover, encode_popover_end, encode_reposition, encode_reset,
+        encode_scale, encode_scroll, encode_scroll_region, encode_text_run_end, BarCommand,
+        BorderCommand, BorderStyle, Command, FillCommand, IconCommand, IconKind, LineLayoutCommand,
+        MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
+        PanelCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
+        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -1827,6 +1888,26 @@ mod tests {
     }
 
     #[test]
+    fn pool_cursor_round_trips() {
+        let command = PoolCursorCommand {
+            pool: 3,
+            row: 5_000_000_000,
+            col: 40_000,
+        };
+
+        assert_eq!(
+            decode(&encode_pool_cursor(&command)),
+            Some(Command::PoolCursor(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_pool_cursor_payload() {
+        // The single arg here decodes to 3 bytes, not the 14 a cursor anchor needs.
+        assert!(decode(b"Gstoatty;pool_cursor;YWJj").is_none());
+    }
+
+    #[test]
     fn reposition_round_trips() {
         let command = RepositionCommand {
             pool: 2,
@@ -2134,6 +2215,11 @@ mod tests {
                 pool: 2,
                 page: 12,
                 fraction: 30_000,
+            }),
+            Command::PoolCursor(PoolCursorCommand {
+                pool: 2,
+                row: 12,
+                col: 30_000,
             }),
             Command::Reposition(RepositionCommand {
                 pool: 3,

@@ -833,6 +833,8 @@ impl Terminal {
                     };
                 }
             },
+            // FIXME: ignored until Pool gains a cursor_anchor field to store this into.
+            Command::PoolCursor(_) => {},
             Command::Reposition(reposition) => {
                 if let Some(pool) = self.pools.get_mut(&reposition.pool) {
                     pool.scroll_target = DocumentOffset {
@@ -982,6 +984,7 @@ impl Terminal {
             | Command::TextRunEnd
             | Command::PoolRegion(_)
             | Command::Scroll(_)
+            | Command::PoolCursor(_)
             | Command::Reposition(_)
             | Command::PoolDrop(_)
             | Command::MinimapLines(_)
