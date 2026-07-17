@@ -1011,6 +1011,22 @@ mod tests {
     }
 
     #[test]
+    fn space_buffer_binds_d_to_close_buffer() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let space_buffer = TestState::new().set("mode", StateValue::String("space_buffer".into()));
+        let d = keymap
+            .lookup(
+                &space_buffer,
+                &key_event(KeyCode::Char('d'), KeyModifiers::NONE),
+            )
+            .expect("d is bound in space_buffer");
+        assert_eq!(d[0].name, "CloseBuffer");
+        assert_eq!(d[1].name, "SetMode");
+    }
+
+    #[test]
     fn default_config_pins_every_setting_default() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         // The embedded config must actively set every fixed-default scalar, so

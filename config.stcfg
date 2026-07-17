@@ -713,6 +713,7 @@ on key {
     mode == space_buffer {
         Escape -> SetMode(normal);
         b -> OpenBufferPicker();
+        d -> [CloseBuffer(), SetMode(normal)];
     }
     mode == space_lsp {
         Escape -> SetMode(normal);
