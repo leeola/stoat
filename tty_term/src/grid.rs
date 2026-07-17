@@ -39,6 +39,14 @@ pub struct Grid {
     /// from the vec is one row tall. The prefix sum gives a line's physical
     /// start row, so an inline expansion pushes later lines down.
     line_heights: Vec<u16>,
+    /// Change counters bumped by [`crate::Terminal::project`] when it re-applies
+    /// the overlay/popover, off-grid text-run, or minimap decorations. A render
+    /// pass compares each against its last-seen value to skip rebuilding and
+    /// re-uploading a decoration that did not change. Monotonic across resizes,
+    /// since a resize re-applies every decoration and so bumps all three.
+    popovers_epoch: u64,
+    text_runs_epoch: u64,
+    minimap_epoch: u64,
 }
 
 impl Grid {
@@ -57,7 +65,39 @@ impl Grid {
             minimaps: Vec::new(),
             minimap_contents: HashMap::new(),
             line_heights: Vec::new(),
+            popovers_epoch: 0,
+            text_runs_epoch: 0,
+            minimap_epoch: 0,
         }
+    }
+
+    /// Change counter for the overlay/popover decorations, bumped each time
+    /// [`crate::Terminal::project`] re-applies them.
+    pub fn popovers_epoch(&self) -> u64 {
+        self.popovers_epoch
+    }
+
+    /// Change counter for the off-grid text-run decorations.
+    pub fn text_runs_epoch(&self) -> u64 {
+        self.text_runs_epoch
+    }
+
+    /// Change counter for the minimap decorations, covering both the strip list
+    /// and the line-summary content stores.
+    pub fn minimap_epoch(&self) -> u64 {
+        self.minimap_epoch
+    }
+
+    pub(crate) fn bump_popovers_epoch(&mut self) {
+        self.popovers_epoch += 1;
+    }
+
+    pub(crate) fn bump_text_runs_epoch(&mut self) {
+        self.text_runs_epoch += 1;
+    }
+
+    pub(crate) fn bump_minimap_epoch(&mut self) {
+        self.minimap_epoch += 1;
     }
 
     pub fn rows(&self) -> usize {

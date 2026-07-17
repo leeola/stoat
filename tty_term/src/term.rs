@@ -1513,6 +1513,7 @@ impl Terminal {
         }
         if self.decorations_dirty.popovers || resized {
             apply_popovers(grid, &self.popovers);
+            grid.bump_popovers_epoch();
         }
         if self.decorations_dirty.panels || resized {
             apply_panels(grid, &self.panels, &self.panel_seq);
@@ -1528,18 +1529,21 @@ impl Terminal {
         }
         if self.decorations_dirty.text_runs || layout_changed {
             apply_text_runs(grid, &self.text_runs, &self.text_run_seq);
+            grid.bump_text_runs_epoch();
         }
         if self.decorations_dirty.bars || layout_changed {
             apply_bars(grid, &self.bars, &self.bar_seq);
         }
         if self.decorations_dirty.minimaps || resized {
             apply_minimaps(grid, &self.minimaps, &self.minimap_seq, &self.minimap_views);
+            grid.bump_minimap_epoch();
         }
         // The content stores re-clone into the grid only when a splice or drop
         // changed them, so a viewport-only frame re-projects the small strip list
         // above without touching the line summaries.
         if self.minimap_content_dirty || resized {
             grid.set_minimap_contents(self.minimap_contents.clone());
+            grid.bump_minimap_epoch();
             self.minimap_content_dirty = false;
         }
 
@@ -2756,6 +2760,51 @@ mod tests {
         );
         assert_eq!(*grid.get(0, 3), row0, "an unchanged row keeps its cells");
         assert_eq!(*grid.get(1, 3), row1, "an unchanged row keeps its cells");
+    }
+
+    #[test]
+    fn projection_without_decoration_change_keeps_every_epoch() {
+        let mut terminal = Terminal::new(3, 4, Theme::default());
+        let mut grid = Grid::new(3, 4);
+        terminal.project(&mut grid);
+        let popovers = grid.popovers_epoch();
+        let text_runs = grid.text_runs_epoch();
+        let minimap = grid.minimap_epoch();
+
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.popovers_epoch(), popovers, "popovers epoch stable");
+        assert_eq!(grid.text_runs_epoch(), text_runs, "text-runs epoch stable");
+        assert_eq!(grid.minimap_epoch(), minimap, "minimap epoch stable");
+    }
+
+    #[test]
+    fn a_decoration_change_bumps_only_its_epoch() {
+        let mut terminal = Terminal::new(3, 4, Theme::default());
+        let mut grid = Grid::new(3, 4);
+        terminal.project(&mut grid);
+        let popovers = grid.popovers_epoch();
+        let text_runs = grid.text_runs_epoch();
+        let minimap = grid.minimap_epoch();
+
+        terminal.decorations_dirty.popovers = true;
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.popovers_epoch(),
+            popovers + 1,
+            "the changed decoration bumps its epoch"
+        );
+        assert_eq!(
+            grid.text_runs_epoch(),
+            text_runs,
+            "an unchanged decoration is left alone"
+        );
+        assert_eq!(
+            grid.minimap_epoch(),
+            minimap,
+            "an unchanged decoration is left alone"
+        );
     }
 
     #[test]
