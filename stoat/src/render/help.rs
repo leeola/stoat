@@ -107,7 +107,7 @@ pub(crate) fn render_help(
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let separator = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
     let search_row = inner.y;
     let prompt = match input_mode {
@@ -148,7 +148,7 @@ pub(crate) fn render_help(
         list_rect.x + list_rect.width,
         list_rect.y,
         list_rect.height,
-        muted,
+        separator,
         scene,
     );
 

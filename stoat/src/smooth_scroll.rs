@@ -539,7 +539,13 @@ fn paint_page_gutter(
                 &rich.colors,
                 gutter.current_line,
             );
-            let widget = rich_gutter(&lines, width_digits, rich.number_fg, rich.bg);
+            let widget = rich_gutter(
+                &lines,
+                width_digits,
+                rich.number_fg,
+                rich.separator,
+                rich.bg,
+            );
             let mut scene = ApcScene::new();
             let mut scratch = Buffer::empty(area);
             widget.draw_components(area, &mut scratch, &mut scene);

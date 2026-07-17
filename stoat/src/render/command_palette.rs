@@ -173,7 +173,7 @@ fn render_palette_arg_picker(
         return;
     };
     let inner = layout.inner;
-    let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
     let Some((list, preview)) = arg_body_split(inner) else {
         return;
@@ -316,7 +316,7 @@ fn render_palette_command_prelude(
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
     let input_row = inner.y;
     write_str(buf, inner.x, input_row, ":", prompt_style);
@@ -378,7 +378,7 @@ fn render_palette_filter(
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
     let input_row = inner.y;
     write_str(buf, inner.x, input_row, ":", prompt_style);

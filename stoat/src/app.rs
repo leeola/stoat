@@ -10498,6 +10498,7 @@ mod tests {
             ui.modal.hints.fg = "#8899aa";
             ui.text.fg = "#c8ccd4";
             ui.text.muted.fg = "#606060";
+            ui.border.inactive.fg = "#606060";
             ui.key_label.fg = "#d19a66";
             ui.background.bg = "#282c34";
         }"##;

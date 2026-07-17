@@ -134,7 +134,7 @@ pub(crate) fn render_hints(
         let sep_row = inner.y + max_col_rows as u16;
         let text_row = sep_row + 1;
         if sep_row < inner.y + inner.height {
-            let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+            let sep_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
             crate::render::chrome::hline(
                 buf,
                 inner.x,

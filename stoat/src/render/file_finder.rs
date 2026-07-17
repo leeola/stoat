@@ -103,7 +103,7 @@ pub(crate) fn render_file_finder(
 
     let inner = layout.inner;
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
     let input_row = inner.y;
     write_str(buf, inner.x, input_row, ">", prompt_style);
@@ -124,7 +124,7 @@ pub(crate) fn render_file_finder(
         inner.x,
         separator_row,
         inner.width,
-        muted_style,
+        separator_style,
         scene.as_deref_mut(),
     );
 
@@ -134,7 +134,7 @@ pub(crate) fn render_file_finder(
             layout.list.x + layout.list.width,
             layout.list.y,
             layout.list.height,
-            muted_style,
+            separator_style,
             scene,
         );
         render_preview(finder, preview_rect, theme, ws, buf);

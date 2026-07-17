@@ -298,7 +298,7 @@ fn render_status_segments(
     scene: Option<&mut ApcScene>,
 ) {
     let rich = scene.filter(|_| frame.stoatty).and_then(|scene| {
-        let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_TEXT_MUTED).fg)?;
+        let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg)?;
         let left_rich = resolve_rich_segments(left, base_style)?;
         let right_rich = resolve_rich_segments(right, base_style)?;
         Some((scene, separator, left_rich, right_rich))

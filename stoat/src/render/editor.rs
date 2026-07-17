@@ -785,6 +785,7 @@ pub(crate) struct RichGutterColors {
     pub(crate) colors: SeverityColors,
     pub(crate) diff: DiffMarkColors,
     pub(crate) number_fg: [u8; 3],
+    pub(crate) separator: [u8; 3],
     pub(crate) bg: [u8; 3],
 }
 
@@ -805,6 +806,7 @@ pub(crate) fn resolve_rich_gutter(
     let colors = severity_colors(theme)?;
     let diff = DiffMarkColors::resolve(theme);
     let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
+    let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
     let bg = style_rgb(
         fallback_style
             .bg
@@ -814,6 +816,7 @@ pub(crate) fn resolve_rich_gutter(
         colors,
         diff,
         number_fg,
+        separator,
         bg,
     })
 }
@@ -1013,6 +1016,7 @@ pub(crate) fn rich_gutter(
     lines: &[GutterLine],
     width_digits: u16,
     number_fg: [u8; 3],
+    separator: [u8; 3],
     bg: [u8; 3],
 ) -> Gutter<'_> {
     Gutter {
@@ -1022,7 +1026,7 @@ pub(crate) fn rich_gutter(
         number_scale: TEXT_SCALE_COMPACT,
         width_digits,
         number_fg,
-        separator: number_fg,
+        separator,
         bg,
     }
 }
@@ -1061,16 +1065,17 @@ fn draw_line_number_gutter(
     let rich = scene.filter(|_| stoatty).and_then(|scene| {
         let colors = severity?;
         let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
+        let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
         let bg = style_rgb(
             fallback_style
                 .bg
                 .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg)),
         )?;
-        Some((scene, colors, number_fg, bg))
+        Some((scene, colors, number_fg, separator, bg))
     });
 
     match rich {
-        Some((scene, colors, number_fg, bg)) => {
+        Some((scene, colors, number_fg, separator, bg)) => {
             let lines = gutter_component_lines(
                 &folded,
                 row_severity,
@@ -1080,7 +1085,7 @@ fn draw_line_number_gutter(
                 colors,
                 current_line,
             );
-            let gutter = rich_gutter(&lines, width_digits, number_fg, bg);
+            let gutter = rich_gutter(&lines, width_digits, number_fg, separator, bg);
             gutter.draw_components(inner, buf, scene);
             gutter.cell_width()
         },
