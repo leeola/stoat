@@ -978,11 +978,11 @@ impl Stoat {
         initial_git_root: PathBuf,
         user_config: Option<String>,
     ) -> Self {
-        let (config, config_error) = match user_config {
+        let (config, theme_base, config_error) = match user_config {
             Some(source) => {
                 let (parsed, errors) = stoat_config::parse(&source);
                 if errors.is_empty() {
-                    (parsed, None)
+                    (parsed, Self::parse_default_keymap(), None)
                 } else {
                     tracing::error!(
                         "user config parse failed; using built-in defaults: {}",
@@ -990,11 +990,12 @@ impl Stoat {
                     );
                     (
                         Self::parse_default_keymap(),
+                        None,
                         Some("user config parse failed; using built-in defaults".to_string()),
                     )
                 }
             },
-            None => (Self::parse_default_keymap(), None),
+            None => (Self::parse_default_keymap(), None, None),
         };
 
         let settings = config
@@ -1015,12 +1016,26 @@ impl Stoat {
 
         let theme = {
             let name = settings.theme.as_deref().unwrap_or("default_dark");
-            match config.as_ref() {
-                Some(c) => crate::theme::Theme::from_config(c, name).unwrap_or_else(|e| {
+
+            // The embedded theme blocks sit under the user's so a clean user
+            // config can override a built-in theme field-by-field without
+            // restating it. theme_base is None when config already is the
+            // embedded default, avoiding a redundant self-layering.
+            let mut blocks = Vec::new();
+            if let Some(base) = theme_base.as_ref() {
+                blocks.extend(base.themes.iter().filter(|t| t.node.name.node == name));
+            }
+            if let Some(c) = config.as_ref() {
+                blocks.extend(c.themes.iter().filter(|t| t.node.name.node == name));
+            }
+
+            if blocks.is_empty() {
+                crate::theme::Theme::empty()
+            } else {
+                crate::theme::Theme::from_blocks(name, &blocks).unwrap_or_else(|e| {
                     tracing::error!("theme '{name}' load failed: {e}");
                     crate::theme::Theme::empty()
-                }),
-                None => crate::theme::Theme::empty(),
+                })
             }
         };
 
@@ -11495,6 +11510,64 @@ mod tests {
         assert_eq!(
             stoat.pending_message, None,
             "a clean parse shows no message"
+        );
+    }
+
+    #[test]
+    fn user_theme_block_layers_over_embedded_base() {
+        use crate::theme::scope::{UI_MODAL_PALETTE, UI_TEXT};
+        use ratatui::style::Color;
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let base = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            None,
+        );
+        let layered = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            Some("theme default_dark { ui.modal.palette.fg = \"#ff0000\"; }".to_string()),
+        );
+
+        let red = Some(Color::Rgb(255, 0, 0));
+        assert_eq!(
+            layered.theme.get(UI_MODAL_PALETTE).fg,
+            red,
+            "the user override recolors the modal palette border",
+        );
+        assert_ne!(
+            base.theme.get(UI_MODAL_PALETTE).fg,
+            red,
+            "the embedded base is not already red on its own",
+        );
+        assert_eq!(
+            layered.theme.get(UI_TEXT).fg,
+            base.theme.get(UI_TEXT).fg,
+            "a scope the user did not touch keeps the embedded value",
+        );
+    }
+
+    #[test]
+    fn user_only_theme_name_resolves() {
+        use crate::theme::scope::UI_TEXT;
+        use ratatui::style::Color;
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let stoat = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            Some("theme mine { ui.text.fg = \"#00ff00\"; }\non init { theme = mine; }".to_string()),
+        );
+
+        assert_eq!(stoat.theme.name, "mine", "the user-only theme activates");
+        assert_eq!(
+            stoat.theme.get(UI_TEXT).fg,
+            Some(Color::Rgb(0, 255, 0)),
+            "its scopes resolve without an embedded base of the same name",
         );
     }
 

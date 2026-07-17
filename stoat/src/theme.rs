@@ -41,16 +41,28 @@ impl Theme {
         self.palette.get(name).copied()
     }
 
-    /// Build a theme from all `theme NAME` blocks in `config` matching `name`.
-    /// Multiple blocks of the same name are processed in source order; later
-    /// statements override earlier per-field entries, allowing user config
-    /// to layer overrides on top of a built-in theme.
+    /// Build a theme from every `theme NAME` block in `config` matching `name`.
+    ///
+    /// A thin wrapper over [`Self::from_blocks`] that filters `config.themes`
+    /// by name. See it for the layering contract.
     pub fn from_config(config: &Config, name: &str) -> Result<Theme, ThemeError> {
         let blocks: Vec<&Spanned<ThemeBlock>> = config
             .themes
             .iter()
             .filter(|t| t.node.name.node == name)
             .collect();
+        Self::from_blocks(name, &blocks)
+    }
+
+    /// Build a theme from `theme NAME` blocks that all carry `name`, already
+    /// filtered out of one or more [`Config`]s.
+    ///
+    /// Blocks are processed in slice order and later statements override
+    /// earlier per-field entries, so a built-in theme's blocks followed by a
+    /// user's layer the user's overrides field-by-field over the base without
+    /// restating the whole theme. Fails when `blocks` is empty -- the named
+    /// theme is defined nowhere.
+    pub fn from_blocks(name: &str, blocks: &[&Spanned<ThemeBlock>]) -> Result<Theme, ThemeError> {
         if blocks.is_empty() {
             return ThemeNotFoundSnafu {
                 name: name.to_string(),
@@ -63,7 +75,7 @@ impl Theme {
         let mut bg: HashMap<String, Color> = HashMap::new();
         let mut mods: HashMap<String, Modifier> = HashMap::new();
 
-        for block in &blocks {
+        for block in blocks {
             for stmt in &block.node.statements {
                 match &stmt.node {
                     Statement::Let(l) => {
