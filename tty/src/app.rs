@@ -324,6 +324,12 @@ struct State {
     /// the cursor stretches along its path. Drives the
     /// [`CursorAnimation::Warp`] motion.
     cursor_corner_anim: [[f32; 2]; 4],
+    /// Whether last frame drew the cursor at a glide anchor rather than easing it.
+    ///
+    /// Set while a pool glides and the cursor rides its content. Drives the
+    /// one-shot snap to the landing cell on the first frame after the glide
+    /// releases, so the cursor does not sweep from the anchored position.
+    cursor_was_anchored: bool,
     /// Each overlay's eased vertical scroll offset, in rows, indexed by overlay
     /// order. An entry ping-pongs between the top and its overflow bottom while
     /// that popover overflows its box, so several scroll independently.
@@ -595,6 +601,7 @@ impl ApplicationHandler<PtyEvent> for App {
             cursor_anim: [0.0, 0.0],
             cursor_animation: self.cursor_animation,
             cursor_corner_anim: [[0.0, 0.0]; 4],
+            cursor_was_anchored: false,
             popover_scrolls: Vec::new(),
             popover_scroll_downs: Vec::new(),
             grid_scroll: 0.0,
@@ -777,7 +784,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     display_offset,
                     active,
                     pool_easing,
-                    cursor_launch_shift,
+                    cursor_anchor,
                 ) = {
                     let mut terminal = state.terminal.lock();
                     let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
@@ -801,7 +808,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     let mut active = mem::take(&mut state.active_scratch);
                     active.clear();
                     let mut pool_easing = false;
-                    let mut cursor_launch_shift: Option<f32> = None;
+                    let mut cursor_anchor: Option<AnchoredCursor> = None;
                     for pool in &pools {
                         let page_rows = (pool.region.height as f32).max(1.0);
                         let anim = state
@@ -823,18 +830,6 @@ impl ApplicationHandler<PtyEvent> for App {
                             anim.target_stable_for = anim.target_stable_for.saturating_add(dt);
                         } else {
                             anim.target_stable_for = Duration::ZERO;
-                        }
-                        if jump_rows.abs() >= CURSOR_SWEEP_MIN_ROWS
-                            && cursor_in_region(cursor, pool.region)
-                        {
-                            let top = pool.region.top as f32;
-                            let bottom = top + pool.region.height as f32;
-                            cursor_launch_shift = Some(sweep_launch_shift(
-                                jump_rows,
-                                cursor.row as f32,
-                                top,
-                                bottom,
-                            ));
                         }
 
                         // A reposition jump re-anchors the offset to a local
@@ -861,6 +856,25 @@ impl ApplicationHandler<PtyEvent> for App {
                             continue;
                         }
                         pool_easing = true;
+
+                        // While the focused pane glides it ships the primary
+                        // cursor's document anchor, so place the cursor riding
+                        // this pool's eased content offset instead of easing it
+                        // toward the VT cell.
+                        if let Some((row, col)) = pool.cursor_anchor {
+                            let (pos, in_region) = anchored_cursor_pos(
+                                pool.region.top as f32,
+                                page_rows,
+                                row as f32,
+                                col as f32,
+                                anim.scroll,
+                            );
+                            cursor_anchor = Some(AnchoredCursor {
+                                pos,
+                                in_region,
+                                region: pool.region,
+                            });
+                        }
 
                         // The composed rows depend only on the integer top
                         // document row, the pooled page bytes, and the region
@@ -930,19 +944,9 @@ impl ApplicationHandler<PtyEvent> for App {
                         display_offset,
                         active,
                         pool_easing,
-                        cursor_launch_shift,
+                        cursor_anchor,
                     )
                 };
-
-                // Throw the cursor back along a scrolling jump so its ease sweeps
-                // it to the destination. Shifts both the block point and the warp
-                // corners so whichever animation the mode advances starts launched.
-                if let Some(shift) = cursor_launch_shift {
-                    state.cursor_anim[1] += shift;
-                    for corner in &mut state.cursor_corner_anim {
-                        corner[1] += shift;
-                    }
-                }
 
                 let mut overflows = mem::take(&mut state.overflows_scratch);
                 overflows.clear();
@@ -1049,6 +1053,12 @@ impl ApplicationHandler<PtyEvent> for App {
                             // At the live bottom: render the projected live grid
                             // (cursor and decorations), cursor easing as usual.
                             state.last_scrollback_offset = None;
+                            snap_cursor_after_anchor(
+                                &mut state.cursor_was_anchored,
+                                &mut state.cursor_anim,
+                                &mut state.cursor_corner_anim,
+                                cursor,
+                            );
                             let (cursor, cursor_corners, easing) = step_cursor(
                                 state.cursor_animation,
                                 &mut state.cursor_anim,
@@ -1133,30 +1143,52 @@ impl ApplicationHandler<PtyEvent> for App {
                         })
                         .collect::<Vec<_>>();
 
-                    let (base_cursor, base_corners, cursor_easing) = step_cursor(
-                        state.cursor_animation,
-                        &mut state.cursor_anim,
-                        &mut state.cursor_corner_anim,
-                        cursor_position(cursor),
-                        dt,
-                    );
+                    let (base_cursor, base_corners, cursor_easing) = match cursor_anchor {
+                        Some(anchor) => {
+                            // The anchor is frame-locked to the pool's eased
+                            // content offset, so the cursor is placed directly
+                            // rather than eased toward the VT cell. Once its line
+                            // has scrolled off the pool it leaves the region and
+                            // hides. Keep the anim in sync for a clean settle.
+                            state.cursor_anim = anchor.pos;
+                            state.cursor_corner_anim = block_corners(anchor.pos);
+                            state.cursor_was_anchored = true;
+                            if anchor.in_region {
+                                (Some(anchor.pos), Some(block_corners(anchor.pos)), false)
+                            } else {
+                                (None, None, false)
+                            }
+                        },
+                        None => {
+                            snap_cursor_after_anchor(
+                                &mut state.cursor_was_anchored,
+                                &mut state.cursor_anim,
+                                &mut state.cursor_corner_anim,
+                                cursor,
+                            );
+                            step_cursor(
+                                state.cursor_animation,
+                                &mut state.cursor_anim,
+                                &mut state.cursor_corner_anim,
+                                cursor_position(cursor),
+                                dt,
+                            )
+                        },
+                    };
 
                     // The pool composites paint over the cursor's cell, so the
                     // cursor draws on top of them, clipped to the pool it sits in
-                    // (topmost when they stack) so its swept block does not bleed
-                    // past that pane.
-                    let cursor_scissor = active
-                        .iter()
-                        .rev()
-                        .find(|pool| cursor_in_region(cursor, pool.region))
-                        .map(|pool| {
-                            let region = pool.region;
-                            let x0 = (region.left as f32 * cw) as u32;
-                            let y0 = (region.top as f32 * ch) as u32;
-                            let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
-                            let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
-                            [x0, y0, x1 - x0, y1 - y0]
-                        });
+                    // (topmost when they stack) so its block does not bleed past
+                    // that pane. An anchored cursor rides a known pool, so clip to
+                    // that region rather than the stale VT cell.
+                    let cursor_scissor = match cursor_anchor {
+                        Some(anchor) => Some(region_scissor(anchor.region, cw, ch)),
+                        None => active
+                            .iter()
+                            .rev()
+                            .find(|pool| cursor_in_region(cursor, pool.region))
+                            .map(|pool| region_scissor(pool.region, cw, ch)),
+                    };
 
                     state.gpu.render_with_pools(
                         &state.grid,
@@ -1538,23 +1570,77 @@ fn cursor_in_region(cursor: Cursor, region: PoolRegionCommand) -> bool {
         && row < region.top as usize + region.height as usize
 }
 
-/// The vertical shift, in rows, that launches the cursor back along a scrolling
-/// jump so its ease sweeps it onto the destination cell at `target_y`.
-///
-/// `jump_rows` is how far the document scrolled, positive when the content
-/// scrolled up under a downward jump. The cursor launches that far back toward
-/// where its old line went -- up the screen for a downward jump -- clamped to
-/// the region `[top, bottom)` so the launch lands within the pane and the sweep
-/// stays on-screen however far the jump was.
-fn sweep_launch_shift(jump_rows: f32, target_y: f32, top: f32, bottom: f32) -> f32 {
-    (-jump_rows).clamp(top - target_y, bottom - target_y)
-}
-
 /// The four block corners [TL, TR, BL, BR] for a one-cell cursor block at
 /// fractional cell origin `origin`.
 fn block_corners(origin: [f32; 2]) -> [[f32; 2]; 4] {
     let [x, y] = origin;
     [[x, y], [x + 1.0, y], [x, y + 1.0], [x + 1.0, y + 1.0]]
+}
+
+/// The primary cursor's placement while it rides a gliding pool.
+///
+/// Frame-locked to the pool's eased content offset rather than eased toward the
+/// VT cursor cell, so the cursor slides with the text under it.
+#[derive(Clone, Copy)]
+struct AnchoredCursor {
+    /// Fractional cell position [col, row] the cursor draws at this frame.
+    pos: [f32; 2],
+    /// Whether [`Self::pos`] sits within the pool. The cursor hides once its line
+    /// has scrolled off either edge.
+    in_region: bool,
+    /// The gliding pool's region, used to clip the drawn cursor to the pane.
+    region: PoolRegionCommand,
+}
+
+/// The screen position a cursor anchored to a document row draws at while its
+/// pool glides, and whether it still falls within the pool.
+///
+/// `top` and `page_rows` are the pool region's top row and height, `row` and
+/// `col` the cursor's document display row and column, and `scroll` the pool's
+/// eased scroll in pages. The cursor rides the eased content, so it leaves the
+/// region once its line scrolls past either edge.
+fn anchored_cursor_pos(
+    top: f32,
+    page_rows: f32,
+    row: f32,
+    col: f32,
+    scroll: f32,
+) -> ([f32; 2], bool) {
+    let y = top + row - scroll * page_rows;
+    let in_region = y >= top && y < top + page_rows;
+    ([col, y], in_region)
+}
+
+/// The pixel scissor rect [x, y, width, height] covering pool `region`, laid out
+/// on a `cw` by `ch` cell grid.
+fn region_scissor(region: PoolRegionCommand, cw: f32, ch: f32) -> [u32; 4] {
+    let x0 = (region.left as f32 * cw) as u32;
+    let y0 = (region.top as f32 * ch) as u32;
+    let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
+    let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
+/// Snap the eased cursor state to the landing cell after a glide's anchor releases.
+///
+/// While a pool glides the cursor is placed by its anchor, not eased. When the
+/// glide hands the region back, easing resumes. Snapping the animation to the
+/// cursor's real cell first makes it appear there instead of sweeping across the
+/// screen from where it rode the content. A no-op when the cursor was not anchored.
+fn snap_cursor_after_anchor(
+    was_anchored: &mut bool,
+    point: &mut [f32; 2],
+    corners: &mut [[f32; 2]; 4],
+    cursor: Cursor,
+) {
+    if !*was_anchored {
+        return;
+    }
+    if let Some(landing) = cursor_position(cursor) {
+        *point = landing;
+        *corners = block_corners(landing);
+    }
+    *was_anchored = false;
 }
 
 /// The centroid of a quad's four corners.
@@ -2078,11 +2164,6 @@ fn step_region_scroll(scroll: f32, delta: f32, dt: Duration) -> (f32, bool) {
 /// the target so the landing glide draws pooled content.
 const REPOSITION_LAND_PAGES: f32 = 1.0;
 
-/// Rows a scrolling jump must move the document before the cursor sweep fires,
-/// so single-line motion and small wheel nudges leave the cursor pinned while a
-/// real jump (a page, `G`, a multi-line motion) launches it.
-const CURSOR_SWEEP_MIN_ROWS: f32 = 2.0;
-
 /// Wall time the scroll target must hold steady before the pool hands its
 /// region back to the live grid.
 ///
@@ -2125,12 +2206,12 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32, dt: Duration) 
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, bell_should_ring, cell_at, copy_pool_region, cursor_in_region,
-        ease, ease_corners, encode_key, font_step, paste_bytes, popover_overflow,
+        alternate_scroll_bytes, anchored_cursor_pos, bell_should_ring, cell_at, copy_pool_region,
+        cursor_in_region, ease, ease_corners, encode_key, font_step, paste_bytes, popover_overflow,
         selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes,
         step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
-        step_scrollback_scroll, swallow_super_combo, sweep_launch_shift, wheel_lines,
-        EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
+        step_scrollback_scroll, swallow_super_combo, wheel_lines, EASE_BASELINE_FRAME,
+        SCROLLBACK_MIN_STEP,
     };
     use alacritty_terminal::sync::FairMutex;
     use std::time::{Duration, Instant};
@@ -2377,14 +2458,21 @@ mod tests {
     }
 
     #[test]
-    fn sweep_launch_shift_throws_back_and_clamps_to_pane() {
-        // A 50-row downward jump with the cursor resting on the bottom row of a
-        // 40-row pane launches it to the pane top, not 50 rows above it.
-        assert_eq!(sweep_launch_shift(50.0, 39.0, 0.0, 40.0), -39.0);
-        // An upward jump clamps to the bottom edge.
-        assert_eq!(sweep_launch_shift(-50.0, 1.0, 0.0, 40.0), 39.0);
-        // A jump shorter than the pane launches by its own distance.
-        assert_eq!(sweep_launch_shift(5.0, 20.0, 0.0, 40.0), -5.0);
+    fn anchored_cursor_rides_the_glide_and_hides_off_pane() {
+        // A pool at top row 4 and 40 rows tall has eased a quarter page (10 rows)
+        // down. The cursor's document row 20 draws 10 rows higher, still in pane.
+        let (pos, in_region) = anchored_cursor_pos(4.0, 40.0, 20.0, 7.0, 0.25);
+        assert_eq!(pos, [7.0, 14.0]);
+        assert!(in_region);
+
+        // Eased far enough, the line rides off the top edge and hides.
+        let (pos, in_region) = anchored_cursor_pos(4.0, 40.0, 6.0, 7.0, 0.25);
+        assert_eq!(pos, [7.0, 0.0]);
+        assert!(!in_region);
+
+        // A line below the pane's bottom edge is hidden too.
+        let (_, in_region) = anchored_cursor_pos(0.0, 40.0, 45.0, 0.0, 0.0);
+        assert!(!in_region);
     }
 
     #[test]
