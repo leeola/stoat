@@ -286,6 +286,12 @@ pub(crate) fn render_editor_with_overlay(
     }
 
     let buffer_snapshot = snapshot.buffer_snapshot();
+    let visible = visible_byte_range(
+        &snapshot,
+        buffer_snapshot.rope(),
+        editor.scroll_row,
+        end_row,
+    );
 
     if let Some((path, set)) = diagnostic_info {
         let rope = buffer_snapshot.rope();
@@ -294,10 +300,9 @@ pub(crate) fn render_editor_with_overlay(
             .diagnostic_span_cache
             .as_ref()
             .map_or(&[], |c| c.spans.as_slice());
-        let visible = visible_byte_range(&snapshot, rope, editor.scroll_row, end_row);
         paint_diagnostic_spans(
             spans,
-            visible,
+            visible.clone(),
             rope,
             &snapshot,
             theme,
@@ -316,7 +321,6 @@ pub(crate) fn render_editor_with_overlay(
     if let Some(query) = search_query.filter(|q| !q.is_empty()) {
         let version = buffer_snapshot.version();
         let rope = buffer_snapshot.rope();
-        let visible = visible_byte_range(&snapshot, rope, editor.scroll_row, end_row);
         let stale = match &editor.search_match_cache {
             Some(cache) => {
                 cache.version != version || cache.query != query || cache.visible != visible
@@ -381,7 +385,6 @@ pub(crate) fn render_editor_with_overlay(
     let primary_id = editor.selections.newest_anchor().id;
     let mut primary_cell: Option<(u16, u16)> = None;
     let rope = buffer_snapshot.rope();
-    let visible = visible_byte_range(&snapshot, rope, editor.scroll_row, end_row);
     for selection in editor.selections.all_anchors() {
         let start_offset = buffer_snapshot.resolve_anchor(&selection.start);
         let end_offset = buffer_snapshot.resolve_anchor(&selection.end);
