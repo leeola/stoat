@@ -12,7 +12,7 @@ use std::{
     },
 };
 use stoat_text::{
-    Anchor, Bias, ContextLessSummary, Dimension, Item, KeyedItem, SeekTarget, SumTree,
+    Anchor, Bias, ContextLessSummary, Dimension, Dimensions, Item, SeekTarget, SumTree,
 };
 
 static DIFF_MAP_VERSION_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -69,12 +69,24 @@ pub struct DiffHunk {
 
 // --- SumTree plumbing (follows TreeMap/MapKey pattern from text/src/tree_map.rs) ---
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct HunkKey(Option<u32>);
+/// SumTree summary for the hunk tree.
+///
+/// `max_start` carries the largest `buffer_start_line` in a subtree for keyed
+/// seeking, so it replaces on combine because hunks are ordered by start.
+/// `changed_rows` sums the buffer rows covered by non-deleted hunks, letting a
+/// cursor answer how many changed rows precede a buffer row in one seek.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct HunkKey {
+    max_start: Option<u32>,
+    changed_rows: u32,
+}
 
 impl ContextLessSummary for HunkKey {
     fn add_summary(&mut self, other: &Self) {
-        *self = other.clone();
+        if other.max_start.is_some() {
+            self.max_start = other.max_start;
+        }
+        self.changed_rows += other.changed_rows;
     }
 }
 
@@ -86,7 +98,7 @@ impl<'a> Dimension<'a, HunkKey> for HunkKeyRef<'a> {
         Self(None)
     }
     fn add_summary(&mut self, summary: &'a HunkKey, _cx: ()) {
-        self.0 = summary.0.as_ref();
+        self.0 = summary.max_start.as_ref();
     }
 }
 
@@ -96,17 +108,34 @@ impl<'a> SeekTarget<'a, HunkKey, HunkKeyRef<'a>> for HunkKeyRef<'_> {
     }
 }
 
-impl Item for DiffHunk {
-    type Summary = HunkKey;
-    fn summary(&self, _cx: ()) -> HunkKey {
-        HunkKey(Some(self.buffer_start_line))
+/// Cumulative buffer rows covered by non-deleted hunks, for seeking how many
+/// changed rows precede a buffer position.
+#[derive(Clone, Copy, Default, Debug)]
+struct ChangedRows(u32);
+
+impl<'a> Dimension<'a, HunkKey> for ChangedRows {
+    fn zero(_cx: ()) -> Self {
+        Self(0)
+    }
+    fn add_summary(&mut self, summary: &'a HunkKey, _cx: ()) {
+        self.0 += summary.changed_rows;
     }
 }
 
-impl KeyedItem for DiffHunk {
-    type Key = HunkKey;
-    fn key(&self) -> HunkKey {
-        HunkKey(Some(self.buffer_start_line))
+impl Item for DiffHunk {
+    type Summary = HunkKey;
+    fn summary(&self, _cx: ()) -> HunkKey {
+        let changed_rows = if self.status == DiffHunkStatus::Deleted {
+            0
+        } else {
+            self.buffer_line_range
+                .end
+                .saturating_sub(self.buffer_line_range.start)
+        };
+        HunkKey {
+            max_start: Some(self.buffer_start_line),
+            changed_rows,
+        }
     }
 }
 
@@ -299,6 +328,31 @@ impl DiffMap {
             },
             None => false,
         }
+    }
+
+    /// Buffer rows covered by non-deleted hunks strictly before `buffer_row`.
+    ///
+    /// One cursor seek finds the hunk at or before `buffer_row`, then this sums
+    /// the changed rows before it plus that hunk's own rows below `buffer_row`.
+    /// Lets the diff view map a viewport top to its base line without walking
+    /// every row from the document start.
+    pub fn changed_rows_before(&self, buffer_row: u32) -> u32 {
+        let target = HunkKeyRef(Some(&buffer_row));
+        let mut cursor = self
+            .hunks
+            .cursor::<Dimensions<HunkKeyRef<'_>, ChangedRows>>(());
+        cursor.seek(&target, Bias::Right);
+        cursor.prev();
+        let before = cursor.start().1 .0;
+        let partial = match cursor.item() {
+            Some(hunk) => hunk
+                .buffer_line_range
+                .end
+                .min(buffer_row)
+                .saturating_sub(hunk.buffer_start_line),
+            None => 0,
+        };
+        before + partial
     }
 
     pub fn deleted_blocks(&self) -> Vec<BlockProperties> {

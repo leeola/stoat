@@ -871,6 +871,10 @@ impl DisplaySnapshot {
         self.block_snapshot.classify_row(display_row)
     }
 
+    pub fn buffer_rows_above(&self, display_row: u32) -> u32 {
+        self.block_snapshot.buffer_rows_above(display_row)
+    }
+
     pub fn clip_point(&self, point: DisplayPoint, bias: Bias) -> DisplayPoint {
         let bp = self
             .block_snapshot

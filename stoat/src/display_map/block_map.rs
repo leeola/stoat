@@ -983,6 +983,29 @@ impl BlockSnapshot {
         }
     }
 
+    /// Input (buffer) rows above display row `display_row`.
+    ///
+    /// Counts the input rows the transforms consume before `display_row`. A
+    /// block transform consumes no input, so a display row inside a block
+    /// returns the input rows before the block. With no soft-wrap or folds
+    /// active (the diff view's case) input rows equal buffer rows. Mirrors
+    /// [`Self::classify_row`]'s seek.
+    pub fn buffer_rows_above(&self, display_row: u32) -> u32 {
+        let target = OutputRow(display_row + 1);
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&target, Bias::Left);
+
+        let Dimensions(input_start, output_start, _) = cursor.start();
+        let rows_into_transform = display_row.saturating_sub(output_start.0);
+
+        match cursor.item() {
+            Some(transform) if transform.block.is_some() => input_start.0,
+            _ => input_start.0 + rows_into_transform,
+        }
+    }
+
     pub fn clip_point(&self, point: BlockPoint, bias: Bias) -> BlockPoint {
         let row = point.row.min(self.total_rows.saturating_sub(1));
         match self.classify_row(row) {

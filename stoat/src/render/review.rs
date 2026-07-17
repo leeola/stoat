@@ -269,25 +269,19 @@ fn paint_staged_glyph(buf: &mut Buffer, x: u16, y: u16, staged: bool, theme: &cr
     buf[(x, y)].set_char(ch).set_style(style);
 }
 
-/// Count the base-present display rows above `scroll_row` to get the base-file
-/// line number at the top of the viewport.
+/// Base-file line number at the top of the viewport (display row `scroll_row`).
 ///
-/// Context buffer rows and deleted/modified base block rows each map to one base
-/// line. Added and modified new-line buffer rows do not, and are skipped. Walks
-/// from row 0, so a deep scroll costs one classify per row above the viewport.
+/// Every display row above `scroll_row` is base-present (a deleted-base block
+/// row or an unchanged buffer row) except changed buffer rows, which have no
+/// base line. So the base line count is `scroll_row` minus the changed buffer
+/// rows above, which the diff map answers in one seek rather than a per-row
+/// walk from the document start.
 fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
-    let mut base_line = 0;
-    for row in 0..scroll_row {
-        match snapshot.classify_row(row) {
-            BlockRowKind::Block { .. } => base_line += 1,
-            BlockRowKind::BufferRow { buffer_row } => {
-                if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
-                    base_line += 1;
-                }
-            },
-        }
-    }
-    base_line
+    let buffer_rows_above = snapshot.buffer_rows_above(scroll_row);
+    let changed = snapshot
+        .diff_map()
+        .map_or(0, |dm| dm.changed_rows_before(buffer_rows_above));
+    scroll_row.saturating_sub(changed)
 }
 
 /// Paint one display row's syntax-highlighted chunks into a column starting at
@@ -981,6 +975,54 @@ mod tests {
         (buf.area.x..buf.area.x + buf.area.width)
             .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
             .collect()
+    }
+
+    #[test]
+    fn base_line_at_matches_the_reference_walk() {
+        // The original per-row walk, kept as the correctness oracle.
+        fn reference(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
+            let mut base_line = 0;
+            for row in 0..scroll_row {
+                match snapshot.classify_row(row) {
+                    BlockRowKind::Block { .. } => base_line += 1,
+                    BlockRowKind::BufferRow { buffer_row } => {
+                        if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
+                            base_line += 1;
+                        }
+                    },
+                }
+            }
+            base_line
+        }
+
+        // Each fixture is (base HEAD, buffer). Together they span a mid-file
+        // modification with deletion, a deletion at the top, consecutive changes,
+        // and a deletion at the tail, so the display carries added, deleted, and
+        // modified hunks with deleted-base block rows spliced in.
+        let fixtures = [
+            ("a\nb\nc\nd\ne\nf\ng\nh\n", "a\nB\nc\nd\nINS\ng\nh\n"),
+            ("x\ny\nz\nw\n", "z\nw\n"),
+            ("1\n2\n3\n4\n5\n", "1\nTWO\nTHREE\n5\n"),
+            ("p\nq\nr\ns\nt\n", "p\nq\nr\n"),
+        ];
+        let mut saw_blocks = false;
+        for (base, text) in fixtures {
+            let mut editor = diff_editor(base, text);
+            let snapshot = editor.display_map.snapshot();
+            let total = snapshot.line_count();
+            saw_blocks |= total > snapshot.buffer_line_count();
+            for row in 0..total {
+                assert_eq!(
+                    base_line_at(&snapshot, row),
+                    reference(&snapshot, row),
+                    "base_line_at disagrees with the walk at row {row}/{total} for {base:?}->{text:?}"
+                );
+            }
+        }
+        assert!(
+            saw_blocks,
+            "fixtures must splice deleted-base block rows to exercise the block case"
+        );
     }
 
     /// A diff-view editor over `text`, diffed against `base`, with the view and
