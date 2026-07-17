@@ -20,6 +20,21 @@ struct PathDiagnostics {
     merged: Vec<Diagnostic>,
 }
 
+impl PathDiagnostics {
+    /// The merged diagnostic list for this path.
+    ///
+    /// A single server's slice is its own merge, so it is read straight from
+    /// `by_server`; `merged` is materialized only while more than one server
+    /// contributes, sparing a full clone on the common single-server publish.
+    fn merged(&self) -> &[Diagnostic] {
+        if self.by_server.len() == 1 {
+            self.by_server.values().next().expect("one server")
+        } else {
+            &self.merged
+        }
+    }
+}
+
 /// Maps each known file path to its per-server diagnostics. Each server
 /// publishes a full snapshot per `textDocument/publishDiagnostics`, replacing
 /// only its own slice for the path. An empty slice clears that server's
@@ -78,8 +93,12 @@ impl DiagnosticSet {
         }
         if entry.by_server.is_empty() {
             self.by_path.remove(&path);
-        } else {
+        } else if entry.by_server.len() > 1 {
             entry.merged = entry.by_server.values().flatten().cloned().collect();
+        } else {
+            // A single server's slice is read directly by `merged()`, so skip
+            // the clone. Drop any stale multi-server copy so it never lingers.
+            entry.merged = Vec::new();
         }
     }
 
@@ -95,7 +114,7 @@ impl DiagnosticSet {
     pub fn get(&self, path: &Path) -> &[Diagnostic] {
         self.by_path
             .get(path)
-            .map(|entry| entry.merged.as_slice())
+            .map(PathDiagnostics::merged)
             .unwrap_or(&[])
     }
 
@@ -111,7 +130,7 @@ impl DiagnosticSet {
     pub fn iter(&self) -> impl Iterator<Item = (&Path, &[Diagnostic])> {
         self.by_path
             .iter()
-            .map(|(path, entry)| (path.as_path(), entry.merged.as_slice()))
+            .map(|(path, entry)| (path.as_path(), entry.merged()))
     }
 
     /// Returns severity counts plus the worst severity for `path`.

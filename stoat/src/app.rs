@@ -2583,16 +2583,16 @@ impl Stoat {
             if self.lsp_progress.update(server, &notification) {
                 continue;
             }
-            match &notification {
+            match notification {
                 LspNotification::Diagnostics {
                     uri, diagnostics, ..
                 } => {
-                    if let Some(path) = lsp_uri_to_path(uri) {
+                    if let Some(path) = lsp_uri_to_path(&uri) {
                         let count = diagnostics.len();
                         self.diagnostics.replace_from_server(
                             path.clone(),
                             server.to_string(),
-                            diagnostics.clone(),
+                            diagnostics,
                         );
                         tracing::info!(
                             target: "stoat::lsp",
@@ -2609,12 +2609,12 @@ impl Stoat {
                     }
                 },
                 LspNotification::ShowMessage { typ, message } => {
-                    self.lsp_message = Some((*typ, message.clone()));
+                    self.lsp_message = Some((typ, message));
                 },
-                _ => {
+                other => {
                     tracing::debug!(
                         target: "stoat::app",
-                        ?notification,
+                        ?other,
                         "unhandled LSP notification"
                     );
                 },
