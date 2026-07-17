@@ -4124,6 +4124,22 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
     editor.scroll_row != before
 }
 
+/// The display row the primary cursor's caret sits on.
+///
+/// Resolves the newest selection's caret to a buffer offset and maps it through
+/// the display map, so folds and soft wraps are accounted for rather than the raw
+/// buffer line.
+pub(crate) fn cursor_display_row(editor: &mut EditorState) -> u32 {
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let sel = editor.selections.newest_anchor().clone();
+    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+    let cursor = cursor_offset(rope, tail_off, head_off);
+    snapshot.buffer_to_display(rope.offset_to_point(cursor)).row
+}
+
 /// The dual of [`ensure_cursor_in_view`]: move the cursor to the view rather
 /// than the view to the cursor.
 ///
@@ -4139,14 +4155,11 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
 pub(crate) fn clamp_cursor_to_view(editor: &mut EditorState, scrolloff: u32) -> bool {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
 
+    let cursor_row = cursor_display_row(editor);
+
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let sel = editor.selections.newest_anchor().clone();
-    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
-    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
-    let cursor = cursor_offset(rope, tail_off, head_off);
-    let cursor_row = snapshot.buffer_to_display(rope.offset_to_point(cursor)).row;
 
     let top = scrolloff.min(viewport.saturating_sub(1) / 2);
     let bottom = scrolloff.min(viewport / 2);

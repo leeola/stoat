@@ -6235,6 +6235,25 @@ impl Stoat {
                 );
             }
 
+            // While the focused pane glides, ship the cursor's content anchor so
+            // the terminal draws it riding the eased offset. A None cell (cursor
+            // off-view at the last paint) skips the emit, so the terminal falls
+            // back to its plain ease.
+            if focused_editor == Some(*editor_id)
+                && editor.scroll_glide != ScrollGlide::None
+                && let Some((col, _)) = editor.cursor_screen_cell
+            {
+                let row = action_handlers::movement::cursor_display_row(editor) as u64;
+                stoatty_protocol::command::encode_pool_cursor_into(
+                    &mut out,
+                    &stoatty_protocol::command::PoolCursorCommand {
+                        pool: region.pool,
+                        row,
+                        col,
+                    },
+                );
+            }
+
             if !entered.is_empty() {
                 let snapshot = editor.display_map.snapshot();
                 if let Some(view) = editor.review_view.as_ref() {
@@ -11954,6 +11973,71 @@ mod tests {
         assert_eq!(
             scroll.page, 0,
             "a glide emits the eased offset's page (1.0 -> page 0), not scroll_row 50's page"
+        );
+    }
+
+    #[test]
+    fn emit_smooth_scroll_anchors_the_cursor_during_a_wheel_glide() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        // Move the cursor off the first line so the anchored row is non-trivial,
+        // then drop the batches those moves pushed.
+        for _ in 0..15 {
+            action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+        }
+        while rx.try_recv().is_ok() {}
+
+        // Collect every batch the emit and its async page fills push. An idle
+        // pane (no glide) ships no cursor anchor.
+        h.stoat.emit_smooth_scroll();
+        let mut idle = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            idle.extend(decode_apc_stream(&bytes));
+        }
+        assert!(
+            !idle.iter().any(|c| matches!(c, Command::PoolCursor(_))),
+            "an idle emit carries no cursor anchor, got {idle:?}"
+        );
+
+        // Arm a wheel glide with a known on-screen cursor cell.
+        let expected_row = {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_glide = ScrollGlide::Wheel;
+            editor.cursor_screen_cell = Some((7, 3));
+            action_handlers::movement::cursor_display_row(editor) as u64
+        };
+        assert_eq!(expected_row, 15, "the cursor sits on display row 15");
+
+        h.stoat.emit_smooth_scroll();
+        let mut cmds = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            cmds.extend(decode_apc_stream(&bytes));
+        }
+        let anchor = cmds
+            .iter()
+            .find_map(|c| match c {
+                Command::PoolCursor(p) => Some(*p),
+                _ => None,
+            })
+            .expect("a pool_cursor frame while gliding");
+        assert_eq!(
+            (anchor.row, anchor.col),
+            (15, 7),
+            "the anchor carries the cursor's display row and recorded column"
         );
     }
 
