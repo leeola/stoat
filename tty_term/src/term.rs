@@ -1017,14 +1017,21 @@ impl Terminal {
     /// render loop can step each pool's ease and composite it. Empty until a
     /// `Gstoatty;pool_region` declares the first pool.
     pub fn pools(&self) -> Vec<PoolView> {
-        self.pools
-            .values()
-            .map(|pool| PoolView {
-                id: pool.region.pool,
-                region: pool.region,
-                scroll_target: pool.scroll_target,
-            })
-            .collect()
+        let mut out = Vec::new();
+        self.pools_into(&mut out);
+        out
+    }
+
+    /// Snapshot every declared pool into `out`, clearing it first so a reused
+    /// buffer holds only the current pools. See [`Self::pools`] for the ordering
+    /// and contents.
+    pub fn pools_into(&self, out: &mut Vec<PoolView>) {
+        out.clear();
+        out.extend(self.pools.values().map(|pool| PoolView {
+            id: pool.region.pool,
+            region: pool.region,
+            scroll_target: pool.scroll_target,
+        }));
     }
 
     /// Take pool `id`'s pending discontinuous-jump destination, clearing it.
@@ -4443,6 +4450,24 @@ mod tests {
                 page: 9,
                 fraction: 0.25,
             }),
+        );
+    }
+
+    #[test]
+    fn pools_into_clears_prior_contents() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 0, 4, 8);
+
+        let mut buf = Vec::new();
+        terminal.pools_into(&mut buf);
+        assert_eq!(buf.len(), 1, "one declared pool yields one view");
+
+        // A reused buffer is cleared before refilling, so it never accumulates.
+        terminal.pools_into(&mut buf);
+        assert_eq!(
+            buf.len(),
+            1,
+            "reuse clears the prior view rather than appending"
         );
     }
 

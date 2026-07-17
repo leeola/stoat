@@ -18,6 +18,7 @@ use alacritty_terminal::sync::FairMutex;
 use std::process::Command;
 use std::{
     collections::BTreeMap,
+    mem,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -33,7 +34,7 @@ use stoatty_render::{
 };
 use stoatty_term::{
     grid::{Bar, Grid, Overlay, TextRun},
-    term::{Cursor, CursorShape, Damage, TermEvent, Terminal},
+    term::{Cursor, CursorShape, Damage, PoolView, TermEvent, Terminal},
     theme::Theme,
 };
 use winit::{
@@ -369,6 +370,12 @@ struct State {
     /// ascending-id z-order. An entry is created when a pool first appears and
     /// dropped when the app retires it.
     pool_anims: BTreeMap<u32, PoolAnim>,
+    /// Scratch buffers reused across redraws so frame assembly allocates no
+    /// per-frame temporary. They hold the pool snapshot, the active-glide pools,
+    /// and the per-overlay overflow amounts, each cleared and refilled per frame.
+    pools_scratch: Vec<PoolView>,
+    active_scratch: Vec<ActivePool>,
+    overflows_scratch: Vec<Option<f32>>,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -598,6 +605,9 @@ impl ApplicationHandler<PtyEvent> for App {
             region_scroll: 0.0,
             last_region_offset: 0.0,
             pool_anims: BTreeMap::new(),
+            pools_scratch: Vec::new(),
+            active_scratch: Vec::new(),
+            overflows_scratch: Vec::new(),
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
             pressed_button: None,
@@ -773,7 +783,8 @@ impl ApplicationHandler<PtyEvent> for App {
                     let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
                     let decoration_damage = terminal.take_decoration_damage();
                     let display_offset = terminal.display_offset();
-                    let pools = terminal.pools();
+                    let mut pools = mem::take(&mut state.pools_scratch);
+                    terminal.pools_into(&mut pools);
 
                     // Drop animation state for pools the app has retired, so a
                     // closed pane or dismissed modal stops compositing and frees
@@ -787,7 +798,8 @@ impl ApplicationHandler<PtyEvent> for App {
                     // that just settled is left out so the live grid takes over; one
                     // easing but not yet buffered keeps the loop ticking via
                     // `pool_easing` until the app fills its window.
-                    let mut active: Vec<ActivePool> = Vec::new();
+                    let mut active = mem::take(&mut state.active_scratch);
+                    active.clear();
                     let mut pool_easing = false;
                     let mut cursor_launch_shift: Option<f32> = None;
                     for pool in &pools {
@@ -908,6 +920,8 @@ impl ApplicationHandler<PtyEvent> for App {
                         }
                     }
 
+                    state.pools_scratch = pools;
+
                     (
                         cursor,
                         scroll_delta,
@@ -930,13 +944,14 @@ impl ApplicationHandler<PtyEvent> for App {
                     }
                 }
 
-                let overflows: Vec<Option<f32>> =
-                    state.grid.overlays().iter().map(popover_overflow).collect();
+                let mut overflows = mem::take(&mut state.overflows_scratch);
+                overflows.clear();
+                overflows.extend(state.grid.overlays().iter().map(popover_overflow));
                 state.popover_scrolls.resize(overflows.len(), 0.0);
                 state.popover_scroll_downs.resize(overflows.len(), true);
 
                 let mut popover_scrolling = false;
-                for (index, overflow) in overflows.into_iter().enumerate() {
+                for (index, overflow) in overflows.iter().copied().enumerate() {
                     match overflow {
                         Some(max) => {
                             let (next, down) = step_popover_scroll(
@@ -952,6 +967,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         None => state.popover_scrolls[index] = 0.0,
                     }
                 }
+                state.overflows_scratch = overflows;
 
                 let (grid_scroll, grid_scrolling) =
                     step_grid_scroll(state.grid_scroll, scroll_delta, dt);
@@ -1095,6 +1111,10 @@ impl ApplicationHandler<PtyEvent> for App {
                     // its region's rows. Flooring width and height on their own
                     // would round the far edge to a different pixel than the
                     // adjacent row, leaking a sliver of one surface into the next.
+                    //
+                    // Unlike the pool, active, and overflow buffers, this one holds
+                    // borrows into pool_anims, so it cannot be a reused state field
+                    // without a self-referential borrow and stays freshly allocated.
                     let composites = active
                         .iter()
                         .map(|pool| {
@@ -1158,6 +1178,8 @@ impl ApplicationHandler<PtyEvent> for App {
                     );
                     cursor_easing
                 };
+
+                state.active_scratch = active;
 
                 // Keep the vsync-paced loop running while the cursor eases, a
                 // popover scrolls, or the grid, scrollback, a region, or a pool
