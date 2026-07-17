@@ -6618,10 +6618,21 @@ impl Stoat {
                 let View::Editor(editor_id) = pane.view else {
                     return None;
                 };
-                ws.editors.get(editor_id)?;
+                let editor = ws.editors.get(editor_id)?;
 
                 let (content, _) = crate::render::layout::split_pane_status(pane.area);
                 if content.width == 0 || content.height == 0 {
+                    return None;
+                }
+
+                // The pool composite paints an opaque quad per cell across the
+                // region during a glide, which would bury the right-edge minimap
+                // strip and thumb drawn in the base pass. Exclude the strip
+                // columns from the region. minimap_rect is Some exactly when the
+                // strip is drawn, so its width is the columns to reserve.
+                let strip_cols = editor.minimap_rect.map_or(0, |rect| rect.width);
+                let width = content.width.saturating_sub(strip_cols);
+                if width == 0 {
                     return None;
                 }
 
@@ -6632,7 +6643,7 @@ impl Stoat {
                         pool: pane.index,
                         top: content.y,
                         left: content.x,
-                        width: content.width,
+                        width,
                         height: content.height,
                     },
                 ))
@@ -9622,6 +9633,27 @@ mod tests {
             (region.top, region.left, region.width, region.height),
             (1, 2, 76, 22)
         );
+    }
+
+    #[test]
+    fn editor_pool_pane_region_excludes_the_minimap_strip() {
+        let mut h = Stoat::test();
+        let editor_id = open_with_minimap_strip(&mut h);
+
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(2, 1, 76, 23);
+
+        let (_, _, region) = h.stoat.editor_pool_panes()[0];
+        // The 8-column strip is reserved so a glide's pool composite cannot paint
+        // over it, leaving content width 76 minus the strip's 8 columns.
+        assert_eq!(
+            (region.top, region.left, region.width, region.height),
+            (1, 2, 68, 22)
+        );
+
+        h.stoat.active_workspace_mut().editors[editor_id].minimap_rect = None;
+        let (_, _, region) = h.stoat.editor_pool_panes()[0];
+        assert_eq!(region.width, 76, "no strip restores the full content width");
     }
 
     #[test]
