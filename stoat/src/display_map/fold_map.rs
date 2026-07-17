@@ -564,34 +564,33 @@ fn build_fold_transforms(
         return transforms;
     }
 
-    let text: &str = if inlay_snapshot.has_inlays() {
-        inlay_snapshot.inlay_text()
-    } else {
-        inlay_snapshot.buffer_snapshot().text()
-    };
-
     let rope = inlay_snapshot.rope();
     let has_inlays = inlay_snapshot.has_inlays();
 
-    let mut scanner = PointScanner::new(text.as_bytes());
+    // The inlay text and its scanner are consulted only in the has-inlays
+    // branches below, so materializing the whole buffer as a String is wasted
+    // work with no inlays -- the rope answers lengths and summaries directly.
+    let inlay_text: Option<&str> = has_inlays.then(|| inlay_snapshot.inlay_text());
+    let text_len = inlay_text.map_or(rope.len(), |text| text.len());
+    let mut scanner = inlay_text.map(|text| PointScanner::new(text.as_bytes()));
     let mut cursor = 0usize;
 
     for fold in folds.iter() {
-        let fold_start = if has_inlays {
+        let fold_start = if let Some(scanner) = scanner.as_mut() {
             scanner.advance_to(&fold.range.start)
         } else {
             let buf_point = inlay_snapshot.to_buffer_point(fold.range.start);
-            rope.point_to_offset(buf_point).min(text.len())
+            rope.point_to_offset(buf_point).min(rope.len())
         };
-        let fold_end = if has_inlays {
+        let fold_end = if let Some(scanner) = scanner.as_mut() {
             scanner.advance_to(&fold.range.end)
         } else {
             let buf_point = inlay_snapshot.to_buffer_point(fold.range.end);
-            rope.point_to_offset(buf_point).min(text.len())
+            rope.point_to_offset(buf_point).min(rope.len())
         };
 
         if fold_start > cursor {
-            let summary = if has_inlays {
+            let summary = if let Some(text) = inlay_text {
                 TextSummary::from_str(&text[cursor..fold_start])
             } else {
                 rope.text_summary_for_range(cursor..fold_start)
@@ -609,7 +608,7 @@ fn build_fold_transforms(
             );
         }
 
-        let input_summary = if has_inlays {
+        let input_summary = if let Some(text) = inlay_text {
             TextSummary::from_str(&text[fold_start..fold_end])
         } else {
             rope.text_summary_for_range(fold_start..fold_end)
@@ -630,11 +629,11 @@ fn build_fold_transforms(
         cursor = fold_end;
     }
 
-    if cursor < text.len() {
-        let summary = if has_inlays {
+    if cursor < text_len {
+        let summary = if let Some(text) = inlay_text {
             TextSummary::from_str(&text[cursor..])
         } else {
-            rope.text_summary_for_range(cursor..text.len())
+            rope.text_summary_for_range(cursor..rope.len())
         };
         transforms.push(
             Transform {
@@ -711,11 +710,10 @@ fn sync_fold_incremental(
 ) -> (SumTree<Transform>, Patch<u32>) {
     let has_inlays = inlay_snapshot.has_inlays();
     let rope = inlay_snapshot.rope();
-    let text = if has_inlays {
-        inlay_snapshot.inlay_text()
-    } else {
-        inlay_snapshot.buffer_snapshot().text()
-    };
+    // Materialize the inlay text only with inlays. The rope answers lengths and
+    // summaries directly otherwise, sparing an O(file) String per keystroke.
+    let text: Option<&str> = has_inlays.then(|| inlay_snapshot.inlay_text());
+    let text_len = text.map_or(rope.len(), |t| t.len());
 
     let row_to_offset = |row: u32| -> usize {
         if has_inlays {
@@ -726,7 +724,7 @@ fn sync_fold_incremental(
     };
 
     let text_summary = |a: usize, b: usize| -> TextSummary {
-        if has_inlays {
+        if let Some(text) = text {
             TextSummary::from_str(&text[a..b])
         } else {
             rope.text_summary_for_range(a..b)
@@ -740,10 +738,11 @@ fn sync_fold_incremental(
     let old_inlay = old_snapshot.inlay_snapshot();
     let old_has_inlays = old_inlay.has_inlays();
     let old_rope = old_inlay.rope();
-    let old_text = if old_has_inlays {
-        old_inlay.inlay_text()
+    // old_text is consulted only for its length below, so avoid the String.
+    let old_text_len = if old_has_inlays {
+        old_inlay.inlay_text().len()
     } else {
-        old_inlay.buffer_snapshot().text()
+        old_rope.len()
     };
     let old_row_to_offset = |row: u32| -> usize {
         if old_has_inlays {
@@ -760,7 +759,7 @@ fn sync_fold_incremental(
     let mut edits_iter = inlay_edits.into_iter().peekable();
     while let Some(edit) = edits_iter.next() {
         let old_start_offset = old_row_to_offset(edit.old.start);
-        let old_end_offset = old_row_to_offset(edit.old.end).min(old_text.len());
+        let old_end_offset = old_row_to_offset(edit.old.end).min(old_text_len);
 
         // Preserve unchanged prefix
         new_transforms.append(cursor.slice(&InputOffset(old_start_offset), Bias::Left), ());
@@ -806,7 +805,7 @@ fn sync_fold_incremental(
         let new_fold_start = new_transforms.summary().output.lines.row;
 
         // Rebuild transforms for the edit region [new_start, new_end)
-        let new_end_offset = row_to_offset(edit.new.end).min(text.len());
+        let new_end_offset = row_to_offset(edit.new.end).min(text_len);
         let folds_in_range: Vec<&Fold> = {
             let new_start_inlay = InlayPoint::new(edit.new.start, 0);
             let new_end_inlay = InlayPoint::new(edit.new.end, 0);
@@ -843,11 +842,11 @@ fn sync_fold_incremental(
                 let fold_start_offset = inlay_snapshot
                     .inlay_point_to_offset(fold.range.start)
                     .0
-                    .min(text.len());
+                    .min(text_len);
                 let fold_end_offset = inlay_snapshot
                     .inlay_point_to_offset(fold.range.end)
                     .0
-                    .min(text.len());
+                    .min(text_len);
 
                 if fold_start_offset > region_cursor {
                     let summary = text_summary(region_cursor, fold_start_offset);
@@ -927,8 +926,8 @@ fn sync_fold_incremental(
 
     new_transforms.append(cursor.suffix(), ());
 
-    if new_transforms.is_empty() && !text.is_empty() {
-        let summary = if has_inlays {
+    if new_transforms.is_empty() && text_len != 0 {
+        let summary = if let Some(text) = text {
             TextSummary::from_str(text)
         } else {
             rope.summary().clone()

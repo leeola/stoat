@@ -303,7 +303,7 @@ impl InlayMap {
                 buffer_snapshot
                     .rope()
                     .point_to_offset(i.position)
-                    .min(buffer_snapshot.text().len())
+                    .min(buffer_snapshot.rope().len())
             })
             .collect();
         (resolved, inlay_offsets)
@@ -317,7 +317,7 @@ impl InlayMap {
         buffer_edits: &Patch<usize>,
     ) -> (Vec<Inlay>, Vec<usize>) {
         let mut offsets = self.cached_offsets.clone();
-        let text_len = buffer_snapshot.text().len();
+        let text_len = buffer_snapshot.rope().len();
         let mut needs_resolve: Vec<bool> = vec![false; offsets.len()];
 
         // Process edits in reverse to avoid index shifting issues
@@ -501,7 +501,6 @@ fn sync_incremental(
 ) -> (SumTree<Transform>, Patch<u32>) {
     let old_rope = old_snapshot.buffer.rope();
     let new_rope = buffer_snapshot.rope();
-    let new_text = buffer_snapshot.text();
 
     let mut new_transforms = SumTree::new(());
     let mut cursor = old_snapshot.transforms.cursor::<InputOffset>(());
@@ -607,7 +606,7 @@ fn sync_incremental(
 
     new_transforms.append(cursor.suffix(), ());
 
-    if new_transforms.is_empty() && !new_text.is_empty() {
+    if new_transforms.is_empty() && !new_rope.is_empty() {
         new_transforms.push(Transform::Isomorphic(new_rope.summary().clone()), ());
     }
 
