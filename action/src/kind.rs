@@ -316,6 +316,7 @@ pub enum ActionKind {
     ConflictApply,
     ConflictAbort,
     Dump,
+    SetTheme,
     NewWorkspace,
     CopyWorkspace,
     SwitchWorkspace,

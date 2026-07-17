@@ -45,7 +45,7 @@ use std::{
     sync::Arc,
 };
 use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
-use stoat_config::{LineNumbers, Settings};
+use stoat_config::{LineNumbers, Settings, Spanned, ThemeBlock};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::{Anchor, Bias, IndentStyle, Selection};
@@ -154,6 +154,10 @@ pub struct Stoat {
     pub(crate) keymap: Keymap,
     pub settings: Settings,
     pub theme: crate::theme::Theme,
+    /// The combined embedded-plus-user `theme` blocks the active theme was built
+    /// from, retained so [`ActionKind::SetTheme`] can re-resolve a different
+    /// theme at runtime without reparsing the config.
+    pub(crate) theme_blocks: Vec<Spanned<ThemeBlock>>,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
@@ -1014,25 +1018,28 @@ impl Stoat {
             "highlight retention: caching syntax trees and token sets for hidden buffers"
         );
 
-        let theme = {
-            let name = settings.theme.as_deref().unwrap_or("default_dark");
-
-            // The embedded theme blocks sit under the user's so a clean user
-            // config can override or inherit a built-in theme without
-            // restating it. theme_base is None when config already is the
-            // embedded default. The whole pool is passed, not just the named
-            // theme's blocks, so an `inherits PARENT` can resolve its parent.
-            let mut all = Vec::new();
+        // The embedded theme blocks sit under the user's so a clean user config
+        // can override or inherit a built-in theme without restating it.
+        // theme_base is None when config already is the embedded default. The
+        // whole pool is retained on Stoat so SetTheme can re-resolve any theme
+        // at runtime, and so an `inherits PARENT` sees every candidate parent.
+        let theme_blocks: Vec<Spanned<ThemeBlock>> = {
+            let mut blocks = Vec::new();
             if let Some(base) = theme_base.as_ref() {
-                all.extend(base.themes.iter());
+                blocks.extend(base.themes.iter().cloned());
             }
             if let Some(c) = config.as_ref() {
-                all.extend(c.themes.iter());
+                blocks.extend(c.themes.iter().cloned());
             }
+            blocks
+        };
 
-            if all.is_empty() {
+        let theme = {
+            let name = settings.theme.as_deref().unwrap_or("default_dark");
+            if theme_blocks.is_empty() {
                 crate::theme::Theme::empty()
             } else {
+                let all: Vec<&Spanned<ThemeBlock>> = theme_blocks.iter().collect();
                 crate::theme::Theme::from_blocks(name, &all).unwrap_or_else(|e| {
                     tracing::error!("theme '{name}' load failed: {e}");
                     crate::theme::Theme::empty()
@@ -1085,6 +1092,7 @@ impl Stoat {
             keymap,
             settings,
             theme,
+            theme_blocks,
             command_palette: None,
             help: None,
             file_finder: None,

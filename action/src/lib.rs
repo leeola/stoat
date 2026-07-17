@@ -87,6 +87,7 @@ pub use defs::{
         ReviewToggleStage, ReviewUnstageChunk, StageHunk, ToggleDiff, ToggleStageHunk, UnstageHunk,
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
+    set_theme::SetTheme,
     terminal::Terminal,
     workspace::{
         CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd, ShowCwd,

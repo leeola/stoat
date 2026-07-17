@@ -14,5 +14,6 @@ pub mod prompt;
 pub mod rebase;
 pub mod review;
 pub mod run;
+pub mod set_theme;
 pub mod terminal;
 pub mod workspace;

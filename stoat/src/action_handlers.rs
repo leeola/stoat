@@ -32,6 +32,7 @@ pub(crate) mod yank;
 use crate::{
     app::{Stoat, UpdateEffect},
     command_palette::CommandPalette,
+    display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     help::Help,
     host::FsHost,
@@ -53,6 +54,7 @@ use std::path::Path;
 use stoat_action::{
     Action, ActionKind, AutoReload, Dump, FocusPane, OpenBuffer, OpenFile, OpenReviewAgentEdits,
     OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
+    SetTheme,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -686,6 +688,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             workspace::handle_dump(stoat, &dump.name);
             UpdateEffect::Redraw
         },
+        ActionKind::SetTheme => {
+            let action = action
+                .as_any()
+                .downcast_ref::<SetTheme>()
+                .expect("SetTheme action downcast");
+            set_theme(stoat, &action.name)
+        },
         ActionKind::NewWorkspace => workspace::new_workspace(stoat),
         ActionKind::CopyWorkspace => workspace::copy_workspace(stoat),
         ActionKind::SwitchWorkspace => {
@@ -842,6 +851,30 @@ fn open_last_picker(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
     dispatch(stoat, &*action)
+}
+
+/// Re-resolve `name` against the loaded theme blocks and apply it live.
+///
+/// On success the theme and its derived style tables are swapped and every
+/// minimap content store is dropped so each strip re-ships against the new
+/// palette. On failure the current theme is kept and a transient message names
+/// the problem. Per-language highlight maps are not rebuilt: they index the
+/// static theme-key table, so only the resolved colors change.
+fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
+    let all: Vec<_> = stoat.theme_blocks.iter().collect();
+    match crate::theme::Theme::from_blocks(name, &all) {
+        Ok(theme) => {
+            stoat.theme = theme;
+            stoat.syntax_styles = SyntaxStyles::from_theme(&stoat.theme);
+            stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
+            stoat.minimap_content.clear();
+            UpdateEffect::Redraw
+        },
+        Err(e) => {
+            stoat.set_status(e.to_string());
+            UpdateEffect::Redraw
+        },
+    }
 }
 
 /// Return a mutable reference to the effective focused editor, respecting
@@ -1160,7 +1193,8 @@ mod tests {
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
         FlipSelections, FocusPane, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd,
         MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
-        Quit, QuitAll, RenameWorkspace, SaveSelection, SelectAll, SplitNewRight, SplitRight,
+        Quit, QuitAll, RenameWorkspace, SaveSelection, SelectAll, SetTheme, SplitNewRight,
+        SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -1174,6 +1208,62 @@ mod tests {
         );
         stoat.update(Event::Resize(80, 24));
         stoat
+    }
+
+    fn stoat_with_config(user: Option<String>) -> Stoat {
+        let scheduler = Arc::new(TestScheduler::new());
+        let mut stoat = Stoat::new_with_user_config(
+            scheduler.executor(),
+            stoat_config::Settings::default(),
+            std::path::PathBuf::new(),
+            user,
+        );
+        stoat.update(Event::Resize(80, 24));
+        stoat
+    }
+
+    #[test]
+    fn set_theme_switches_active_theme() {
+        use crate::theme::scope::UI_TEXT;
+        use ratatui::style::Color;
+
+        let mut stoat =
+            stoat_with_config(Some("theme mine { ui.text.fg = \"#abcdef\"; }".to_string()));
+        assert_eq!(stoat.theme.name, "default_dark");
+
+        let effect = dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "mine".to_string(),
+            },
+        );
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(stoat.theme.name, "mine");
+        assert_eq!(
+            stoat.theme.get(UI_TEXT).fg,
+            Some(Color::Rgb(0xab, 0xcd, 0xef))
+        );
+    }
+
+    #[test]
+    fn set_theme_unknown_keeps_theme_and_warns() {
+        let mut stoat = stoat_with_config(None);
+        assert_eq!(stoat.theme.name, "default_dark");
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "nonexistent".to_string(),
+            },
+        );
+        assert_eq!(
+            stoat.theme.name, "default_dark",
+            "an unknown theme keeps the current one",
+        );
+        assert!(
+            stoat.pending_message.is_some(),
+            "an unknown theme sets a status message",
+        );
     }
 
     #[test]

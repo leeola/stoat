@@ -99,6 +99,7 @@ use crate::{
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
         },
+        set_theme::SetTheme,
         terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
@@ -747,6 +748,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             name: raw.to_owned(),
         }))
     });
+    add(SetTheme::DEF, |params| {
+        let raw = params
+            .first()
+            .context(MissingSnafu { name: "name" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "name",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(SetTheme {
+            name: raw.to_owned(),
+        }))
+    });
     add(NewWorkspace::DEF, |_| Ok(Box::new(NewWorkspace)));
     add(CopyWorkspace::DEF, |_| Ok(Box::new(CopyWorkspace)));
     add(SwitchWorkspace::DEF, |_| Ok(Box::new(SwitchWorkspace)));
@@ -1314,7 +1328,8 @@ mod tests {
         // + 1 PaletteCompletePath.
         // + 1 FocusPane.
         // + 2 PaletteHistoryPrev/Next.
-        assert_eq!(all().count(), 347);
+        // + 1 SetTheme.
+        assert_eq!(all().count(), 348);
     }
 
     #[test]
