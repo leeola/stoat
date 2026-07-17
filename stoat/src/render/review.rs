@@ -230,6 +230,17 @@ fn paint_base_row(
     fallback: Style,
     underlines: &[std::ops::Range<usize>],
 ) {
+    debug_assert!(
+        token_spans.is_sorted_by_key(|(range, _)| range.start),
+        "token_spans must be start-sorted for the monotonic cursor"
+    );
+    debug_assert!(
+        underlines.is_sorted_by_key(|range| range.start),
+        "underlines must be start-sorted for the monotonic cursor"
+    );
+
+    let mut token_cursor = 0;
+    let mut underline_cursor = 0;
     for (col, (byte_idx, ch)) in text.char_indices().enumerate() {
         if col >= max_cols {
             break;
@@ -238,14 +249,28 @@ fn paint_base_row(
         if x >= buf.area.x + buf.area.width {
             break;
         }
-        let mut style = token_spans
-            .iter()
-            .find(|(range, _)| range.contains(&byte_idx))
-            .map(|(_, hs)| hs.to_ratatui_style())
-            .unwrap_or(fallback);
-        if underlines.iter().any(|range| range.contains(&byte_idx)) {
+
+        while token_spans
+            .get(token_cursor)
+            .is_some_and(|(r, _)| r.end <= byte_idx)
+        {
+            token_cursor += 1;
+        }
+        let mut style = match token_spans.get(token_cursor) {
+            Some((range, hs)) if range.start <= byte_idx => hs.to_ratatui_style(),
+            _ => fallback,
+        };
+
+        while underlines
+            .get(underline_cursor)
+            .is_some_and(|r| r.end <= byte_idx)
+        {
+            underline_cursor += 1;
+        }
+        if matches!(underlines.get(underline_cursor), Some(range) if range.start <= byte_idx) {
             style = style.add_modifier(Modifier::UNDERLINED);
         }
+
         buf[(x, y)].set_char(ch).set_style(style);
     }
 }
@@ -931,6 +956,17 @@ pub(crate) fn render_side_text(
     moved_spans: &[std::ops::Range<usize>],
     moved_style: Style,
 ) {
+    debug_assert!(
+        moved_spans.is_sorted_by_key(|s| s.start),
+        "moved_spans must be start-sorted for the monotonic cursor"
+    );
+    debug_assert!(
+        spans.is_sorted_by_key(|s| s.start),
+        "spans must be start-sorted for the monotonic cursor"
+    );
+
+    let mut moved_cursor = 0;
+    let mut span_cursor = 0;
     for (col, (byte_idx, ch)) in text.char_indices().enumerate() {
         if col >= max_cols {
             break;
@@ -939,12 +975,20 @@ pub(crate) fn render_side_text(
         if x >= buf.area.x + buf.area.width {
             break;
         }
-        let in_moved = moved_spans
-            .iter()
-            .any(|s| byte_idx >= s.start && byte_idx < s.end);
-        let in_span = spans
-            .iter()
-            .any(|s| byte_idx >= s.start && byte_idx < s.end);
+
+        while moved_spans
+            .get(moved_cursor)
+            .is_some_and(|s| s.end <= byte_idx)
+        {
+            moved_cursor += 1;
+        }
+        let in_moved = matches!(moved_spans.get(moved_cursor), Some(s) if s.start <= byte_idx);
+
+        while spans.get(span_cursor).is_some_and(|s| s.end <= byte_idx) {
+            span_cursor += 1;
+        }
+        let in_span = matches!(spans.get(span_cursor), Some(s) if s.start <= byte_idx);
+
         let style = if in_moved {
             moved_style
         } else if in_span {
