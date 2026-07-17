@@ -41,7 +41,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     keymap_state::{action_display_desc, Flags, StoatKeymapState},
     minimap::MinimapContent,
-    pane::{DockVisibility, FocusTarget},
+    pane::{DockVisibility, FocusTarget, View},
     rebase::RebasePause,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
@@ -50,8 +50,8 @@ use crate::{
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use slotmap::SlotMap;
 use std::{collections::HashMap, path::Path};
-use stoat_config::LineNumbers;
-use stoatty_widgets::{popover::Popover, ApcScene};
+use stoat_config::{LineNumbers, MinimapMode};
+use stoatty_widgets::{minimap::Minimap, popover::Popover, ApcScene};
 
 /// Full-cell text scale under stoatty, in 256ths of a cell, for grid-size modal
 /// titles.
@@ -62,6 +62,11 @@ pub(crate) const TEXT_SCALE_POPUP: u16 = 218;
 /// Compact chrome text scale under stoatty, 0.625x a cell, for line numbers and
 /// the status bar.
 pub(crate) const TEXT_SCALE_COMPACT: u16 = 160;
+
+/// Strip id for the single-mode minimap, reserved above every pane index (which
+/// are small and dense from zero). stoatty keys minimap strips in a namespace
+/// separate from scroll pools, so `u32::MAX` never collides.
+pub(crate) const SINGLE_MINIMAP_STRIP_ID: u32 = u32::MAX;
 
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
@@ -146,8 +151,9 @@ pub(crate) struct FrameCtx<'a> {
     /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
     /// to unfocused panes only.
     pub(crate) inactive_dim: f32,
-    /// Whether editor panes reserve the right-edge minimap strip, resolved from
-    /// [`crate::app::Stoat::minimap_enabled`]. Only takes effect under stoatty.
+    /// Whether editor panes reserve their own per-pane right-edge minimap strip.
+    /// `true` only in [`MinimapMode::PerPane`] under stoatty. Single mode gates
+    /// this off and declares one shared strip over the reserved band instead.
     pub(crate) minimap_enabled: bool,
     /// The lookup and colors a pane needs to declare its minimap strip, `Some`
     /// only when the strip is active (under stoatty with the minimap enabled).
@@ -228,11 +234,33 @@ pub(crate) fn frame(
         stoat.pending_message_expiry = None;
     }
 
-    let size = full;
-
     let mode = stoat.focused_mode().to_string();
-    let minimap_enabled = stoat.minimap_enabled();
+    let minimap_mode = stoat.minimap_mode();
+    let minimap_enabled = minimap_mode != MinimapMode::Off;
     stoat.ensure_minimap_content_ids();
+
+    // Single mode reserves a full-height strip band at the window's right edge
+    // and shrinks the pane layout by the strip width, so the panes never overlap
+    // the strip. The band is stamped on Stoat for the mouse handler, then read
+    // back for this paint.
+    stoat.single_minimap_rect = (stoat.stoatty
+        && minimap_mode == MinimapMode::Single
+        && full.width >= editor::MINIMAP_MIN_PANE_COLS)
+        .then(|| Rect {
+            x: full.x + full.width - editor::MINIMAP_STRIP_COLS,
+            y: full.y,
+            width: editor::MINIMAP_STRIP_COLS,
+            height: full.height,
+        });
+    let single_minimap_rect = stoat.single_minimap_rect;
+    let size = if single_minimap_rect.is_some() {
+        Rect {
+            width: full.width - editor::MINIMAP_STRIP_COLS,
+            ..full
+        }
+    } else {
+        full
+    };
     let minimap_chrome = (stoat.stoatty && minimap_enabled).then(|| {
         let thumb = {
             let sel = stoat.theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
@@ -295,7 +323,7 @@ pub(crate) fn frame(
             .ui_inactive_dim
             .unwrap_or(0.25)
             .clamp(0.0, 1.0) as f32,
-        minimap_enabled,
+        minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
         hover_cell: stoat.hover_cell,
         #[cfg(feature = "perf")]
@@ -322,6 +350,30 @@ pub(crate) fn frame(
             scene,
             undercurls,
         );
+    }
+
+    // Single mode declares one strip over the reserved right-edge band for the
+    // focused split pane's buffer. The scene re-stamps every paint, so a focus
+    // switch to another buffer redeclares it. A non-editor focus leaves it empty.
+    if let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
+        && let View::Editor(editor_id) = &ws.panes.pane(ws.panes.focus()).view
+        && let Some(editor) = ws.editors.get(*editor_id)
+        && editor.review_view.is_none()
+        && !editor.diff_view
+        && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
+    {
+        let [tr, tg, tb, _] = chrome.thumb;
+        Minimap {
+            strip_id: SINGLE_MINIMAP_STRIP_ID,
+            content_id: content.content_id(),
+            lines_per_cell: pane::MINIMAP_LINES_PER_CELL,
+            max_columns: pane::MINIMAP_MAX_COLUMNS,
+            bg: [0, 0, 0, 0],
+            thumb: chrome.thumb,
+            thumb_border: [tr, tg, tb],
+            palette: chrome.palette.to_vec(),
+        }
+        .render(band, buf, scene);
     }
 
     // Record each undercurl span's cells now, after the editor panes painted but

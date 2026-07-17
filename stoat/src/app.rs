@@ -319,6 +319,10 @@ pub struct Stoat {
     /// `ToggleMinimap`. `None` follows the `editor.minimap` setting; `Some`
     /// wins for the session. Not persisted.
     pub(crate) minimap_override: Option<bool>,
+    /// The window-right strip band single-minimap mode reserves, stamped every
+    /// paint. `Some` only under stoatty in [`stoat_config::MinimapMode::Single`]
+    /// on a wide-enough window, and `None` in per-pane and off modes.
+    pub(crate) single_minimap_rect: Option<Rect>,
     /// Whether the keybinding hints overlay is force-shown in a primary mode,
     /// toggled by `ToggleKeyHints`, off by default. A runtime session flag like
     /// [`Self::syntax_highlight`], not persisted. Contexts that already
@@ -1164,6 +1168,7 @@ impl Stoat {
             modal_run: None,
             syntax_highlight: true,
             minimap_override: None,
+            single_minimap_rect: None,
             key_hints_visible: false,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: None,
@@ -9287,6 +9292,122 @@ mod tests {
             unfocused.thumb_border,
             [dr, dg, db],
             "the unfocused thumb border dims"
+        );
+    }
+
+    #[test]
+    fn single_minimap_mode_reserves_a_right_edge_band() {
+        use stoat_config::MinimapMode;
+
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\n");
+        let b = h.write_file("b.txt", "delta\necho\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+        let _ = h.stoat.render();
+
+        let full = h.stoat.size();
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        assert_eq!(
+            band.x + band.width,
+            full.width,
+            "the band ends at the window right edge"
+        );
+        assert_eq!(band.y, full.y);
+        assert_eq!(band.height, full.height);
+        assert!(band.width > 0, "the band has a real width");
+
+        let focused_area = focused_editor_pane_area(&h);
+        assert!(
+            focused_area.x + focused_area.width <= band.x,
+            "the focused pane stays left of the reserved band"
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .editors
+                .values()
+                .all(|e| e.minimap_rect.is_none()),
+            "single mode reserves no per-pane strips"
+        );
+    }
+
+    #[test]
+    fn single_minimap_mode_declares_one_strip_following_focus() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let content_id = |h: &Stoat| -> u32 {
+            let (editor_id, _) = h.focused_editor_ids().expect("focused editor");
+            let buffer_id = h
+                .active_workspace()
+                .editors
+                .get(editor_id)
+                .expect("editor")
+                .buffer_id;
+            h.minimap_content
+                .get(&(h.active_workspace, buffer_id))
+                .expect("minimap content for the focused buffer")
+                .content_id()
+        };
+        let single_strips = |cmds: &[Command]| -> Vec<u32> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    Command::Minimap(m) if m.strip_id == u32::MAX => Some(m.content_id),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.settle();
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, Command::Minimap(m) if m.strip_id != u32::MAX)),
+            "single mode declares no per-pane strips, got {cmds:?}"
+        );
+        let b_content = content_id(&h.stoat);
+        assert_eq!(
+            single_strips(&cmds).last().copied(),
+            Some(b_content),
+            "the single strip shows the focused buffer"
+        );
+
+        h.type_action("FocusNext()");
+        h.settle();
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        let cmds = drain_apc(&mut rx);
+        let a_content = content_id(&h.stoat);
+        assert_ne!(a_content, b_content, "the two panes show different buffers");
+        assert_eq!(
+            single_strips(&cmds).last().copied(),
+            Some(a_content),
+            "the strip redeclares for the newly focused buffer"
         );
     }
 

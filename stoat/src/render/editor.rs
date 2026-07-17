@@ -37,11 +37,11 @@ use stoatty_widgets::{
 
 /// Columns reserved on a pane's right edge for the minimap strip under stoatty,
 /// matching the width stoatty's GPU minimap pass paints there.
-const MINIMAP_STRIP_COLS: u16 = 8;
+pub(super) const MINIMAP_STRIP_COLS: u16 = 8;
 
 /// Narrowest pane, in columns, that still reserves a minimap strip. Below this
 /// the strip would crowd the remaining text, so the pane keeps its full width.
-const MINIMAP_MIN_PANE_COLS: u16 = 60;
+pub(super) const MINIMAP_MIN_PANE_COLS: u16 = 60;
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,

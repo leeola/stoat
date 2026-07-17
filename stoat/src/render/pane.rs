@@ -29,10 +29,10 @@ use stoatty_widgets::{
 };
 
 /// Buffer lines the minimap strip draws per vertical cell.
-const MINIMAP_LINES_PER_CELL: u8 = 8;
+pub(super) const MINIMAP_LINES_PER_CELL: u8 = 8;
 
 /// Widest line, in minimap columns, a strip renders before clipping.
-const MINIMAP_MAX_COLUMNS: u8 = 120;
+pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;
 
 pub(crate) fn render_pane(
     pane: &Pane,
