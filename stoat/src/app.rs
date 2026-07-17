@@ -285,6 +285,12 @@ pub struct Stoat {
     /// off this task and installs it on the main loop, so opening a review
     /// never stalls input on the scan.
     pub(crate) pending_review_scan: Option<action_handlers::PendingReviewScan>,
+    /// In-flight global-search scan streaming match batches from the blocking
+    /// pool, drained by
+    /// [`pump_global_search`](action_handlers::pump_global_search) into
+    /// [`Self::global_search`]. `None` when no search is running. Dropping it
+    /// cancels the walk.
+    pub(crate) pending_global_search: Option<action_handlers::PendingGlobalSearch>,
     /// An in-flight background diff-cache warm pass, drained by
     /// [`crate::diff_warm::install_finished`] in [`Self::drive_background`].
     pub(crate) pending_diff_warm: Option<crate::diff_warm::PendingDiffWarm>,
@@ -1132,6 +1138,7 @@ impl Stoat {
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
             pending_review_scan: None,
+            pending_global_search: None,
             pending_diff_warm: None,
             modal_run: None,
             syntax_highlight: true,
@@ -6545,6 +6552,7 @@ impl Stoat {
         self.drive_diff_jobs();
         action_handlers::pump_commits(self);
         action_handlers::pump_review_scan(self);
+        action_handlers::pump_global_search(self);
         action_handlers::pump_lsp_jumps(self);
         action_handlers::lsp::pump_lsp_hover(self);
         action_handlers::lsp::pump_lsp_signature_help(self);

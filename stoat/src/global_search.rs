@@ -45,6 +45,12 @@ impl GlobalSearchPicker {
         &self.matches
     }
 
+    /// Append a streamed batch of matches, leaving the selection where it is so
+    /// results filling in never move the highlight under the user.
+    pub fn push_matches(&mut self, mut more: Vec<SearchMatch>) {
+        self.matches.append(&mut more);
+    }
+
     pub fn selected(&self) -> usize {
         self.selected
     }
@@ -80,11 +86,15 @@ impl GlobalSearchPicker {
     }
 }
 
-/// Walk every workspace file via `fs_host`, scan for `pattern`, and
-/// return one [`SearchMatch`] per match site. Skips files whose
-/// contents are not valid UTF-8. Returns the compiled regex error
-/// when `pattern` does not parse.
-pub fn perform_search(
+/// Walk every workspace file via `fs_host`, scan for `pattern`, and return one
+/// [`SearchMatch`] per match site. Skips files whose contents are not valid
+/// UTF-8. Returns the compiled regex error when `pattern` does not parse.
+///
+/// The non-streaming reference for [`scan_file`], retained to exercise the
+/// per-file scan over a whole workspace in one pass. The live search streams the
+/// same [`scan_file`] from the blocking pool instead.
+#[cfg(test)]
+fn perform_search(
     fs_host: &dyn FsHost,
     git_root: &Path,
     pattern: &str,
@@ -92,27 +102,42 @@ pub fn perform_search(
     let regex = Regex::new(pattern)?;
     let mut matches = Vec::new();
     for path in fs_host.walk_workspace_files(git_root) {
-        let mut buf = Vec::new();
-        if fs_host.read(&path, &mut buf).is_err() {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(&buf) else {
-            continue;
-        };
-        for m in regex.find_iter(text) {
-            let start = m.start();
-            let (line, column) = offset_to_line_column(text, start);
-            let snippet = line_snippet(text, start);
-            matches.push(SearchMatch {
-                path: path.clone(),
-                offset: start,
-                line,
-                column,
-                snippet,
-            });
-        }
+        scan_file(fs_host, &regex, &path, &mut matches);
     }
     Ok(matches)
+}
+
+/// Read `path` through `fs_host`, scan its UTF-8 text for `regex`, and push one
+/// [`SearchMatch`] per match site onto `out`.
+///
+/// A file that fails to read, or whose bytes are not valid UTF-8, contributes
+/// nothing. Shared by the live streaming scan and the non-streaming test
+/// reference so both surface identical matches.
+pub(crate) fn scan_file(
+    fs_host: &dyn FsHost,
+    regex: &Regex,
+    path: &Path,
+    out: &mut Vec<SearchMatch>,
+) {
+    let mut buf = Vec::new();
+    if fs_host.read(path, &mut buf).is_err() {
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(&buf) else {
+        return;
+    };
+    for m in regex.find_iter(text) {
+        let start = m.start();
+        let (line, column) = offset_to_line_column(text, start);
+        let snippet = line_snippet(text, start);
+        out.push(SearchMatch {
+            path: path.to_path_buf(),
+            offset: start,
+            line,
+            column,
+            snippet,
+        });
+    }
 }
 
 /// Convert a byte offset into a `(line, column)` pair, both 1-based,
@@ -262,6 +287,7 @@ mod tests {
         h.type_text("alpha");
         h.stoat
             .update(crossterm::event::Event::Key(keys::key(KeyCode::Enter)));
+        h.settle();
         h.assert_snapshot("global_search_picker_listing");
     }
 }
