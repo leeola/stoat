@@ -295,17 +295,19 @@ fn insert_mode_in_editor_pane(stoat: &Stoat) -> bool {
         return false;
     }
     let ws = stoat.active_workspace();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let FocusTarget::SplitPane = ws.focus else {
         return false;
     };
+    let pane_id = ws.panes.focus();
     matches!(ws.panes.pane(pane_id).view, View::Editor(_))
 }
 
 fn focused_editor_snapshot(stoat: &Stoat) -> Option<EditorSnapshot> {
     let ws = stoat.active_workspace();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let FocusTarget::SplitPane = ws.focus else {
         return None;
     };
+    let pane_id = ws.panes.focus();
     let View::Editor(editor_id) = ws.panes.pane(pane_id).view else {
         return None;
     };

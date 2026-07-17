@@ -167,7 +167,7 @@ pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {
                 .get(dock_id)
                 .is_some_and(|d| d.side == DockSide::Right) =>
         {
-            ws.focus = FocusTarget::SplitPane(ws.panes.focus());
+            ws.focus = FocusTarget::SplitPane;
         },
         (FocusTarget::Dock(dock_id), Direction::Right)
             if ws
@@ -175,9 +175,9 @@ pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {
                 .get(dock_id)
                 .is_some_and(|d| d.side == DockSide::Left) =>
         {
-            ws.focus = FocusTarget::SplitPane(ws.panes.focus());
+            ws.focus = FocusTarget::SplitPane;
         },
-        (FocusTarget::SplitPane(_), Direction::Right)
+        (FocusTarget::SplitPane, Direction::Right)
             if !ws.panes.focus_direction(Direction::Right) =>
         {
             if let Some((dock_id, _)) = ws.docks.iter().find(|(_, d)| {
@@ -186,16 +186,14 @@ pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {
                 ws.focus = FocusTarget::Dock(dock_id);
             }
         },
-        (FocusTarget::SplitPane(_), Direction::Left)
-            if !ws.panes.focus_direction(Direction::Left) =>
-        {
+        (FocusTarget::SplitPane, Direction::Left) if !ws.panes.focus_direction(Direction::Left) => {
             if let Some((dock_id, _)) = ws.docks.iter().find(|(_, d)| {
                 d.side == DockSide::Left && !matches!(d.visibility, DockVisibility::Hidden)
             }) {
                 ws.focus = FocusTarget::Dock(dock_id);
             }
         },
-        (FocusTarget::SplitPane(_), Direction::Up | Direction::Down) => {
+        (FocusTarget::SplitPane, Direction::Up | Direction::Down) => {
             ws.panes.focus_direction(direction);
         },
         _ => {},
@@ -231,7 +229,7 @@ pub(super) fn toggle_dock(stoat: &mut Stoat, side: DockSide) -> UpdateEffect {
         if matches!(dock.visibility, DockVisibility::Hidden)
             && matches!(ws.focus, FocusTarget::Dock(id) if id == dock_id)
         {
-            ws.focus = FocusTarget::SplitPane(ws.panes.focus());
+            ws.focus = FocusTarget::SplitPane;
         }
         return UpdateEffect::Redraw;
     }

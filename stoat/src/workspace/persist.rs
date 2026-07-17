@@ -22,7 +22,7 @@ use crate::{
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
     host::FsHost,
     input_history::InputHistory,
-    pane::{DockId, DockPanel, FocusTarget, PaneTree, View},
+    pane::{DockId, DockPanel, FocusTarget, PaneId, PaneTree, View},
     rebase::RebaseState,
     workspace::{Workspace, WorkspaceUid},
 };
@@ -35,6 +35,18 @@ use std::{
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::Executor;
+
+/// On-disk shape of [`FocusTarget`], preserving the pre-unit-variant wire format
+/// so older and newer state.ron files stay mutually readable.
+///
+/// The live [`FocusTarget::SplitPane`] is a unit variant, but the split pane's
+/// id is re-materialized here from [`PaneTree::focus`] on save and discarded on
+/// load, since the loaded [`PaneTree`] already carries the real focus.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum FocusTargetSnap {
+    SplitPane(PaneId),
+    Dock(DockId),
+}
 
 /// Versioned on-disk representation of a [`Workspace`]. Fields not covered
 /// by this struct are regenerated from defaults on load.
@@ -49,7 +61,7 @@ pub(crate) struct WorkspaceStateV1 {
     pub git_root: PathBuf,
     pub panes: PaneTree,
     pub docks: SlotMap<DockId, DockPanel>,
-    pub focus: FocusTarget,
+    pub focus: FocusTargetSnap,
     /// Saved with their pre-shutdown [`EditorId`]s; on load the ids are
     /// remapped to fresh keys in the rehydrated slotmap and pane/dock
     /// `View::Editor` references are rewritten to match.
@@ -212,7 +224,10 @@ impl Workspace {
             git_root: self.git_root.clone(),
             panes: clone_pane_tree(&self.panes),
             docks: clone_docks(&self.docks),
-            focus: self.focus,
+            focus: match self.focus {
+                FocusTarget::SplitPane => FocusTargetSnap::SplitPane(self.panes.focus()),
+                FocusTarget::Dock(id) => FocusTargetSnap::Dock(id),
+            },
             editors,
             buffers: self.buffers.snapshot(),
             rebase: self.rebase.clone(),
@@ -311,10 +326,10 @@ impl Workspace {
         sweep_stale_views_in_docks(&mut docks);
 
         let focus = match state.focus {
-            FocusTarget::Dock(id) if !docks.contains_key(id) => {
-                FocusTarget::SplitPane(panes.focus())
-            },
-            other => other,
+            FocusTargetSnap::Dock(id) if docks.contains_key(id) => FocusTarget::Dock(id),
+            // A dock that no longer exists, or any split-pane snapshot, resolves
+            // to the live split-pane focus carried by the rehydrated pane tree.
+            FocusTargetSnap::Dock(_) | FocusTargetSnap::SplitPane(_) => FocusTarget::SplitPane,
         };
 
         self.panes = panes;
@@ -464,7 +479,7 @@ mod tests {
         ws.panes.pane_mut(root).view = View::Editor(editor_a);
         let right = ws.panes.split(Axis::Vertical);
         ws.panes.pane_mut(right).view = View::Editor(editor_b);
-        ws.focus = FocusTarget::SplitPane(right);
+        ws.focus = FocusTarget::SplitPane;
 
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
@@ -479,9 +494,10 @@ mod tests {
         // scratch editor is preserved because its buffer's op log round-trips.
         assert_eq!(fresh.editors.len(), 3);
 
-        let FocusTarget::SplitPane(focused) = fresh.focus else {
+        let FocusTarget::SplitPane = fresh.focus else {
             panic!("focus should be a split pane");
         };
+        let focused = fresh.panes.focus();
         let View::Editor(focused_editor) = fresh.panes.pane(focused).view else {
             panic!("focused pane should host an editor");
         };

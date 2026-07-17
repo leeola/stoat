@@ -259,7 +259,7 @@ impl Availability {
             .unwrap_or((false, false));
 
         let focused_view = match ws.focus {
-            FocusTarget::SplitPane(_) => Some(ws.panes.pane(ws.panes.focus()).view.clone()),
+            FocusTarget::SplitPane => Some(ws.panes.pane(ws.panes.focus()).view.clone()),
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|d| d.view.clone()),
         };
         let run_focused = matches!(focused_view, Some(View::Run(_))) || stoat.modal_run.is_some();

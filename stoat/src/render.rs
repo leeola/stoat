@@ -332,7 +332,7 @@ pub(crate) fn frame(
 
     let split_focused = ws.panes.focus();
     for (id, pane) in ws.panes.split_panes() {
-        let is_focused = matches!(ws.focus, FocusTarget::SplitPane(_)) && id == split_focused;
+        let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && id == split_focused;
         if Some(id) == overlay_pane {
             continue;
         }
@@ -390,7 +390,7 @@ pub(crate) fn frame(
 
     if let Some(pane_id) = overlay_pane {
         let pane = ws.panes.pane(pane_id);
-        let is_focused = matches!(ws.focus, FocusTarget::SplitPane(id) if id == pane_id);
+        let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && ws.panes.focus() == pane_id;
         if screen == Some("commits") {
             if let Some(state) = ws.commits.as_mut() {
                 commits::render_commits(

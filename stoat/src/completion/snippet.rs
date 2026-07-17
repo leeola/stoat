@@ -292,9 +292,10 @@ pub(crate) fn advance(stoat: &mut Stoat) -> bool {
     let next_group = active.groups.pop_front();
 
     let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let FocusTarget::SplitPane = ws.focus else {
         return true;
     };
+    let pane_id = ws.panes.focus();
     let View::Editor(editor_id) = ws.panes.pane(pane_id).view else {
         return true;
     };

@@ -29,9 +29,10 @@ pub(crate) fn render_symbol_picker(
     };
 
     let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let FocusTarget::SplitPane = ws.focus else {
         return;
     };
+    let pane_id = ws.panes.focus();
 
     let pane = ws.panes.pane(pane_id);
     let View::Editor(editor_id) = pane.view else {

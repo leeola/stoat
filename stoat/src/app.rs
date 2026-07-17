@@ -16,7 +16,7 @@ use crate::{
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
-    pane::{FocusTarget, NodeId, Placement, View},
+    pane::{DockId, FocusTarget, NodeId, PaneId, Placement, View},
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
     register,
@@ -106,6 +106,19 @@ pub enum UpdateEffect {
     Redraw,
     Quit,
     None,
+}
+
+/// A focusable panel resolved by hit-testing a point, carrying the concrete pane
+/// id under the cursor.
+///
+/// Distinct from [`FocusTarget`], whose `SplitPane` is a unit variant: a hit
+/// names the specific pane at the point, which is not necessarily the focused
+/// one, so [`Stoat::target_at`] must return the id even though `ws.focus` no
+/// longer stores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelHit {
+    Pane(PaneId),
+    Dock(DockId),
 }
 
 impl UpdateEffect {
@@ -3396,11 +3409,11 @@ impl Stoat {
         // Snapshot the view and pane area under the cursor so the scroll below
         // can take a fresh mutable borrow of the run or editor state.
         let (view, area) = match target {
-            FocusTarget::SplitPane(pid) => {
+            PanelHit::Pane(pid) => {
                 let pane = ws.panes.pane(pid);
                 (pane.view.clone(), pane.area)
             },
-            FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
+            PanelHit::Dock(dock_id) => match ws.docks.get(dock_id) {
                 Some(dock) => (dock.view.clone(), dock.area),
                 None => return UpdateEffect::None,
             },
@@ -3440,8 +3453,8 @@ impl Stoat {
         let target = {
             let ws = self.active_workspace();
             match ws.focus {
-                FocusTarget::SplitPane(pane_id) => {
-                    let pane = ws.panes.pane(pane_id);
+                FocusTarget::SplitPane => {
+                    let pane = ws.panes.pane(ws.panes.focus());
                     if let View::Run(id) = pane.view {
                         Some((id, pane.area))
                     } else {
@@ -3527,8 +3540,8 @@ impl Stoat {
     fn focused_editor_target(&self) -> Option<(EditorId, Rect)> {
         let ws = self.active_workspace();
         match ws.focus {
-            FocusTarget::SplitPane(pane_id) => {
-                let pane = ws.panes.pane(pane_id);
+            FocusTarget::SplitPane => {
+                let pane = ws.panes.pane(ws.panes.focus());
                 if let View::Editor(id) = pane.view {
                     Some((id, pane.area))
                 } else {
@@ -3704,7 +3717,7 @@ impl Stoat {
     pub(crate) fn translate_mouse_to_focused(&self, column: u16, row: u16) -> Option<(u16, u16)> {
         let ws = self.active_workspace();
         let area = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => ws.panes.pane(pane_id).area,
+            FocusTarget::SplitPane => ws.panes.pane(ws.panes.focus()).area,
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id)?.area,
         };
         Some((column.saturating_sub(area.x), row.saturating_sub(area.y)))
@@ -3715,19 +3728,21 @@ impl Stoat {
     ///
     /// Split panes are tested before docks. Returns `None` for a point in a
     /// divider gap or over no panel. A hidden dock has a zero-width `area`, so
-    /// it never matches.
-    fn target_at(&self, column: u16, row: u16) -> Option<FocusTarget> {
+    /// it never matches. Unlike [`FocusTarget`], the pane hit carries the id of
+    /// the pane actually under the cursor, which is not necessarily the focused
+    /// one.
+    fn target_at(&self, column: u16, row: u16) -> Option<PanelHit> {
         let ws = self.active_workspace();
         let pos = Position::new(column, row);
         for (id, pane) in ws.panes.split_panes() {
             if pane.area.contains(pos) {
-                return Some(FocusTarget::SplitPane(id));
+                return Some(PanelHit::Pane(id));
             }
         }
         ws.docks
             .iter()
             .find(|(_, dock)| dock.area.contains(pos))
-            .map(|(id, _)| FocusTarget::Dock(id))
+            .map(|(id, _)| PanelHit::Dock(id))
     }
 
     /// Moves focus to the panel under a terminal-global `(column, row)`. A
@@ -3738,19 +3753,31 @@ impl Stoat {
     /// path. A dock target leaves the pane tree's focus at the last split
     /// pane.
     fn focus_at(&mut self, column: u16, row: u16) {
-        let Some(target) = self.target_at(column, row) else {
+        let Some(hit) = self.target_at(column, row) else {
             return;
         };
         // A mouse focus change closes any open hover. Its popup was anchored
         // against the previously focused editor and must not re-anchor here.
-        if self.active_workspace().focus != target {
+        // Focus stays put when the hit pane is already the focused one, so the
+        // unit `SplitPane` is compared against the live pane-tree focus.
+        let ws = self.active_workspace();
+        let changed = match hit {
+            PanelHit::Pane(id) => {
+                !matches!(ws.focus, FocusTarget::SplitPane) || ws.panes.focus() != id
+            },
+            PanelHit::Dock(id) => ws.focus != FocusTarget::Dock(id),
+        };
+        if changed {
             self.pending_hover = None;
             self.pending_hover_request = None;
         }
         let ws = self.active_workspace_mut();
-        ws.focus = target;
-        if let FocusTarget::SplitPane(id) = target {
-            ws.panes.set_focus(id);
+        match hit {
+            PanelHit::Pane(id) => {
+                ws.panes.set_focus(id);
+                ws.focus = FocusTarget::SplitPane;
+            },
+            PanelHit::Dock(id) => ws.focus = FocusTarget::Dock(id),
         }
     }
 
@@ -4548,7 +4575,7 @@ impl Stoat {
         }
 
         let view = match ws.focus {
-            FocusTarget::SplitPane(_) => {
+            FocusTarget::SplitPane => {
                 let focused = ws.panes.focus();
                 ws.panes.pane(focused).view.clone()
             },
@@ -4581,7 +4608,7 @@ impl Stoat {
     pub(crate) fn primary_cursor_screen_pos(&self) -> Option<(u16, u16)> {
         let (focused_id, _) = self.focused_editor_ids()?;
         let ws = self.active_workspace();
-        let FocusTarget::SplitPane(_) = ws.focus else {
+        let FocusTarget::SplitPane = ws.focus else {
             return None;
         };
         let pane_editor = match ws.panes.pane(ws.panes.focus()).view {
@@ -4793,7 +4820,7 @@ impl Stoat {
     /// so [`Self::focused_mode`] can consult it without recursing.
     fn focused_term_id(&self) -> Option<TermId> {
         let ws = self.active_workspace();
-        let FocusTarget::SplitPane(_) = ws.focus else {
+        let FocusTarget::SplitPane = ws.focus else {
             return None;
         };
         match &ws.panes.pane(ws.panes.focus()).view {
@@ -4808,7 +4835,7 @@ impl Stoat {
     /// their manual `i` entry.
     pub(crate) fn focused_shell_term_id(&self) -> Option<TermId> {
         let ws = self.active_workspace();
-        let FocusTarget::SplitPane(_) = ws.focus else {
+        let FocusTarget::SplitPane = ws.focus else {
             return None;
         };
         match &ws.panes.pane(ws.panes.focus()).view {
@@ -5460,7 +5487,7 @@ impl Stoat {
                 let new_pane = {
                     let ws = self.active_workspace_mut();
                     let new_pane = ws.panes.split(crate::pane::Axis::Vertical);
-                    ws.focus = FocusTarget::SplitPane(new_pane);
+                    ws.focus = FocusTarget::SplitPane;
                     new_pane
                 };
 
@@ -5607,7 +5634,7 @@ impl Stoat {
                 // holds focus (see `term_input_target`), so a focused dock
                 // must not trigger the reset. Recorded before the loop closes
                 // or restores the pane, which reassigns focus.
-                let exited_held_focus = matches!(ws.focus, FocusTarget::SplitPane(_))
+                let exited_held_focus = matches!(ws.focus, FocusTarget::SplitPane)
                     && pane_ids.contains(&ws.panes.focus());
 
                 ws.terms.remove(term_id);
@@ -6807,7 +6834,7 @@ impl Stoat {
     pub(crate) fn offset_for_focused_point(&mut self, line: u32, column: u32) -> Option<usize> {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
+            FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
                 View::Editor(id) => id,
                 _ => return None,
             },
@@ -6828,7 +6855,7 @@ impl Stoat {
     pub(crate) fn collapse_focused_cursor_to(&mut self, offset: usize) {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
+            FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
                 View::Editor(id) => id,
                 _ => return,
             },
@@ -6854,7 +6881,7 @@ impl Stoat {
     pub(crate) fn jump_focused_to_match_offset(&mut self, offset: usize) {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
+            FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
                 View::Editor(id) => id,
                 _ => return,
             },
@@ -10363,6 +10390,57 @@ mod tests {
         assert!(
             popup.x + popup.width > left_content.x + left_content.width,
             "the popup crosses the divider into the right pane"
+        );
+    }
+
+    #[test]
+    fn closing_a_mouse_focused_pane_leaves_focus_readers_panic_free() {
+        // Mouse-focusing a split pane then closing it used to leave that pane's
+        // id dangling in `ws.focus`, so the next focus-reading event dereferenced
+        // a freed SlotMap key and panicked. `FocusTarget::SplitPane` is now a unit
+        // variant resolved through the live pane-tree focus.
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let root = std::path::PathBuf::from("/close");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let right = {
+            let ws = h.stoat.active_workspace_mut();
+            let right = ws.panes.split(crate::pane::Axis::Vertical);
+            ws.panes.resize(Rect::new(0, 0, 80, 24));
+            right
+        };
+        let right_area = h.stoat.active_workspace().panes.pane(right).area;
+        h.stoat.focus_at(right_area.x + 1, right_area.y + 1);
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            right,
+            "the mouse click focused the right pane"
+        );
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+        assert!(
+            !h.stoat
+                .active_workspace()
+                .panes
+                .split_pane_ids()
+                .contains(&right),
+            "the closed pane is gone"
+        );
+
+        // Each of these resolves the focused pane. Before the fix they panicked
+        // on the stale id left behind in `ws.focus`.
+        assert!(h.stoat.translate_mouse_to_focused(1, 1).is_some());
+        h.stoat.focus_at(1, 1);
+        let ws = h.stoat.active_workspace();
+        assert!(
+            ws.panes.contains(ws.panes.focus()),
+            "focus resolves to a live pane after the close"
         );
     }
 
@@ -14687,7 +14765,7 @@ mod tests {
     fn focused_editor_pane_area(h: &crate::test_harness::TestHarness) -> Rect {
         let ws = h.stoat.active_workspace();
         match ws.focus {
-            FocusTarget::SplitPane(pane_id) => ws.panes.pane(pane_id).area,
+            FocusTarget::SplitPane => ws.panes.pane(ws.panes.focus()).area,
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).expect("dock").area,
         }
     }

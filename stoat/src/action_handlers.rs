@@ -914,7 +914,7 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     }
 
     let view = match ws.focus {
-        FocusTarget::SplitPane(_) => {
+        FocusTarget::SplitPane => {
             let focused = ws.panes.focus();
             ws.panes.pane(focused).view.clone()
         },
@@ -939,7 +939,7 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
 pub(crate) fn focused_pane_jumplist(stoat: &mut Stoat) -> Option<&mut JumpList> {
     let ws = stoat.active_workspace_mut();
     match ws.focus {
-        FocusTarget::SplitPane(_) => {
+        FocusTarget::SplitPane => {
             let focused = ws.panes.focus();
             Some(&mut ws.panes.pane_mut(focused).jumplist)
         },
@@ -1169,7 +1169,7 @@ fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
 fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let editor_id = match ws.focus {
-        FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
+        FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
             View::Editor(id) => id,
             _ => return UpdateEffect::None,
         },

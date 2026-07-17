@@ -30,7 +30,8 @@ pub(crate) fn render_rename_input(
         .expect("checked above");
 
     let (content_area, focus_pane_id) = match stoat.active_workspace().focus {
-        FocusTarget::SplitPane(pane_id) => {
+        FocusTarget::SplitPane => {
+            let pane_id = stoat.active_workspace().panes.focus();
             let pane = stoat.active_workspace().panes.pane(pane_id);
             let (content, _) = split_pane_status(pane.area);
             (content, pane_id)
@@ -95,9 +96,10 @@ fn cursor_screen_position(
     anchor_offset: usize,
 ) -> Option<(u16, u16)> {
     let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let FocusTarget::SplitPane = ws.focus else {
         return None;
     };
+    let pane_id = ws.panes.focus();
     let pane = ws.panes.pane(pane_id);
     let View::Editor(editor_id) = pane.view else {
         return None;

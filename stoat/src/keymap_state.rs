@@ -109,13 +109,12 @@ impl KeymapState for StoatKeymapState {
 
 /// The `View` of the active workspace's focused pane or dock.
 ///
-/// The authoritative split-pane focus is [`crate::pane::PaneTree::focus`], not
-/// the id embedded in [`FocusTarget::SplitPane`], which can dangle after a pane
-/// is closed. Reading the tree's focus keeps this in step with
-/// [`Stoat::focused_editor_ids`].
+/// The split-pane focus lives solely in [`crate::pane::PaneTree::focus`];
+/// [`FocusTarget::SplitPane`] is a unit variant, so this resolves the focused
+/// pane through the tree, staying in step with [`Stoat::focused_editor_ids`].
 fn focused_view(ws: &Workspace) -> Option<&View> {
     match ws.focus {
-        FocusTarget::SplitPane(_) => Some(&ws.panes.pane(ws.panes.focus()).view),
+        FocusTarget::SplitPane => Some(&ws.panes.pane(ws.panes.focus()).view),
         FocusTarget::Dock(dock_id) => Some(&ws.docks.get(dock_id)?.view),
     }
 }
@@ -345,7 +344,8 @@ mod tests {
         let mut h = Stoat::test();
         {
             let ws = h.stoat.active_workspace_mut();
-            if let FocusTarget::SplitPane(pane_id) = ws.focus {
+            if matches!(ws.focus, FocusTarget::SplitPane) {
+                let pane_id = ws.panes.focus();
                 ws.panes.pane_mut(pane_id).view = View::Run(RunId::default());
             }
         }

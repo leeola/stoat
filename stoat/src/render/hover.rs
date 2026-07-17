@@ -352,9 +352,10 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     let frame = stoat.size();
 
     let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let FocusTarget::SplitPane = ws.focus else {
         return None;
     };
+    let pane_id = ws.panes.focus();
     let pane = ws.panes.pane(pane_id);
     let View::Editor(editor_id) = pane.view else {
         return None;

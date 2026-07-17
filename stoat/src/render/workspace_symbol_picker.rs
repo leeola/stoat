@@ -221,9 +221,10 @@ fn render_picker(
 
 fn focused_editor_content_area(stoat: &Stoat) -> Option<Rect> {
     let ws = stoat.active_workspace();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let FocusTarget::SplitPane = ws.focus else {
         return None;
     };
+    let pane_id = ws.panes.focus();
     let pane = ws.panes.pane(pane_id);
     if !matches!(pane.view, View::Editor(_)) {
         return None;
@@ -238,9 +239,10 @@ fn cursor_screen_position(
     anchor_offset: usize,
 ) -> Option<(u16, u16)> {
     let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let FocusTarget::SplitPane = ws.focus else {
         return None;
     };
+    let pane_id = ws.panes.focus();
     let pane = ws.panes.pane(pane_id);
     let View::Editor(editor_id) = pane.view else {
         return None;

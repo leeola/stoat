@@ -112,9 +112,15 @@ impl DockPanel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Which of a workspace's focusable panels holds focus.
+///
+/// `SplitPane` is a unit variant on purpose. The focused split pane is always
+/// [`PaneTree::focus`], so carrying a `PaneId` here would just be a second copy
+/// that no pane-close path updates, leaving a dangling key that panics on the
+/// next lookup. Resolve the live pane through [`PaneTree::focus`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
-    SplitPane(PaneId),
+    SplitPane,
     Dock(DockId),
 }
 

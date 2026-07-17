@@ -46,7 +46,7 @@ fn focused_target(stoat: &Stoat) -> Option<crate::input_view::SubmitTarget> {
 
     let ws = stoat.active_workspace();
     let view = match ws.focus {
-        FocusTarget::SplitPane(_) => ws.panes.pane(ws.panes.focus()).view.clone(),
+        FocusTarget::SplitPane => ws.panes.pane(ws.panes.focus()).view.clone(),
         FocusTarget::Dock(dock_id) => ws.docks.get(dock_id)?.view.clone(),
     };
     match view {

@@ -83,9 +83,10 @@ fn snapshot_completion_word_buffer() {
 
 fn focused_buffer_len(h: &mut TestHarness) -> usize {
     let ws = h.stoat.active_workspace_mut();
-    let crate::pane::FocusTarget::SplitPane(pane_id) = ws.focus else {
+    let crate::pane::FocusTarget::SplitPane = ws.focus else {
         panic!("not a split pane");
     };
+    let pane_id = ws.panes.focus();
     let crate::pane::View::Editor(editor_id) = ws.panes.pane(pane_id).view else {
         panic!("not an editor pane");
     };

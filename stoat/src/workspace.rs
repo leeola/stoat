@@ -257,7 +257,7 @@ impl Workspace {
             palette_history: InputHistory::default(),
             panes,
             docks: SlotMap::with_key(),
-            focus: FocusTarget::SplitPane(initial_focus),
+            focus: FocusTarget::SplitPane,
             buffers,
             editors,
             runs: SlotMap::with_key(),

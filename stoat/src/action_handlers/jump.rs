@@ -44,7 +44,7 @@ pub(crate) fn push_jump(stoat: &mut Stoat) {
 pub(crate) fn push_entry(stoat: &mut Stoat, entry: JumpEntry) {
     let ws = stoat.active_workspace_mut();
     let pane_id = match ws.focus {
-        FocusTarget::SplitPane(_) => ws.panes.focus(),
+        FocusTarget::SplitPane => ws.panes.focus(),
         FocusTarget::Dock(_) => return,
     };
     let buffers = &ws.buffers;
@@ -89,7 +89,7 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
     let resolved = {
         let ws = stoat.active_workspace();
         let pane_id = match ws.focus {
-            FocusTarget::SplitPane(_) => ws.panes.focus(),
+            FocusTarget::SplitPane => ws.panes.focus(),
             FocusTarget::Dock(_) => return,
         };
         let current_buffer = match ws.panes.pane(pane_id).view {
@@ -134,7 +134,7 @@ pub(super) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
     let target = {
         let ws = stoat.active_workspace_mut();
         let pane_id = match ws.focus {
-            FocusTarget::SplitPane(_) => ws.panes.focus(),
+            FocusTarget::SplitPane => ws.panes.focus(),
             FocusTarget::Dock(_) => return UpdateEffect::None,
         };
         let buffers = &ws.buffers;
@@ -156,7 +156,7 @@ pub(super) fn jump_forward(stoat: &mut Stoat) -> UpdateEffect {
     let target = {
         let ws = stoat.active_workspace_mut();
         let pane_id = match ws.focus {
-            FocusTarget::SplitPane(_) => ws.panes.focus(),
+            FocusTarget::SplitPane => ws.panes.focus(),
             FocusTarget::Dock(_) => return UpdateEffect::None,
         };
         ws.panes.pane_mut(pane_id).jumplist.forward(count).cloned()
