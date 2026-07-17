@@ -287,6 +287,12 @@ impl DiffMap {
         if hunk.status == DiffHunkStatus::Deleted && hunk.buffer_start_line == line {
             return Some((DiffHunkStatus::Deleted, hunk.staged));
         }
+        if hunk.status == DiffHunkStatus::Moved
+            && hunk.buffer_line_range.is_empty()
+            && hunk.buffer_start_line == line
+        {
+            return Some((DiffHunkStatus::Moved, hunk.staged));
+        }
         None
     }
 
@@ -386,6 +392,14 @@ impl DiffMap {
                 props
             })
             .collect()
+    }
+
+    /// All hunks in buffer-start order.
+    ///
+    /// Unlike [`Self::hunks_in_range`], this includes moved-away seam hunks whose
+    /// `buffer_line_range` is empty and so match no line range.
+    pub fn hunks(&self) -> impl Iterator<Item = &DiffHunk> {
+        self.hunks.iter()
     }
 
     pub fn hunks_in_range(&self, line_range: Range<u32>) -> Vec<&DiffHunk> {
@@ -969,6 +983,30 @@ mod tests {
             "the deletion seam anchors on the row below the removed lines",
         );
         assert_eq!(dm.gutter_mark_for_line(0), None);
+    }
+
+    #[test]
+    fn gutter_mark_reports_the_moved_seam() {
+        // A moved-away seam is a Moved hunk with an empty buffer line range
+        // anchored at line 3.
+        let seam = DiffHunk {
+            status: DiffHunkStatus::Moved,
+            staged: false,
+            buffer_start_line: 3,
+            buffer_line_range: 3..3,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        };
+        let dm = DiffMap::from_hunks([seam], None);
+
+        assert_eq!(
+            dm.gutter_mark_for_line(3),
+            Some((DiffHunkStatus::Moved, false)),
+            "the moved-away seam anchors a Moved gutter mark",
+        );
+        assert_eq!(dm.gutter_mark_for_line(2), None);
+        assert_eq!(dm.gutter_mark_for_line(4), None);
     }
 
     #[test]
