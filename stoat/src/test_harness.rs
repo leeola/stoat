@@ -58,6 +58,9 @@ pub struct TestHarness {
     last_buffer: Option<Buffer>,
     step: usize,
     sub_frame: usize,
+    /// When set, the on-drop [`TestHarness::assert_no_real_io`] check is skipped
+    /// for a test that deliberately installed a different host.
+    host_swap_allowed: std::cell::Cell<bool>,
 }
 
 impl TestHarness {
@@ -106,6 +109,7 @@ impl TestHarness {
             last_buffer: None,
             step: 0,
             sub_frame: 0,
+            host_swap_allowed: std::cell::Cell::new(false),
         };
         harness.capture("resize");
         harness
@@ -189,13 +193,18 @@ impl TestHarness {
 
     /// Assert that every host installed on [`Stoat`] still points at the
     /// fake originally constructed by this harness. Detects test code that
-    /// swaps a real host (e.g. [`crate::host::LocalFs`]) back in via the
-    /// public `set_*_host` setters; comparison is by `Arc` allocation
-    /// pointer, so a fresh fake of the same type would still trigger the
-    /// panic.
+    /// swaps a real host (e.g. [`crate::host::LocalFs`]) back in via the public
+    /// `set_*_host` setters or a direct field assignment. Comparison is by `Arc`
+    /// allocation pointer, so a fresh fake of the same type would still trigger
+    /// the panic.
     ///
-    /// Does not detect direct `std::fs::*` / `std::env::*` calls in
-    /// production code that bypass the `*Host` traits entirely.
+    /// Runs automatically on every harness drop, so a test never has to call it
+    /// explicitly. A test that installs a different host on purpose opts out
+    /// with [`Self::allow_host_swap`].
+    ///
+    /// Does not detect direct `std::fs::*` / `std::env::*` calls in production
+    /// code that bypass the `*Host` traits entirely. The clippy disallowed-
+    /// methods lint on the `stoat` crate forbids those at their call sites.
     pub fn assert_no_real_io(&self) {
         fn alloc_ptr<T: ?Sized>(arc: &Arc<T>) -> *const () {
             Arc::as_ptr(arc) as *const ()
@@ -230,6 +239,18 @@ impl TestHarness {
             alloc_ptr(&self.fake_clipboard),
             "ClipboardHost was replaced during the test; real clipboard writes may have escaped"
         );
+        assert_eq!(
+            alloc_ptr(&self.stoat.terminal_host),
+            alloc_ptr(&self.fake_terminal_host),
+            "TerminalHost was replaced during the test; real PTY spawns may have escaped"
+        );
+    }
+
+    /// Opt out of the on-drop [`Self::assert_no_real_io`] check for a test that
+    /// deliberately installs a different host, such as [`crate::host::NoopLsp`]
+    /// to model "no server configured" or a fresh terminal host it inspects.
+    pub fn allow_host_swap(&self) {
+        self.host_swap_allowed.set(true);
     }
 
     /// Stage a working-tree review scenario in one call.
@@ -1050,6 +1071,20 @@ impl Default for TestHarness {
     }
 }
 
+impl Drop for TestHarness {
+    /// Enforce host purity when the harness goes out of scope. A test that let a
+    /// real host escape fails here even if it never called
+    /// [`TestHarness::assert_no_real_io`] itself. The panicking guard keeps a
+    /// test already unwinding (including the `assert_no_real_io` self-tests) from
+    /// double-panicking, and [`TestHarness::allow_host_swap`] opts out a
+    /// deliberate swap.
+    fn drop(&mut self) {
+        if !std::thread::panicking() && !self.host_swap_allowed.get() {
+            self.assert_no_real_io();
+        }
+    }
+}
+
 fn buffer_to_text(buf: &Buffer) -> String {
     let area = buf.area;
     let mut lines = Vec::with_capacity(area.height as usize);
@@ -1526,5 +1561,24 @@ mod tests {
         let mut h = TestHarness::with_size(80, 24);
         h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
         h.assert_no_real_io();
+    }
+
+    #[test]
+    #[should_panic(expected = "TerminalHost was replaced")]
+    fn assert_no_real_io_panics_when_terminal_host_swapped() {
+        let mut h = TestHarness::with_size(80, 24);
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.assert_no_real_io();
+    }
+
+    #[test]
+    fn allow_host_swap_suppresses_the_drop_check() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
+        h.allow_host_swap();
+        // The harness drops here with a replaced LspHost. With the swap allowed,
+        // the on-drop assert is suppressed, so reaching the end without a panic
+        // is the assertion.
     }
 }

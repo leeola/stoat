@@ -194,6 +194,7 @@ mod tests {
         let mut h = Stoat::test();
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.allow_host_swap();
 
         super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
 
@@ -256,6 +257,7 @@ mod tests {
         let mut h = Stoat::test();
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.allow_host_swap();
 
         // A restored terminal pane names a session id that no longer exists.
         let ws = h.stoat.active_workspace_mut();

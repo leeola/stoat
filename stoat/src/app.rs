@@ -8881,6 +8881,7 @@ mod tests {
         let mut h = Stoat::test();
         let fake = Arc::new(crate::host::FakeTerminalSession::new());
         h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+        h.allow_host_swap();
 
         let pane = h.stoat.active_workspace().panes.focus();
         let View::Editor(original) = h.stoat.active_workspace().panes.pane(pane).view else {

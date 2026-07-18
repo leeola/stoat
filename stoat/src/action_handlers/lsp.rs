@@ -4072,6 +4072,7 @@ mod tests {
     #[test]
     fn lsp_spawn_defers_while_env_loading() {
         let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
         h.stoat
             .set_lsp_host(std::sync::Arc::new(crate::host::NoopLsp));
         h.stoat.set_lsp_auto_spawn(true);
@@ -4096,6 +4097,7 @@ mod tests {
     #[test]
     fn env_install_consumes_lsp_deferral() {
         let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
         h.stoat
             .set_lsp_host(std::sync::Arc::new(crate::host::NoopLsp));
         h.stoat.set_lsp_auto_spawn(true);
@@ -4153,6 +4155,7 @@ mod tests {
         use crate::completion::{request::COMPLETION_DEBOUNCE, CompletionSource};
 
         let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
         open_stcfg_with_server(&mut h);
 
         h.type_text("on init { form");
@@ -4180,6 +4183,7 @@ mod tests {
         use lsp_types::DiagnosticSeverity;
 
         let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
         let path = open_stcfg_with_server(&mut h);
 
         h.type_text("on init { format_on_save = ");
@@ -5482,6 +5486,7 @@ mod tests {
     #[test]
     fn goto_definition_without_a_server_reports_no_server() {
         let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
         h.stoat
             .set_lsp_host(std::sync::Arc::new(crate::host::NoopLsp));
         let root = seed(&mut h, &[("main.rs", "abc\n")]);
