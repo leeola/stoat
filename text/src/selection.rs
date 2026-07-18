@@ -2,10 +2,15 @@ use crate::rope::Rope;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, ops::Range};
 
+/// The column a vertical motion remembers so `j`/`k` keep the cursor at one
+/// column as it crosses lines.
 #[derive(Default, Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectionGoal {
     #[default]
     None,
+    /// A buffer column (character offset from the start of the buffer line), not
+    /// a display column, so a vertical motion lands at the same buffer-line
+    /// offset regardless of soft wrap or folds.
     Column(u32),
 }
 

@@ -390,27 +390,32 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
     };
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
-    let max_row = display_snapshot.max_point().row;
     let rope = buffer_snapshot.rope();
+    let max_row = rope.max_point().row;
     editor.selections.transform(buffer_snapshot, |sel| {
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
         let tail_offset = buffer_snapshot.resolve_anchor(&sel.tail());
         let cursor = cursor_offset(rope, tail_offset, head_offset);
-        let cursor_display = display_snapshot.buffer_to_display(rope.offset_to_point(cursor));
+        let cursor_pt = rope.offset_to_point(cursor);
         let goal_col = match sel.goal {
             SelectionGoal::Column(c) => c,
-            SelectionGoal::None => cursor_display.column,
+            SelectionGoal::None => cursor_pt.column,
         };
-        let new_row_i = (cursor_display.row as i64).saturating_add(delta);
-        let new_row = new_row_i.clamp(0, max_row as i64) as u32;
+        let new_row = (cursor_pt.row as i64)
+            .saturating_add(delta)
+            .clamp(0, max_row as i64) as u32;
         // A plain j/k at the file edge stays a no-op. An overshooting count
         // jump lands on the clamped edge row rather than doing nothing.
-        if new_row == cursor_display.row {
+        if new_row == cursor_pt.row {
             return sel.clone();
         }
-        let clamped_col = goal_col.min(display_snapshot.line_len(new_row));
-        let raw = DisplayPoint::new(new_row, clamped_col);
-        let clipped = display_snapshot.clip_point(raw, clip_bias);
+        let col = goal_col.min(rope.line_len(new_row));
+        // The target is the same column of the target buffer line. Snap it
+        // through display space so a row hidden in a fold or beside a diff block
+        // row lands on the next visible buffer row in the travel direction
+        // rather than inside the hidden region.
+        let target = display_snapshot.buffer_to_display(Point::new(new_row, col));
+        let clipped = display_snapshot.clip_point(target, clip_bias);
         let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
             return sel.clone();
         };
@@ -418,7 +423,7 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
         if extend {
             // Keep the block cursor on the last character when the goal column
             // overruns the line, rather than on the line break past it.
-            let cursor_target = if clamped_col > 0 && rope.chars_at(offset).next() == Some('\n') {
+            let cursor_target = if col > 0 && rope.chars_at(offset).next() == Some('\n') {
                 rope.reversed_chars_at(offset)
                     .next()
                     .map_or(offset, |c| offset - c.len_utf8())
@@ -5106,6 +5111,72 @@ mod tests {
             focused_head_row(&mut h),
             0,
             "an overshooting count-up clamps to the first line",
+        );
+    }
+
+    /// A harness whose focused editor soft-wraps a long first line into several
+    /// display rows, followed by a short line, with the cursor at the start of
+    /// the short buffer line (row 1, column 0). Wrap is set directly so no render
+    /// clobbers it.
+    fn wrapped_pane_cursor_on_short_line() -> TestHarness {
+        let mut h = TestHarness::with_size(40, 12);
+        let path = h.write_file("wrap.rs", &format!("{}\nshort\n", "a".repeat(30)));
+        h.open_file(&path);
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+        editor.display_map.set_wrap_width(Some(10));
+        set_cursor_row(editor, 1);
+        h
+    }
+
+    #[test]
+    fn move_up_under_wrap_lands_on_the_buffer_line_not_its_wrapped_tail() {
+        let mut h = wrapped_pane_cursor_on_short_line();
+        move_vertical(&mut h.stoat, -1, false);
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(0, 0),
+            "k moves up one buffer line to column 0, not into the wrapped tail",
+        );
+    }
+
+    #[test]
+    fn vertical_motion_under_wrap_round_trips() {
+        let mut h = wrapped_pane_cursor_on_short_line();
+        move_vertical(&mut h.stoat, -1, false);
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(0, 0),
+            "k reaches the long line",
+        );
+        move_vertical(&mut h.stoat, 1, false);
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(1, 0),
+            "j returns to the short line",
+        );
+    }
+
+    #[test]
+    fn count_up_under_wrap_crosses_the_whole_wrapped_line() {
+        let mut h = wrapped_pane_cursor_on_short_line();
+        h.stoat.pending_count = Some(1);
+        move_vertical(&mut h.stoat, -1, false);
+        assert_eq!(
+            focused_cursor_point(&mut h),
+            Point::new(0, 0),
+            "1k crosses the entire wrapped line as one buffer-line step",
+        );
+    }
+
+    #[test]
+    fn extend_up_under_wrap_extends_the_head_by_a_buffer_line() {
+        let mut h = wrapped_pane_cursor_on_short_line();
+        move_vertical(&mut h.stoat, -1, true);
+        assert_eq!(
+            focused_head_row(&mut h),
+            0,
+            "extend-up moves the head up one buffer line under wrap",
         );
     }
 
