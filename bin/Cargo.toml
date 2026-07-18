@@ -44,6 +44,9 @@ tokio = { workspace = true, features = ["time"] }
 tempfile.workspace = true
 time.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 git2 = { version = "0.21", default-features = false }
 insta = "1"

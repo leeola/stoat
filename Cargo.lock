@@ -3990,6 +3990,7 @@ dependencies = [
  "futures",
  "git2",
  "insta",
+ "libc",
  "serde",
  "serde_json",
  "snafu",
