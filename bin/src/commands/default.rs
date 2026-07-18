@@ -312,7 +312,7 @@ fn run_tui(
         stoat.set_lsp_auto_spawn(true);
         stoat.set_env_auto_load(true);
         stoat.set_diff_warm_auto(true);
-        stoat.set_clipboard_host(Arc::new(LocalClipboard));
+        stoat.set_clipboard_host(Arc::new(LocalClipboard::new()));
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }
