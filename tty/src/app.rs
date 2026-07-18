@@ -1191,7 +1191,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             .map(|pool| region_scissor(pool.region, cw, ch)),
                     };
 
-                    state.gpu.render_with_pools(
+                    if state.gpu.render_with_pools(
                         &state.grid,
                         Frame {
                             cursor: base_cursor,
@@ -1208,7 +1208,13 @@ impl ApplicationHandler<PtyEvent> for App {
                         },
                         &composites,
                         cursor_scissor,
-                    );
+                    ) {
+                        // A pool composite grew or evicted from the atlas after
+                        // the live grid was drawn, so the live buffers now hold
+                        // stale UVs. Schedule the heal frame an idle screen would
+                        // otherwise skip. The next prepare rebuilds them.
+                        state.window.request_redraw();
+                    }
                     cursor_easing
                 };
 

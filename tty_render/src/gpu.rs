@@ -493,6 +493,15 @@ impl Renderer {
         self.last_gpu.take()
     }
 
+    /// The glyph atlas content epoch, which changes on a grow or eviction.
+    ///
+    /// A caller compositing pools over a just-drawn live grid can compare this
+    /// before and after to tell whether a pool pass moved the atlas UVs, leaving
+    /// the live buffers it already drew stale.
+    pub fn content_epoch(&self) -> u64 {
+        self.text.content_epoch()
+    }
+
     /// Composite `pool_grid`'s backgrounds and text over an already-rendered
     /// `view`, clipped to `scissor` and shifted up by `shift_rows` rows.
     ///
@@ -1030,13 +1039,18 @@ impl GpuContext {
     /// [`Self::render`], and adopts the acquired drawable's size the same way,
     /// so its pool and cursor scissors stay within the render target during a
     /// live resize.
+    ///
+    /// Returns `true` when a pool composite grew or evicted from the glyph atlas
+    /// after the live grid was drawn, so the live buffers just presented hold
+    /// stale UVs. The caller should schedule another frame, on which the live
+    /// prepare rebuilds them. Without it, an idle screen keeps the stale frame.
     pub fn render_with_pools(
         &mut self,
         live_grid: &Grid,
         frame: Frame<'_>,
         pools: &[PoolComposite<'_>],
         cursor_scissor: Option<[u32; 4]>,
-    ) {
+    ) -> bool {
         self.perf.begin_frame();
         let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1044,11 +1058,11 @@ impl GpuContext {
             },
             CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             },
             CurrentSurfaceTexture::Timeout
             | CurrentSurfaceTexture::Occluded
-            | CurrentSurfaceTexture::Validation => return,
+            | CurrentSurfaceTexture::Validation => return false,
         };
         self.perf.mark_acquired();
 
@@ -1065,6 +1079,12 @@ impl GpuContext {
         let resolution = [self.config.width as f32, self.config.height as f32];
         let cursor_corners = frame.cursor_corners;
         let cursor_scroll = frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback;
+
+        // The live buffers are drawn against the atlas as it stands now. A pool
+        // composite below can grow or evict from it, moving every UV, so capture
+        // the epoch first to tell afterward whether the buffers just drawn have
+        // gone stale.
+        let epoch_before = self.renderer.content_epoch();
 
         // The pool composites paint over the cursor's cell, so the base draws
         // without its cursor block and the block is drawn on top afterward. The
@@ -1094,6 +1114,13 @@ impl GpuContext {
                 pool.occludable,
             );
         }
+
+        // The pool loop is the only atlas-touching work after the live draw, so
+        // a moved epoch here means the live buffers predate the change. The
+        // cursor and HUD draws below never grow the atlas the same way, so they
+        // stay outside this compare.
+        let atlas_changed = self.renderer.content_epoch() != epoch_before;
+
         if cursor_corners.is_some() {
             self.renderer.draw_cursor_over(
                 &self.device,
@@ -1128,6 +1155,8 @@ impl GpuContext {
         if let Some(gpu) = self.renderer.take_gpu_time() {
             self.perf.attach_gpu(gpu);
         }
+
+        atlas_changed
     }
 
     /// Adopt a drawable's `width`x`height` when it disagrees with the

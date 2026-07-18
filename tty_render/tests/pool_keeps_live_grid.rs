@@ -464,3 +464,86 @@ fn pool_grow_heals_live_instances() {
         "the live glyph must survive an atlas grow driven by a pool composite"
     );
 }
+
+/// Compositing a pool page of never-seen glyphs that overflow the atlas bumps
+/// the content epoch; recompositing the same page (glyphs now resident) leaves
+/// it unchanged.
+///
+/// This is the detection `render_with_pools` reports back so the app schedules a
+/// heal frame only when a pool pass actually moved the atlas UVs.
+#[test]
+fn composite_pool_bumps_content_epoch_only_on_atlas_change() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 60;
+    let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
+    // Large glyphs plus a full ASCII spread overflow the 256px atlas and grow it.
+    let (width, height) = (512u32, cell_h * 8);
+
+    let black = Rgb::new(0, 0, 0);
+    let white = Rgb::new(255, 255, 255);
+
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("content epoch target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        black,
+        white,
+    );
+
+    let (rows, cols) = renderer.grid_size();
+
+    let mut pool = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let idx = (r * cols + c) as u32;
+            let cell = pool.get_mut(r, c);
+            cell.ch = char::from_u32(0x21 + idx % 94).unwrap_or('#');
+            cell.fg = white;
+            cell.bg = black;
+        }
+    }
+
+    let full = [0, 0, width, height];
+    let before = renderer.content_epoch();
+    renderer.composite_pool(&device, &queue, &view, &pool, &[], full, 0.0, true, true);
+    let after_new = renderer.content_epoch();
+    assert_ne!(
+        after_new, before,
+        "a burst of never-seen glyphs that overflows the atlas must bump the epoch"
+    );
+
+    renderer.composite_pool(&device, &queue, &view, &pool, &[], full, 0.0, true, true);
+    let after_repeat = renderer.content_epoch();
+    assert_eq!(
+        after_repeat, after_new,
+        "recompositing the same resident glyphs must not bump the epoch"
+    );
+}

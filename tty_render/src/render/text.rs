@@ -684,6 +684,15 @@ impl TextPass {
         }
     }
 
+    /// The glyph atlas content epoch, which changes on a grow or eviction.
+    ///
+    /// A caller that draws instances built against one epoch and then packs more
+    /// glyphs can compare this before and after to tell whether the earlier
+    /// instances now hold stale UVs.
+    pub(crate) fn content_epoch(&self) -> u64 {
+        self.atlas.content_epoch()
+    }
+
     /// Shape, rasterize, and upload the frame's glyph instances for `grid`.
     ///
     /// `resolution` is the surface size in physical pixels. `scroll.popovers`
