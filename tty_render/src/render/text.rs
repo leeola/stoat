@@ -843,17 +843,16 @@ impl TextPass {
 
         let region = grid.scroll_region();
 
-        // The grid-glyph instances from last frame stay valid when no row was
-        // rebuilt and the atlas content is unchanged. The content epoch bumps on
-        // a grow or an eviction from any pass, including a pool composite between
-        // frames, so a persistent epoch compare heals cached rows that a
-        // frame-local size compare would miss. Text runs are packed above, so a
-        // text-run grow is already folded into the epoch. Scroll no longer counts
-        // -- it rides the globals uniform.
-        let atlas_changed = self.atlas.content_epoch() != self.grid_atlas_epoch;
-        let grid_unchanged = rebuilt.is_empty() && !atlas_changed;
+        // Text runs pack above, so a text-run grow is already folded into the
+        // content epoch grid_build reads. Scroll no longer counts -- it rides the
+        // globals uniform.
+        let build = grid_build(
+            rebuilt.is_empty(),
+            self.atlas.content_epoch(),
+            self.grid_atlas_epoch,
+        );
 
-        if !grid_unchanged {
+        if build != GridBuild::Reuse {
             match region {
                 // A scroll region splits each row's glyphs across the plain and
                 // region buffers, so build the whole grid and drop the per-row
@@ -899,7 +898,7 @@ impl TextPass {
                     self.region_pending_scratch = region_pending;
                 },
                 None => {
-                    let rebuild_all = atlas_changed;
+                    let rebuild_all = build == GridBuild::RebuildAll;
                     self.patch_plain_rows(device, queue, &rebuilt, rebuild_all);
                 },
             }
@@ -2182,6 +2181,38 @@ struct OverlayDraw {
     scissor: Option<[u32; 4]>,
 }
 
+/// What a region-free grid frame must do with last frame's cached plain-row
+/// glyph instances.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GridBuild {
+    /// No row was damaged and the atlas is unchanged, so the cached instances
+    /// still point at the right pixels and the build is skipped.
+    Reuse,
+    /// Only the damaged rows changed. Patch those in place and keep the rest.
+    Patch,
+    /// The atlas content epoch moved, so re-resolve every row.
+    RebuildAll,
+}
+
+/// Decide how to rebuild the plain grid instances from whether any row was
+/// damaged and how the atlas content epoch compares to the one the cached
+/// instances were built against.
+///
+/// A changed epoch means a grow or eviction moved some glyph's UV, so every
+/// cached row -- even an undamaged one -- now points at the wrong pixels and the
+/// whole grid must be re-resolved. A frame-local texture-size compare misses the
+/// eviction case. An eviction reuses a slot without resizing the texture, so
+/// only the epoch reveals it.
+fn grid_build(rebuilt_empty: bool, current_epoch: u64, cached_epoch: u64) -> GridBuild {
+    if current_epoch != cached_epoch {
+        GridBuild::RebuildAll
+    } else if rebuilt_empty {
+        GridBuild::Reuse
+    } else {
+        GridBuild::Patch
+    }
+}
+
 fn texture_entry(binding: u32) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
@@ -2904,10 +2935,10 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_font_system, build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell,
-        fill_cell_box, glyph_family, glyph_origin, is_cell_fill, load_bundled_fonts,
+        fill_cell_box, glyph_family, glyph_origin, grid_build, is_cell_fill, load_bundled_fonts,
         overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_char,
         shape_family, shape_run, shape_run_cached, text_run_origin, FxHashMap, GlyphSource,
-        RectInstance, TextInstance, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        GridBuild, RectInstance, TextInstance, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
@@ -2928,6 +2959,18 @@ mod tests {
         },
         TextureFormat,
     };
+
+    #[test]
+    fn grid_build_rebuilds_all_when_the_atlas_epoch_moves() {
+        assert_eq!(grid_build(true, 7, 7), GridBuild::Reuse);
+        assert_eq!(grid_build(false, 7, 7), GridBuild::Patch);
+        assert_eq!(
+            grid_build(true, 8, 7),
+            GridBuild::RebuildAll,
+            "an eviction moves UVs, so undamaged rows must still rebuild"
+        );
+        assert_eq!(grid_build(false, 8, 7), GridBuild::RebuildAll);
+    }
 
     #[test]
     fn glyph_origin_offsets_from_cell_pen_and_baseline() {
