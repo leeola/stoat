@@ -326,9 +326,10 @@ struct State {
     cursor_corner_anim: [[f32; 2]; 4],
     /// Whether last frame drew the cursor at a glide anchor rather than easing it.
     ///
-    /// Set while a pool glides and the cursor rides its content. Drives the
-    /// one-shot snap to the landing cell on the first frame after the glide
-    /// releases, so the cursor does not sweep from the anchored position.
+    /// Set while a pool glides and the cursor rides its content. On the first
+    /// frame after the glide releases it seeds the settle flight, so the cursor
+    /// eases from its last anchored position to the landing cell instead of
+    /// teleporting there.
     cursor_was_anchored: bool,
     /// Each overlay's eased vertical scroll offset, in rows, indexed by overlay
     /// order. An entry ping-pongs between the top and its overflow bottom while
@@ -1053,11 +1054,11 @@ impl ApplicationHandler<PtyEvent> for App {
                             // At the live bottom: render the projected live grid
                             // (cursor and decorations), cursor easing as usual.
                             state.last_scrollback_offset = None;
-                            snap_cursor_after_anchor(
+                            seed_settle_flight(
                                 &mut state.cursor_was_anchored,
                                 &mut state.cursor_anim,
                                 &mut state.cursor_corner_anim,
-                                cursor,
+                                state.grid.rows(),
                             );
                             let (cursor, cursor_corners, easing) = step_cursor(
                                 state.cursor_animation,
@@ -1160,11 +1161,11 @@ impl ApplicationHandler<PtyEvent> for App {
                             }
                         },
                         None => {
-                            snap_cursor_after_anchor(
+                            seed_settle_flight(
                                 &mut state.cursor_was_anchored,
                                 &mut state.cursor_anim,
                                 &mut state.cursor_corner_anim,
-                                cursor,
+                                state.grid.rows(),
                             );
                             step_cursor(
                                 state.cursor_animation,
@@ -1621,26 +1622,25 @@ fn region_scissor(region: PoolRegionCommand, cw: f32, ch: f32) -> [u32; 4] {
     [x0, y0, x1 - x0, y1 - y0]
 }
 
-/// Snap the eased cursor state to the landing cell after a glide's anchor releases.
+/// Seed the settle flight on the first non-anchored frame after a glide.
 ///
-/// While a pool glides the cursor is placed by its anchor, not eased. When the
-/// glide hands the region back, easing resumes. Snapping the animation to the
-/// cursor's real cell first makes it appear there instead of sweeping across the
-/// screen from where it rode the content. A no-op when the cursor was not anchored.
-fn snap_cursor_after_anchor(
+/// Leaves `point` at its last anchored position so [`step_cursor`] eases from
+/// there to the landing cell rather than teleporting. When that position slid
+/// off the viewport during the glide, it is pulled to just beyond the edge it
+/// exited (`rows` is the viewport height), so the flight is a consistent length
+/// regardless of how far the content scrolled.
+fn seed_settle_flight(
     was_anchored: &mut bool,
     point: &mut [f32; 2],
     corners: &mut [[f32; 2]; 4],
-    cursor: Cursor,
+    rows: usize,
 ) {
     if !*was_anchored {
         return;
     }
-    if let Some(landing) = cursor_position(cursor) {
-        *point = landing;
-        *corners = block_corners(landing);
-    }
     *was_anchored = false;
+    point[1] = point[1].clamp(-1.0, rows as f32);
+    *corners = block_corners(*point);
 }
 
 /// The centroid of a quad's four corners.
@@ -2206,12 +2206,12 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32, dt: Duration) 
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, anchored_cursor_pos, bell_should_ring, cell_at, copy_pool_region,
-        cursor_in_region, ease, ease_corners, encode_key, font_step, paste_bytes, popover_overflow,
-        selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes,
-        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
-        step_scrollback_scroll, swallow_super_combo, wheel_lines, EASE_BASELINE_FRAME,
-        SCROLLBACK_MIN_STEP,
+        alternate_scroll_bytes, anchored_cursor_pos, bell_should_ring, block_corners, cell_at,
+        copy_pool_region, cursor_in_region, ease, ease_corners, encode_key, font_step, paste_bytes,
+        popover_overflow, seed_settle_flight, selection_copy_text, sgr_button_bytes,
+        sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll,
+        step_popover_scroll, step_region_scroll, step_scrollback_scroll, swallow_super_combo,
+        wheel_lines, CursorAnimation, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     use alacritty_terminal::sync::FairMutex;
     use std::time::{Duration, Instant};
@@ -2503,6 +2503,81 @@ mod tests {
             whole[0]
         );
         assert!(halfway[0] < whole[0], "a half frame advances less");
+    }
+
+    #[test]
+    fn seed_settle_flight_clamps_an_offscreen_start_to_the_edge() {
+        let rows = 40usize;
+
+        // A cursor that slid far below the viewport starts the flight from just
+        // beyond the bottom edge, not from ninety rows down.
+        let mut anchored = true;
+        let mut point = [5.0, 90.0];
+        let mut corners = block_corners(point);
+        seed_settle_flight(&mut anchored, &mut point, &mut corners, rows);
+        assert_eq!(
+            point,
+            [5.0, 40.0],
+            "off the bottom clamps to just past the edge"
+        );
+        assert!(!anchored, "the anchor flag is cleared");
+
+        // Above the top clamps to just above it.
+        let mut anchored = true;
+        let mut point = [5.0, -20.0];
+        let mut corners = block_corners(point);
+        seed_settle_flight(&mut anchored, &mut point, &mut corners, rows);
+        assert_eq!(
+            point,
+            [5.0, -1.0],
+            "off the top clamps to just past the edge"
+        );
+
+        // An on-screen position is the flight origin, left untouched.
+        let mut anchored = true;
+        let mut point = [5.0, 12.0];
+        let mut corners = block_corners(point);
+        seed_settle_flight(&mut anchored, &mut point, &mut corners, rows);
+        assert_eq!(
+            point,
+            [5.0, 12.0],
+            "an on-screen start eases from where it is"
+        );
+
+        // No anchor means no seeding.
+        let mut anchored = false;
+        let mut point = [5.0, 90.0];
+        let mut corners = block_corners(point);
+        seed_settle_flight(&mut anchored, &mut point, &mut corners, rows);
+        assert_eq!(
+            point,
+            [5.0, 90.0],
+            "without an anchor the position is untouched"
+        );
+    }
+
+    #[test]
+    fn settle_flight_eases_from_the_edge_toward_the_landing() {
+        // Seeding from off-screen then stepping must move the cursor part-way,
+        // not teleport it onto the landing cell.
+        let mut anchored = true;
+        let mut point = [5.0, 90.0];
+        let mut corners = block_corners(point);
+        seed_settle_flight(&mut anchored, &mut point, &mut corners, 40);
+
+        let landing = [5.0, 22.0];
+        let (_, _, easing) = step_cursor(
+            CursorAnimation::Block,
+            &mut point,
+            &mut corners,
+            Some(landing),
+            EASE_BASELINE_FRAME,
+        );
+        assert!(easing, "the cursor is still in flight, not settled");
+        assert!(
+            point[1] < 40.0 && point[1] > landing[1],
+            "it advanced from the edge toward the landing: {point:?}",
+        );
     }
 
     #[test]
