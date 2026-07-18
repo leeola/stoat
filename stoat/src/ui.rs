@@ -18,6 +18,11 @@ use std::{
     panic,
     sync::{Arc, Once},
     thread,
+    time::{Duration, Instant},
+};
+use stoatty_protocol::{
+    command::{self, HelloCommand, IdentReply},
+    frame,
 };
 use tokio::sync::{
     mpsc::{Sender, UnboundedReceiver},
@@ -125,6 +130,8 @@ async fn run(
     {
         return Ok(());
     }
+
+    stoatty_handshake();
 
     let mut events = EventStream::new();
 
@@ -242,6 +249,116 @@ async fn run(
     Ok(())
 }
 
+/// How long to wait for the terminal's ident reply before giving up.
+///
+/// Sized to cover an ssh round trip while bounding the startup window during
+/// which typed keystrokes are consumed here and lost.
+const IDENT_REPLY_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Announce this editor to the terminal and log its ident reply.
+///
+/// Writes an APC hello frame identifying this process, then reads raw stdin for
+/// up to [`IDENT_REPLY_TIMEOUT`] for the terminal's ident reply. The hello is
+/// sent unconditionally because an APC frame degrades to nothing in a foreign
+/// terminal, so a missing reply is the normal headless, ssh, or
+/// foreign-terminal case.
+///
+/// Any keystrokes typed during the read window are consumed here and lost. This
+/// wart is tolerated because crossterm's [`EventStream`] cannot surface an APC
+/// reply and must not own stdin until the window closes, so the handshake reads
+/// fd 0 directly first.
+fn stoatty_handshake() {
+    let hello = command::encode_hello(&HelloCommand {
+        pid: std::process::id(),
+        log_id: stoat_log::ident::get()
+            .map(|ident| ident.id.to_string())
+            .unwrap_or_default(),
+        hostname: stoat_log::ident::hostname(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    });
+
+    {
+        let mut stdout = io::stdout().lock();
+        if stdout.write_all(&hello).is_err() || stdout.flush().is_err() {
+            return;
+        }
+    }
+
+    match read_ident_reply(IDENT_REPLY_TIMEOUT) {
+        Some(reply) => tracing::info!(
+            stoatty_pid = reply.pid,
+            stoatty_log_id = %reply.log_id,
+            stoatty_hostname = %reply.hostname,
+            stoatty_version = %reply.version,
+            "stoatty ident"
+        ),
+        None => tracing::info!("no stoatty ident reply (headless or foreign terminal)"),
+    }
+}
+
+/// Read raw stdin for up to `timeout`, returning the terminal's ident reply if
+/// one arrives within it. Bytes that are not the reply frame are dropped.
+#[cfg(unix)]
+fn read_ident_reply(timeout: Duration) -> Option<IdentReply> {
+    let deadline = Instant::now() + timeout;
+    let mut buf = Vec::new();
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let ms = remaining.as_millis().min(i32::MAX as u128) as libc::c_int;
+        let mut fds = [libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) } <= 0 {
+            break;
+        }
+
+        let mut chunk = [0u8; 512];
+        let n = unsafe { libc::read(libc::STDIN_FILENO, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if n <= 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n as usize]);
+
+        if let Some(span) = extract_apc_payload(&buf) {
+            return frame::decode(span).and_then(|frame| command::decode_ident_reply(&frame));
+        }
+    }
+
+    if !buf.is_empty() {
+        tracing::debug!(
+            dropped = buf.len(),
+            "dropped non-APC stdin bytes during handshake"
+        );
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn read_ident_reply(_timeout: Duration) -> Option<IdentReply> {
+    None
+}
+
+/// The first complete APC frame span in `bytes`, from `ESC _` through its `ESC \`
+/// or `BEL` terminator inclusive, or `None` if no complete span is present yet.
+///
+/// Leading bytes before the introducer (stray keystrokes) are skipped.
+fn extract_apc_payload(bytes: &[u8]) -> Option<&[u8]> {
+    let start = bytes.windows(2).position(|pair| pair == b"\x1b_")?;
+    let rest = &bytes[start..];
+    let mut i = 2;
+    while i < rest.len() {
+        if rest[i] == 0x07 {
+            return Some(&rest[..=i]);
+        }
+        if rest[i] == 0x1b && rest.get(i + 1) == Some(&b'\\') {
+            return Some(&rest[..=i + 1]);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Frames between periodic input-to-flush latency log lines.
 #[cfg(feature = "perf")]
 const PERF_LOG_INTERVAL: usize = 600;
@@ -316,6 +433,25 @@ mod tests {
         copy_clamped(&mut dst, &src);
 
         assert_eq!(dst, Buffer::with_lines(["ab"]));
+    }
+
+    #[test]
+    fn extract_apc_payload_returns_a_complete_st_span() {
+        let bytes = b"\x1b_Gstoatty;ident\x1b\\";
+        assert_eq!(extract_apc_payload(bytes), Some(&bytes[..]));
+    }
+
+    #[test]
+    fn extract_apc_payload_skips_leading_garbage_and_accepts_bel() {
+        assert_eq!(
+            extract_apc_payload(b"junk\x1b_Gstoatty;ident\x07"),
+            Some(&b"\x1b_Gstoatty;ident\x07"[..])
+        );
+    }
+
+    #[test]
+    fn extract_apc_payload_is_none_when_the_span_is_incomplete() {
+        assert_eq!(extract_apc_payload(b"\x1b_Gstoatty;ident"), None);
     }
 
     #[test]
