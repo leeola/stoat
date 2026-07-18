@@ -1,9 +1,10 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     editor_state::{EditorId, EditorState},
-    pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, PaneId, View},
+    pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, PaneId, Placement, View},
     workspace::Workspace,
 };
+use ratatui::layout::Rect;
 
 /// Closes the focused pane and disposes its backing view state. Returns
 /// `false` when the pane tree refused to close (only one split pane
@@ -12,6 +13,50 @@ use crate::{
 pub(super) fn close_focused_pane(stoat: &mut Stoat) -> bool {
     let focused = stoat.active_workspace().panes.focus();
     close_pane_by_id(stoat, focused)
+}
+
+/// Detaches the focused editor pane into its own stoatty aux window.
+///
+/// A no-op with a status message when stoat is not running under stoatty or the
+/// focused pane is not an editor, and silently when the tree refuses (the last
+/// split pane). On success the pane keeps its size as window-relative
+/// coordinates, focus stays on it, and the next aux-window id is consumed.
+pub(super) fn detach_focused_pane(stoat: &mut Stoat) {
+    if !stoat.stoatty {
+        stoat.set_status("detach needs stoatty");
+        return;
+    }
+
+    let focused = stoat.active_workspace().panes.focus();
+    if !matches!(
+        stoat.active_workspace().panes.pane(focused).view,
+        View::Editor(_)
+    ) {
+        stoat.set_status("only editor panes detach (yet)");
+        return;
+    }
+
+    let window = stoat.next_aux_window;
+    let ws = stoat.active_workspace_mut();
+    let old = ws.panes.pane(focused).area;
+    if !ws.panes.detach(focused, window) {
+        return;
+    }
+    ws.panes.pane_mut(focused).area = Rect::new(0, 0, old.width, old.height);
+    ws.panes.set_focus(focused);
+    stoat.next_aux_window += 1;
+}
+
+/// Reattaches the focused detached pane back into the split layout.
+///
+/// A no-op unless the focused pane is currently detached into a window.
+pub(super) fn reattach_focused_pane(stoat: &mut Stoat) {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    if !matches!(ws.panes.pane(focused).placement, Placement::Window(_)) {
+        return;
+    }
+    ws.panes.attach(focused);
 }
 
 /// Closes every split pane except the focused one. Pre-collects the

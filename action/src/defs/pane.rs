@@ -88,6 +88,22 @@ define_action!(
     "focus previous pane",
     "Move focus to the previous pane in traversal order, wrapping around."
 );
+define_action!(
+    DetachPaneDef,
+    DetachPane,
+    "DetachPane",
+    ActionKind::DetachPane,
+    "detach pane into its own window",
+    "Detach the focused pane into a separate stoatty OS window. Requires running under stoatty; the last split pane cannot detach."
+);
+define_action!(
+    ReattachPaneDef,
+    ReattachPane,
+    "ReattachPane",
+    ActionKind::ReattachPane,
+    "reattach a detached pane",
+    "Reattach the focused detached pane back into the split layout, closing its window."
+);
 
 const FOCUS_PANE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "index",

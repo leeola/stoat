@@ -70,9 +70,9 @@ use crate::{
         },
         palette::OpenCommandPalette,
         pane::{
-            CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPane, FocusPrev,
-            FocusRight, FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight,
-            ToggleDockLeft, ToggleDockRight,
+            CloseOtherPanes, ClosePane, DetachPane, FocusDown, FocusLeft, FocusNext, FocusPane,
+            FocusPrev, FocusRight, FocusUp, ReattachPane, SplitDown, SplitNewDown, SplitNewRight,
+            SplitRight, ToggleDockLeft, ToggleDockRight,
         },
         picker::{
             DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
@@ -170,6 +170,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(ClosePane::DEF, |_| Ok(Box::new(ClosePane)));
     add(CloseOtherPanes::DEF, |_| Ok(Box::new(CloseOtherPanes)));
+    add(DetachPane::DEF, |_| Ok(Box::new(DetachPane)));
+    add(ReattachPane::DEF, |_| Ok(Box::new(ReattachPane)));
     add(OpenCommandPalette::DEF, |_| {
         Ok(Box::new(OpenCommandPalette))
     });
@@ -1337,7 +1339,8 @@ mod tests {
         // + 1 FocusPane.
         // + 2 PaletteHistoryPrev/Next.
         // + 1 SetTheme.
-        assert_eq!(all().count(), 350);
+        // + 2 DetachPane, ReattachPane.
+        assert_eq!(all().count(), 352);
     }
 
     #[test]

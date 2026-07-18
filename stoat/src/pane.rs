@@ -77,6 +77,10 @@ pub enum Placement {
     Dock,
     /// Exists but not rendered.
     Hidden,
+    /// Detached into stoatty aux window `N`, outside the split tree. The pane
+    /// stays in the slotmap and paints into its own OS window. Its `area` holds
+    /// window-relative coordinates rather than a slot in the split layout.
+    Window(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,10 +254,7 @@ impl PaneTree {
     /// If the parent split has the same axis, the new pane is inserted adjacent.
     /// Otherwise a new nested split is created. Focus moves to the new pane.
     pub fn split(&mut self, axis: Axis) -> PaneId {
-        let focused_pane = self.focus;
-        let focused_node = self.node_for_pane(focused_pane);
-
-        let focused_view = self.panes[focused_pane].view.clone();
+        let focused_view = self.panes[self.focus_anchor()].view.clone();
         let new_pane_id = self.panes.insert(Pane {
             view: focused_view,
             prev_view: None,
@@ -264,9 +265,23 @@ impl PaneTree {
         });
         self.next_index += 1;
 
+        self.insert_pane_leaf(new_pane_id, axis);
+        self.focus = new_pane_id;
+        self.recalculate();
+        new_pane_id
+    }
+
+    /// Inserts `pane_id` as a new leaf beside the focused split pane along
+    /// `axis`, reusing the focused pane's parent split when its axis matches or
+    /// nesting a fresh split otherwise. Anchors through [`Self::focus_anchor`] so
+    /// it holds even when focus sits on a windowed pane. Neither moves focus nor
+    /// recalculates, both of which the caller does.
+    fn insert_pane_leaf(&mut self, pane_id: PaneId, axis: Axis) {
+        let focused_node = self.node_for_pane(self.focus_anchor());
+
         let new_leaf = self.nodes.insert(Node {
             parent: NodeId::default(),
-            content: NodeContent::Leaf(new_pane_id),
+            content: NodeContent::Leaf(pane_id),
         });
 
         let parent_id = self.nodes[focused_node].parent;
@@ -328,10 +343,6 @@ impl PaneTree {
                 }
             }
         }
-
-        self.focus = new_pane_id;
-        self.recalculate();
-        new_pane_id
     }
 
     /// Removes a pane. Returns `false` if it's the last split pane.
@@ -343,15 +354,67 @@ impl PaneTree {
             return false;
         }
 
-        let node_id = self.node_for_pane(id);
+        let Some(node_id) = self.leaf_node(id) else {
+            return false;
+        };
 
         if self.focus == id {
             self.focus = self.next_split_pane(id);
         }
 
+        self.detach_node(node_id);
+        self.panes.remove(id);
+        self.recalculate();
+        true
+    }
+
+    /// Detaches the pane into stoatty aux window `window`, keeping it in the
+    /// slotmap outside the split tree. Returns `false` when it is the last split
+    /// pane or has no tree node.
+    ///
+    /// Only the pane's placement and its standing in the tree change. Its backing
+    /// view state is untouched, so a later [`Self::attach`] restores it. Focus
+    /// moves to a neighbor split pane, matching [`Self::close`], so the tree keeps
+    /// a valid focus. The caller may then refocus the detached pane.
+    pub fn detach(&mut self, id: PaneId, window: u32) -> bool {
+        if self.split_pane_count() <= 1 {
+            return false;
+        }
+
+        let Some(node_id) = self.leaf_node(id) else {
+            return false;
+        };
+
+        if self.focus == id {
+            self.focus = self.next_split_pane(id);
+        }
+
+        self.detach_node(node_id);
+        self.panes[id].placement = Placement::Window(window);
+        self.recalculate();
+        true
+    }
+
+    /// Reattaches windowed pane `id` into the split tree as a leaf beside the
+    /// current split focus, resetting its placement to [`Placement::Split`] and
+    /// focusing it.
+    ///
+    /// The reattached pane has no tree node, so the insertion anchors on the
+    /// focused split pane, or on any split pane when focus is the windowed pane
+    /// itself (see [`Self::focus_anchor`]). Inserts along [`Axis::Vertical`].
+    pub fn attach(&mut self, id: PaneId) {
+        self.panes[id].placement = Placement::Split;
+        self.insert_pane_leaf(id, Axis::Vertical);
+        self.focus = id;
+        self.recalculate();
+    }
+
+    /// Removes leaf `node_id` from the tree and collapses a resulting
+    /// single-child split into its parent, leaving the backing pane in the
+    /// slotmap for the caller to remove or repurpose.
+    fn detach_node(&mut self, node_id: NodeId) {
         let parent_id = self.nodes[node_id].parent;
         self.nodes.remove(node_id);
-        self.panes.remove(id);
 
         if let NodeContent::Split(split) = &mut self.nodes[parent_id].content {
             split.children.retain(|&c| c != node_id);
@@ -378,9 +441,6 @@ impl PaneTree {
                 self.nodes.remove(parent_id);
             }
         }
-
-        self.recalculate();
-        true
     }
 
     pub fn resize(&mut self, area: Rect) {
@@ -391,7 +451,7 @@ impl PaneTree {
     /// Moves focus to the adjacent split pane in `direction`.
     /// Returns whether focus actually changed.
     pub fn focus_direction(&mut self, direction: Direction) -> bool {
-        let current_node = self.node_for_pane(self.focus);
+        let current_node = self.node_for_pane(self.focus_anchor());
         if let Some(target) = self.find_split_in_direction(current_node, direction)
             && let NodeContent::Leaf(pane_id) = self.nodes[target].content
             && pane_id != self.focus
@@ -422,6 +482,32 @@ impl PaneTree {
     /// borrow of `self` across the loop.
     pub fn split_pane_ids(&self) -> Vec<PaneId> {
         self.split_panes().map(|(id, _)| id).collect()
+    }
+
+    /// Every detached pane paired with the aux window it renders into, ordered by
+    /// [`Pane::index`] so window assignment is stable across calls.
+    pub fn windowed_panes(&self) -> Vec<(PaneId, u32)> {
+        let mut out: Vec<(PaneId, u32, u32)> = self
+            .panes
+            .iter()
+            .filter_map(|(id, pane)| match pane.placement {
+                Placement::Window(window) => Some((id, window, pane.index)),
+                _ => None,
+            })
+            .collect();
+        out.sort_by_key(|&(_, _, index)| index);
+        out.into_iter()
+            .map(|(id, window, _)| (id, window))
+            .collect()
+    }
+
+    /// The panes numeric selection and pane-ID badges address, split panes in
+    /// traversal order first, then detached panes in [`Self::windowed_panes`]
+    /// order. This ordering is the badge digit sequence.
+    pub fn selectable_pane_ids(&self) -> Vec<PaneId> {
+        let mut ids = self.split_pane_ids();
+        ids.extend(self.windowed_panes().into_iter().map(|(id, _)| id));
+        ids
     }
 
     /// Enumerate the 1-cell gap segments that sit between adjacent children
@@ -576,13 +662,35 @@ impl PaneTree {
     }
 
     fn node_for_pane(&self, pane_id: PaneId) -> NodeId {
+        self.leaf_node(pane_id).expect("pane not found in tree")
+    }
+
+    /// The tree node holding leaf pane `id`, or `None` when the pane has no node
+    /// (a windowed pane, or an unknown id).
+    fn leaf_node(&self, id: PaneId) -> Option<NodeId> {
         self.nodes
             .iter()
             .find_map(|(nid, node)| match &node.content {
-                NodeContent::Leaf(pid) if *pid == pane_id => Some(nid),
+                NodeContent::Leaf(pid) if *pid == id => Some(nid),
                 _ => None,
             })
-            .expect("pane not found in tree")
+    }
+
+    /// The focused pane when it is a live split leaf, otherwise any split pane.
+    ///
+    /// Detaching leaves focus on a windowed pane that has no tree node, so
+    /// operations anchored on the focus resolve through this to act on a real
+    /// leaf rather than panicking. There is always at least one split pane, since
+    /// [`Self::detach`] refuses to windowize the last one.
+    fn focus_anchor(&self) -> PaneId {
+        if self.leaf_node(self.focus).is_some() {
+            self.focus
+        } else {
+            self.split_panes()
+                .next()
+                .map(|(id, _)| id)
+                .unwrap_or(self.focus)
+        }
     }
 
     fn next_split_pane(&self, current: PaneId) -> PaneId {
@@ -949,6 +1057,52 @@ mod tests {
         assert_eq!(panes.len(), 2);
         let total_width: u16 = panes.iter().map(|(_, p)| p.area.width).sum::<u16>() + 1; // +1 gap
         assert_eq!(total_width, 120);
+    }
+
+    #[test]
+    fn detach_removes_leaf_keeps_pane() {
+        let mut tree = PaneTree::new(area());
+        let a = tree.focus();
+        let b = tree.split(Axis::Vertical);
+
+        assert!(tree.detach(b, 1));
+        assert_eq!(tree.pane_count(), 2, "detached pane stays in the slotmap");
+        assert_eq!(tree.split_pane_ids(), vec![a], "its leaf leaves the tree");
+        assert_eq!(tree.pane(b).placement, Placement::Window(1));
+        assert_eq!(tree.focus(), a, "focus moves to the remaining split pane");
+    }
+
+    #[test]
+    fn attach_restores_at_focused_node() {
+        let mut tree = PaneTree::new(area());
+        let a = tree.focus();
+        let b = tree.split(Axis::Vertical);
+        tree.detach(b, 1);
+
+        tree.attach(b);
+        assert_eq!(tree.split_pane_ids().len(), 2);
+        assert_eq!(tree.pane(b).placement, Placement::Split);
+        assert!(tree.split_pane_ids().contains(&a));
+        assert_eq!(tree.focus(), b, "attach focuses the reattached pane");
+    }
+
+    #[test]
+    fn detach_last_split_pane_refuses() {
+        let mut tree = PaneTree::new(area());
+        let a = tree.focus();
+        assert!(!tree.detach(a, 1));
+        assert_eq!(tree.pane(a).placement, Placement::Split);
+    }
+
+    #[test]
+    fn selectable_pane_ids_orders_split_then_windowed() {
+        let mut tree = PaneTree::new(area());
+        let a = tree.focus();
+        let b = tree.split(Axis::Vertical);
+        let c = tree.split(Axis::Vertical);
+
+        assert!(tree.detach(c, 1));
+        assert_eq!(tree.selectable_pane_ids(), vec![a, b, c]);
     }
 
     #[test]

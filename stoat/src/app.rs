@@ -965,6 +965,10 @@ pub struct Stoat {
     /// when `false`, [`Self::emit_smooth_scroll`] is a no-op and the byte
     /// stream is identical to a run in any other terminal.
     pub(crate) stoatty: bool,
+    /// Next aux-window id handed out when a pane detaches. Ids are per-process
+    /// and monotonic, shared across workspaces, so a window id never aliases a
+    /// pane detached from a different workspace.
+    pub(crate) next_aux_window: u32,
     /// Ordered, non-dropping channel carrying stoatty APC byte batches from
     /// the app loop to the UI thread, written to stdout right after each
     /// rendered frame. Separate from the latest-wins render watch because
@@ -1348,6 +1352,7 @@ impl Stoat {
             active_snippet: None,
             version_info: "unknown",
             stoatty: false,
+            next_aux_window: 1,
             apc_tx: None,
             apc_scene: ApcScene::new(),
             pending_undercurls: Vec::new(),

@@ -19,6 +19,8 @@ pub enum ActionKind {
     FocusPane,
     ClosePane,
     CloseOtherPanes,
+    DetachPane,
+    ReattachPane,
     OpenFile,
     OpenConfig,
     ToggleMinimap,

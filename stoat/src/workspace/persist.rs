@@ -318,6 +318,13 @@ impl Workspace {
         }
 
         let mut panes = state.panes;
+        // Aux windows do not survive a restart, so reattach every detached pane
+        // as a split before the remap and sweep passes. Those passes walk the
+        // split tree, so a pane left windowed would be skipped and orphaned in
+        // the slotmap.
+        for (id, _window) in panes.windowed_panes() {
+            panes.attach(id);
+        }
         remap_editor_views_in_panes(&mut panes, &editor_id_map);
         sweep_stale_views_in_panes(&mut panes);
 
@@ -625,6 +632,32 @@ mod tests {
         for id in fresh.panes.split_pane_ids() {
             assert_eq!(fresh.panes.pane(id).placement, Placement::Split);
         }
+    }
+
+    #[test]
+    fn detached_pane_reattaches_on_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let detached = ws.panes.split(Axis::Vertical);
+        assert!(ws.panes.detach(detached, 1));
+        let count_before = ws.panes.pane_count();
+        assert_eq!(ws.panes.windowed_panes().len(), 1);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        assert_eq!(fresh.panes.pane_count(), count_before);
+        assert!(
+            fresh.panes.windowed_panes().is_empty(),
+            "no pane stays windowed after restart"
+        );
+        assert_eq!(fresh.panes.split_pane_ids().len(), count_before);
     }
 
     fn buffer_text(ws: &Workspace, id: crate::buffer::BufferId) -> String {
