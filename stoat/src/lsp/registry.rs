@@ -84,6 +84,20 @@ impl LspRegistry {
         self.languages.insert(language, selectors);
     }
 
+    /// Append `selector` to `language`'s ordered server list, creating the list
+    /// when the language has none yet.
+    ///
+    /// Unlike [`Self::set_selectors`], which replaces the whole list, this adds a
+    /// single server so callers build a language's set incrementally. Install
+    /// order is routing priority, so a later push ranks after earlier ones.
+    #[cfg(test)]
+    pub(crate) fn push_selector(&mut self, language: &str, selector: ServerSelector) {
+        self.languages
+            .entry(language.to_string())
+            .or_default()
+            .push(selector);
+    }
+
     /// Inject a single host that serves every language, replacing all
     /// per-language state.
     ///

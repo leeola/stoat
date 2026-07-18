@@ -7,6 +7,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     keymap::resolve_config_action,
     keymap_state::arg_as_str,
+    lsp::registry::ServerSelector,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -161,6 +162,25 @@ impl TestHarness {
     /// `stoat.lsp_host()`.
     pub fn fake_lsp(&self) -> &Arc<crate::host::FakeLsp> {
         &self.fake_lsp
+    }
+
+    /// Install an additional named [`crate::host::FakeLsp`] serving `language`,
+    /// returning it so the test can seed and inspect it.
+    ///
+    /// The default sole fake from [`Self::fake_lsp`] stays, but the named servers
+    /// take priority for buffers of `language`, because document sync and feature
+    /// routing prefer per-language clients over the sole host. A test can thus run
+    /// several servers against one language. Install order is routing priority.
+    pub fn install_lsp_server(&mut self, language: &str, name: &str) -> Arc<crate::host::FakeLsp> {
+        let fake = Arc::new(crate::host::FakeLsp::new());
+        fake.set_executor(self.scheduler.executor());
+        self.stoat
+            .lsp_registry
+            .insert(name.to_string(), fake.clone());
+        self.stoat
+            .lsp_registry
+            .push_selector(language, ServerSelector::all(name.to_string()));
+        fake
     }
 
     /// Drives a notification drain so tests that pushed onto
@@ -1580,5 +1600,66 @@ mod tests {
         // The harness drops here with a replaced LspHost. With the swap allowed,
         // the on-drop assert is suppressed, so reaching the end without a panic
         // is the assertion.
+    }
+
+    #[test]
+    fn install_lsp_server_routes_to_named_servers_and_merges_diagnostics() {
+        use crate::host::LspNotification;
+        use lsp_types::{Diagnostic, Position, Range};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let ra1 = h.install_lsp_server("rust", "ra1");
+        let ra2 = h.install_lsp_server("rust", "ra2");
+
+        let path = h.write_file("a.rs", "fn a() {}\n");
+        h.open_file(&path);
+
+        assert_eq!(
+            ra1.observed_opens().len(),
+            1,
+            "first named server saw the open"
+        );
+        assert_eq!(
+            ra2.observed_opens().len(),
+            1,
+            "second named server saw the open"
+        );
+        assert!(
+            h.fake_lsp().observed_opens().is_empty(),
+            "the sole fake is bypassed once named servers serve the language",
+        );
+
+        let uri = ra1.observed_opens()[0].text_document.uri.clone();
+        let diag = |message: &str| {
+            Diagnostic::new_simple(
+                Range::new(Position::new(0, 0), Position::new(0, 1)),
+                message.to_string(),
+            )
+        };
+        ra1.push_notification(LspNotification::Diagnostics {
+            uri: uri.clone(),
+            diagnostics: vec![diag("from ra1")],
+            version: None,
+        });
+        ra2.push_notification(LspNotification::Diagnostics {
+            uri,
+            diagnostics: vec![diag("from ra2")],
+            version: None,
+        });
+        h.drain_lsp();
+
+        let mut messages: Vec<String> = h
+            .stoat
+            .diagnostics
+            .get(&path)
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        messages.sort();
+        assert_eq!(
+            messages,
+            vec!["from ra1".to_string(), "from ra2".to_string()],
+            "diagnostics from both servers merge in the store",
+        );
     }
 }
