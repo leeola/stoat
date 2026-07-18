@@ -75,19 +75,22 @@ pub struct LspTranscript {
 }
 
 impl LspTranscript {
-    /// Create the paired protocol transcripts for `text_proto_log`, keyed by
-    /// stoat's pid so they correlate with `stoat-<pid>.log`.
+    /// Create the paired protocol transcripts for `text_proto_log`, named to
+    /// sort beside the editor's own log.
     ///
-    /// Writes `lsp-<pid>.tx.jsonl` (frames sent to the server) and
-    /// `lsp-<pid>.rx.jsonl` (frames received) under the shared log directory,
-    /// creating that directory if it does not exist.
+    /// Writes `<stem>.tx.jsonl` (frames sent to the server) and `<stem>.rx.jsonl`
+    /// (frames received) under the shared log directory, creating it if it does
+    /// not exist. The stem is `<process log stem>-lsp-<server slug>` when a log
+    /// identity is installed, so it shares the editor log's filename prefix, and
+    /// `lsp-<pid>-<server slug>` otherwise.
     pub fn create(server: &str) -> io::Result<Self> {
         let dir = stoat_log::log_dir()?;
         std::fs::create_dir_all(&dir)?;
-        let pid = std::process::id();
         let slug = transcript_slug(server);
-        let tx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}-{slug}.tx.jsonl")))?;
-        let rx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}-{slug}.rx.jsonl")))?;
+        let process_stem = stoat_log::ident::get().map(|i| i.file_stem.as_str());
+        let stem = transcript_stem(process_stem, std::process::id(), &slug);
+        let tx = TextProtoLog::create_at(&dir.join(format!("{stem}.tx.jsonl")))?;
+        let rx = TextProtoLog::create_at(&dir.join(format!("{stem}.rx.jsonl")))?;
         Ok(LspTranscript { tx, rx })
     }
 }
@@ -99,6 +102,20 @@ fn transcript_slug(server: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
+}
+
+/// The transcript filename stem for a server, minus the direction and `.jsonl`
+/// extension.
+///
+/// When the process installed a log identity, `process_stem` is its log file
+/// stem (e.g. `stoatty-<sid>-stoat-<id>`), so the transcript sorts beside the
+/// editor's own log as `<process_stem>-lsp-<slug>`. Without one (library
+/// callers, tests), it falls back to `lsp-<pid>-<slug>`.
+fn transcript_stem(process_stem: Option<&str>, pid: u32, slug: &str) -> String {
+    match process_stem {
+        Some(stem) => format!("{stem}-lsp-{slug}"),
+        None => format!("lsp-{pid}-{slug}"),
+    }
 }
 
 /// A language server running as a child process, addressed over stdio JSON-RPC.
@@ -971,8 +988,8 @@ fn client_capabilities() -> ClientCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, client_capabilities, encode_message, transcript_slug, DiagnosticTag,
-        FrameDecoder, Routed,
+        classify, client_capabilities, encode_message, transcript_slug, transcript_stem,
+        DiagnosticTag, FrameDecoder, Routed,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::json;
@@ -989,6 +1006,18 @@ mod tests {
         assert_eq!(transcript_slug("rust-analyzer"), "rust-analyzer");
         assert_eq!(transcript_slug("clangd 15.0"), "clangd-15-0");
         assert_eq!(transcript_slug("a_b.c/d"), "a-b-c-d");
+    }
+
+    #[test]
+    fn transcript_stem_reuses_the_process_stem_or_falls_back_to_pid() {
+        assert_eq!(
+            transcript_stem(Some("stoatty-a-stoat-b"), 12345, "rust-analyzer"),
+            "stoatty-a-stoat-b-lsp-rust-analyzer"
+        );
+        assert_eq!(
+            transcript_stem(None, 12345, "rust-analyzer"),
+            "lsp-12345-rust-analyzer"
+        );
     }
 
     #[test]
