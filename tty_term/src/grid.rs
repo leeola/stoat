@@ -292,6 +292,28 @@ impl Grid {
         self.minimap_contents = contents;
     }
 
+    /// Splice `lines` into store `content_id`, replacing `removed` lines from
+    /// `start` and creating the store when absent.
+    ///
+    /// Replays one `minimap_lines` change against the grid's stores, which equal
+    /// the term's as of the last projection, so this clamps exactly as the term's
+    /// splice did.
+    pub fn splice_minimap_content(
+        &mut self,
+        content_id: u32,
+        start: u32,
+        removed: u32,
+        lines: &[LineSummary],
+    ) {
+        let store = self.minimap_contents.entry(content_id).or_default();
+        splice_summaries(store, start, removed, lines);
+    }
+
+    /// Remove the store under `content_id`, replaying a `minimap_drop`.
+    pub fn drop_minimap_content(&mut self, content_id: u32) {
+        self.minimap_contents.remove(&content_id);
+    }
+
     /// Replace the per-logical-line heights, in rows, indexed from the top.
     ///
     /// A line past the end of the list is one row tall. The cell projection is
@@ -357,6 +379,22 @@ impl Grid {
         );
         row * self.cols + col
     }
+}
+
+/// Splice `lines` into `store`, replacing `removed` lines from `start`.
+///
+/// `start` and the removal end clamp to the store length, so an out-of-range
+/// splice appends or truncates rather than panicking. Lines are cloned from the
+/// slice, so the same splice can feed a separate store than the one it came from.
+pub(crate) fn splice_summaries(
+    store: &mut Vec<LineSummary>,
+    start: u32,
+    removed: u32,
+    lines: &[LineSummary],
+) {
+    let start = (start as usize).min(store.len());
+    let end = start.saturating_add(removed as usize).min(store.len());
+    store.splice(start..end, lines.iter().cloned());
 }
 
 /// A bounded, recycled pool of viewport-sized content pages for smooth

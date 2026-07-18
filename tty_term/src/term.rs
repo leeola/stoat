@@ -8,7 +8,7 @@
 
 use crate::{
     grid::{
-        Bar, Border, BorderStyle, Borders, Cell, DocumentOffset, Flags, Grid, Icon, IconKind,
+        self, Bar, Border, BorderStyle, Borders, Cell, DocumentOffset, Flags, Grid, Icon, IconKind,
         Minimap, MinimapView, Overlay, PagePool, Panel, Rgb, Scale, ScrollRegion, TextRun,
         UnderlineStyle,
     },
@@ -52,6 +52,15 @@ const PAGE_POOL_CAPACITY: usize = 5;
 /// Denominator the wire's sub-page scroll fraction is expressed over: a
 /// `Gstoatty;scroll` fraction of `n` (a `u16`) means `n / 65536` of a page.
 const FRACTION_SCALE: f32 = 65536.0;
+
+/// A minimap content-store change buffered for the next projection.
+///
+/// The projection replays these against the grid's stores in arrival order. See
+/// [`Terminal::minimap_journal`] for the replay contract.
+enum MinimapJournal {
+    Splice(MinimapLinesCommand),
+    Drop(u32),
+}
 
 /// A live terminal driven by a VT byte stream.
 ///
@@ -140,9 +149,14 @@ pub struct Terminal {
     /// frame that moves the thumb without redeclaring the strip.
     minimap_views: HashMap<u32, MinimapView>,
     /// Whether a content-store splice or drop happened since the last
-    /// [`Self::project`], so the projection re-clones the stores into the grid
-    /// only when they changed rather than on every viewport frame.
+    /// [`Self::project`], so the projection replays [`Self::minimap_journal`] into
+    /// the grid only when the stores changed rather than on every viewport frame.
     minimap_content_dirty: bool,
+    /// The store changes since the last [`Self::project`], in arrival order. The
+    /// grid's stores equal these stores as of that projection, so replaying the
+    /// journal against them reproduces the current stores exactly while cloning
+    /// only each splice's lines rather than every store.
+    minimap_journal: Vec<MinimapJournal>,
     /// Next seq to stamp, incremented per decoration and reset by a
     /// `Gstoatty;reset` frame. Starts at 1 so pool-composited content (seq 0)
     /// sorts below every declared decoration.
@@ -477,6 +491,7 @@ impl Terminal {
             minimap_contents: HashMap::new(),
             minimap_views: HashMap::new(),
             minimap_content_dirty: false,
+            minimap_journal: Vec::new(),
             decoration_seq: 1,
             decorations_dirty: DecorationDirty::default(),
             last_decoration_footprint: Vec::new(),
@@ -876,6 +891,8 @@ impl Terminal {
             Command::MinimapDrop(drop) => {
                 self.minimap_contents.remove(&drop.content_id);
                 self.minimap_content_dirty = true;
+                self.minimap_journal
+                    .push(MinimapJournal::Drop(drop.content_id));
             },
             // A reset is also a fill/capture close trigger. The fill and capture
             // commits must run at feed time, but the decoration clear stages so a
@@ -891,17 +908,14 @@ impl Terminal {
     /// Splice the command's lines into the content store `content_id`, replacing
     /// `removed` lines from `start` with the inserted ones.
     ///
-    /// Creates the store when absent, so a first splice populates it. `start` and
-    /// the removal end clamp to the store length, so an out-of-range splice
-    /// appends or truncates rather than panicking.
+    /// Creates the store when absent, so a first splice populates it. Records the
+    /// command on [`Self::minimap_journal`] so the next projection replays the
+    /// same splice into the grid instead of re-cloning every store.
     fn splice_minimap_content(&mut self, command: MinimapLinesCommand) {
         let store = self.minimap_contents.entry(command.content_id).or_default();
-        let start = (command.start as usize).min(store.len());
-        let end = start
-            .saturating_add(command.removed as usize)
-            .min(store.len());
-        store.splice(start..end, command.lines);
+        grid::splice_summaries(store, command.start, command.removed, &command.lines);
         self.minimap_content_dirty = true;
+        self.minimap_journal.push(MinimapJournal::Splice(command));
     }
 
     /// Route a decoration command to the live lists now, or defer it while a DEC
@@ -1551,11 +1565,28 @@ impl Terminal {
             apply_minimaps(grid, &self.minimaps, &self.minimap_seq, &self.minimap_views);
             grid.bump_minimap_epoch();
         }
-        // The content stores re-clone into the grid only when a splice or drop
-        // changed them, so a viewport-only frame re-projects the small strip list
-        // above without touching the line summaries.
-        if self.minimap_content_dirty || resized {
+        // A resize empties the grid's stores, so re-clone them wholesale and drop
+        // the journal the clone subsumes. Otherwise replay only the splices and
+        // drops since the last projection. The grid's stores match the term's as
+        // of then, so the replay reproduces the current stores while cloning just
+        // each splice's lines. A viewport-only frame touches neither.
+        if resized {
             grid.set_minimap_contents(self.minimap_contents.clone());
+            self.minimap_journal.clear();
+            grid.bump_minimap_epoch();
+            self.minimap_content_dirty = false;
+        } else if self.minimap_content_dirty {
+            for change in self.minimap_journal.drain(..) {
+                match change {
+                    MinimapJournal::Splice(command) => grid.splice_minimap_content(
+                        command.content_id,
+                        command.start,
+                        command.removed,
+                        &command.lines,
+                    ),
+                    MinimapJournal::Drop(content_id) => grid.drop_minimap_content(content_id),
+                }
+            }
             grid.bump_minimap_epoch();
             self.minimap_content_dirty = false;
         }
@@ -5007,5 +5038,98 @@ mod tests {
             grid.minimap_content(9),
             &[vec![run(0, 2, 1)], vec![run(1, 3, 2)]],
         );
+    }
+
+    #[test]
+    fn projection_replays_splices_incrementally_into_the_grid() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+
+        terminal.advance(&splice(
+            9,
+            0,
+            0,
+            vec![vec![run(0, 2, 1)], vec![run(1, 3, 2)]],
+        ));
+        terminal.project(&mut grid);
+        let epoch = grid.minimap_epoch();
+        assert_eq!(
+            grid.minimap_content(9),
+            &terminal.minimap_contents[&9][..],
+            "the first splice projects into the grid",
+        );
+
+        // A second splice replays against the grid store rather than re-cloning it.
+        terminal.advance(&splice(9, 1, 1, vec![vec![run(2, 2, 4)]]));
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.minimap_content(9),
+            &terminal.minimap_contents[&9][..],
+            "the replayed grid store equals the term store",
+        );
+        assert!(
+            grid.minimap_epoch() > epoch,
+            "a store change bumps the epoch"
+        );
+    }
+
+    #[test]
+    fn projection_replays_a_drop_to_an_empty_grid_store() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+
+        terminal.advance(&splice(9, 0, 0, vec![vec![run(0, 2, 1)]]));
+        terminal.project(&mut grid);
+        assert_eq!(grid.minimap_content(9).len(), 1);
+
+        terminal.advance(&encode_minimap_drop(&MinimapDropCommand { content_id: 9 }));
+        terminal.project(&mut grid);
+        assert!(
+            grid.minimap_content(9).is_empty(),
+            "a replayed drop empties the grid store",
+        );
+    }
+
+    #[test]
+    fn a_resize_restores_the_grid_store_via_the_full_clone() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+
+        terminal.advance(&splice(
+            9,
+            0,
+            0,
+            vec![vec![run(0, 2, 1)], vec![run(1, 3, 2)]],
+        ));
+        terminal.project(&mut grid);
+
+        // A resize empties the grid stores, so the next projection re-clones them.
+        terminal.resize(8, 8);
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.minimap_content(9),
+            &terminal.minimap_contents[&9][..],
+            "the resize fallback restores the grid store",
+        );
+    }
+
+    #[test]
+    fn a_projection_with_no_store_change_leaves_the_grid_untouched() {
+        let mut terminal = Terminal::new(4, 4, Theme::default());
+        let mut grid = Grid::new(4, 4);
+
+        terminal.advance(&splice(9, 0, 0, vec![vec![run(0, 2, 1)]]));
+        terminal.project(&mut grid);
+        let epoch = grid.minimap_epoch();
+        let store = grid.minimap_content(9).to_vec();
+
+        // A viewport-only projection re-projects neither the store nor the epoch.
+        terminal.project(&mut grid);
+        assert_eq!(
+            grid.minimap_content(9),
+            &store[..],
+            "the grid store is untouched"
+        );
+        assert_eq!(grid.minimap_epoch(), epoch, "the epoch is untouched");
     }
 }
