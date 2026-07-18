@@ -18,6 +18,7 @@ pub(crate) mod layout;
 pub(crate) mod location_picker;
 pub(crate) mod pane;
 pub(crate) mod picker;
+pub(crate) mod popout;
 pub(crate) mod quit_all_confirm;
 pub(crate) mod rebase;
 pub(crate) mod rename_input;

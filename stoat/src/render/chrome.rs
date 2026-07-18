@@ -3,7 +3,7 @@ use crate::{render::review::style_rgb, theme::Theme};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Color, Style},
     widgets::{Block, Borders, StatefulWidget, Widget},
 };
 use stoatty_protocol::command::{self, BorderStyle, PanelCommand};
@@ -86,6 +86,71 @@ pub(crate) fn modal_frame(
     }
 
     inner
+}
+
+/// Device pixels shaved off each horizontal edge of a popout card's panel, so the
+/// card draws a touch narrower than its cell rect and the editor background shows
+/// in the thin strip beside it.
+#[allow(dead_code)] // caller lands with the status-bar popout cards
+const POPOUT_INSET_PX: u8 = 4;
+
+/// Draw a popout card frame around `area`.
+///
+/// The frame is a filled, rounded, drop-shadowed panel inset a few pixels from
+/// its cell rect. This draws only the frame, so the caller owns the interior.
+///
+/// The rich arm -- taken when `scene` is threaded and both `bg` and `border`
+/// resolve to RGB -- emits a `panel` APC frame with `fill` set to `bg`, a
+/// [`POPOUT_INSET_PX`] horizontal inset, a drop shadow, and a rounded hairline in
+/// `border`. The inset and shadow are what make the card read as tucked behind
+/// the bar, and a plain terminal cannot draw them.
+///
+/// The fallback draws a ratatui [`Block`] with [`Borders::ALL`] in `border`. It
+/// draws only when `area` spans at least two rows, because a one-row card has no
+/// room for a box border and degrades to the bare background cells the caller
+/// already painted.
+#[allow(dead_code)] // caller lands with the status-bar popout cards
+pub(crate) fn popout_frame(
+    buf: &mut Buffer,
+    area: Rect,
+    bg: Color,
+    border: Color,
+    _theme: &Theme,
+    scene: Option<&mut ApcScene>,
+) {
+    let rich = scene.and_then(|scene| {
+        let bg = style_rgb(Some(bg))?;
+        let border = style_rgb(Some(border))?;
+        Some((scene, bg, border))
+    });
+
+    match rich {
+        Some((scene, bg, border)) => {
+            command::encode_panel_into(
+                scene.buffer(),
+                &PanelCommand {
+                    top: area.y,
+                    left: area.x,
+                    width: area.width,
+                    height: area.height,
+                    style: BorderStyle::Rounded,
+                    border,
+                    corner_radius: 6,
+                    fill: Some(bg),
+                    shadow: true,
+                    inset_x: POPOUT_INSET_PX,
+                },
+            );
+        },
+        None => {
+            if area.height >= 2 {
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border))
+                    .render(area, buf);
+            }
+        },
+    }
 }
 
 /// Draw a horizontal separator across `width` cells at row `y`, starting at
