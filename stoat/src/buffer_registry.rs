@@ -1,10 +1,12 @@
 use crate::{
     buffer::{BufferHistory, BufferId, SharedBuffer, TextBuffer},
     display_map::{HighlightStyleInterner, SemanticTokenHighlight},
+    lsp::LspSymbolKind,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::SystemTime,
@@ -12,6 +14,12 @@ use std::{
 use stoat_language::{
     drop_syntax_in_background, structural_diff::DiffResult, Language, SyntaxMap, SyntaxState,
 };
+use stoat_text::Anchor;
+
+/// Anchored, start-sorted LSP symbol kinds for one buffer, keyed by span. Built
+/// from a semantic-tokens response and queried by offset via
+/// [`BufferRegistry::lsp_symbol_kind_at`].
+pub(crate) type LspSymbolKindIndex = Arc<[(Range<Anchor>, LspSymbolKind)]>;
 
 /// Memoized [`DiffResult`] for a `(buffer, base_text)` pair. Cached
 /// on [`BufferRegistry`] so repeat review-view renders and consumer
@@ -58,6 +66,10 @@ struct BufferEntry {
         Arc<[SemanticTokenHighlight]>,
         Arc<HighlightStyleInterner>,
     )>,
+    /// Anchored symbol kinds from the same LSP semantic-tokens response, kept
+    /// separate from [`Self::lsp_tokens`] so cursor-aware features can query the
+    /// kind under an offset without the highlight styling. Start-anchor sorted.
+    lsp_symbol_kinds: Option<LspSymbolKindIndex>,
     diff: Option<CachedDiff>,
     /// Marks this buffer as a transient preview surface (e.g. the
     /// file finder's preview pane). The parse pipeline pulls these
@@ -177,6 +189,7 @@ impl BufferRegistry {
                 syntax_map: None,
                 tokens: None,
                 lsp_tokens: None,
+                lsp_symbol_kinds: None,
                 diff: None,
                 preview,
                 disk_mtime: None,
@@ -209,6 +222,7 @@ impl BufferRegistry {
                 syntax_map: None,
                 tokens: None,
                 lsp_tokens: None,
+                lsp_symbol_kinds: None,
                 diff: None,
                 preview: false,
                 disk_mtime: None,
@@ -337,6 +351,7 @@ impl BufferRegistry {
             entry.syntax_map = None;
             entry.tokens = None;
             entry.lsp_tokens = None;
+            entry.lsp_symbol_kinds = None;
         }
     }
 
@@ -379,6 +394,7 @@ impl BufferRegistry {
             entry.syntax_map = None;
             entry.tokens = None;
             entry.lsp_tokens = None;
+            entry.lsp_symbol_kinds = None;
         }
     }
 
@@ -453,6 +469,50 @@ impl BufferRegistry {
         self.buffers.get(&id)?.lsp_tokens.clone()
     }
 
+    /// Retain the anchored symbol-kind index from the LSP semantic-tokens
+    /// response for `id`, replacing any prior index.
+    ///
+    /// Stored even when empty, so a buffer whose response carried no symbol
+    /// tokens reads as an existing index with no match rather than as having no
+    /// index at all.
+    pub(crate) fn store_lsp_symbol_kinds(&mut self, id: BufferId, kinds: LspSymbolKindIndex) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.lsp_symbol_kinds = Some(kinds);
+        }
+    }
+
+    /// The [`LspSymbolKind`] naming the symbol at buffer `offset`, resolved
+    /// against the buffer's current text so it tracks edits.
+    ///
+    /// Returns `None` when no index exists (no server, or the response has not
+    /// arrived), `Some(None)` when the index exists but no token covers `offset`,
+    /// and `Some(Some(kind))` when one does. A caller shows every option for
+    /// `None` and hides the symbol-targeted ones for `Some(None)`.
+    // The consumer (the `space l` which-key kind filter) lands as a sibling item.
+    #[allow(dead_code)]
+    pub(crate) fn lsp_symbol_kind_at(
+        &self,
+        id: BufferId,
+        offset: usize,
+    ) -> Option<Option<LspSymbolKind>> {
+        let entry = self.buffers.get(&id)?;
+        let index = entry.lsp_symbol_kinds.as_ref()?;
+        let snapshot = entry.buffer.read().ok()?.snapshot.clone();
+
+        // Tokens are start-anchor sorted, so the last one starting at or before
+        // offset is the only candidate whose span can contain it.
+        let after =
+            index.partition_point(|(range, _)| snapshot.resolve_anchor(&range.start) <= offset);
+        let Some((range, kind)) = after.checked_sub(1).map(|i| &index[i]) else {
+            return Some(None);
+        };
+        if snapshot.resolve_anchor(&range.end) > offset {
+            Some(Some(*kind))
+        } else {
+            Some(None)
+        }
+    }
+
     /// Stamp `id` as the most-recently-shown buffer for highlight-eviction
     /// recency, called whenever a buffer is shown in a pane.
     pub(crate) fn mark_shown(&mut self, id: BufferId) {
@@ -483,7 +543,8 @@ impl BufferRegistry {
                     && (entry.syntax.is_some()
                         || entry.syntax_map.is_some()
                         || entry.tokens.is_some()
-                        || entry.lsp_tokens.is_some())
+                        || entry.lsp_tokens.is_some()
+                        || entry.lsp_symbol_kinds.is_some())
             })
             .map(|(id, entry)| (*id, entry.last_shown))
             .collect();
@@ -507,6 +568,7 @@ impl BufferRegistry {
                 entry.syntax_map = None;
                 entry.tokens = None;
                 entry.lsp_tokens = None;
+                entry.lsp_symbol_kinds = None;
             }
         }
         evicted
@@ -646,6 +708,7 @@ impl BufferRegistry {
                     syntax_map: None,
                     tokens: None,
                     lsp_tokens: None,
+                    lsp_symbol_kinds: None,
                     diff: None,
                     preview: false,
                     disk_mtime: None,
@@ -780,6 +843,35 @@ mod tests {
         assert!(reg.tokens_for(ids[2]).is_none());
         assert!(reg.tokens_for(ids[3]).is_some(), "within the newest cap");
         assert!(reg.tokens_for(ids[4]).is_some());
+    }
+
+    #[test]
+    fn lsp_symbol_kind_at_reports_hit_gap_and_no_index() {
+        let mut reg = BufferRegistry::new();
+        let (id, buffer) = reg.open(Path::new("/a.rs"), "hello world");
+        let snapshot = buffer.read().unwrap().snapshot.clone();
+        let start = snapshot.anchors_at_batch(&[0usize], stoat_text::Bias::Right)[0];
+        let end = snapshot.anchors_at_batch(&[5usize], stoat_text::Bias::Left)[0];
+        let kinds: LspSymbolKindIndex = Arc::from(vec![(start..end, LspSymbolKind::Function)]);
+        reg.store_lsp_symbol_kinds(id, kinds);
+
+        assert_eq!(
+            reg.lsp_symbol_kind_at(id, 2),
+            Some(Some(LspSymbolKind::Function)),
+            "an offset inside the token span resolves its kind"
+        );
+        assert_eq!(
+            reg.lsp_symbol_kind_at(id, 8),
+            Some(None),
+            "an offset outside every span reports the index has no match"
+        );
+
+        let (empty, _) = reg.new_scratch();
+        assert_eq!(
+            reg.lsp_symbol_kind_at(empty, 0),
+            None,
+            "a buffer with no index reports none"
+        );
     }
 
     #[test]

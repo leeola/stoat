@@ -13,7 +13,7 @@ use crate::{
     agent_ipc::AgentQuery,
     app::{PendingSpawn, Stoat, UpdateEffect},
     buffer::BufferId,
-    buffer_registry::BufferRegistry,
+    buffer_registry::{BufferRegistry, LspSymbolKindIndex},
     display_map::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
         HighlightStyleInterner, InlayKind, SemanticTokenHighlight,
@@ -21,7 +21,7 @@ use crate::{
     editor_state::EditorId,
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
-    lsp::servers::ServerSource,
+    lsp::{servers::ServerSource, LspSymbolKind},
     theme::scope,
     workspace::WorkspaceUid,
 };
@@ -2279,20 +2279,34 @@ fn apply_pull_diagnostics(
 const SEMANTIC_TOKENS_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// A decoded LSP semantic token. It pairs an absolute buffer span with the
-/// tree-sitter highlight scope stem its type maps to.
+/// tree-sitter highlight scope stem its type maps to and, separately, the
+/// coarser [`LspSymbolKind`] the type names.
+///
+/// The scope and kind are independent. A token may carry a scope but no kind (a
+/// keyword), a kind but no scope (a namespace, which has no highlight
+/// equivalent), or both. A token with neither is dropped during decode.
 #[derive(Debug, PartialEq)]
 struct DecodedToken {
     line: u32,
     start: u32,
     length: u32,
-    scope: &'static str,
+    scope: Option<&'static str>,
+    kind: Option<LspSymbolKind>,
 }
 
 /// A completed semantic-tokens request's payload. It carries the buffer, the
 /// buffer version the request was built against, and the resolved `(byte range,
-/// scope stem)` spans in request-time coordinates.
-pub(crate) type SemanticTokensOutcome =
-    (BufferId, u64, Vec<(std::ops::Range<usize>, &'static str)>);
+/// scope stem, symbol kind)` spans in request-time coordinates. The scope drives
+/// the highlight channel and the kind the symbol-kind index. Each is optional.
+pub(crate) type SemanticTokensOutcome = (
+    BufferId,
+    u64,
+    Vec<(
+        std::ops::Range<usize>,
+        Option<&'static str>,
+        Option<LspSymbolKind>,
+    )>,
+);
 
 /// Request semantic tokens for the focused editor when the server advertises a
 /// full-document legend and the `(buffer, version)` key changed.
@@ -2410,7 +2424,11 @@ fn convert_semantic_tokens(
     legend: &[SemanticTokenType],
     rope: &Rope,
     encoding: OffsetEncoding,
-) -> Vec<(std::ops::Range<usize>, &'static str)> {
+) -> Vec<(
+    std::ops::Range<usize>,
+    Option<&'static str>,
+    Option<LspSymbolKind>,
+)> {
     let SemanticTokensResult::Tokens(tokens) = result else {
         return Vec::new();
     };
@@ -2428,7 +2446,7 @@ fn convert_semantic_tokens(
     decoded
         .iter()
         .enumerate()
-        .map(|(i, t)| (offsets[2 * i]..offsets[2 * i + 1], t.scope))
+        .map(|(i, t)| (offsets[2 * i]..offsets[2 * i + 1], t.scope, t.kind))
         .collect()
 }
 
@@ -2451,12 +2469,38 @@ fn lsp_token_scope(token_type: &str) -> Option<&'static str> {
     })
 }
 
+/// Map an LSP `SemanticTokenType` name onto the coarse [`LspSymbolKind`] it
+/// names, so the distinction highlight decoding collapses (trait vs struct vs
+/// enum, all "type") survives for cursor-aware features. Types that name no
+/// symbol -- keywords, punctuation, literals -- return `None`.
+fn lsp_symbol_kind(token_type: &str) -> Option<LspSymbolKind> {
+    Some(match token_type {
+        "interface" => LspSymbolKind::Trait,
+        "type" | "class" | "struct" | "enum" | "union" | "typeAlias" | "builtinType"
+        | "typeParameter" | "selfTypeKeyword" => LspSymbolKind::Type,
+        "function" | "method" => LspSymbolKind::Function,
+        "variable" | "parameter" | "property" | "enumMember" | "constParameter" | "selfKeyword" => {
+            LspSymbolKind::Value
+        },
+        "namespace"
+        | "macro"
+        | "decorator"
+        | "event"
+        | "derive"
+        | "attribute"
+        | "label"
+        | "lifetime"
+        | "unresolvedReference" => LspSymbolKind::Symbol,
+        _ => return None,
+    })
+}
+
 /// Decode the LSP relative token stream into absolute-positioned spans.
 ///
 /// Each token's line and start accumulate from the previous per the LSP encoding.
 /// `delta_start` is relative within a line and absolute after a line break. Tokens
-/// whose type index falls outside the legend, or whose type has no stoat scope,
-/// are skipped.
+/// whose type index falls outside the legend, or whose type maps to neither a
+/// highlight scope nor a symbol kind, are skipped.
 fn decode_semantic_tokens(
     data: &[SemanticToken],
     legend: &[SemanticTokenType],
@@ -2474,14 +2518,17 @@ fn decode_semantic_tokens(
         let Some(ty) = legend.get(token.token_type as usize) else {
             continue;
         };
-        let Some(scope) = lsp_token_scope(ty.as_str()) else {
+        let scope = lsp_token_scope(ty.as_str());
+        let kind = lsp_symbol_kind(ty.as_str());
+        if scope.is_none() && kind.is_none() {
             continue;
-        };
+        }
         out.push(DecodedToken {
             line,
             start: col,
             length: token.length,
             scope,
+            kind,
         });
     }
     out
@@ -2512,18 +2559,31 @@ fn apply_semantic_tokens(
     stoat: &mut Stoat,
     buffer_id: BufferId,
     version: u64,
-    items: Vec<(std::ops::Range<usize>, &'static str)>,
+    items: Vec<(
+        std::ops::Range<usize>,
+        Option<&'static str>,
+        Option<LspSymbolKind>,
+    )>,
 ) {
+    // The highlight channel takes the scope-bearing spans, the symbol-kind index
+    // the kind-bearing ones. A token may feed one, both, or (dropped in decode)
+    // neither.
     let mut interner = HighlightStyleInterner::default();
     let styled: Vec<(std::ops::Range<usize>, _)> = items
-        .into_iter()
-        .map(|(range, scope)| {
+        .iter()
+        .filter_map(|(range, scope, _)| {
+            let scope = (*scope)?;
             let scope_path = syntax_theme::theme_scope_for_key(scope);
             let style = syntax_theme::style_to_highlight_style(&stoat.theme.get(&scope_path));
-            (range, interner.intern(style))
+            Some((range.clone(), interner.intern(style)))
         })
         .collect();
     let interner = Arc::new(interner);
+
+    let kind_spans: Vec<(std::ops::Range<usize>, LspSymbolKind)> = items
+        .iter()
+        .filter_map(|(range, _, kind)| kind.map(|kind| (range.clone(), kind)))
+        .collect();
 
     let ws = stoat.active_workspace_mut();
     let Some(shared) = ws.buffers.get(buffer_id) else {
@@ -2533,25 +2593,36 @@ fn apply_semantic_tokens(
     // Anchor against the buffer's own snapshot from the registry, not the
     // focused editor's, so the response lands and is retained even when focus
     // has since moved to another buffer.
-    let tokens: Arc<[SemanticTokenHighlight]> = {
+    let (tokens, kinds): (Arc<[SemanticTokenHighlight]>, LspSymbolKindIndex) = {
         let buf_snap = shared.read().expect("buffer poisoned").snapshot.clone();
-        let starts: Vec<usize> = styled.iter().map(|(range, _)| range.start).collect();
-        let ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
-        let start_anchors = buf_snap.anchors_at_batch(&starts, Bias::Right);
-        let end_anchors = buf_snap.anchors_at_batch(&ends, Bias::Left);
-        styled
+
+        let t_starts: Vec<usize> = styled.iter().map(|(range, _)| range.start).collect();
+        let t_ends: Vec<usize> = styled.iter().map(|(range, _)| range.end).collect();
+        let tokens: Arc<[SemanticTokenHighlight]> = styled
             .into_iter()
-            .zip(start_anchors)
-            .zip(end_anchors)
-            .map(|(((_range, style), start), end)| SemanticTokenHighlight {
+            .zip(buf_snap.anchors_at_batch(&t_starts, Bias::Right))
+            .zip(buf_snap.anchors_at_batch(&t_ends, Bias::Left))
+            .map(|(((_, style), start), end)| SemanticTokenHighlight {
                 range: start..end,
                 style,
             })
-            .collect()
+            .collect();
+
+        let k_starts: Vec<usize> = kind_spans.iter().map(|(range, _)| range.start).collect();
+        let k_ends: Vec<usize> = kind_spans.iter().map(|(range, _)| range.end).collect();
+        let kinds: LspSymbolKindIndex = kind_spans
+            .into_iter()
+            .zip(buf_snap.anchors_at_batch(&k_starts, Bias::Right))
+            .zip(buf_snap.anchors_at_batch(&k_ends, Bias::Left))
+            .map(|(((_, kind), start), end)| (start..end, kind))
+            .collect();
+
+        (tokens, kinds)
     };
 
     ws.buffers
         .store_lsp_tokens(buffer_id, version, tokens.clone(), interner.clone());
+    ws.buffers.store_lsp_symbol_kinds(buffer_id, kinds);
     for editor in ws.editors.values_mut() {
         if editor.buffer_id == buffer_id {
             editor.display_map.set_lsp_token_highlights(
@@ -3967,6 +4038,7 @@ pub(crate) fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use crate::{
         agent_ipc::{AgentControl, AgentQuery},
+        lsp::LspSymbolKind,
         test_harness::TestHarness,
     };
     use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
@@ -7471,6 +7543,7 @@ mod tests {
             SemanticTokenType::new("keyword"),
             SemanticTokenType::new("function"),
             SemanticTokenType::new("boolean"),
+            SemanticTokenType::new("namespace"),
         ];
         let tok = |delta_line, delta_start, length, token_type| SemanticToken {
             delta_line,
@@ -7484,21 +7557,25 @@ mod tests {
             tok(0, 4, 2, 1),
             tok(1, 2, 5, 0),
             tok(0, 6, 1, 2),
-            tok(0, 8, 4, 9),
+            tok(0, 8, 4, 3),
         ];
         let decoded = super::decode_semantic_tokens(&data, &legend);
-        let want = |line, start, length, scope| super::DecodedToken {
+        let want = |line, start, length, scope, kind| super::DecodedToken {
             line,
             start,
             length,
             scope,
+            kind,
         };
+        // The boolean token maps to neither a scope nor a kind and is dropped.
+        // The namespace token has no highlight scope but keeps its Symbol kind.
         assert_eq!(
             decoded,
             vec![
-                want(0, 0, 3, "keyword"),
-                want(0, 4, 2, "function"),
-                want(1, 2, 5, "keyword"),
+                want(0, 0, 3, Some("keyword"), None),
+                want(0, 4, 2, Some("function"), Some(LspSymbolKind::Function)),
+                want(1, 2, 5, Some("keyword"), None),
+                want(1, 16, 4, None, Some(LspSymbolKind::Symbol)),
             ]
         );
     }
@@ -7513,6 +7590,19 @@ mod tests {
         );
         assert_eq!(super::lsp_token_scope("struct"), Some("type"));
         assert_eq!(super::lsp_token_scope("regexp"), None);
+    }
+
+    #[test]
+    fn lsp_symbol_kind_classifies_token_types() {
+        use super::lsp_symbol_kind;
+        assert_eq!(lsp_symbol_kind("interface"), Some(LspSymbolKind::Trait));
+        assert_eq!(lsp_symbol_kind("struct"), Some(LspSymbolKind::Type));
+        assert_eq!(lsp_symbol_kind("enum"), Some(LspSymbolKind::Type));
+        assert_eq!(lsp_symbol_kind("method"), Some(LspSymbolKind::Function));
+        assert_eq!(lsp_symbol_kind("parameter"), Some(LspSymbolKind::Value));
+        assert_eq!(lsp_symbol_kind("namespace"), Some(LspSymbolKind::Symbol));
+        assert_eq!(lsp_symbol_kind("keyword"), None);
+        assert_eq!(lsp_symbol_kind("string"), None);
     }
 
     fn enable_semantic_tokens(h: &TestHarness) {
