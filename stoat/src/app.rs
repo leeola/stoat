@@ -6304,7 +6304,7 @@ impl Stoat {
         // Review variant does not dwarf Editor.
         struct ReviewFillParts {
             view: crate::review_session::ReviewViewState,
-            theme: crate::theme::Theme,
+            theme: Arc<crate::theme::Theme>,
         }
         enum PoolFill {
             Editor {
@@ -6481,7 +6481,7 @@ impl Stoat {
                         snapshot,
                         parts: Box::new(ReviewFillParts {
                             view: view.clone(),
-                            theme: theme.clone(),
+                            theme: Arc::new(theme.clone()),
                         }),
                         pages: entered,
                         pool: region.pool,
@@ -6506,7 +6506,7 @@ impl Stoat {
                         gutter: crate::smooth_scroll::PageGutter::new(
                             line_numbers != LineNumbers::Off,
                             severity,
-                            theme.clone(),
+                            Arc::new(theme.clone()),
                             rich,
                             current_line,
                         ),

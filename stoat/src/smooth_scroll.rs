@@ -51,6 +51,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{
     collections::{BTreeMap, HashMap},
     ops::Range,
+    sync::Arc,
 };
 use stoat_action::registry::RegistryEntry;
 use stoatty_protocol::command::{
@@ -521,7 +522,7 @@ pub(crate) struct PageGutter {
     /// numbers relative to the cursor exactly as the live render does.
     current_line: Option<u32>,
     severity: BTreeMap<u32, DiagnosticSeverity>,
-    theme: crate::theme::Theme,
+    theme: Arc<crate::theme::Theme>,
     rich: Option<RichGutterColors>,
 }
 
@@ -534,7 +535,7 @@ impl PageGutter {
     pub(crate) fn new(
         line_numbers: bool,
         severity: BTreeMap<u32, DiagnosticSeverity>,
-        theme: crate::theme::Theme,
+        theme: Arc<crate::theme::Theme>,
         rich: Option<RichGutterColors>,
         current_line: Option<u32>,
     ) -> PageGutter {
@@ -894,6 +895,7 @@ pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{emit_into, scroll_target, window_range, SmoothScrollState, WINDOW_PAGES};
+    use std::sync::Arc;
     use stoatty_protocol::command::{
         decode, Command, PoolDropCommand, PoolRegionCommand, RepositionCommand, ScrollCommand,
     };
@@ -932,7 +934,7 @@ mod tests {
 
         // With line numbers on in fallback mode, the page's degraded cell gutter
         // must match the live render's so the settle handoff shows no shift.
-        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None, None);
+        let gutter = PageGutter::new(true, BTreeMap::new(), Arc::new(theme.clone()), None, None);
 
         for top_row in [0u32, 4, 8, 40] {
             let area = Rect::new(0, 0, 12, 4);
@@ -1000,7 +1002,7 @@ mod tests {
         let bg = style_rgb(theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg))
             .expect("default theme has an rgb background");
         let fallback = theme.get(scope::UI_TEXT);
-        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None, None);
+        let gutter = PageGutter::new(true, BTreeMap::new(), Arc::new(theme.clone()), None, None);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
 
@@ -1037,10 +1039,7 @@ mod tests {
             multi_buffer::MultiBuffer,
             theme::{scope, Theme},
         };
-        use std::{
-            collections::BTreeMap,
-            sync::{Arc, RwLock},
-        };
+        use std::{collections::BTreeMap, sync::RwLock};
         use stoat_language::structural_diff;
         use stoat_scheduler::{Executor, TestScheduler};
 
@@ -1061,7 +1060,7 @@ mod tests {
 
         let theme = Theme::empty();
         let fallback = theme.get(scope::UI_TEXT);
-        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None, None);
+        let gutter = PageGutter::new(true, BTreeMap::new(), Arc::new(theme.clone()), None, None);
         let area = Rect::new(0, 0, 40, 8);
 
         let mut expected = Buffer::empty(area);
@@ -1103,7 +1102,7 @@ mod tests {
 
         // current_line 3 numbers every line by its distance from line 3, which
         // keeps its absolute number.
-        let gutter = PageGutter::new(true, BTreeMap::new(), theme, None, Some(3));
+        let gutter = PageGutter::new(true, BTreeMap::new(), Arc::new(theme), None, Some(3));
         let area = Rect::new(0, 0, 12, 5);
         let mut buf = Buffer::empty(area);
         let (width, _) = paint_page_gutter(&snapshot, 0, 5, &mut buf, area, &gutter);
@@ -1377,7 +1376,7 @@ mod tests {
         let fallback = Theme::empty().get(scope::UI_TEXT);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
-        let gutter = PageGutter::new(false, BTreeMap::new(), Theme::empty(), None, None);
+        let gutter = PageGutter::new(false, BTreeMap::new(), Arc::new(Theme::empty()), None, None);
 
         let frame = render_page_fill(&snapshot, 7, 2, fallback, 12, 3, &gutter, false, 0.0);
 
@@ -1424,7 +1423,13 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let rich = resolve_rich_gutter(&theme, fallback, true)
             .expect("the shipped theme resolves the rich gutter colors");
-        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), Some(rich), None);
+        let gutter = PageGutter::new(
+            true,
+            BTreeMap::new(),
+            Arc::new(theme.clone()),
+            Some(rich),
+            None,
+        );
 
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
