@@ -61,6 +61,7 @@ pub(crate) fn modal_frame(
                     corner_radius: 6,
                     fill: None,
                     shadow: true,
+                    inset_x: 0,
                 },
             );
             if let Some(title) = title {
@@ -268,6 +269,7 @@ mod tests {
             corner_radius: 6,
             fill: None,
             shadow: true,
+            inset_x: 0,
         });
         // The title run carries no background box and anchors one cell into the
         // modal (area.x * 16 + 16 = 48, area.y * 16 = 16), so the hairline draws

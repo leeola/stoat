@@ -22,7 +22,7 @@ var<uniform> globals: Globals;
 @group(0) @binding(1)
 var<storage, read> instances: array<f32>;
 
-const INSTANCE_STRIDE: u32 = 16u;
+const INSTANCE_STRIDE: u32 = 17u;
 
 // Border style codes, matching the protocol's border style ordering.
 const STYLE_LIGHT: u32 = 0u;
@@ -69,6 +69,7 @@ fn vs_main(
     @location(6) corner_radius: f32,
     @location(7) fill_flag: f32,
     @location(8) style: u32,
+    @location(9) inset_x: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -99,8 +100,11 @@ fn vs_main(
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.quad_px = corner * quad_size_px;
-    out.box_min = vec2<f32>(pad, pad);
-    out.box_max = vec2<f32>(pad, pad) + box_size_px;
+    // Shave inset_x off each x edge so the frame, fill, corners, and shadow all
+    // draw narrower than the cell rect; the quad still spans the full rect, so
+    // the inset strip rasterizes as transparent cells.
+    out.box_min = vec2<f32>(pad + inset_x, pad);
+    out.box_max = vec2<f32>(pad + box_size_px.x - inset_x, pad + box_size_px.y);
     out.shadow = vec3<f32>(shadow_offset.x, shadow_offset.y, shadow_margin);
     out.fill = fill;
     out.border = border;
@@ -144,8 +148,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let base = j * INSTANCE_STRIDE;
         let cell_j = vec2<f32>(instances[base], instances[base + 1u]);
         let size_j = vec2<f32>(instances[base + 2u], instances[base + 3u]);
-        let box_min = cell_j * globals.cell_size;
-        let box_max = (cell_j + size_j) * globals.cell_size;
+        let inset_j = instances[base + 16u];
+        let box_min = cell_j * globals.cell_size + vec2<f32>(inset_j, 0.0);
+        let box_max = (cell_j + size_j) * globals.cell_size - vec2<f32>(inset_j, 0.0);
         if frag.x >= box_min.x && frag.x < box_max.x && frag.y >= box_min.y
             && frag.y < box_max.y {
             discard;

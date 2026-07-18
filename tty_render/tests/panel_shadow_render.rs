@@ -22,24 +22,41 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
-#[test]
-fn unfilled_panel_shadow_stays_outside_the_box() {
-    let Some((device, queue)) = headless_device() else {
-        eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
-        return;
-    };
+/// The surface (clear) color the panel is rendered over, so darkening or fill is
+/// measurable against a known non-black background.
+const SURFACE: [u8; 3] = [120, 120, 120];
+
+/// Rendered pixels of one panel over the [`SURFACE`] clear, plus the geometry
+/// needed to index into them.
+struct Rendered {
+    pixels: Vec<u8>,
+    width: u32,
+    cell: [f32; 2],
+    rows: usize,
+    cols: usize,
+}
+
+impl Rendered {
+    fn px(&self, x: u32, y: u32) -> [u8; 3] {
+        let i = ((y * self.width + x) * 4) as usize;
+        [self.pixels[i], self.pixels[i + 1], self.pixels[i + 2]]
+    }
+}
+
+/// Render the panel `build` produces (given the grid size) over the clear and
+/// read the pixels back. `None` when no GPU adapter is present so a GPU-less CI
+/// stays green.
+fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Option<Rendered> {
+    let (device, queue) = headless_device()?;
 
     let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, 1.0);
-    let (cell_w, cell_h) = (cell[0], cell[1]);
-    let (width, height) = (256u32, (cell_h * 8.0).round() as u32);
-
-    // A non-black cell background so the black shadow's darkening is measurable.
-    let surface = Rgb::new(120, 120, 120);
+    let (width, height) = (256u32, (cell[1] * 8.0).round() as u32);
+    let surface = Rgb::new(SURFACE[0], SURFACE[1], SURFACE[2]);
 
     let target = device.create_texture(&TextureDescriptor {
-        label: Some("panel shadow target"),
+        label: Some("panel target"),
         size: Extent3d {
             width,
             height,
@@ -72,29 +89,13 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 5 && cols >= 6, "grid too small: {rows}x{cols}");
 
-    // A panel inset one cell from the top-left, leaving a couple cells of margin
-    // at the bottom-right for the [5,7]px shadow to fall into.
-    let panel = Panel {
-        top: 1,
-        left: 1,
-        width: cols as u16 - 3,
-        height: rows as u16 - 3,
-        style: BorderStyle::Rounded,
-        border: Rgb::new(200, 100, 50),
-        corner_radius: 6,
-        fill: None,
-        shadow: true,
-        seq: 0,
-    };
     let mut grid = Grid::new(rows, cols);
-    // Paint every cell the surface color so the panel's interior and its
-    // exterior-shadow region sit on the same known background.
     for r in 0..rows {
         for c in 0..cols {
             grid.get_mut(r, c).bg = surface;
         }
     }
-    grid.set_panels(vec![panel]);
+    grid.set_panels(vec![build(rows, cols)]);
 
     renderer.render_into(
         &device,
@@ -117,24 +118,47 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);
-    let px = |x: u32, y: u32| -> [u8; 3] {
-        let i = ((y * width + x) * 4) as usize;
-        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    Some(Rendered {
+        pixels,
+        width,
+        cell,
+        rows,
+        cols,
+    })
+}
+
+#[test]
+fn unfilled_panel_shadow_stays_outside_the_box() {
+    // A panel inset one cell from the top-left, leaving a couple cells of margin
+    // at the bottom-right for the [5,7]px shadow to fall into.
+    let Some(r) = render_panel(|rows, cols| Panel {
+        top: 1,
+        left: 1,
+        width: cols as u16 - 3,
+        height: rows as u16 - 3,
+        style: BorderStyle::Rounded,
+        border: Rgb::new(200, 100, 50),
+        corner_radius: 6,
+        fill: None,
+        shadow: true,
+        inset_x: 0,
+        seq: 0,
+    }) else {
+        eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
+        return;
     };
 
-    // The box's right and bottom edges in pixels, one cell past the left/top
-    // inset plus the panel's cell width and height.
-    let box_right = (1.0 + (cols as f32 - 3.0)) * cell_w;
-    let box_bottom = (1.0 + (rows as f32 - 3.0)) * cell_h;
+    let box_right = (1.0 + (r.cols as f32 - 3.0)) * r.cell[0];
+    let box_bottom = (1.0 + (r.rows as f32 - 3.0)) * r.cell[1];
 
-    let center = px((box_right * 0.5) as u32, (box_bottom * 0.5) as u32);
+    let center = r.px((box_right * 0.5) as u32, (box_bottom * 0.5) as u32);
     // A few px past the box's bottom-right corner, inside the offset shadow rect.
-    let exterior = px(box_right as u32 + 3, box_bottom as u32 + 3);
+    let exterior = r.px(box_right as u32 + 3, box_bottom as u32 + 3);
 
     assert!(
         center
             .iter()
-            .zip([120, 120, 120])
+            .zip(SURFACE)
             .all(|(&got, want)| got.abs_diff(want) <= 1),
         "panel interior center should keep the clear color, got {center:?}"
     );
@@ -142,6 +166,53 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         exterior[0] < center[0].saturating_sub(20),
         "a pixel past the box's bottom-right edge should be shadow-darkened, \
          got exterior {exterior:?} vs center {center:?}"
+    );
+}
+
+#[test]
+fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
+    let inset = 6u8;
+    let Some(r) = render_panel(|rows, cols| Panel {
+        top: 1,
+        left: 1,
+        width: cols as u16 - 2,
+        height: rows as u16 - 3,
+        style: BorderStyle::Rounded,
+        border: Rgb::new(200, 100, 50),
+        corner_radius: 6,
+        // Fill the box so the inset frame's interior is visibly not the clear.
+        fill: Some(Rgb::new(20, 22, 30)),
+        shadow: false,
+        inset_x: inset,
+        seq: 0,
+    }) else {
+        eprintln!("panel_shadow_render: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let box_left = 1.0 * r.cell[0];
+    let box_right = (1.0 + (r.cols as f32 - 2.0)) * r.cell[0];
+    let mid_y = ((1.0 + (r.rows as f32 - 3.0) * 0.5) * r.cell[1]) as u32;
+
+    // A couple pixels inside each cell-rect edge, within the inset strip, keeps
+    // the clear color because the box is shaved off there.
+    let left_strip = r.px(box_left as u32 + 2, mid_y);
+    let right_strip = r.px(box_right as u32 - 3, mid_y);
+    for (label, got) in [("left", left_strip), ("right", right_strip)] {
+        assert!(
+            got.iter().zip(SURFACE).all(|(&g, want)| g.abs_diff(want) <= 1),
+            "the {label} inset strip at the cell rect edge should keep the clear color, got {got:?}"
+        );
+    }
+
+    // Past the inset, inside the frame, the fill drew, so the pixel is not clear.
+    let interior = r.px(box_left as u32 + inset as u32 + 6, mid_y);
+    assert!(
+        interior
+            .iter()
+            .zip(SURFACE)
+            .any(|(&g, want)| g.abs_diff(want) > 1),
+        "just inside the inset frame the fill should show, got {interior:?}"
     );
 }
 

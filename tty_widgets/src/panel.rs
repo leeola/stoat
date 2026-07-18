@@ -24,6 +24,10 @@ pub struct Panel {
     pub corner_radius: u8,
     pub fill: Option<[u8; 3]>,
     pub shadow: bool,
+    /// Device pixels shaved off each horizontal edge in the APC frame, so the box
+    /// draws narrower than its cell rect. `0` is cell-exact. The fallback border
+    /// ignores it (cell borders are whole cells).
+    pub inset_x: u8,
 }
 
 impl StatefulWidget for Panel {
@@ -44,6 +48,7 @@ impl StatefulWidget for Panel {
                 corner_radius: self.corner_radius,
                 fill: self.fill,
                 shadow: self.shadow,
+                inset_x: self.inset_x,
             },
         );
     }
@@ -87,6 +92,7 @@ mod tests {
             corner_radius: 6,
             fill: Some([40, 44, 52]),
             shadow: true,
+            inset_x: 4,
         }
         .render(area, &mut buf, &mut scene);
 
@@ -100,6 +106,7 @@ mod tests {
             corner_radius: 6,
             fill: Some([40, 44, 52]),
             shadow: true,
+            inset_x: 4,
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }
@@ -116,6 +123,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            inset_x: 0,
         }
         .render(area, &mut buf, &mut scene);
 
@@ -139,6 +147,7 @@ mod tests {
             corner_radius: 6,
             fill: None,
             shadow: false,
+            inset_x: 0,
         }
         .render(area, &mut buf, &mut scene);
 

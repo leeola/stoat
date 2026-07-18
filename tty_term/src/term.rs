@@ -2686,6 +2686,7 @@ fn panel_grid(command: &PanelCommand, seq: u32) -> Panel {
         corner_radius: command.corner_radius,
         fill: command.fill.map(|[r, g, b]| Rgb::new(r, g, b)),
         shadow: command.shadow,
+        inset_x: command.inset_x,
         seq,
     }
 }
@@ -3652,6 +3653,7 @@ mod tests {
             corner_radius: 6,
             fill: Some([10, 20, 30]),
             shadow: true,
+            inset_x: 0,
         });
 
         let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -3671,6 +3673,7 @@ mod tests {
                 corner_radius: 6,
                 fill: Some(Rgb::new(10, 20, 30)),
                 shadow: true,
+                inset_x: 0,
                 seq: 1,
             }]
         );
@@ -3688,6 +3691,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            inset_x: 0,
         });
 
         let mut terminal = Terminal::new(4, 4, Theme::default());
@@ -3711,6 +3715,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            inset_x: 0,
         });
         stream.extend_from_slice(&encode_icon(&IconCommand {
             top: 0,
@@ -3771,6 +3776,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            inset_x: 0,
         });
 
         let mut terminal = Terminal::new(4, 3, Theme::default());

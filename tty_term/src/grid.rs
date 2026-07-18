@@ -757,6 +757,10 @@ pub struct Panel {
     pub corner_radius: u8,
     pub fill: Option<Rgb>,
     pub shadow: bool,
+    /// Device pixels shaved off each horizontal edge, so the box draws narrower
+    /// than its cell rect. Carried from the panel command and applied by the
+    /// renderer to the frame, fill, corners, and shadow.
+    pub inset_x: u8,
     /// Monotonic declaration-order index across all non-cell components. A later
     /// component (higher `seq`) draws on top, so a box's own runs and bars carry
     /// a higher `seq` than its panel while a lower box's components carry a lower

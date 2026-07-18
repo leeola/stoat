@@ -187,6 +187,11 @@ pub struct PanelCommand {
     pub corner_radius: u8,
     pub fill: Option<[u8; 3]>,
     pub shadow: bool,
+    /// Device pixels shaved off each horizontal edge, so the box draws narrower
+    /// than its cell rect. `0` is cell-exact. The border, fill, corner rounding,
+    /// and shadow all follow the inset rect, leaving the strip outside it showing
+    /// the cells behind.
+    pub inset_x: u8,
 }
 
 /// Draw the glyph at a cell `scale` times the cell size.
@@ -573,6 +578,7 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
         w.write_all(&[command.fill.is_some() as u8])?;
         w.write_all(&command.fill.unwrap_or([0, 0, 0]))?;
         w.write_all(&[command.shadow as u8])?;
+        w.write_all(&[command.inset_x])?;
         Ok(())
     });
     frame::end(out);
@@ -1259,7 +1265,7 @@ fn decode_border(args: &[Vec<u8>]) -> Option<BorderCommand> {
 
 fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
     let arg = args.first()?;
-    if arg.len() < 18 {
+    if arg.len() < 19 {
         return None;
     }
 
@@ -1273,6 +1279,7 @@ fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         corner_radius: arg[12],
         fill: (arg[13] != 0).then_some([arg[14], arg[15], arg[16]]),
         shadow: arg[17] != 0,
+        inset_x: arg[18],
     })
 }
 
@@ -1682,6 +1689,7 @@ mod tests {
             corner_radius: 6,
             fill: Some([20, 22, 30]),
             shadow: true,
+            inset_x: 4,
         };
 
         assert_eq!(
@@ -1702,6 +1710,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            inset_x: 0,
         };
 
         assert_eq!(
@@ -1718,9 +1727,10 @@ mod tests {
 
     #[test]
     fn panel_decode_ignores_legacy_title_gap_bytes() {
-        // A 22-byte arg carries four trailing bytes from an emitter that still
-        // wrote the retired title-gap span. The decoder reads the 18-byte base
-        // and ignores the rest rather than rejecting the frame.
+        // A 22-byte arg carries three trailing bytes past the 19-byte base from
+        // an emitter that still wrote the retired title-gap span. The decoder
+        // reads the base -- here a zero inset -- and ignores the rest rather than
+        // rejecting the frame.
         let mut arg = Vec::new();
         arg.extend_from_slice(&3u16.to_be_bytes());
         arg.extend_from_slice(&12u16.to_be_bytes());
@@ -1748,6 +1758,7 @@ mod tests {
                 corner_radius: 6,
                 fill: Some([20, 22, 30]),
                 shadow: true,
+                inset_x: 0,
             })
         );
     }

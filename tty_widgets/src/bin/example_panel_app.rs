@@ -79,6 +79,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
             corner_radius: 6,
             fill: None,
             shadow: true,
+            inset_x: 0,
         },
         dialog,
         scene,

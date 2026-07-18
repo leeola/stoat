@@ -47,6 +47,7 @@ struct PanelInstance {
     corner_radius: f32,
     fill_flag: f32,
     style: u32,
+    inset_x: f32,
 }
 
 /// The uniform shared by every instance. Carries the surface resolution, the
@@ -134,6 +135,7 @@ impl PanelPass {
                         6 => Float32,
                         7 => Float32,
                         8 => Uint32,
+                        9 => Float32,
                     ],
                 }],
             },
@@ -288,6 +290,7 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
                 corner_radius: panel.corner_radius as f32,
                 fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
                 style: style_code(panel.style),
+                inset_x: panel.inset_x as f32,
             }
         })
         .collect()
@@ -339,6 +342,7 @@ mod tests {
             corner_radius: 6,
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: true,
+            inset_x: 0,
             seq: 0,
         }];
 
@@ -368,6 +372,7 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: false,
+            inset_x: 0,
             seq: 0,
         }];
 
