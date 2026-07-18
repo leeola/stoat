@@ -1685,6 +1685,10 @@ impl Stoat {
         let mut frame_timer = tokio::time::interval(SCROLL_FRAME);
         frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_tick: Option<std::time::Instant> = None;
+        // The prior frame's screen buffer, recycled into the next paint once the
+        // render thread has released it, so a redraw reuses one allocation rather
+        // than allocating a fresh ~screen-sized buffer per frame.
+        let mut recycled: Option<RenderFrame> = None;
 
         loop {
             let animating = self.is_animating();
@@ -1764,7 +1768,14 @@ impl Stoat {
                         break;
                     }
                     let (buffer, undercurl) = {
-                        let mut b = Buffer::empty(self.size);
+                        // Reuse the released prior frame's allocation. paint_into
+                        // resizes and resets it, so it paints as a fresh buffer
+                        // would. The fallback fresh buffer double-clears (empty
+                        // then reset), acceptable on this rare path.
+                        let mut b = recycled
+                            .take()
+                            .and_then(|f| Arc::try_unwrap(f.buffer).ok())
+                            .unwrap_or_else(|| Buffer::empty(self.size));
                         #[cfg(feature = "perf")]
                         let painted = std::time::Instant::now();
                         self.paint_into(&mut b);
@@ -1774,7 +1785,7 @@ impl Stoat {
                         (Arc::new(b), undercurl)
                     };
                     let cursor = self.primary_cursor_screen_pos();
-                    render.send_replace(Some(RenderFrame {
+                    recycled = render.send_replace(Some(RenderFrame {
                         buffer,
                         cursor,
                         undercurl,
@@ -5987,8 +5998,8 @@ impl Stoat {
     /// Paint the current state into a fresh [`Buffer`] and return it.
     ///
     /// A convenience wrapper over [`Self::paint_into`] for the test harness,
-    /// which snapshots the returned buffer. The event loop paints into one
-    /// reused buffer via [`Self::paint_into`] instead, so this is otherwise
+    /// which snapshots the returned buffer. The event loop instead recycles a
+    /// buffer across frames via [`Self::paint_into`], so this is otherwise
     /// unused.
     #[allow(dead_code)]
     pub(crate) fn render(&mut self) -> Buffer {
@@ -6001,8 +6012,8 @@ impl Stoat {
     ///
     /// Resizes `buf` to the current screen and resets it to blank before
     /// drawing, so a recycled buffer paints byte-identically to a fresh one.
-    /// The event loop paints into one long-lived buffer this way to avoid a
-    /// per-frame screen allocation.
+    /// The event loop recycles the prior frame's buffer this way once the render
+    /// thread releases it, avoiding a per-frame screen allocation.
     fn paint_into(&mut self, buf: &mut Buffer) {
         self.render_tick += 1;
         buf.resize(self.size);
