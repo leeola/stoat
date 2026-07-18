@@ -6802,7 +6802,9 @@ impl Stoat {
             );
         }
 
-        if let Some((popup, prefix, layout)) = completion {
+        if let Some((prefix, layout)) = completion
+            && let Some(popup) = self.pending_completion.as_ref()
+        {
             let region = stoatty_protocol::command::PoolRegionCommand {
                 pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
                 top: layout.inner.y,
@@ -12328,7 +12330,7 @@ mod tests {
 
         let popup_area = crate::render::completion::completion_popup_layout(&mut h.stoat)
             .expect("completion popup lays out")
-            .2
+            .1
             .popup_area;
         let cmds = drain_apc(&mut rx);
         assert!(
@@ -12672,7 +12674,7 @@ mod tests {
         });
 
         h.stoat.emit_smooth_scroll();
-        let (_, _, layout) = crate::render::completion::completion_popup_layout(&mut h.stoat)
+        let (_, layout) = crate::render::completion::completion_popup_layout(&mut h.stoat)
             .expect("the popup anchors in the test terminal");
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::COMPLETION,

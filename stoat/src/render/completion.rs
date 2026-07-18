@@ -1,6 +1,6 @@
 use crate::{
     app::Stoat,
-    completion::{CompletionItem, CompletionPopup},
+    completion::CompletionItem,
     fuzzy,
     pane::{FocusTarget, View},
     render::layout::split_pane_status,
@@ -12,6 +12,7 @@ use ratatui::{
     style::Modifier,
     widgets::{Block, Borders, Clear, Widget},
 };
+use std::ops::Range;
 
 /// Maximum number of completion rows visible at once. Larger lists
 /// scroll so the selected row stays in view.
@@ -37,44 +38,49 @@ pub(crate) struct CompletionLayout {
     pub(crate) detail: Option<String>,
 }
 
-/// Compute the anchored completion popup geometry, returning the cloned popup,
-/// its match prefix, and the [`CompletionLayout`], or `None` when no popup
-/// should show.
+/// Compute the anchored completion popup geometry, returning its match prefix
+/// and the [`CompletionLayout`], or `None` when no popup should show.
 ///
-/// `None` mirrors every [`render_completion`] bail: no pending completion or
-/// empty items, the focused pane is not an editor, the cursor is off-screen, or
-/// the interior width collapses to zero.
-pub(crate) fn completion_popup_layout(
-    stoat: &mut Stoat,
-) -> Option<(CompletionPopup, String, CompletionLayout)> {
-    let popup = match &stoat.pending_completion {
-        Some(p) if !p.items.is_empty() => p.clone(),
+/// The popup itself is not returned. Callers re-borrow
+/// [`Stoat::pending_completion`] for the item rows, so the list is never cloned
+/// here. `None` mirrors every [`render_completion`] bail: no pending completion
+/// or empty items, the focused pane is not an editor, the cursor is off-screen,
+/// or the interior width collapses to zero.
+pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, CompletionLayout)> {
+    // Read the scalars the geometry needs and drop the popup borrow before the
+    // mutable workspace access below. The item list is re-borrowed for the width
+    // scan once that work is done, so the popup is never cloned.
+    let (anchor_offset, selected_idx, prefix_range) = match &stoat.pending_completion {
+        Some(p) if !p.items.is_empty() => (p.anchor_offset, p.selected_idx, p.prefix_range.clone()),
         _ => return None,
     };
 
-    let prefix = extract_prefix(stoat, &popup);
+    let prefix = extract_prefix(stoat, prefix_range);
 
-    let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane = ws.focus else {
-        return None;
+    let (cursor_screen, content_area) = {
+        let ws = stoat.active_workspace_mut();
+        let FocusTarget::SplitPane = ws.focus else {
+            return None;
+        };
+        let pane_id = ws.panes.focus();
+        let pane = ws.panes.pane(pane_id);
+        let View::Editor(editor_id) = pane.view else {
+            return None;
+        };
+        let (content_area, _) = split_pane_status(pane.area);
+        let editor = ws.editors.get_mut(editor_id)?;
+        let cursor_screen = cursor_screen_position(editor, content_area, anchor_offset)?;
+        (cursor_screen, content_area)
     };
-    let pane_id = ws.panes.focus();
-    let pane = ws.panes.pane(pane_id);
-    let View::Editor(editor_id) = pane.view else {
-        return None;
-    };
-    let (content_area, _) = split_pane_status(pane.area);
-
-    let editor = ws.editors.get_mut(editor_id)?;
-    let cursor_screen = cursor_screen_position(editor, content_area, popup.anchor_offset)?;
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
         return None;
     }
 
+    let popup = stoat.pending_completion.as_ref()?;
     let total = popup.items.len();
-    let viewport_top = viewport_top_for(popup.selected_idx, total, MAX_VISIBLE_ROWS);
+    let viewport_top = viewport_top_for(selected_idx, total, MAX_VISIBLE_ROWS);
     let visible_count = total.saturating_sub(viewport_top).min(MAX_VISIBLE_ROWS);
 
     let max_line_width = popup
@@ -89,7 +95,7 @@ pub(crate) fn completion_popup_layout(
         })
         .max()
         .unwrap_or(0) as u16;
-    let detail = popup.items.get(popup.selected_idx).and_then(detail_footer);
+    let detail = popup.items.get(selected_idx).and_then(detail_footer);
     let detail_width = detail
         .as_deref()
         .map(|d| {
@@ -128,7 +134,6 @@ pub(crate) fn completion_popup_layout(
     };
 
     Some((
-        popup,
         prefix,
         CompletionLayout {
             popup_area,
@@ -171,7 +176,12 @@ pub(crate) fn render_completion(
     buf: &mut Buffer,
     scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
-    let Some((popup, prefix, layout)) = completion_popup_layout(stoat) else {
+    let Some((prefix, layout)) = completion_popup_layout(stoat) else {
+        return;
+    };
+    // The layout confirmed a non-empty popup. Re-borrow it for the rows instead
+    // of cloning the item list through the layout call.
+    let Some(popup) = stoat.pending_completion.as_ref() else {
         return;
     };
 
@@ -272,7 +282,7 @@ pub(crate) fn paint_completion_rows(
     }
 }
 
-fn extract_prefix(stoat: &Stoat, popup: &CompletionPopup) -> String {
+fn extract_prefix(stoat: &Stoat, prefix_range: Range<usize>) -> String {
     let ws = stoat.active_workspace();
     let FocusTarget::SplitPane = ws.focus else {
         return String::new();
@@ -294,8 +304,8 @@ fn extract_prefix(stoat: &Stoat, popup: &CompletionPopup) -> String {
     };
     let rope = guard.rope();
     let len = rope.len();
-    let start = popup.prefix_range.start.min(len);
-    let end = popup.prefix_range.end.min(len);
+    let start = prefix_range.start.min(len);
+    let end = prefix_range.end.min(len);
     if start >= end {
         return String::new();
     }
