@@ -990,6 +990,16 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
         true
     });
 
+    // The jump only moves the selection. Pull the view onto it here so a
+    // non-key dispatch (the `stoat review` startup, a mouse palette accept)
+    // lands scrolled, not relying on the Key-event epilogue.
+    if jumped {
+        let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+        if let Some(editor) = super::focused_editor_mut(stoat) {
+            super::movement::ensure_cursor_in_view(editor, scrolloff);
+        }
+    }
+
     if jumped && let Some(entry) = origin {
         super::jump::push_entry(stoat, entry);
     }

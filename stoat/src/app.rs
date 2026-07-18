@@ -13268,6 +13268,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn opening_diff_view_scrolls_a_far_first_hunk_into_the_viewport() {
+        let mut h = Stoat::test();
+        let base: String = (0..30).map(|i| format!("line {i:02}\n")).collect();
+        let text: String = (0..30)
+            .map(|i| {
+                if i == 20 {
+                    "changed\n".to_string()
+                } else {
+                    format!("line {i:02}\n")
+                }
+            })
+            .collect();
+        open_scratch_file(&mut h, &text);
+
+        let buffer_id = {
+            let ws = h.stoat.active_workspace();
+            match ws.panes.pane(ws.panes.focus()).view {
+                View::Editor(id) => ws.editors[id].buffer_id,
+                _ => panic!("focused pane is not an editor"),
+            }
+        };
+        {
+            let dm = crate::diff_map::DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(&base, &text),
+                &base,
+                &text,
+            );
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .diff_map = Some(dm);
+        }
+
+        // A ten-row viewport with the first hunk (buffer row 20) far below it.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.viewport_rows = Some(10);
+            editor.scroll_row = 0;
+        }
+
+        h.stoat.toggle_diff_view();
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let scroll_row = editor.scroll_row;
+        let cursor_row = action_handlers::movement::cursor_display_row(editor);
+        assert!(
+            scroll_row > 0,
+            "opening the diff view scrolled away from the top"
+        );
+        assert!(
+            (scroll_row..scroll_row + 10).contains(&cursor_row),
+            "the first hunk's display row {cursor_row} sits inside the viewport [{scroll_row}, {})",
+            scroll_row + 10,
+        );
+    }
+
     fn open_with_minimap_strip(h: &mut crate::test_harness::TestHarness) -> EditorId {
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         let body: String = (0..60)

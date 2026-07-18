@@ -3459,6 +3459,7 @@ fn goto_change_across_files(
         target_buffer,
     );
 
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     if let Some(editor) = focused_editor_mut(stoat) {
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
@@ -3482,6 +3483,9 @@ fn goto_change_across_files(
                     buffer_snapshot,
                 )
             });
+            // Pull the view onto the landed hunk here, so a startup or mouse
+            // dispatch that skips the Key-event epilogue still lands scrolled.
+            ensure_cursor_in_view(editor, scrolloff);
         }
     }
 
