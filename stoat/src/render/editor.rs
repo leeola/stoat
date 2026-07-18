@@ -316,15 +316,20 @@ pub(crate) fn render_editor_with_overlay(
     {
         let mut x = inner.x;
         let mut y = inner.y;
+        let inlay_style = fallback_style.patch(theme.get(crate::theme::scope::UI_VIRTUAL_INLAY));
         'chunks: for chunk in snapshot.highlighted_chunks_cached(
             editor.scroll_row..end_row,
             &mut editor.highlight_endpoint_cache,
         ) {
-            let style = chunk
-                .highlight_style
-                .as_ref()
-                .map(|hs| hs.to_ratatui_style())
-                .unwrap_or(fallback_style);
+            let style = if chunk.is_inlay {
+                inlay_style
+            } else {
+                chunk
+                    .highlight_style
+                    .as_ref()
+                    .map(|hs| hs.to_ratatui_style())
+                    .unwrap_or(fallback_style)
+            };
             for ch in chunk.text.chars() {
                 if ch == '\n' {
                     y += 1;
@@ -2019,7 +2024,7 @@ mod tests {
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range};
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
     use std::path::PathBuf;
     use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
     use stoat_config::{LineNumbers, WrapMode};
@@ -2124,6 +2129,72 @@ mod tests {
             render_search(&mut h.stoat, area, "bar"),
             vec![(4, 7)],
             "a new query recompiles and matches the new pattern"
+        );
+    }
+
+    #[test]
+    fn inlay_hints_paint_in_the_virtual_style() {
+        let mut h = Stoat::test();
+        open_search_buffer(&mut h, "let x = 1");
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let inlay_bg = theme
+            .get(crate::theme::scope::UI_VIRTUAL_INLAY)
+            .bg
+            .expect("the default theme sets an inlay bg");
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let inserts = {
+            let snapshot = editor.display_map.snapshot();
+            let buf_snap = snapshot.buffer_snapshot();
+            vec![(
+                buf_snap.anchor_at(5, Bias::Left),
+                ": i32".to_string(),
+                crate::display_map::InlayKind::Hint,
+            )]
+        };
+        editor.display_map.splice_inlays(Vec::new(), inserts);
+
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            true,
+            false,
+            false,
+            LineNumbers::Off,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+
+        let italic: String = (0..area.width)
+            .filter(|&x| buf[(x, 0)].modifier.contains(Modifier::ITALIC))
+            .map(|x| buf[(x, 0)].symbol())
+            .collect();
+        assert_eq!(
+            italic, ": i32",
+            "the inlay hint renders italic while code stays upright"
+        );
+
+        let hint_x = (0..area.width)
+            .find(|&x| buf[(x, 0)].modifier.contains(Modifier::ITALIC))
+            .expect("a hint cell exists");
+        assert_eq!(
+            buf[(hint_x, 0)].bg,
+            inlay_bg,
+            "the hint carries the inlay background wash"
         );
     }
 

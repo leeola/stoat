@@ -463,12 +463,18 @@ pub(crate) fn render_page_from_snapshot(
         let text_x = area.x + gutter_w;
         let mut x = text_x;
         let mut y = area.y;
+        let inlay_style =
+            fallback_style.patch(gutter.theme().get(crate::theme::scope::UI_VIRTUAL_INLAY));
         'chunks: for chunk in snapshot.highlighted_chunks(top_row..end_row) {
-            let style = chunk
-                .highlight_style
-                .as_ref()
-                .map(|hs| hs.to_ratatui_style())
-                .unwrap_or(fallback_style);
+            let style = if chunk.is_inlay {
+                inlay_style
+            } else {
+                chunk
+                    .highlight_style
+                    .as_ref()
+                    .map(|hs| hs.to_ratatui_style())
+                    .unwrap_or(fallback_style)
+            };
             for ch in chunk.text.chars() {
                 if ch == '\n' {
                     y += 1;

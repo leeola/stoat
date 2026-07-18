@@ -456,6 +456,10 @@ pub mod scope {
     pub const UI_TEXT_DIM: &str = "ui.text.dim";
     pub const UI_TEXT_DISABLED: &str = "ui.text.disabled";
 
+    /// Style for inserted virtual text such as LSP inlay hints, keeping them
+    /// visually distinct from the surrounding source.
+    pub const UI_VIRTUAL_INLAY: &str = "ui.virtual.inlay";
+
     pub const UI_CURSOR: &str = "ui.cursor";
     pub const UI_CURSOR_INPUT: &str = "ui.cursor.input";
 

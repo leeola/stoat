@@ -131,6 +131,7 @@ pub(crate) fn paint_diff_rows(
     use crate::theme::scope as s;
     let dim_style = theme.get(s::DIFF_CONTEXT);
     let del_style = theme.get(s::DIFF_DELETED);
+    let inlay_style = fallback_style.patch(theme.get(s::UI_VIRTUAL_INLAY));
 
     let tints = resolve_diff_tints(theme);
     let base_changes = snapshot
@@ -209,6 +210,7 @@ pub(crate) fn paint_diff_rows(
                     right_content_w,
                     buf,
                     fallback_style,
+                    inlay_style,
                     &changes,
                     tints.as_ref().map(|t| t.added_span),
                     tints.as_ref().map(|t| t.moved_span),
@@ -459,6 +461,7 @@ fn paint_highlighted_row(
     max_cols: usize,
     buf: &mut Buffer,
     fallback_style: Style,
+    inlay_style: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind)],
     side_span_tint: Option<[u8; 3]>,
     moved_span_tint: Option<[u8; 3]>,
@@ -468,11 +471,15 @@ fn paint_highlighted_row(
     for chunk in
         snapshot.highlighted_chunks_with_endpoints(display_row..display_row + 1, endpoints.clone())
     {
-        let style = chunk
-            .highlight_style
-            .as_ref()
-            .map(|hs| hs.to_ratatui_style())
-            .unwrap_or(fallback_style);
+        let style = if chunk.is_inlay {
+            inlay_style
+        } else {
+            chunk
+                .highlight_style
+                .as_ref()
+                .map(|hs| hs.to_ratatui_style())
+                .unwrap_or(fallback_style)
+        };
         for ch in chunk.text.chars() {
             if ch == '\n' || col >= max_cols {
                 return;

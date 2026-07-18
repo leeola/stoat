@@ -54,6 +54,7 @@ theme default_dark {
     ui.text.fg = text;
     ui.text.muted.fg = muted;
     ui.text.dim.fg = dim;
+    ui.virtual.inlay = { fg: dim, bg: subtle, modifiers: [italic] };
 
     ui.badge.active.fg = warning;
     ui.badge.complete.fg = success;
