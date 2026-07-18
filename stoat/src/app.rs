@@ -976,6 +976,9 @@ pub struct Stoat {
     /// recomputed by [`Self::emit_minimap`]. Keeps the run loop's frame timer
     /// firing so idle frames drive the build to completion.
     pub(crate) minimap_build_pending: bool,
+    /// Whether a visible run or terminal fed output since the last frame tick, so
+    /// the tick repaints once rather than the output arm repainting per PTY chunk.
+    pub(crate) pty_dirty: bool,
     /// Syntax-scope palette the minimap strips declare and their run summaries
     /// index, resolved from [`Self::theme`].
     pub(crate) minimap_class_table: crate::minimap::ClassTable,
@@ -1323,6 +1326,7 @@ impl Stoat {
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
             minimap_build_pending: false,
+            pty_dirty: false,
             minimap_class_table,
         };
 
@@ -1684,6 +1688,7 @@ impl Stoat {
         loop {
             let animating = self.is_animating();
             let building = self.minimap_build_pending;
+            let dirty = self.pty_dirty;
             if !animating {
                 last_tick = None;
             }
@@ -1722,7 +1727,7 @@ impl Stoat {
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
-                _ = frame_timer.tick(), if animating || building => {
+                _ = frame_timer.tick(), if animating || building || dirty => {
                     let now = std::time::Instant::now();
                     let dt = last_tick
                         .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
@@ -1730,24 +1735,7 @@ impl Stoat {
                     #[cfg(feature = "perf")]
                     self.perf
                         .record_anim_tick(std::time::Duration::from_secs_f32(dt));
-                    let effect = if self.tick_scroll_anim(dt) {
-                        // While the glide continues, push the eased scroll
-                        // target to stoatty's pool and skip the full live-grid
-                        // repaint. The pool composites the smooth position over
-                        // the live grid, which only needs repainting once the
-                        // glide settles, so a glide frame costs microseconds
-                        // rather than a full editor re-render.
-                        self.emit_smooth_scroll();
-                        UpdateEffect::None
-                    } else if animating {
-                        UpdateEffect::Redraw
-                    } else {
-                        // A build-only wakeup advances one minimap build chunk
-                        // with no repaint. A Redraw frame resumes the build
-                        // through the emit_minimap seam below.
-                        self.emit_minimap();
-                        UpdateEffect::None
-                    };
+                    let effect = self.frame_tick(dt);
                     // Measure the next dt from here, after any synchronous page
                     // refill inside emit_smooth_scroll. Otherwise a refill's
                     // render time inflates the following step into a visible
@@ -1856,6 +1844,36 @@ impl Stoat {
             .editors
             .values()
             .any(|editor| editor.scroll_glide != ScrollGlide::None)
+    }
+
+    /// Resolve one frame-timer tick into an [`UpdateEffect`].
+    ///
+    /// While a glide eases, push the eased scroll target to the pool and skip the
+    /// live-grid repaint, since a settled glide repaints once. Otherwise advance
+    /// a pending minimap build chunk. A visible run or terminal that fed output
+    /// since the last tick then merges in a repaint, so streamed output paces to
+    /// one repaint per frame rather than one per PTY chunk.
+    fn frame_tick(&mut self, dt: f32) -> UpdateEffect {
+        let animating = self.is_animating();
+        let building = self.minimap_build_pending;
+        let effect = if self.tick_scroll_anim(dt) {
+            self.emit_smooth_scroll();
+            UpdateEffect::None
+        } else if animating {
+            UpdateEffect::Redraw
+        } else if building {
+            // A build-only wakeup advances one minimap build chunk with no
+            // repaint. A Redraw frame resumes the build through the seam.
+            self.emit_minimap();
+            UpdateEffect::None
+        } else {
+            UpdateEffect::None
+        };
+        if std::mem::take(&mut self.pty_dirty) {
+            effect.merge(UpdateEffect::Redraw)
+        } else {
+            effect
+        }
     }
 
     /// Advance every animating editor's scroll glide by `dt` seconds, the real
@@ -5774,10 +5792,9 @@ impl Stoat {
                     run_state.cwd = cwd;
                 }
                 if visible {
-                    UpdateEffect::Redraw
-                } else {
-                    UpdateEffect::None
+                    self.pty_dirty = true;
                 }
+                UpdateEffect::None
             },
             PtyNotification::CommandDone {
                 run_id,
@@ -5812,10 +5829,9 @@ impl Stoat {
                     crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
                 }
                 if visible {
-                    UpdateEffect::Redraw
-                } else {
-                    UpdateEffect::None
+                    self.pty_dirty = true;
                 }
+                UpdateEffect::None
             },
             PtyNotification::TermExited { term_id } => {
                 let pane_ids = ws
@@ -8660,7 +8676,7 @@ mod tests {
                     crate::term_screen::TermScreen::new(24, 80),
                     session,
                 ));
-        // Show the agent in the focused pane so its output drives a repaint.
+        // Show the agent in the focused pane so its output marks the frame dirty.
         let pane = stoat.active_workspace().panes.focus();
         stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
 
@@ -8669,7 +8685,12 @@ mod tests {
             data: b"hello".to_vec(),
         });
 
-        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(
+            effect,
+            UpdateEffect::None,
+            "a visible agent paces its repaint to the frame tick",
+        );
+        assert!(stoat.pty_dirty, "the output marked the frame dirty");
         let term = &stoat.active_workspace().terms[agent_id].term;
         let row: String = term.row(0).iter().map(|cell| cell.ch).collect();
         assert!(row.starts_with("hello"), "row: {row:?}");
@@ -9138,23 +9159,45 @@ mod tests {
     }
 
     #[test]
-    fn visible_term_output_drives_a_repaint() {
+    fn visible_term_output_paces_a_repaint_to_the_tick() {
         let mut h = Stoat::test();
         let ws = h.stoat.active_workspace_mut();
         let pane = ws.panes.focus();
         let term_id = insert_term_session(ws);
         ws.panes.pane_mut(pane).view = View::Terminal(term_id);
 
-        let effect = h
-            .stoat
-            .handle_pty_notification(PtyNotification::TermOutput {
-                agent_id: term_id,
-                data: b"abc".to_vec(),
-            });
+        // Rapid bursts each mark the frame dirty and repaint nothing on their own.
+        for _ in 0..2 {
+            let effect = h
+                .stoat
+                .handle_pty_notification(PtyNotification::TermOutput {
+                    agent_id: term_id,
+                    data: b"x".to_vec(),
+                });
+            assert_eq!(
+                effect,
+                UpdateEffect::None,
+                "a visible term does not repaint per PTY chunk",
+            );
+        }
+        assert!(h.stoat.pty_dirty, "the bursts marked the frame dirty");
+
+        // The next tick coalesces them into one repaint and clears the flag.
         assert_eq!(
-            effect,
+            h.stoat.frame_tick(0.016),
             UpdateEffect::Redraw,
-            "a term in a split pane drives a repaint",
+            "the frame tick paints the accumulated output once",
+        );
+        assert!(!h.stoat.pty_dirty, "the tick cleared the dirty flag");
+    }
+
+    #[test]
+    fn an_idle_frame_tick_repaints_nothing() {
+        let mut h = Stoat::test();
+        assert_eq!(
+            h.stoat.frame_tick(0.016),
+            UpdateEffect::None,
+            "a tick with no glide, build, or pty output repaints nothing",
         );
     }
 
