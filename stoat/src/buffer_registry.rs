@@ -488,8 +488,6 @@ impl BufferRegistry {
     /// arrived), `Some(None)` when the index exists but no token covers `offset`,
     /// and `Some(Some(kind))` when one does. A caller shows every option for
     /// `None` and hides the symbol-targeted ones for `Some(None)`.
-    // The consumer (the `space l` which-key kind filter) lands as a sibling item.
-    #[allow(dead_code)]
     pub(crate) fn lsp_symbol_kind_at(
         &self,
         id: BufferId,
