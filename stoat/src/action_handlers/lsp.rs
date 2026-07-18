@@ -48,7 +48,6 @@ use ratatui::{layout::Rect, style::Style};
 use serde_json::{json, Value};
 use std::{
     future::Future,
-    io,
     path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
@@ -56,7 +55,6 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use stoat_log::TextProtoLog;
 use stoat_text::{patch::Patch, Anchor, Bias, Point, Rope};
 use tokio::sync::oneshot;
 
@@ -282,7 +280,7 @@ fn spawn_command_server(stoat: &mut Stoat, command: String, argv: Vec<String>, l
     let slot = stoat.pending_lsp_host.clone();
     let wake = stoat.redraw_notify.clone();
     let transcript = if stoat.settings.text_proto_log == Some(true) {
-        match create_lsp_transcript(&command) {
+        match LspTranscript::create(&command) {
             Ok(transcript) => Some(transcript),
             Err(err) => {
                 tracing::warn!(target: "stoat::lsp", ?err, "text_proto_log transcript disabled");
@@ -420,31 +418,6 @@ fn report_lsp_unavailable(stoat: &mut Stoat, what: &str) -> UpdateEffect {
 
     set_lsp_status(stoat, msg);
     UpdateEffect::Redraw
-}
-
-/// Create the paired protocol transcripts for `text_proto_log`, keyed by
-/// stoat's pid so they correlate with `stoat-<pid>.log`.
-///
-/// Writes `lsp-<pid>.tx.jsonl` (frames sent to the server) and
-/// `lsp-<pid>.rx.jsonl` (frames received) under the shared log directory,
-/// creating that directory if it does not exist.
-fn create_lsp_transcript(server: &str) -> io::Result<LspTranscript> {
-    let dir = stoat_log::log_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    let pid = std::process::id();
-    let slug = transcript_slug(server);
-    let tx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}-{slug}.tx.jsonl")))?;
-    let rx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}-{slug}.rx.jsonl")))?;
-    Ok(LspTranscript { tx, rx })
-}
-
-/// A filesystem-safe slug for `server`, so several servers' transcripts under
-/// one pid do not collide. Non-alphanumeric characters become `-`.
-fn transcript_slug(server: &str) -> String {
-    server
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
 }
 
 /// Scan every buffer in [`Stoat::lsp_opened`] for an updated

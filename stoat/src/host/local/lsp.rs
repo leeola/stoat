@@ -74,6 +74,33 @@ pub struct LspTranscript {
     pub rx: TextProtoLog,
 }
 
+impl LspTranscript {
+    /// Create the paired protocol transcripts for `text_proto_log`, keyed by
+    /// stoat's pid so they correlate with `stoat-<pid>.log`.
+    ///
+    /// Writes `lsp-<pid>.tx.jsonl` (frames sent to the server) and
+    /// `lsp-<pid>.rx.jsonl` (frames received) under the shared log directory,
+    /// creating that directory if it does not exist.
+    pub fn create(server: &str) -> io::Result<Self> {
+        let dir = stoat_log::log_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        let pid = std::process::id();
+        let slug = transcript_slug(server);
+        let tx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}-{slug}.tx.jsonl")))?;
+        let rx = TextProtoLog::create_at(&dir.join(format!("lsp-{pid}-{slug}.rx.jsonl")))?;
+        Ok(LspTranscript { tx, rx })
+    }
+}
+
+/// A filesystem-safe slug for `server`, so several servers' transcripts under
+/// one pid do not collide. Non-alphanumeric characters become `-`.
+fn transcript_slug(server: &str) -> String {
+    server
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 /// A language server running as a child process, addressed over stdio JSON-RPC.
 ///
 /// Construct with [`Self::spawn`] to start the process and its reader threads,
@@ -944,7 +971,8 @@ fn client_capabilities() -> ClientCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, client_capabilities, encode_message, DiagnosticTag, FrameDecoder, Routed,
+        classify, client_capabilities, encode_message, transcript_slug, DiagnosticTag,
+        FrameDecoder, Routed,
     };
     use crate::host::lsp::{IncomingRequest, LspNotification};
     use serde_json::json;
@@ -953,6 +981,14 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.push(bytes);
         decoder.next_body().expect("one complete body")
+    }
+
+    #[test]
+    fn transcript_slug_keeps_alphanumerics_and_dashes_the_rest() {
+        assert_eq!(transcript_slug("rustanalyzer"), "rustanalyzer");
+        assert_eq!(transcript_slug("rust-analyzer"), "rust-analyzer");
+        assert_eq!(transcript_slug("clangd 15.0"), "clangd-15-0");
+        assert_eq!(transcript_slug("a_b.c/d"), "a-b-c-d");
     }
 
     #[test]
