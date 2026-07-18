@@ -19,6 +19,7 @@
 //! 2. `RUST_LOG` - Standard tracing environment variable
 //! 3. Default - `warn` globally, `info` for stoat crates
 
+pub mod ident;
 pub mod paths;
 pub mod text_proto;
 

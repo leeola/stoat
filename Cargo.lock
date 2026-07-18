@@ -4052,8 +4052,10 @@ name = "stoat_log"
 version = "0.1.0"
 dependencies = [
  "etcetera",
+ "libc",
  "snafu",
  "tempfile",
+ "time",
  "tracing",
  "tracing-subscriber",
 ]

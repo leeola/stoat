@@ -10,8 +10,12 @@ workspace = true
 [dependencies]
 etcetera.workspace = true
 snafu.workspace = true
+time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
