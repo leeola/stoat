@@ -793,7 +793,9 @@ impl TextPass {
         // offset is applied, so they sit at their declared position. They pack
         // here, before the grid-instance build below, so a text-run atlas grow
         // bumps the content epoch that build reads instead of invalidating its
-        // UVs.
+        // UVs. The run build packs and emits in one pass, so a grow midway
+        // through it would freeze the earlier instances at the pre-grow size;
+        // it re-resolves once when that happens (below).
         //
         // The chrome the runs back changes rarely, so reuse the instances built
         // on an earlier frame while the run content and their atlas UVs both
@@ -806,7 +808,15 @@ impl TextPass {
         let (text_run_instances, run_rects) = if runs_unchanged {
             (None, None)
         } else {
-            let instances = self.build_text_run_instances(device, queue, grid);
+            let atlas_dims = self.atlas.texture_dims();
+            let mut instances = self.build_text_run_instances(device, queue, grid);
+            // Packing a run glyph can grow the atlas, rescaling the UVs the
+            // instances already emitted this pass froze. Every run glyph is
+            // resident after the first pass, so a second one reads final UVs
+            // without growing again.
+            if self.atlas.texture_dims() != atlas_dims {
+                instances = self.build_text_run_instances(device, queue, grid);
+            }
             let rects = self.build_run_rects(grid);
             self.last_text_run_epoch = text_runs_epoch;
             self.last_atlas_epoch = self.atlas.content_epoch();
@@ -1090,20 +1100,16 @@ impl TextPass {
         // grid glyphs, so a run-glyph atlas grow reflects in the grid resolve
         // below rather than invalidating its UVs. The runs carry the pool shift
         // through the composite globals, so they glide with the page cells.
+        //
+        // The run build packs and emits in one pass, and the row pack below
+        // packs more glyphs after it, so either can grow the atlas and rescale
+        // the UVs the runs froze. The run instances are held here and
+        // re-resolved, counted, and uploaded only after the row pack, so they
+        // land against the final atlas.
         let atlas_dims = self.atlas.texture_dims();
 
         let mut run_instances = mem::take(&mut self.composite_run_scratch);
         self.build_text_run_instances_into(device, queue, grid, &mut run_instances);
-        self.composite_text_run_count = run_instances.len() as u32;
-        upload_instances(
-            device,
-            queue,
-            &run_instances,
-            &mut self.composite_text_run_instances,
-            &mut self.composite_text_run_capacity,
-            "composite text run instances",
-        );
-        self.composite_run_scratch = run_instances;
 
         let mut run_rects = mem::take(&mut self.composite_rect_scratch);
         self.build_run_rects_into(grid, &mut run_rects);
@@ -1144,6 +1150,24 @@ impl TextPass {
                 self.rasterize_row(device, queue, grid, row, &shaping, &mut pending);
             }
         }
+
+        // The runs packed before the rows above, so either pass may have grown
+        // the atlas since the runs froze their UVs. Every run glyph is resident
+        // now, so a second pass reads final UVs without growing again. The grid
+        // build below already resolves post-pack.
+        if self.atlas.texture_dims() != atlas_dims {
+            self.build_text_run_instances_into(device, queue, grid, &mut run_instances);
+        }
+        self.composite_text_run_count = run_instances.len() as u32;
+        upload_instances(
+            device,
+            queue,
+            &run_instances,
+            &mut self.composite_text_run_instances,
+            &mut self.composite_text_run_capacity,
+            "composite text run instances",
+        );
+        self.composite_run_scratch = run_instances;
 
         let mut instances = mem::take(&mut self.composite_upload_scratch);
         self.build_text_instances_into(device, queue, &pending, &mut instances);
@@ -2828,8 +2852,8 @@ mod tests {
         build_font_system, build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell,
         fill_cell_box, glyph_family, glyph_origin, is_cell_fill, load_bundled_fonts,
         overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_char,
-        shape_family, shape_run, text_run_origin, GlyphSource, RectInstance, TextPass,
-        STYLE_DOTTED, SYMBOLS_FAMILY,
+        shape_family, shape_run, text_run_origin, GlyphSource, RectInstance, TextInstance,
+        TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
@@ -3257,11 +3281,18 @@ mod tests {
 
     /// A text pass on the headless device, or `None` when no adapter is present.
     fn headless_text_pass() -> Option<(wgpu::Device, wgpu::Queue, TextPass)> {
+        headless_text_pass_font(16)
+    }
+
+    /// A text pass at `font_size` on the headless device, or `None` when no
+    /// adapter is present. A large size makes a small glyph burst overflow the
+    /// initial atlas and force a grow.
+    fn headless_text_pass_font(font_size: u32) -> Option<(wgpu::Device, wgpu::Queue, TextPass)> {
         let (device, queue) = headless_device()?;
         let pass = TextPass::new(
             &device,
             TextureFormat::Rgba8Unorm,
-            CellMetrics::from_font_size(16, 1.0),
+            CellMetrics::from_font_size(font_size, 1.0),
             build_font_system(),
             &["JetBrains Mono".to_owned()],
             true,
@@ -3352,6 +3383,129 @@ mod tests {
             bytemuck::cast_slice::<RectInstance, u8>(&fresh),
             "reuse clears the stale rects and rebuilds only the run's rect"
         );
+    }
+
+    /// A one-row text run whose `text` is every printable ASCII glyph, enough
+    /// distinct masks at a large font to overflow the initial atlas.
+    fn ascii_burst_run() -> TextRun {
+        TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(255, 255, 255),
+            bg: None,
+            text: (0x21u32..=0x7e).filter_map(char::from_u32).collect(),
+            seq: 0,
+        }
+    }
+
+    /// Assert the composite run instances match a fresh resolve against the
+    /// current atlas, so none were left frozen at a pre-grow atlas size.
+    fn assert_composite_runs_healed(
+        pass: &mut TextPass,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        grid: &Grid,
+    ) {
+        let fresh = pass.build_text_run_instances(device, queue, grid);
+        assert!(!fresh.is_empty(), "the run contributes glyph instances");
+        assert_eq!(
+            bytemuck::cast_slice::<TextInstance, u8>(&pass.composite_run_scratch),
+            bytemuck::cast_slice::<TextInstance, u8>(&fresh),
+            "composite run instances must resolve against the grown atlas, not a pre-grow size"
+        );
+    }
+
+    #[test]
+    fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
+        let Some((device, queue, mut pass)) = headless_text_pass_font(60) else {
+            return;
+        };
+        let mut grid = Grid::new(2, 4);
+        grid.set_text_runs(vec![ascii_burst_run()]);
+
+        let (initial, _) = pass.atlas.texture_dims();
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [640.0, 480.0],
+            0.0,
+            true,
+            false,
+        );
+        let (grown, _) = pass.atlas.texture_dims();
+        assert!(
+            grown > initial,
+            "the run's glyph burst must grow the atlas mid-build: {initial} -> {grown}"
+        );
+
+        assert_composite_runs_healed(&mut pass, &device, &queue, &grid);
+
+        // A reuse composite returns early and leaves the healed instances intact.
+        let healed = pass.composite_run_scratch.clone();
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [640.0, 480.0],
+            0.0,
+            false,
+            false,
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<TextInstance, u8>(&pass.composite_run_scratch),
+            bytemuck::cast_slice::<TextInstance, u8>(&healed),
+            "a reuse composite must not disturb the healed run instances"
+        );
+    }
+
+    #[test]
+    fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
+        let Some((device, queue, mut pass)) = headless_text_pass_font(60) else {
+            return;
+        };
+
+        // A small run packs first, then a cell glyph burst grows the atlas
+        // during the row pack, after the run instances were built. The run must
+        // still land against the grown atlas, not the size it was built at.
+        let mut grid = Grid::new(10, 10);
+        for row in 0..10 {
+            for col in 0..10 {
+                let idx = (row * 10 + col) as u32;
+                grid.get_mut(row, col).ch = char::from_u32(0x21 + idx % 94).unwrap_or('#');
+            }
+        }
+        grid.set_text_runs(vec![TextRun {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: Rgb::new(255, 255, 255),
+            bg: None,
+            text: "42".to_owned(),
+            seq: 0,
+        }]);
+
+        let (initial, _) = pass.atlas.texture_dims();
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [640.0, 480.0],
+            0.0,
+            true,
+            false,
+        );
+        let (grown, _) = pass.atlas.texture_dims();
+        assert!(
+            grown > initial,
+            "the cell glyph burst must grow the atlas during the row pack: {initial} -> {grown}"
+        );
+
+        assert_composite_runs_healed(&mut pass, &device, &queue, &grid);
     }
 
     #[test]
