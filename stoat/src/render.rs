@@ -221,6 +221,26 @@ pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
     }
 }
 
+/// True while any centered modal owns the screen's right edge.
+///
+/// The single-minimap strip and every modal draw in the same GPU passes with
+/// the strip on top, so a modal cannot paint over the strip. Instead the strip
+/// is undeclared on frames where a modal is open, and the modal lays out on the
+/// full window rather than yielding the band. These are the ten mutually
+/// exclusive overlays of the frame's modal chain.
+fn modal_overlay_open(stoat: &Stoat) -> bool {
+    stoat.modal_run.is_some()
+        || stoat.help.is_some()
+        || stoat.file_finder.is_some()
+        || stoat.command_palette.is_some()
+        || stoat.workspace_picker.is_some()
+        || stoat.quit_all_confirm.is_some()
+        || stoat.jumplist_picker.is_some()
+        || stoat.diagnostics_picker.is_some()
+        || stoat.location_picker.is_some()
+        || stoat.global_search.is_some()
+}
+
 /// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
 /// tick after the parse pipeline and commits pump have run.
 ///
@@ -261,6 +281,7 @@ pub(crate) fn frame(
             height: full.height,
         });
     let single_minimap_rect = stoat.single_minimap_rect;
+    let modal_overlay = modal_overlay_open(stoat);
     let size = stoat.layout_size();
     let minimap_chrome = (stoat.stoatty && minimap_enabled).then(|| {
         let thumb = {
@@ -358,7 +379,8 @@ pub(crate) fn frame(
     // Single mode declares one strip over the reserved right-edge band for the
     // focused split pane's buffer. The scene re-stamps every paint, so a focus
     // switch to another buffer redeclares it. A non-editor focus leaves it empty.
-    if let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
+    if !modal_overlay
+        && let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
         && let View::Editor(editor_id) = &ws.panes.pane(ws.panes.focus()).view
         && let Some(editor) = ws.editors.get(*editor_id)
         && editor.review_view.is_none()
@@ -516,7 +538,7 @@ pub(crate) fn frame(
             run_pane::render_modal_run(
                 run_state,
                 &stoat.theme,
-                size,
+                full,
                 buf,
                 stoat.stoatty.then_some(&mut *scene),
             );
@@ -528,7 +550,7 @@ pub(crate) fn frame(
             ws,
             &stoat.theme,
             &stoat.settings.mode_badges,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -555,7 +577,7 @@ pub(crate) fn frame(
             finder,
             ws,
             &stoat.theme,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -582,7 +604,7 @@ pub(crate) fn frame(
             palette,
             ws,
             &stoat.theme,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -608,7 +630,7 @@ pub(crate) fn frame(
         workspace_picker::render_workspace_picker(
             picker,
             &stoat.theme,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -626,7 +648,7 @@ pub(crate) fn frame(
         quit_all_confirm::render_quit_all_confirm(
             modal,
             &stoat.theme,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -649,7 +671,7 @@ pub(crate) fn frame(
         jumplist_picker::render_jumplist_picker(
             picker,
             &stoat.theme,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -668,7 +690,7 @@ pub(crate) fn frame(
             picker,
             &ws.git_root,
             &stoat.theme,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -687,7 +709,7 @@ pub(crate) fn frame(
             picker,
             &ws.git_root,
             &stoat.theme,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -707,7 +729,7 @@ pub(crate) fn frame(
             picker,
             &git_root,
             &stoat.theme,
-            size,
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );

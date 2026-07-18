@@ -1593,13 +1593,18 @@ impl Stoat {
         self.size
     }
 
-    /// The area the last paint laid the workspace and its centered modals out in.
+    /// The area the last paint laid the workspace split panes out in.
     ///
     /// This is the full terminal ([`Self::size`]) minus the single-minimap band
-    /// when one is reserved. Paint, smooth-scroll pool emit, and modal mouse
-    /// hit-tests must all derive from it so a pooled region lines up with the
-    /// painted grid instead of tearing a few columns off. The stamped
-    /// `single_minimap_rect` is the source of truth for what the last paint drew.
+    /// when one is reserved, so the panes never overlap the strip. Pane paint,
+    /// smooth-scroll pool emit, and pane mouse hit-tests all derive from it so a
+    /// pooled region lines up with the painted grid instead of tearing a few
+    /// columns off. The stamped `single_minimap_rect` records what that paint
+    /// reserved.
+    ///
+    /// Centered modals do not lay out here. They take the full [`Self::size`]
+    /// and the strip yields to them, so their paint, pools, and mouse hit-tests
+    /// derive from `size` instead.
     pub(crate) fn layout_size(&self) -> Rect {
         match self.single_minimap_rect {
             Some(band) => Rect {
@@ -3049,7 +3054,7 @@ impl Stoat {
         let MouseEventKind::Down(MouseButton::Left) = mouse.kind else {
             return UpdateEffect::None;
         };
-        let size = self.layout_size();
+        let size = self.size();
 
         let (list, selected, filtered_len) = if let Some(finder) = self.file_finder.as_ref() {
             let Some(layout) = crate::render::file_finder::file_finder_layout(size) else {
@@ -3393,7 +3398,7 @@ impl Stoat {
                 MouseEventKind::ScrollUp => false,
                 _ => return UpdateEffect::None,
             };
-            let size = self.layout_size();
+            let size = self.size();
 
             // A wheel over the visible preview pane scrolls the preview content
             // instead of moving the selection, mirroring the editor-pane path.
@@ -6079,7 +6084,7 @@ impl Stoat {
         // The file finder is a modal over normal mode (not a full-screen overlay
         // mode); its result list pools as a non-pane surface above the panes.
         let finder_list = (!overlay && self.file_finder.is_some())
-            .then(|| crate::render::file_finder::file_finder_layout(self.layout_size()))
+            .then(|| crate::render::file_finder::file_finder_layout(self.size()))
             .flatten()
             .map(|layout| layout.list);
 
@@ -6091,7 +6096,7 @@ impl Stoat {
                 .command_palette
                 .as_ref()
                 .is_some_and(|p| p.command.is_none()))
-        .then(|| crate::render::command_palette::palette_filter_layout(self.layout_size()))
+        .then(|| crate::render::command_palette::palette_filter_layout(self.size()))
         .flatten()
         .map(|layout| layout.list);
 
@@ -6104,7 +6109,7 @@ impl Stoat {
                 .command_palette
                 .as_ref()
                 .is_some_and(|p| p.arg_picker.is_some() && p.arg_source().is_some()))
-        .then(|| crate::render::command_palette::palette_arg_list_rect(self.layout_size()))
+        .then(|| crate::render::command_palette::palette_arg_list_rect(self.size()))
         .flatten();
 
         // The commits overlay renders into the focused pane; its left list pools
@@ -6128,7 +6133,7 @@ impl Stoat {
         // The help view is a fixed centered modal over the editor like the
         // finder; its list and detail panes pool as two non-pane surfaces.
         let help_layout = (!overlay && self.help.is_some())
-            .then(|| crate::render::help::help_layout(self.layout_size()))
+            .then(|| crate::render::help::help_layout(self.size()))
             .flatten();
 
         // The hover popup is cursor-anchored like the completion popup. Its
@@ -7813,7 +7818,7 @@ mod tests {
         h.type_text(":o ");
         h.settle();
 
-        let preview = crate::render::command_palette::palette_arg_body(h.stoat.layout_size())
+        let preview = crate::render::command_palette::palette_arg_body(h.stoat.size())
             .and_then(|(_, preview)| preview)
             .expect("the arg preview pane is present at this width");
         let preview_id = h
@@ -9883,6 +9888,52 @@ mod tests {
     }
 
     #[test]
+    fn a_centered_modal_undeclares_the_single_strip() {
+        use stoat_action::OpenFileFinder;
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let strip_declared = |cmds: &[Command]| -> bool {
+            cmds.iter()
+                .any(|c| matches!(c, Command::Minimap(m) if m.strip_id == u32::MAX))
+        };
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        h.open_file(&a);
+        h.settle();
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        assert!(
+            strip_declared(&drain_apc(&mut rx)),
+            "single mode declares the strip while no modal is open"
+        );
+
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        assert!(
+            !strip_declared(&drain_apc(&mut rx)),
+            "opening the finder undeclares the strip so the modal owns the right edge"
+        );
+
+        h.stoat.file_finder = None;
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        assert!(
+            strip_declared(&drain_apc(&mut rx)),
+            "closing the finder redeclares the strip"
+        );
+    }
+
+    #[test]
     fn minimap_marks_diff_and_diagnostic_lines() {
         use crate::minimap::EdgeClass;
         use lsp_types::DiagnosticSeverity;
@@ -11425,7 +11476,7 @@ mod tests {
         h.stoat.paint_into(&mut buf);
         h.stoat.emit_apc_scene();
 
-        let modal = crate::render::help::help_layout(h.stoat.layout_size())
+        let modal = crate::render::help::help_layout(h.stoat.size())
             .expect("help modal fits the test viewport")
             .modal;
         let cmds = drain_apc(&mut rx);
@@ -11459,7 +11510,7 @@ mod tests {
         h.stoat.paint_into(&mut buf);
         h.stoat.emit_apc_scene();
 
-        let modal = crate::render::help::help_layout(h.stoat.layout_size())
+        let modal = crate::render::help::help_layout(h.stoat.size())
             .expect("help modal fits the test viewport")
             .modal;
         let cmds = drain_apc(&mut rx);
@@ -11495,7 +11546,7 @@ mod tests {
         h.stoat.paint_into(&mut buf);
         h.stoat.emit_apc_scene();
 
-        let list = crate::render::help::help_layout(h.stoat.layout_size())
+        let list = crate::render::help::help_layout(h.stoat.size())
             .expect("help modal fits the test viewport")
             .list;
         let sep_x = (list.x + list.width) as i16 * 16 + 8;
@@ -11772,7 +11823,7 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let list = crate::render::file_finder::file_finder_layout(h.stoat.layout_size())
+        let list = crate::render::file_finder::file_finder_layout(h.stoat.size())
             .expect("finder fits the test terminal")
             .list;
         let expected = PoolRegionCommand {
@@ -11798,7 +11849,7 @@ mod tests {
     }
 
     #[test]
-    fn finder_pool_region_matches_the_band_reduced_layout() {
+    fn finder_pool_region_spans_the_full_window_over_the_band() {
         use stoat_action::OpenFileFinder;
         use stoatty_protocol::command::{Command, PoolRegionCommand};
 
@@ -11819,13 +11870,13 @@ mod tests {
         assert_ne!(
             h.stoat.layout_size(),
             h.stoat.size(),
-            "the single-minimap band must be reserved for this test to exercise the fix"
+            "the single-minimap band must be reserved so the test proves the modal ignores it"
         );
         let _ = drain_apc(&mut rx);
 
         h.stoat.emit_smooth_scroll();
-        let list = crate::render::file_finder::file_finder_layout(h.stoat.layout_size())
-            .expect("finder fits the band-reduced terminal")
+        let list = crate::render::file_finder::file_finder_layout(h.stoat.size())
+            .expect("finder fits the full-window terminal")
             .list;
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::FINDER,
@@ -11836,7 +11887,7 @@ mod tests {
         };
         assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
-            "the finder pool region tracks the band-reduced painted list, not the full-size layout"
+            "the finder pool spans the full window even with the band reserved, so the modal takes precedence over the strip"
         );
     }
 
@@ -11855,7 +11906,7 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let list = crate::render::command_palette::palette_filter_layout(h.stoat.layout_size())
+        let list = crate::render::command_palette::palette_filter_layout(h.stoat.size())
             .expect("the palette fits the test terminal")
             .list;
         let expected = PoolRegionCommand {
@@ -11902,7 +11953,7 @@ mod tests {
         let _ = drain_apc(&mut rx);
 
         h.stoat.emit_smooth_scroll();
-        let list = crate::render::command_palette::palette_arg_list_rect(h.stoat.layout_size())
+        let list = crate::render::command_palette::palette_arg_list_rect(h.stoat.size())
             .expect("the arg picker fits the test terminal");
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
@@ -11955,7 +12006,7 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
         h.stoat.emit_smooth_scroll();
 
-        let arg_list = crate::render::command_palette::palette_arg_list_rect(h.stoat.layout_size())
+        let arg_list = crate::render::command_palette::palette_arg_list_rect(h.stoat.size())
             .expect("the arg picker fits the test terminal");
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
@@ -12041,8 +12092,8 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let layout = crate::render::help::help_layout(h.stoat.layout_size())
-            .expect("help fits the test terminal");
+        let layout =
+            crate::render::help::help_layout(h.stoat.size()).expect("help fits the test terminal");
         let list = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
             top: layout.list.y,
