@@ -22,12 +22,22 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
         Arc,
     },
     time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::{
+    io::{self, Write},
+    os::unix::net::UnixListener,
+    sync::mpsc::{self, Receiver},
+};
 use stoat_cli::CommonArgs;
-use stoatty_protocol::command::{PoolRegionCommand, WindowOpenCommand, NON_PANE_POOL_BASE};
+use stoatty_protocol::{
+    command::{PoolRegionCommand, WindowOpenCommand, NON_PANE_POOL_BASE},
+    window_ipc::WindowIpcEvent,
+};
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll},
     render,
@@ -324,6 +334,10 @@ struct AuxWindow {
     /// Scratch that [`Terminal::project_pool`] composes one pool into before its
     /// rows are blitted into `grid` at the pool's window-relative region.
     scratch: Grid,
+    /// Whether this window holds OS focus, tracked from `WindowEvent::Focused`.
+    /// Feeds the app-wide DECSET 1004 report so a switch between stoatty windows
+    /// keeps the app focused.
+    focused: bool,
 }
 
 /// The renderer-construction inputs an aux window needs, read from [`App`]
@@ -368,9 +382,15 @@ struct State {
     /// The most recent modifier state, tracked from `ModifiersChanged` so a key
     /// press can tell whether the platform zoom modifier is held.
     modifiers: ModifiersState,
-    /// Whether the window currently holds focus, tracked from
-    /// `WindowEvent::Focused`. Drives the DECSET 1004 focus report to the child.
+    /// Whether the primary window currently holds focus, tracked from
+    /// `WindowEvent::Focused`. Combined with each aux window's focus into the
+    /// app-wide DECSET 1004 report via [`reconcile_app_focus`].
     focused: bool,
+    /// The last app-wide focus state reported to the child (true when the
+    /// primary or any aux window is focused). A DECSET 1004 report fires only
+    /// when this flips, so a switch between stoatty windows sends nothing while
+    /// a click to a foreign app reports the app lost focus.
+    app_focused: bool,
     /// Instant of the last bell that rang, so a burst of BELs from a catted
     /// binary makes one beep and attention request rather than a storm. `None`
     /// until the first bell.
@@ -449,6 +469,11 @@ struct State {
     /// Live aux OS windows, each hosting a detached pane's window-bound pools.
     /// Empty until a [`TermEvent::WindowOpen`] opens the first one.
     aux: Vec<AuxWindow>,
+    /// Channel to the thread serving the window-event socket, carrying encoded
+    /// [`WindowIpcEvent`] lines to forward to the connected child. `None` when
+    /// the socket could not be bound, in which case aux windows still render but
+    /// report nothing upstream.
+    window_event_tx: Option<Sender<String>>,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -613,6 +638,11 @@ impl ApplicationHandler<PtyEvent> for App {
         let dirty = Arc::new(AtomicBool::new(false));
         let sync_pending = Arc::new(AtomicBool::new(false));
 
+        // Bind the socket aux windows report focus, resize, and close over, and
+        // export its path so the child editor can connect. A bind failure is
+        // non-fatal. Aux windows still render, they just report nothing upstream.
+        let (window_socket, window_event_tx) = open_window_event_socket();
+
         let t_pty = Instant::now();
         let pty = {
             let proxy = self.proxy.clone();
@@ -626,6 +656,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 self.working_directory.as_deref(),
                 self.stoat_dir.as_deref(),
                 stoat_log::ident::get().map(|i| i.id.as_str()),
+                window_socket.as_deref().and_then(Path::to_str),
                 rows as u16,
                 cols as u16,
                 move |output| match output {
@@ -687,6 +718,7 @@ impl ApplicationHandler<PtyEvent> for App {
             scale_factor,
             modifiers: ModifiersState::empty(),
             focused: true,
+            app_focused: true,
             last_bell: None,
             cursor_anim: [0.0, 0.0],
             cursor_animation: self.cursor_animation,
@@ -706,6 +738,7 @@ impl ApplicationHandler<PtyEvent> for App {
             active_scratch: Vec::new(),
             overflows_scratch: Vec::new(),
             aux: Vec::new(),
+            window_event_tx,
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
             pressed_button: None,
@@ -779,6 +812,11 @@ impl ApplicationHandler<PtyEvent> for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+
+        // Reconcile app-wide focus after the current event batch, so a switch
+        // between stoatty windows (one focus-out plus one focus-in) settles to
+        // no net report while a click to a foreign app reports the app unfocused.
+        reconcile_app_focus(state);
 
         if !state.sync_pending.load(Ordering::Relaxed) {
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -854,15 +892,48 @@ impl ApplicationHandler<PtyEvent> for App {
                 },
                 WindowEvent::Resized(size) => {
                     let size = *size;
-                    if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id) {
-                        if let Some(gpu) = aux.gpu.as_mut() {
-                            gpu.resize(size.width, size.height);
-                        }
-                        aux.window.request_redraw();
+                    let resized = state
+                        .aux
+                        .iter_mut()
+                        .find(|aux| aux.window.id() == id)
+                        .and_then(|aux| {
+                            let dims = aux.gpu.as_mut().map(|gpu| {
+                                gpu.resize(size.width, size.height);
+                                gpu.grid_size()
+                            });
+                            aux.window.request_redraw();
+                            dims.map(|(rows, cols)| (aux.id, cols as u16, rows as u16))
+                        });
+                    if let Some((window, cols, rows)) = resized {
+                        send_window_event(state, WindowIpcEvent::Resized { window, cols, rows });
+                    }
+                    return;
+                },
+                WindowEvent::Focused(gained) => {
+                    let gained = *gained;
+                    let window =
+                        state
+                            .aux
+                            .iter_mut()
+                            .find(|aux| aux.window.id() == id)
+                            .map(|aux| {
+                                aux.focused = gained;
+                                aux.id
+                            });
+                    if gained && let Some(window) = window {
+                        send_window_event(state, WindowIpcEvent::Focused { window });
                     }
                     return;
                 },
                 WindowEvent::CloseRequested => {
+                    if let Some(window) = state
+                        .aux
+                        .iter()
+                        .find(|aux| aux.window.id() == id)
+                        .map(|aux| aux.id)
+                    {
+                        send_window_event(state, WindowIpcEvent::Closed { window });
+                    }
                     state.aux.retain(|aux| aux.window.id() != id);
                     return;
                 },
@@ -877,11 +948,10 @@ impl ApplicationHandler<PtyEvent> for App {
             },
             WindowEvent::Focused(gained) => {
                 state.focused = gained;
-                if state.terminal.lock().report_focus_in_out() {
-                    let report: &[u8] = if state.focused { b"\x1b[I" } else { b"\x1b[O" };
-                    let _ = state.pty.write(report);
-                }
-                if state.focused {
+                // The app-wide DECSET 1004 report is reconciled in about_to_wait
+                // so a switch between stoatty windows nets no report.
+                if gained {
+                    send_window_event(state, WindowIpcEvent::Focused { window: 0 });
                     // Regaining focus clears any pending attention request, e.g.
                     // a dock bounce a bell raised while the window was in back.
                     state.window.request_user_attention(None);
@@ -2056,6 +2126,7 @@ fn open_aux_window(
         gpu: None,
         grid: Grid::new(0, 0),
         scratch: Grid::new(0, 0),
+        focused: false,
     });
 
     let size = window.inner_size();
@@ -2204,6 +2275,110 @@ fn compose_aux_grid(
 
     grid.set_text_runs(text_runs);
     grid.set_bars(bars);
+}
+
+/// Send a window-lifecycle event to the child over the window-event socket.
+///
+/// A no-op when the socket did not bind. The line is only queued on the channel,
+/// so this never blocks on socket IO. The serving thread forwards it to the
+/// connected child.
+fn send_window_event(state: &State, event: WindowIpcEvent) {
+    if let Some(tx) = &state.window_event_tx {
+        let _ = tx.send(event.encode_line());
+    }
+}
+
+/// Report an app-wide DECSET 1004 focus change to the child when it flips.
+///
+/// The app counts as focused while the primary or any aux window holds focus, so
+/// a switch between stoatty windows nets no report and only a move to or from a
+/// foreign app crosses the boundary. Gated on the child having requested focus
+/// reporting.
+fn reconcile_app_focus(state: &mut State) {
+    let focused = app_has_focus(state.focused, state.aux.iter().map(|aux| aux.focused));
+    if focused == state.app_focused {
+        return;
+    }
+    state.app_focused = focused;
+    if state.terminal.lock().report_focus_in_out() {
+        let report: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        let _ = state.pty.write(report);
+    }
+}
+
+/// Whether the app as a whole holds focus, true when the primary window or any
+/// aux window is focused.
+fn app_has_focus(primary: bool, aux: impl IntoIterator<Item = bool>) -> bool {
+    primary || aux.into_iter().any(|focused| focused)
+}
+
+/// Bind the window-event socket and start its serving thread, or report that no
+/// socket is available.
+///
+/// Returns the path to export as `STOATTY_WINDOW_SOCKET` and the channel aux
+/// windows report on. Both are `None` on a bind failure or a non-unix build,
+/// where aux windows render but report nothing upstream.
+fn open_window_event_socket() -> (Option<PathBuf>, Option<Sender<String>>) {
+    #[cfg(unix)]
+    {
+        match bind_window_socket() {
+            Ok((path, tx)) => (Some(path), Some(tx)),
+            Err(error) => {
+                tracing::warn!(%error, "window-event socket unavailable");
+                (None, None)
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        (None, None)
+    }
+}
+
+/// The window-event socket path for a stoatty process, `stoatty-win-<pid>.sock`
+/// in `dir`. Per-pid so concurrent stoatty processes never collide.
+#[cfg(unix)]
+fn window_socket_path(dir: &Path, pid: u32) -> PathBuf {
+    dir.join(format!("stoatty-win-{pid}.sock"))
+}
+
+/// Bind the per-pid window-event socket under the log directory and spawn the
+/// thread forwarding queued events to the connected child.
+#[cfg(unix)]
+fn bind_window_socket() -> io::Result<(PathBuf, Sender<String>)> {
+    let dir = stoat_log::log_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = window_socket_path(&dir, std::process::id());
+    // A prior process at this pid may have left its socket behind, and bind
+    // fails on an existing path, so clear a stale one first.
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path)?;
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::Builder::new()
+        .name("window-events".to_string())
+        .spawn(move || serve_window_events(listener, rx))?;
+    Ok((path, tx))
+}
+
+/// Forward queued window-event lines to the connected child.
+///
+/// Serves one client at a time. Each accepted stream receives every subsequent
+/// line terminated by '\n' until a write fails, then the thread re-accepts.
+/// Events sent while no client is connected queue on the channel and flush to
+/// the next one. Returns when the channel closes as the app exits.
+#[cfg(unix)]
+fn serve_window_events(listener: UnixListener, rx: Receiver<String>) {
+    for client in listener.incoming() {
+        let Ok(mut client) = client else { continue };
+        loop {
+            let Ok(line) = rx.recv() else { return };
+            let mut bytes = line.into_bytes();
+            bytes.push(b'\n');
+            if client.write_all(&bytes).is_err() {
+                break;
+            }
+        }
+    }
 }
 
 /// Minimum spacing between bells, so a catted binary's burst of BELs rings once
@@ -2591,13 +2766,16 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32, dt: Duration) 
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_scroll_bytes, anchored_cursor_pos, bell_should_ring, block_corners, cell_at,
-        copy_pool_region, cursor_in_region, ease, ease_corners, encode_key, font_step, paste_bytes,
-        popover_overflow, seed_settle_flight, selection_copy_text, sgr_button_bytes,
-        sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll,
-        step_popover_scroll, step_region_scroll, step_scrollback_scroll, swallow_super_combo,
-        wheel_lines, CursorAnimation, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
+        alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, bell_should_ring,
+        block_corners, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners, encode_key,
+        font_step, paste_bytes, popover_overflow, seed_settle_flight, selection_copy_text,
+        sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll,
+        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
+        swallow_super_combo, wheel_lines, CursorAnimation, EASE_BASELINE_FRAME,
+        SCROLLBACK_MIN_STEP,
     };
+    #[cfg(unix)]
+    use super::{window_socket_path, PathBuf};
     use alacritty_terminal::sync::FairMutex;
     use std::time::{Duration, Instant};
     use stoatty_protocol::command::PoolRegionCommand;
@@ -2611,6 +2789,23 @@ mod tests {
         event::MouseScrollDelta,
         keyboard::{Key, ModifiersState, NamedKey},
     };
+
+    #[test]
+    fn app_has_focus_tracks_any_window() {
+        assert!(app_has_focus(true, [false, false]));
+        assert!(app_has_focus(false, [false, true]));
+        assert!(!app_has_focus(false, [false, false]));
+        assert!(!app_has_focus(false, std::iter::empty()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn window_socket_path_is_per_pid() {
+        assert_eq!(
+            window_socket_path(std::path::Path::new("/run/stoat"), 42),
+            PathBuf::from("/run/stoat/stoatty-win-42.sock"),
+        );
+    }
 
     #[test]
     fn super_combo_swallowed_only_on_macos() {

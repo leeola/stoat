@@ -78,6 +78,7 @@ impl Pty {
         cwd: Option<&Path>,
         stoat_dir: Option<&Path>,
         log_id: Option<&str>,
+        window_socket: Option<&str>,
         rows: u16,
         cols: u16,
         sink: impl FnMut(PtyOutput<'_>) + Send + 'static,
@@ -93,7 +94,14 @@ impl Pty {
 
         let child = pair
             .slave
-            .spawn_command(shell_command(program, args, cwd, stoat_dir, log_id))
+            .spawn_command(shell_command(
+                program,
+                args,
+                cwd,
+                stoat_dir,
+                log_id,
+                window_socket,
+            ))
             .map_err(io::Error::other)?;
         tracing::info!(program, pid = ?child.process_id(), "spawned child over pty");
         let master_writer = pair.master.take_writer().map_err(io::Error::other)?;
@@ -195,13 +203,14 @@ fn shell_command(
     cwd: Option<&Path>,
     stoat_dir: Option<&Path>,
     log_id: Option<&str>,
+    window_socket: Option<&str>,
 ) -> CommandBuilder {
     let mut command = CommandBuilder::new(program);
     command.args(args);
     if let Some(dir) = cwd {
         command.cwd(dir);
     }
-    configure_child_env(&mut command, stoat_dir, log_id);
+    configure_child_env(&mut command, stoat_dir, log_id, window_socket);
     command
 }
 
@@ -224,6 +233,8 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 /// on its presence synchronously at startup, without the `XTVERSION` query round
 /// trip. `STOATTY_LOG_ID`, when set, carries this session's log id so a child
 /// prefixes its own log filenames with it and one session's files sort together.
+/// `STOATTY_WINDOW_SOCKET`, when set, is the unix-socket path a child editor
+/// connects to for upstream window focus, resize, and close events.
 ///
 /// Inherited multiplexer markers ([`MULTIPLEXER_ENV_VARS`]) are removed because
 /// stoatty presents a fresh terminal that owns and forwards its own window's
@@ -236,12 +247,16 @@ fn configure_child_env(
     command: &mut CommandBuilder,
     stoat_dir: Option<&Path>,
     log_id: Option<&str>,
+    window_socket: Option<&str>,
 ) {
     command.env("TERM", "xterm-256color");
     command.env("STOATTY", "1");
     command.env("STOATTY_VERSION", crate::cli::VERSION_INFO);
     if let Some(id) = log_id {
         command.env("STOATTY_LOG_ID", id);
+    }
+    if let Some(socket) = window_socket {
+        command.env("STOATTY_WINDOW_SOCKET", socket);
     }
     for var in MULTIPLEXER_ENV_VARS {
         command.env_remove(var);
@@ -484,6 +499,7 @@ mod tests {
             None,
             Some(Path::new("/opt/stoat/bin")),
             Some("20260718-143022-99"),
+            Some("/run/stoat/stoatty-win-42.sock"),
         );
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
@@ -495,6 +511,10 @@ mod tests {
             command.get_env("STOATTY_LOG_ID"),
             Some(OsStr::new("20260718-143022-99")),
         );
+        assert_eq!(
+            command.get_env("STOATTY_WINDOW_SOCKET"),
+            Some(OsStr::new("/run/stoat/stoatty-win-42.sock")),
+        );
         let path = command.get_env("PATH").expect("PATH set from stoat dir");
         assert!(
             path.to_str()
@@ -503,8 +523,9 @@ mod tests {
             "stoat dir prepended to PATH: {path:?}"
         );
 
-        let without_id = shell_command("/bin/sh", &[], None, None, None);
+        let without_id = shell_command("/bin/sh", &[], None, None, None, None);
         assert_eq!(without_id.get_env("STOATTY_LOG_ID"), None);
+        assert_eq!(without_id.get_env("STOATTY_WINDOW_SOCKET"), None);
     }
 
     #[test]
@@ -516,7 +537,7 @@ mod tests {
         command.env("ZELLIJ_SESSION_NAME", "main");
         command.env("ZELLIJ_PANE_ID", "71");
 
-        configure_child_env(&mut command, None, None);
+        configure_child_env(&mut command, None, None, None);
 
         for var in MULTIPLEXER_ENV_VARS {
             assert_eq!(command.get_env(var), None, "{var} not stripped");
@@ -531,7 +552,7 @@ mod tests {
 
     #[test]
     fn shell_command_sets_cwd_when_given() {
-        let command = shell_command("/bin/sh", &[], Some(Path::new("/tmp")), None, None);
+        let command = shell_command("/bin/sh", &[], Some(Path::new("/tmp")), None, None, None);
         assert_eq!(
             command.get_cwd().map(|cwd| cwd.as_os_str()),
             Some(OsStr::new("/tmp"))
