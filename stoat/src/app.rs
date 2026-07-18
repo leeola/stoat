@@ -1848,17 +1848,23 @@ impl Stoat {
 
     /// Resolve one frame-timer tick into an [`UpdateEffect`].
     ///
-    /// While a glide eases, push the eased scroll target to the pool and skip the
-    /// live-grid repaint, since a settled glide repaints once. Otherwise advance
-    /// a pending minimap build chunk. A visible run or terminal that fed output
-    /// since the last tick then merges in a repaint, so streamed output paces to
-    /// one repaint per frame rather than one per PTY chunk.
+    /// While a glide eases, stoatty pushes the eased scroll target to its pool and
+    /// skips the live-grid repaint, since a settled glide repaints once. A plain
+    /// terminal has no pool, so it repaints the eased position each tick instead
+    /// of freezing until the glide settles. Otherwise advance a pending minimap
+    /// build chunk. A visible run or terminal that fed output since the last tick
+    /// then merges in a repaint, so streamed output paces to one repaint per
+    /// frame rather than one per PTY chunk.
     fn frame_tick(&mut self, dt: f32) -> UpdateEffect {
         let animating = self.is_animating();
         let building = self.minimap_build_pending;
         let effect = if self.tick_scroll_anim(dt) {
-            self.emit_smooth_scroll();
-            UpdateEffect::None
+            if self.stoatty {
+                self.emit_smooth_scroll();
+                UpdateEffect::None
+            } else {
+                UpdateEffect::Redraw
+            }
         } else if animating {
             UpdateEffect::Redraw
         } else if building {
@@ -9198,6 +9204,44 @@ mod tests {
             h.stoat.frame_tick(0.016),
             UpdateEffect::None,
             "a tick with no glide, build, or pty output repaints nothing",
+        );
+    }
+
+    #[test]
+    fn non_stoatty_wheel_glide_repaints_the_eased_position() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        // Arm a wheel glide. The harness is non-stoatty, so there is no pool to
+        // composite the eased scroll.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            for _ in 0..4 {
+                action_handlers::movement::wheel_scroll(editor, true);
+            }
+        }
+        assert!(h.stoat.is_animating(), "the wheel flick armed a glide");
+        let scrolled = action_handlers::focused_editor_mut(&mut h.stoat)
+            .unwrap()
+            .scroll_row;
+        assert!(scrolled > 0, "the flick moved the rendered scroll position");
+
+        // A plain terminal has no pool to composite the eased scroll, so the glide
+        // tick repaints the moved view rather than returning None and freezing it
+        // until the glide settles.
+        assert_eq!(
+            h.stoat.frame_tick(0.016),
+            UpdateEffect::Redraw,
+            "a non-stoatty glide tick repaints",
+        );
+        assert!(
+            h.stoat.is_animating(),
+            "the glide is still easing, so the repaint came before settle",
         );
     }
 
