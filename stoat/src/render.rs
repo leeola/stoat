@@ -114,6 +114,9 @@ pub(crate) struct FrameCtx<'a> {
     /// Painted in the right side of the status bar so users see
     /// "rust-analyzer indexing" / "checking" progress.
     pub(crate) lsp_progress: Option<&'a crate::lsp::progress::LspProgressEntry>,
+    /// Whether a `textDocument/hover` request is still in flight, so the status
+    /// bar shows a "lsp: hover..." segment until the response lands.
+    pub(crate) hover_pending: bool,
     /// Freshest `window/showMessage` text, painted in the right side of
     /// the status bar. `MessageType::ERROR` is styled as an error.
     pub(crate) lsp_message: Option<(lsp_types::MessageType, &'a str)>,
@@ -331,6 +334,7 @@ pub(crate) fn frame(
         theme: &stoat.theme,
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
+        hover_pending: stoat.pending_hover_request.is_some(),
         lsp_message: stoat
             .lsp_message
             .as_ref()

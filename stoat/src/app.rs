@@ -764,9 +764,10 @@ pub struct Stoat {
     /// drops the prior task, cancelling its spawned future before the
     /// response can land. Polled by
     /// [`action_handlers::pump_lsp_hover`] at the top of each render
-    /// tick; `Ready(Some)` writes the response to [`Self::pending_hover`].
+    /// tick, which resolves the [`HoverOutcome`] into a popup or an
+    /// honest status message.
     pub(crate) pending_hover_request:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::HoverResponse>>>,
+        Option<stoat_scheduler::Task<action_handlers::lsp::HoverOutcome>>,
 
     /// Hover popup content waiting to be painted. Set by
     /// [`action_handlers::pump_lsp_hover`] when a hover response lands.

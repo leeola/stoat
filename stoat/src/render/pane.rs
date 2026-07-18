@@ -523,6 +523,16 @@ fn status_segments(
                 right_anchor = start;
             }
         }
+        if frame.hover_pending {
+            let available = right_anchor.saturating_sub(cursor) as usize;
+            if available > 0 {
+                let text: String = " lsp: hover... ".chars().take(available).collect();
+                let width = text.chars().count() as u16;
+                let start = right_anchor.saturating_sub(width);
+                right.push((text, base_style.add_modifier(Modifier::ITALIC)));
+                right_anchor = start;
+            }
+        }
         if let Some(entry) = frame.lsp_progress {
             let text = lsp_progress_label(entry);
             let width = text.chars().count() as u16;

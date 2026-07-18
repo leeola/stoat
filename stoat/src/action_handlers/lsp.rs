@@ -1084,6 +1084,20 @@ pub(crate) struct HoverResponse {
     pub(crate) editor_id: EditorId,
 }
 
+/// The outcome of a spawned hover request, carried to [`pump_lsp_hover`].
+///
+/// Distinguishing an empty answer from a failed request lets the status bar
+/// report honest state. A server still indexing says so and a broken request
+/// says it failed, rather than collapsing both to a flat "no hover info".
+pub(crate) enum HoverOutcome {
+    /// The server returned hover content to render.
+    Content(HoverResponse),
+    /// The server answered with no hover for the cursor position.
+    Empty,
+    /// The request errored.
+    Failed,
+}
+
 /// A live text selection over the hover popup body.
 ///
 /// Endpoints are `(content line, char column)` into [`HoverPopup::lines`], so
@@ -1208,17 +1222,17 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         match lsp.hover(params).await {
             Ok(Some(hover)) => {
                 let (text, plain) = flatten_hover_contents(hover.contents);
-                Some(HoverResponse {
+                HoverOutcome::Content(HoverResponse {
                     text,
                     plain,
                     anchor_offset,
                     editor_id,
                 })
             },
-            Ok(None) => None,
+            Ok(None) => HoverOutcome::Empty,
             Err(err) => {
                 tracing::warn!(target: "stoat::lsp", ?err, "hover request failed");
-                None
+                HoverOutcome::Failed
             },
         }
     });
@@ -1337,9 +1351,10 @@ fn flatten_hover_contents(contents: HoverContents) -> (String, bool) {
 }
 
 /// Poll any in-flight hover request ([`Stoat::pending_hover_request`])
-/// and apply the result. On `Ready(Some)` writes the response to
-/// [`Stoat::pending_hover`]; on `Ready(None)` clears
-/// [`Stoat::pending_hover`]; on `Pending` puts the task back.
+/// and apply the [`HoverOutcome`].
+///
+/// `Content` writes the popup to [`Stoat::pending_hover`]. `Empty` and `Failed`
+/// clear it and set an honest status message. `Pending` puts the task back.
 /// Returns true when state changed so the caller can request a redraw.
 pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_hover_request.take() else {
@@ -1348,7 +1363,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(response)) => {
+        Poll::Ready(HoverOutcome::Content(response)) => {
             // Drop a response whose editor lost focus while the request was in
             // flight, so the popup never anchors against a pane that did not
             // request it.
@@ -1381,8 +1396,27 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             });
             true
         },
-        Poll::Ready(None) => {
-            set_lsp_status(stoat, "lsp: no hover info".to_string());
+        Poll::Ready(HoverOutcome::Empty) => {
+            // A busy server is still worth naming, so an empty result during
+            // work-done progress reports which operation is running. The
+            // progress segment already shows the percentage, so none is added.
+            let status = match stoat.lsp_progress.current() {
+                Some(entry) => {
+                    let body = if !entry.title.is_empty() {
+                        entry.title.as_str()
+                    } else {
+                        entry.message.as_deref().unwrap_or("working")
+                    };
+                    format!("lsp: no hover info yet ({} {})", entry.server, body)
+                },
+                None => "lsp: no hover info".to_string(),
+            };
+            set_lsp_status(stoat, status);
+            stoat.pending_hover = None;
+            true
+        },
+        Poll::Ready(HoverOutcome::Failed) => {
+            set_lsp_status(stoat, "lsp: hover request failed".to_string());
             stoat.pending_hover = None;
             true
         },
@@ -4928,6 +4962,81 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("lsp: no hover info"),
         );
+    }
+
+    #[test]
+    fn hover_no_result_during_progress_names_the_operation() {
+        use crate::host::LspNotification;
+        use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
+
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        h.stoat.lsp_progress.update(
+            "primary",
+            &LspNotification::Progress {
+                token: NumberOrString::Number(1),
+                value: WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                    title: "indexing".into(),
+                    cancellable: None,
+                    message: None,
+                    percentage: None,
+                }),
+            },
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: no hover info yet (primary indexing)"),
+        );
+    }
+
+    #[test]
+    fn hover_request_failure_reports_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        h.fake_lsp()
+            .fail_next_request("textDocument/hover", std::io::ErrorKind::Other);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: hover request failed"),
+        );
+    }
+
+    #[test]
+    fn in_flight_hover_shows_a_status_segment() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        // Hold the response open so the request stays in flight through render.
+        h.fake_lsp()
+            .set_request_delay("textDocument/hover", Duration::from_secs(60));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        assert!(
+            h.stoat.pending_hover_request.is_some(),
+            "the delayed hover request stays in flight",
+        );
+
+        let buf = h.stoat.render();
+        let shown = (0..buf.area.height).any(|y| {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            row.contains("lsp: hover...")
+        });
+        assert!(shown, "the status bar shows the in-flight hover segment");
     }
 
     #[test]
