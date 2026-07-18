@@ -5,15 +5,25 @@
 use clap::{CommandFactory, Parser};
 use std::{backtrace::Backtrace, panic, sync::Once};
 use stoat_cli::FixtureSub;
-use stoat_log::LogTarget;
+use stoat_log::{
+    ident::{self, LogId, ProcessIdent},
+    LogTarget,
+};
 use stoatty::cli::{Cli, TtyCommand};
 
 fn main() {
     let mut cli = Cli::parse();
 
+    let id = LogId::mint();
+    ident::install(ProcessIdent {
+        file_stem: format!("stoatty-{id}"),
+        id,
+    });
+    let installed = ident::get().expect("ident installed above");
+
     let stoat_log_env = std::env::var("STOAT_LOG").ok();
     let rust_log_env = std::env::var("RUST_LOG").ok();
-    let target = match resolve_log_path() {
+    let target = match resolve_log_path(&installed.file_stem) {
         Ok(path) => LogTarget::File(path),
         Err(e) => {
             eprintln!("Failed to prepare log directory: {e}");
@@ -25,7 +35,7 @@ fn main() {
         std::process::exit(1);
     }
     install_panic_hook();
-    tracing::info!("starting stoatty");
+    tracing::info!(log_id = %installed.id, hostname = %ident::hostname(), "starting stoatty");
 
     match cli.command_sub.take() {
         Some(TtyCommand::Fixture(args)) => match (args.sub, args.name) {
@@ -65,18 +75,22 @@ fn main() {
     );
 }
 
-/// The per-process log file under the shared stoat log directory, named
-/// `stoatty-<pid>.log` to sit beside the editor's `stoat-<pid>.log`. Creates the
-/// log directory if it does not yet exist.
-fn resolve_log_path() -> std::io::Result<std::path::PathBuf> {
+/// The log file for `stem` under the shared stoat log directory, at
+/// `<log dir>/<stem>.log`. Creates the log directory if it does not yet exist.
+///
+/// `stem` carries the process's timestamped log id (e.g. `stoatty-<log-id>`), so
+/// the filename sorts chronologically. It is the key that correlates this
+/// session's files: an inner stoat and its LSP transcripts reuse the same id, so
+/// they sort together in a directory listing.
+fn resolve_log_path(stem: &str) -> std::io::Result<std::path::PathBuf> {
     let dir = stoat_log::log_dir()?;
     std::fs::create_dir_all(&dir)?;
-    Ok(dir.join(format!("stoatty-{}.log", std::process::id())))
+    Ok(dir.join(format!("{stem}.log")))
 }
 
 /// Install a process-global panic hook that records the panic message,
 /// location, and a captured backtrace via [`tracing::error`] before delegating
-/// to the prior hook, so a panic survives in `stoatty-<pid>.log` after the
+/// to the prior hook, so a panic survives in `stoatty-<log-id>.log` after the
 /// window is gone. Idempotent across repeated calls.
 ///
 /// Unlike the editor's hook, stoatty runs a GUI rather than a raw-mode terminal,
