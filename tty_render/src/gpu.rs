@@ -27,7 +27,7 @@ use crate::{
 use cosmic_text::FontSystem;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::thread;
+use std::{thread, time::Instant};
 use stoatty_term::grid::{Grid, Panel, Rgb};
 use wgpu::{
     Adapter, Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
@@ -848,6 +848,7 @@ impl GpuContext {
         // Prefer a hardware adapter, but retry with a software rasterizer
         // (llvmpipe) before giving up, so a driverless or headless box still
         // starts rather than panicking on the first request.
+        let t_adapter = Instant::now();
         let adapter = {
             let request = |force_fallback_adapter: bool| {
                 executor::block_on(instance.request_adapter(&RequestAdapterOptions {
@@ -863,10 +864,13 @@ impl GpuContext {
                  was available",
             )
         };
+        let adapter_time = t_adapter.elapsed();
 
+        let t_device = Instant::now();
         let (device, queue) =
             executor::block_on(adapter.request_device(&device_descriptor(&adapter)))
                 .expect("GPU device creation failed on the selected adapter");
+        let device_time = t_device.elapsed();
 
         // The text pass encodes its gamma-correct composite to sRGB in the
         // shader and the background pass writes already-encoded colors, so the
@@ -900,9 +904,15 @@ impl GpuContext {
             view_formats,
             desired_maximum_frame_latency: 1,
         };
+        let t_surface = Instant::now();
         surface.configure(&device, &config);
+        let surface_time = t_surface.elapsed();
 
+        let t_font = Instant::now();
         let font_system = font_load.join();
+        let font_time = t_font.elapsed();
+
+        let t_renderer = Instant::now();
         let renderer = Renderer::new(
             &device,
             view_format,
@@ -911,6 +921,19 @@ impl GpuContext {
             font,
             background,
             cursor,
+        );
+        let renderer_time = t_renderer.elapsed();
+
+        // Always-on single line so a real launch can attribute cold-start cost.
+        // The font wait is the residual after the concurrent scan. A small value
+        // means the scan finished before the GPU was ready.
+        tracing::info!(
+            adapter = ?adapter_time,
+            device = ?device_time,
+            surface = ?surface_time,
+            font_wait = ?font_time,
+            renderer = ?renderer_time,
+            "gpu init phases",
         );
 
         GpuContext {

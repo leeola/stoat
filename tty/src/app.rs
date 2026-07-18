@@ -89,6 +89,7 @@ pub fn run(
     common: CommonArgs,
     terminal: bool,
 ) {
+    let start = Instant::now();
     let mut config = load_config();
     let (program, args, stoat_dir) = if let Some((program, args)) = command {
         (program, args, None)
@@ -115,7 +116,15 @@ pub fn run(
             None
         }
     });
-    run_with_config(config, program, args, None, working_directory, stoat_dir);
+    run_with_config(
+        start,
+        config,
+        program,
+        args,
+        None,
+        working_directory,
+        stoat_dir,
+    );
 }
 
 /// Open the stoatty window running `program` with `args` as the PTY command,
@@ -131,7 +140,8 @@ pub fn run(
 /// (`ControlFlow::Wait`): frames are drawn on demand when PTY output arrives or
 /// the window is resized, not on a continuous timer.
 pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>) {
-    run_with_config(load_config(), program, args, size, None, None);
+    let start = Instant::now();
+    run_with_config(start, load_config(), program, args, size, None, None);
 }
 
 /// Open the window running `program` with `args`, drawing with `config`'s theme
@@ -140,6 +150,7 @@ pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>
 /// The shared core of [`run`] and [`run_with_shell`]. It takes an
 /// already-loaded `config` so each entry point loads it exactly once.
 fn run_with_config(
+    start: Instant,
     config: Config,
     program: String,
     args: Vec<String>,
@@ -160,6 +171,7 @@ fn run_with_config(
     let working_directory = working_directory.or_else(|| std::env::current_dir().ok());
 
     let mut app = App::new(
+        start,
         event_loop.create_proxy(),
         program,
         args,
@@ -220,6 +232,9 @@ struct FontSettings {
 }
 
 struct App {
+    /// Process-start instant captured at the entry point, used to log the total
+    /// cold-start time when the first frame is presented.
+    start: Instant,
     proxy: EventLoopProxy<PtyEvent>,
     program: String,
     args: Vec<String>,
@@ -249,6 +264,7 @@ struct App {
 impl App {
     #[allow(clippy::too_many_arguments)]
     fn new(
+        start: Instant,
         proxy: EventLoopProxy<PtyEvent>,
         program: String,
         args: Vec<String>,
@@ -260,6 +276,7 @@ impl App {
         stoat_dir: Option<PathBuf>,
     ) -> App {
         App {
+            start,
             proxy,
             program,
             args,
@@ -278,6 +295,9 @@ impl App {
 
 struct State {
     window: Arc<Window>,
+    /// Process-start instant, taken once when the first frame is presented to
+    /// log the total cold-start time. `None` after that first frame.
+    first_frame_start: Option<Instant>,
     gpu: GpuContext,
     /// The parsed screen, shared with the reader thread that advances it. The
     /// [`FairMutex`] lets the main thread lock it to project while the reader
@@ -508,7 +528,9 @@ impl ApplicationHandler<PtyEvent> for App {
                 rows as f32 * cell_height,
             ));
         }
+        let t_window = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
+        let window_time = t_window.elapsed();
 
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
@@ -534,6 +556,7 @@ impl ApplicationHandler<PtyEvent> for App {
         let dirty = Arc::new(AtomicBool::new(false));
         let sync_pending = Arc::new(AtomicBool::new(false));
 
+        let t_pty = Instant::now();
         let pty = {
             let proxy = self.proxy.clone();
             let terminal = terminal.clone();
@@ -584,10 +607,18 @@ impl ApplicationHandler<PtyEvent> for App {
             )
             .expect("spawn shell over pty")
         };
+        let pty_time = t_pty.elapsed();
+
+        tracing::info!(
+            window = ?window_time,
+            pty = ?pty_time,
+            "window and pty ready",
+        );
 
         window.request_redraw();
         self.state = Some(State {
             window,
+            first_frame_start: Some(self.start),
             gpu,
             terminal,
             dirty,
@@ -763,6 +794,12 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
+                // The first redraw drives the first present, so report the total
+                // cold-start time once, then never again.
+                if let Some(start) = state.first_frame_start.take() {
+                    tracing::info!(elapsed = ?start.elapsed(), "first frame");
+                }
+
                 // Each frame's easing advances by the wall time since the
                 // previous frame, so animation speed stays refresh-rate
                 // independent. The cap bounds the step after an idle gap, when

@@ -16,6 +16,7 @@ perf = []
 stoatty_term = { path = "../tty_term" }
 stoatty_protocol = { path = "../tty_protocol" }
 wgpu.workspace = true
+tracing.workspace = true
 bytemuck.workspace = true
 raw-window-handle.workspace = true
 futures = { workspace = true, features = ["executor"] }
