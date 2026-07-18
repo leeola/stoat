@@ -44,7 +44,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
+use stoat_action::{Diff, GotoNextChange, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock, WrapMode};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
@@ -1623,9 +1623,21 @@ impl Stoat {
     }
 
     /// Toggle the side-by-side diff view on the focused editor, as the `:diff`
-    /// command does. Used by the `--review` TUI-start entry point.
+    /// command does.
     pub fn toggle_diff_view(&mut self) {
         action_handlers::dispatch(self, &Diff);
+    }
+
+    /// Open the working-tree diff for the `stoat review` entry point.
+    ///
+    /// `Diff` turns the view on for the current editor -- a no-op jump on the
+    /// pathless startup scratch -- and `GotoNextChange` then crosses into the
+    /// first changed file, installs its diff map, and lands the cursor on its
+    /// first hunk with the view scrolled to it. With no changed files it sets
+    /// the "no more changes" status and stays on the scratch.
+    pub fn open_working_tree_diff(&mut self) {
+        action_handlers::dispatch(self, &Diff);
+        action_handlers::dispatch(self, &GotoNextChange);
     }
 
     /// Handle that makes [`Self::run`] quit at its next loop turn when
@@ -13326,6 +13338,67 @@ mod tests {
             (scroll_row..scroll_row + 10).contains(&cursor_row),
             "the first hunk's display row {cursor_row} sits inside the viewport [{scroll_row}, {})",
             scroll_row + 10,
+        );
+    }
+
+    #[test]
+    fn stoat_review_opens_the_first_changed_file_on_its_first_hunk() {
+        let mut h = Stoat::test();
+        let workdir = PathBuf::from("/repo");
+        h.stage_review_scenario(&workdir, &[("changed.rs", "a\nb\nc\n", "a\nX\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+
+        // Mirrors the `stoat review` startup, where the diff view opens on the
+        // pathless scratch and then crosses into the sole changed file.
+        h.stoat.open_working_tree_diff();
+
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("focused editor");
+        let path = {
+            let ws = h.stoat.active_workspace();
+            ws.buffers.path_for(buffer_id).map(|p| p.to_path_buf())
+        };
+        assert_eq!(
+            path,
+            Some(workdir.join("changed.rs")),
+            "opened the first changed file",
+        );
+        assert!(
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("editor")
+                .diff_view,
+            "the diff view is on for the opened file",
+        );
+
+        let (cursor_buffer, offset) = h.stoat.focused_cursor_pos().expect("focused cursor");
+        let cursor_row = {
+            let ws = h.stoat.active_workspace();
+            let buffer = ws.buffers.get(cursor_buffer).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard.rope().offset_to_point(offset).row
+        };
+        assert_eq!(cursor_row, 1, "the cursor sits on the file's first hunk");
+    }
+
+    #[test]
+    fn stoat_review_with_no_changes_stays_on_the_scratch() {
+        let mut h = Stoat::test();
+        let workdir = PathBuf::from("/repo");
+        h.stage_review_scenario(&workdir, &[]);
+        h.stoat.set_diff_warm_auto(true);
+
+        let scratch = h.stoat.focused_editor_ids().expect("editor").1;
+
+        h.stoat.open_working_tree_diff();
+
+        assert_eq!(
+            h.stoat.focused_editor_ids().expect("editor").1,
+            scratch,
+            "focus stays on the startup scratch when nothing changed",
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no more changes"),
+            "the status reports that there are no changes",
         );
     }
 

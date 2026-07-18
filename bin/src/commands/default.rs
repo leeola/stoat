@@ -339,7 +339,7 @@ fn run_tui(
         }
 
         match start {
-            TuiStart::Review => stoat.toggle_diff_view(),
+            TuiStart::Review => stoat.open_working_tree_diff(),
             TuiStart::Files => {
                 for (i, path) in files.iter().enumerate() {
                     if i > 0 {
