@@ -233,24 +233,63 @@ fn make_language_with_injections(
     injections: Vec<LanguageInjection>,
     aux: AuxQuerySources,
 ) -> Language {
-    let highlight_query = Query::new(&grammar, highlight_src)
-        .unwrap_or_else(|e| panic!("highlight query for {name} failed to compile: {e}"));
-    let injection_query = build_injection_query(name, &grammar, &injections);
-    let bracket_query = aux
-        .brackets
-        .and_then(|src| try_compile_query(name, "brackets", &grammar, src));
-    let indent_query = aux
-        .indents
-        .and_then(|src| try_compile_query(name, "indents", &grammar, src));
-    let textobjects_query = aux
-        .textobjects
-        .and_then(|src| try_compile_query(name, "textobjects", &grammar, src));
-    let outline_query = aux
-        .outline
-        .and_then(|src| try_compile_query(name, "outline", &grammar, src));
-    let tags_query = aux
-        .tags
-        .and_then(|src| try_compile_query(name, "tags", &grammar, src));
+    let AuxQuerySources {
+        brackets,
+        indents,
+        textobjects,
+        outline,
+        tags,
+        line_comment,
+    } = aux;
+
+    // Each Query::new is tens of milliseconds against the rust grammar, and the
+    // seven are independent, so compile them concurrently to shrink the
+    // pre-first-frame path. The grammar and injections are shared immutably and
+    // the scoped threads join before either is moved into the returned Language.
+    let (
+        highlight_query,
+        injection_query,
+        bracket_query,
+        indent_query,
+        textobjects_query,
+        outline_query,
+        tags_query,
+    ) = std::thread::scope(|s| {
+        let injection_handle = s.spawn(|| build_injection_query(name, &grammar, &injections));
+        let bracket_handle =
+            s.spawn(|| brackets.and_then(|src| try_compile_query(name, "brackets", &grammar, src)));
+        let indent_handle =
+            s.spawn(|| indents.and_then(|src| try_compile_query(name, "indents", &grammar, src)));
+        let textobjects_handle = s.spawn(|| {
+            textobjects.and_then(|src| try_compile_query(name, "textobjects", &grammar, src))
+        });
+        let outline_handle =
+            s.spawn(|| outline.and_then(|src| try_compile_query(name, "outline", &grammar, src)));
+        let tags_handle =
+            s.spawn(|| tags.and_then(|src| try_compile_query(name, "tags", &grammar, src)));
+
+        let highlight_query = Query::new(&grammar, highlight_src)
+            .unwrap_or_else(|e| panic!("highlight query for {name} failed to compile: {e}"));
+
+        (
+            highlight_query,
+            injection_handle
+                .join()
+                .expect("injection query thread panicked"),
+            bracket_handle
+                .join()
+                .expect("brackets query thread panicked"),
+            indent_handle.join().expect("indents query thread panicked"),
+            textobjects_handle
+                .join()
+                .expect("textobjects query thread panicked"),
+            outline_handle
+                .join()
+                .expect("outline query thread panicked"),
+            tags_handle.join().expect("tags query thread panicked"),
+        )
+    });
+
     Language {
         name,
         extensions,
@@ -264,7 +303,7 @@ fn make_language_with_injections(
         textobjects_query,
         outline_query,
         tags_query,
-        line_comment: aux.line_comment,
+        line_comment,
         fence_candidates: OnceLock::new(),
     }
 }
