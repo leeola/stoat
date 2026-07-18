@@ -25,6 +25,10 @@ pub(crate) fn render_hints(
         return;
     }
 
+    // Reserve the bottom row for the pane status bar. Every caller passes the
+    // full window, so the box lays out flush to the right edge above the bar.
+    let area = super::hints_overlay_area(area);
+
     let rows = group_by_action(bindings);
 
     let gap = 3;
@@ -70,7 +74,7 @@ pub(crate) fn render_hints(
     }
 
     let x = area.x + area.width.saturating_sub(box_width);
-    let y = area.y;
+    let y = area.y + area.height.saturating_sub(box_height);
     let help_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);

@@ -10525,6 +10525,42 @@ mod tests {
     }
 
     #[test]
+    fn the_hints_box_draws_over_the_single_strip() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        h.open_file(&a);
+        h.settle();
+
+        // The which-key box is standing hints, not a centered modal, so the strip
+        // stays declared and the box draws on top of it.
+        h.type_keys("space");
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+
+        let cmds = drain_apc(&mut rx);
+        let strip_idx = cmds
+            .iter()
+            .position(|c| matches!(c, Command::Minimap(m) if m.strip_id == u32::MAX))
+            .expect("the single strip stays declared under the hints box");
+        let panel_idx = cmds
+            .iter()
+            .position(|c| matches!(c, Command::Panel(_)))
+            .expect("the hints box emits a panel");
+        assert!(
+            strip_idx < panel_idx,
+            "the strip declares before the hints panel so the panel occludes their overlap"
+        );
+    }
+
+    #[test]
     fn minimap_marks_diff_and_diagnostic_lines() {
         use crate::minimap::EdgeClass;
         use lsp_types::DiagnosticSeverity;
@@ -12181,7 +12217,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hints_box_anchors_to_the_top_right_corner() {
+    fn the_hints_box_anchors_to_the_bottom_right_corner() {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
@@ -12202,7 +12238,11 @@ mod tests {
                 _ => None,
             })
             .expect("the standing hints box emits a panel");
-        assert_eq!(panel.top, 0, "the hints box hugs the frame's top row");
+        assert_eq!(
+            panel.top + panel.height,
+            size.height - 1,
+            "the hints box's bottom edge sits just above the reserved status row"
+        );
         assert_eq!(
             panel.left + panel.width,
             size.width,
