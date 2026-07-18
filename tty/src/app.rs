@@ -160,6 +160,10 @@ fn run_with_config(
 ) {
     let theme = config.resolve_theme();
 
+    // Start the system-font scan before the event loop and window are built, so
+    // its enumeration overlaps them rather than only the later GPU setup.
+    let font_load = FontLoad::spawn();
+
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
         .build()
         .expect("create event loop");
@@ -172,6 +176,7 @@ fn run_with_config(
 
     let mut app = App::new(
         start,
+        font_load,
         event_loop.create_proxy(),
         program,
         args,
@@ -235,6 +240,9 @@ struct App {
     /// Process-start instant captured at the entry point, used to log the total
     /// cold-start time when the first frame is presented.
     start: Instant,
+    /// The system-font scan started at `run_with_config` entry, taken in
+    /// `resumed` to hand to the renderer. `None` after the window is built.
+    font_load: Option<FontLoad>,
     proxy: EventLoopProxy<PtyEvent>,
     program: String,
     args: Vec<String>,
@@ -265,6 +273,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn new(
         start: Instant,
+        font_load: FontLoad,
         proxy: EventLoopProxy<PtyEvent>,
         program: String,
         args: Vec<String>,
@@ -277,6 +286,7 @@ impl App {
     ) -> App {
         App {
             start,
+            font_load: Some(font_load),
             proxy,
             program,
             args,
@@ -515,10 +525,11 @@ impl ApplicationHandler<PtyEvent> for App {
             return;
         }
 
-        // Kick off font enumeration before creating the window, so it runs on a
-        // background thread concurrently with window and GPU setup rather than
-        // blocking the first paint after them.
-        let font_load = FontLoad::spawn();
+        // Take the font enumeration started at `run_with_config` entry, which has
+        // been running on a background thread through the event-loop and window
+        // build. A second resume finds it already taken and starts a fresh scan
+        // rather than panicking.
+        let font_load = self.font_load.take().unwrap_or_else(FontLoad::spawn);
 
         let mut attributes = Window::default_attributes().with_title(DEFAULT_TITLE);
         if let Some([cols, rows]) = self.size {
