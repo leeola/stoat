@@ -66,10 +66,11 @@ pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(50);
 
-/// Frame interval for scroll-animation ticks, about 120 fps. [`Stoat::run`]
-/// arms a timer at this cadence while a scroll glide is active, advancing the
-/// inertial scroll one step per fire.
-const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(8);
+/// Frame interval for scroll-animation ticks, about 60 fps to match a typical
+/// display rather than shipping targets that can never be presented.
+/// [`Stoat::run`] arms a timer at this cadence while a scroll glide is active,
+/// advancing the inertial scroll one step per fire.
+const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Upper bound on one scroll-animation step's `dt`. A render that runs long, or
 /// a glide resumed after an idle gap, advances by at most this much rather than
