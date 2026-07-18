@@ -13262,7 +13262,6 @@ mod tests {
     fn snapshot_run_pane_prompt_blocks() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 12);
         let run_id = h.open_run();
-        // A non-home cwd keeps abbreviate_path deterministic across hosts.
         h.stoat
             .active_workspace_mut()
             .runs
@@ -13283,6 +13282,40 @@ mod tests {
         h.submit_run("retry");
 
         h.assert_snapshot("run_pane_prompt_blocks");
+    }
+
+    #[test]
+    fn run_pane_abbreviates_cwd_under_home() {
+        let paint = |home: Option<&str>| {
+            let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+            if let Some(home) = home {
+                h.fake_env().set("HOME", home);
+            }
+            let run_id = h.open_run();
+            h.stoat
+                .active_workspace_mut()
+                .runs
+                .get_mut(run_id)
+                .expect("run state")
+                .cwd = std::path::PathBuf::from("/home/tester/proj");
+            h.submit_run("ls");
+            h.rendered_text()
+        };
+
+        assert!(
+            paint(Some("/home/tester")).contains("~/proj"),
+            "a cwd under $HOME (resolved through EnvHost) paints the ~-abbreviated path",
+        );
+
+        let full = paint(None);
+        assert!(
+            full.contains("/h/t/proj"),
+            "with no $HOME the prompt paints the plain path with ancestors abbreviated: {full:?}",
+        );
+        assert!(
+            !full.contains("~/proj"),
+            "with no $HOME the prompt does not ~-abbreviate",
+        );
     }
 
     #[test]

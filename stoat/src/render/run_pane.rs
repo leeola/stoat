@@ -8,12 +8,13 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Clear, Widget},
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(crate) fn render_run_pane(
     run_state: &RunState,
     editors: &mut slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
     theme: &crate::theme::Theme,
+    home: Option<&Path>,
     area: Rect,
     is_focused: bool,
     buf: &mut Buffer,
@@ -24,7 +25,6 @@ pub(crate) fn render_run_pane(
 
     let input_row = area.y + area.height - 1;
     let output_height = area.height.saturating_sub(1);
-    let home = std::env::var_os("HOME").map(PathBuf::from);
 
     let mut output_lines: Vec<OutputLine<'_>> = Vec::new();
     for (i, block) in run_state.blocks.iter().enumerate() {
@@ -59,7 +59,7 @@ pub(crate) fn render_run_pane(
                 prev_exit,
                 command,
             } => {
-                let abbrev = crate::run::abbreviate_path(cwd, home.as_deref());
+                let abbrev = crate::run::abbreviate_path(cwd, home);
                 let pw = write_prompt(buf, area.x, y, &abbrev, *prev_exit, theme);
                 let max_w = (area.width as usize).saturating_sub(pw as usize);
                 let display: String = command.chars().take(max_w).collect();
@@ -116,7 +116,7 @@ pub(crate) fn render_run_pane(
         .rev()
         .find(|block| block.finished)
         .and_then(|block| block.exit_status);
-    let abbrev = crate::run::abbreviate_path(&run_state.cwd, home.as_deref());
+    let abbrev = crate::run::abbreviate_path(&run_state.cwd, home);
     let prompt_w = write_prompt(buf, area.x, input_row, &abbrev, last_exit, theme);
 
     let input_area = Rect::new(

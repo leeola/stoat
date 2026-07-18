@@ -49,7 +49,10 @@ use crate::{
 };
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use slotmap::SlotMap;
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoatty_widgets::{minimap::Minimap, popover::Popover, ApcScene};
 
@@ -178,6 +181,10 @@ pub(crate) struct FrameCtx<'a> {
     /// moved over a pane. The focused editor resolves the diagnostic under it
     /// to raise a hover popover.
     pub(crate) hover_cell: Option<(u16, u16)>,
+    /// The user home directory, for `~`-abbreviating run-pane prompt cwds.
+    /// Resolved through [`crate::host::EnvHost`] so tests control it instead of
+    /// the paint reading the real environment. `None` when `$HOME` is unset.
+    pub(crate) home: Option<&'a Path>,
     /// Latency readout for the status bar, or `None` before any frame has
     /// been painted. Present only under the `perf` feature.
     #[cfg(feature = "perf")]
@@ -295,6 +302,8 @@ pub(crate) fn frame(
         }
     });
 
+    let home = stoat.env_host().var("HOME").map(PathBuf::from);
+
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
     ws.layout(size);
@@ -360,6 +369,7 @@ pub(crate) fn frame(
         minimap_chrome,
         minimap_band: single_minimap_rect,
         hover_cell: stoat.hover_cell,
+        home: home.as_deref(),
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),
     };

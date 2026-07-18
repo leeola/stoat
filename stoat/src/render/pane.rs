@@ -139,7 +139,15 @@ pub(crate) fn render_pane(
         },
         View::Run(run_id) => {
             if let Some(run_state) = runs.get(*run_id) {
-                render_run_pane(run_state, editors, theme, content_area, is_focused, buf);
+                render_run_pane(
+                    run_state,
+                    editors,
+                    theme,
+                    frame.home,
+                    content_area,
+                    is_focused,
+                    buf,
+                );
             }
         },
         View::Agent(term_id) | View::Terminal(term_id) => {

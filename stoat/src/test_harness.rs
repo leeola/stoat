@@ -643,6 +643,12 @@ impl TestHarness {
         self.last_buffer.as_ref().expect("no rendered buffer yet")
     }
 
+    /// The last rendered frame as plain text, rows joined by newlines, for
+    /// targeted assertions on painted content.
+    pub(crate) fn rendered_text(&self) -> String {
+        buffer_to_text(self.rendered_buffer())
+    }
+
     pub fn resize(&mut self, width: u16, height: u16) {
         self.step += 100;
         self.sub_frame = 0;
