@@ -972,6 +972,10 @@ pub struct Stoat {
     /// Monotonic source of the `content_id`s naming minimap content stores on the
     /// terminal, global so ids stay unique across workspaces.
     pub(crate) minimap_next_content_id: u32,
+    /// Whether any visible strip's chunked build has lines left to summarize,
+    /// recomputed by [`Self::emit_minimap`]. Keeps the run loop's frame timer
+    /// firing so idle frames drive the build to completion.
+    pub(crate) minimap_build_pending: bool,
     /// Syntax-scope palette the minimap strips declare and their run summaries
     /// index, resolved from [`Self::theme`].
     pub(crate) minimap_class_table: crate::minimap::ClassTable,
@@ -1318,6 +1322,7 @@ impl Stoat {
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
+            minimap_build_pending: false,
             minimap_class_table,
         };
 
@@ -1678,6 +1683,7 @@ impl Stoat {
 
         loop {
             let animating = self.is_animating();
+            let building = self.minimap_build_pending;
             if !animating {
                 last_tick = None;
             }
@@ -1716,7 +1722,7 @@ impl Stoat {
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
-                _ = frame_timer.tick(), if animating => {
+                _ = frame_timer.tick(), if animating || building => {
                     let now = std::time::Instant::now();
                     let dt = last_tick
                         .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
@@ -1733,8 +1739,14 @@ impl Stoat {
                         // rather than a full editor re-render.
                         self.emit_smooth_scroll();
                         UpdateEffect::None
-                    } else {
+                    } else if animating {
                         UpdateEffect::Redraw
+                    } else {
+                        // A build-only wakeup advances one minimap build chunk
+                        // with no repaint. A Redraw frame resumes the build
+                        // through the emit_minimap seam below.
+                        self.emit_minimap();
+                        UpdateEffect::None
                     };
                     // Measure the next dt from here, after any synchronous page
                     // refill inside emit_smooth_scroll. Otherwise a refill's
@@ -6010,6 +6022,9 @@ impl Stoat {
     /// the diffed scene from the paint. This sends only the persistent content
     /// stores. A no-op outside stoatty.
     fn emit_minimap(&mut self) {
+        // Recomputed below from each synced strip. Cleared first so the early
+        // exits (non-stoatty, no channel, minimap off) leave no build pending.
+        self.minimap_build_pending = false;
         if !self.stoatty {
             return;
         }
@@ -6044,6 +6059,10 @@ impl Stoat {
         let mut out = Vec::new();
         for (buffer_id, editor_id) in strips {
             self.sync_minimap_strip(ws_id, buffer_id, editor_id, &mut out);
+            self.minimap_build_pending |= self
+                .minimap_content
+                .get(&(ws_id, buffer_id))
+                .is_some_and(|content| content.build_pending());
         }
 
         let dropped: Vec<(WorkspaceId, BufferId)> = self
@@ -9753,6 +9772,60 @@ mod tests {
                 .iter()
                 .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
             "an edit splices the changed line, got {edited:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_chunk_minimap_build_completes_over_idle_emits() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        // A file larger than one build chunk fills over several syncs.
+        let total = 6000usize;
+        let body: String = vec!["ln"; total].join("\n");
+        let root = std::path::PathBuf::from("/minimap");
+        let path = root.join("big.txt");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        h.stoat.emit_minimap();
+        assert!(
+            h.stoat.minimap_build_pending,
+            "a multi-chunk file leaves the build pending after the first emit",
+        );
+
+        // Drive the build the way an idle frame tick does, gathering the lines
+        // every emitted splice covers.
+        let mut covered: Vec<u32> = Vec::new();
+        for _ in 0..100 {
+            for cmd in drain_apc(&mut rx) {
+                if let Command::MinimapLines(lines) = cmd {
+                    covered.extend(lines.start..lines.start + lines.lines.len() as u32);
+                }
+            }
+            if !h.stoat.minimap_build_pending {
+                break;
+            }
+            h.stoat.emit_minimap();
+        }
+
+        assert!(
+            !h.stoat.minimap_build_pending,
+            "the build completes over successive emits",
+        );
+        covered.sort_unstable();
+        assert_eq!(
+            covered,
+            (0..total as u32).collect::<Vec<_>>(),
+            "the emitted splices cover every line exactly once",
         );
     }
 

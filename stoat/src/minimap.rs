@@ -167,6 +167,15 @@ impl MinimapContent {
         self.synced_version
     }
 
+    /// Whether the initial chunked build still has lines to summarize.
+    ///
+    /// True from the first [`Self::sync`] on a file larger than one chunk until
+    /// its last chunk fills, so the caller keeps ticking [`Self::sync`] to drive
+    /// the build to completion on idle frames instead of stalling until an event.
+    pub fn build_pending(&self) -> bool {
+        !self.disabled && self.built_upto < line_count(&self.synced_rope)
+    }
+
     /// Drain the pending splices for the emission layer.
     pub fn take_queued(&mut self) -> Vec<Splice> {
         std::mem::take(&mut self.queued)
@@ -883,6 +892,10 @@ mod tests {
             BUILD_CHUNK,
             "first chunk is full"
         );
+        assert!(
+            content.build_pending(),
+            "the build still has a chunk after the first sync"
+        );
 
         content.sync(
             &rope,
@@ -899,6 +912,10 @@ mod tests {
             second[0].lines.len() as u32,
             BUILD_CHUNK / 2,
             "the remainder finishes the build",
+        );
+        assert!(
+            !content.build_pending(),
+            "the build is complete after the last chunk"
         );
 
         content.sync(
