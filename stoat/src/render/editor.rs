@@ -2188,6 +2188,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wrapped_continuation_row_paints_the_parent_indent() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/wrap-indent");
+        let path = root.join("a.txt");
+        let body = format!("    {}", "word ".repeat(20));
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            super::render_editor_with_overlay(
+                editor,
+                area,
+                fallback,
+                &theme,
+                &mut buf,
+                true,
+                false,
+                false,
+                LineNumbers::Off,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0.0,
+                WrapMode::EditorWidth,
+                80,
+            );
+        }
+
+        let row_text = |y: u16| -> String {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        let continuation = row_text(1);
+        assert!(
+            continuation.starts_with("    ") && !continuation.trim_start().is_empty(),
+            "the continuation row is indented under the parent's whitespace: {continuation:?}",
+        );
+    }
+
     /// Paint the focused editor's line-number gutter and return its
     /// geometry-cache key.
     fn paint_gutter_key(stoat: &mut Stoat, rows: u16) -> u64 {

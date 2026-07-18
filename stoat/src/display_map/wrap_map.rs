@@ -91,6 +91,12 @@ struct Transform {
     summary: TransformSummary,
     wrap_columns: Vec<u32>,
     tab_line_len: u32,
+    /// Display columns each continuation row is indented by, matching the
+    /// line's leading whitespace capped at half the wrap width. Zero on a
+    /// non-wrapping or single-row transform. Baked into the display columns of
+    /// every `sub_row > 0`, so the synthetic margin needs no special casing
+    /// downstream.
+    indent: u32,
 }
 
 impl Item for Transform {
@@ -400,8 +406,8 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
     for tab_row in 0..tab_line_count {
         let tab_line_len = tab_snapshot.line_len(tab_row);
 
-        let wrap_columns = match wrap_width {
-            None => vec![0],
+        let (wrap_columns, indent) = match wrap_width {
+            None => (vec![0], 0),
             Some(width) => {
                 let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
                 compute_wrap_columns(
@@ -416,7 +422,7 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
 
         let output_rows = wrap_columns.len() as u32;
         let (local_longest_row, local_longest_chars) =
-            compute_transform_longest(&wrap_columns, tab_line_len);
+            compute_transform_longest(&wrap_columns, tab_line_len, indent);
 
         transforms.push(
             Transform {
@@ -428,6 +434,7 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
                 },
                 wrap_columns,
                 tab_line_len,
+                indent,
             },
             (),
         );
@@ -473,8 +480,8 @@ fn sync_incremental(
 
         for tab_row in edit.new.start..edit.new.end {
             let tab_line_len = tab_snapshot.line_len(tab_row);
-            let wrap_columns = match wrap_width {
-                None => vec![0],
+            let (wrap_columns, indent) = match wrap_width {
+                None => (vec![0], 0),
                 Some(width) => {
                     let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
                     compute_wrap_columns(
@@ -488,7 +495,7 @@ fn sync_incremental(
             };
             let output_rows = wrap_columns.len() as u32;
             let (local_longest_row, local_longest_chars) =
-                compute_transform_longest(&wrap_columns, tab_line_len);
+                compute_transform_longest(&wrap_columns, tab_line_len, indent);
             new_transforms.push(
                 Transform {
                     summary: TransformSummary {
@@ -499,6 +506,7 @@ fn sync_incremental(
                     },
                     wrap_columns,
                     tab_line_len,
+                    indent,
                 },
                 (),
             );
@@ -532,14 +540,19 @@ fn sync_incremental(
     (snapshot, wrap_edits)
 }
 
-fn compute_transform_longest(wrap_columns: &[u32], tab_line_len: u32) -> (u32, u32) {
+fn compute_transform_longest(wrap_columns: &[u32], tab_line_len: u32, indent: u32) -> (u32, u32) {
     let mut best_row = 0u32;
     let mut best_chars = 0u32;
     for sub_idx in 0..wrap_columns.len() {
-        let sub_len = if sub_idx + 1 < wrap_columns.len() {
+        let text_len = if sub_idx + 1 < wrap_columns.len() {
             wrap_columns[sub_idx + 1] - wrap_columns[sub_idx]
         } else {
             tab_line_len - wrap_columns[sub_idx]
+        };
+        let sub_len = if sub_idx > 0 {
+            text_len + indent
+        } else {
+            text_len
         };
         if sub_len > best_chars {
             best_row = sub_idx as u32;
@@ -549,20 +562,30 @@ fn compute_transform_longest(wrap_columns: &[u32], tab_line_len: u32) -> (u32, u
     (best_row, best_chars)
 }
 
+/// Break a tab-expanded line into sub-row start columns and its continuation
+/// indent.
+///
+/// The returned columns always start with `0`. Each later entry is the tab
+/// column a continuation row begins at. The indent is the line's leading-
+/// whitespace display width capped at `width / 2`, and continuation rows wrap at
+/// `width - indent` so the indent plus text fills the pane. Both are zero when
+/// the line fits or wrapping is off.
 fn compute_wrap_columns(
     chars: impl Iterator<Item = char>,
     tab_line_len: u32,
     width: u32,
     tab_size: u32,
     max_expansion_column: u32,
-) -> Vec<u32> {
+) -> (Vec<u32>, u32) {
     if width == 0 || tab_line_len <= width {
-        return vec![0];
+        return (vec![0], 0);
     }
 
     let mut breaks = vec![0u32];
     let mut expanded_col = 0u32;
     let mut last_break_candidate: Option<u32> = None;
+    let mut leading_ws = 0u32;
+    let mut in_leading = true;
 
     for ch in chars {
         let char_width = if ch == '\t' {
@@ -575,6 +598,14 @@ fn compute_wrap_columns(
             super::display_width(ch)
         };
 
+        if in_leading {
+            if ch.is_whitespace() {
+                leading_ws += char_width;
+            } else {
+                in_leading = false;
+            }
+        }
+
         if ch == ' ' || ch == '\t' || ch == '-' {
             last_break_candidate = Some(expanded_col + char_width);
         } else if char_width >= 2 {
@@ -584,8 +615,16 @@ fn compute_wrap_columns(
 
         expanded_col += char_width;
 
+        // The indent is finalized well before the first break, since a break
+        // needs `width` columns and the indent caps at half of it.
+        let indent = leading_ws.min(width / 2);
+        let budget = if breaks.len() == 1 {
+            width
+        } else {
+            width - indent
+        };
         let segment_start = *breaks.last().expect("breaks starts with [0]");
-        if expanded_col - segment_start >= width {
+        if expanded_col - segment_start >= budget {
             let break_at = match last_break_candidate {
                 Some(b) if b > segment_start => b,
                 _ => expanded_col,
@@ -599,7 +638,8 @@ fn compute_wrap_columns(
         breaks.pop();
     }
 
-    breaks
+    let indent = leading_ws.min(width / 2);
+    (breaks, indent)
 }
 
 impl WrapSnapshot {
@@ -636,6 +676,7 @@ impl WrapSnapshot {
                         },
                         wrap_columns: vec![0],
                         tab_line_len,
+                        indent: 0,
                     },
                     (),
                 );
@@ -685,7 +726,15 @@ impl WrapSnapshot {
         let sub_row = wrap_point.row() - output_start.0;
 
         if let Some(transform) = cursor.item() {
-            let tab_col = transform.wrap_columns[sub_row as usize] + wrap_point.column();
+            // A continuation row's display columns are shifted right by the
+            // indent, and columns inside the synthetic margin resolve to the
+            // start of the continuation's text.
+            let text_col = if sub_row > 0 {
+                wrap_point.column().saturating_sub(transform.indent)
+            } else {
+                wrap_point.column()
+            };
+            let tab_col = transform.wrap_columns[sub_row as usize] + text_col;
             TabPoint::new(input_start.0, tab_col)
         } else {
             let last_tab_row = input_start.0.saturating_sub(1);
@@ -712,7 +761,12 @@ impl WrapSnapshot {
                 .wrap_columns
                 .partition_point(|&c| c <= tab_col)
                 .saturating_sub(1);
-            let wrap_col = tab_col - transform.wrap_columns[sub_row];
+            let text_col = tab_col - transform.wrap_columns[sub_row];
+            let wrap_col = if sub_row > 0 {
+                text_col + transform.indent
+            } else {
+                text_col
+            };
             WrapPoint::new(output_start.0 + sub_row as u32, wrap_col)
         } else {
             WrapPoint::new(output_start.0, tab_point.column())
@@ -742,7 +796,10 @@ impl WrapSnapshot {
         let max_row = self.total_rows.saturating_sub(1);
         let row = point.row().min(max_row);
         let max_col = self.line_len(row);
-        let col = point.column().min(max_col);
+        // A continuation row's synthetic indent margin holds no text, so a
+        // column inside it clamps up to the first real cell.
+        let min_col = self.soft_wrap_indent(row).min(max_col);
+        let col = point.column().clamp(min_col, max_col);
         WrapPoint::new(row, col)
     }
 
@@ -761,12 +818,7 @@ impl WrapSnapshot {
         let sub_row = wrap_row - output_start.0;
 
         if let Some(transform) = cursor.item() {
-            let next_idx = sub_row as usize + 1;
-            if next_idx < transform.wrap_columns.len() {
-                transform.wrap_columns[next_idx] - transform.wrap_columns[sub_row as usize]
-            } else {
-                transform.tab_line_len - transform.wrap_columns[sub_row as usize]
-            }
+            transform_sub_row_len(transform, sub_row as usize)
         } else {
             0
         }
@@ -788,12 +840,7 @@ impl WrapSnapshot {
             return 0;
         }
 
-        let tab_row = cursor.start().0 .0;
-        self.tab_snapshot
-            .fold_snapshot()
-            .fold_line_chars(tab_row)
-            .take_while(|c| c.is_whitespace())
-            .count() as u32
+        cursor.item().map_or(0, |transform| transform.indent)
     }
 
     pub fn write_display_line(&self, buf: &mut String, wrap_row: u32) {
@@ -813,6 +860,11 @@ impl WrapSnapshot {
         let tab_row = input_start.0;
 
         if let Some(transform) = cursor.item() {
+            if sub_row > 0 {
+                for _ in 0..transform.indent {
+                    buf.push(' ');
+                }
+            }
             let start_col = transform.wrap_columns[sub_row];
             let end_col = if sub_row + 1 < transform.wrap_columns.len() {
                 Some(transform.wrap_columns[sub_row + 1])
@@ -998,6 +1050,9 @@ struct RowChunksState<'a> {
     target_start: u32,
     target_end: Option<u32>,
     done: bool,
+    /// Synthetic leading spaces yielded before this continuation row's text, so
+    /// its columns line up with the parent's indent. Zero on a primary row.
+    indent: u32,
 }
 
 impl<'a> Iterator for WrapChunks<'a> {
@@ -1037,6 +1092,15 @@ impl<'a> WrappedChunksInner<'a> {
             if state.done {
                 self.advance_row();
                 continue;
+            }
+
+            if state.indent > 0 {
+                let spaces = " ".repeat(state.indent as usize);
+                state.indent = 0;
+                return Some(Chunk {
+                    text: Cow::Owned(spaces),
+                    ..Default::default()
+                });
             }
 
             let Some(chunk) = state.tab_chunks.next() else {
@@ -1102,6 +1166,7 @@ impl<'a> WrappedChunksInner<'a> {
             target_start,
             target_end,
             done: false,
+            indent: if sub_row > 0 { transform.indent } else { 0 },
         })
     }
 }
@@ -1182,7 +1247,12 @@ impl WrapPointCursor<'_> {
                 .wrap_columns
                 .partition_point(|&c| c <= tab_col)
                 .saturating_sub(1);
-            let wrap_col = tab_col - transform.wrap_columns[sub_row];
+            let text_col = tab_col - transform.wrap_columns[sub_row];
+            let wrap_col = if sub_row > 0 {
+                text_col + transform.indent
+            } else {
+                text_col
+            };
             WrapPoint::new(output_start.0 + sub_row as u32, wrap_col)
         } else {
             WrapPoint::new(output_start.0, tab_point.column())
@@ -1191,10 +1261,15 @@ impl WrapPointCursor<'_> {
 }
 
 fn transform_sub_row_len(transform: &Transform, sub_idx: usize) -> u32 {
-    if sub_idx + 1 < transform.wrap_columns.len() {
+    let text_len = if sub_idx + 1 < transform.wrap_columns.len() {
         transform.wrap_columns[sub_idx + 1] - transform.wrap_columns[sub_idx]
     } else {
         transform.tab_line_len - transform.wrap_columns[sub_idx]
+    };
+    if sub_idx > 0 {
+        text_len + transform.indent
+    } else {
+        text_len
     }
 }
 
@@ -1377,9 +1452,104 @@ mod tests {
 
     #[test]
     fn soft_wrap_indent_continuation() {
+        // Four leading spaces at width 8 give an indent equal to the whitespace,
+        // sitting exactly at the width/2 cap.
         let snap = make_snapshot("    hello world foo", Some(8));
         assert!(snap.line_count() > 1);
         assert_eq!(snap.soft_wrap_indent(1), 4);
+    }
+
+    #[test]
+    fn continuation_row_display_line_is_indented() {
+        let snap = make_snapshot("    hello world example text", Some(12));
+        assert!(snap.line_count() > 1);
+        let indent = snap.soft_wrap_indent(1) as usize;
+        assert_eq!(
+            indent, 4,
+            "continuation indent matches the four leading spaces"
+        );
+
+        let line = snap.display_line(1);
+        assert_eq!(
+            &line[..indent],
+            "    ",
+            "the row opens with the indent spaces"
+        );
+        assert_ne!(
+            line.as_bytes()[indent],
+            b' ',
+            "real text begins right after the indent",
+        );
+        assert_eq!(
+            line.chars().count() as u32,
+            snap.line_len(1),
+            "line_len counts the indent plus the text",
+        );
+    }
+
+    #[test]
+    fn wrap_point_round_trips_across_the_indent() {
+        let snap = make_snapshot("    hello world example text", Some(12));
+        let indent = snap.soft_wrap_indent(1);
+        assert!(indent > 0);
+        for col in [indent, indent + 2] {
+            let wp = WrapPoint::new(1, col);
+            let tp = snap.to_tab_point(wp);
+            assert_eq!(
+                snap.to_wrap_point(tp),
+                wp,
+                "round-trips at display column {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn clip_point_pushes_out_of_the_indent_margin() {
+        use stoat_text::Bias;
+        let snap = make_snapshot("    hello world example text", Some(12));
+        let indent = snap.soft_wrap_indent(1);
+        assert!(indent > 0);
+        assert_eq!(
+            snap.clip_point(WrapPoint::new(1, 0), Bias::Left),
+            WrapPoint::new(1, indent),
+            "a column in the synthetic margin clamps to the first real cell",
+        );
+    }
+
+    #[test]
+    fn deeply_indented_line_caps_the_indent() {
+        // Ten leading spaces at width 8 cap the indent at width/2 = 4, and the
+        // reduced-but-positive continuation budget still terminates the wrap.
+        let snap = make_snapshot("          alpha beta gamma delta", Some(8));
+        assert!(snap.line_count() > 1, "the line wraps");
+        assert_eq!(snap.soft_wrap_indent(1), 4, "indent caps at half the width");
+        assert!(snap.line_count() < 100, "wrapping still terminates");
+    }
+
+    #[test]
+    fn continuation_chunk_prepends_an_unstyled_indent() {
+        let snap = make_snapshot("    hello world example text", Some(12));
+        let indent = snap.soft_wrap_indent(1) as usize;
+        assert!(indent > 0);
+
+        let endpoints: Arc<[_]> = Arc::from(Vec::new());
+        let chunks: Vec<_> = snap.chunks(1..2, endpoints).collect();
+        let recovered: String = chunks.iter().flat_map(|c| c.text.chars()).collect();
+        assert_eq!(
+            recovered,
+            snap.display_line(1),
+            "the chunks reconstruct the indented continuation row",
+        );
+
+        let first = &chunks[0];
+        assert!(
+            first.text.chars().count() == indent && first.text.chars().all(|c| c == ' '),
+            "the first chunk is exactly the indent spaces",
+        );
+        assert!(
+            first.highlight_style.is_none(),
+            "the synthetic indent carries no style",
+        );
     }
 
     fn make_wrap_map(
