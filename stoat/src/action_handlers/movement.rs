@@ -213,7 +213,7 @@ pub(crate) fn set_cursor_row(editor: &mut EditorState, row: u32) {
     editor
         .selections
         .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
-    editor.scroll_row = row.saturating_sub(2);
+    editor.scroll_row = snapshot.buffer_to_display(point).row.saturating_sub(2);
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -3863,20 +3863,40 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let max_row = rope.max_point().row;
+    let max_point = display_snapshot.max_point();
 
     let sel = editor.selections.newest_anchor().clone();
     let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
     let head_off = buffer_snapshot.resolve_anchor(&sel.head());
     let cursor = cursor_offset(rope, tail_off, head_off);
-    let current_row = rope.offset_to_point(cursor).row;
-    let target_row = match dir {
-        PageDir::Up => current_row.saturating_sub(delta),
-        PageDir::Down => current_row.saturating_add(delta).min(max_row),
+    let current = display_snapshot.buffer_to_display(rope.offset_to_point(cursor));
+
+    // Move the cursor in display rows so it tracks the scroll leg below one for
+    // one across block rows. A downward jump past the last display row lands on
+    // the final cell, since the empty buffer row beyond it has no display row of
+    // its own. Otherwise clip toward the direction of travel so a block row
+    // snaps to the buffer row past it rather than back to the one just left.
+    let target_point = match dir {
+        PageDir::Up => {
+            let raw = DisplayPoint::new(current.row.saturating_sub(delta), current.column);
+            display_snapshot.clip_point(raw, Bias::Left)
+        },
+        PageDir::Down => {
+            let row = current.row.saturating_add(delta);
+            if row >= max_point.row {
+                max_point
+            } else {
+                display_snapshot.clip_point(DisplayPoint::new(row, current.column), Bias::Right)
+            }
+        },
     };
-    if target_row == current_row {
+    if target_point == current {
         return UpdateEffect::None;
     }
+    let Some(target_buffer_pt) = display_snapshot.display_to_buffer(target_point) else {
+        return UpdateEffect::None;
+    };
+    let target_offset = rope.point_to_offset(target_buffer_pt);
 
     let prev = editor.scroll_row;
     let max_scroll = max_scroll_row(display_snapshot.line_count(), viewport);
@@ -3884,8 +3904,6 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
         PageDir::Up => editor.scroll_row.saturating_sub(delta),
         PageDir::Down => editor.scroll_row.saturating_add(delta).min(max_scroll),
     };
-
-    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
     editor.selections.transform(buffer_snapshot, |sel| {
         if extend {
             // In select mode the page motion grows the selection by holding the
@@ -4121,7 +4139,9 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
     let head_off = buffer_snapshot.resolve_anchor(&sel.head());
     let cursor = cursor_offset(rope, tail_off, head_off);
-    let cursor_row = rope.offset_to_point(cursor).row;
+    let cursor_row = display_snapshot
+        .buffer_to_display(rope.offset_to_point(cursor))
+        .row;
 
     let desired_scroll = match align {
         ViewAlign::Top => cursor_row,
@@ -4296,16 +4316,20 @@ pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let max_row = rope.max_point().row;
+    let max_display_row = display_snapshot.max_point().row;
 
     let offset = match align {
         WindowAlign::Top => 0,
         WindowAlign::Center => viewport / 2,
         WindowAlign::Bottom => viewport.saturating_sub(1),
     };
-    let target_row = scroll_row.saturating_add(offset).min(max_row);
+    let target_row = scroll_row.saturating_add(offset).min(max_display_row);
 
-    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
+    let target_point = display_snapshot.clip_point(DisplayPoint::new(target_row, 0), Bias::Left);
+    let Some(target_buffer_pt) = display_snapshot.display_to_buffer(target_point) else {
+        return UpdateEffect::None;
+    };
+    let target_offset = rope.point_to_offset(target_buffer_pt);
     editor.selections.transform(buffer_snapshot, |sel| {
         if extend {
             extend_head_to_cursor(
@@ -4700,14 +4724,12 @@ mod tests {
         );
     }
 
-    /// Block rows -- review chunk headers or deleted-line blocks -- add display
-    /// rows the buffer does not have. The scroll bound must count them, and the
-    /// cursor-follow must reach the last display row, or the last content sits
-    /// below a false bottom. A deletion diff is the cache-coherent way to add
-    /// block rows in a test (a `diff_version` bump forces the snapshot rebuild).
-    #[test]
-    fn scroll_bound_reaches_last_row_past_block_rows() {
-        let mut h = TestHarness::with_size(40, 12);
+    /// Open a 20-line buffer with a deleted-line block anchored above buffer row
+    /// 1, so display rows sit below their buffer rows for every row past the
+    /// block. The harness comes back with a 10-row viewport and deleted blocks
+    /// shown. A deletion diff is the cache-coherent way to add block rows in a
+    /// test (a `diff_version` bump forces the snapshot rebuild).
+    fn open_with_deleted_block(h: &mut TestHarness) {
         let body: String = (0..20).map(|i| format!("line {i:02}\n")).collect();
         let path = h.write_file("diff.rs", &body);
         h.open_file(&path);
@@ -4741,7 +4763,32 @@ mod tests {
         let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
         editor.viewport_rows = Some(10);
         editor.display_map.set_show_deleted_blocks(true);
+    }
 
+    /// The focused editor's block cursor as a display row, mapped through the
+    /// display map so inserted block rows are accounted for.
+    fn focused_cursor_display_row(h: &mut TestHarness) -> u32 {
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let tail = buffer_snapshot.resolve_anchor(&sel.tail());
+        let head = buffer_snapshot.resolve_anchor(&sel.head());
+        let cursor = cursor_offset(buffer_snapshot.rope(), tail, head);
+        let point = buffer_snapshot.rope().offset_to_point(cursor);
+        snapshot.buffer_to_display(point).row
+    }
+
+    /// Block rows -- review chunk headers or deleted-line blocks -- add display
+    /// rows the buffer does not have. The scroll bound must count them, and the
+    /// cursor-follow must reach the last display row, or the last content sits
+    /// below a false bottom.
+    #[test]
+    fn scroll_bound_reaches_last_row_past_block_rows() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_with_deleted_block(&mut h);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
         let (buffer_rows, line_count) = {
             let s = editor.display_map.snapshot();
             (s.buffer_line_count(), s.line_count())
@@ -4766,6 +4813,106 @@ mod tests {
             editor.scroll_row,
             line_count - 11,
             "following the cursor to the last content line nears the display bound",
+        );
+    }
+
+    #[test]
+    fn set_cursor_row_anchors_display_row_past_a_block() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_with_deleted_block(&mut h);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        set_cursor_row(editor, 12);
+        let scroll = editor.scroll_row;
+
+        let cursor_row = focused_cursor_display_row(&mut h);
+        assert!(
+            cursor_row > 12,
+            "the block shifts buffer row 12 to a lower display row",
+        );
+        assert_eq!(
+            cursor_row - scroll,
+            2,
+            "the cursor's display row keeps the intended 2-row top margin",
+        );
+    }
+
+    #[test]
+    fn page_motion_pins_cursor_to_its_screen_row_past_a_block() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_with_deleted_block(&mut h);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            place_cursor(editor, 0, 0);
+            editor.scroll_row = 0;
+        }
+
+        page_motion(&mut h.stoat, PageDir::Down, true);
+
+        let cursor_row = focused_cursor_display_row(&mut h);
+        let scroll = focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .scroll_row;
+        assert!(cursor_row > 0, "the half-page jump moves the cursor down");
+        assert_eq!(
+            cursor_row, scroll,
+            "the cursor stays pinned to the screen row it started on",
+        );
+    }
+
+    #[test]
+    fn align_view_top_uses_cursor_display_row_past_a_block() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_with_deleted_block(&mut h);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            place_cursor(editor, 8, 0);
+        }
+
+        align_view(&mut h.stoat, ViewAlign::Top);
+
+        let cursor_row = focused_cursor_display_row(&mut h);
+        let scroll = focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .scroll_row;
+        assert!(
+            cursor_row > 8,
+            "the block shifts buffer row 8 below display row 8",
+        );
+        assert_eq!(
+            scroll, cursor_row,
+            "align Top puts the cursor's display row at the viewport top",
+        );
+    }
+
+    #[test]
+    fn goto_window_top_lands_on_display_top_line_past_a_block() {
+        let mut h = TestHarness::with_size(40, 12);
+        open_with_deleted_block(&mut h);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_row = 11;
+        }
+
+        let expected_row = {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            let snapshot = editor.display_map.snapshot();
+            snapshot
+                .display_to_buffer(DisplayPoint::new(11, 0))
+                .expect("a buffer line renders at the viewport top")
+                .row
+        };
+
+        goto_window(&mut h.stoat, WindowAlign::Top, false);
+
+        assert!(
+            expected_row < 11,
+            "display row 11 maps to an earlier buffer row past the block",
+        );
+        assert_eq!(
+            focused_cursor_point(&mut h).row,
+            expected_row,
+            "goto Top lands on the buffer line rendered at the viewport top",
         );
     }
 
