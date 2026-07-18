@@ -166,6 +166,11 @@ pub(crate) struct FrameCtx<'a> {
     /// The lookup and colors a pane needs to declare its minimap strip, `Some`
     /// only when the strip is active (under stoatty with the minimap enabled).
     pub(crate) minimap_chrome: Option<MinimapChrome<'a>>,
+    /// The reserved single-minimap band, `Some` only when [`MinimapMode::Single`]
+    /// stamped one this frame. It stops one row above the bottom, so a pane whose
+    /// status bar sits on that freed row flush against the band reclaims its
+    /// width and runs edge to edge.
+    pub(crate) minimap_band: Option<Rect>,
     /// Terminal cell the mouse last rested over, or `None` when it has not
     /// moved over a pane. The focused editor resolves the diagnostic under it
     /// to raise a hover popover.
@@ -256,10 +261,11 @@ pub(crate) fn frame(
     let minimap_enabled = minimap_mode != MinimapMode::Off;
     stoat.ensure_minimap_content_ids();
 
-    // Single mode reserves a full-height strip band at the window's right edge
-    // and shrinks the pane layout by the strip width, so the panes never overlap
-    // the strip. The band is stamped on Stoat for the mouse handler, then read
-    // back for this paint.
+    // Single mode reserves a strip band at the window's right edge and shrinks
+    // the pane layout by the strip width, so the panes never overlap the strip.
+    // The band stops one row above the bottom so a status bar on that row runs
+    // the full window width. The band is stamped on Stoat for the mouse handler,
+    // then read back for this paint.
     stoat.single_minimap_rect = (stoat.stoatty
         && minimap_mode == MinimapMode::Single
         && full.width >= editor::MINIMAP_MIN_PANE_COLS)
@@ -267,7 +273,7 @@ pub(crate) fn frame(
             x: full.x + full.width - editor::MINIMAP_STRIP_COLS,
             y: full.y,
             width: editor::MINIMAP_STRIP_COLS,
-            height: full.height,
+            height: full.height.saturating_sub(1),
         });
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
@@ -348,6 +354,7 @@ pub(crate) fn frame(
             .clamp(0.0, 1.0) as f32,
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
+        minimap_band: single_minimap_rect,
         hover_cell: stoat.hover_cell,
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),

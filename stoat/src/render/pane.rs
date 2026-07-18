@@ -45,7 +45,18 @@ pub(crate) fn render_pane(
 ) {
     let theme = frame.theme;
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
-    let (content_area, status_area) = split_pane_status(pane.area);
+    let (content_area, mut status_area) = split_pane_status(pane.area);
+
+    // The single-minimap band stops one row above the bottom. A status bar on
+    // that freed row, flush against the band's left edge, reclaims the band's
+    // width so it runs edge to edge. Mid-window status rows sit beside strip
+    // rows and stay pane-width.
+    if let Some(band) = frame.minimap_band
+        && status_area.y == band.y + band.height
+        && status_area.x + status_area.width == band.x
+    {
+        status_area.width += band.width;
+    }
 
     let PaneCtx {
         editors,

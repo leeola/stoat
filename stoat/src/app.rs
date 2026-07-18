@@ -9596,7 +9596,11 @@ mod tests {
             "the band ends at the window right edge"
         );
         assert_eq!(band.y, full.y);
-        assert_eq!(band.height, full.height);
+        assert_eq!(
+            band.height,
+            full.height - 1,
+            "the band stops one row above the bottom status row"
+        );
         assert!(band.width > 0, "the band has a real width");
 
         let focused_area = focused_editor_pane_area(&h);
@@ -9611,6 +9615,48 @@ mod tests {
                 .values()
                 .all(|e| e.minimap_rect.is_none()),
             "single mode reserves no per-pane strips"
+        );
+    }
+
+    #[test]
+    fn single_minimap_band_leaves_the_bottom_status_row_full_width() {
+        use stoat_config::MinimapMode;
+
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\n");
+        h.open_file(&a);
+        h.settle();
+
+        let size = h.stoat.size();
+        let status_bg = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+            .bg
+            .expect("theme has a focused status background");
+
+        let buf = h.stoat.render();
+
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        assert_eq!(
+            band.height,
+            size.height - 1,
+            "the band stops one row above the bottom status row"
+        );
+
+        let bottom = size.height - 1;
+        assert_eq!(
+            buf[(size.width - 1, bottom)].bg,
+            status_bg,
+            "the focused status bar reaches the window's last column"
         );
     }
 
