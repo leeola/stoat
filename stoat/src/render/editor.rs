@@ -24,7 +24,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
-use stoat_config::LineNumbers;
+use stoat_config::{LineNumbers, WrapMode};
 use stoat_text::{cursor_offset, Bias, Point, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
@@ -69,6 +69,8 @@ pub(crate) fn render_editor(
         None,
         None,
         0.0,
+        WrapMode::None,
+        80,
     );
 }
 
@@ -91,21 +93,56 @@ pub(crate) fn render_editor_with_overlay(
     mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut Vec<UndercurlSpan>>,
     dim: f32,
+    wrap: WrapMode,
+    wrap_column: u32,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
     editor.minimap_rect = None;
 
     if editor.review_view.is_some() {
+        editor.display_map.set_wrap_width(None);
         let scene = if stoatty { scene } else { None };
         render_review(editor, inner, fallback_style, theme, buf, scene);
         return;
     }
 
     if editor.diff_view {
+        editor.display_map.set_wrap_width(None);
         render_diff_view(editor, inner, fallback_style, theme, buf, stoatty);
         return;
     }
+
+    // A first snapshot drives the gutter measurement and the wrap-width
+    // decision. Its buffer-level facts (line count, cursor line, diagnostics)
+    // are wrap-independent, so the width is resolved and stamped here before the
+    // wrapped snapshot the gutter and text paint from is taken below.
+    let snapshot = editor.display_map.snapshot();
+
+    let rich_gutter_colors = resolve_rich_gutter(theme, fallback_style, stoatty);
+    let gutter_is_rich = scene.is_some() && rich_gutter_colors.is_some();
+    let measured_gutter_w = if line_numbers != LineNumbers::Off {
+        measure_gutter_width(&snapshot, gutter_is_rich)
+    } else {
+        match diagnostic_info {
+            Some((path, set)) if !set.get(path).is_empty() => 1,
+            _ => 0,
+        }
+    };
+
+    let after_gutter = inner.width.saturating_sub(measured_gutter_w);
+    let minimap_cols = if stoatty && minimap_enabled && after_gutter >= MINIMAP_MIN_PANE_COLS {
+        MINIMAP_STRIP_COLS
+    } else {
+        0
+    };
+    let text_width = after_gutter.saturating_sub(minimap_cols);
+    let wrap_width = match wrap {
+        WrapMode::None => None,
+        WrapMode::EditorWidth => Some(u32::from(text_width).max(1)),
+        WrapMode::Bounded => Some(u32::from(text_width).max(1).min(wrap_column)),
+    };
+    editor.display_map.set_wrap_width(wrap_width);
 
     let snapshot = editor.display_map.snapshot();
     let visible_rows = inner.height as u32;
@@ -235,6 +272,14 @@ pub(crate) fn render_editor_with_overlay(
         }
         1
     };
+
+    // The wrap width stamped above subtracted `measured_gutter_w` from the pane;
+    // the painted gutter must reserve exactly that so the text rect and the wrap
+    // width agree.
+    debug_assert_eq!(
+        gutter_w, measured_gutter_w,
+        "painted gutter width matches the measured width the wrap used",
+    );
 
     // Inset the text rect by the gutter, and record the width so click-to-offset
     // subtracts the same shift. Written after the `row_severity` borrow ends.
@@ -1015,9 +1060,35 @@ pub(crate) fn gutter_geometry(
     let phantom = (max.row > 0 && max.column == 0).then_some(max.row + 1);
     folded.retain(|&(number, _)| Some(number) != phantom);
 
-    let width_digits =
-        decimal_digits(snapshot.buffer_line_count() - phantom.is_some() as u32).max(2);
-    (folded, width_digits)
+    (folded, gutter_width_digits(snapshot))
+}
+
+/// The digit width the gutter reserves for `snapshot`'s line numbers, at least
+/// two.
+///
+/// A trailing newline leaves an empty final line the min-width-1 cursor cannot
+/// reach, so it is rendering padding rather than a line and never widens the
+/// gutter. Counts only buffer lines, never wrap or block rows, so it can be
+/// measured before the wrapped snapshot is taken.
+fn gutter_width_digits(snapshot: &DisplaySnapshot) -> u16 {
+    let max = snapshot.buffer_snapshot().rope().max_point();
+    let phantom = max.row > 0 && max.column == 0;
+    decimal_digits(snapshot.buffer_line_count() - phantom as u32).max(2)
+}
+
+/// The cell columns the line-number gutter reserves, measured without painting.
+///
+/// `rich` selects the sub-cell [`Gutter::cell_width`] layout. The degraded
+/// gutter instead reserves a mark column, the digits, and a gap. The result
+/// matches what [`draw_line_number_gutter`] paints for the same snapshot, so the
+/// wrap width can be resolved before the wrapped snapshot exists.
+fn measure_gutter_width(snapshot: &DisplaySnapshot, rich: bool) -> u16 {
+    let width_digits = gutter_width_digits(snapshot);
+    if rich {
+        rich_gutter(&[], width_digits, [0; 3], [0; 3], [0; 3]).cell_width()
+    } else {
+        width_digits + 2
+    }
 }
 
 /// The number the gutter paints for an absolute 1-based line.
@@ -1899,7 +1970,11 @@ fn visible_byte_range(
     end_row: u32,
 ) -> Range<usize> {
     let rope_len = rope.len();
+    let line_count = snapshot.line_count();
     let row_offset = |row: u32| {
+        if row >= line_count {
+            return rope_len;
+        }
         snapshot
             .display_to_buffer(DisplayPoint::new(row, 0))
             .map(|point| rope.point_to_offset(point))
@@ -1936,7 +2011,7 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
     use std::path::PathBuf;
     use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
-    use stoat_config::LineNumbers;
+    use stoat_config::{LineNumbers, WrapMode};
     use stoat_text::{Bias, Point, SelectionGoal};
 
     fn diag(line: u32, severity: DiagnosticSeverity) -> Diagnostic {
@@ -1982,6 +2057,137 @@ mod tests {
         );
     }
 
+    #[test]
+    fn measure_gutter_width_matches_the_painted_fallback_gutter() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/measure-gutter");
+        let path = root.join("a.txt");
+        let body: String = (0..120).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 6);
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        assert_eq!(
+            super::gutter_width_digits(&snapshot),
+            3,
+            "120 lines need three digits",
+        );
+        assert_eq!(
+            super::measure_gutter_width(&snapshot, false),
+            editor.gutter_width,
+            "the measured fallback width matches the painted gutter",
+        );
+    }
+
+    /// Open a single 200-column line with no trailing newline, so any wrapping
+    /// splits it across display rows.
+    fn open_long_line(h: &mut crate::test_harness::TestHarness) {
+        let root = PathBuf::from("/wrap");
+        let path = root.join("long.txt");
+        h.fake_fs().insert_file(&path, "a".repeat(200).as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+    }
+
+    /// Render the focused editor with `wrap` and return its stamped wrap width
+    /// alongside the resulting display and buffer line counts.
+    fn wrap_after_render(
+        stoat: &mut Stoat,
+        area: Rect,
+        wrap: WrapMode,
+        wrap_column: u32,
+    ) -> (Option<u32>, u32, u32) {
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            true,
+            false,
+            false,
+            LineNumbers::Off,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            wrap,
+            wrap_column,
+        );
+        let snapshot = editor.display_map.snapshot();
+        (
+            editor.display_map.wrap_width(),
+            snapshot.line_count(),
+            snapshot.buffer_line_count(),
+        )
+    }
+
+    #[test]
+    fn editor_width_wrap_splits_a_long_line() {
+        let mut h = Stoat::test();
+        open_long_line(&mut h);
+        let area = Rect::new(0, 0, 40, 10);
+        let (width, display_rows, buffer_rows) =
+            wrap_after_render(&mut h.stoat, area, WrapMode::EditorWidth, 80);
+        assert_eq!(width, Some(40), "editor_width wraps at the pane text width");
+        assert_eq!(buffer_rows, 1, "the buffer is one long line");
+        assert_eq!(display_rows, 5, "200 columns wrap into five 40-column rows");
+    }
+
+    #[test]
+    fn wrap_none_leaves_a_long_line_on_one_row() {
+        let mut h = Stoat::test();
+        open_long_line(&mut h);
+        let area = Rect::new(0, 0, 40, 10);
+        let (width, display_rows, buffer_rows) =
+            wrap_after_render(&mut h.stoat, area, WrapMode::None, 80);
+        assert_eq!(width, None, "none disables wrapping");
+        assert_eq!(
+            display_rows, buffer_rows,
+            "the long line keeps its single row and truncates",
+        );
+    }
+
+    #[test]
+    fn bounded_wrap_caps_at_the_wrap_column() {
+        let mut h = Stoat::test();
+        open_long_line(&mut h);
+        let area = Rect::new(0, 0, 40, 10);
+        let (width, display_rows, _) = wrap_after_render(&mut h.stoat, area, WrapMode::Bounded, 20);
+        assert_eq!(
+            width,
+            Some(20),
+            "bounded caps at the wrap column below the pane width",
+        );
+        assert_eq!(display_rows, 10, "200 columns wrap into ten 20-column rows");
+    }
+
+    #[test]
+    fn an_unrendered_editor_has_no_wrap_width() {
+        let mut h = Stoat::test();
+        open_long_line(&mut h);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        assert_eq!(
+            editor.display_map.wrap_width(),
+            None,
+            "an editor never rendered has no pane width to wrap at",
+        );
+    }
+
     /// Paint the focused editor's line-number gutter and return its
     /// geometry-cache key.
     fn paint_gutter_key(stoat: &mut Stoat, rows: u16) -> u64 {
@@ -2008,6 +2214,8 @@ mod tests {
             None,
             None,
             0.0,
+            WrapMode::None,
+            80,
         );
         editor
             .gutter_geometry_cache
@@ -2101,6 +2309,8 @@ mod tests {
             None,
             None,
             0.0,
+            WrapMode::None,
+            80,
         );
         let gutter_w = editor.gutter_width;
         (0..rows)
@@ -2147,6 +2357,8 @@ mod tests {
             None,
             None,
             0.0,
+            WrapMode::None,
+            80,
         );
         let rect = editor.minimap_rect;
         let strip = (0..rows)
@@ -2258,6 +2470,8 @@ mod tests {
             None,
             None,
             0.0,
+            WrapMode::None,
+            80,
         );
         (0..rows)
             .map(|y| {

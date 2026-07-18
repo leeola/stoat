@@ -6240,6 +6240,7 @@ impl Stoat {
                 None => editor_page_content_version(
                     syntax_highlight,
                     editor.gutter_width,
+                    editor.display_map.wrap_width(),
                     current_line,
                     editor
                         .gutter_severity_cache
@@ -6927,11 +6928,13 @@ impl Stoat {
 ///
 /// A page stays cached while the surface scrolls, but must repaint when the
 /// syntax-highlight toggle recolors every row, a diagnostics change restyles
-/// the gutter, a gutter-width change reflows the inset, or the cursor's buffer
-/// line moves under relative numbering.
+/// the gutter, a gutter-width or wrap-width change reflows the text, or the
+/// cursor's buffer line moves under relative numbering.
+#[allow(clippy::too_many_arguments)]
 fn editor_page_content_version(
     syntax_highlight: bool,
     gutter_width: u16,
+    wrap_width: Option<u32>,
     current_line: Option<u32>,
     severity_version: u64,
     diff_view: bool,
@@ -6941,6 +6944,7 @@ fn editor_page_content_version(
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
     gutter_width.hash(&mut hasher);
+    wrap_width.hash(&mut hasher);
     current_line.hash(&mut hasher);
     severity_version.hash(&mut hasher);
     diff_view.hash(&mut hasher);
@@ -14885,30 +14889,35 @@ mod tests {
 
     #[test]
     fn editor_page_content_version_tracks_the_cursor_line() {
-        let base = editor_page_content_version(true, 3, Some(10), 0, false, 0, 0.0);
+        let base = editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0);
         assert_eq!(
             base,
-            editor_page_content_version(true, 3, Some(10), 0, false, 0, 0.0),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0),
             "identical inputs keep a buffered page cached"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(11), 0, false, 0, 0.0),
+            editor_page_content_version(true, 3, None, Some(11), 0, false, 0, 0.0),
             "a cursor-line move refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, 0, false, 0, 0.0),
+            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0),
             "switching to absolute numbering refills"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(10), 0, true, 7, 0.0),
+            editor_page_content_version(true, 3, Some(72), Some(10), 0, false, 0, 0.0),
+            "a wrap-width change refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0),
             "a diff-view hunk change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(10), 0, false, 0, 0.25),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.25),
             "a focus change to a dimmed pane refills buffered pages"
         );
     }

@@ -406,7 +406,23 @@ impl DisplayMap {
     }
 
     pub fn set_wrap_width(&mut self, width: Option<u32>) {
+        // The snapshot fast-path keys only off buffer, fold, and inlay versions,
+        // so a wrap-width change with an otherwise-unchanged buffer would be
+        // served a stale snapshot. Drop the cache when the width actually moves.
+        if self
+            .cached_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.wrap_width() != width)
+        {
+            self.cached_snapshot = None;
+        }
         self.wrap_map.set_wrap_width(width);
+    }
+
+    /// The wrap width most recently stamped by [`Self::set_wrap_width`], before
+    /// the next snapshot applies it. `None` disables wrapping.
+    pub fn wrap_width(&self) -> Option<u32> {
+        self.wrap_map.wrap_width()
     }
 
     pub fn highlight_text(

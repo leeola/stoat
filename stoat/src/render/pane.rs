@@ -88,6 +88,8 @@ pub(crate) fn render_pane(
                     Some(&mut *scene),
                     Some(undercurls),
                     if is_focused { 0.0 } else { frame.inactive_dim },
+                    frame.wrap_mode,
+                    frame.wrap_column,
                 );
 
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)

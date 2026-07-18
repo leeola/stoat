@@ -892,6 +892,7 @@ mod tests {
         };
         use std::{collections::BTreeMap, path::PathBuf};
         use stoat_action::OpenFile;
+        use stoat_config::WrapMode;
 
         let mut h = Stoat::test();
         let root = PathBuf::from("/page-snapshot");
@@ -935,6 +936,8 @@ mod tests {
                 None,
                 None,
                 0.0,
+                WrapMode::None,
+                80,
             );
             editor.scroll_row = saved;
             let expected = serialize_buffer(&expected);

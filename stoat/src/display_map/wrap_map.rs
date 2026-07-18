@@ -263,10 +263,11 @@ impl WrapMap {
         self.poll_background_task();
 
         if !self.snapshot.interpolated {
-            let snap_version = self.snapshot.tab_snapshot.fold_snapshot().version();
+            let (snap_fold, snap_buf, snap_inlay) = tab_versions(&self.snapshot.tab_snapshot);
             let mut to_remove = 0;
             for (tab_snapshot, _) in &self.pending_edits {
-                if tab_snapshot.fold_snapshot().version() <= snap_version {
+                let (fold, buf, inlay) = tab_versions(tab_snapshot);
+                if fold <= snap_fold && buf <= snap_buf && inlay <= snap_inlay {
                     to_remove += 1;
                 } else {
                     break;
@@ -327,10 +328,11 @@ impl WrapMap {
 
             // Apply interpolated edits for any remaining pending
             let was_interpolated = self.snapshot.interpolated;
-            let snap_version = self.snapshot.tab_snapshot.fold_snapshot().version();
+            let (snap_fold, snap_buf, snap_inlay) = tab_versions(&self.snapshot.tab_snapshot);
             let mut to_remove = 0;
             for (tab_snapshot, edits) in &self.pending_edits {
-                if tab_snapshot.fold_snapshot().version() <= snap_version {
+                let (fold, buf, inlay) = tab_versions(tab_snapshot);
+                if fold <= snap_fold && buf <= snap_buf && inlay <= snap_inlay {
                     to_remove += 1;
                 } else {
                     let interpolated = self.snapshot.interpolate(tab_snapshot.clone(), edits);
@@ -374,6 +376,21 @@ impl WrapMap {
     pub fn wrap_width(&self) -> Option<u32> {
         self.wrap_width
     }
+}
+
+/// The `(fold, buffer, inlay)` version tuple a tab snapshot carries.
+///
+/// A wrapped snapshot already reflects a pending edit only when its own tuple is
+/// at least the edit's in every component. Folding advances the fold version
+/// alone and a buffer edit the buffer version alone, so comparing any single
+/// component would miss the other kind of change and drop an unapplied edit.
+fn tab_versions(tab: &TabSnapshot) -> (usize, u64, usize) {
+    let inlay = tab.fold_snapshot().inlay_snapshot();
+    (
+        tab.fold_snapshot().version(),
+        inlay.version(),
+        inlay.inlay_version,
+    )
 }
 
 fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSnapshot {
@@ -957,8 +974,7 @@ impl WrapSnapshot {
 pub enum WrapChunks<'a> {
     /// No wrapping: a thin wrapper around [`TabChunks`].
     Passthrough { tab_chunks: Box<TabChunks<'a>> },
-    /// Wrapping active: emits row-by-row using the expanded display line
-    /// text. Unstyled; see the FIXME on [`WrapSnapshot::chunks`].
+    /// Wrapping active: emits row-by-row using the expanded display line text.
     Wrapped(Box<WrappedChunksInner<'a>>),
 }
 

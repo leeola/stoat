@@ -50,7 +50,7 @@ use crate::{
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use slotmap::SlotMap;
 use std::{collections::HashMap, path::Path};
-use stoat_config::{LineNumbers, MinimapMode};
+use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoatty_widgets::{minimap::Minimap, popover::Popover, ApcScene};
 
 /// Full-cell text scale under stoatty, in 256ths of a cell, for grid-size modal
@@ -146,6 +146,14 @@ pub(crate) struct FrameCtx<'a> {
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
     pub(crate) line_numbers: LineNumbers,
+    /// How document editor panes soft-wrap long lines, resolved from
+    /// `editor.wrap` (default [`WrapMode::EditorWidth`]). Applied only to pane
+    /// editors. Non-pane inputs and pickers never wrap.
+    pub(crate) wrap_mode: WrapMode,
+    /// The wrap column [`WrapMode::Bounded`] caps against, resolved from
+    /// `editor.wrap_column` (default 80, at least 1). Ignored by the other wrap
+    /// modes.
+    pub(crate) wrap_column: u32,
     /// Fraction an unfocused pane's colors blend toward the theme background,
     /// resolved from `ui.inactive_dim` (default 0.25, clamped to `0.0..=1.0`).
     /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
@@ -311,6 +319,8 @@ pub(crate) fn frame(
             .settings
             .editor_line_numbers
             .unwrap_or(LineNumbers::Relative),
+        wrap_mode: stoat.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth),
+        wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
         inactive_dim: stoat
             .settings
             .ui_inactive_dim
