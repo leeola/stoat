@@ -579,6 +579,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 &self.args,
                 self.working_directory.as_deref(),
                 self.stoat_dir.as_deref(),
+                stoat_log::ident::get().map(|i| i.id.as_str()),
                 rows as u16,
                 cols as u16,
                 move |output| match output {

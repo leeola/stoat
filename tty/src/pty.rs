@@ -71,11 +71,13 @@ impl Pty {
     /// `sink` runs on the reader thread: it is called with [`PtyOutput::Data`]
     /// for each chunk the shell writes and once with [`PtyOutput::Eof`] when the
     /// shell exits. It must be `Send` since it runs off the main thread.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         program: &str,
         args: &[String],
         cwd: Option<&Path>,
         stoat_dir: Option<&Path>,
+        log_id: Option<&str>,
         rows: u16,
         cols: u16,
         sink: impl FnMut(PtyOutput<'_>) + Send + 'static,
@@ -91,7 +93,7 @@ impl Pty {
 
         let child = pair
             .slave
-            .spawn_command(shell_command(program, args, cwd, stoat_dir))
+            .spawn_command(shell_command(program, args, cwd, stoat_dir, log_id))
             .map_err(io::Error::other)?;
         tracing::info!(program, pid = ?child.process_id(), "spawned child over pty");
         let master_writer = pair.master.take_writer().map_err(io::Error::other)?;
@@ -192,13 +194,14 @@ fn shell_command(
     args: &[String],
     cwd: Option<&Path>,
     stoat_dir: Option<&Path>,
+    log_id: Option<&str>,
 ) -> CommandBuilder {
     let mut command = CommandBuilder::new(program);
     command.args(args);
     if let Some(dir) = cwd {
         command.cwd(dir);
     }
-    configure_child_env(&mut command, stoat_dir);
+    configure_child_env(&mut command, stoat_dir, log_id);
     command
 }
 
@@ -219,7 +222,8 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 /// `TERM` selects the terminfo the shell and its children load. `STOATTY` marks
 /// the shell as running under stoatty, so a child can gate stoatty-only output
 /// on its presence synchronously at startup, without the `XTVERSION` query round
-/// trip.
+/// trip. `STOATTY_LOG_ID`, when set, carries this session's log id so a child
+/// prefixes its own log filenames with it and one session's files sort together.
 ///
 /// Inherited multiplexer markers ([`MULTIPLEXER_ENV_VARS`]) are removed because
 /// stoatty presents a fresh terminal that owns and forwards its own window's
@@ -228,10 +232,17 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 /// control this window. A real multiplexer launched inside stoatty re-sets
 /// these for its own children, so in-stoatty-mux detection still stands down as
 /// intended.
-fn configure_child_env(command: &mut CommandBuilder, stoat_dir: Option<&Path>) {
+fn configure_child_env(
+    command: &mut CommandBuilder,
+    stoat_dir: Option<&Path>,
+    log_id: Option<&str>,
+) {
     command.env("TERM", "xterm-256color");
     command.env("STOATTY", "1");
     command.env("STOATTY_VERSION", crate::cli::VERSION_INFO);
+    if let Some(id) = log_id {
+        command.env("STOATTY_LOG_ID", id);
+    }
     for var in MULTIPLEXER_ENV_VARS {
         command.env_remove(var);
     }
@@ -467,12 +478,22 @@ mod tests {
 
     #[test]
     fn shell_command_sets_term_and_stoatty_env() {
-        let command = shell_command("/bin/sh", &[], None, Some(Path::new("/opt/stoat/bin")));
+        let command = shell_command(
+            "/bin/sh",
+            &[],
+            None,
+            Some(Path::new("/opt/stoat/bin")),
+            Some("20260718-143022-99"),
+        );
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
         assert_eq!(
             command.get_env("STOATTY_VERSION"),
             Some(OsStr::new(crate::cli::VERSION_INFO)),
+        );
+        assert_eq!(
+            command.get_env("STOATTY_LOG_ID"),
+            Some(OsStr::new("20260718-143022-99")),
         );
         let path = command.get_env("PATH").expect("PATH set from stoat dir");
         assert!(
@@ -481,6 +502,9 @@ mod tests {
                 .starts_with("/opt/stoat/bin"),
             "stoat dir prepended to PATH: {path:?}"
         );
+
+        let without_id = shell_command("/bin/sh", &[], None, None, None);
+        assert_eq!(without_id.get_env("STOATTY_LOG_ID"), None);
     }
 
     #[test]
@@ -492,7 +516,7 @@ mod tests {
         command.env("ZELLIJ_SESSION_NAME", "main");
         command.env("ZELLIJ_PANE_ID", "71");
 
-        configure_child_env(&mut command, None);
+        configure_child_env(&mut command, None, None);
 
         for var in MULTIPLEXER_ENV_VARS {
             assert_eq!(command.get_env(var), None, "{var} not stripped");
@@ -507,7 +531,7 @@ mod tests {
 
     #[test]
     fn shell_command_sets_cwd_when_given() {
-        let command = shell_command("/bin/sh", &[], Some(Path::new("/tmp")), None);
+        let command = shell_command("/bin/sh", &[], Some(Path::new("/tmp")), None, None);
         assert_eq!(
             command.get_cwd().map(|cwd| cwd.as_os_str()),
             Some(OsStr::new("/tmp"))
