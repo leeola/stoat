@@ -66,13 +66,21 @@ pub fn detect_width() -> u16 {
 /// `--no-color` flag and the standard CLI conventions: respects the
 /// `NO_COLOR` env var (any value disables) and `TERM=dumb`.
 pub fn detect_color_enabled(no_color_flag: bool) -> bool {
+    let no_color_env_set = std::env::var_os("NO_COLOR").is_some();
+    let term = std::env::var("TERM").ok();
+    color_enabled(no_color_flag, no_color_env_set, term.as_deref())
+}
+
+/// The color decision as pure logic, split from [`detect_color_enabled`]'s env
+/// reads so the flag > `NO_COLOR` > `TERM=dumb` precedence is unit-testable.
+fn color_enabled(no_color_flag: bool, no_color_env_set: bool, term: Option<&str>) -> bool {
     if no_color_flag {
         return false;
     }
-    if std::env::var_os("NO_COLOR").is_some() {
+    if no_color_env_set {
         return false;
     }
-    if std::env::var_os("TERM").is_some_and(|t| t == "dumb") {
+    if term == Some("dumb") {
         return false;
     }
     true
@@ -539,5 +547,19 @@ mod tests {
     #[test]
     fn detect_color_respects_explicit_no_color_flag() {
         assert!(!detect_color_enabled(true));
+    }
+
+    #[test]
+    fn color_enabled_precedence() {
+        // The flag disables regardless of the environment.
+        assert!(!color_enabled(true, false, Some("xterm")));
+        assert!(!color_enabled(true, true, Some("dumb")));
+        // NO_COLOR set disables.
+        assert!(!color_enabled(false, true, Some("xterm")));
+        // TERM=dumb disables.
+        assert!(!color_enabled(false, false, Some("dumb")));
+        // Any other TERM, or none, enables.
+        assert!(color_enabled(false, false, Some("xterm")));
+        assert!(color_enabled(false, false, None));
     }
 }
