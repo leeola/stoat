@@ -301,6 +301,13 @@ pub struct TextPass {
     /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
     /// alongside the integer cell scales.
     shape_cache: FxHashMap<(char, u32, u16), Option<CacheKey>>,
+    /// Shaped glyphs of each ligature run, keyed by the run text, so a repainted
+    /// row reuses them instead of rebuilding a cosmic-text buffer and reshaping.
+    ///
+    /// Keyed on text alone because runs only group same-scale primary-covered
+    /// cells in the constant primary family, matching [`Self::shape_cache`]'s
+    /// family-blind invariant. Flushed whole past [`RUN_SHAPE_CACHE_CAP`].
+    run_shape_cache: FxHashMap<String, Vec<(usize, CacheKey)>>,
     /// The shaped glyphs of each grid row from the previous frame, indexed by
     /// row, so an unchanged row reuses them instead of re-shaping. Rebuilt for
     /// damaged rows, the cursor's old and new rows, and (wholesale) on resize or
@@ -620,6 +627,7 @@ impl TextPass {
             ligatures,
             swash_cache,
             shape_cache: FxHashMap::default(),
+            run_shape_cache: FxHashMap::default(),
             glyph_row_cache: Vec::new(),
             plain_row_instances: Vec::new(),
             underline_row_instances: Vec::new(),
@@ -648,6 +656,7 @@ impl TextPass {
         self.metrics = metrics;
         self.baseline = probe_baseline(&mut self.font_system, metrics, shape_family(&self.family));
         self.shape_cache.clear();
+        self.run_shape_cache.clear();
     }
 
     /// Upload the panel occluders, reallocating the buffer and rebuilding all
@@ -1951,9 +1960,14 @@ impl TextPass {
 
             let (fg, _) = cell.draw_colors();
             let (text, col_of_byte) = run_text_and_columns(&run);
-            for (offset, key) in
-                shape_run(&mut self.font_system, &text, self.metrics, shaping.primary)
-            {
+            let shaped = shape_run_cached(
+                &mut self.run_shape_cache,
+                &mut self.font_system,
+                &text,
+                self.metrics,
+                shaping.primary,
+            );
+            for &(offset, key) in shaped {
                 let Some(&glyph_col) = col_of_byte.get(offset) else {
                     continue;
                 };
@@ -2478,6 +2492,37 @@ fn shape_run(
         .collect()
 }
 
+/// The largest the run-shape cache grows before it is flushed whole.
+///
+/// Terminal content repeats, so a flushed cache repopulates within a frame. The
+/// bound keeps a pathological stream of unique runs from growing it unbounded.
+const RUN_SHAPE_CACHE_CAP: usize = 65_536;
+
+/// Shape `text` as one run, reusing an identical run's glyphs from `cache`.
+///
+/// [`shape_run`] rebuilds a cosmic-text buffer and reshapes from scratch, the
+/// dominant per-frame cost when a ligature row is repainted. The run text alone
+/// keys the result, since runs group only same-scale primary-covered cells in
+/// the constant `family`. On a miss the run is shaped and stored. The cache is
+/// flushed whole once it reaches [`RUN_SHAPE_CACHE_CAP`], before the new entry
+/// lands so the current run survives.
+fn shape_run_cached<'a>(
+    cache: &'a mut FxHashMap<String, Vec<(usize, CacheKey)>>,
+    font_system: &mut FontSystem,
+    text: &str,
+    metrics: CellMetrics,
+    family: Family<'_>,
+) -> &'a [(usize, CacheKey)] {
+    if !cache.contains_key(text) {
+        let shaped = shape_run(font_system, text, metrics, family);
+        if cache.len() >= RUN_SHAPE_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(text.to_string(), shaped);
+    }
+    &cache[text]
+}
+
 /// The run's shaping string and a per-byte map from string offset to grid column.
 ///
 /// Each cell contributes its character. Every byte of that character maps to the
@@ -2861,8 +2906,8 @@ mod tests {
         build_font_system, build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell,
         fill_cell_box, glyph_family, glyph_origin, is_cell_fill, load_bundled_fonts,
         overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_char,
-        shape_family, shape_run, text_run_origin, GlyphSource, RectInstance, TextInstance,
-        TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        shape_family, shape_run, shape_run_cached, text_run_origin, FxHashMap, GlyphSource,
+        RectInstance, TextInstance, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
@@ -3223,6 +3268,35 @@ mod tests {
             ligated[0].0, 0,
             "the ligature's first glyph maps back to the run's first column"
         );
+    }
+
+    #[test]
+    fn shape_run_cached_returns_the_cached_run_without_reshaping() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+        let metrics = CellMetrics::from_font_size(16, 1.0);
+        let jbm = Family::Name("JetBrains Mono");
+
+        let mut cache = FxHashMap::default();
+        let fresh = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm).to_vec();
+        assert_eq!(
+            fresh,
+            shape_run(&mut font_system, "==", metrics, jbm),
+            "the miss stores the same glyphs a direct shape produces"
+        );
+        assert_eq!(cache.len(), 1, "the miss shaped and stored one run");
+
+        // Poison the entry with another run's glyphs. A reshape would overwrite
+        // it, so getting the poisoned glyphs back proves the hit read the cache.
+        let poison = shape_run(&mut font_system, "ab", metrics, jbm);
+        cache.insert("==".to_string(), poison.clone());
+        let hit = shape_run_cached(&mut cache, &mut font_system, "==", metrics, jbm);
+        assert_eq!(
+            hit,
+            poison.as_slice(),
+            "a hit returns the stored run, not a reshape"
+        );
+        assert_eq!(cache.len(), 1, "a hit adds no entry");
     }
 
     #[test]
