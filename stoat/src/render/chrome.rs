@@ -91,7 +91,6 @@ pub(crate) fn modal_frame(
 /// Device pixels shaved off each horizontal edge of a popout card's panel, so the
 /// card draws a touch narrower than its cell rect and the editor background shows
 /// in the thin strip beside it.
-#[allow(dead_code)] // caller lands with the status-bar popout cards
 const POPOUT_INSET_PX: u8 = 4;
 
 /// Draw a popout card frame around `area`.
@@ -109,7 +108,6 @@ const POPOUT_INSET_PX: u8 = 4;
 /// draws only when `area` spans at least two rows, because a one-row card has no
 /// room for a box border and degrades to the bare background cells the caller
 /// already painted.
-#[allow(dead_code)] // caller lands with the status-bar popout cards
 pub(crate) fn popout_frame(
     buf: &mut Buffer,
     area: Rect,

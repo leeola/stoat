@@ -1,10 +1,12 @@
 use crate::{
+    app::SPINNER_FRAMES,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, View},
     render::{
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
+        popout::{paint_popout_card, popout_area},
         review::{dim_rgb, style_rgb},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
@@ -178,6 +180,38 @@ pub(crate) fn render_pane(
         buf,
         Some(scene),
     );
+
+    if is_focused
+        && let Some(entry) = frame.lsp_progress
+        && let Some(area) = popout_area(status_area, content_area, 1, 0)
+    {
+        let bg = theme
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+            .bg
+            .unwrap_or(Color::Reset);
+        let border = theme
+            .get(crate::theme::scope::UI_BORDER_INACTIVE)
+            .fg
+            .unwrap_or(Color::Reset);
+        let content = paint_popout_card(
+            buf,
+            area,
+            bg,
+            border,
+            theme,
+            frame.stoatty.then_some(&mut *scene),
+        );
+
+        let text = format!(
+            "{} {}",
+            SPINNER_FRAMES[frame.spinner_phase as usize],
+            lsp_progress_label(entry).trim()
+        );
+        let style = theme
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+            .add_modifier(Modifier::ITALIC);
+        buf.set_stringn(content.x, content.y, text, content.width as usize, style);
+    }
 }
 
 /// Blend every RGB cell in `area` toward `bg` by `amount`, dimming an unfocused
@@ -539,18 +573,6 @@ fn status_segments(
                 let start = right_anchor.saturating_sub(width);
                 right.push((text, base_style.add_modifier(Modifier::ITALIC)));
                 right_anchor = start;
-            }
-        }
-        if let Some(entry) = frame.lsp_progress {
-            let text = lsp_progress_label(entry);
-            let width = text.chars().count() as u16;
-            let start = right_anchor.saturating_sub(width);
-            if start >= cursor {
-                right.push((text, base_style.add_modifier(Modifier::ITALIC)));
-                #[cfg(feature = "perf")]
-                {
-                    right_anchor = start;
-                }
             }
         }
         #[cfg(feature = "perf")]

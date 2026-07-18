@@ -72,6 +72,20 @@ pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
 /// advancing the inertial scroll one step per fire.
 const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// Frame interval for the LSP work-done spinner popout, about 10 fps. Fast enough
+/// to read as motion, slow enough not to churn repaints while progress streams.
+const SPINNER_FRAME_SECS: f32 = 0.1;
+
+/// Braille glyphs cycled to animate an in-flight LSP work-done spinner, one per
+/// [`SPINNER_FRAME_SECS`] window.
+pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Index into [`SPINNER_FRAMES`] for a spinner that has animated for `clock`
+/// seconds, wrapping once per full cycle.
+pub(crate) fn spinner_phase(clock: f32) -> u8 {
+    ((clock / SPINNER_FRAME_SECS) as u64 % SPINNER_FRAMES.len() as u64) as u8
+}
+
 /// Upper bound on one scroll-animation step's `dt`. A render that runs long, or
 /// a glide resumed after an idle gap, advances by at most this much rather than
 /// a single large jump.
@@ -988,6 +1002,11 @@ pub struct Stoat {
     /// Whether a visible run or terminal fed output since the last frame tick, so
     /// the tick repaints once rather than the output arm repainting per PTY chunk.
     pub(crate) pty_dirty: bool,
+    /// Wall-clock seconds an in-flight LSP work-done spinner has animated, mapped
+    /// to a [`SPINNER_FRAMES`] glyph by [`spinner_phase`]. Advanced by the frame
+    /// tick while progress is live and reset to zero when it ends, so each fresh
+    /// progress starts at frame zero.
+    pub(crate) spinner_clock: f32,
     /// Syntax-scope palette the minimap strips declare and their run summaries
     /// index, resolved from [`Self::theme`].
     pub(crate) minimap_class_table: crate::minimap::ClassTable,
@@ -1337,6 +1356,7 @@ impl Stoat {
             minimap_next_content_id: 0,
             minimap_build_pending: false,
             pty_dirty: false,
+            spinner_clock: 0.0,
             minimap_class_table,
         };
 
@@ -1703,7 +1723,8 @@ impl Stoat {
             let animating = self.is_animating();
             let building = self.minimap_build_pending;
             let dirty = self.pty_dirty;
-            if !animating {
+            let spinning = self.lsp_progress.current().is_some();
+            if !animating && !spinning {
                 last_tick = None;
             }
             // Wall-clock instant the frame's first event arrived, so
@@ -1741,7 +1762,7 @@ impl Stoat {
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
-                _ = frame_timer.tick(), if animating || building || dirty => {
+                _ = frame_timer.tick(), if animating || building || dirty || spinning => {
                     let now = std::time::Instant::now();
                     let dt = last_tick
                         .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
@@ -1896,6 +1917,20 @@ impl Stoat {
         } else {
             UpdateEffect::None
         };
+
+        let effect = if self.lsp_progress.current().is_some() {
+            let before = spinner_phase(self.spinner_clock);
+            self.spinner_clock += dt;
+            if spinner_phase(self.spinner_clock) == before {
+                effect
+            } else {
+                effect.merge(UpdateEffect::Redraw)
+            }
+        } else {
+            self.spinner_clock = 0.0;
+            effect
+        };
+
         if std::mem::take(&mut self.pty_dirty) {
             effect.merge(UpdateEffect::Redraw)
         } else {
@@ -13200,6 +13235,47 @@ mod tests {
         h.stoat.active_workspace_mut().focus = FocusTarget::Dock(dangling);
         let translated = h.stoat.translate_mouse_to_focused(10, 10);
         assert_eq!(translated, None);
+    }
+
+    #[test]
+    fn spinner_phase_advances_and_wraps() {
+        assert_eq!(spinner_phase(0.0), 0);
+        assert_eq!(spinner_phase(0.05), 0, "within the first frame window");
+        assert_eq!(spinner_phase(0.15), 1, "second frame");
+        assert_eq!(spinner_phase(0.95), 9, "last frame of the cycle");
+        assert_eq!(spinner_phase(1.05), 0, "wraps to the first frame");
+        assert_eq!(spinner_phase(1.15), 1);
+    }
+
+    #[test]
+    fn frame_tick_repaints_the_spinner_only_when_the_phase_advances() {
+        use crate::host::LspNotification;
+        use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
+        let mut h = Stoat::test();
+        h.fake_lsp().push_notification(LspNotification::Progress {
+            token: NumberOrString::Number(1),
+            value: WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "indexing".into(),
+                cancellable: None,
+                message: None,
+                percentage: None,
+            }),
+        });
+        h.drain_lsp();
+        assert!(h.stoat.lsp_progress.current().is_some(), "progress is live");
+
+        assert_eq!(
+            h.stoat.frame_tick(0.1),
+            UpdateEffect::Redraw,
+            "a full frame interval advances the phase and repaints"
+        );
+
+        h.stoat.spinner_clock = 0.0;
+        assert_eq!(
+            h.stoat.frame_tick(0.01),
+            UpdateEffect::None,
+            "a sub-frame tick leaves the phase put, so no repaint"
+        );
     }
 
     #[test]

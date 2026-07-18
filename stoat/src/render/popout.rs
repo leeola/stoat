@@ -13,8 +13,7 @@ use stoatty_widgets::ApcScene;
 /// already placed at offset zero. Returns `None` when the card would not fit
 /// within `content_area`, matching how a pane too short for a bar segment simply
 /// drops it.
-#[allow(dead_code)] // caller lands with the status-bar popout cards
-fn popout_area(
+pub(crate) fn popout_area(
     status_area: Rect,
     content_area: Rect,
     height: u16,
@@ -40,7 +39,6 @@ fn popout_area(
 ///
 /// The returned rect is `area` inset one cell on each horizontal side, where the
 /// caller draws the card's text.
-#[allow(dead_code)] // caller lands with the status-bar popout cards
 pub(crate) fn paint_popout_card(
     buf: &mut Buffer,
     area: Rect,

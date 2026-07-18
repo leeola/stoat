@@ -36,7 +36,7 @@ pub(crate) mod workspace_symbol_picker;
 
 use self::undercurl::UndercurlSpan;
 use crate::{
-    app::Stoat,
+    app::{self, Stoat},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
@@ -115,10 +115,13 @@ pub(crate) struct FrameCtx<'a> {
     /// user knows a partial count is in flight; cleared after every
     /// action dispatch.
     pub(crate) pending_count: Option<u32>,
-    /// Most recently updated in-progress LSP work-done entry, if any.
-    /// Painted in the right side of the status bar so users see
-    /// "rust-analyzer indexing" / "checking" progress.
+    /// Most recently updated in-progress LSP work-done entry, if any. Painted as
+    /// an animated spinner popout above the focused pane's status bar while work
+    /// is in flight.
     pub(crate) lsp_progress: Option<&'a crate::lsp::progress::LspProgressEntry>,
+    /// Braille spinner glyph index for the [`lsp_progress`](Self::lsp_progress)
+    /// popout, advanced by the frame tick so the spinner animates.
+    pub(crate) spinner_phase: u8,
     /// Whether a `textDocument/hover` request is still in flight, so the status
     /// bar shows a "lsp: hover..." segment until the response lands.
     pub(crate) hover_pending: bool,
@@ -347,6 +350,7 @@ pub(crate) fn frame(
         theme: &stoat.theme,
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
+        spinner_phase: app::spinner_phase(stoat.spinner_clock),
         hover_pending: stoat.pending_hover_request.is_some(),
         lsp_message: stoat
             .lsp_message
