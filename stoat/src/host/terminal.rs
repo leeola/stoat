@@ -226,7 +226,9 @@ fn process_name_for_pid(_pid: libc::pid_t) -> Option<String> {
 }
 
 fn blocking_read_loop(mut reader: Box<dyn io::Read + Send>, tx: mpsc::Sender<Vec<u8>>) {
-    let mut buf = [0u8; 4096];
+    // 64KB matches stoatty's own PTY reader, so a high-throughput stream sends
+    // whole chunks rather than fragmenting into 16x the messages and allocations.
+    let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
