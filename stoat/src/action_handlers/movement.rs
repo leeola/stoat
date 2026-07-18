@@ -3416,14 +3416,17 @@ fn goto_change_across_files(
         .filter(|f| !f.untracked)
         .map(|f| f.path)
         .collect();
-    if changed.len() < 2 {
+    let current_index = current_path
+        .as_deref()
+        .and_then(|path| changed.iter().position(|c| c == path));
+    // Cross into a lone changed file when the current buffer is not itself in
+    // the list. Only bail when nothing changed, or the current buffer is the
+    // sole changed file and there is nowhere else to go.
+    if changed.is_empty() || (current_index.is_some() && changed.len() < 2) {
         stoat.set_status("no more changes");
         return UpdateEffect::Redraw;
     }
 
-    let current_index = current_path
-        .as_deref()
-        .and_then(|path| changed.iter().position(|c| c == path));
     let (target_index, wrapped) = match (current_index, dir) {
         (Some(i), ChangeDir::Next) if i + 1 < changed.len() => (i + 1, false),
         (Some(_), ChangeDir::Next) => (0, true),
@@ -4530,6 +4533,33 @@ mod tests {
         assert!(
             focused_editor_mut(&mut h.stoat).expect("editor").diff_view,
             "diff_view carried across the file boundary"
+        );
+    }
+
+    #[test]
+    fn next_change_crosses_into_a_lone_changed_file_from_an_unchanged_buffer() {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = PathBuf::from("/repo");
+        h.stage_review_scenario(&workdir, &[("changed.rs", "a\nb\nc\n", "a\nX\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+
+        // The focused editor is the pathless scratch, absent from the changed
+        // list, mirroring the `stoat review` startup on a one-file working tree.
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+
+        goto_change(&mut h.stoat, ChangeDir::Next);
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            workdir.join("changed.rs"),
+            "crossed into the sole changed file from the unchanged scratch",
+        );
+        assert_eq!(
+            focused_head_row(&mut h),
+            1,
+            "landed on the changed file's first hunk",
         );
     }
 
