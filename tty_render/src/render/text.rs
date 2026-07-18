@@ -195,6 +195,13 @@ pub struct TextPass {
     /// have not moved.
     last_text_run_epoch: u64,
     last_atlas_epoch: u64,
+    /// The [`Atlas::content_epoch`] the cached grid-glyph instances were last
+    /// built against. A frame-local texture-size compare only catches a grow in
+    /// the current frame, so it misses an atlas change from any earlier pass -- a
+    /// pool composite between frames, or an eviction (which reuses a slot without
+    /// moving the texture size). Persisting the epoch heals those cached rows on
+    /// the next prepare.
+    grid_atlas_epoch: u64,
     overlay_instances: Buffer,
     overlay_capacity: usize,
     overlay_count: u32,
@@ -564,6 +571,8 @@ impl TextPass {
             composite_epoch: 0,
             last_text_run_epoch: 0,
             last_atlas_epoch: 0,
+            // Never a real content epoch, so the first prepare always builds.
+            grid_atlas_epoch: u64::MAX,
             overlay_instances,
             overlay_capacity: INITIAL_CAPACITY,
             overlay_count: 0,
@@ -782,8 +791,9 @@ impl TextPass {
 
         // Off-grid text runs are screen-anchored. No grid or region scroll
         // offset is applied, so they sit at their declared position. They pack
-        // here, before atlas_grew, so a text-run atlas grow is reflected in the
-        // grid-instance build below instead of invalidating its UVs.
+        // here, before the grid-instance build below, so a text-run atlas grow
+        // bumps the content epoch that build reads instead of invalidating its
+        // UVs.
         //
         // The chrome the runs back changes rarely, so reuse the instances built
         // on an earlier frame while the run content and their atlas UVs both
@@ -806,11 +816,14 @@ impl TextPass {
         let region = grid.scroll_region();
 
         // The grid-glyph instances from last frame stay valid when no row was
-        // rebuilt and the atlas did not grow (its size drives every UV). Text
-        // runs are packed above, so a text-run grow shows up in atlas_grew.
-        // Scroll no longer counts -- it rides the globals uniform.
-        let atlas_grew = self.atlas.texture_dims() != atlas_dims;
-        let grid_unchanged = rebuilt.is_empty() && !atlas_grew;
+        // rebuilt and the atlas content is unchanged. The content epoch bumps on
+        // a grow or an eviction from any pass, including a pool composite between
+        // frames, so a persistent epoch compare heals cached rows that a
+        // frame-local size compare would miss. Text runs are packed above, so a
+        // text-run grow is already folded into the epoch. Scroll no longer counts
+        // -- it rides the globals uniform.
+        let atlas_changed = self.atlas.content_epoch() != self.grid_atlas_epoch;
+        let grid_unchanged = rebuilt.is_empty() && !atlas_changed;
 
         if !grid_unchanged {
             match region {
@@ -858,10 +871,13 @@ impl TextPass {
                     self.region_pending_scratch = region_pending;
                 },
                 None => {
-                    let rebuild_all = atlas_grew;
+                    let rebuild_all = atlas_changed;
                     self.patch_plain_rows(device, queue, &rebuilt, rebuild_all);
                 },
             }
+            // Both arms resolved every grid glyph against the current atlas, so
+            // record the epoch they built against for the next frame's compare.
+            self.grid_atlas_epoch = self.atlas.content_epoch();
         }
 
         self.region_scissor = region.and_then(|region| {

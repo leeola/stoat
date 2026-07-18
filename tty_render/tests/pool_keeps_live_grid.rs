@@ -330,3 +330,137 @@ fn read_back(
         .expect("poll readback");
     buffer.slice(..).get_mapped_range().to_vec()
 }
+
+/// A pool composite whose glyph burst grows the atlas heals the live grid's
+/// cached instances, so its glyph survives instead of freezing stale UVs.
+///
+/// The pool packs dozens of never-seen glyphs, overflowing the initial atlas and
+/// doubling it. That rescales every normalized UV, so the live grid's cached
+/// instances -- reused under empty damage -- must rebuild against the grown
+/// atlas rather than sampling the pre-grow region.
+#[test]
+fn pool_grow_heals_live_instances() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("pool_keeps_live_grid: no wgpu adapter available, skipping");
+        return;
+    };
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 30;
+    let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
+    // Wide and tall enough for the pool to pack enough distinct glyphs to
+    // overflow the 256px atlas and force a grow.
+    let (width, height) = (512u32, cell_h * 8);
+
+    let black = Rgb::new(0, 0, 0);
+    let white = Rgb::new(255, 255, 255);
+
+    let target = device.create_texture(&TextureDescriptor {
+        label: Some("pool grow heals target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&TextureViewDescriptor::default());
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        black,
+        white,
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 1 && cols >= 1, "grid too small: {rows}x{cols}");
+
+    let mut live = Grid::new(rows, cols);
+    live.get_mut(0, 0).ch = 'M';
+    live.get_mut(0, 0).fg = white;
+    live.get_mut(0, 0).bg = black;
+
+    // Every pool cell carries a distinct printable glyph, a burst of never-seen
+    // masks that overflows the atlas and grows it.
+    let mut pool = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let idx = (r * cols + c) as u32;
+            let ch = char::from_u32(0x21 + idx % 94).unwrap_or('#');
+            let cell = pool.get_mut(r, c);
+            cell.ch = ch;
+            cell.fg = white;
+            cell.bg = black;
+        }
+    }
+
+    let no_decoration = Damage::Partial(Vec::new());
+    let frame = |damage| Frame {
+        cursor: None,
+        cursor_corners: None,
+        scroll: Scroll {
+            grid: 0.0,
+            document: 0.0,
+            scrollback: 0.0,
+            region: 0.0,
+            popovers: &[],
+        },
+        damage,
+        decoration_damage: &no_decoration,
+    };
+
+    renderer.render_into(&device, &queue, &view, &live, frame(&Damage::Full));
+    let base = read_back(&device, &queue, &target, width, height);
+
+    // Composite the distinct-glyph pool, growing the atlas, then render the live
+    // grid again with no damage so it must heal its cached instances.
+    renderer.composite_pool(
+        &device,
+        &queue,
+        &view,
+        &pool,
+        &[],
+        [0, 0, width, height],
+        0.0,
+        true,
+        true,
+    );
+    let idle = Damage::Partial(vec![false; rows]);
+    renderer.render_into(&device, &queue, &view, &live, frame(&idle));
+    let after = read_back(&device, &queue, &target, width, height);
+
+    let lit = |pixels: &[u8], band: u32| {
+        let mut count = 0usize;
+        for y in (band * cell_h)..((band + 1) * cell_h) {
+            for x in 0..width {
+                let i = ((y * width + x) * 4) as usize;
+                let (r, g, b) = (pixels[i] as u32, pixels[i + 1] as u32, pixels[i + 2] as u32);
+                if r + g + b > 120 {
+                    count += 1;
+                }
+            }
+        }
+        count
+    };
+
+    assert!(lit(&base, 0) > 0, "the glyph renders in the base frame");
+    assert_eq!(
+        lit(&after, 0),
+        lit(&base, 0),
+        "the live glyph must survive an atlas grow driven by a pool composite"
+    );
+}
