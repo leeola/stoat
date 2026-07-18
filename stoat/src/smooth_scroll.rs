@@ -231,29 +231,50 @@ pub(crate) fn emit_into(
     region: PoolRegionCommand,
     scroll_offset: f32,
     content_version: u64,
+    hold_when_idle: bool,
     mut render_page: impl FnMut(u64) -> Vec<u8>,
 ) -> Vec<u64> {
     let pool = region.pool;
     let entry = state.pools.entry(pool).or_default();
 
+    // Pools composite only while the eased offset moves, so a content change seen
+    // while the target is stationary can wait for the next move. Holding keeps the
+    // stored version (suppressing the refill wipe) and narrows this emit to the
+    // visible page, deferring the full-window prefill until the target shifts.
+    //
+    // Computed before the region and version wipes below reset last_scroll_offset,
+    // so it reflects real scroll motion. A fresh entry has last_scroll_offset None,
+    // so its first display counts as scrolling and still prefills the whole window.
+    let scrolling = entry.last_scroll_offset != Some(scroll_offset);
+    let hold = hold_when_idle && !scrolling;
+
     if entry.region != Some(region) {
         encode_pool_region_into(out, &region);
         entry.region = Some(region);
-        // A fresh region invalidates the pool's slot contents; force a refill.
+        // A fresh region invalidates the pool's slot contents. Force a refill.
         entry.requested = None;
         entry.last_scroll_offset = None;
     }
 
-    if entry.content_version != content_version {
-        // The surface changed under the pool; the buffered pages are stale.
+    let effective_version = if hold {
+        entry.content_version
+    } else {
+        content_version
+    };
+    if entry.content_version != effective_version {
+        // The surface changed under the pool. The buffered pages are stale.
         entry.requested = None;
         entry.last_scroll_offset = None;
-        entry.content_version = content_version;
+        entry.content_version = effective_version;
     }
 
     let region_height = region.height.max(1) as u64;
     let page = scroll_offset.floor() as u64 / region_height;
-    let window = window_range(page);
+    let window = if hold {
+        page..page + 1
+    } else {
+        window_range(page)
+    };
 
     let prev = entry.requested.clone();
     let jumped = prev.is_some_and(|p| p.end <= window.start || window.end <= p.start);
@@ -1178,7 +1199,7 @@ mod tests {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
         let mut filled = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, |page| {
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, false, |page| {
             filled.push(page);
             Vec::new()
         });
@@ -1202,23 +1223,123 @@ mod tests {
         let mut out = Vec::new();
 
         // page 2 (offset 40 / height 20) buffers window 0..5.
-        let first = emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, |_| Vec::new());
+        let first = emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, false, |_| {
+            Vec::new()
+        });
         assert_eq!(first, (0..WINDOW_PAGES).collect::<Vec<_>>());
 
         // A sub-page scroll within page 2 enters no new page.
-        let same = emit_into(&mut out, &mut state, region(1, 20), 41.0, 0, |_| Vec::new());
+        let same = emit_into(&mut out, &mut state, region(1, 20), 41.0, 0, false, |_| {
+            Vec::new()
+        });
         assert!(same.is_empty(), "sub-page scroll entered {same:?}");
 
         // Stepping to page 3 shifts the window to 1..6, entering only page 5.
-        let stepped = emit_into(&mut out, &mut state, region(1, 20), 60.0, 0, |_| Vec::new());
+        let stepped = emit_into(&mut out, &mut state, region(1, 20), 60.0, 0, false, |_| {
+            Vec::new()
+        });
         assert_eq!(stepped, vec![5]);
+    }
+
+    #[test]
+    fn hold_defers_a_resting_content_change_until_the_target_moves() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, true, |_| {
+            Vec::new()
+        });
+
+        // A content-version bump while the target rests enters no page and must
+        // not render, so the buffered window is left untouched.
+        let held = emit_into(&mut out, &mut state, region(1, 20), 40.0, 1, true, |_| {
+            panic!("a resting hold must not refill")
+        });
+        assert!(held.is_empty(), "resting hold entered {held:?}");
+
+        // A sub-page move applies the deferred bump, wiping the stale window and
+        // refilling it even though the visible page did not change.
+        let moved = emit_into(&mut out, &mut state, region(1, 20), 41.0, 1, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(moved, (0..WINDOW_PAGES).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn moving_the_target_after_a_rest_reenters_the_deferred_window() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, true, |_| {
+            Vec::new()
+        });
+        // Resting narrows the requested range to the visible page 2.
+        emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, true, |_| {
+            Vec::new()
+        });
+
+        // Stepping to page 3 moves the target, refilling window 1..6 minus the
+        // page 2 that resting kept requested.
+        let moved = emit_into(&mut out, &mut state, region(1, 20), 60.0, 0, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(moved, vec![1, 3, 4, 5]);
+    }
+
+    #[test]
+    fn hold_still_prefills_the_full_window_on_first_display() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        // A fresh entry has last_scroll_offset None, so its first display counts
+        // as scrolling and hold does not suppress the prefill.
+        let entered = emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(entered, (0..WINDOW_PAGES).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_region_change_while_holding_enters_one_page() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, true, |_| {
+            Vec::new()
+        });
+
+        // The region changed under the resting pool, wiping its slots. Holding
+        // refills only the visible page (offset 40 / height 22 = page 1).
+        let entered = emit_into(&mut out, &mut state, region(1, 22), 40.0, 0, true, |_| {
+            Vec::new()
+        });
+        assert_eq!(entered, vec![1]);
+    }
+
+    #[test]
+    fn without_hold_a_resting_content_change_still_refills() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+
+        emit_into(&mut out, &mut state, region(1, 20), 40.0, 0, false, |_| {
+            Vec::new()
+        });
+
+        // Overlays pass hold_when_idle false, so a content change refills the full
+        // window even while the target is stationary.
+        let entered = emit_into(&mut out, &mut state, region(1, 20), 40.0, 1, false, |_| {
+            Vec::new()
+        });
+        assert_eq!(entered, (0..WINDOW_PAGES).collect::<Vec<_>>());
     }
 
     #[test]
     fn empty_render_requests_pages_without_emitting_fills() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
-        let entered = emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, |_| Vec::new());
+        let entered = emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
 
         assert_eq!(entered, (0..WINDOW_PAGES).collect::<Vec<_>>());
         let cmds = commands(&out);
@@ -1391,10 +1512,12 @@ mod tests {
     fn unchanged_scroll_emits_nothing_after_first() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 5.0, 0, |_| Vec::new());
+        emit_into(&mut out, &mut state, region(1, 20), 5.0, 0, false, |_| {
+            Vec::new()
+        });
 
         out.clear();
-        emit_into(&mut out, &mut state, region(1, 20), 5.0, 0, |_| {
+        emit_into(&mut out, &mut state, region(1, 20), 5.0, 0, false, |_| {
             panic!("no page should be re-filled")
         });
         assert!(out.is_empty(), "stable frame emitted {} bytes", out.len());
@@ -1404,11 +1527,13 @@ mod tests {
     fn sub_page_scroll_reuses_window_and_emits_only_scroll() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, |_| Vec::new());
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
 
         out.clear();
         let mut refilled = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 3.0, 0, |page| {
+        emit_into(&mut out, &mut state, region(1, 20), 3.0, 0, false, |page| {
             refilled.push(page);
             Vec::new()
         });
@@ -1430,10 +1555,12 @@ mod tests {
     fn far_jump_emits_reposition_then_precise_scroll() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, |_| Vec::new());
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
 
         out.clear();
-        emit_into(&mut out, &mut state, region(1, 20), 170.0, 0, |_| {
+        emit_into(&mut out, &mut state, region(1, 20), 170.0, 0, false, |_| {
             Vec::new()
         });
 
@@ -1459,17 +1586,19 @@ mod tests {
     fn content_version_bump_forces_refill() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 1, |_| Vec::new());
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 1, false, |_| {
+            Vec::new()
+        });
 
         out.clear();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 1, |_| {
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 1, false, |_| {
             panic!("unchanged content must not refill")
         });
         assert!(out.is_empty(), "stable frame emitted {} bytes", out.len());
 
         out.clear();
         let mut refilled = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 2, |page| {
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 2, false, |page| {
             refilled.push(page);
             Vec::new()
         });
@@ -1492,11 +1621,13 @@ mod tests {
     fn region_change_forces_refill() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, |_| Vec::new());
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
 
         out.clear();
         let mut refilled = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 22), 0.0, 0, |page| {
+        emit_into(&mut out, &mut state, region(1, 22), 0.0, 0, false, |page| {
             refilled.push(page);
             Vec::new()
         });
@@ -1511,8 +1642,12 @@ mod tests {
     fn pools_scroll_independently() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, |_| Vec::new());
-        emit_into(&mut out, &mut state, region(2, 20), 40.0, 0, |_| Vec::new());
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
+        emit_into(&mut out, &mut state, region(2, 20), 40.0, 0, false, |_| {
+            Vec::new()
+        });
 
         let cmds = commands(&out);
         assert!(cmds.contains(&Command::PoolRegion(region(1, 20))));
@@ -1528,8 +1663,12 @@ mod tests {
     fn drop_absent_retires_vanished_pools() {
         let mut state = SmoothScrollState::default();
         let mut out = Vec::new();
-        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, |_| Vec::new());
-        emit_into(&mut out, &mut state, region(2, 20), 0.0, 0, |_| Vec::new());
+        emit_into(&mut out, &mut state, region(1, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
+        emit_into(&mut out, &mut state, region(2, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
 
         out.clear();
         state.drop_absent(&mut out, &[1]);
@@ -1540,7 +1679,9 @@ mod tests {
 
         // Pool 2 is forgotten, so re-emitting it re-declares its region.
         out.clear();
-        emit_into(&mut out, &mut state, region(2, 20), 0.0, 0, |_| Vec::new());
+        emit_into(&mut out, &mut state, region(2, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
         assert!(commands(&out).contains(&Command::PoolRegion(region(2, 20))));
     }
 

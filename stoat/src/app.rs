@@ -6378,7 +6378,9 @@ impl Stoat {
             // content version. Plain editors stay stable while scrolling, save
             // for the syntax-highlight toggle (recolors every row), a diagnostics
             // change (restyles the gutter), and a gutter-width change (reflows the
-            // inset), so a buffered page must refill when any of those move.
+            // inset), so a buffered page must refill when any of those move. The
+            // emit below holds that refill while the pool's scroll target rests,
+            // deferring it until the target next moves.
             //
             // Relative numbers reference the cursor's buffer line, which the
             // wheel glide's cursor-follow drags every row. Holding the baked line
@@ -6426,6 +6428,10 @@ impl Stoat {
                 region,
                 scroll_offset,
                 content_version,
+                // Editor panes refill constantly at rest for the cursor line,
+                // focus dim, and diagnostics, so they hold the window until the
+                // glide starts. Overlays stay static at rest and pass false.
+                true,
                 // Editor and review pages both fill asynchronously below, so the
                 // synchronous render emits nothing here.
                 |_| Vec::new(),
@@ -6544,6 +6550,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
+                false,
                 |page| {
                     crate::smooth_scroll::render_finder_page(
                         finder,
@@ -6584,6 +6591,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
+                false,
                 |page| {
                     crate::smooth_scroll::render_palette_page(
                         filtered,
@@ -6640,6 +6648,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
+                false,
                 |page| {
                     crate::smooth_scroll::render_arg_page(
                         picker,
@@ -6675,6 +6684,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
+                false,
                 |page| {
                     crate::smooth_scroll::render_commits_page(
                         state,
@@ -6711,6 +6721,7 @@ impl Stoat {
                 region,
                 scroll_row as f32,
                 content_version,
+                false,
                 |page| {
                     crate::smooth_scroll::render_completion_page(
                         &popup.items,
@@ -6750,6 +6761,7 @@ impl Stoat {
                 list_region,
                 list_scroll as f32,
                 list_version,
+                false,
                 |page| {
                     crate::smooth_scroll::render_help_list_page(
                         help,
@@ -6786,6 +6798,7 @@ impl Stoat {
                 detail_region,
                 detail_scroll as f32,
                 detail_version,
+                false,
                 |page| {
                     crate::smooth_scroll::render_help_detail_page(
                         help,
@@ -6826,6 +6839,7 @@ impl Stoat {
                 region,
                 scroll as f32,
                 content_version,
+                false,
                 |page| {
                     crate::render::hover::render_hover_page(
                         popup,
@@ -12558,14 +12572,34 @@ mod tests {
             "the first emit prefills the pool window"
         );
 
+        // The editor pool refills only while its scroll target moves. A sub-page
+        // glide keeps the same page window, so a bare scroll re-enters nothing.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_offset = 0.5;
+            editor.scroll_glide = ScrollGlide::Page;
+        }
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            drain_fills(&mut rx).is_empty(),
+            "a same-window scroll with no content change re-enters no pages"
+        );
+
         h.edit_focused(0..0, "x");
         let _ = drain_fills(&mut rx);
 
+        // The edit bumps the snapshot version, so the next moving emit wipes the
+        // buffered window and re-enters its pages rather than compositing stale
+        // pre-edit text.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_offset = 0.9;
+            editor.scroll_glide = ScrollGlide::Page;
+        }
         h.stoat.emit_smooth_scroll();
         assert!(
             !drain_fills(&mut rx).is_empty(),
-            "an edit bumps the snapshot version, so the pool re-enters its pages \
-             rather than compositing stale pre-edit text"
+            "a scroll after an edit re-enters the pool's pages with fresh text"
         );
     }
 
