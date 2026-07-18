@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat_cli::CommonArgs;
-use stoatty_protocol::command::{PoolRegionCommand, NON_PANE_POOL_BASE};
+use stoatty_protocol::command::{PoolRegionCommand, WindowOpenCommand, NON_PANE_POOL_BASE};
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll},
     render,
@@ -226,6 +226,10 @@ enum PtyEvent {
     /// the escape-stripped tail of what the child wrote, empty when it produced
     /// nothing, carried so the main thread can log it alongside the exit status.
     Exited { last_output: String },
+    /// An aux window's [`GpuContext`] finished building on a background thread.
+    /// The main thread installs it into the matching [`AuxWindow`], which then
+    /// requests its first redraw. Boxed so the enum stays small.
+    AuxGpuReady { window: u32, gpu: Box<GpuContext> },
 }
 
 /// The text-rendering configuration read from the config once, which [`App`]
@@ -301,6 +305,35 @@ impl App {
             state: None,
         }
     }
+}
+
+/// A detached pane's aux OS window, a second render target for the window-bound
+/// pools the primary composite omits.
+///
+/// The winit window is created on the main thread when a
+/// [`TermEvent::WindowOpen`] arrives, while its [`GpuContext`] builds on a
+/// background thread and installs via [`PtyEvent::AuxGpuReady`], so the primary
+/// never stalls on aux GPU setup. Until it arrives `gpu` is `None` and redraw
+/// requests find nothing to draw.
+struct AuxWindow {
+    id: u32,
+    window: Arc<Window>,
+    gpu: Option<GpuContext>,
+    /// The window's composed content grid, rendered whole each redraw.
+    grid: Grid,
+    /// Scratch that [`Terminal::project_pool`] composes one pool into before its
+    /// rows are blitted into `grid` at the pool's window-relative region.
+    scratch: Grid,
+}
+
+/// The renderer-construction inputs an aux window needs, read from [`App`]
+/// alongside the live [`State`] so opening one mirrors the primary's setup in
+/// [`App::resumed`].
+struct AuxWindowConfig<'a> {
+    proxy: &'a EventLoopProxy<PtyEvent>,
+    theme: Theme,
+    font_family: &'a [String],
+    ligatures: bool,
 }
 
 struct State {
@@ -413,6 +446,9 @@ struct State {
     pools_scratch: Vec<PoolView>,
     active_scratch: Vec<ActivePool>,
     overflows_scratch: Vec<Option<f32>>,
+    /// Live aux OS windows, each hosting a detached pane's window-bound pools.
+    /// Empty until a [`TermEvent::WindowOpen`] opens the first one.
+    aux: Vec<AuxWindow>,
     /// Unspent vertical wheel travel in physical pixels, accumulated from
     /// high-resolution `PixelDelta` events until it reaches a whole cell so a
     /// trackpad scrolls scrollback smoothly without losing sub-line motion.
@@ -669,6 +705,7 @@ impl ApplicationHandler<PtyEvent> for App {
             pools_scratch: Vec::new(),
             active_scratch: Vec::new(),
             overflows_scratch: Vec::new(),
+            aux: Vec::new(),
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
             pressed_button: None,
@@ -695,7 +732,23 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.dirty.store(false, Ordering::Relaxed);
                 state.window.request_redraw();
             },
-            PtyEvent::Term(events) => handle_term_events(state, events),
+            PtyEvent::Term(events) => handle_term_events(
+                state,
+                event_loop,
+                &AuxWindowConfig {
+                    proxy: &self.proxy,
+                    theme: self.theme,
+                    font_family: &self.font_family,
+                    ligatures: self.ligatures,
+                },
+                events,
+            ),
+            PtyEvent::AuxGpuReady { window, gpu } => {
+                if let Some(aux) = state.aux.iter_mut().find(|aux| aux.id == window) {
+                    aux.gpu = Some(*gpu);
+                    aux.window.request_redraw();
+                }
+            },
             PtyEvent::Exited { last_output } => {
                 let status = state.pty.exit_status(Duration::from_millis(500));
                 if status.as_ref().is_none_or(|status| !status.success()) {
@@ -754,7 +807,17 @@ impl ApplicationHandler<PtyEvent> for App {
                 let _ = state.pty.write(&responses);
             }
             if !events.is_empty() {
-                handle_term_events(state, events);
+                handle_term_events(
+                    state,
+                    event_loop,
+                    &AuxWindowConfig {
+                        proxy: &self.proxy,
+                        theme: self.theme,
+                        font_family: &self.font_family,
+                        ligatures: self.ligatures,
+                    },
+                    events,
+                );
             }
         }
 
@@ -768,10 +831,44 @@ impl ApplicationHandler<PtyEvent> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+
+        // Aux windows are second render targets for detached panes. Their
+        // lifecycle events are handled here and consumed. Keyboard and modifier
+        // events fall through to the primary handling below so an aux keypress
+        // drives the one PTY exactly as a primary keypress does. Every other aux
+        // event (mouse, focus reporting) belongs to a later change and is
+        // ignored, so it never reaches the primary arms with aux coordinates.
+        let primary = id == state.window.id();
+        if !primary {
+            match &event {
+                WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) => {},
+                WindowEvent::RedrawRequested => {
+                    if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id) {
+                        redraw_aux(aux, &state.terminal);
+                    }
+                    return;
+                },
+                WindowEvent::Resized(size) => {
+                    let size = *size;
+                    if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id) {
+                        if let Some(gpu) = aux.gpu.as_mut() {
+                            gpu.resize(size.width, size.height);
+                        }
+                        aux.window.request_redraw();
+                    }
+                    return;
+                },
+                WindowEvent::CloseRequested => {
+                    state.aux.retain(|aux| aux.window.id() != id);
+                    return;
+                },
+                _ => return,
+            }
+        }
 
         match event {
             WindowEvent::CloseRequested => {
@@ -1314,7 +1411,10 @@ impl ApplicationHandler<PtyEvent> for App {
                     state.modifiers.control_key()
                 };
 
-                if let Some(delta) = font_step(platform_mod_held, &event.logical_key) {
+                // Font zoom resizes the primary surface, so it stays a primary
+                // control. Per-window font zoom is out of scope, so an aux zoom
+                // combo falls through and reaches the PTY as a plain keystroke.
+                if primary && let Some(delta) = font_step(platform_mod_held, &event.logical_key) {
                     let font_size =
                         (state.font_size as i32 + delta).max(FONT_SIZE_FLOOR as i32) as u32;
                     state.font_size = font_size;
@@ -1334,7 +1434,8 @@ impl ApplicationHandler<PtyEvent> for App {
                 }
 
                 #[cfg(feature = "perf")]
-                if platform_mod_held
+                if primary
+                    && platform_mod_held
                     && state.modifiers.shift_key()
                     && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("p"))
                 {
@@ -1872,7 +1973,17 @@ fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize) -> Vec<u8> {
 /// Title and reset-title set the window title. Clipboard-store copies to the
 /// system clipboard. Bell rings the terminal bell. Notification raises a desktop
 /// notification.
-fn handle_term_events(state: &mut State, events: Vec<TermEvent>) {
+///
+/// The window-lifecycle events drive the aux OS windows detached panes render
+/// into. Open creates one, building its GPU off-thread per `config`. Close,
+/// focus, and dirty act on the matching live window, closing it, OS-focusing
+/// it, or requesting its redraw.
+fn handle_term_events(
+    state: &mut State,
+    event_loop: &ActiveEventLoop,
+    config: &AuxWindowConfig<'_>,
+    events: Vec<TermEvent>,
+) {
     for event in events {
         match event {
             TermEvent::Title(title) => state.window.set_title(&title),
@@ -1889,14 +2000,210 @@ fn handle_term_events(state: &mut State, events: Vec<TermEvent>) {
                 version = %hello.version,
                 "program hello"
             ),
-            // Opening, closing, focusing, and redrawing aux windows lands in a
-            // later change. Until then these window events are inert.
-            TermEvent::WindowOpen(_)
-            | TermEvent::WindowClose(_)
-            | TermEvent::WindowFocus(_)
-            | TermEvent::WindowDirty(_) => {},
+            TermEvent::WindowOpen(cmd) => open_aux_window(state, event_loop, config, cmd),
+            TermEvent::WindowClose(window) => state.aux.retain(|aux| aux.id != window),
+            TermEvent::WindowFocus(window) => {
+                if let Some(aux) = state.aux.iter().find(|aux| aux.id == window) {
+                    aux.window.focus_window();
+                }
+            },
+            TermEvent::WindowDirty(window) => {
+                if let Some(aux) = state.aux.iter().find(|aux| aux.id == window) {
+                    aux.window.request_redraw();
+                }
+            },
         }
     }
+}
+
+/// Create the aux OS window a [`WindowOpenCommand`] asks for and start building
+/// its renderer off the main thread.
+///
+/// The winit window is made on the main thread (winit requires it) sized to the
+/// command's cell grid at the primary's current cell metrics, and pushed with no
+/// GPU yet. Its [`GpuContext`] is built on a named background thread -- adapter
+/// and device acquisition block there, never on the run loop -- and installed via
+/// [`PtyEvent::AuxGpuReady`], so opening a window never stalls the primary. Until
+/// it arrives the window's redraws find no GPU and draw nothing.
+fn open_aux_window(
+    state: &mut State,
+    event_loop: &ActiveEventLoop,
+    config: &AuxWindowConfig<'_>,
+    cmd: WindowOpenCommand,
+) {
+    let WindowOpenCommand {
+        window: window_id,
+        cols,
+        rows,
+        title,
+    } = cmd;
+
+    let [cell_w, cell_h] = render::cell_size(state.font_size, state.scale_factor as f32);
+    let attributes = Window::default_attributes()
+        .with_title(title)
+        .with_inner_size(LogicalSize::new(cols as f32 * cell_w, rows as f32 * cell_h));
+    let window = match event_loop.create_window(attributes) {
+        Ok(window) => Arc::new(window),
+        Err(error) => {
+            tracing::warn!(window = window_id, %error, "failed to create aux window");
+            return;
+        },
+    };
+
+    state.aux.push(AuxWindow {
+        id: window_id,
+        window: window.clone(),
+        gpu: None,
+        grid: Grid::new(0, 0),
+        scratch: Grid::new(0, 0),
+    });
+
+    let size = window.inner_size();
+    let font_size = state.font_size;
+    let scale_factor = state.scale_factor as f32;
+    let proxy = config.proxy.clone();
+    let theme = config.theme;
+    let font_family = config.font_family.to_vec();
+    let ligatures = config.ligatures;
+    let spawn = std::thread::Builder::new()
+        .name(format!("aux-gpu-{window_id}"))
+        .spawn(move || {
+            let gpu = GpuContext::new(
+                window,
+                size.width.max(1),
+                size.height.max(1),
+                FontLoad::spawn(),
+                FontConfig {
+                    size: font_size,
+                    scale_factor,
+                    family: &font_family,
+                    ligatures,
+                },
+                theme.background,
+                theme.cursor,
+            );
+            let _ = proxy.send_event(PtyEvent::AuxGpuReady {
+                window: window_id,
+                gpu: Box::new(gpu),
+            });
+        });
+    if let Err(error) = spawn {
+        tracing::warn!(window = window_id, %error, "failed to spawn aux gpu thread");
+        state.aux.retain(|aux| aux.id != window_id);
+    }
+}
+
+/// Redraw one aux window, composing its window-bound pools into its grid and
+/// presenting it.
+///
+/// The terminal is locked only for the read-only compose, then released before
+/// the GPU present, so the reader thread and the primary redraw path are never
+/// held off by an aux frame. Returns without drawing when the GPU is still
+/// building.
+fn redraw_aux(aux: &mut AuxWindow, terminal: &FairMutex<Terminal>) {
+    let Some(gpu) = aux.gpu.as_mut() else {
+        return;
+    };
+    let (rows, cols) = gpu.grid_size();
+
+    {
+        let terminal = terminal.lock();
+        compose_aux_grid(
+            &terminal,
+            aux.id,
+            &mut aux.grid,
+            &mut aux.scratch,
+            rows,
+            cols,
+        );
+    }
+
+    let damage = Damage::Full;
+    gpu.render(
+        &aux.grid,
+        Frame {
+            cursor: None,
+            cursor_corners: None,
+            scroll: Scroll {
+                grid: 0.0,
+                document: 0.0,
+                scrollback: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage: &damage,
+            decoration_damage: &damage,
+        },
+    );
+}
+
+/// Compose every pool bound to aux `window` into `grid`, sized to `rows` x
+/// `cols`, each pool's cells and decorations placed at its window-relative
+/// region.
+///
+/// `grid` is blanked first, so a cell no pool covers shows the window
+/// background, and `scratch` is reused to project each pool before its rows are
+/// blitted. Pools compose in ascending-id order, their off-grid text runs and
+/// bars translated from region-local to window coordinates. v1 projects at each
+/// pool's scroll target directly, with no sub-cell glide, so only the region's
+/// own rows are copied and the straddle row `project_pool` composes is dropped.
+fn compose_aux_grid(
+    terminal: &Terminal,
+    window: u32,
+    grid: &mut Grid,
+    scratch: &mut Grid,
+    rows: usize,
+    cols: usize,
+) {
+    if grid.rows() != rows || grid.cols() != cols {
+        grid.resize(rows, cols);
+    } else {
+        grid.clear();
+    }
+
+    let mut text_runs = Vec::new();
+    let mut bars = Vec::new();
+    for pool in terminal.window_pools(window) {
+        if terminal
+            .project_pool(pool.id, scratch, pool.scroll_target.pages())
+            .is_none()
+        {
+            continue;
+        }
+
+        let top = pool.region.top as usize;
+        let left = pool.region.left as usize;
+        let region_rows = (pool.region.height as usize)
+            .min(scratch.rows())
+            .min(grid.rows().saturating_sub(top));
+        let region_cols = (pool.region.width as usize)
+            .min(scratch.cols())
+            .min(grid.cols().saturating_sub(left));
+        if region_cols == 0 {
+            continue;
+        }
+
+        for r in 0..region_rows {
+            grid.row_mut(top + r)[left..left + region_cols]
+                .copy_from_slice(&scratch.row(r)[..region_cols]);
+        }
+
+        let dx = pool.region.left as i16 * 16;
+        let dy = pool.region.top as i16 * 16;
+        text_runs.extend(scratch.text_runs().iter().map(|run| TextRun {
+            col: run.col + dx,
+            row: run.row + dy,
+            ..run.clone()
+        }));
+        bars.extend(scratch.bars().iter().map(|bar| Bar {
+            x: bar.x + dx,
+            y: bar.y + dy,
+            ..*bar
+        }));
+    }
+
+    grid.set_text_runs(text_runs);
+    grid.set_bars(bars);
 }
 
 /// Minimum spacing between bells, so a catted binary's burst of BELs rings once

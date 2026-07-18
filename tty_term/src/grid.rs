@@ -172,7 +172,7 @@ impl Grid {
     ///
     /// Unlike [`Self::resize`], the cell buffer is cleared in place rather than
     /// reallocated, so recycling a grid to hold new content allocates nothing.
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.cells.fill(Cell::default());
         self.overlays.clear();
         self.scroll_region = None;
