@@ -11590,6 +11590,36 @@ mod tests {
     }
 
     #[test]
+    fn the_hints_box_anchors_to_the_top_right_corner() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.stoat.theme = rgb_modal_theme();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.type_keys("space");
+
+        let size = h.stoat.size();
+        let mut buf = Buffer::empty(size);
+        h.stoat.paint_into(&mut buf);
+        h.stoat.emit_apc_scene();
+
+        let panel = drain_apc(&mut rx)
+            .into_iter()
+            .find_map(|c| match c {
+                Command::Panel(p) => Some(p),
+                _ => None,
+            })
+            .expect("the standing hints box emits a panel");
+        assert_eq!(panel.top, 0, "the hints box hugs the frame's top row");
+        assert_eq!(
+            panel.left + panel.width,
+            size.width,
+            "the hints box's right edge lands on the window's last column"
+        );
+    }
+
+    #[test]
     fn hover_body_emits_scaled_text_runs_inside_stoatty() {
         use lsp_types::{HoverProviderCapability, ServerCapabilities};
         use stoatty_protocol::command::Command;

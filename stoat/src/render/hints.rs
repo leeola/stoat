@@ -70,7 +70,7 @@ pub(crate) fn render_hints(
     }
 
     let x = area.x + area.width.saturating_sub(box_width);
-    let y = area.y + area.height.saturating_sub(box_height);
+    let y = area.y;
     let help_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);

@@ -210,17 +210,6 @@ pub(crate) fn perf_label(seg: PerfSegment) -> String {
 
 pub(crate) const PRIMARY_MODES: &[&str] = &["normal", "insert"];
 
-/// Reserves the bottom row for the pane status bar so the hints overlay
-/// does not paint over it.
-pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
-    Rect {
-        x: size.x,
-        y: size.y,
-        width: size.width,
-        height: size.height.saturating_sub(1),
-    }
-}
-
 /// True while any centered modal owns the screen's right edge.
 ///
 /// The single-minimap strip and every modal draw in the same GPU passes with
@@ -302,6 +291,16 @@ pub(crate) fn frame(
     ws.layout(size);
 
     let screen = crate::keymap_state::view_predicate(ws);
+
+    // The which-key box now anchors flush to the top-right corner over the
+    // band's top, and it paints below the minimap pass, so the strip yields to
+    // it exactly as it yields to a modal. This mirrors the standing-hints arm of
+    // the modal chain below.
+    let standing_hints = mode != "space_pane_display"
+        && (!PRIMARY_MODES.contains(&mode.as_str())
+            || screen == Some("review")
+            || stoat.key_hints_visible);
+
     let overlay_pane = if matches!(screen, Some("commits" | "rebase" | "reword" | "conflict")) {
         Some(ws.panes.focus())
     } else {
@@ -380,6 +379,7 @@ pub(crate) fn frame(
     // focused split pane's buffer. The scene re-stamps every paint, so a focus
     // switch to another buffer redeclares it. A non-editor focus leaves it empty.
     if !modal_overlay
+        && !standing_hints
         && let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
         && let View::Editor(editor_id) = &ws.panes.pane(ws.panes.focus()).view
         && let Some(editor) = ws.editors.get(*editor_id)
@@ -568,7 +568,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -595,7 +595,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -622,7 +622,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -640,7 +640,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -663,7 +663,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -681,7 +681,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -700,7 +700,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -719,7 +719,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -739,7 +739,7 @@ pub(crate) fn frame(
             &bindings,
             None,
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
@@ -809,7 +809,7 @@ pub(crate) fn frame(
             &bindings,
             footer.as_ref(),
             &stoat.theme,
-            hints_overlay_area(size),
+            full,
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
