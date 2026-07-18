@@ -125,8 +125,9 @@ pub(crate) struct FrameCtx<'a> {
     /// Whether a `textDocument/hover` request is still in flight, so the status
     /// bar shows a "lsp: hover..." segment until the response lands.
     pub(crate) hover_pending: bool,
-    /// Freshest `window/showMessage` text, painted in the right side of
-    /// the status bar. `MessageType::ERROR` is styled as an error.
+    /// Freshest `window/showMessage` text. `MessageType::ERROR` paints as a
+    /// wrapped popout card above the status bar. Other levels paint in the bar's
+    /// right side.
     pub(crate) lsp_message: Option<(lsp_types::MessageType, &'a str)>,
     /// The transient status message ([`Stoat::pending_message`]), already
     /// checked against its TTL deadline. Painted in the focused pane's status

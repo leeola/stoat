@@ -759,8 +759,8 @@ pub struct Stoat {
     /// Freshest `window/showMessage` text from the language server,
     /// shown in the status line until the next key press. Set by
     /// [`Self::drain_lsp_notifications`] and cleared at the top of
-    /// [`Self::handle_key`]. `MessageType::ERROR` renders in the error
-    /// style. Other levels use the default status style.
+    /// [`Self::handle_key`]. `MessageType::ERROR` renders as a wrapped popout
+    /// card above the status bar. Other levels paint in the bar itself.
     pub(crate) lsp_message: Option<(lsp_types::MessageType, String)>,
     /// In-flight goto-style LSP request, paired with the user-facing
     /// label of the jump kind ("definition", "references", ...) so the
@@ -13294,6 +13294,53 @@ mod tests {
         });
         h.drain_lsp();
         h.assert_snapshot("lsp_progress_indexing");
+    }
+
+    #[test]
+    fn error_show_message_wraps_into_a_popout_above_the_bar() {
+        use lsp_types::MessageType;
+        let mut h = Stoat::test();
+        let msg = "rust-analyzer failed to load the workspace: Cargo.toml is malformed and could not be parsed, so diagnostics are unavailable";
+        h.stoat.lsp_message = Some((MessageType::ERROR, msg.to_string()));
+
+        let buf = h.stoat.render();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let bar = rows.len() - 1;
+
+        assert!(
+            !rows[bar].contains("rust-analyzer"),
+            "the bar row no longer carries the error text"
+        );
+        let head = rows
+            .iter()
+            .position(|r| r.contains("rust-analyzer"))
+            .expect("error head painted");
+        let tail = rows
+            .iter()
+            .position(|r| r.contains("diagnostics"))
+            .expect("error tail painted");
+        assert!(tail < bar, "the popout sits above the bar");
+        assert!(tail > head, "the long message wrapped onto a second row");
+    }
+
+    #[test]
+    fn warning_show_message_still_paints_in_the_bar() {
+        use lsp_types::MessageType;
+        let mut h = Stoat::test();
+        h.stoat.lsp_message = Some((MessageType::WARNING, "cargo check is slow".to_string()));
+
+        let buf = h.stoat.render();
+        let bar = buf.area.height - 1;
+        let bar_row: String = (0..buf.area.width)
+            .map(|x| buf[(x, bar)].symbol())
+            .collect();
+
+        assert!(
+            bar_row.contains("cargo check is slow"),
+            "a warning keeps painting in the status bar"
+        );
     }
 
     #[test]

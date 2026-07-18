@@ -68,9 +68,38 @@ pub(crate) fn paint_popout_card(
     )
 }
 
+/// Greedy char-wrap `msg` into at most `max_rows` rows of `width` columns each.
+///
+/// Each row is filled to `width` characters before breaking, so a long word
+/// splits across rows rather than pushing past the edge. When the message needs
+/// more than `max_rows` rows, the last row ends with a `...` ellipsis to mark the
+/// truncation. Returns an empty vector when `width` or `max_rows` is zero.
+pub(crate) fn wrap_popout_lines(msg: &str, width: usize, max_rows: usize) -> Vec<String> {
+    if width == 0 || max_rows == 0 {
+        return Vec::new();
+    }
+
+    let chars: Vec<char> = msg.chars().collect();
+    let mut rows: Vec<String> = chars
+        .chunks(width)
+        .take(max_rows)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+
+    if chars.len() > width * max_rows
+        && let Some(last) = rows.last_mut()
+    {
+        let mut truncated: String = last.chars().take(width.saturating_sub(3)).collect();
+        truncated.push_str("...");
+        *last = truncated;
+    }
+
+    rows
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{paint_popout_card, popout_area};
+    use super::{paint_popout_card, popout_area, wrap_popout_lines};
     use crate::theme::Theme;
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use stoatty_widgets::ApcScene;
@@ -127,5 +156,31 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), " ", "edge glyph cleared");
         assert_eq!(buf[(2, 0)].bg, bg, "interior filled with card bg");
         assert_eq!(buf[(3, 1)].bg, bg, "interior filled with card bg");
+    }
+
+    #[test]
+    fn wrap_popout_lines_short_message_fits_one_row() {
+        assert_eq!(wrap_popout_lines("oops", 10, 4), vec!["oops"]);
+    }
+
+    #[test]
+    fn wrap_popout_lines_wraps_at_the_width() {
+        assert_eq!(
+            wrap_popout_lines("aaaaabbbbbccc", 5, 4),
+            vec!["aaaaa", "bbbbb", "ccc"]
+        );
+    }
+
+    #[test]
+    fn wrap_popout_lines_caps_overflow_with_an_ellipsis() {
+        assert_eq!(
+            wrap_popout_lines("abcdefghijklm", 5, 2),
+            vec!["abcde", "fg..."]
+        );
+    }
+
+    #[test]
+    fn wrap_popout_lines_zero_width_is_empty() {
+        assert!(wrap_popout_lines("anything", 0, 4).is_empty());
     }
 }

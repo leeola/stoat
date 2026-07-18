@@ -6,7 +6,7 @@ use crate::{
     render::{
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
-        popout::{paint_popout_card, popout_area},
+        popout::{paint_popout_card, popout_area, wrap_popout_lines},
         review::{dim_rgb, style_rgb},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
@@ -181,7 +181,7 @@ pub(crate) fn render_pane(
         Some(scene),
     );
 
-    if is_focused
+    let spinner_painted = if is_focused
         && let Some(entry) = frame.lsp_progress
         && let Some(area) = popout_area(status_area, content_area, 1, 0)
     {
@@ -211,6 +211,55 @@ pub(crate) fn render_pane(
             .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
             .add_modifier(Modifier::ITALIC);
         buf.set_stringn(content.x, content.y, text, content.width as usize, style);
+        true
+    } else {
+        false
+    };
+
+    if is_focused
+        && let Some((typ, msg)) = frame.lsp_message
+        && typ == lsp_types::MessageType::ERROR
+    {
+        let width = status_area.width.saturating_sub(2) as usize;
+        let lines = wrap_popout_lines(msg, width, 4);
+        if !lines.is_empty()
+            && let Some(area) = popout_area(
+                status_area,
+                content_area,
+                lines.len() as u16,
+                spinner_painted as u16,
+            )
+        {
+            let bg = theme
+                .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+                .bg
+                .unwrap_or(Color::Reset);
+            let border = theme
+                .get(crate::theme::scope::UI_BORDER_INACTIVE)
+                .fg
+                .unwrap_or(Color::Reset);
+            let content = paint_popout_card(
+                buf,
+                area,
+                bg,
+                border,
+                theme,
+                frame.stoatty.then_some(&mut *scene),
+            );
+
+            let style = theme
+                .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+                .patch(theme.get(crate::theme::scope::UI_ERROR));
+            for (i, line) in lines.iter().enumerate() {
+                buf.set_stringn(
+                    content.x,
+                    content.y + i as u16,
+                    line,
+                    content.width as usize,
+                    style,
+                );
+            }
+        }
     }
 }
 
@@ -550,18 +599,15 @@ fn status_segments(
                 right_anchor = start;
             }
         }
-        if let Some((typ, message)) = frame.lsp_message {
+        if let Some((typ, message)) = frame.lsp_message
+            && typ != lsp_types::MessageType::ERROR
+        {
             let available = right_anchor.saturating_sub(cursor) as usize;
             if available > 0 {
                 let text: String = message.chars().take(available).collect();
                 let width = text.chars().count() as u16;
                 let start = right_anchor.saturating_sub(width);
-                let style = if typ == lsp_types::MessageType::ERROR {
-                    base_style.patch(theme.get(crate::theme::scope::UI_ERROR))
-                } else {
-                    base_style
-                };
-                right.push((text, style));
+                right.push((text, base_style));
                 right_anchor = start;
             }
         }
