@@ -33,6 +33,10 @@ const MAX_RUNS: usize = 12;
 /// large file fills over several frames rather than stalling one.
 const BUILD_CHUNK: u32 = 4096;
 
+/// Lines re-summarized per [`MinimapContent::sync`] during a recolor sweep, so a
+/// large file's syntax recolor spreads across frames rather than stalling one.
+const RESYNC_CHUNK: u32 = 4096;
+
 /// Line count past which a buffer disables its minimap, so a huge file neither
 /// summarizes nor emits.
 const MAX_LINES: usize = 500_000;
@@ -125,6 +129,13 @@ pub struct MinimapContent {
     /// Syntax-coloring version (toggle plus parse) last synced. A change
     /// re-summarizes the built lines' content without a buffer edit.
     synced_syntax_version: u64,
+    /// The next built row a recolor sweep will re-summarize, or `None` when idle.
+    /// A syntax version change starts the sweep at 0, and it advances
+    /// [`RESYNC_CHUNK`] rows per sync until it reaches [`Self::built_upto`].
+    resync_upto: Option<u32>,
+    /// The syntax version an active sweep is bringing the strip to, so a fresh
+    /// bump to a different version restarts the sweep at the top.
+    resync_target: u64,
     queued: Vec<Splice>,
 }
 
@@ -140,6 +151,8 @@ impl MinimapContent {
             disabled: false,
             synced_decoration_version: 0,
             synced_syntax_version: 0,
+            resync_upto: None,
+            resync_target: 0,
             queued: Vec::new(),
         }
     }
@@ -221,34 +234,52 @@ impl MinimapContent {
             self.built_upto = end;
         }
 
-        // A recolor rewrites the content runs, so re-summarize every built line
-        // and compare. This subsumes the edge re-check, so run it instead of
-        // resync_edges and advance both versions.
-        if versions.syntax != self.synced_syntax_version {
-            self.resync_all(new_rope, &tokens_for, &edge_of);
-            self.synced_syntax_version = versions.syntax;
-            self.synced_decoration_version = versions.decoration;
-        } else if versions.decoration != self.synced_decoration_version {
+        // A recolor re-summarizes the built lines' content, swept RESYNC_CHUNK
+        // rows per sync so a large file never recolors in one frame. A syntax
+        // version change starts the sweep at the top. A fresh bump to a new
+        // version mid-sweep restarts it against the new target.
+        if versions.syntax != self.synced_syntax_version
+            && (self.resync_upto.is_none() || self.resync_target != versions.syntax)
+        {
+            self.resync_upto = Some(0);
+            self.resync_target = versions.syntax;
+        }
+        if let Some(from) = self.resync_upto {
+            let to = (from + RESYNC_CHUNK).min(self.built_upto);
+            self.resync_chunk(new_rope, from..to, &tokens_for, &edge_of);
+            if to >= self.built_upto {
+                self.resync_upto = None;
+                self.synced_syntax_version = self.resync_target;
+            } else {
+                self.resync_upto = Some(to);
+            }
+        }
+
+        // A diff or diagnostic change re-checks every built line's edge mark,
+        // independent of the content sweep. A row the sweep just re-summarized
+        // already carries the current edge, so resync_edges skips it.
+        if versions.decoration != self.synced_decoration_version {
             self.resync_edges(new_rope, &tokens_for, &edge_of);
             self.synced_decoration_version = versions.decoration;
         }
     }
 
-    /// Re-summarize every built line and queue a one-line splice where its full
-    /// summary changed, for a recolor (highlight toggle or a completed parse)
-    /// that leaves the buffer text untouched.
+    /// Re-summarize the built lines in `range` and queue a one-line splice where
+    /// a line's full summary changed, for a recolor (highlight toggle or a
+    /// completed parse) that leaves the buffer text untouched.
     ///
-    /// Costlier than [`Self::resync_edges`] since every line re-summarizes, but a
-    /// recolor is rare and can touch any line, unlike an edge change.
-    fn resync_all(
+    /// A recolor can touch any line, so the caller sweeps the whole built range
+    /// one [`RESYNC_CHUNK`] at a time across successive syncs rather than in one.
+    fn resync_chunk(
         &mut self,
         new_rope: &Rope,
+        range: Range<u32>,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         edge_of: &impl Fn(u32) -> Option<u8>,
     ) {
-        let tokens = tokens_for(0..self.built_upto);
+        let tokens = tokens_for(range.clone());
         let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
-        for row in 0..self.built_upto {
+        for row in range {
             let edge = edge_of(row);
             let text = line_text(new_rope, row);
             let summary = summarize_line(&text, &line_tokens(row, &text), edge);
@@ -605,7 +636,7 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 mod tests {
     use super::{
         summarize_line, LineToken, MinimapContent, Run, Splice, SyncVersions, BUILD_CHUNK,
-        MAX_LINES,
+        MAX_LINES, RESYNC_CHUNK,
     };
     use std::{collections::HashMap, ops::Range};
     use stoat_text::{patch::Patch, Rope};
@@ -879,6 +910,132 @@ mod tests {
             no_edges,
         );
         assert!(content.take_queued().is_empty(), "nothing left to build");
+    }
+
+    fn built_recolor_fixture() -> (Rope, MinimapContent) {
+        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let text: String = vec!["line"; total as usize].join("\n");
+        let rope = rope(&text);
+        let mut content = MinimapContent::new(1);
+        // Build the whole file monochrome over two syncs (syntax 0 sweeps nothing).
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        content.take_queued();
+        (rope, content)
+    }
+
+    fn color(class: u8) -> impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>> {
+        move |rows: Range<u32>| rows.map(|r| (r, vec![tok(0..4, class)])).collect()
+    }
+
+    #[test]
+    fn a_recolor_sweeps_in_chunks_across_syncs() {
+        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let (rope, mut content) = built_recolor_fixture();
+
+        // A syntax bump recolors, one chunk per sync.
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        let first = content.take_queued();
+        assert_eq!(
+            first.len(),
+            RESYNC_CHUNK as usize,
+            "first sync sweeps one chunk"
+        );
+        assert_eq!(first[0].start, 0);
+        assert_eq!(first.last().unwrap().start, RESYNC_CHUNK - 1);
+        assert_eq!(
+            first[0].lines[0],
+            summarize_line("line", &[tok(0..4, 1)], None),
+            "the swept summary matches a direct resummarize"
+        );
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        let second = content.take_queued();
+        assert_eq!(
+            second.len(),
+            (total - RESYNC_CHUNK) as usize,
+            "the remainder finishes the sweep"
+        );
+        assert_eq!(second[0].start, RESYNC_CHUNK);
+
+        // The sweep has reached the version, so a further sync recolors nothing.
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        assert!(
+            content.take_queued().is_empty(),
+            "a settled recolor queues nothing"
+        );
+    }
+
+    #[test]
+    fn a_fresh_syntax_bump_restarts_the_sweep() {
+        let (rope, mut content) = built_recolor_fixture();
+
+        // The first recolor sweeps chunk 0 to class 1, leaving the cursor mid-file.
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        content.take_queued();
+
+        // A fresh bump to a new version restarts at row 0 with the new color
+        // instead of continuing to the next chunk.
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 2),
+            color(2),
+            no_edges,
+        );
+        let restarted = content.take_queued();
+        assert_eq!(
+            restarted[0].start, 0,
+            "a fresh bump restarts the sweep at the top"
+        );
+        assert_eq!(restarted.len(), RESYNC_CHUNK as usize);
+        assert_eq!(
+            restarted[0].lines[0],
+            summarize_line("line", &[tok(0..4, 2)], None)
+        );
     }
 
     #[test]
