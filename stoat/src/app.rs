@@ -891,6 +891,14 @@ pub struct Stoat {
     /// popup's `prefix_range`, or by acceptance.
     pub(crate) pending_completion: Option<crate::completion::CompletionPopup>,
 
+    /// Monotonic counter bumped each time a popup is installed into
+    /// [`Self::pending_completion`], so the pooled list region detects a re-query
+    /// by comparing one `u64` rather than hashing every label each emit.
+    ///
+    /// Installing is the only site that bumps it, so it always matches the shown
+    /// popup and can serve as that popup's pool content version.
+    pub(crate) completion_generation: u64,
+
     /// In-flight debounced completion request. Replacing the entry
     /// drops the prior task, cancelling its spawned future before its
     /// debounce timer or downstream LSP request can land. Polled by
@@ -1313,6 +1321,7 @@ impl Stoat {
             quit_after_save: false,
             quit_requested: false,
             pending_completion: None,
+            completion_generation: 0,
             pending_completion_request: None,
             pending_completion_resolve: None,
             pending_completion_accept: None,
@@ -6802,15 +6811,10 @@ impl Stoat {
                 height: layout.inner.height,
             };
             let scroll_row = layout.viewport_top as u32;
-            // Items are replaced wholesale when the prefix re-queries, so a hash
-            // of their labels is the pool's content version: a re-query refills.
-            let content_version = {
-                let mut hasher = DefaultHasher::new();
-                for item in &popup.items {
-                    item.label.hash(&mut hasher);
-                }
-                hasher.finish()
-            };
+            // The item list is replaced wholesale on a re-query, which bumps
+            // completion_generation, so that counter is the pool's content
+            // version. A re-query refills without hashing every label each emit.
+            let content_version = self.completion_generation;
             crate::smooth_scroll::emit_into(
                 &mut out,
                 &mut self.smooth_scroll,

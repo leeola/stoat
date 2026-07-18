@@ -262,6 +262,9 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
             if popup.items.is_empty() {
                 stoat.pending_completion = None;
             } else {
+                // Bumped on each install so the pooled list region detects a
+                // re-query by comparing this counter instead of hashing labels.
+                stoat.completion_generation = stoat.completion_generation.wrapping_add(1);
                 stoat.pending_completion = Some(popup);
             }
             crate::action_handlers::completion::arm_completion_resolve(stoat);
@@ -699,6 +702,45 @@ mod harness_tests {
         assert!(
             got.iter().any(|l| l == "foobaz"),
             "expected foobaz in {got:?}",
+        );
+    }
+
+    #[test]
+    fn a_re_query_bumps_the_generation_while_a_stable_popup_does_not() {
+        let mut h = TestHarness::default();
+        enable_completion(&h);
+        open_scratch(&mut h, "");
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 3, &["foobar", "foobaz"]);
+
+        assert_eq!(h.stoat.completion_generation, 0, "no completion armed yet");
+
+        h.type_keys("i");
+        h.type_text("foo");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        assert!(h.stoat.pending_completion.is_some(), "popup armed");
+        assert_eq!(
+            h.stoat.completion_generation, 1,
+            "installing a popup bumps the generation"
+        );
+
+        // Settling with no new query leaves the popup in place, so the pool's
+        // content version stays put across emits.
+        h.settle();
+        assert_eq!(
+            h.stoat.completion_generation, 1,
+            "a stable popup does not bump the generation"
+        );
+
+        // Extending the prefix re-queries and installs fresh items.
+        h.fake_lsp()
+            .set_completions("/ws/buf.rs", 0, 4, &["foobar"]);
+        h.type_text("b");
+        h.advance_clock(COMPLETION_DEBOUNCE);
+        assert!(h.stoat.pending_completion.is_some(), "re-query re-armed");
+        assert_eq!(
+            h.stoat.completion_generation, 2,
+            "a re-query bumps the generation so the pool refills"
         );
     }
 
