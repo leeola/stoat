@@ -16,7 +16,7 @@ use crate::{
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
-    pane::{DockId, FocusTarget, NodeId, PaneId, Placement, View},
+    pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, Placement, View},
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
     register,
@@ -5730,9 +5730,13 @@ impl Stoat {
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
         let clipboard_host = self.clipboard_host.clone();
         let env_host = self.env_host.clone();
+        let modal_run = self.modal_run;
         let ws = self.active_workspace_mut();
         match notif {
             PtyNotification::Output { run_id, data } => {
+                // The block still feeds while hidden, but a hidden run drives no
+                // repaint. Revealing it repaints on the toggle's own dispatch.
+                let visible = Self::run_visible(ws, run_id, modal_run);
                 let Some(run_state) = ws.runs.get_mut(run_id) else {
                     return UpdateEffect::None;
                 };
@@ -5769,7 +5773,11 @@ impl Stoat {
                 if let Some(cwd) = reported_cwd {
                     run_state.cwd = cwd;
                 }
-                UpdateEffect::Redraw
+                if visible {
+                    UpdateEffect::Redraw
+                } else {
+                    UpdateEffect::None
+                }
             },
             PtyNotification::CommandDone {
                 run_id,
@@ -5788,6 +5796,10 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
             PtyNotification::TermOutput { agent_id, data } => {
+                // Computed before the feed so the later self.write_to_term does
+                // not collide with a borrow of ws. A hidden term still feeds but
+                // drives no repaint until a surface reveals it.
+                let visible = Self::term_visible(ws, agent_id);
                 let Some(agent) = ws.terms.get_mut(agent_id) else {
                     return UpdateEffect::None;
                 };
@@ -5799,7 +5811,11 @@ impl Stoat {
                 for text in clipboard_writes {
                     crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
                 }
-                UpdateEffect::Redraw
+                if visible {
+                    UpdateEffect::Redraw
+                } else {
+                    UpdateEffect::None
+                }
             },
             PtyNotification::TermExited { term_id } => {
                 let pane_ids = ws
@@ -5851,6 +5867,36 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
         }
+    }
+
+    /// Whether any visible surface shows run `run_id`.
+    ///
+    /// A split pane always counts as visible. A dock counts only when not hidden. A run
+    /// shown modally counts too. Gates a run block's output-driven repaint.
+    fn run_visible(ws: &Workspace, run_id: RunId, modal_run: Option<RunId>) -> bool {
+        modal_run == Some(run_id)
+            || ws
+                .panes
+                .split_panes()
+                .any(|(_, pane)| matches!(pane.view, View::Run(id) if id == run_id))
+            || ws.docks.values().any(|dock| {
+                dock.visibility != DockVisibility::Hidden
+                    && matches!(dock.view, View::Run(id) if id == run_id)
+            })
+    }
+
+    /// Whether any visible surface shows terminal `term_id`, as either a terminal
+    /// or an agent view.
+    ///
+    /// A split pane always counts as visible. A dock counts only when not hidden. Gates
+    /// a terminal's output-driven repaint.
+    fn term_visible(ws: &Workspace, term_id: TermId) -> bool {
+        ws.panes.split_panes().any(
+            |(_, pane)| matches!(pane.view, View::Agent(id) | View::Terminal(id) if id == term_id),
+        ) || ws.docks.values().any(|dock| {
+            dock.visibility != DockVisibility::Hidden
+                && matches!(dock.view, View::Agent(id) | View::Terminal(id) if id == term_id)
+        })
     }
 
     /// Drive background parse jobs: poll any in-flight tasks for completion,
@@ -8614,6 +8660,9 @@ mod tests {
                     crate::term_screen::TermScreen::new(24, 80),
                     session,
                 ));
+        // Show the agent in the focused pane so its output drives a repaint.
+        let pane = stoat.active_workspace().panes.focus();
+        stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
 
         let effect = stoat.handle_pty_notification(PtyNotification::TermOutput {
             agent_id,
@@ -9042,6 +9091,70 @@ mod tests {
         assert!(
             matches!(ws.panes.pane(only_pane).view, View::Agent(id) if id == term_id),
             "agent pane view unchanged",
+        );
+    }
+
+    #[test]
+    fn hidden_term_output_advances_state_without_a_repaint() {
+        use crate::pane::{DockPanel, DockSide, DockVisibility};
+
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let term_id = insert_term_session(ws);
+        // Only a hidden dock shows the term, so no visible surface has it.
+        ws.docks.insert(DockPanel {
+            view: View::Terminal(term_id),
+            side: DockSide::Right,
+            visibility: DockVisibility::Hidden,
+            default_width: 30,
+            area: Rect::new(0, 0, 0, 0),
+        });
+
+        let effect = h
+            .stoat
+            .handle_pty_notification(PtyNotification::TermOutput {
+                agent_id: term_id,
+                data: b"abc".to_vec(),
+            });
+        assert_eq!(
+            effect,
+            UpdateEffect::None,
+            "a hidden term drives no repaint"
+        );
+
+        let cursor = h
+            .stoat
+            .active_workspace()
+            .terms
+            .get(term_id)
+            .expect("term session")
+            .term
+            .cursor();
+        assert_eq!(
+            cursor.map(|c| c.col),
+            Some(3),
+            "the term still fed its bytes while hidden",
+        );
+    }
+
+    #[test]
+    fn visible_term_output_drives_a_repaint() {
+        let mut h = Stoat::test();
+        let ws = h.stoat.active_workspace_mut();
+        let pane = ws.panes.focus();
+        let term_id = insert_term_session(ws);
+        ws.panes.pane_mut(pane).view = View::Terminal(term_id);
+
+        let effect = h
+            .stoat
+            .handle_pty_notification(PtyNotification::TermOutput {
+                agent_id: term_id,
+                data: b"abc".to_vec(),
+            });
+        assert_eq!(
+            effect,
+            UpdateEffect::Redraw,
+            "a term in a split pane drives a repaint",
         );
     }
 
