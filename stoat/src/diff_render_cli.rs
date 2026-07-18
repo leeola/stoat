@@ -65,6 +65,9 @@ pub fn detect_width() -> u16 {
 /// Returns whether ANSI color should be emitted, given the explicit
 /// `--no-color` flag and the standard CLI conventions: respects the
 /// `NO_COLOR` env var (any value disables) and `TERM=dumb`.
+// The env-reading wrapper is the blessed boundary. The precedence logic it
+// delegates to is pure and unit-tested.
+#[allow(clippy::disallowed_methods)]
 pub fn detect_color_enabled(no_color_flag: bool) -> bool {
     let no_color_env_set = std::env::var_os("NO_COLOR").is_some();
     let term = std::env::var("TERM").ok();

@@ -1,3 +1,7 @@
+// These tests exercise LocalFs against the real filesystem, so they set up
+// files in a tempdir with std::fs directly.
+#![allow(clippy::disallowed_methods)]
+
 use stoat::host::{FsHost, LocalFs};
 
 #[test]

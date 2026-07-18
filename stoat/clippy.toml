@@ -1,0 +1,21 @@
+# Clippy resolves the config nearest the crate with no merging, so the root's
+# test-only allowances are re-stated here alongside the crate-specific ban.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Production code reaches the environment and filesystem only through the *Host
+# layer (EnvHost / FsHost), so unit tests never do real IO. Direct std::env /
+# std::fs calls bypass that abstraction. The local host module and a few other
+# blessed boundaries opt out with #[allow(clippy::disallowed_methods)].
+disallowed-methods = [
+  { path = "std::env::var", reason = "read the environment through EnvHost" },
+  { path = "std::env::var_os", reason = "read the environment through EnvHost" },
+  { path = "std::fs::read", reason = "read files through FsHost" },
+  { path = "std::fs::read_to_string", reason = "read files through FsHost" },
+  { path = "std::fs::write", reason = "write files through FsHost" },
+  { path = "std::fs::create_dir_all", reason = "create directories through FsHost" },
+  { path = "std::fs::remove_file", reason = "remove files through FsHost" },
+  { path = "std::fs::rename", reason = "rename files through FsHost" },
+  { path = "std::fs::copy", reason = "copy files through FsHost" },
+  { path = "std::fs::metadata", reason = "stat files through FsHost" },
+]

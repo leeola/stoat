@@ -196,7 +196,10 @@ pub(crate) fn merge_env_diff(args: &mut SpawnArgs, diff: &[(String, Option<Strin
 /// Resolve a pid to its command name from the OS process table. Linux
 /// reads `/proc/<pid>/comm`. macOS calls `libc::proc_name`. Other targets
 /// return `None`.
+// Reads the OS process table via /proc, which is process introspection rather
+// than the user-file IO the FsHost abstracts.
 #[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_methods)]
 fn process_name_for_pid(pid: libc::pid_t) -> Option<String> {
     let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     let name = comm.trim();

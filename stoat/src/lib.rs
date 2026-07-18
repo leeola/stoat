@@ -20,7 +20,9 @@ pub mod display_map;
 pub mod dump;
 mod editor_state;
 pub mod file_finder;
+// Materializes real sample repositories on disk for the CLI by design.
 #[cfg(feature = "fixture")]
+#[allow(clippy::disallowed_methods)]
 pub mod fixture;
 pub mod fuzzy;
 pub(crate) mod global_search;

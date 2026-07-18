@@ -1,3 +1,7 @@
+// These tests exercise LocalGit against real git repositories, so they
+// materialize working trees in a tempdir with std::fs directly.
+#![allow(clippy::disallowed_methods)]
+
 use git2::Repository;
 use std::{
     collections::BTreeMap,

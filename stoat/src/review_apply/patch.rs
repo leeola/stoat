@@ -233,7 +233,10 @@ fn touches_buffer_eof(side: &ReviewSide, buffer_total: u32) -> bool {
     side.line_num == buffer_total
 }
 
+// Two tests materialize a real git repo in a tempdir to exercise libgit2 patch
+// application, so they write to disk directly.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::review_session::{InMemoryFile, ReviewSession, ReviewSource};

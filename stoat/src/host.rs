@@ -12,6 +12,9 @@ pub mod clipboard;
 #[cfg(test)]
 pub mod fake;
 pub mod git;
+// The local host layer is the syscall boundary itself, so its direct std::env /
+// std::fs calls are the intended implementation, not a bypass.
+#[allow(clippy::disallowed_methods)]
 pub mod local;
 pub mod lsp;
 pub mod terminal;
