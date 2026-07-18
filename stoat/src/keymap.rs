@@ -546,7 +546,7 @@ pub(crate) fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAc
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use stoat_config::{LineNumbers, MouseCapturePolicy, Settings};
+    use stoat_config::{LineNumbers, MouseCapturePolicy, Settings, WrapMode};
 
     struct TestState {
         values: HashMap<String, StateValue>,
@@ -1045,6 +1045,8 @@ mod tests {
                 scrolloff: Some(3),
                 editor_line_numbers: Some(LineNumbers::Relative),
                 editor_minimap: None,
+                editor_wrap: Some(WrapMode::EditorWidth),
+                editor_wrap_column: None,
                 ui_inactive_dim: None,
                 highlight_retention: Some(64),
                 terminal_shell: None,

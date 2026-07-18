@@ -42,6 +42,18 @@ pub enum MinimapMode {
     Single,
 }
 
+/// How editor panes soft-wrap long lines. `EditorWidth` wraps at the pane's text
+/// width. `Bounded` wraps at the smaller of the pane text width and
+/// `editor.wrap_column`. `None` disables wrapping, so long lines truncate at the
+/// pane edge. `None` on the setting falls back to `EditorWidth`, and
+/// `false`/`true` are accepted as `None`/`EditorWidth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrapMode {
+    None,
+    EditorWidth,
+    Bounded,
+}
+
 /// Top-level resolved settings struct.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Settings {
@@ -86,6 +98,15 @@ pub struct Settings {
     /// `off`, `true` means `single`). The `:minimap` command toggles visibility
     /// at runtime.
     pub editor_minimap: Option<MinimapMode>,
+    /// How editor panes soft-wrap long lines, one of `none`, `editor_width`, or
+    /// `bounded`. `None` falls back at the consumer to [`WrapMode::EditorWidth`].
+    /// Set `editor.wrap = none;` in stcfg to disable (`false` means `none`,
+    /// `true` means `editor_width`).
+    pub editor_wrap: Option<WrapMode>,
+    /// The column `bounded` wrap mode wraps at, clamped against the pane text
+    /// width. `None` falls back at the consumer to 80. Set `editor.wrap_column =
+    /// N;` in stcfg. Consulted only by [`WrapMode::Bounded`].
+    pub editor_wrap_column: Option<u32>,
     /// Fraction an unfocused pane's colors blend toward the theme background,
     /// so an inactive split reads as dimmed. `None` falls back to 0.25; `0`
     /// disables dimming. Set `ui.inactive_dim = 0.4;` in stcfg. The raw value
@@ -182,6 +203,8 @@ impl Settings {
             scrolloff: other.scrolloff.or(self.scrolloff),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             editor_minimap: other.editor_minimap.or(self.editor_minimap),
+            editor_wrap: other.editor_wrap.or(self.editor_wrap),
+            editor_wrap_column: other.editor_wrap_column.or(self.editor_wrap_column),
             ui_inactive_dim: other.ui_inactive_dim.or(self.ui_inactive_dim),
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
@@ -291,6 +314,27 @@ impl Settings {
                     self.editor_minimap = Some(m);
                 }
             },
+            ["editor", "wrap"] => {
+                let mode = match &setting.value.node {
+                    Value::Bool(false) => Some(WrapMode::None),
+                    Value::Bool(true) => Some(WrapMode::EditorWidth),
+                    Value::String(s) | Value::Ident(s) => match s.as_str() {
+                        "none" => Some(WrapMode::None),
+                        "editor_width" => Some(WrapMode::EditorWidth),
+                        "bounded" => Some(WrapMode::Bounded),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(m) = mode {
+                    self.editor_wrap = Some(m);
+                }
+            },
+            ["editor", "wrap_column"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.editor_wrap_column = Some(n as u32);
+                }
+            },
             ["ui", "inactive_dim"] => {
                 if let Value::Number(n) = setting.value.node {
                     self.ui_inactive_dim = Some(n);
@@ -390,6 +434,8 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_wrap: None,
+                editor_wrap_column: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -487,6 +533,44 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_editor_wrap() {
+        let mode = |src: &str| Settings::from_config(&parse_ok(src)).editor_wrap;
+        assert_eq!(
+            mode("on init { editor.wrap = none; }"),
+            Some(WrapMode::None)
+        );
+        assert_eq!(
+            mode("on init { editor.wrap = editor_width; }"),
+            Some(WrapMode::EditorWidth)
+        );
+        assert_eq!(
+            mode("on init { editor.wrap = bounded; }"),
+            Some(WrapMode::Bounded)
+        );
+        assert_eq!(
+            mode("on init { editor.wrap = false; }"),
+            Some(WrapMode::None),
+            "false is an alias for none"
+        );
+        assert_eq!(
+            mode("on init { editor.wrap = true; }"),
+            Some(WrapMode::EditorWidth),
+            "true is an alias for editor_width"
+        );
+        assert_eq!(
+            mode("on init { }"),
+            None,
+            "absent falls back at the consumer"
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_editor_wrap_column() {
+        let config = parse_ok("on init { editor.wrap_column = 60; }");
+        assert_eq!(Settings::from_config(&config).editor_wrap_column, Some(60));
+    }
+
+    #[test]
     fn from_config_extracts_ui_inactive_dim() {
         let dim = |src: &str| Settings::from_config(&parse_ok(src)).ui_inactive_dim;
         assert_eq!(dim("on init { ui.inactive_dim = 0.4; }"), Some(0.4));
@@ -572,6 +656,8 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_wrap: None,
+                editor_wrap_column: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -603,6 +689,8 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_wrap: None,
+                editor_wrap_column: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -643,6 +731,8 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_wrap: None,
+            editor_wrap_column: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
@@ -666,6 +756,8 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_wrap: None,
+            editor_wrap_column: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
@@ -691,6 +783,8 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_wrap: None,
+                editor_wrap_column: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -719,6 +813,8 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_wrap: None,
+            editor_wrap_column: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
@@ -745,6 +841,8 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_wrap: None,
+                editor_wrap_column: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -784,6 +882,8 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_wrap: None,
+                editor_wrap_column: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -815,6 +915,8 @@ mod tests {
                 scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_wrap: None,
+                editor_wrap_column: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -843,6 +945,8 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_wrap: None,
+            editor_wrap_column: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
@@ -866,6 +970,8 @@ mod tests {
             scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_wrap: None,
+            editor_wrap_column: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,

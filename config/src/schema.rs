@@ -133,6 +133,21 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "single",
         },
         SettingDef {
+            path: &[Lit("editor"), Lit("wrap")],
+            shape: ValueShape::Enum(&["none", "editor_width", "bounded"]),
+            doc: "How editor panes soft-wrap long lines (none, editor_width, or \
+                  bounded at editor.wrap_column). `false` means none, `true` \
+                  means editor_width.",
+            default: "editor_width",
+        },
+        SettingDef {
+            path: &[Lit("editor"), Lit("wrap_column")],
+            shape: ValueShape::Number,
+            doc: "Column that bounded wrap mode wraps at, clamped to the pane \
+                  text width.",
+            default: "80",
+        },
+        SettingDef {
             path: &[Lit("ui"), Lit("inactive_dim")],
             shape: ValueShape::Number,
             doc: "Fraction an unfocused pane's colors blend toward the background \

@@ -151,6 +151,14 @@ on init {
     # absolute (each line's own number), or off (diagnostic marks only).
     editor.line_numbers = relative;
 
+    # Soft-wrap long lines: editor_width wraps at the pane's text width, bounded
+    # wraps at the smaller of the pane width and editor.wrap_column, none turns
+    # wrapping off (long lines truncate at the pane edge).
+    editor.wrap = editor_width;
+
+    # Column bounded wrap mode wraps at (applies only to editor.wrap = bounded).
+    # editor.wrap_column = 80;
+
     # Rows the view keeps between the cursor and the top or bottom edge when
     # following the cursor.
     editor.scrolloff = 3;
