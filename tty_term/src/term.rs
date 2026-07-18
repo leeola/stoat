@@ -1781,13 +1781,19 @@ impl ApcScanner {
     /// in.
     fn scan(&mut self, bytes: &[u8]) -> Vec<(Vec<u8>, usize)> {
         let mut payloads = Vec::new();
+        let mut i = 0;
 
-        for (i, &byte) in bytes.iter().enumerate() {
+        while i < bytes.len() {
+            let byte = bytes[i];
             match self.state {
-                ApcState::Ground => {
-                    if byte == ESC {
+                // No frame is open, so jump to the next ESC and skip the plain
+                // bytes between rather than stepping each one.
+                ApcState::Ground => match memchr::memchr(ESC, &bytes[i..]) {
+                    Some(off) => {
                         self.state = ApcState::Escape;
-                    }
+                        i += off;
+                    },
+                    None => break,
                 },
                 ApcState::Escape => {
                     self.state = match byte {
@@ -1819,6 +1825,7 @@ impl ApcScanner {
                     },
                 },
             }
+            i += 1;
         }
 
         payloads
@@ -1879,12 +1886,19 @@ impl XtVersionScanner {
     /// A query split across calls is retained until its final `q` arrives.
     fn scan(&mut self, bytes: &[u8]) -> usize {
         let mut hits = 0;
+        let mut i = 0;
 
-        for &byte in bytes {
+        while i < bytes.len() {
+            let byte = bytes[i];
             self.state = match self.state {
-                CsiState::Ground => match byte {
-                    ESC => CsiState::Escape,
-                    _ => CsiState::Ground,
+                // No query is open, so jump to the next ESC and skip the plain
+                // bytes between rather than stepping each one.
+                CsiState::Ground => match memchr::memchr(ESC, &bytes[i..]) {
+                    Some(off) => {
+                        i += off;
+                        CsiState::Escape
+                    },
+                    None => break,
                 },
                 CsiState::Escape => match byte {
                     b'[' => CsiState::CsiEntry,
@@ -1906,6 +1920,7 @@ impl XtVersionScanner {
                     _ => CsiState::Ground,
                 },
             };
+            i += 1;
         }
 
         hits
@@ -1962,13 +1977,19 @@ impl OscNotifyScanner {
     /// A sequence split across calls is retained until its terminator arrives.
     fn scan(&mut self, bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
         let mut out = Vec::new();
+        let mut i = 0;
 
-        for &byte in bytes {
+        while i < bytes.len() {
+            let byte = bytes[i];
             match self.state {
-                OscNotifyState::Ground => {
-                    if byte == ESC {
+                // No sequence is open, so jump to the next ESC and skip the
+                // plain bytes between rather than stepping each one.
+                OscNotifyState::Ground => match memchr::memchr(ESC, &bytes[i..]) {
+                    Some(off) => {
                         self.state = OscNotifyState::Escape;
-                    }
+                        i += off;
+                    },
+                    None => break,
                 },
                 OscNotifyState::Escape => {
                     self.state = match byte {
@@ -2024,6 +2045,7 @@ impl OscNotifyScanner {
                     _ => self.state = OscNotifyState::Skip,
                 },
             }
+            i += 1;
         }
 
         out
@@ -2698,7 +2720,7 @@ fn cube_channel(level: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApcScanner, Cursor, CursorShape, OscNotifyScanner, TermEvent, Terminal,
+        ApcScanner, Cursor, CursorShape, OscNotifyScanner, TermEvent, Terminal, XtVersionScanner,
         MAX_OSC_NOTIFY_BYTES, XTVERSION_REPLY,
     };
     use crate::{
@@ -3154,6 +3176,50 @@ mod tests {
     }
 
     #[test]
+    fn osc_notify_scan_skips_long_plain_runs() {
+        let mut scanner = OscNotifyScanner::default();
+        let mut input = vec![b'.'; 8192];
+        input.extend_from_slice(b"\x1b]9;ping\x07");
+
+        assert_eq!(scanner.scan(&input), vec![(9, b"ping".to_vec())]);
+    }
+
+    #[test]
+    fn osc_notify_scan_output_is_split_invariant() {
+        let input = b"log\x1b]9;alpha\x07gap\x1b]52;c;QQ==\x07\x1b]777;notify;t;b\x1b\\end";
+        let whole = OscNotifyScanner::default().scan(input);
+
+        for split in 0..=input.len() {
+            let mut scanner = OscNotifyScanner::default();
+            let mut got = scanner.scan(&input[..split]);
+            got.extend(scanner.scan(&input[split..]));
+            assert_eq!(got, whole, "split at {split} changed the notifications");
+        }
+    }
+
+    #[test]
+    fn xtversion_scan_skips_long_plain_runs() {
+        let mut scanner = XtVersionScanner::default();
+        let mut input = vec![b'.'; 8192];
+        input.extend_from_slice(b"\x1b[>q");
+
+        assert_eq!(scanner.scan(&input), 1);
+    }
+
+    #[test]
+    fn xtversion_scan_output_is_split_invariant() {
+        let input = b"a\x1b[>4;1mb\x1b[>qc\x1b[>0q";
+        let whole = XtVersionScanner::default().scan(input);
+        assert_eq!(whole, 2, "two queries; the modify-keys CSI is not one");
+
+        for split in 0..=input.len() {
+            let mut scanner = XtVersionScanner::default();
+            let got = scanner.scan(&input[..split]) + scanner.scan(&input[split..]);
+            assert_eq!(got, whole, "split at {split} changed the hit count");
+        }
+    }
+
+    #[test]
     fn surfaces_osc9_notification() {
         let mut terminal = Terminal::new(4, 8, Theme::default());
 
@@ -3436,6 +3502,37 @@ mod tests {
         let mut scanner = ApcScanner::default();
 
         assert!(scanner.scan(b"hello\x1b[31mworld").is_empty());
+    }
+
+    #[test]
+    fn apc_scan_skips_long_plain_runs() {
+        let mut scanner = ApcScanner::default();
+        let mut input = vec![b'.'; 8192];
+        input.extend_from_slice(b"\x1b_frame\x07");
+        let offset = input.len();
+
+        assert_eq!(scanner.scan(&input), vec![(b"frame".to_vec(), offset)]);
+    }
+
+    #[test]
+    fn apc_scan_payloads_are_split_invariant() {
+        let input = b"pre\x1b_alpha\x1b\\mid\x1b_beta\x07post";
+        let whole: Vec<Vec<u8>> = ApcScanner::default()
+            .scan(input)
+            .into_iter()
+            .map(|(payload, _)| payload)
+            .collect();
+
+        for split in 0..=input.len() {
+            let mut scanner = ApcScanner::default();
+            let mut got: Vec<Vec<u8>> = scanner
+                .scan(&input[..split])
+                .into_iter()
+                .map(|(payload, _)| payload)
+                .collect();
+            got.extend(scanner.scan(&input[split..]).into_iter().map(|(p, _)| p));
+            assert_eq!(got, whole, "split at {split} changed the payloads");
+        }
     }
 
     #[test]
