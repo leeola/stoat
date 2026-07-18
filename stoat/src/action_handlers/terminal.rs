@@ -104,7 +104,7 @@ fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let (program, args) = resolve_shell(
         stoat.settings.terminal_shell.as_deref(),
         stoat.settings.terminal_args.as_deref(),
-        std::env::var("SHELL").ok(),
+        stoat.env_host().var("SHELL"),
     );
 
     let host = stoat.terminal_host.clone();
@@ -205,6 +205,47 @@ mod tests {
         assert!(
             ws.terms.contains_key(term_id),
             "spawned terminal session is stored",
+        );
+    }
+
+    #[test]
+    fn terminal_spawn_resolves_shell_from_env() {
+        let mut h = Stoat::test();
+        h.fake_env().set("SHELL", "/bin/fakesh");
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        let spawns = h.fake_terminal_host().spawns();
+        assert_eq!(spawns.len(), 1, "the terminal action spawns one session");
+        assert_eq!(
+            spawns[0].program, "/bin/fakesh",
+            "the program resolves from $SHELL through EnvHost, not the real environment",
+        );
+        assert!(
+            spawns[0].args.is_empty(),
+            "an env-resolved shell launches with no args",
+        );
+    }
+
+    #[test]
+    fn terminal_shell_setting_beats_env() {
+        let mut h = Stoat::test();
+        h.fake_env().set("SHELL", "/bin/fakesh");
+        h.stoat.settings.terminal_shell = Some("/bin/zsh".to_owned());
+        h.stoat.settings.terminal_args = Some(args(&["-l"]));
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        let spawns = h.fake_terminal_host().spawns();
+        assert_eq!(spawns.len(), 1);
+        assert_eq!(
+            spawns[0].program, "/bin/zsh",
+            "the terminal.shell setting overrides the seeded $SHELL",
+        );
+        assert_eq!(
+            spawns[0].args,
+            args(&["-l"]),
+            "terminal.args accompany the setting-resolved shell",
         );
     }
 

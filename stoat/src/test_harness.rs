@@ -53,6 +53,7 @@ pub struct TestHarness {
     pub(crate) fake_lsp: Arc<crate::host::FakeLsp>,
     pub(crate) fake_clipboard: Arc<crate::host::FakeClipboard>,
     pub(crate) fake_terminal: Arc<crate::host::FakeTerminalSession>,
+    pub(crate) fake_terminal_host: Arc<crate::host::FakeTerminalHost>,
     frames: Vec<Frame>,
     last_buffer: Option<Buffer>,
     step: usize,
@@ -76,6 +77,8 @@ impl TestHarness {
         fake_lsp.set_executor(executor.clone());
         let fake_clipboard = Arc::new(crate::host::FakeClipboard::new());
         let fake_terminal = Arc::new(crate::host::FakeTerminalSession::new());
+        let fake_terminal_host =
+            Arc::new(crate::host::FakeTerminalHost::new(fake_terminal.clone()));
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;
         stoat.active_workspace_mut().name = String::new();
@@ -85,7 +88,7 @@ impl TestHarness {
         stoat.set_env_host(fake_env.clone());
         stoat.set_lsp_host(fake_lsp.clone());
         stoat.set_clipboard_host(fake_clipboard.clone());
-        stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake_terminal.clone()));
+        stoat.terminal_host = fake_terminal_host.clone();
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {
@@ -98,6 +101,7 @@ impl TestHarness {
             fake_lsp,
             fake_clipboard,
             fake_terminal,
+            fake_terminal_host,
             frames: Vec::new(),
             last_buffer: None,
             step: 0,
@@ -174,6 +178,13 @@ impl TestHarness {
     /// and terminal panes wrote to their PTY.
     pub fn fake_terminal(&self) -> &Arc<crate::host::FakeTerminalSession> {
         &self.fake_terminal
+    }
+
+    /// Expose the [`crate::host::FakeTerminalHost`] backing this harness so tests
+    /// can read the [`crate::host::SpawnArgs`] of terminal spawns via its
+    /// `spawns()`, asserting what program and arguments a spawn resolved to.
+    pub fn fake_terminal_host(&self) -> &Arc<crate::host::FakeTerminalHost> {
+        &self.fake_terminal_host
     }
 
     /// Assert that every host installed on [`Stoat`] still points at the

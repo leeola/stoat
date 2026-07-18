@@ -138,17 +138,28 @@ impl TerminalSession for FakeTerminalSession {
 /// returned by [`Self::spawn`] observe the same underlying state.
 pub struct FakeTerminalHost {
     session: Arc<FakeTerminalSession>,
+    spawns: Mutex<Vec<SpawnArgs>>,
 }
 
 impl FakeTerminalHost {
     pub fn new(session: Arc<FakeTerminalSession>) -> Self {
-        Self { session }
+        Self {
+            session,
+            spawns: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The [`SpawnArgs`] of every [`TerminalHost::spawn`] call so far, in order,
+    /// so a test can assert what program and arguments a spawn resolved to.
+    pub fn spawns(&self) -> Vec<SpawnArgs> {
+        self.spawns.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
 impl TerminalHost for FakeTerminalHost {
-    async fn spawn(&self, _args: SpawnArgs) -> io::Result<Box<dyn TerminalSession>> {
+    async fn spawn(&self, args: SpawnArgs) -> io::Result<Box<dyn TerminalSession>> {
+        self.spawns.lock().unwrap().push(args);
         Ok(Box::new(ArcTerminalSession(self.session.clone())))
     }
 }
