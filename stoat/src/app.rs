@@ -6400,6 +6400,9 @@ impl Stoat {
                 line
             };
 
+            // Version-cached, so the extra query is cheap. Its fold-chain version
+            // carries buffer edits into the content hash below.
+            let snapshot_version = editor.display_map.snapshot().version();
             let content_version = match editor.review_view.as_ref() {
                 Some(view) => view.session_version,
                 None => editor_page_content_version(
@@ -6414,6 +6417,7 @@ impl Stoat {
                     editor.diff_view,
                     editor.display_map.diff_version(),
                     dim,
+                    snapshot_version,
                 ),
             };
             let entered = crate::smooth_scroll::emit_into(
@@ -7105,6 +7109,7 @@ fn editor_page_content_version(
     diff_view: bool,
     diff_version: usize,
     dim: f32,
+    snapshot_version: usize,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
@@ -7115,6 +7120,11 @@ fn editor_page_content_version(
     diff_view.hash(&mut hasher);
     diff_version.hash(&mut hasher);
     ((dim * 1000.0) as u32).hash(&mut hasher);
+    // The display snapshot version bumps on buffer edits, folds, and inlay
+    // splices -- all of which change page pixels but reach nothing else here, so
+    // a file outside git (diff_version stuck at 0) would glide stale text
+    // without it.
+    snapshot_version.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -12511,6 +12521,55 @@ mod tests {
     }
 
     #[test]
+    fn emit_after_edit_reenters_pool_pages() {
+        use stoatty_protocol::command::{Command, FillCommand};
+        use tokio::sync::mpsc::UnboundedReceiver;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+
+        // A file outside any git root keeps diff_version at 0, so only the
+        // display snapshot version can carry an edit into the page content hash.
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+
+        fn drain_fills(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<u64> {
+            let mut filled = Vec::new();
+            while let Ok(batch) = rx.try_recv() {
+                for cmd in decode_apc_stream(&batch) {
+                    if let Command::Fill(FillCommand { index, .. }) = cmd {
+                        filled.push(index);
+                    }
+                }
+            }
+            filled
+        }
+
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            !drain_fills(&mut rx).is_empty(),
+            "the first emit prefills the pool window"
+        );
+
+        h.edit_focused(0..0, "x");
+        let _ = drain_fills(&mut rx);
+
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            !drain_fills(&mut rx).is_empty(),
+            "an edit bumps the snapshot version, so the pool re-enters its pages \
+             rather than compositing stale pre-edit text"
+        );
+    }
+
+    #[test]
     fn emit_smooth_scroll_glide_uses_the_eased_offset() {
         use stoatty_protocol::command::Command;
 
@@ -15481,36 +15540,41 @@ mod tests {
 
     #[test]
     fn editor_page_content_version_tracks_the_cursor_line() {
-        let base = editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0);
+        let base = editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0);
         assert_eq!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0),
             "identical inputs keep a buffered page cached"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(11), 0, false, 0, 0.0),
+            editor_page_content_version(true, 3, None, Some(11), 0, false, 0, 0.0, 0),
             "a cursor-line move refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0),
+            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0, 0),
             "switching to absolute numbering refills"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(72), Some(10), 0, false, 0, 0.0),
+            editor_page_content_version(true, 3, Some(72), Some(10), 0, false, 0, 0.0, 0),
             "a wrap-width change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0),
+            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0, 0),
             "a diff-view hunk change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.25),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.25, 0),
             "a focus change to a dimmed pane refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 1),
+            "a buffer edit (snapshot version bump) refills buffered pages"
         );
     }
 
