@@ -11,7 +11,7 @@ use crate::{
     theme::{scope, Theme},
 };
 use ratatui::style::Color;
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 use stoat_language::HighlightId;
 use stoat_text::{
     patch::{Edit, Patch},
@@ -77,7 +77,7 @@ pub enum EdgeClass {
 /// the resolved class so it stays free of the theme.
 #[derive(Clone, Debug)]
 pub struct LineToken {
-    pub range: std::ops::Range<usize>,
+    pub range: Range<usize>,
     pub class: u8,
 }
 
@@ -161,11 +161,12 @@ impl MinimapContent {
 
     /// Bring the summaries up to date with `new_rope` at `version`.
     ///
-    /// `edits` is the buffer's `edits_since(self.synced_version())`. `line_tokens`
-    /// resolves a row's syntax tokens and `edge_of` its diff/diagnostic mark, both
-    /// for re-summarizing. [`SyncVersions::decoration`] changing re-checks the
-    /// built lines' edge marks and [`SyncVersions::syntax`] changing re-summarizes
-    /// their content, each without a buffer edit.
+    /// `edits` is the buffer's `edits_since(self.synced_version())`. `tokens_for`
+    /// resolves the syntax tokens of a row range, queried once per range each
+    /// branch touches so a small edit never resolves the whole buffer, and
+    /// `edge_of` a row's diff/diagnostic mark. [`SyncVersions::decoration`]
+    /// changing re-checks the built lines' edge marks and [`SyncVersions::syntax`]
+    /// changing re-summarizes their content, each without a buffer edit.
     ///
     /// Edits within the already-built prefix queue splices. The unbuilt tail fills
     /// up to [`BUILD_CHUNK`] lines per call. A buffer over [`MAX_LINES`] disables
@@ -176,7 +177,7 @@ impl MinimapContent {
         version: u64,
         edits: &Patch<usize>,
         versions: SyncVersions,
-        line_tokens: impl Fn(u32, &str) -> Vec<LineToken>,
+        tokens_for: impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         edge_of: impl Fn(u32) -> Option<u8>,
     ) {
         if self.disabled {
@@ -199,7 +200,7 @@ impl MinimapContent {
 
         if version != self.synced_version {
             for edit in edits.edits() {
-                self.apply_edit(edit, new_rope, &line_tokens, &edge_of);
+                self.apply_edit(edit, new_rope, &tokens_for, &edge_of);
             }
             self.synced_version = version;
             self.synced_rope = new_rope.clone();
@@ -207,6 +208,8 @@ impl MinimapContent {
 
         if self.built_upto < total {
             let end = (self.built_upto + BUILD_CHUNK).min(total);
+            let tokens = tokens_for(self.built_upto..end);
+            let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
             let lines = summarize_rows(new_rope, self.built_upto..end, &line_tokens, &edge_of);
             self.queued.push(Splice {
                 start: self.built_upto,
@@ -222,11 +225,11 @@ impl MinimapContent {
         // and compare. This subsumes the edge re-check, so run it instead of
         // resync_edges and advance both versions.
         if versions.syntax != self.synced_syntax_version {
-            self.resync_all(new_rope, &line_tokens, &edge_of);
+            self.resync_all(new_rope, &tokens_for, &edge_of);
             self.synced_syntax_version = versions.syntax;
             self.synced_decoration_version = versions.decoration;
         } else if versions.decoration != self.synced_decoration_version {
-            self.resync_edges(new_rope, &line_tokens, &edge_of);
+            self.resync_edges(new_rope, &tokens_for, &edge_of);
             self.synced_decoration_version = versions.decoration;
         }
     }
@@ -240,9 +243,11 @@ impl MinimapContent {
     fn resync_all(
         &mut self,
         new_rope: &Rope,
-        line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
+        tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         edge_of: &impl Fn(u32) -> Option<u8>,
     ) {
+        let tokens = tokens_for(0..self.built_upto);
+        let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
         for row in 0..self.built_upto {
             let edge = edge_of(row);
             let text = line_text(new_rope, row);
@@ -268,9 +273,11 @@ impl MinimapContent {
     fn resync_edges(
         &mut self,
         new_rope: &Rope,
-        line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
+        tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         edge_of: &impl Fn(u32) -> Option<u8>,
     ) {
+        let tokens = tokens_for(0..self.built_upto);
+        let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
         for row in 0..self.built_upto {
             let new_edge = edge_of(row);
             if self.edges[row as usize] == new_edge {
@@ -297,7 +304,7 @@ impl MinimapContent {
         &mut self,
         edit: &Edit<usize>,
         new_rope: &Rope,
-        line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
+        tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         edge_of: &impl Fn(u32) -> Option<u8>,
     ) {
         let old_start_row = self.synced_rope.offset_to_point(edit.old.start).row;
@@ -309,11 +316,14 @@ impl MinimapContent {
         let new_start_row = new_rope.offset_to_point(edit.new.start).row;
         let new_end_row = new_rope.offset_to_point(edit.new.end).row;
 
+        let tokens = tokens_for(new_start_row..new_end_row + 1);
+        let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
+
         let removed = (old_end_row + 1).min(self.built_upto) - old_start_row;
         let inserted = summarize_rows(
             new_rope,
             new_start_row..new_end_row + 1,
-            line_tokens,
+            &line_tokens,
             edge_of,
         );
         let inserted_edges: Vec<Option<u8>> =
@@ -340,7 +350,7 @@ impl MinimapContent {
 /// and its edge mark from `edge_of`.
 fn summarize_rows(
     rope: &Rope,
-    rows: std::ops::Range<u32>,
+    rows: Range<u32>,
     line_tokens: &impl Fn(u32, &str) -> Vec<LineToken>,
     edge_of: &impl Fn(u32) -> Option<u8>,
 ) -> Vec<Vec<Run>> {
@@ -597,14 +607,15 @@ mod tests {
         summarize_line, LineToken, MinimapContent, Run, Splice, SyncVersions, BUILD_CHUNK,
         MAX_LINES,
     };
+    use std::{collections::HashMap, ops::Range};
     use stoat_text::{patch::Patch, Rope};
 
     fn rope(text: &str) -> Rope {
         Rope::from(text)
     }
 
-    fn no_tokens(_: u32, _: &str) -> Vec<LineToken> {
-        Vec::new()
+    fn no_tokens(_: Range<u32>) -> HashMap<u32, Vec<LineToken>> {
+        HashMap::new()
     }
 
     fn no_edges(_: u32) -> Option<u8> {
@@ -623,7 +634,7 @@ mod tests {
         }
     }
 
-    fn tok(range: std::ops::Range<usize>, class: u8) -> LineToken {
+    fn tok(range: Range<usize>, class: u8) -> LineToken {
         LineToken { range, class }
     }
 
@@ -710,6 +721,50 @@ mod tests {
         assert_eq!(queued[0].start, 1);
         assert_eq!(queued[0].removed, 1);
         assert_eq!(queued[0].lines.len(), 1, "one line re-summarized");
+    }
+
+    #[test]
+    fn a_sync_queries_tokens_only_for_the_rows_it_touches() {
+        use std::cell::RefCell;
+
+        let queried: RefCell<Vec<Range<u32>>> = RefCell::new(Vec::new());
+        let record = |rows: Range<u32>| -> HashMap<u32, Vec<LineToken>> {
+            queried.borrow_mut().push(rows);
+            HashMap::new()
+        };
+
+        let before = rope("a\nb\nc\nd\ne\nf\n");
+        let mut content = MinimapContent::new(1);
+
+        // The initial build queries exactly the build chunk it fills.
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            record,
+            no_edges,
+        );
+        assert_eq!(
+            *queried.borrow(),
+            vec![0..7],
+            "the build queries only the chunk it fills (6 lines and a trailing empty line)"
+        );
+        queried.borrow_mut().clear();
+        content.take_queued();
+
+        // An in-place edit on row 2 queries only that row, not the whole buffer.
+        let after = rope("a\nb\nC\nd\ne\nf\n");
+        let edit = Patch::new(vec![stoat_text::patch::Edit {
+            old: 4..5,
+            new: 4..5,
+        }]);
+        content.sync(&after, 2, &edit, versions(0, 0), record, no_edges);
+        assert_eq!(
+            *queried.borrow(),
+            vec![2..3],
+            "an edit queries only its splice rows"
+        );
     }
 
     #[test]
@@ -936,15 +991,12 @@ mod tests {
         let mut content = MinimapContent::new(1);
 
         // Build with line 0 colored class 5 across the whole word.
-        let colored = |row: u32, line: &str| {
-            if row == 0 {
-                vec![LineToken {
-                    range: 0..line.len(),
-                    class: 5,
-                }]
-            } else {
-                Vec::new()
+        let colored = |rows: Range<u32>| {
+            let mut map = HashMap::new();
+            if rows.contains(&0) {
+                map.insert(0, vec![tok(0.."alpha".len(), 5)]);
             }
+            map
         };
         content.sync(&text, 1, &Patch::empty(), versions(0, 1), colored, no_edges);
         let _ = content.take_queued();

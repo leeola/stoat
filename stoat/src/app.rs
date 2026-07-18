@@ -41,6 +41,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     io,
+    ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -6126,15 +6127,11 @@ impl Stoat {
         let syntax_on = self.syntax_highlight;
         let class_table = &self.minimap_class_table;
 
-        // Resolve the whole buffer's tokens once, on the first summarized row, so
-        // a steady frame that summarizes nothing pays nothing.
-        let line_bucket = std::cell::OnceCell::new();
-        let line_tokens = |row: u32, _text: &str| {
-            line_bucket
-                .get_or_init(|| minimap_line_tokens(&snapshot, buffer_id, syntax_on, class_table))
-                .get(&row)
-                .cloned()
-                .unwrap_or_default()
+        // Resolve only the tokens overlapping the rows each sync branch touches, so
+        // an edit or recolor never resolves the whole buffer. A steady frame that
+        // summarizes nothing queries no range and pays nothing.
+        let tokens_for = |rows: Range<u32>| {
+            minimap_line_tokens(&snapshot, buffer_id, syntax_on, class_table, rows)
         };
         let edge_of = |row: u32| minimap_edge_class(&snapshot, &severity_map, class_table, row);
 
@@ -6150,7 +6147,7 @@ impl Stoat {
                 decoration: decoration_version,
                 syntax: syntax_version,
             },
-            line_tokens,
+            tokens_for,
             edge_of,
         );
 
@@ -7155,15 +7152,28 @@ fn minimap_line_tokens(
     buffer_id: BufferId,
     syntax_on: bool,
     class_table: &crate::minimap::ClassTable,
+    rows: Range<u32>,
 ) -> std::collections::HashMap<u32, Vec<crate::minimap::LineToken>> {
     let mut by_row: std::collections::HashMap<u32, Vec<crate::minimap::LineToken>> =
         std::collections::HashMap::new();
-    if !syntax_on {
+    if !syntax_on || rows.is_empty() {
         return by_row;
     }
 
     let buffer_snap = snapshot.buffer_snapshot();
     let rope = buffer_snap.rope();
+
+    let last_row = rows.end.min(rope.max_point().row + 1).saturating_sub(1);
+    if rows.start > last_row {
+        return by_row;
+    }
+    // The byte span of `rows`, so each channel resolves anchors only for the
+    // tokens that can overlap it instead of the whole buffer.
+    let byte_range = {
+        let start = rope.point_to_offset(stoat_text::Point::new(rows.start, 0));
+        let end = rope.point_to_offset(stoat_text::Point::new(last_row, rope.line_len(last_row)));
+        start..end
+    };
 
     for highlights in [
         snapshot.semantic_token_highlights(),
@@ -7172,7 +7182,9 @@ fn minimap_line_tokens(
         let Some(channel) = highlights.get(&buffer_id) else {
             continue;
         };
-        for span in channel.tokens.iter() {
+        let bounds =
+            channel.overlap_bounds(&byte_range, |anchor| buffer_snap.resolve_anchor(anchor));
+        for span in &channel.tokens[bounds] {
             let class = channel.interner[span.style]
                 .foreground
                 .map_or(0, |fg| class_table.class_of_color(fg));
@@ -7185,8 +7197,8 @@ fn minimap_line_tokens(
                 continue;
             }
 
-            let start_row = rope.offset_to_point(start).row;
-            let end_row = rope.offset_to_point(end).row;
+            let start_row = rope.offset_to_point(start).row.max(rows.start);
+            let end_row = rope.offset_to_point(end).row.min(last_row);
             for row in start_row..=end_row {
                 let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
                 let line_end =

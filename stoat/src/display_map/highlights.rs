@@ -193,6 +193,38 @@ impl BufferSemanticTokens {
             prefix_max_end: Arc::from(prefix_max_end),
         }
     }
+
+    /// The half-open index range of [`Self::tokens`] that can overlap `byte_range`.
+    ///
+    /// Tokens are start-sorted, so a `partition_point` caps the upper bound at the
+    /// first token starting at or past `byte_range.end`. The lower bound reads
+    /// `prefix_max_end`, so a multi-line token enclosing the range from earlier is
+    /// kept while tokens ending before it are skipped without resolving them.
+    ///
+    /// Tokens in the returned range still need a per-token end check. Some end at
+    /// or before `byte_range.start` and only ride along under an enclosing token's
+    /// max end.
+    pub fn overlap_bounds(
+        &self,
+        byte_range: &Range<usize>,
+        resolve: impl Fn(&Anchor) -> usize,
+    ) -> Range<usize> {
+        let hi = self
+            .tokens
+            .partition_point(|token| resolve(&token.range.start) < byte_range.end);
+
+        let (mut left, mut right) = (0, hi);
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let max_end = resolve(&self.tokens[self.prefix_max_end[mid] as usize].range.end);
+            if max_end > byte_range.start {
+                right = mid;
+            } else {
+                left = mid + 1;
+            }
+        }
+        left..hi
+    }
 }
 
 pub type SemanticTokensHighlights = Arc<HashMap<BufferId, BufferSemanticTokens>>;
@@ -450,30 +482,10 @@ fn push_semantic_endpoints(
     resolve: &impl Fn(&Anchor) -> usize,
 ) {
     for (_buffer_id, channel) in semantic.iter() {
-        let tokens = &channel.tokens;
-        let prefix_max_end = &channel.prefix_max_end;
+        let bounds = channel.overlap_bounds(range, resolve);
+        let lo = bounds.start;
 
-        let hi = tokens.partition_point(|token| resolve(&token.range.start) < range.end);
-
-        // prefix_max_end[i] indexes the greatest-end token in 0..=i, and that
-        // end is non-decreasing in i, so the first i whose max end passes
-        // range.start is the earliest token that can reach the viewport. Every
-        // token before it ends at or before range.start.
-        let lo = {
-            let (mut left, mut right) = (0, hi);
-            while left < right {
-                let mid = left + (right - left) / 2;
-                let max_end = resolve(&tokens[prefix_max_end[mid] as usize].range.end);
-                if max_end > range.start {
-                    right = mid;
-                } else {
-                    left = mid + 1;
-                }
-            }
-            left
-        };
-
-        for (offset, token) in tokens[lo..hi].iter().enumerate() {
+        for (offset, token) in channel.tokens[bounds].iter().enumerate() {
             let s = resolve(&token.range.start);
             let e = resolve(&token.range.end);
             if s == e {
@@ -964,6 +976,42 @@ mod tests {
             .expect("enclosing token must style the scrolled viewport");
         assert_eq!(style.foreground, Some(Color::Blue));
         assert_eq!(style.bold, Some(true));
+    }
+
+    #[test]
+    fn overlap_bounds_brackets_the_tokens_reaching_a_range() {
+        use super::{BufferSemanticTokens, HighlightStyleInterner, SemanticTokenHighlight};
+
+        let make = |ranges: &[(usize, usize)]| -> BufferSemanticTokens {
+            let mut interner = HighlightStyleInterner::default();
+            let id = interner.intern(HighlightStyle::default());
+            let tokens: Arc<[SemanticTokenHighlight]> = ranges
+                .iter()
+                .map(|&(s, e)| SemanticTokenHighlight {
+                    range: anchor(s)..anchor(e),
+                    style: id,
+                })
+                .collect();
+            BufferSemanticTokens::new(tokens, Arc::new(interner), |a: &Anchor| a.offset as usize)
+        };
+        let resolve = |a: &Anchor| a.offset as usize;
+
+        // Tokens ending before the range are dropped from the lower bound.
+        let short = make(&[(0, 5), (6, 10), (22, 28), (30, 38)]);
+        assert_eq!(
+            short.overlap_bounds(&(20..40), resolve),
+            2..4,
+            "tokens ending before the range are excluded"
+        );
+
+        // A long token starting before the range but reaching into it is kept via
+        // prefix_max_end, even though the nearer token ends earlier.
+        let enclosing = make(&[(0, 40), (22, 28)]);
+        assert_eq!(
+            enclosing.overlap_bounds(&(20..40), resolve),
+            0..2,
+            "an enclosing token reaching the range is kept"
+        );
     }
 
     #[test]
