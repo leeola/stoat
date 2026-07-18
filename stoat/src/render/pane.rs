@@ -144,7 +144,7 @@ pub(crate) fn render_pane(
         },
         View::Agent(term_id) | View::Terminal(term_id) => {
             if let Some(term) = terms.get(*term_id) {
-                render_term_pane(term, content_area, is_focused, buf);
+                render_term_pane(term, theme, content_area, is_focused, buf);
             }
         },
     }

@@ -23,7 +23,7 @@ use crate::{
     render::undercurl::{self, UndercurlSpan},
     review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
-    term_session::TermId,
+    term_session::{TermId, TermSelection},
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
@@ -530,6 +530,11 @@ pub struct Stoat {
     /// field. The flag keeps a plain click, now a 1-wide block cursor, from
     /// copying a character.
     pub(crate) editor_drag: Option<(EditorId, BufferId, bool)>,
+    /// The in-flight terminal-pane selection drag, or `None` when no drag is
+    /// active. Holds the dragged pane's [`TermId`] and whether the pointer has
+    /// moved since the press, so `Up(Left)` copies the selection only for a real
+    /// drag and a plain click leaves no selection behind.
+    pub(crate) terminal_drag: Option<(TermId, bool)>,
     /// Terminal cell the mouse last rested over a focused editor pane, or
     /// `None` before any motion. The render resolves the diagnostic under it
     /// to raise a hover popover. Motion events only arrive with mouse capture
@@ -1222,6 +1227,7 @@ impl Stoat {
             selected_register: None,
             pending_insert_register: false,
             editor_drag: None,
+            terminal_drag: None,
             hover_cell: None,
             hover_diag: None,
             divider_drag: None,
@@ -3179,6 +3185,9 @@ impl Stoat {
         if self.handle_editor_pane_mouse(mouse.kind, col, row) {
             return UpdateEffect::Redraw;
         }
+        if self.handle_terminal_pane_mouse(mouse.kind, col, row) {
+            return UpdateEffect::Redraw;
+        }
         tracing::trace!(
             target: "stoat::app",
             kind = ?mouse.kind,
@@ -3610,6 +3619,25 @@ impl Stoat {
         }
     }
 
+    /// The focused terminal or agent pane's [`TermId`] and pane area, or `None`
+    /// when the focused element is not a terminal-backed pane.
+    fn focused_term_target(&self) -> Option<(TermId, Rect)> {
+        let ws = self.active_workspace();
+        match ws.focus {
+            FocusTarget::SplitPane => {
+                let pane = ws.panes.pane(ws.panes.focus());
+                match pane.view {
+                    View::Agent(id) | View::Terminal(id) => Some((id, pane.area)),
+                    _ => None,
+                }
+            },
+            FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).and_then(|dock| match dock.view {
+                View::Agent(id) | View::Terminal(id) => Some((id, dock.area)),
+                _ => None,
+            }),
+        }
+    }
+
     /// Index of the diagnostic under the terminal cell `(column, row)` in the
     /// focused editor pane, or `None` when the pointer is off a diagnostic or
     /// off the focused editor.
@@ -3733,6 +3761,96 @@ impl Stoat {
                 false
             },
             _ => false,
+        }
+    }
+
+    /// Route a left press, drag, or release over the focused terminal pane to a
+    /// grid selection, returning `true` when the event is consumed.
+    ///
+    /// `Down` anchors a selection at the clicked cell and arms
+    /// [`Self::terminal_drag`]. `Drag` extends the head, clamped to the grid, and
+    /// marks the drag moved. `Up` copies the selected text to the clipboard and
+    /// keeps it highlighted when the drag moved, and otherwise clears it so a
+    /// plain click leaves no selection. Coordinates are pane-relative cells.
+    fn handle_terminal_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
+        let Some((term_id, _area)) = self.focused_term_target() else {
+            return false;
+        };
+        let (rows, cols) = {
+            let ws = self.active_workspace();
+            let Some(session) = ws.terms.get(term_id) else {
+                return false;
+            };
+            (session.term.rows(), session.term.cols())
+        };
+        if rows == 0 || cols == 0 {
+            return false;
+        }
+
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let (cell_row, cell_col) = (row as usize, col as usize);
+                if cell_row >= rows || cell_col >= cols {
+                    self.clear_term_selection(term_id);
+                    return false;
+                }
+                {
+                    let ws = self.active_workspace_mut();
+                    let session = ws.terms.get_mut(term_id).expect("focused term exists");
+                    session.selection = Some(TermSelection::new(cell_row, cell_col));
+                }
+                self.terminal_drag = Some((term_id, false));
+                true
+            },
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some((drag_term, _)) = self.terminal_drag else {
+                    return false;
+                };
+                if drag_term != term_id {
+                    return false;
+                }
+                let cell_row = (row as usize).min(rows - 1);
+                let cell_col = (col as usize).min(cols - 1);
+                self.terminal_drag = Some((term_id, true));
+                let ws = self.active_workspace_mut();
+                let session = ws.terms.get_mut(term_id).expect("focused term exists");
+                if let Some(selection) = session.selection.as_mut() {
+                    selection.extend_to(cell_row, cell_col);
+                }
+                true
+            },
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some((drag_term, moved)) = self.terminal_drag.take() else {
+                    return false;
+                };
+                if drag_term != term_id {
+                    return false;
+                }
+                if !moved {
+                    self.clear_term_selection(term_id);
+                    return false;
+                }
+                let text = self
+                    .active_workspace()
+                    .terms
+                    .get(term_id)
+                    .and_then(|session| session.selection_text());
+                if let Some(text) = text {
+                    let clipboard_host = self.clipboard_host.clone();
+                    let env_host = self.env_host.clone();
+                    crate::host::clipboard_copy(clipboard_host.as_ref(), env_host.as_ref(), &text);
+                }
+                false
+            },
+            _ => false,
+        }
+    }
+
+    /// Drop any mouse selection on `term_id`, so the next keystroke, click, or
+    /// drag starts fresh.
+    fn clear_term_selection(&mut self, term_id: TermId) {
+        if let Some(session) = self.active_workspace_mut().terms.get_mut(term_id) {
+            session.selection = None;
         }
     }
 
@@ -3891,6 +4009,7 @@ impl Stoat {
                 return UpdateEffect::Redraw;
             }
             if let Some(agent_id) = self.term_input_target() {
+                self.clear_term_selection(agent_id);
                 self.write_to_term(agent_id, &[0x03]);
                 return UpdateEffect::None;
             }
@@ -4459,6 +4578,7 @@ impl Stoat {
     /// drop to normal for pane navigation rather than a lasting exit. A
     /// `View::Agent` pane stays in normal until the user presses `i`.
     fn route_key_to_term(&mut self, agent_id: TermId, key: KeyEvent) -> UpdateEffect {
+        self.clear_term_selection(agent_id);
         if key.code == KeyCode::Esc {
             self.transition_mode("normal".to_string());
             return UpdateEffect::Redraw;
@@ -9166,6 +9286,102 @@ mod tests {
             h.stoat.focused_mode(),
             "insert",
             "focusing a terminal by mouse enters insert",
+        );
+    }
+
+    fn focused_terminal_pane(h: &mut crate::test_harness::TestHarness, content: &[u8]) -> TermId {
+        let term_id = {
+            let ws = h.stoat.active_workspace_mut();
+            let pane = ws.panes.focus();
+            let term_id = insert_term_session(ws);
+            ws.panes.pane_mut(pane).view = View::Terminal(term_id);
+            term_id
+        };
+        // A focused terminal pane runs in insert, so typing routes to the pty.
+        h.stoat.set_focused_mode("insert".to_string());
+        // A render fits the emulator to the focused pane, so feed the content
+        // afterward to land it in the final grid.
+        let _ = h.stoat.render();
+        h.stoat.active_workspace_mut().terms[term_id]
+            .term
+            .feed(content);
+        term_id
+    }
+
+    #[test]
+    fn dragging_over_a_terminal_pane_selects_and_copies() {
+        use crossterm::event::MouseButton;
+
+        let mut h = Stoat::test();
+        let term_id = focused_terminal_pane(&mut h, b"hello world");
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 0));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 0));
+
+        assert_eq!(h.fake_clipboard().writes(), vec!["hello"]);
+        assert!(
+            h.stoat.active_workspace().terms[term_id]
+                .selection
+                .is_some(),
+            "the selection stays highlighted after release",
+        );
+        assert!(
+            h.stoat.terminal_drag.is_none(),
+            "the drag clears on release"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_clears_the_terminal_selection() {
+        use crossterm::event::MouseButton;
+
+        let mut h = Stoat::test();
+        let term_id = focused_terminal_pane(&mut h, b"hello world");
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 0));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 0));
+        assert!(h.stoat.active_workspace().terms[term_id]
+            .selection
+            .is_some());
+
+        h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+        assert!(
+            h.stoat.active_workspace().terms[term_id]
+                .selection
+                .is_none(),
+            "typing into the terminal clears the selection",
+        );
+    }
+
+    #[test]
+    fn a_click_without_drag_leaves_no_terminal_selection() {
+        use crossterm::event::MouseButton;
+
+        let mut h = Stoat::test();
+        let term_id = focused_terminal_pane(&mut h, b"hello world");
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 0));
+
+        assert!(
+            h.stoat.active_workspace().terms[term_id]
+                .selection
+                .is_none(),
+            "a plain click leaves no selection",
+        );
+        assert!(
+            h.fake_clipboard().writes().is_empty(),
+            "a plain click copies nothing",
         );
     }
 

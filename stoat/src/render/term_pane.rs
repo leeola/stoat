@@ -16,8 +16,13 @@ use ratatui::{
 ///
 /// When `is_focused`, the emulator's cursor cell is drawn as a reversed block,
 /// matching how the editor shows its caret only in the focused pane.
+///
+/// A mouse selection over the pane ([`TermSession::selection`]) tints its cells
+/// with the theme's selection style so the highlight follows the drag and
+/// persists until it is cleared.
 pub(crate) fn render_term_pane(
     agent: &TermSession,
+    theme: &crate::theme::Theme,
     area: Rect,
     is_focused: bool,
     buf: &mut Buffer,
@@ -29,6 +34,8 @@ pub(crate) fn render_term_pane(
     let term = &agent.term;
     let rows = term.rows().min(area.height as usize);
     let cols = term.cols().min(area.width as usize);
+    let selection = agent.selection;
+    let selection_style = theme.get(crate::theme::scope::UI_SELECTION);
 
     for row_idx in 0..rows {
         let y = area.y + row_idx as u16;
@@ -43,6 +50,9 @@ pub(crate) fn render_term_pane(
                 style = style.bg(bg);
             }
             style = style.add_modifier(cell.modifiers);
+            if selection.is_some_and(|sel| sel.contains(row_idx, col)) {
+                style = style.patch(selection_style);
+            }
             buf[(x, y)].set_char(cell.ch).set_style(style);
         }
     }
