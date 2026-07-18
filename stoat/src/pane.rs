@@ -188,6 +188,11 @@ pub struct PaneTree {
     next_index: u32,
     #[serde(skip)]
     stack: Vec<(NodeId, Rect)>,
+    /// The most recent split pane to hold focus, so focus can return to the split
+    /// layout after leaving a detached pane's window. Transient, resolved through
+    /// [`Self::last_split_focus`] which falls back when it goes stale.
+    #[serde(skip)]
+    last_split_focus: PaneId,
 }
 
 impl PaneTree {
@@ -218,6 +223,7 @@ impl PaneTree {
             nodes,
             next_index: 1,
             stack: Vec::new(),
+            last_split_focus: pane_id,
         }
     }
 
@@ -228,6 +234,22 @@ impl PaneTree {
     pub fn set_focus(&mut self, id: PaneId) {
         if self.panes.contains_key(id) {
             self.focus = id;
+            // Remember the split-layout focus so it can be restored after focus
+            // leaves a detached pane. A windowed pane is not a valid return point.
+            if self.leaf_node(id).is_some() {
+                self.last_split_focus = id;
+            }
+        }
+    }
+
+    /// The split pane focus should return to when it leaves a detached pane's
+    /// window, the last split pane focused when it is still live, otherwise the
+    /// first split pane. `None` only when no split pane exists.
+    pub fn last_split_focus(&self) -> Option<PaneId> {
+        if self.leaf_node(self.last_split_focus).is_some() {
+            Some(self.last_split_focus)
+        } else {
+            self.split_panes().next().map(|(id, _)| id)
         }
     }
 

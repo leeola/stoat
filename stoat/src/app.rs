@@ -16,7 +16,7 @@ use crate::{
     },
     keymap::{Keymap, ResolvedAction, StateValue},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
-    pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, Placement, View},
+    pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
     register,
@@ -50,10 +50,14 @@ use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock, Wrap
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::{Anchor, Bias, IndentStyle, Selection};
+use stoatty_protocol::window_ipc::WindowIpcEvent;
 use stoatty_widgets::ApcScene;
-use tokio::sync::{
-    mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
-    watch,
+use tokio::{
+    io::AsyncBufReadExt,
+    sync::{
+        mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
+        watch,
+    },
 };
 
 pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
@@ -185,6 +189,17 @@ pub(crate) struct PendingWorkspaceRestore {
     )>,
 }
 
+/// A message from the window-event socket reader task to the main loop.
+///
+/// The socket connection lives on a background task. Connection state and each
+/// decoded [`WindowIpcEvent`] cross to the main thread as one of these, so the
+/// flag and pane routing only ever mutate on the loop.
+enum WindowIpc {
+    Connected,
+    Disconnected,
+    Event(WindowIpcEvent),
+}
+
 pub struct Stoat {
     size: Rect,
     /// Fallback mode store, read and written only when the focused target has
@@ -303,6 +318,14 @@ pub struct Stoat {
     /// streaming build never blocks on a full channel.
     pub(crate) index_update_tx: UnboundedSender<IndexUpdate>,
     index_update_rx: UnboundedReceiver<IndexUpdate>,
+    /// Window focus, resize, and close events forwarded by the reader task that
+    /// connects to stoatty's `STOATTY_WINDOW_SOCKET`. Drained each tick into
+    /// [`Self::handle_window_ipc`].
+    window_ipc_tx: UnboundedSender<WindowIpc>,
+    window_ipc_rx: UnboundedReceiver<WindowIpc>,
+    /// Whether the window-event socket is currently connected. Gates pane
+    /// detach, which needs stoatty to host the aux window and report its events.
+    pub(crate) window_ipc_connected: bool,
     /// Cold-build worker, held only to keep the spawned scan alive while it
     /// runs. Progress arrives through [`Self::index_update_rx`].
     _index_build_task: Option<stoat_scheduler::Task<()>>,
@@ -1169,6 +1192,7 @@ impl Stoat {
         let (agent_event_tx, agent_event_rx) = tokio::sync::mpsc::channel(256);
         let (agent_control_tx, agent_control_rx) = tokio::sync::mpsc::channel(256);
         let (index_update_tx, index_update_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (window_ipc_tx, window_ipc_rx) = tokio::sync::mpsc::unbounded_channel();
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
         let (review_git_refresh_tx, review_git_refresh_rx) = tokio::sync::mpsc::channel(256);
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
@@ -1216,6 +1240,9 @@ impl Stoat {
             agent_control_rx,
             index_update_tx,
             index_update_rx,
+            window_ipc_tx,
+            window_ipc_rx,
+            window_ipc_connected: false,
             _index_build_task: None,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -1412,6 +1439,70 @@ impl Stoat {
     pub fn set_stoatty_apc(&mut self, stoatty: bool, apc_tx: UnboundedSender<Vec<u8>>) {
         self.stoatty = stoatty;
         self.apc_tx = Some(apc_tx);
+    }
+
+    /// Connect to stoatty's window-event socket at `socket`, if set, so detached
+    /// panes receive their windows' focus, resize, and close events.
+    ///
+    /// A detached reader task forwards decoded events over the channel
+    /// [`Self::run`] drains. A `None` path (not launched from stoatty, or over
+    /// ssh) leaves the connection closed and detach reporting unavailable.
+    pub fn set_window_ipc(&mut self, socket: Option<PathBuf>) {
+        let Some(path) = socket else {
+            return;
+        };
+        let tx = self.window_ipc_tx.clone();
+        self.executor.spawn(connect_window_ipc(path, tx)).detach();
+    }
+
+    /// Apply one window-event socket message to the active workspace.
+    ///
+    /// Connected/Disconnected track the socket state that gates detach. The rest
+    /// route to the pane bound to the reported window. `Focused{0}`, the primary
+    /// window, returns focus to the split layout when it currently sits on a
+    /// detached pane. `Focused{n}` focuses that window's pane, `Resized` re-sizes
+    /// it, and `Closed` reattaches it. Every event is a no-op when no pane
+    /// matches, absorbing a report that races a reattach.
+    fn handle_window_ipc(&mut self, message: WindowIpc) -> UpdateEffect {
+        let event = match message {
+            WindowIpc::Connected => {
+                self.window_ipc_connected = true;
+                return UpdateEffect::None;
+            },
+            WindowIpc::Disconnected => {
+                self.window_ipc_connected = false;
+                return UpdateEffect::None;
+            },
+            WindowIpc::Event(event) => event,
+        };
+
+        let panes = &mut self.active_workspace_mut().panes;
+        match event {
+            WindowIpcEvent::Focused { window: 0 } => {
+                let focused = panes.focus();
+                if matches!(panes.pane(focused).placement, Placement::Window(_))
+                    && let Some(target) = panes.last_split_focus()
+                {
+                    panes.set_focus(target);
+                }
+            },
+            WindowIpcEvent::Focused { window } => {
+                if let Some(id) = pane_for_window(panes, window) {
+                    panes.set_focus(id);
+                }
+            },
+            WindowIpcEvent::Resized { window, cols, rows } => {
+                if let Some(id) = pane_for_window(panes, window) {
+                    panes.pane_mut(id).area = Rect::new(0, 0, cols, rows);
+                }
+            },
+            WindowIpcEvent::Closed { window } => {
+                if let Some(id) = pane_for_window(panes, window) {
+                    panes.attach(id);
+                }
+            },
+        }
+        UpdateEffect::Redraw
     }
 
     /// Inject the version string the `ShowVersion` action reports. The binary
@@ -1765,6 +1856,10 @@ impl Stoat {
                     let Some(ctl) = ctl else { continue };
                     self.handle_agent_control(ctl)
                 }
+                msg = self.window_ipc_rx.recv() => {
+                    let Some(msg) = msg else { continue };
+                    self.handle_window_ipc(msg)
+                }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
                 _ = self.shutdown_notify.notified() => UpdateEffect::Quit,
                 _ = frame_timer.tick(), if animating || building || dirty || spinning => {
@@ -2031,6 +2126,10 @@ impl Stoat {
         }
         while let Ok(ctl) = self.agent_control_rx.try_recv() {
             effect = effect.merge(self.handle_agent_control(ctl));
+            coalesced += 1;
+        }
+        while let Ok(msg) = self.window_ipc_rx.try_recv() {
+            effect = effect.merge(self.handle_window_ipc(msg));
             coalesced += 1;
         }
         self.drain_index_updates();
@@ -7565,6 +7664,45 @@ fn control_byte(c: char) -> Option<u8> {
         .then(|| (c.to_ascii_lowercase() as u8) - b'a' + 1)
 }
 
+/// The detached pane bound to aux window `window`, or `None` when none is.
+fn pane_for_window(panes: &PaneTree, window: u32) -> Option<PaneId> {
+    panes
+        .windowed_panes()
+        .into_iter()
+        .find(|(_, w)| *w == window)
+        .map(|(id, _)| id)
+}
+
+/// Read stoatty's window-event socket, forwarding each event over `tx`.
+///
+/// Sends [`WindowIpc::Connected`] once the stream opens, then a
+/// [`WindowIpc::Event`] per decoded line, and [`WindowIpc::Disconnected`] when
+/// the stream ends or errors (stoatty exited, so detach reports unavailable
+/// again). Unparseable lines are skipped so the format can grow.
+async fn connect_window_ipc(path: PathBuf, tx: UnboundedSender<WindowIpc>) {
+    let stream = match tokio::net::UnixStream::connect(&path).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::warn!(?path, %error, "window-event socket connect failed");
+            let _ = tx.send(WindowIpc::Disconnected);
+            return;
+        },
+    };
+
+    let _ = tx.send(WindowIpc::Connected);
+
+    let mut lines = tokio::io::BufReader::new(stream).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(event) = stoatty_protocol::window_ipc::parse_line(&line)
+            && tx.send(WindowIpc::Event(event)).is_err()
+        {
+            return;
+        }
+    }
+
+    let _ = tx.send(WindowIpc::Disconnected);
+}
+
 pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
     if uri.scheme().map(|s| s.as_str()) != Some("file") {
         return None;
@@ -7706,6 +7844,64 @@ mod tests {
     use super::*;
     use crate::{agent_status::AgentHookEvent, buffer::TextBuffer};
     use std::path::{Path, PathBuf};
+
+    fn stoat_with_detached_pane(window: u32) -> (Stoat, PaneId) {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let mut stoat = Stoat::new(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::from("/repo"),
+        );
+        stoat.persistence_disabled = true;
+        let ws = stoat.active_workspace_mut();
+        let detached = ws.panes.split(crate::pane::Axis::Vertical);
+        assert!(ws.panes.detach(detached, window));
+        (stoat, detached)
+    }
+
+    #[test]
+    fn window_ipc_resize_sets_detached_pane_area() {
+        let (mut stoat, detached) = stoat_with_detached_pane(3);
+        stoat.handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Resized {
+            window: 3,
+            cols: 50,
+            rows: 20,
+        }));
+        assert_eq!(
+            stoat.active_workspace().panes.pane(detached).area,
+            Rect::new(0, 0, 50, 20),
+        );
+    }
+
+    #[test]
+    fn window_ipc_closed_reattaches_pane() {
+        let (mut stoat, detached) = stoat_with_detached_pane(3);
+        stoat.handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Closed { window: 3 }));
+        let panes = &stoat.active_workspace().panes;
+        assert_eq!(panes.pane(detached).placement, Placement::Split);
+        assert!(panes.split_pane_ids().contains(&detached));
+    }
+
+    #[test]
+    fn window_ipc_focused_moves_focus_to_and_from_the_windowed_pane() {
+        let (mut stoat, detached) = stoat_with_detached_pane(3);
+        let split = stoat.active_workspace().panes.split_pane_ids()[0];
+        stoat.active_workspace_mut().panes.set_focus(split);
+
+        stoat.handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Focused { window: 3 }));
+        assert_eq!(
+            stoat.active_workspace().panes.focus(),
+            detached,
+            "focused(n) focuses the windowed pane"
+        );
+
+        stoat.handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Focused { window: 0 }));
+        assert_eq!(
+            stoat.active_workspace().panes.focus(),
+            split,
+            "focused(0) returns focus to the split layout"
+        );
+    }
 
     #[test]
     fn scroll_anim_tick_eases_offset_then_settles() {

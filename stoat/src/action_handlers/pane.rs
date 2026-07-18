@@ -22,7 +22,7 @@ pub(super) fn close_focused_pane(stoat: &mut Stoat) -> bool {
 /// split pane). On success the pane keeps its size as window-relative
 /// coordinates, focus stays on it, and the next aux-window id is consumed.
 pub(super) fn detach_focused_pane(stoat: &mut Stoat) {
-    if !stoat.stoatty {
+    if !stoat.window_ipc_connected {
         stoat.set_status("detach needs stoatty");
         return;
     }

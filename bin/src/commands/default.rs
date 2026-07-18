@@ -308,6 +308,7 @@ fn run_tui(
         let mut stoat =
             Stoat::new_with_user_config(executor.clone(), cli_settings, initial_git_root, user_config);
         stoat.set_stoatty_apc(stoatty, apc_tx);
+        stoat.set_window_ipc(std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from));
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);
         stoat.set_env_auto_load(true);
