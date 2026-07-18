@@ -38,6 +38,7 @@ use stoatty_protocol::command::{
     self, BarCommand, BorderCommand, Command, HelloCommand, IconCommand, IdentReply,
     LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand, PanelCommand,
     PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
+    WindowOpenCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -338,6 +339,15 @@ pub enum TermEvent {
     /// A program identified itself with a [`Command::Hello`]. The host logs it so
     /// a remote editor is attributable to this terminal's log.
     Hello(HelloCommand),
+    /// A program asked to open an aux OS window as a second render target.
+    WindowOpen(WindowOpenCommand),
+    /// A program asked to close the aux OS window with this id.
+    WindowClose(u32),
+    /// A program asked to raise and OS-focus the aux window with this id.
+    WindowFocus(u32),
+    /// A window-bound pool's content changed, so the aux window with this id
+    /// needs a redraw. Coalesced to one per window within an advance.
+    WindowDirty(u32),
 }
 
 /// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
@@ -845,42 +855,60 @@ impl Terminal {
                 Some(fill) => fill.bars.push(bar),
                 None => self.stage_or_apply(Command::Bar(bar)),
             },
-            Command::PoolRegion(region) => match self.pools.get_mut(&region.pool) {
-                Some(pool) => {
-                    let resized =
-                        pool.region.width != region.width || pool.region.height != region.height;
-                    pool.region = region;
-                    if resized {
-                        pool.page_pool
-                            .rebuild(region.height.max(1) as usize, region.width.max(1) as usize);
-                    }
-                },
-                None => {
-                    self.pools.insert(region.pool, Pool::new(region));
-                },
+            Command::PoolRegion(region) => {
+                let window = region.window;
+                match self.pools.get_mut(&region.pool) {
+                    Some(pool) => {
+                        let resized = pool.region.width != region.width
+                            || pool.region.height != region.height;
+                        pool.region = region;
+                        if resized {
+                            pool.page_pool.rebuild(
+                                region.height.max(1) as usize,
+                                region.width.max(1) as usize,
+                            );
+                        }
+                    },
+                    None => {
+                        self.pools.insert(region.pool, Pool::new(region));
+                    },
+                }
+                self.mark_window_dirty(window);
             },
             Command::Fill(fill) => self.begin_fill(fill.pool, fill.index),
             Command::FillEnd => self.commit_fill(),
             Command::Scroll(scroll) => {
-                if let Some(pool) = self.pools.get_mut(&scroll.pool) {
+                let window = self.pools.get_mut(&scroll.pool).map(|pool| {
                     pool.scroll_target = DocumentOffset {
                         page: scroll.page,
                         fraction: scroll.fraction as f32 / FRACTION_SCALE,
                     };
+                    pool.region.window
+                });
+                if let Some(window) = window {
+                    self.mark_window_dirty(window);
                 }
             },
             Command::PoolCursor(cursor) => {
-                if let Some(pool) = self.pools.get_mut(&cursor.pool) {
+                let window = self.pools.get_mut(&cursor.pool).map(|pool| {
                     pool.cursor_anchor = Some((cursor.row, cursor.col));
+                    pool.region.window
+                });
+                if let Some(window) = window {
+                    self.mark_window_dirty(window);
                 }
             },
             Command::Reposition(reposition) => {
-                if let Some(pool) = self.pools.get_mut(&reposition.pool) {
+                let window = self.pools.get_mut(&reposition.pool).map(|pool| {
                     pool.scroll_target = DocumentOffset {
                         page: reposition.page,
                         fraction: 0.0,
                     };
                     pool.reposition = Some(reposition.page);
+                    pool.region.window
+                });
+                if let Some(window) = window {
+                    self.mark_window_dirty(window);
                 }
             },
             Command::PoolDrop(drop) => {
@@ -930,11 +958,30 @@ impl Terminal {
                 }
                 self.pending_events.push(TermEvent::Hello(hello));
             },
-            // Window lifecycle commands open, close, and focus aux OS windows.
-            // This terminal has no aux windows yet, so they are inert until a
-            // later change wires them to the windowing path.
-            Command::WindowOpen(_) | Command::WindowClose(_) | Command::WindowFocus(_) => {},
+            // Window lifecycle commands surface as events for the host's
+            // windowing path, which owns the actual aux OS windows.
+            Command::WindowOpen(open) => self.pending_events.push(TermEvent::WindowOpen(open)),
+            Command::WindowClose(close) => self
+                .pending_events
+                .push(TermEvent::WindowClose(close.window)),
+            Command::WindowFocus(focus) => self
+                .pending_events
+                .push(TermEvent::WindowFocus(focus.window)),
         }
+    }
+
+    /// Queue a [`TermEvent::WindowDirty`] for aux window `window`, coalescing
+    /// repeats within one advance.
+    ///
+    /// A no-op for the primary window (`0`), which composites on the main grid,
+    /// and when the last pending event is already the same dirty request, so a
+    /// region re-declare, a scroll, and a fill on one window in a single advance
+    /// yield a single redraw.
+    fn mark_window_dirty(&mut self, window: u32) {
+        if window == 0 || self.pending_events.last() == Some(&TermEvent::WindowDirty(window)) {
+            return;
+        }
+        self.pending_events.push(TermEvent::WindowDirty(window));
     }
 
     /// Splice the command's lines into the content store `content_id`, replacing
@@ -1085,12 +1132,34 @@ impl Terminal {
     /// and contents.
     pub fn pools_into(&self, out: &mut Vec<PoolView>) {
         out.clear();
-        out.extend(self.pools.values().map(|pool| PoolView {
+        out.extend(
+            self.pools
+                .values()
+                .filter(|pool| pool.region.window == 0)
+                .map(Self::pool_view),
+        );
+    }
+
+    /// Snapshots of every pool bound to aux `window`, in ascending-id (z) order.
+    ///
+    /// The counterpart to [`Self::pools`], which yields only primary-grid pools.
+    /// A window-bound pool is kept out of the primary composite and drawn into
+    /// its own window from this list instead.
+    pub fn window_pools(&self, window: u32) -> Vec<PoolView> {
+        self.pools
+            .values()
+            .filter(|pool| pool.region.window == window)
+            .map(Self::pool_view)
+            .collect()
+    }
+
+    fn pool_view(pool: &Pool) -> PoolView {
+        PoolView {
             id: pool.region.pool,
             region: pool.region,
             scroll_target: pool.scroll_target,
             cursor_anchor: pool.cursor_anchor,
-        }));
+        }
     }
 
     /// Take pool `id`'s pending discontinuous-jump destination, clearing it.
@@ -1248,6 +1317,8 @@ impl Terminal {
         pool.page_pool
             .set_decorations(fill.index, fill.text_runs, fill.bars);
         pool.content_version = pool.content_version.wrapping_add(1);
+        let window = pool.region.window;
+        self.mark_window_dirty(window);
     }
 
     /// Open a content capture for the command described by `target`.
@@ -1356,7 +1427,11 @@ impl Terminal {
         // Pages are sized to each pool's region, not the viewport, so a viewport
         // resize only empties them: the app re-declares regions and refills as
         // its layout recomputes. Any half-painted page is abandoned.
-        for pool in self.pools.values_mut() {
+        for pool in self
+            .pools
+            .values_mut()
+            .filter(|pool| pool.region.window == 0)
+        {
             pool.page_pool.rebuild(
                 pool.region.height.max(1) as usize,
                 pool.region.width.max(1) as usize,
@@ -2772,12 +2847,12 @@ mod tests {
         encode_ident_reply, encode_line_layout, encode_minimap, encode_minimap_drop,
         encode_minimap_lines, encode_minimap_view, encode_panel, encode_pool_cursor,
         encode_pool_drop, encode_pool_region, encode_popover, encode_reposition, encode_reset,
-        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, BarCommand,
-        BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
-        IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
+        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, encode_window_open,
+        BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand,
+        IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
         MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
         PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand,
-        ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand, WindowOpenCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -4415,6 +4490,88 @@ mod tests {
             .page_pool
             .page(index)
             .expect("page buffered")
+    }
+
+    fn declare_window_pool(terminal: &mut Terminal, id: u32, window: u32) {
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: id,
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 2,
+            window,
+        }));
+    }
+
+    #[test]
+    fn window_bound_pool_is_excluded_from_the_primary_composite() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 1, 2, 4);
+        declare_window_pool(&mut terminal, 2, 3);
+
+        let primary: Vec<u32> = terminal.pools().iter().map(|view| view.id).collect();
+        assert_eq!(
+            primary,
+            vec![1],
+            "the aux pool stays out of the primary list"
+        );
+
+        let aux: Vec<u32> = terminal
+            .window_pools(3)
+            .iter()
+            .map(|view| view.id)
+            .collect();
+        assert_eq!(aux, vec![2], "the aux pool appears under its window");
+        assert!(
+            terminal.window_pools(9).is_empty(),
+            "no pools for an unused window"
+        );
+    }
+
+    #[test]
+    fn a_fill_on_a_window_pool_marks_the_window_dirty_once() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_window_pool(&mut terminal, 2, 3);
+        terminal.take_events();
+
+        let mut stream = encode_fill(&FillCommand { pool: 2, index: 0 });
+        stream.extend_from_slice(b"hi");
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        assert_eq!(terminal.take_events(), vec![TermEvent::WindowDirty(3)]);
+    }
+
+    #[test]
+    fn window_open_command_surfaces_as_a_term_event() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let open = WindowOpenCommand {
+            window: 2,
+            cols: 80,
+            rows: 24,
+            title: "editor".to_string(),
+        };
+        terminal.advance(&encode_window_open(&open));
+
+        assert_eq!(terminal.take_events(), vec![TermEvent::WindowOpen(open)]);
+    }
+
+    #[test]
+    fn a_scroll_on_a_primary_pool_marks_nothing_dirty() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        declare_pool(&mut terminal, 1, 2, 4);
+        terminal.take_events();
+
+        terminal.advance(&encode_scroll(&ScrollCommand {
+            pool: 1,
+            page: 3,
+            fraction: 0,
+        }));
+
+        assert!(
+            terminal.take_events().is_empty(),
+            "a primary pool raises no window-dirty event"
+        );
     }
 
     #[test]

@@ -1889,6 +1889,12 @@ fn handle_term_events(state: &mut State, events: Vec<TermEvent>) {
                 version = %hello.version,
                 "program hello"
             ),
+            // Opening, closing, focusing, and redrawing aux windows lands in a
+            // later change. Until then these window events are inert.
+            TermEvent::WindowOpen(_)
+            | TermEvent::WindowClose(_)
+            | TermEvent::WindowFocus(_)
+            | TermEvent::WindowDirty(_) => {},
         }
     }
 }
