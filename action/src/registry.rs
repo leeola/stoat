@@ -48,7 +48,10 @@ use crate::{
             ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
             UnindentSelection, WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
         },
-        file::{AutoReload, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ToggleMinimap},
+        file::{
+            AutoReload, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ToggleMinimap,
+            ToggleWrap,
+        },
         file_finder::{
             FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
             FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
@@ -434,6 +437,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ForceSaveBuffer::DEF, |_| Ok(Box::new(ForceSaveBuffer)));
     add(OpenConfig::DEF, |_| Ok(Box::new(OpenConfig)));
     add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
+    add(ToggleWrap::DEF, |_| Ok(Box::new(ToggleWrap)));
     add(ToggleKeyHints::DEF, |_| Ok(Box::new(ToggleKeyHints)));
     add(DismissKeyHints::DEF, |_| Ok(Box::new(DismissKeyHints)));
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
@@ -1303,6 +1307,7 @@ mod tests {
         // + 3 StageHunk, UnstageHunk, ToggleStageHunk.
         // + 1 OpenConfig.
         // + 1 ToggleMinimap.
+        // + 1 ToggleWrap.
         // + 1 ToggleKeyHints.
         // + 1 DismissKeyHints.
         // + 1 ToggleSyntaxHighlight.
@@ -1332,7 +1337,7 @@ mod tests {
         // + 1 FocusPane.
         // + 2 PaletteHistoryPrev/Next.
         // + 1 SetTheme.
-        assert_eq!(all().count(), 349);
+        assert_eq!(all().count(), 350);
     }
 
     #[test]

@@ -161,6 +161,56 @@ impl Action for ToggleMinimap {
     }
 }
 
+#[derive(Debug)]
+pub struct ToggleWrapDef;
+
+impl ActionDef for ToggleWrapDef {
+    fn name(&self) -> &'static str {
+        "ToggleWrap"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ToggleWrap
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "toggle soft wrap in the focused editor"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Toggle soft wrap in the focused editor, overriding the editor.wrap setting until toggled back."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["wrap"]
+    }
+}
+
+#[derive(Debug)]
+pub struct ToggleWrap;
+
+impl ToggleWrap {
+    pub const DEF: &ToggleWrapDef = &ToggleWrapDef;
+}
+
+impl Action for ToggleWrap {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 const OPEN_BUFFER_PARAMS: &[ParamDef] = &[ParamDef {
     name: "path",
     kind: ParamKind::String,

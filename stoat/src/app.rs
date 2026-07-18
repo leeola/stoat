@@ -45,7 +45,7 @@ use std::{
     sync::Arc,
 };
 use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
-use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock};
+use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock, WrapMode};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::{Anchor, Bias, IndentStyle, Selection};
@@ -1392,6 +1392,24 @@ impl Stoat {
     /// Flip the minimap's visibility for the session, overriding the setting.
     pub(crate) fn toggle_minimap(&mut self) {
         self.minimap_override = Some(!self.minimap_enabled());
+    }
+
+    /// Flip the focused editor's soft-wrap override.
+    ///
+    /// A first toggle overrides the configured `editor.wrap` mode with its
+    /// opposite (wrapping the other way); a second clears the override so the
+    /// editor follows the setting again.
+    pub(crate) fn toggle_wrap(&mut self) {
+        let flipped = match self.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth) {
+            WrapMode::None => WrapMode::EditorWidth,
+            _ => WrapMode::None,
+        };
+        if let Some(editor) = action_handlers::focused_editor_mut(self) {
+            editor.wrap_override = match editor.wrap_override {
+                Some(_) => None,
+                None => Some(flipped),
+            };
+        }
     }
 
     /// Swap in an alternative [`FsHost`]. The default is [`LocalFs`]; the

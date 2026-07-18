@@ -22,6 +22,7 @@ pub enum ActionKind {
     OpenFile,
     OpenConfig,
     ToggleMinimap,
+    ToggleWrap,
     ToggleKeyHints,
     DismissKeyHints,
     OpenBuffer,

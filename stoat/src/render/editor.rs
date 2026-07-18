@@ -137,7 +137,8 @@ pub(crate) fn render_editor_with_overlay(
         0
     };
     let text_width = after_gutter.saturating_sub(minimap_cols);
-    let wrap_width = match wrap {
+    // A per-editor ToggleWrap override wins over the frame's configured mode.
+    let wrap_width = match editor.wrap_override.unwrap_or(wrap) {
         WrapMode::None => None,
         WrapMode::EditorWidth => Some(u32::from(text_width).max(1)),
         WrapMode::Bounded => Some(u32::from(text_width).max(1).min(wrap_column)),
@@ -2146,6 +2147,42 @@ mod tests {
         assert_eq!(width, Some(40), "editor_width wraps at the pane text width");
         assert_eq!(buffer_rows, 1, "the buffer is one long line");
         assert_eq!(display_rows, 5, "200 columns wrap into five 40-column rows");
+    }
+
+    #[test]
+    fn wrap_override_forces_wrap_off_then_restores() {
+        let mut h = Stoat::test();
+        open_long_line(&mut h);
+        let area = Rect::new(0, 0, 40, 10);
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .wrap_override = Some(WrapMode::None);
+        let (off_width, off_rows, buffer_rows) =
+            wrap_after_render(&mut h.stoat, area, WrapMode::EditorWidth, 80);
+        assert_eq!(
+            off_width, None,
+            "a wrap-off override truncates even under the editor_width frame",
+        );
+        assert_eq!(
+            off_rows, buffer_rows,
+            "the long line stays on its single row"
+        );
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .wrap_override = None;
+        let (on_width, on_rows, _) =
+            wrap_after_render(&mut h.stoat, area, WrapMode::EditorWidth, 80);
+        assert_eq!(
+            on_width,
+            Some(40),
+            "clearing the override follows the frame again"
+        );
+        assert!(
+            on_rows > buffer_rows,
+            "the line wraps once the override is cleared"
+        );
     }
 
     #[test]

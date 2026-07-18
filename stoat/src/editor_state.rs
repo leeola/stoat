@@ -8,6 +8,7 @@ use crate::{
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
+use stoat_config::WrapMode;
 use stoat_scheduler::Executor;
 
 new_key_type! { pub struct EditorId; }
@@ -79,6 +80,10 @@ pub(crate) struct EditorState {
     /// the render pipeline's layout `Rect`. `None` until the editor has
     /// been rendered at least once; handlers fall back to a default.
     pub(crate) viewport_rows: Option<u32>,
+    /// Per-editor soft-wrap override, toggled by `ToggleWrap`. `Some` forces this
+    /// editor's wrap mode regardless of the global `editor.wrap` setting; `None`
+    /// follows the setting. Transient, not persisted.
+    pub(crate) wrap_override: Option<WrapMode>,
     /// When `Some`, this editor is a review view; `render_editor` dispatches
     /// to the side-by-side renderer and flattened rows are read from the
     /// cache here. The cache is rebuilt by action handlers whenever the
@@ -181,6 +186,7 @@ impl EditorState {
             scroll_glide: ScrollGlide::None,
             pool_current_line: None,
             viewport_rows: None,
+            wrap_override: None,
             review_view: None,
             diff_view: false,
             selections,
@@ -216,6 +222,7 @@ impl EditorState {
             scroll_glide: ScrollGlide::None,
             pool_current_line: None,
             viewport_rows: None,
+            wrap_override: None,
             review_view: None,
             diff_view: false,
             selections,

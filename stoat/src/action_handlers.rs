@@ -147,6 +147,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.toggle_minimap();
             UpdateEffect::Redraw
         },
+        ActionKind::ToggleWrap => {
+            stoat.toggle_wrap();
+            UpdateEffect::Redraw
+        },
         ActionKind::ToggleKeyHints => {
             if stoat.key_hints_visible {
                 stoat.key_hints_visible = false;
@@ -2395,6 +2399,38 @@ mod tests {
         assert!(!h.stoat.minimap_enabled(), "toggle hides the minimap");
         dispatch(&mut h.stoat, &stoat_action::ToggleMinimap);
         assert!(h.stoat.minimap_enabled(), "toggle shows it again");
+    }
+
+    #[test]
+    fn toggle_wrap_overrides_then_clears() {
+        use stoat_config::WrapMode;
+        let mut h = Stoat::test();
+        let override_of =
+            |h: &mut Stoat| focused_editor_mut(h).expect("focused editor").wrap_override;
+
+        assert_eq!(override_of(&mut h.stoat), None, "no override by default");
+
+        dispatch(&mut h.stoat, &stoat_action::ToggleWrap);
+        assert_eq!(
+            override_of(&mut h.stoat),
+            Some(WrapMode::None),
+            "the default editor_width mode toggles to none",
+        );
+
+        dispatch(&mut h.stoat, &stoat_action::ToggleWrap);
+        assert_eq!(
+            override_of(&mut h.stoat),
+            None,
+            "a second toggle clears the override",
+        );
+
+        h.stoat.settings.editor_wrap = Some(WrapMode::None);
+        dispatch(&mut h.stoat, &stoat_action::ToggleWrap);
+        assert_eq!(
+            override_of(&mut h.stoat),
+            Some(WrapMode::EditorWidth),
+            "with wrap configured off, the toggle overrides to editor_width",
+        );
     }
 
     #[test]
