@@ -564,6 +564,16 @@ impl ApplicationHandler<PtyEvent> for App {
         let grid = Grid::new(rows, cols);
         let terminal = Arc::new(FairMutex::new(Terminal::new(rows, cols, self.theme)));
         update_cell_pixels(&terminal, self.font_size, scale_factor as f32);
+        if let Some(ident) = stoat_log::ident::get() {
+            terminal
+                .lock()
+                .set_ident(stoatty_protocol::command::IdentReply {
+                    pid: std::process::id(),
+                    log_id: ident.id.to_string(),
+                    hostname: stoat_log::ident::hostname(),
+                    version: crate::cli::VERSION_INFO.to_string(),
+                });
+        }
         let dirty = Arc::new(AtomicBool::new(false));
         let sync_pending = Arc::new(AtomicBool::new(false));
 
@@ -1872,6 +1882,13 @@ fn handle_term_events(state: &mut State, events: Vec<TermEvent>) {
             TermEvent::Notification { title, body } => {
                 deliver_notification(title.as_deref(), &body)
             },
+            TermEvent::Hello(hello) => tracing::info!(
+                pid = hello.pid,
+                log_id = %hello.log_id,
+                hostname = %hello.hostname,
+                version = %hello.version,
+                "program hello"
+            ),
         }
     }
 }

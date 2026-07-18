@@ -104,6 +104,36 @@ pub enum Command {
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
+    /// A handshake the program sends to identify itself to the terminal, so the
+    /// terminal's log records which process drives it. The terminal replies with
+    /// its own [`IdentReply`].
+    Hello(HelloCommand),
+}
+
+/// The payload of [`Command::Hello`]: a program's self-identification.
+///
+/// Sent by a program (the stoat editor) to the terminal (stoatty) so the
+/// terminal logs which process, over which session, on which host drives it --
+/// the record that ties a remote editor to a local terminal log.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct HelloCommand {
+    pub pid: u32,
+    pub log_id: String,
+    pub hostname: String,
+    pub version: String,
+}
+
+/// The terminal's reply to a [`Command::Hello`], identifying the terminal.
+///
+/// Unlike a [`Command`], this travels terminal-to-program: it arrives as input
+/// bytes on the program's stdin, so [`decode`] (the terminal-facing entry) never
+/// yields it. Decode it explicitly with [`decode_ident_reply`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct IdentReply {
+    pub pid: u32,
+    pub log_id: String,
+    pub hostname: String,
+    pub version: String,
 }
 
 /// Frame a rectangular cell region with a border.
@@ -1059,6 +1089,78 @@ pub fn encode_reset_into(out: &mut Vec<u8>) {
     frame::end(out);
 }
 
+/// Encode a [`HelloCommand`] as a full `Gstoatty;hello` frame for an emitter.
+pub fn encode_hello(command: &HelloCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_hello_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;hello` frame for `command` to `out`.
+///
+/// The four fields ride as separate arguments in field order, with `pid` as a
+/// decimal string so the frame stays legible in a raw log.
+pub fn encode_hello_into(out: &mut Vec<u8>, command: &HelloCommand) {
+    frame::begin(out, "hello");
+    frame::push_arg(out, |w| write!(w, "{}", command.pid));
+    frame::push_arg(out, |w| w.write_all(command.log_id.as_bytes()));
+    frame::push_arg(out, |w| w.write_all(command.hostname.as_bytes()));
+    frame::push_arg(out, |w| w.write_all(command.version.as_bytes()));
+    frame::end(out);
+}
+
+fn decode_hello(args: &[Vec<u8>]) -> Option<HelloCommand> {
+    let [pid, log_id, hostname, version] = args else {
+        return None;
+    };
+    Some(HelloCommand {
+        pid: std::str::from_utf8(pid).ok()?.parse().ok()?,
+        log_id: String::from_utf8(log_id.clone()).ok()?,
+        hostname: String::from_utf8(hostname.clone()).ok()?,
+        version: String::from_utf8(version.clone()).ok()?,
+    })
+}
+
+/// Encode an [`IdentReply`] as a full `Gstoatty;ident` frame for a terminal.
+pub fn encode_ident_reply(reply: &IdentReply) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_ident_reply_into(&mut out, reply);
+    out
+}
+
+/// Append a `Gstoatty;ident` frame for `reply` to `out`.
+///
+/// The terminal writes this to the program's stdin in answer to a
+/// [`Command::Hello`], carrying the same four fields.
+pub fn encode_ident_reply_into(out: &mut Vec<u8>, reply: &IdentReply) {
+    frame::begin(out, "ident");
+    frame::push_arg(out, |w| write!(w, "{}", reply.pid));
+    frame::push_arg(out, |w| w.write_all(reply.log_id.as_bytes()));
+    frame::push_arg(out, |w| w.write_all(reply.hostname.as_bytes()));
+    frame::push_arg(out, |w| w.write_all(reply.version.as_bytes()));
+    frame::end(out);
+}
+
+/// Decode a `Gstoatty;ident` [`Frame`] into an [`IdentReply`], or `None` when it
+/// is not an ident frame or its fields do not parse.
+///
+/// Separate from [`decode`] because an ident reply travels terminal-to-program
+/// and never appears in the terminal-facing command stream.
+pub fn decode_ident_reply(frame: &Frame) -> Option<IdentReply> {
+    if frame.sub != "ident" {
+        return None;
+    }
+    let [pid, log_id, hostname, version] = frame.args.as_slice() else {
+        return None;
+    };
+    Some(IdentReply {
+        pid: std::str::from_utf8(pid).ok()?.parse().ok()?,
+        log_id: String::from_utf8(log_id.clone()).ok()?,
+        hostname: String::from_utf8(hostname.clone()).ok()?,
+        version: String::from_utf8(version.clone()).ok()?,
+    })
+}
+
 /// Append the full `Gstoatty` frame for any [`Command`] to `out` without
 /// allocating, dispatching on the variant.
 ///
@@ -1104,6 +1206,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::MinimapView(c) => encode_minimap_view_into(out, c),
         Command::MinimapDrop(c) => encode_minimap_drop_into(out, c),
         Command::Reset => encode_reset_into(out),
+        Command::Hello(c) => encode_hello_into(out, c),
     }
 }
 
@@ -1136,6 +1239,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "minimap_view" => decode_minimap_view(&frame.args).map(Command::MinimapView),
         "minimap_drop" => decode_minimap_drop(&frame.args).map(Command::MinimapDrop),
         "reset" => Some(Command::Reset),
+        "hello" => decode_hello(&frame.args).map(Command::Hello),
         _ => None,
     }
 }
@@ -1488,12 +1592,13 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_into,
-        encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
-        encode_minimap_view, encode_panel, encode_pool_cursor, encode_pool_drop,
-        encode_pool_region, encode_popover, encode_popover_end, encode_reposition, encode_reset,
-        encode_scale, encode_scroll, encode_scroll_region, encode_text_run_end, BarCommand,
-        BorderCommand, BorderStyle, Command, FillCommand, IconCommand, IconKind, LineLayoutCommand,
+        decode, decode_ident_reply, encode_bar, encode_border, encode_fill, encode_fill_end,
+        encode_hello, encode_icon, encode_ident_reply, encode_into, encode_line_layout,
+        encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
+        encode_panel, encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
+        encode_popover_end, encode_reposition, encode_reset, encode_scale, encode_scroll,
+        encode_scroll_region, encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command,
+        FillCommand, HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand,
         MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
         PanelCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
         RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
@@ -1514,6 +1619,32 @@ mod tests {
             decode(&encode_border(&command)),
             Some(Command::Border(command))
         );
+    }
+
+    #[test]
+    fn hello_round_trips() {
+        let command = HelloCommand {
+            pid: 12345,
+            log_id: "20260718-143022-12345".to_string(),
+            hostname: "workstation".to_string(),
+            version: "0.1.0 (abc)".to_string(),
+        };
+        assert_eq!(
+            decode(&encode_hello(&command)),
+            Some(Command::Hello(command))
+        );
+    }
+
+    #[test]
+    fn ident_reply_round_trips() {
+        let reply = IdentReply {
+            pid: 4321,
+            log_id: "20260718-143000-4321".to_string(),
+            hostname: "workstation".to_string(),
+            version: "0.2.0".to_string(),
+        };
+        let frame = crate::frame::decode(&encode_ident_reply(&reply)).expect("ident frame decodes");
+        assert_eq!(decode_ident_reply(&frame), Some(reply));
     }
 
     #[test]

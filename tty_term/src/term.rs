@@ -35,9 +35,9 @@ use std::{
     time::Instant,
 };
 use stoatty_protocol::command::{
-    self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, LineSummary,
-    MinimapCommand, MinimapLinesCommand, PanelCommand, PoolRegionCommand, PopoverCommand,
-    ScaleCommand, ScrollRegionCommand, TextRunCommand,
+    self, BarCommand, BorderCommand, Command, HelloCommand, IconCommand, IdentReply,
+    LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand, PanelCommand,
+    PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -77,6 +77,10 @@ pub struct Terminal {
     /// Shares the `term`'s response buffer so [`Self::take_responses`] can drain
     /// the replies the terminal emits to host queries.
     responses: ResponseSink,
+    /// This terminal's own identity, replied to a program's [`Command::Hello`].
+    /// `None` until the host installs it via [`Self::set_ident`]. While `None` a
+    /// hello is still logged but not answered.
+    ident: Option<IdentReply>,
     parser: Processor,
     /// Color set the projection resolves named and default colors against.
     theme: Theme,
@@ -331,6 +335,9 @@ pub enum TermEvent {
     /// Raise a desktop notification (OSC 9, or OSC 777;notify). `title` is
     /// `None` for OSC 9, which carries only a body.
     Notification { title: Option<String>, body: String },
+    /// A program identified itself with a [`Command::Hello`]. The host logs it so
+    /// a remote editor is attributable to this terminal's log.
+    Hello(HelloCommand),
 }
 
 /// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
@@ -467,6 +474,7 @@ impl Terminal {
         Terminal {
             term,
             responses,
+            ident: None,
             parser: Processor::new(),
             theme,
             palette,
@@ -643,6 +651,7 @@ impl Terminal {
                         | Command::MinimapLines(_)
                         | Command::MinimapView(_)
                         | Command::MinimapDrop(_)
+                        | Command::Hello(_)
                 );
                 if routed || (self.fill.is_none() && self.capture.is_none()) {
                     self.apply_command(command);
@@ -701,6 +710,13 @@ impl Terminal {
     /// no such event.
     pub fn take_events(&mut self) -> Vec<TermEvent> {
         mem::take(&mut self.pending_events)
+    }
+
+    /// Install this terminal's identity, so an arriving [`Command::Hello`] is
+    /// answered with an ident reply. Without it a hello is still logged (as a
+    /// [`TermEvent::Hello`]) but not answered.
+    pub fn set_ident(&mut self, ident: IdentReply) {
+        self.ident = Some(ident);
     }
 
     /// Record the physical pixel size of one cell so a CSI 14 t query can report
@@ -902,6 +918,15 @@ impl Terminal {
                 self.commit_capture();
                 self.stage_or_apply(Command::Reset);
             },
+            // Hello identifies the program behind the terminal and touches no
+            // grid state. The host logs the event, and the terminal answers with
+            // its own ident when one is installed.
+            Command::Hello(hello) => {
+                if let Some(ident) = &self.ident {
+                    self.responses.push(&command::encode_ident_reply(ident));
+                }
+                self.pending_events.push(TermEvent::Hello(hello));
+            },
         }
     }
 
@@ -1008,7 +1033,8 @@ impl Terminal {
             | Command::PoolDrop(_)
             | Command::MinimapLines(_)
             | Command::MinimapView(_)
-            | Command::MinimapDrop(_) => {},
+            | Command::MinimapDrop(_)
+            | Command::Hello(_) => {},
         }
     }
 
@@ -2731,12 +2757,13 @@ mod tests {
         theme::Theme,
     };
     use stoatty_protocol::command::{
-        encode_bar, encode_border, encode_fill, encode_fill_end, encode_icon, encode_line_layout,
-        encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
-        encode_panel, encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
-        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-        encode_text_run, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand,
-        IconCommand, IconKind as ProtoIconKind, LineLayoutCommand, MinimapCommand,
+        encode_bar, encode_border, encode_fill, encode_fill_end, encode_hello, encode_icon,
+        encode_ident_reply, encode_line_layout, encode_minimap, encode_minimap_drop,
+        encode_minimap_lines, encode_minimap_view, encode_panel, encode_pool_cursor,
+        encode_pool_drop, encode_pool_region, encode_popover, encode_reposition, encode_reset,
+        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, BarCommand,
+        BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
+        IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
         MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
         PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand,
         ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
@@ -2994,6 +3021,48 @@ mod tests {
 
         terminal.advance(b"\x1b[>0q");
         assert_eq!(terminal.take_responses(), XTVERSION_REPLY.as_bytes());
+    }
+
+    #[test]
+    fn hello_yields_event_and_replies_when_ident_set() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let ident = IdentReply {
+            pid: 42,
+            log_id: "20260718-143000-42".to_string(),
+            hostname: "host".to_string(),
+            version: "v".to_string(),
+        };
+        terminal.set_ident(ident.clone());
+
+        let hello = HelloCommand {
+            pid: 99,
+            log_id: "20260718-143022-99".to_string(),
+            hostname: "remote".to_string(),
+            version: "pv".to_string(),
+        };
+        terminal.advance(&encode_hello(&hello));
+
+        assert_eq!(terminal.take_events(), vec![TermEvent::Hello(hello)]);
+        assert_eq!(terminal.take_responses(), encode_ident_reply(&ident));
+    }
+
+    #[test]
+    fn hello_yields_event_but_no_reply_without_ident() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        let hello = HelloCommand {
+            pid: 99,
+            log_id: "20260718-143022-99".to_string(),
+            hostname: "remote".to_string(),
+            version: "pv".to_string(),
+        };
+        terminal.advance(&encode_hello(&hello));
+
+        assert_eq!(terminal.take_events(), vec![TermEvent::Hello(hello)]);
+        assert!(
+            terminal.take_responses().is_empty(),
+            "no reply without an installed ident"
+        );
     }
 
     #[test]
