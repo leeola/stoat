@@ -4387,11 +4387,20 @@ impl Stoat {
     /// to the focused editor, except the bytes go to the pane's PTY. Normal
     /// mode keeps its editor and pane-navigation bindings.
     ///
+    /// An overlay input (command palette, finder, search, ...) outranks
+    /// terminal passthrough. While one is focused it owns typing, so keys reach
+    /// its insert path rather than the PTY behind it. Its InputView sits in
+    /// insert, so the mode guard alone would misroute every key to the terminal.
+    /// The Ctrl-C branch in [`Self::handle_key`] encodes the same order.
+    ///
     /// A `View::Terminal` pane auto-enters insert when focus arrives
     /// ([`Self::auto_insert_focused_terminal`]), so typing reaches the shell
     /// with no `i`. A `View::Agent` pane is entered manually with `i`, and both
     /// leave via the [`Self::route_key_to_term`] escape.
     fn term_input_target(&self) -> Option<TermId> {
+        if self.focused_editor_ids().is_some() {
+            return None;
+        }
         if self.focused_mode() != "insert" {
             return None;
         }
@@ -9122,6 +9131,59 @@ mod tests {
             h.stoat.focused_mode(),
             "insert",
             "focusing a terminal by mouse enters insert",
+        );
+    }
+
+    #[test]
+    fn palette_over_a_terminal_routes_typing_to_the_palette() {
+        let mut h = Stoat::test();
+        let fake = Arc::new(crate::host::FakeTerminalSession::new());
+        {
+            let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
+            let ws = h.stoat.active_workspace_mut();
+            let pane = ws.panes.focus();
+            let term_id = ws.terms.insert(crate::term_session::TermSession::new(
+                crate::term_screen::TermScreen::new(24, 80),
+                session,
+            ));
+            ws.panes.pane_mut(pane).view = View::Terminal(term_id);
+        }
+        h.stoat.set_focused_mode("insert".to_string());
+
+        // Esc drops the terminal to normal so the next ':' opens the palette.
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+        assert_eq!(h.stoat.focused_mode(), "normal");
+
+        h.stoat.update(Event::Key(bare(KeyCode::Char(':'))));
+        assert!(
+            h.stoat.command_palette.is_some(),
+            "':' over a terminal pane opens the command palette",
+        );
+
+        for ch in "qui".chars() {
+            h.stoat.update(Event::Key(bare(KeyCode::Char(ch))));
+        }
+
+        let text = {
+            let ws = h.stoat.active_workspace();
+            let palette = h.stoat.command_palette.as_ref().expect("palette open");
+            palette.focused_input().expect("palette input").text(ws)
+        };
+        assert_eq!(
+            text, "qui",
+            "typing filters the palette rather than the terminal behind it",
+        );
+        assert!(
+            fake.sent_bytes().is_empty(),
+            "the terminal PTY receives nothing while the palette owns typing",
+        );
+
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+        assert!(h.stoat.command_palette.is_none(), "Esc closes the palette");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "the terminal is left in normal mode after the palette closes",
         );
     }
 
