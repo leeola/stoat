@@ -6,6 +6,7 @@ use crate::{
     selection::SelectionsCollection,
 };
 use ratatui::layout::Rect;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 use stoat_config::WrapMode;
@@ -21,6 +22,9 @@ new_key_type! { pub struct EditorId; }
 /// the visible byte span changes. The visible span covers scrolling and
 /// folding, which move the window. The per-match display mapping stays
 /// per-frame.
+///
+/// The compiled regex survives a rebuild whose query is unchanged, so a scroll
+/// or edit re-scans the window without paying a fresh compile on the paint path.
 pub(crate) struct SearchMatchCache {
     pub(crate) version: u64,
     pub(crate) query: String,
@@ -33,6 +37,11 @@ pub(crate) struct SearchMatchCache {
     /// Scratch holding the scanned window text, retained across rebuilds to
     /// reuse the allocation. Not part of the cache key.
     pub(crate) window: String,
+    /// The query compiled to a [`Regex`], carried across rebuilds while the
+    /// query text holds so the pattern compiles once per query, not once per
+    /// frame. `None` when the query failed to compile, which leaves `matches`
+    /// empty until the query changes. Not part of the cache key.
+    pub(crate) regex: Option<Regex>,
 }
 
 /// Which scroll glide, if any, is easing an editor's `scroll_offset` toward its

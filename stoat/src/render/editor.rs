@@ -387,22 +387,31 @@ pub(crate) fn render_editor_with_overlay(
             None => true,
         };
         if stale {
-            let mut window = editor
-                .search_match_cache
-                .take()
-                .map(|c| c.window)
-                .unwrap_or_default();
+            // Reuse the compiled regex while the query text holds, so only a new
+            // query pays a fresh compile. A cached None from a failed compile is
+            // reused too, so an invalid query does not recompile every frame.
+            let (mut window, regex) = match editor.search_match_cache.take() {
+                Some(cache) if cache.query == query => (cache.window, cache.regex),
+                Some(cache) => (
+                    cache.window,
+                    crate::action_handlers::search::compile_search_regex(query).ok(),
+                ),
+                None => (
+                    String::new(),
+                    crate::action_handlers::search::compile_search_regex(query).ok(),
+                ),
+            };
             window.clear();
             for chunk in rope.chunks_in_range(visible.clone()) {
                 window.push_str(chunk);
             }
-            let matches = match crate::action_handlers::search::compile_search_regex(query) {
-                Ok(regex) => regex
+            let matches = match &regex {
+                Some(regex) => regex
                     .find_iter(&window)
                     .filter(|m| m.end() > m.start())
                     .map(|m| (m.start() + visible.start, m.end() + visible.start))
                     .collect(),
-                Err(_) => Vec::new(),
+                None => Vec::new(),
             };
             editor.search_match_cache = Some(SearchMatchCache {
                 version,
@@ -410,6 +419,7 @@ pub(crate) fn render_editor_with_overlay(
                 visible: visible.clone(),
                 matches,
                 window,
+                regex,
             });
         }
 
@@ -2025,6 +2035,96 @@ mod tests {
             message: String::new(),
             ..Default::default()
         }
+    }
+
+    fn open_search_buffer(h: &mut crate::test_harness::TestHarness, contents: &str) {
+        let root = PathBuf::from("/search");
+        let path = root.join("s.txt");
+        h.fake_fs().insert_file(&path, contents.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+    }
+
+    /// Render the focused editor with `query` active and return the cached match
+    /// byte-ranges.
+    fn render_search(stoat: &mut Stoat, area: Rect, query: &str) -> Vec<(usize, usize)> {
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+        let mut buf = Buffer::empty(area);
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            true,
+            false,
+            false,
+            LineNumbers::Off,
+            false,
+            None,
+            None,
+            Some(query),
+            None,
+            None,
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+        editor
+            .search_match_cache
+            .as_ref()
+            .expect("a search render populates the cache")
+            .matches
+            .clone()
+    }
+
+    #[test]
+    fn search_reuses_the_cached_regex_without_recompiling() {
+        let mut h = Stoat::test();
+        open_search_buffer(&mut h, "foo bar");
+        let area = Rect::new(0, 0, 20, 4);
+
+        assert_eq!(
+            render_search(&mut h.stoat, area, "foo"),
+            vec![(0, 3)],
+            "the query matches foo"
+        );
+
+        // Swap the cached regex for one matching "bar" while keeping the query,
+        // then force the stale path the way an edit would, with a bumped version.
+        // A recompile from the query would match "foo". Reusing the swapped
+        // object instead matches "bar".
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let cache = editor.search_match_cache.as_mut().expect("cache set");
+            cache.regex =
+                Some(action_handlers::search::compile_search_regex("bar").expect("valid"));
+            cache.version = cache.version.wrapping_sub(1);
+        }
+
+        assert_eq!(
+            render_search(&mut h.stoat, area, "foo"),
+            vec![(4, 7)],
+            "the reused regex still matches bar, so the query was not recompiled"
+        );
+    }
+
+    #[test]
+    fn search_recompiles_on_a_new_query() {
+        let mut h = Stoat::test();
+        open_search_buffer(&mut h, "foo bar");
+        let area = Rect::new(0, 0, 20, 4);
+
+        assert_eq!(render_search(&mut h.stoat, area, "foo"), vec![(0, 3)]);
+        assert_eq!(
+            render_search(&mut h.stoat, area, "bar"),
+            vec![(4, 7)],
+            "a new query recompiles and matches the new pattern"
+        );
     }
 
     #[test]
