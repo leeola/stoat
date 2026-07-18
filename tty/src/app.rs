@@ -2319,6 +2319,7 @@ mod tests {
             left: 3,
             width: 4,
             height: 5,
+            window: 0,
         };
         let at = |col, row| {
             cursor_in_region(
@@ -2345,6 +2346,7 @@ mod tests {
             left: 1,
             width: 2,
             height: 2,
+            window: 0,
         };
 
         // The term composes region.height + 1 rows (one straddle row) by width.
@@ -2396,6 +2398,7 @@ mod tests {
             left: 1,
             width: 2,
             height: 2,
+            window: 0,
         };
         let live = Grid::new(5, 5);
 
@@ -2492,6 +2495,7 @@ mod tests {
                 left: 3,
                 width: 4,
                 height: 4,
+                window: 0,
             },
         );
         for r in 0..5 {
@@ -2516,6 +2520,7 @@ mod tests {
                 left: 9,
                 width: 4,
                 height: 4,
+                window: 0,
             },
         );
         for r in 0..5 {

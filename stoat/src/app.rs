@@ -6664,6 +6664,7 @@ impl Stoat {
                 left: list.x,
                 width: list.width,
                 height: list.height,
+                window: 0,
             };
             let core = finder.active_core_ref();
             let scroll_row =
@@ -6713,6 +6714,7 @@ impl Stoat {
                 left: list.x,
                 width: list.width,
                 height: list.height,
+                window: 0,
             };
             let scroll_row = selected.saturating_sub(list.height.saturating_sub(1) as usize) as u32;
             // The visible row set is the filtered entries, so a hash of their
@@ -6758,6 +6760,7 @@ impl Stoat {
                 left: list.x,
                 width: list.width,
                 height: list.height,
+                window: 0,
             };
             let core = picker.active_core_ref();
             let scroll_row =
@@ -6811,6 +6814,7 @@ impl Stoat {
                 left: list.x,
                 width: list.width,
                 height: list.height,
+                window: 0,
             };
             let scroll_row = state.scroll_top as u32;
             // Commits stream in lazily, so the length plus the load/end flags
@@ -6846,6 +6850,7 @@ impl Stoat {
                 left: layout.inner.x,
                 width: layout.inner.width,
                 height: layout.inner.height,
+                window: 0,
             };
             let scroll_row = layout.viewport_top as u32;
             // The item list is replaced wholesale on a re-query, which bumps
@@ -6881,6 +6886,7 @@ impl Stoat {
                 left: list.x,
                 width: list.width,
                 height: list.height,
+                window: 0,
             };
             let list_scroll =
                 help.selected()
@@ -6917,6 +6923,7 @@ impl Stoat {
                 left: detail.x,
                 width: detail.width,
                 height: detail.height,
+                window: 0,
             };
             let detail_scroll = help.detail_scroll() as u32;
             // The detail body is the selected entry's, so a hash of its name is
@@ -6955,6 +6962,7 @@ impl Stoat {
                 left: inner.x,
                 width: inner.width,
                 height: inner.height,
+                window: 0,
             };
             let interior = inner.height.max(1) as usize;
             let half_page = (interior / 2).max(1);
@@ -7115,6 +7123,7 @@ impl Stoat {
                         left: content.x,
                         width,
                         height: content.height,
+                        window: 0,
                     },
                 ))
             })
@@ -12528,6 +12537,7 @@ mod tests {
             left: list.x,
             width: list.width,
             height: list.height,
+            window: 0,
         };
         assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -12580,6 +12590,7 @@ mod tests {
             left: list.x,
             width: list.width,
             height: list.height,
+            window: 0,
         };
         assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -12611,6 +12622,7 @@ mod tests {
             left: list.x,
             width: list.width,
             height: list.height,
+            window: 0,
         };
         assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -12657,6 +12669,7 @@ mod tests {
             left: list.x,
             width: list.width,
             height: list.height,
+            window: 0,
         };
         assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -12710,6 +12723,7 @@ mod tests {
             left: arg_list.x,
             width: arg_list.width,
             height: arg_list.height,
+            window: 0,
         };
         assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -12757,6 +12771,7 @@ mod tests {
             left: layout.inner.x,
             width: layout.inner.width,
             height: layout.inner.height,
+            window: 0,
         };
         assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -12796,6 +12811,7 @@ mod tests {
             left: layout.list.x,
             width: layout.list.width,
             height: layout.list.height,
+            window: 0,
         };
         let detail = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
@@ -12803,6 +12819,7 @@ mod tests {
             left: layout.detail.x,
             width: layout.detail.width,
             height: layout.detail.height,
+            window: 0,
         };
         let cmds = drain_apc(&mut rx);
         assert!(
@@ -12859,6 +12876,7 @@ mod tests {
             left: list.x,
             width: list.width,
             height: list.height,
+            window: 0,
         };
         let bytes = rx
             .try_recv()

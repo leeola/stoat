@@ -101,6 +101,12 @@ pub enum Command {
     /// the terminal need not hold summaries for a minimap that will never render
     /// again.
     MinimapDrop(MinimapDropCommand),
+    /// Open an aux OS window as a second render target for window-bound pools.
+    WindowOpen(WindowOpenCommand),
+    /// Close an aux OS window and free its render target.
+    WindowClose(WindowCloseCommand),
+    /// Raise and OS-focus an aux window.
+    WindowFocus(WindowFocusCommand),
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
@@ -276,6 +282,11 @@ pub struct PoolRegionCommand {
     pub left: u16,
     pub width: u16,
     pub height: u16,
+    /// Which OS window the pool renders into. `0` is the primary grid, where the
+    /// region's coordinates are grid-absolute. A nonzero `N` binds the pool to
+    /// aux window `N`, where the coordinates are relative to that window's own
+    /// grid.
+    pub window: u32,
 }
 
 /// First pool id reserved for non-pane surfaces. Split-pane editor pools
@@ -291,6 +302,34 @@ pub struct PoolRegionCommand {
 /// Shared here because the pool producer (stoat) and the compositor (stoatty)
 /// must agree on the split.
 pub const NON_PANE_POOL_BASE: u32 = 1 << 24;
+
+/// Open an aux OS window `cols` by `rows` cells with an initial `title`.
+///
+/// The terminal creates a native window as a second render target for
+/// window-bound pools, those whose [`PoolRegionCommand::window`] names it. The
+/// primary grid is window `0` and is never opened this way.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WindowOpenCommand {
+    pub window: u32,
+    pub cols: u16,
+    pub rows: u16,
+    pub title: String,
+}
+
+/// Close the aux OS window named by [`WindowCloseCommand::window`].
+///
+/// The terminal destroys the native window and frees its render target, so any
+/// pools still bound to it stop compositing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WindowCloseCommand {
+    pub window: u32,
+}
+
+/// Raise and OS-focus the aux window named by [`WindowFocusCommand::window`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WindowFocusCommand {
+    pub window: u32,
+}
 
 /// Composite a fixed renderer-drawn status icon at a grid cell.
 ///
@@ -722,8 +761,56 @@ pub fn encode_pool_region_into(out: &mut Vec<u8>, command: &PoolRegionCommand) {
         w.write_all(&command.top.to_be_bytes())?;
         w.write_all(&command.left.to_be_bytes())?;
         w.write_all(&command.width.to_be_bytes())?;
-        w.write_all(&command.height.to_be_bytes())
+        w.write_all(&command.height.to_be_bytes())?;
+        w.write_all(&command.window.to_be_bytes())
     });
+    frame::end(out);
+}
+
+/// Encode a [`WindowOpenCommand`] as a full `Gstoatty;window_open` frame.
+pub fn encode_window_open(command: &WindowOpenCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_window_open_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;window_open` frame for `command` to `out`.
+pub fn encode_window_open_into(out: &mut Vec<u8>, command: &WindowOpenCommand) {
+    frame::begin(out, "window_open");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.window.to_be_bytes())?;
+        w.write_all(&command.cols.to_be_bytes())?;
+        w.write_all(&command.rows.to_be_bytes())
+    });
+    frame::push_arg(out, |w| w.write_all(command.title.as_bytes()));
+    frame::end(out);
+}
+
+/// Encode a [`WindowCloseCommand`] as a full `Gstoatty;window_close` frame.
+pub fn encode_window_close(command: &WindowCloseCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_window_close_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;window_close` frame for `command` to `out`.
+pub fn encode_window_close_into(out: &mut Vec<u8>, command: &WindowCloseCommand) {
+    frame::begin(out, "window_close");
+    frame::push_arg(out, |w| w.write_all(&command.window.to_be_bytes()));
+    frame::end(out);
+}
+
+/// Encode a [`WindowFocusCommand`] as a full `Gstoatty;window_focus` frame.
+pub fn encode_window_focus(command: &WindowFocusCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_window_focus_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;window_focus` frame for `command` to `out`.
+pub fn encode_window_focus_into(out: &mut Vec<u8>, command: &WindowFocusCommand) {
+    frame::begin(out, "window_focus");
+    frame::push_arg(out, |w| w.write_all(&command.window.to_be_bytes()));
     frame::end(out);
 }
 
@@ -1211,6 +1298,9 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::MinimapLines(c) => encode_minimap_lines_into(out, c),
         Command::MinimapView(c) => encode_minimap_view_into(out, c),
         Command::MinimapDrop(c) => encode_minimap_drop_into(out, c),
+        Command::WindowOpen(c) => encode_window_open_into(out, c),
+        Command::WindowClose(c) => encode_window_close_into(out, c),
+        Command::WindowFocus(c) => encode_window_focus_into(out, c),
         Command::Reset => encode_reset_into(out),
         Command::Hello(c) => encode_hello_into(out, c),
     }
@@ -1244,6 +1334,9 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "minimap_lines" => decode_minimap_lines(&frame.args).map(Command::MinimapLines),
         "minimap_view" => decode_minimap_view(&frame.args).map(Command::MinimapView),
         "minimap_drop" => decode_minimap_drop(&frame.args).map(Command::MinimapDrop),
+        "window_open" => decode_window_open(&frame.args).map(Command::WindowOpen),
+        "window_close" => decode_window_close(&frame.args).map(Command::WindowClose),
+        "window_focus" => decode_window_focus(&frame.args).map(Command::WindowFocus),
         "reset" => Some(Command::Reset),
         "hello" => decode_hello(&frame.args).map(Command::Hello),
         _ => None,
@@ -1330,7 +1423,7 @@ fn decode_scroll_region(args: &[Vec<u8>]) -> Option<ScrollRegionCommand> {
 }
 
 fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
-    let arg: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
+    let arg: &[u8; 16] = args.first()?.as_slice().try_into().ok()?;
 
     Some(PoolRegionCommand {
         pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
@@ -1338,6 +1431,35 @@ fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
         left: u16::from_be_bytes([arg[6], arg[7]]),
         width: u16::from_be_bytes([arg[8], arg[9]]),
         height: u16::from_be_bytes([arg[10], arg[11]]),
+        window: u32::from_be_bytes([arg[12], arg[13], arg[14], arg[15]]),
+    })
+}
+
+fn decode_window_open(args: &[Vec<u8>]) -> Option<WindowOpenCommand> {
+    let [head, title] = args else {
+        return None;
+    };
+    let head: &[u8; 8] = head.as_slice().try_into().ok()?;
+
+    Some(WindowOpenCommand {
+        window: u32::from_be_bytes([head[0], head[1], head[2], head[3]]),
+        cols: u16::from_be_bytes([head[4], head[5]]),
+        rows: u16::from_be_bytes([head[6], head[7]]),
+        title: String::from_utf8(title.clone()).ok()?,
+    })
+}
+
+fn decode_window_close(args: &[Vec<u8>]) -> Option<WindowCloseCommand> {
+    let arg: &[u8; 4] = args.first()?.as_slice().try_into().ok()?;
+    Some(WindowCloseCommand {
+        window: u32::from_be_bytes(*arg),
+    })
+}
+
+fn decode_window_focus(args: &[Vec<u8>]) -> Option<WindowFocusCommand> {
+    let arg: &[u8; 4] = args.first()?.as_slice().try_into().ok()?;
+    Some(WindowFocusCommand {
+        window: u32::from_be_bytes(*arg),
     })
 }
 
@@ -1604,11 +1726,13 @@ mod tests {
         encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
         encode_panel, encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
         encode_popover_end, encode_reposition, encode_reset, encode_scale, encode_scroll,
-        encode_scroll_region, encode_text_run_end, BarCommand, BorderCommand, BorderStyle, Command,
-        FillCommand, HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand,
-        MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
-        PanelCommand, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
-        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        encode_scroll_region, encode_text_run_end, encode_window_close, encode_window_focus,
+        encode_window_open, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
+        HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand, MinimapCommand,
+        MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
+        PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand,
+        ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand, WindowCloseCommand,
+        WindowFocusCommand, WindowOpenCommand,
     };
 
     #[test]
@@ -1854,6 +1978,7 @@ mod tests {
             left: 2,
             width: 76,
             height: 22,
+            window: 2,
         };
 
         assert_eq!(
@@ -1864,8 +1989,43 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_pool_region_payload() {
-        // The single arg here decodes to 3 bytes, not the 12 a pool region needs.
+        // The single arg here decodes to 3 bytes, not the 16 a pool region needs.
         assert!(decode(b"Gstoatty;pool_region;YWJj").is_none());
+    }
+
+    #[test]
+    fn window_open_round_trips() {
+        let command = WindowOpenCommand {
+            window: 2,
+            cols: 80,
+            rows: 24,
+            title: "src/main.rs".to_string(),
+        };
+
+        assert_eq!(
+            decode(&encode_window_open(&command)),
+            Some(Command::WindowOpen(command))
+        );
+    }
+
+    #[test]
+    fn window_close_round_trips() {
+        let command = WindowCloseCommand { window: 3 };
+
+        assert_eq!(
+            decode(&encode_window_close(&command)),
+            Some(Command::WindowClose(command))
+        );
+    }
+
+    #[test]
+    fn window_focus_round_trips() {
+        let command = WindowFocusCommand { window: 5 };
+
+        assert_eq!(
+            decode(&encode_window_focus(&command)),
+            Some(Command::WindowFocus(command))
+        );
     }
 
     #[test]

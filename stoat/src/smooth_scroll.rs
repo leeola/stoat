@@ -1132,6 +1132,7 @@ mod tests {
             left: 2,
             width: 76,
             height,
+            window: 0,
         }
     }
 

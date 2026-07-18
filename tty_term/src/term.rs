@@ -651,6 +651,9 @@ impl Terminal {
                         | Command::MinimapLines(_)
                         | Command::MinimapView(_)
                         | Command::MinimapDrop(_)
+                        | Command::WindowOpen(_)
+                        | Command::WindowClose(_)
+                        | Command::WindowFocus(_)
                         | Command::Hello(_)
                 );
                 if routed || (self.fill.is_none() && self.capture.is_none()) {
@@ -927,6 +930,10 @@ impl Terminal {
                 }
                 self.pending_events.push(TermEvent::Hello(hello));
             },
+            // Window lifecycle commands open, close, and focus aux OS windows.
+            // This terminal has no aux windows yet, so they are inert until a
+            // later change wires them to the windowing path.
+            Command::WindowOpen(_) | Command::WindowClose(_) | Command::WindowFocus(_) => {},
         }
     }
 
@@ -1034,6 +1041,9 @@ impl Terminal {
             | Command::MinimapLines(_)
             | Command::MinimapView(_)
             | Command::MinimapDrop(_)
+            | Command::WindowOpen(_)
+            | Command::WindowClose(_)
+            | Command::WindowFocus(_)
             | Command::Hello(_) => {},
         }
     }
@@ -4395,6 +4405,7 @@ mod tests {
             left: 0,
             width: cols,
             height: rows,
+            window: 0,
         }));
     }
 
@@ -4790,6 +4801,7 @@ mod tests {
             left: 0,
             width: 3,
             height: 2,
+            window: 0,
         });
         stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 0 }));
         stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));

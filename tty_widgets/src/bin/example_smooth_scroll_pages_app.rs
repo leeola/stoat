@@ -115,6 +115,7 @@ impl Pool {
                 left,
                 width,
                 height,
+                window: 0,
             },
             bg,
             label,
