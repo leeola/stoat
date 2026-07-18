@@ -2082,6 +2082,34 @@ mod tests {
     }
 
     #[test]
+    fn add_selection_below_under_wrap_lands_on_the_next_buffer_line() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, &format!("{}\nshort\n", "a".repeat(30)));
+
+        {
+            let ws = stoat.active_workspace_mut();
+            let focused = ws.panes.focus();
+            let editor_id = match ws.panes.pane(focused).view {
+                View::Editor(id) => id,
+                _ => unreachable!(),
+            };
+            let editor = ws.editors.get_mut(editor_id).expect("editor");
+            editor.viewport_rows = Some(10);
+            editor.display_map.set_wrap_width(Some(10));
+        }
+
+        assert_eq!(
+            dispatch(&mut stoat, &AddSelectionBelow),
+            UpdateEffect::Redraw
+        );
+        assert_eq!(
+            editor::cursor_buffer_positions(&mut stoat),
+            vec![(0, 0), (1, 0)],
+            "the copy lands on the next buffer line, not the long line's wrapped tail",
+        );
+    }
+
+    #[test]
     fn extend_right_grows_selection_from_cursor() {
         let mut stoat = stoat();
         editor::seed_focused_buffer(&mut stoat, "abc");

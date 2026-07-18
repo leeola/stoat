@@ -245,10 +245,10 @@ enum AddDirection {
 /// Copy each selection's shape onto the nearest eligible lines in `dir`,
 /// following Helix's `copy_selection_on_line`.
 ///
-/// A copy preserves the source's width and direction, landing on lines a full
-/// selection-height apart. A line too short to hold the anchor or head column is
-/// skipped rather than clamped onto, so the copy keeps its shape or does not
-/// appear at all.
+/// A copy preserves the source's width and direction, landing on buffer lines a
+/// full selection-height apart, so soft wrap does not change where copies land. A
+/// line too short to hold the anchor or head column is skipped rather than
+/// clamped onto, so the copy keeps its shape or does not appear at all.
 fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let Some(editor) = focused_editor_mut(stoat) else {
@@ -257,15 +257,15 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
     let display = editor.display_map.snapshot();
     let buffer = display.buffer_snapshot();
     let rope = buffer.rope();
-    let max_row = display.max_point().row;
+    let max_row = rope.max_point().row;
 
     let sources = editor.selections.all_anchors().to_vec();
     let mut copies: Vec<Selection<usize>> = Vec::new();
     for source in &sources {
         let anchor_off = buffer.resolve_anchor(&source.tail());
         let head_off = cursor_offset(rope, anchor_off, buffer.resolve_anchor(&source.head()));
-        let anchor_pt = display.buffer_to_display(rope.offset_to_point(anchor_off));
-        let head_pt = display.buffer_to_display(rope.offset_to_point(head_off));
+        let anchor_pt = rope.offset_to_point(anchor_off);
+        let head_pt = rope.offset_to_point(head_off);
         let height = anchor_pt.row.max(head_pt.row) - anchor_pt.row.min(head_pt.row) + 1;
 
         let mut made = 0usize;
@@ -324,21 +324,27 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
     UpdateEffect::Redraw
 }
 
-/// Byte offset of the buffer position at display `(row, col)`, or `None` when
-/// the line is too short to reach `col` exactly (so the caller skips it rather
-/// than clamping).
+/// Byte offset of the buffer position at buffer `(row, col)`, or `None` when the
+/// line is too short to reach `col` exactly or `row` is hidden in a fold (so the
+/// caller skips it rather than clamping onto a different line).
 fn offset_at_exact_col(
     display: &DisplaySnapshot,
     buffer: &MultiBufferSnapshot,
     row: u32,
     col: u32,
 ) -> Option<usize> {
-    if col > display.line_len(row) {
+    let rope = buffer.rope();
+    if col > rope.line_len(row) {
         return None;
     }
-    let clipped = display.clip_point(DisplayPoint::new(row, col), Bias::Left);
+    // Route the buffer target through display space so a folded row snaps to a
+    // different buffer row. A mismatch means the target line is hidden, so skip.
+    let clipped = display.clip_point(display.buffer_to_display(Point::new(row, col)), Bias::Left);
     let buffer_pt = display.display_to_buffer(clipped)?;
-    Some(buffer.rope().point_to_offset(buffer_pt))
+    if buffer_pt.row != row {
+        return None;
+    }
+    Some(rope.point_to_offset(buffer_pt))
 }
 
 pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {

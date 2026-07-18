@@ -177,3 +177,34 @@ pub(crate) fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
         })
         .collect()
 }
+
+/// Buffer-space `(row, column)` of every cursor, in selection order.
+///
+/// The buffer-line analogue of [`cursor_display_positions`], for asserting
+/// motions that must land by buffer line regardless of soft wrap.
+pub(crate) fn cursor_buffer_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => panic!("focused pane is not an editor"),
+    };
+    let editor = ws.editors.get_mut(editor_id).expect("focused editor");
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    editor
+        .selections
+        .all_anchors()
+        .iter()
+        .map(|sel| {
+            let cursor = cursor_offset(
+                rope,
+                buffer_snapshot.resolve_anchor(&sel.tail()),
+                buffer_snapshot.resolve_anchor(&sel.head()),
+            );
+            let point = rope.offset_to_point(cursor);
+            (point.row, point.column)
+        })
+        .collect()
+}
