@@ -51,6 +51,12 @@ fn main() {
         log_id = %installed.id,
         stoatty_log_id = ?stoatty_id,
         hostname = %ident::hostname(),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        cpus = std::thread::available_parallelism().map_or(0, |n| n.get()),
+        term = ?std::env::var("TERM").ok(),
+        colorterm = ?std::env::var("COLORTERM").ok(),
+        stoatty = std::env::var_os("STOATTY").is_some(),
         "Starting Stoat editor"
     );
 
