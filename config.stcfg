@@ -662,17 +662,6 @@ on key {
     view == review && rebase_exec {
         C -> RebaseContinue();
     }
-    view == diff && mode == normal {
-        n -> GotoNextChange();
-        p -> GotoPrevChange();
-        m -> JumpToMoveSource();
-        M -> JumpToMoveTarget();
-        s -> StageHunk();
-        u -> UnstageHunk();
-        S -> StageLine();
-        U -> UnstageLine();
-        Space -> ToggleStageHunk();
-    }
     mode == insert {
         Escape -> SetMode(normal);
         Tab -> SmartTab();

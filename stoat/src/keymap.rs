@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_view_binds_m_and_shift_m_to_the_move_jumps() {
+    fn diff_view_does_not_shadow_normal_mode_keys() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
@@ -1122,12 +1122,15 @@ mod tests {
             .set("mode", StateValue::String("normal".into()));
         let m = keymap
             .lookup(&diff, &key_event(KeyCode::Char('m'), KeyModifiers::NONE))
-            .expect("m is bound in the diff view");
-        assert_eq!(m[0].name, "JumpToMoveSource");
-        let shift_m = keymap
-            .lookup(&diff, &key_event(KeyCode::Char('M'), KeyModifiers::NONE))
-            .expect("M is bound in the diff view");
-        assert_eq!(shift_m[0].name, "JumpToMoveTarget");
+            .expect("m falls through to the normal-mode match binding");
+        assert_eq!(m[0].name, "SetMode");
+        assert_eq!(m[0].args[0].value, Value::Ident("match".into()));
+        assert!(
+            keymap
+                .lookup(&diff, &key_event(KeyCode::Char('M'), KeyModifiers::NONE))
+                .is_none(),
+            "M is unbound in the diff view, matching plain normal mode",
+        );
     }
 
     #[test]
