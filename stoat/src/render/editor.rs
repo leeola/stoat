@@ -1123,7 +1123,7 @@ fn measure_gutter_width(snapshot: &DisplaySnapshot, rich: bool) -> u16 {
     if rich {
         rich_gutter(&[], width_digits, [0; 3], [0; 3], [0; 3]).cell_width()
     } else {
-        width_digits + 2
+        width_digits + 4
     }
 }
 
@@ -1379,8 +1379,10 @@ fn draw_line_number_gutter(
     }
 }
 
-/// Paint right-aligned cell line numbers and a one-column severity mark for a
-/// terminal without the sub-cell components. Returns the reserved cell columns.
+/// Paint right-aligned cell line numbers, a one-column severity mark left of the
+/// number, and two diff glyph cells (change kind then staged state) right of it,
+/// for a terminal without the sub-cell components. Returns the reserved cell
+/// columns.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_fallback_line_numbers(
     folded: &[(u32, u16)],
@@ -1395,7 +1397,9 @@ pub(crate) fn draw_fallback_line_numbers(
     use crate::theme::scope as s;
     let mark_w = 1u16;
     let gap = 1u16;
-    let width = mark_w + width_digits + gap;
+    let change_x = inner.x + mark_w + width_digits;
+    let staged_x = change_x + 1;
+    let width = mark_w + width_digits + 2 + gap;
     let number_style = theme.get(s::UI_TEXT_MUTED);
 
     let mut top = 0u16;
@@ -1408,22 +1412,29 @@ pub(crate) fn draw_fallback_line_numbers(
             buf[(inner.x, y)]
                 .set_char(severity_mark(*sev))
                 .set_style(theme.get(severity_scope(*sev)));
-        } else if let Some(&(status, staged)) = diff_marks.get(&(number - 1)) {
+        }
+        let text = format!("{}", gutter_display_number(number, current_line));
+        let start = inner.x + mark_w + width_digits.saturating_sub(text.len() as u16);
+        buf.set_stringn(start, y, &text, text.len(), number_style);
+        if let Some(&(status, staged)) = diff_marks.get(&(number - 1)) {
             let (mark, scope) = match status {
                 DiffHunkStatus::Deleted => ('▔', s::DIFF_DELETED),
                 DiffHunkStatus::Added => ('▎', s::DIFF_ADDED),
                 DiffHunkStatus::Modified => ('▎', s::DIFF_MODIFIED),
                 DiffHunkStatus::Moved => ('▎', s::DIFF_MOVED),
             };
-            let mut style = theme.get(scope);
-            if staged {
-                style = style.add_modifier(Modifier::DIM);
-            }
-            buf[(inner.x, y)].set_char(mark).set_style(style);
+            buf[(change_x, y)]
+                .set_char(mark)
+                .set_style(theme.get(scope));
+            let staged_scope = if staged {
+                s::DIFF_STAGED
+            } else {
+                s::DIFF_UNSTAGED
+            };
+            buf[(staged_x, y)]
+                .set_char('▎')
+                .set_style(theme.get(staged_scope));
         }
-        let text = format!("{}", gutter_display_number(number, current_line));
-        let start = inner.x + mark_w + width_digits.saturating_sub(text.len() as u16);
-        buf.set_stringn(start, y, &text, text.len(), number_style);
         top += height;
     }
     width
@@ -2278,6 +2289,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fallback_gutter_paints_change_and_staged_glyph_cells() {
+        use crate::diff_map::DiffHunkStatus;
+        let theme = crate::theme::Theme::empty();
+        let folded = [(1u32, 1u16), (2, 1)];
+        let mut diff_marks = std::collections::BTreeMap::new();
+        diff_marks.insert(0u32, (DiffHunkStatus::Modified, false));
+        let area = Rect::new(0, 0, 12, 2);
+        let mut buf = Buffer::empty(area);
+
+        let width = super::draw_fallback_line_numbers(
+            &folded,
+            1,
+            &std::collections::BTreeMap::new(),
+            &diff_marks,
+            None,
+            area,
+            &theme,
+            &mut buf,
+        );
+
+        assert_eq!(width, 5, "mark cell, one digit, two glyph cells, and a gap");
+        assert_eq!(
+            buf[(2u16, 0u16)].symbol(),
+            "▎",
+            "the change-kind glyph sits right of the number",
+        );
+        assert_eq!(
+            buf[(3u16, 0u16)].symbol(),
+            "▎",
+            "the staged-state glyph sits right of the change glyph",
+        );
+        assert_eq!(
+            buf[(2u16, 1u16)].symbol(),
+            " ",
+            "a row with no diff mark leaves the change cell blank",
+        );
+        assert_eq!(
+            buf[(3u16, 1u16)].symbol(),
+            " ",
+            "a row with no diff mark leaves the staged cell blank",
+        );
+    }
+
     /// Open a single 200-column line with no trailing newline, so any wrapping
     /// splits it across display rows.
     fn open_long_line(h: &mut crate::test_harness::TestHarness) {
@@ -2727,9 +2782,11 @@ mod tests {
 
     /// Render the focused editor's gutter in fallback mode and return each
     /// visible row's leftmost mark glyph paired with whether it is dimmed.
-    fn gutter_mark_cells(stoat: &mut Stoat, rows: u16) -> Vec<(String, bool)> {
-        use ratatui::style::Modifier;
-        let theme = crate::theme::Theme::empty();
+    /// The fallback gutter's per-row `(change glyph, staged glyph color)`, read
+    /// from the two diff cells right of the number. Uses the active theme so the
+    /// staged and unstaged scopes resolve to distinct colors.
+    fn gutter_mark_cells(stoat: &mut Stoat, rows: u16) -> Vec<(String, ratatui::style::Color)> {
+        let theme = stoat.theme.clone();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
         let area = Rect::new(0, 0, 12, rows);
@@ -2755,19 +2812,20 @@ mod tests {
             WrapMode::None,
             80,
         );
+        let change_x = editor.gutter_width - 3;
+        let staged_x = change_x + 1;
         (0..rows)
             .map(|y| {
-                let cell = &buf[(area.x, y)];
                 (
-                    cell.symbol().to_string(),
-                    cell.modifier.contains(Modifier::DIM),
+                    buf[(change_x, y)].symbol().to_string(),
+                    buf[(staged_x, y)].fg,
                 )
             })
             .collect()
     }
 
     #[test]
-    fn gutter_marks_modified_lines_and_dims_when_staged() {
+    fn gutter_marks_modified_lines_with_a_distinct_staged_glyph() {
         let mut h = Stoat::test();
         h.stage_index_scenario(
             "/repo",
@@ -2780,14 +2838,16 @@ mod tests {
         let cells = gutter_mark_cells(&mut h.stoat, 6);
         // Line 2 (b -> B) is staged in the index; line 4 (d -> D) is unstaged.
         assert_eq!(
-            cells[1],
-            ("▎".to_string(), true),
-            "a staged modified line is a dimmed change mark: {cells:?}",
+            cells[1].0, "▎",
+            "a modified line shows a change glyph: {cells:?}"
         );
         assert_eq!(
-            cells[3],
-            ("▎".to_string(), false),
-            "an unstaged modified line is a bright change mark: {cells:?}",
+            cells[3].0, "▎",
+            "a modified line shows a change glyph: {cells:?}"
+        );
+        assert_ne!(
+            cells[1].1, cells[3].1,
+            "the staged glyph color distinguishes staged from unstaged: {cells:?}",
         );
     }
 
