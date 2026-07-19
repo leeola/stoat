@@ -47,6 +47,7 @@ use lsp_types::{
 use ratatui::{layout::Rect, style::Style};
 use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -777,54 +778,61 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
     let Some(site) = lsp_request_site(stoat) else {
         return UpdateEffect::None;
     };
-    let Some((_, host)) = stoat
-        .feature_hosts(site.buffer_id, LanguageServerFeature::GotoReference)
-        .into_iter()
-        .next()
-    else {
+    let hosts = stoat.feature_hosts(site.buffer_id, LanguageServerFeature::GotoReference);
+    if hosts.is_empty() {
         return crate::code_index::nav::goto_references(stoat);
-    };
-    let encoding = host.offset_encoding();
+    }
     let Some(source_uri) = path_to_uri(&site.path) else {
         return UpdateEffect::None;
     };
 
-    let position = crate::lsp::util::byte_offset_to_lsp_pos(&site.rope, site.offset, encoding);
-    let params = ReferenceParams {
-        text_document_position: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: source_uri },
-            position,
-        },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
-        context: ReferenceContext {
-            include_declaration: true,
-        },
-    };
-
     let fs = stoat.fs_host.clone();
-    let source_path = site.path;
-    let source_rope = site.rope;
+    let LspRequestSite {
+        path: source_path,
+        rope: source_rope,
+        offset,
+        ..
+    } = site;
     let task = stoat.spawn_woken(async move {
-        let locations = match host.references(params).await {
-            Ok(Some(locations)) => locations,
-            Ok(None) => return Vec::new(),
-            Err(err) => {
-                tracing::warn!(
+        let requests = hosts.iter().map(|(_, host)| {
+            let encoding = host.offset_encoding();
+            let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, offset, encoding);
+            let params = ReferenceParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier {
+                        uri: source_uri.clone(),
+                    },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+            };
+            async move { (encoding, host.references(params).await) }
+        });
+        let responses = futures::future::join_all(requests).await;
+
+        let mut entries = Vec::new();
+        for (encoding, result) in responses {
+            match result {
+                Ok(Some(locations)) => entries.extend(resolve_goto_targets(
+                    GotoDefinitionResponse::Array(locations),
+                    &source_path,
+                    &source_rope,
+                    encoding,
+                    &*fs,
+                )),
+                Ok(None) => {},
+                Err(err) => tracing::warn!(
                     target: "stoat::lsp",
                     ?err,
                     "references request failed",
-                );
-                return Vec::new();
-            },
-        };
-        resolve_goto_targets(
-            GotoDefinitionResponse::Array(locations),
-            &source_path,
-            &source_rope,
-            encoding,
-            &*fs,
-        )
+                ),
+            }
+        }
+        dedup_locations(entries)
     });
     stoat.pending_lsp_jump = Some(("references", task));
     UpdateEffect::None
@@ -938,52 +946,67 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     let Some(site) = lsp_request_site(stoat) else {
         return UpdateEffect::None;
     };
-    let Some((_, host)) = stoat
-        .feature_hosts(site.buffer_id, kind.feature())
-        .into_iter()
-        .next()
-    else {
+    let hosts = stoat.feature_hosts(site.buffer_id, kind.feature());
+    if hosts.is_empty() {
         return report_lsp_unavailable(stoat, &format!("goto {}", kind.status_label()));
-    };
-    let encoding = host.offset_encoding();
+    }
     let Some(source_uri) = path_to_uri(&site.path) else {
         return UpdateEffect::None;
     };
 
-    let position = crate::lsp::util::byte_offset_to_lsp_pos(&site.rope, site.offset, encoding);
-    let params = GotoDefinitionParams {
-        text_document_position_params: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: source_uri },
-            position,
-        },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
-    };
-
     let fs = stoat.fs_host.clone();
-    let source_path = site.path;
-    let source_rope = site.rope;
+    let LspRequestSite {
+        path: source_path,
+        rope: source_rope,
+        offset,
+        ..
+    } = site;
     let task = stoat.spawn_woken(async move {
-        let result = match kind {
-            LspJumpKind::Definition => host.goto_definition(params).await,
-            LspJumpKind::Declaration => host.goto_declaration(params).await,
-            LspJumpKind::TypeDefinition => host.goto_type_definition(params).await,
-            LspJumpKind::Implementation => host.goto_implementation(params).await,
-        };
-        let response = match result {
-            Ok(Some(resp)) => resp,
-            Ok(None) => return Vec::new(),
-            Err(err) => {
-                tracing::warn!(
+        let requests = hosts.iter().map(|(_, host)| {
+            let encoding = host.offset_encoding();
+            let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, offset, encoding);
+            let params = GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier {
+                        uri: source_uri.clone(),
+                    },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+            async move {
+                let result = match kind {
+                    LspJumpKind::Definition => host.goto_definition(params).await,
+                    LspJumpKind::Declaration => host.goto_declaration(params).await,
+                    LspJumpKind::TypeDefinition => host.goto_type_definition(params).await,
+                    LspJumpKind::Implementation => host.goto_implementation(params).await,
+                };
+                (encoding, result)
+            }
+        });
+        let responses = futures::future::join_all(requests).await;
+
+        let mut entries = Vec::new();
+        for (encoding, result) in responses {
+            match result {
+                Ok(Some(response)) => entries.extend(resolve_goto_targets(
+                    response,
+                    &source_path,
+                    &source_rope,
+                    encoding,
+                    &*fs,
+                )),
+                Ok(None) => {},
+                Err(err) => tracing::warn!(
                     target: "stoat::lsp",
                     request = kind.warn_label(),
                     ?err,
                     "lsp jump request failed",
-                );
-                return Vec::new();
-            },
-        };
-        resolve_goto_targets(response, &source_path, &source_rope, encoding, &*fs)
+                ),
+            }
+        }
+        dedup_locations(entries)
     });
     stoat.pending_lsp_jump = Some((kind.status_label(), task));
     UpdateEffect::None
@@ -1069,6 +1092,22 @@ fn resolve_one_target(
         column: position.character + 1,
         text,
     })
+}
+
+/// Drop duplicate goto targets, keeping the first occurrence of each
+/// `(path, offset)` in order.
+///
+/// Fanning a goto request out to every capable server routinely surfaces the
+/// same definition twice (two servers indexing one crate answer identically).
+/// Deduplicating keeps a redundant answer from opening a multi-location picker
+/// over what is really one target. Order is preserved, so the highest-priority
+/// server's copy of a shared target is the one kept.
+fn dedup_locations(entries: Vec<LocationEntry>) -> Vec<LocationEntry> {
+    let mut seen = HashSet::new();
+    entries
+        .into_iter()
+        .filter(|entry| seen.insert((entry.path.clone(), entry.offset)))
+        .collect()
 }
 
 /// The trimmed text of `line` (0-based) in `rope`, for display in the
@@ -4638,6 +4677,99 @@ mod tests {
             cursor_offset(&mut h),
             8,
             "the capable secondary served goto-definition"
+        );
+    }
+
+    /// Install two definition-capable fakes routed primary-then-secondary for
+    /// `rust`, open a three-line buffer, and return the fakes and its path.
+    fn two_definition_servers(
+        h: &mut TestHarness,
+    ) -> (
+        std::sync::Arc<crate::host::FakeLsp>,
+        std::sync::Arc<crate::host::FakeLsp>,
+        PathBuf,
+    ) {
+        use crate::lsp::registry::ServerSelector;
+        use lsp_types::{OneOf, ServerCapabilities};
+
+        let caps = ServerCapabilities {
+            definition_provider: Some(OneOf::Left(true)),
+            ..ServerCapabilities::default()
+        };
+        let primary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        primary.set_capabilities(caps.clone());
+        let secondary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        secondary.set_capabilities(caps);
+        h.stoat
+            .lsp_registry
+            .insert("primary".into(), primary.clone());
+        h.stoat
+            .lsp_registry
+            .insert("secondary".into(), secondary.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                ServerSelector::all("secondary".into()),
+            ],
+        );
+
+        let root = seed(h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(h, path.clone());
+        (primary, secondary, path)
+    }
+
+    #[test]
+    fn goto_definition_merges_distinct_locations_from_two_servers() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (primary, secondary, path) = two_definition_servers(&mut h);
+        let p = path.to_str().unwrap();
+        primary.set_definition(p, 0, 0, p, 1, 0);
+        secondary.set_definition(p, 0, 0, p, 2, 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+
+        let picker = h.stoat.location_picker.as_ref().expect("picker open");
+        let offsets: Vec<usize> = picker.entries().iter().map(|e| e.offset).collect();
+        assert_eq!(offsets, vec![4, 8], "both servers' targets, primary first");
+    }
+
+    #[test]
+    fn goto_definition_dedups_a_shared_location() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (primary, secondary, path) = two_definition_servers(&mut h);
+        let p = path.to_str().unwrap();
+        primary.set_definition(p, 0, 0, p, 2, 0);
+        secondary.set_definition(p, 0, 0, p, 2, 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+
+        assert!(
+            h.stoat.location_picker.is_none(),
+            "identical answers dedup to a single direct jump"
+        );
+        assert_eq!(cursor_offset(&mut h), 8);
+    }
+
+    #[test]
+    fn goto_definition_survives_a_failing_server() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (primary, secondary, path) = two_definition_servers(&mut h);
+        let p = path.to_str().unwrap();
+        primary.set_method_error("textDocument/definition", std::io::ErrorKind::Other);
+        secondary.set_definition(p, 0, 0, p, 2, 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+
+        assert!(h.stoat.location_picker.is_none());
+        assert_eq!(
+            cursor_offset(&mut h),
+            8,
+            "the healthy server's answer lands despite the peer erroring"
         );
     }
 
