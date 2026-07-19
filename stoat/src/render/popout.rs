@@ -1,4 +1,7 @@
-use crate::{render::chrome, theme::Theme};
+use crate::{
+    render::{chrome, TEXT_SCALE_FULL},
+    theme::Theme,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -97,9 +100,19 @@ pub(crate) fn wrap_popout_lines(msg: &str, width: usize, max_rows: usize) -> Vec
     rows
 }
 
+/// The number of glyphs a row of `cells` cells fits at `scale`.
+///
+/// A glyph at `scale` (256ths of a cell) advances `scale`/[`TEXT_SCALE_FULL`] of a
+/// cell, so a sub-cell scale fits more glyphs than the row has cells. Popout text
+/// derives its wrap width and truncation from this so scaled lines fill the card
+/// rather than stopping short at the cell count.
+pub(crate) fn scaled_char_capacity(cells: usize, scale: u16) -> usize {
+    cells * TEXT_SCALE_FULL as usize / scale as usize
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{paint_popout_card, popout_area, wrap_popout_lines};
+    use super::{paint_popout_card, popout_area, scaled_char_capacity, wrap_popout_lines};
     use crate::theme::Theme;
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use stoatty_widgets::ApcScene;
@@ -156,6 +169,20 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), " ", "edge glyph cleared");
         assert_eq!(buf[(2, 0)].bg, bg, "interior filled with card bg");
         assert_eq!(buf[(3, 1)].bg, bg, "interior filled with card bg");
+    }
+
+    #[test]
+    fn scaled_char_capacity_grows_with_a_sub_cell_scale() {
+        assert_eq!(
+            scaled_char_capacity(10, 160),
+            16,
+            "160/256 fits 1.6x per cell"
+        );
+        assert_eq!(
+            scaled_char_capacity(10, 256),
+            10,
+            "full-cell glyphs map 1:1"
+        );
     }
 
     #[test]

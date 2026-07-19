@@ -14431,6 +14431,58 @@ mod tests {
     }
 
     #[test]
+    fn error_popout_emits_scaled_runs_under_stoatty() {
+        use crate::render::TEXT_SCALE_COMPACT;
+        use lsp_types::MessageType;
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        let msg = "rust-analyzer failed to load the workspace: Cargo.toml is malformed and could not be parsed, so diagnostics are unavailable";
+        h.stoat.lsp_message = Some((MessageType::ERROR, msg.to_string()));
+
+        let buf = h.stoat.render();
+        h.stoat.emit_apc_scene();
+
+        let mut raw = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            raw.extend(batch);
+        }
+        let scene = String::from_utf8_lossy(&raw);
+        let cmds = decode_apc_stream(&raw);
+
+        // A run's text streams between its open and close markers, so it reaches
+        // the terminal through the APC scene rather than the cell grid.
+        assert!(
+            scene.contains("rust-analyzer"),
+            "the error head streams into the APC scene"
+        );
+        assert!(
+            scene.contains("diagnostics"),
+            "the wrapped tail streams into the APC scene"
+        );
+
+        // The popout's bottom line paints directly above the bar at the bar's
+        // compact scale.
+        let popout_bottom = (buf.area.height - 2) as i16 * 16;
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::TextRun(t) if t.scale == TEXT_SCALE_COMPACT && t.row == popout_bottom
+            )),
+            "the popout paints as a compact-scale run above the bar"
+        );
+
+        // The rich arm keeps the text off the cell grid, unlike the fallback.
+        let in_cells = (0..buf.area.height).any(|y| {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            row.contains("rust-analyzer")
+        });
+        assert!(!in_cells, "no grid cell carries the error text");
+    }
+
+    #[test]
     fn show_message_is_attributed_to_its_server() {
         use crate::host::{FakeLsp, LspHost, LspNotification};
         use lsp_types::MessageType;

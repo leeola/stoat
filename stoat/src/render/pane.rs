@@ -4,9 +4,10 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, View},
     render::{
+        chrome,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
-        popout::{paint_popout_card, popout_area, wrap_popout_lines},
+        popout::{paint_popout_card, popout_area, scaled_char_capacity, wrap_popout_lines},
         review::{dim_rgb, style_rgb},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
@@ -202,15 +203,29 @@ pub(crate) fn render_pane(
             frame.stoatty.then_some(&mut *scene),
         );
 
-        let text = format!(
+        let cap = scaled_char_capacity(content.width as usize, TEXT_SCALE_COMPACT);
+        let text: String = format!(
             "{} {}",
             SPINNER_FRAMES[frame.spinner_phase as usize],
             lsp_progress_label(entry).trim()
-        );
+        )
+        .chars()
+        .take(cap)
+        .collect();
         let style = theme
             .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
             .add_modifier(Modifier::ITALIC);
-        buf.set_stringn(content.x, content.y, text, content.width as usize, style);
+        chrome::text(
+            buf,
+            content.x,
+            content.y,
+            content.x + content.width,
+            &text,
+            style,
+            style_rgb(Some(bg)),
+            TEXT_SCALE_COMPACT,
+            frame.stoatty.then_some(&mut *scene),
+        );
         true
     } else {
         false
@@ -220,7 +235,12 @@ pub(crate) fn render_pane(
         && let Some((typ, msg)) = frame.lsp_message
         && typ == lsp_types::MessageType::ERROR
     {
-        let width = status_area.width.saturating_sub(2) as usize;
+        let cell_width = status_area.width.saturating_sub(2) as usize;
+        let width = if frame.stoatty {
+            scaled_char_capacity(cell_width, TEXT_SCALE_COMPACT)
+        } else {
+            cell_width
+        };
         let lines = wrap_popout_lines(msg, width, 4);
         if !lines.is_empty()
             && let Some(area) = popout_area(
@@ -251,12 +271,16 @@ pub(crate) fn render_pane(
                 .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
                 .patch(theme.get(crate::theme::scope::UI_ERROR));
             for (i, line) in lines.iter().enumerate() {
-                buf.set_stringn(
+                chrome::text(
+                    buf,
                     content.x,
                     content.y + i as u16,
+                    content.x + content.width,
                     line,
-                    content.width as usize,
                     style,
+                    style_rgb(Some(bg)),
+                    TEXT_SCALE_COMPACT,
+                    frame.stoatty.then_some(&mut *scene),
                 );
             }
         }
@@ -386,14 +410,14 @@ pub(crate) fn render_pane_dividers(
                     continue;
                 }
                 let height = d.y.saturating_add(d.len).min(buf_end_y).saturating_sub(d.y);
-                crate::render::chrome::vline(buf, d.x, d.y, height, style, scene.as_deref_mut());
+                chrome::vline(buf, d.x, d.y, height, style, scene.as_deref_mut());
             },
             DividerOrientation::Horizontal => {
                 if d.y >= buf_end_y {
                     continue;
                 }
                 let width = d.x.saturating_add(d.len).min(buf_end_x).saturating_sub(d.x);
-                crate::render::chrome::hline(buf, d.x, d.y, width, style, scene.as_deref_mut());
+                chrome::hline(buf, d.x, d.y, width, style, scene.as_deref_mut());
             },
         }
     }
