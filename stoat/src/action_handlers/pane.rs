@@ -28,14 +28,6 @@ pub(super) fn detach_focused_pane(stoat: &mut Stoat) {
     }
 
     let focused = stoat.active_workspace().panes.focus();
-    if !matches!(
-        stoat.active_workspace().panes.pane(focused).view,
-        View::Editor(_)
-    ) {
-        stoat.set_status("only editor panes detach (yet)");
-        return;
-    }
-
     let window = stoat.next_aux_window;
     let ws = stoat.active_workspace_mut();
     let old = ws.panes.pane(focused).area;
