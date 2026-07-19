@@ -3121,7 +3121,7 @@ impl Stoat {
                     }
                 },
                 LspNotification::ShowMessage { typ, message } => {
-                    self.lsp_message = Some((typ, message));
+                    self.lsp_message = Some((typ, format!("{server}: {message}")));
                 },
                 other => {
                     tracing::debug!(
@@ -14431,6 +14431,26 @@ mod tests {
     }
 
     #[test]
+    fn show_message_is_attributed_to_its_server() {
+        use crate::host::{FakeLsp, LspHost, LspNotification};
+        use lsp_types::MessageType;
+        let mut h = Stoat::test();
+        let fake = Arc::new(FakeLsp::new());
+        fake.push_notification(LspNotification::ShowMessage {
+            typ: MessageType::ERROR,
+            message: "workspace load failed".to_string(),
+        });
+        let host: Arc<dyn LspHost> = fake;
+
+        h.stoat.drain_notifications_from("rust-analyzer", &host);
+
+        assert_eq!(
+            h.stoat.lsp_message.as_ref().map(|(_, m)| m.as_str()),
+            Some("rust-analyzer: workspace load failed"),
+        );
+    }
+
+    #[test]
     fn warning_show_message_still_paints_in_the_bar() {
         use lsp_types::MessageType;
         let mut h = Stoat::test();
@@ -14624,7 +14644,8 @@ mod tests {
         h.drain_lsp();
         assert_eq!(
             h.stoat.lsp_message,
-            Some((MessageType::INFO, "checking".to_string())),
+            Some((MessageType::INFO, "default: checking".to_string())),
+            "the stored message is attributed to the reporting server",
         );
         h.type_keys("<Esc>");
         assert!(h.stoat.lsp_message.is_none(), "any key retires the message");

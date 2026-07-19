@@ -410,7 +410,7 @@ fn set_lsp_status(stoat: &mut Stoat, msg: String) {
 /// namely that the spawn failed, is deferred until the project environment
 /// loads, is still starting, or was never attempted.
 fn report_lsp_unavailable(stoat: &mut Stoat, what: &str) -> UpdateEffect {
-    let msg = if !stoat.lsp_host().is_noop() {
+    let msg = if stoat.lsp_registry.has_active_host() {
         format!("lsp: server does not support {what}")
     } else if let Some(err) = &stoat.lsp_spawn_failed {
         format!("lsp: {err}")
@@ -1331,12 +1331,21 @@ pub(crate) fn answer_agent_query(
 ) {
     match request {
         AgentQuery::LspStatus => {
-            let capabilities =
-                serde_json::to_value(&*stoat.lsp_host().capabilities()).unwrap_or(Value::Null);
+            let servers: Vec<Value> = stoat
+                .lsp_registry
+                .named_hosts()
+                .into_iter()
+                .filter(|(_, host)| !host.is_noop())
+                .map(|(name, host)| {
+                    let capabilities =
+                        serde_json::to_value(&*host.capabilities()).unwrap_or(Value::Null);
+                    json!({ "name": name, "capabilities": capabilities })
+                })
+                .collect();
             let _ = reply.send(json!({
-                "active": !stoat.lsp_host().is_noop(),
+                "active": !servers.is_empty(),
                 "spawn_attempted": stoat.lsp_registry.spawn_attempted_any(),
-                "capabilities": capabilities,
+                "servers": servers,
             }));
         },
         AgentQuery::Diagnostics { path } => {
@@ -6319,6 +6328,55 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("lsp: no language server running"),
+        );
+    }
+
+    #[test]
+    fn unsupported_feature_with_two_servers_reports_does_not_support() {
+        use lsp_types::ServerCapabilities;
+        let mut h = TestHarness::with_size(80, 24);
+        // Two servers run but neither advertises hover, so the sole-host probe is
+        // a noop. The report must still name the missing capability rather than
+        // claim the server is still starting.
+        let _ = install_two_servers(&mut h, ServerCapabilities::default());
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: server does not support hover"),
+        );
+    }
+
+    #[test]
+    fn lsp_status_lists_each_running_server() {
+        use lsp_types::{HoverProviderCapability, ServerCapabilities};
+        let mut h = TestHarness::with_size(80, 24);
+        let _ = install_two_servers(
+            &mut h,
+            ServerCapabilities {
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                ..ServerCapabilities::default()
+            },
+        );
+
+        let uid = h.stoat.active_workspace().uid();
+        let (tx, mut rx) = oneshot::channel();
+        super::answer_agent_query(&mut h.stoat, uid, AgentQuery::LspStatus, tx);
+        let value = rx.try_recv().expect("lsp-status reply");
+
+        assert_eq!(value["active"], serde_json::json!(true));
+        let names: Vec<&str> = value["servers"]
+            .as_array()
+            .expect("servers array")
+            .iter()
+            .map(|s| s["name"].as_str().expect("server name"))
+            .collect();
+        assert!(
+            names.contains(&"primary") && names.contains(&"secondary"),
+            "servers listed: {names:?}",
         );
     }
 

@@ -164,6 +164,15 @@ impl LspRegistry {
         self.sole.as_ref().is_some_and(|host| !host.is_noop())
     }
 
+    /// Whether any non-noop language server is running, across named clients and
+    /// the injected sole client.
+    ///
+    /// Status surfaces gate on this rather than the sole-host probe, which
+    /// reports a noop the moment two servers serve one language.
+    pub(crate) fn has_active_host(&self) -> bool {
+        self.named_hosts().iter().any(|(_, host)| !host.is_noop())
+    }
+
     /// Every up host serving `language`, for document-sync notifications that
     /// each running server must mirror.
     ///
