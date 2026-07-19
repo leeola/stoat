@@ -927,6 +927,53 @@ mod tests {
     }
 
     #[test]
+    fn space_lsp_token_bindings_gate_by_cursor_kind() {
+        let config = parse_config(
+            r#"on key {
+                mode == space_lsp {
+                    !token_known || token == function { c -> GotoCaller(); }
+                    !token_known || token == trait { T -> GotoImplementors(); }
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let c = key_event(KeyCode::Char('c'), KeyModifiers::NONE);
+        let t = key_event(KeyCode::Char('T'), KeyModifiers::NONE);
+
+        let over_trait = TestState::new()
+            .set("mode", StateValue::String("space_lsp".into()))
+            .set("token_known", StateValue::Bool(true))
+            .set("token", StateValue::String("trait".into()));
+        assert!(
+            keymap.lookup(&over_trait, &c).is_none(),
+            "the caller binding is unbound over a trait",
+        );
+        assert_eq!(
+            keymap
+                .lookup(&over_trait, &t)
+                .expect("T binds over a trait")[0]
+                .name,
+            "GotoImplementors",
+        );
+
+        let over_function = TestState::new()
+            .set("mode", StateValue::String("space_lsp".into()))
+            .set("token_known", StateValue::Bool(true))
+            .set("token", StateValue::String("function".into()));
+        assert_eq!(
+            keymap
+                .lookup(&over_function, &c)
+                .expect("c binds over a function")[0]
+                .name,
+            "GotoCaller",
+        );
+        assert!(
+            keymap.lookup(&over_function, &t).is_none(),
+            "the implementors binding is unbound over a function",
+        );
+    }
+
+    #[test]
     fn lookup_falls_through() {
         let config = parse_config(
             r#"on key {

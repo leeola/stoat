@@ -241,6 +241,30 @@ on init {
     # finder.scope.src = ["src/**"];
 }
 
+# Bindings can be scoped by predicate blocks: `<predicate> { <bindings> }`.
+# Nesting AND-s the predicates, so a binding inside
+# `mode == space_lsp { lsp { ... } }` requires both. A binding whose predicate
+# does not hold is genuinely unbound: the which-key help omits it and the key
+# does nothing.
+#
+# Predicate fields:
+#   mode, pane, view, modal, rebase_exec  editor and chord context
+#   token          semantic-token kind under the cursor (trait / type /
+#                  function / value / symbol), absent when on no token
+#   token_known    whether the buffer has a semantic-token index at all
+#   lsp            a language server serves the focused buffer's language
+#   lang           the buffer's grammar name, absent for grammarless buffers
+#   diags          the focused buffer has published diagnostics
+#   has_selection  the newest selection is non-empty
+#   modified       the buffer has unsaved edits
+#
+# Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
+# || or, and a bare field name is truthy. A token condition must fail open when
+# no index exists, so write `!token_known || token == kind`: the key stays bound
+# while the index is missing or still loading.
+#
+# When several bindings match one key the most specific wins, the one with the
+# most predicate atoms, so a key can carry different actions per context.
 on key {
     mode != normal && mode != goto {
         ? -> OpenHelp();
@@ -735,31 +759,51 @@ on key {
     }
     mode == space_lsp {
         Escape -> SetMode(normal);
-        w -> [GotoNextDiagnostic(), SetMode(normal)];
-        W -> [GotoPrevDiagnostic(), SetMode(normal)];
-        j -> [GotoDefinition(), SetMode(normal)];
-        J -> [GotoDeclaration(), SetMode(normal)];
-        k -> [GotoTypeDefinition(), SetMode(normal)];
-        t -> [GotoImplementation(), SetMode(normal)];
-        c -> [GotoCaller(), SetMode(normal)];
-        C -> [GotoCallee(), SetMode(normal)];
-        R -> [GotoReferences(), SetMode(normal)];
-        T -> [GotoImplementors(), SetMode(normal)];
-        u -> [GotoDiffCallerUp(), SetMode(normal)];
-        o -> [GotoDiffCalleeDown(), SetMode(normal)];
         m -> [MarkTrailStart(), SetMode(normal)];
         M -> [MarkTrailEnd(), SetMode(normal)];
         n -> [TrailNext(), SetMode(normal)];
         p -> [TrailPrev(), SetMode(normal)];
-        i -> [Hover(), SetMode(normal)];
-        a -> [CodeAction(), SetMode(normal)];
-        f -> [Format(), SetMode(normal)];
-        h -> [ToggleInlayHints(), SetMode(normal)];
-        r -> [RenameSymbol(), SetMode(normal)];
-        s -> [OpenSymbolPicker(), SetMode(normal)];
-        S -> OpenWorkspaceSymbolPicker();
-        d -> [OpenDiagnosticsPicker(), SetMode(normal)];
         D -> [OpenWorkspaceDiagnosticsPicker(), SetMode(normal)];
+
+        diags {
+            w -> [GotoNextDiagnostic(), SetMode(normal)];
+            W -> [GotoPrevDiagnostic(), SetMode(normal)];
+            d -> [OpenDiagnosticsPicker(), SetMode(normal)];
+        }
+
+        lsp {
+            f -> [Format(), SetMode(normal)];
+            h -> [ToggleInlayHints(), SetMode(normal)];
+            a -> [CodeAction(), SetMode(normal)];
+            s -> [OpenSymbolPicker(), SetMode(normal)];
+            S -> OpenWorkspaceSymbolPicker();
+
+            !token_known || token {
+                j -> [GotoDefinition(), SetMode(normal)];
+                J -> [GotoDeclaration(), SetMode(normal)];
+                r -> [RenameSymbol(), SetMode(normal)];
+                i -> [Hover(), SetMode(normal)];
+            }
+            !token_known || token == value || token == symbol {
+                k -> [GotoTypeDefinition(), SetMode(normal)];
+            }
+            !token_known || token == trait || token == type {
+                t -> [GotoImplementation(), SetMode(normal)];
+            }
+        }
+
+        !token_known || token {
+            R -> [GotoReferences(), SetMode(normal)];
+        }
+        !token_known || token == trait {
+            T -> [GotoImplementors(), SetMode(normal)];
+        }
+        !token_known || token == function {
+            c -> [GotoCaller(), SetMode(normal)];
+            C -> [GotoCallee(), SetMode(normal)];
+            u -> [GotoDiffCallerUp(), SetMode(normal)];
+            o -> [GotoDiffCalleeDown(), SetMode(normal)];
+        }
     }
     mode == space_workspace {
         Escape -> SetMode(normal);

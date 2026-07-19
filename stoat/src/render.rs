@@ -41,7 +41,6 @@ use crate::{
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
     keymap_state::{action_display_desc, cursor_token, focus_flags, Flags, StoatKeymapState},
-    lsp::LspSymbolKind,
     minimap::MinimapContent,
     pane::{DockVisibility, FocusTarget, View},
     rebase::RebasePause,
@@ -807,17 +806,6 @@ pub(crate) fn frame(
         } else {
             stoat.keymap.active_bindings(&state)
         };
-        // In space_lsp, hide symbol-targeted rows that do not match the kind
-        // under the cursor. Other modes and non-editor focus keep every row.
-        let cursor_kind = (mode == "space_lsp").then(|| lsp_cursor_kind(ws)).flatten();
-        let raw: Vec<_> = raw
-            .into_iter()
-            .filter(|(_, actions)| {
-                actions
-                    .first()
-                    .is_none_or(|a| lsp_binding_visible(&a.name, cursor_kind))
-            })
-            .collect();
         let bindings: Vec<_> = raw
             .iter()
             .map(|(key, actions)| {
@@ -867,58 +855,6 @@ pub(crate) fn frame(
     if mode == "space_pane_display" {
         render_pane_id_badges(&stoat.theme, ws, buf, scene);
     }
-}
-
-/// Whether a `space l` which-key row for `action_name` shows given the symbol
-/// kind under the cursor.
-///
-/// `kind` is the [`BufferRegistry::lsp_symbol_kind_at`] result: `None` means no
-/// index (no server or the response has not arrived), so every row shows because
-/// missing data must not hide options. With an index, symbol-targeted rows show
-/// only over a matching kind, and every non-symbol row (diagnostics, pickers,
-/// trail marks, formatting, Escape) always shows.
-fn lsp_binding_visible(action_name: &str, kind: Option<Option<LspSymbolKind>>) -> bool {
-    let Some(kind) = kind else {
-        return true;
-    };
-    match action_name {
-        "GotoDefinition" | "GotoDeclaration" | "GotoReferences" | "RenameSymbol" | "Hover" => {
-            kind.is_some()
-        },
-        "GotoTypeDefinition" => matches!(kind, Some(LspSymbolKind::Value | LspSymbolKind::Symbol)),
-        "GotoImplementation" => matches!(kind, Some(LspSymbolKind::Trait | LspSymbolKind::Type)),
-        "GotoImplementors" => matches!(kind, Some(LspSymbolKind::Trait)),
-        "GotoCaller" | "GotoCallee" | "GotoDiffCallerUp" | "GotoDiffCalleeDown" => {
-            matches!(kind, Some(LspSymbolKind::Function))
-        },
-        _ => true,
-    }
-}
-
-/// The LSP symbol kind under the focused editor's primary cursor, for filtering
-/// the `space l` which-key rows.
-///
-/// `None` (show every row) when the focused pane is not an editor or the buffer
-/// has no symbol-kind index. `Some(inner)` forwards
-/// [`BufferRegistry::lsp_symbol_kind_at`], where `Some(None)` marks a cursor on
-/// no symbol and `Some(Some(kind))` the kind found.
-fn lsp_cursor_kind(ws: &mut Workspace) -> Option<Option<LspSymbolKind>> {
-    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
-        return None;
-    };
-    let (buffer_id, offset) = {
-        let editor = ws.editors.get_mut(editor_id)?;
-        let snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let offset = stoat_text::cursor_offset(
-            buffer_snapshot.rope(),
-            buffer_snapshot.resolve_anchor(&sel.tail()),
-            buffer_snapshot.resolve_anchor(&sel.head()),
-        );
-        (editor.buffer_id, offset)
-    };
-    ws.buffers.lsp_symbol_kind_at(buffer_id, offset)
 }
 
 /// Paint a large digit badge centered on each split pane while the
@@ -1011,83 +947,8 @@ mod perf_tests {
 
 #[cfg(test)]
 mod lsp_filter_tests {
-    use super::lsp_binding_visible;
     use crate::{lsp::LspSymbolKind, test_harness::TestHarness};
     use std::sync::Arc;
-
-    #[test]
-    fn no_index_shows_every_row() {
-        for name in ["GotoImplementors", "GotoCaller", "GotoDefinition", "Format"] {
-            assert!(
-                lsp_binding_visible(name, None),
-                "{name} shows with no index"
-            );
-        }
-    }
-
-    #[test]
-    fn no_symbol_at_cursor_hides_only_targeted_rows() {
-        let none = Some(None);
-        for name in [
-            "GotoDefinition",
-            "GotoImplementors",
-            "GotoCaller",
-            "GotoTypeDefinition",
-            "Hover",
-        ] {
-            assert!(
-                !lsp_binding_visible(name, none),
-                "{name} hidden with no symbol"
-            );
-        }
-        for name in [
-            "Format",
-            "GotoNextDiagnostic",
-            "SetMode",
-            "OpenSymbolPicker",
-        ] {
-            assert!(lsp_binding_visible(name, none), "{name} always shows");
-        }
-    }
-
-    #[test]
-    fn rows_gate_by_kind() {
-        use LspSymbolKind::{Function, Symbol, Trait, Type, Value};
-        let over = |k| Some(Some(k));
-
-        assert!(lsp_binding_visible("GotoImplementors", over(Trait)));
-        assert!(!lsp_binding_visible("GotoImplementors", over(Type)));
-        assert!(!lsp_binding_visible("GotoImplementors", over(Function)));
-
-        assert!(lsp_binding_visible("GotoImplementation", over(Trait)));
-        assert!(lsp_binding_visible("GotoImplementation", over(Type)));
-        assert!(!lsp_binding_visible("GotoImplementation", over(Function)));
-
-        for name in [
-            "GotoCaller",
-            "GotoCallee",
-            "GotoDiffCallerUp",
-            "GotoDiffCalleeDown",
-        ] {
-            assert!(
-                lsp_binding_visible(name, over(Function)),
-                "{name} over a function"
-            );
-            assert!(
-                !lsp_binding_visible(name, over(Trait)),
-                "{name} not over a trait"
-            );
-        }
-
-        assert!(lsp_binding_visible("GotoTypeDefinition", over(Value)));
-        assert!(lsp_binding_visible("GotoTypeDefinition", over(Symbol)));
-        assert!(!lsp_binding_visible("GotoTypeDefinition", over(Function)));
-
-        for k in [Trait, Type, Function, Value, Symbol] {
-            assert!(lsp_binding_visible("GotoDefinition", over(k)));
-            assert!(lsp_binding_visible("RenameSymbol", over(k)));
-        }
-    }
 
     /// Render one frame and flatten the painted cells into searchable text.
     fn box_text(h: &mut TestHarness) -> String {
@@ -1172,6 +1033,66 @@ mod lsp_filter_tests {
         assert!(
             text.contains("implementor of the trait") && text.contains("caller of the symbol"),
             "a buffer with no symbol-kind index shows every row"
+        );
+    }
+
+    #[test]
+    fn space_lsp_box_gates_lsp_and_diagnostic_rows() {
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+
+        let mut h = TestHarness::with_size(150, 50);
+
+        // The initial scratch buffer has no language and no path, so no server
+        // serves it and it carries no diagnostics.
+        h.type_keys("space l");
+        let scratch = box_text(&mut h);
+        assert!(
+            scratch.contains("caller of the symbol"),
+            "token rows fail open without an index"
+        );
+        assert!(
+            !scratch.contains("format document via LSP"),
+            "the format row is hidden without a language server"
+        );
+        assert!(
+            !scratch.contains("jump to the next diagnostic"),
+            "the diagnostics row is hidden without a diagnostic"
+        );
+
+        // The sole fake client serves the rust buffer, so lsp rows appear.
+        h.type_keys("escape");
+        open_foo_bar(&mut h);
+        h.type_keys("space l");
+        let served = box_text(&mut h);
+        assert!(
+            served.contains("format document via LSP"),
+            "the format row shows once a server serves the buffer"
+        );
+        assert!(
+            !served.contains("jump to the next diagnostic"),
+            "the diagnostics row stays hidden until a diagnostic exists"
+        );
+
+        h.type_keys("escape");
+        h.stoat.diagnostics.replace_for_path(
+            std::path::PathBuf::from("/lsp/a.rs"),
+            vec![Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: None,
+                message: String::new(),
+                related_information: None,
+                tags: None,
+                data: None,
+            }],
+        );
+        h.type_keys("space l");
+        let with_diag = box_text(&mut h);
+        assert!(
+            with_diag.contains("jump to the next diagnostic"),
+            "the diagnostics row shows once a diagnostic is seeded"
         );
     }
 }
