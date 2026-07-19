@@ -45,7 +45,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_action::{Diff, GotoNextChange, OpenFile, ReviewExternalEdit, ReviewRefresh};
+use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock, WrapMode};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
@@ -1850,14 +1850,13 @@ impl Stoat {
 
     /// Open the working-tree diff for the `stoat review` entry point.
     ///
-    /// `Diff` turns the view on for the current editor -- a no-op jump on the
-    /// pathless startup scratch -- and `GotoNextChange` then crosses into the
+    /// `Diff` turns the view on for the current editor. On the pathless startup
+    /// scratch, which has no changes of its own, the toggle crosses into the
     /// first changed file, installs its diff map, and lands the cursor on its
     /// first hunk with the view scrolled to it. With no changed files it sets
     /// the "no more changes" status and stays on the scratch.
     pub fn open_working_tree_diff(&mut self) {
         action_handlers::dispatch(self, &Diff);
-        action_handlers::dispatch(self, &GotoNextChange);
     }
 
     /// Handle that makes [`Self::run`] quit at its next loop turn when
@@ -15653,6 +15652,61 @@ mod tests {
             guard.rope().offset_to_point(offset).row
         };
         assert_eq!(cursor_row, 1, "the cursor sits on the file's first hunk");
+    }
+
+    #[test]
+    fn diff_from_an_unchanged_file_crosses_into_the_first_changed_file() {
+        let mut h = Stoat::test();
+        let workdir = PathBuf::from("/repo");
+        h.stage_review_scenario(&workdir, &[("changed.rs", "a\nb\nc\n", "a\nX\nc\n")]);
+        // plain.rs is tracked but unchanged. Its HEAD content and working-tree
+        // copy are identical, so it never appears in the changed list.
+        h.fake_git()
+            .add_repo(workdir.clone())
+            .with_fs(h.fake_fs())
+            .head_file("plain.rs", "one\ntwo\nthree\n");
+        h.fake_fs()
+            .insert_file(workdir.join("plain.rs"), b"one\ntwo\nthree\n");
+        h.stoat.set_diff_warm_auto(true);
+
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: workdir.join("plain.rs"),
+            },
+        );
+        h.settle();
+
+        h.stoat.toggle_diff_view();
+
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("focused editor");
+        let path = {
+            let ws = h.stoat.active_workspace();
+            ws.buffers.path_for(buffer_id).map(|p| p.to_path_buf())
+        };
+        assert_eq!(
+            path,
+            Some(workdir.join("changed.rs")),
+            "diff from an unchanged file crosses into the first changed file",
+        );
+        assert!(
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("editor")
+                .diff_view,
+            "the diff view is on for the crossed-into file",
+        );
+
+        let (cursor_buffer, offset) = h.stoat.focused_cursor_pos().expect("focused cursor");
+        let cursor_row = {
+            let ws = h.stoat.active_workspace();
+            let buffer = ws.buffers.get(cursor_buffer).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            guard.rope().offset_to_point(offset).row
+        };
+        assert_eq!(
+            cursor_row, 1,
+            "the cursor lands on the changed file's first hunk"
+        );
     }
 
     #[test]

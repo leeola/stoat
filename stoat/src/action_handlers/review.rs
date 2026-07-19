@@ -1,3 +1,4 @@
+use super::movement::ChangeDir;
 use crate::{
     app::{Stoat, UpdateEffect},
     diff_cache::{DiffCache, DiffCacheKey},
@@ -922,10 +923,12 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
 /// no scratch buffer -- the editor stays the real, editable file buffer, so
 /// re-pressing toggles the two columns off again.
 ///
-/// Opening the view lands the cursor on the first change chunk (the hunk `n`
-/// reaches from the top of the file) and pushes the pre-jump position to the
-/// jumplist, so the usual jump-back returns. A file with no changes, or toggling
-/// the view off, leaves the cursor untouched.
+/// Opening the view lands the cursor on the focused buffer's first change chunk
+/// (the hunk `n` reaches from the top of the file) and pushes the pre-jump
+/// position to the jumplist, so the usual jump-back returns. When the focused
+/// buffer has no changes of its own, opening the view instead crosses into the
+/// first changed file and lands on its first hunk. Toggling the view off leaves
+/// the cursor untouched.
 pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     let origin = super::jump::live_entry(stoat);
     let Some(buffer_id) = super::focused_editor_mut(stoat).map(|editor| editor.buffer_id) else {
@@ -1002,6 +1005,13 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
 
     if jumped && let Some(entry) = origin {
         super::jump::push_entry(stoat, entry);
+    }
+
+    // A buffer with no changes of its own has no hunk to land on, so cross into
+    // the first changed file. This makes `:diff` from a scratch or unchanged
+    // buffer open a real diff instead of silently toggling empty columns.
+    if !jumped {
+        let _ = super::movement::goto_change(stoat, ChangeDir::Next);
     }
 }
 
