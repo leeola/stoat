@@ -51,7 +51,7 @@ use regex::Regex;
 #[cfg(test)]
 pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
-use std::{ops::ControlFlow, path::Path};
+use std::{ops::ControlFlow, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, Dump, FocusPane, OpenBuffer, OpenFile, OpenReviewAgentEdits,
     OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
@@ -894,7 +894,7 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
     let all: Vec<_> = stoat.theme_blocks.iter().collect();
     match crate::theme::Theme::from_blocks(name, &all) {
         Ok(theme) => {
-            stoat.theme = theme;
+            stoat.theme = Arc::new(theme);
             stoat.syntax_styles = SyntaxStyles::from_theme(&stoat.theme);
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
             stoat.minimap_content.clear();

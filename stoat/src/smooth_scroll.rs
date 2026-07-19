@@ -1012,7 +1012,7 @@ mod tests {
         let bg = style_rgb(theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg))
             .expect("default theme has an rgb background");
         let fallback = theme.get(scope::UI_TEXT);
-        let gutter = PageGutter::new(true, BTreeMap::new(), Arc::new(theme.clone()), None, None);
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), None, None);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();
 
@@ -1434,13 +1434,7 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let rich = resolve_rich_gutter(&theme, fallback, true)
             .expect("the shipped theme resolves the rich gutter colors");
-        let gutter = PageGutter::new(
-            true,
-            BTreeMap::new(),
-            Arc::new(theme.clone()),
-            Some(rich),
-            None,
-        );
+        let gutter = PageGutter::new(true, BTreeMap::new(), theme.clone(), Some(rich), None);
 
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         let snapshot = editor.display_map.snapshot();

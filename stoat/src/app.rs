@@ -213,7 +213,7 @@ pub struct Stoat {
     pub executor: Executor,
     pub(crate) keymap: Keymap,
     pub settings: Settings,
-    pub theme: crate::theme::Theme,
+    pub theme: Arc<crate::theme::Theme>,
     /// The combined embedded-plus-user `theme` blocks the active theme was built
     /// from, retained so [`ActionKind::SetTheme`] can re-resolve a different
     /// theme at runtime without reparsing the config.
@@ -1225,7 +1225,7 @@ impl Stoat {
             executor,
             keymap,
             settings,
-            theme,
+            theme: Arc::new(theme),
             theme_blocks,
             command_palette: None,
             help: None,
@@ -7170,7 +7170,7 @@ impl Stoat {
                         snapshot,
                         parts: Box::new(ReviewFillParts {
                             view: view.clone(),
-                            theme: Arc::new(theme.clone()),
+                            theme: theme.clone(),
                         }),
                         pages: entered,
                         pool: region.pool,
@@ -7195,7 +7195,7 @@ impl Stoat {
                         gutter: crate::smooth_scroll::PageGutter::new(
                             line_numbers != LineNumbers::Off,
                             severity,
-                            Arc::new(theme.clone()),
+                            theme.clone(),
                             rich,
                             current_line,
                         ),
@@ -12547,7 +12547,7 @@ mod tests {
         // status bar into the scene as sub-cell components. A theme without RGB
         // status colors keeps the status bar in cells, so with line numbers off
         // the frame stays genuinely widget-free.
-        h.stoat.theme = rgb_review_theme();
+        h.stoat.theme = Arc::new(rgb_review_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -12611,7 +12611,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
-        h.stoat.theme = rgb_review_theme();
+        h.stoat.theme = Arc::new(rgb_review_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -12723,7 +12723,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
-        h.stoat.theme = rgb_diagnostic_theme();
+        h.stoat.theme = Arc::new(rgb_diagnostic_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -12767,7 +12767,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
-        h.stoat.theme = rgb_diagnostic_theme();
+        h.stoat.theme = Arc::new(rgb_diagnostic_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -12889,7 +12889,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
-        h.stoat.theme = rgb_diagnostic_theme();
+        h.stoat.theme = Arc::new(rgb_diagnostic_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -12989,7 +12989,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
-        h.stoat.theme = rgb_modal_theme();
+        h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -13059,7 +13059,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
-        h.stoat.theme = rgb_modal_theme();
+        h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -13095,7 +13095,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
-        h.stoat.theme = rgb_modal_theme();
+        h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -13119,7 +13119,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
-        h.stoat.theme = rgb_modal_theme();
+        h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
         h.type_keys("space");
@@ -13191,7 +13191,7 @@ mod tests {
         use stoatty_protocol::command::{BarCommand, Command};
 
         let mut h = Stoat::test();
-        h.stoat.theme = rgb_border_theme();
+        h.stoat.theme = Arc::new(rgb_border_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
@@ -13232,7 +13232,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
-        h.stoat.theme = rgb_modal_theme();
+        h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_stoatty_apc(true, tx);
 
