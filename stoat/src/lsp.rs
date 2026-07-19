@@ -20,3 +20,16 @@ pub(crate) enum LspSymbolKind {
     Value,
     Symbol,
 }
+
+impl LspSymbolKind {
+    /// The lowercase name a `token == <kind>` keymap predicate matches on.
+    pub(crate) fn config_name(self) -> &'static str {
+        match self {
+            Self::Trait => "trait",
+            Self::Type => "type",
+            Self::Function => "function",
+            Self::Value => "value",
+            Self::Symbol => "symbol",
+        }
+    }
+}

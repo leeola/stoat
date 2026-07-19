@@ -895,6 +895,38 @@ mod tests {
     }
 
     #[test]
+    fn lookup_prefers_token_specific_binding_and_falls_back_without_an_index() {
+        let config = parse_config(
+            r#"on key {
+                mode == "space_lsp" { c -> MoveLeft(); }
+                mode == "space_lsp" && token == "function" { c -> MoveRight(); }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let event = key_event(KeyCode::Char('c'), KeyModifiers::NONE);
+
+        // Over a function token the 2-atom binding wins.
+        let over_function = TestState::new()
+            .set("mode", StateValue::String("space_lsp".into()))
+            .set("token_known", StateValue::Bool(true))
+            .set("token", StateValue::String("function".into()));
+        assert_eq!(
+            keymap.lookup(&over_function, &event).expect("match")[0].name,
+            "MoveRight",
+        );
+
+        // With no index `token` is absent, so the token binding fails and the
+        // base binding wins.
+        let no_index = TestState::new()
+            .set("mode", StateValue::String("space_lsp".into()))
+            .set("token_known", StateValue::Bool(false));
+        assert_eq!(
+            keymap.lookup(&no_index, &event).expect("match")[0].name,
+            "MoveLeft",
+        );
+    }
+
+    #[test]
     fn lookup_falls_through() {
         let config = parse_config(
             r#"on key {

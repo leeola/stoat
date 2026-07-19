@@ -1,6 +1,7 @@
 use crate::{
     app::Stoat,
     keymap::{KeymapState, ResolvedAction, ResolvedArg, StateValue},
+    lsp::LspSymbolKind,
     pane::{FocusTarget, View},
     rebase::RebasePause,
     workspace::Workspace,
@@ -11,7 +12,15 @@ use stoat_action::Action;
 
 /// The predicate field names [`StoatKeymapState`] derives itself, which a
 /// `SetVar` user variable may not shadow.
-pub(crate) const BUILTIN_FIELDS: &[&str] = &["mode", "pane", "view", "modal", "rebase_exec"];
+pub(crate) const BUILTIN_FIELDS: &[&str] = &[
+    "mode",
+    "pane",
+    "view",
+    "modal",
+    "rebase_exec",
+    "token",
+    "token_known",
+];
 
 /// The hand-set booleans a keymap state carries besides the derived
 /// `mode`/`pane`/`view`/`modal` predicates.
@@ -37,6 +46,15 @@ pub(crate) struct StoatKeymapState {
     /// The topmost open modal, absent when none is open. Absence lets bare
     /// `modal` read false and `modal != x` read true.
     modal: Option<StateValue>,
+    /// The semantic-token kind under the cursor, absent when no index exists or
+    /// the cursor sits on no token. Absence lets bare `token` read "on a known
+    /// token" (false) and pairs with [`Self::token_known`] for the fail-open
+    /// `!token_known || token == kind` idiom.
+    token: Option<StateValue>,
+    /// Whether the focused buffer has a semantic-token index at all (a server
+    /// answered). `Bool(false)` when none, so `!token_known` fails token
+    /// conditions open when the index is missing or still pending.
+    token_known: StateValue,
     /// Config-defined session variables, read only after the built-in fields so
     /// a variable can never shadow one.
     user_vars: HashMap<String, StateValue>,
@@ -55,6 +73,8 @@ impl StoatKeymapState {
             pane: None,
             view: None,
             modal: None,
+            token: None,
+            token_known: StateValue::Bool(false),
             user_vars: HashMap::new(),
         }
     }
@@ -79,6 +99,24 @@ impl StoatKeymapState {
         self
     }
 
+    /// Set the `token` and `token_known` predicate values from a semantic-token
+    /// lookup at the cursor (see [`cursor_token`]).
+    ///
+    /// `None` (no index) leaves `token` absent and `token_known` false.
+    /// `Some(None)` (index present, cursor on no token) leaves `token` absent but
+    /// marks the index known. `Some(Some(kind))` sets `token` to the kind's
+    /// config name.
+    pub(crate) fn with_token(mut self, token: Option<Option<LspSymbolKind>>) -> Self {
+        let (value, known) = match token {
+            None => (None, false),
+            Some(None) => (None, true),
+            Some(Some(kind)) => (Some(StateValue::String(kind.config_name().into())), true),
+        };
+        self.token = value;
+        self.token_known = StateValue::Bool(known);
+        self
+    }
+
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         let ws = stoat.active_workspace();
         let flags = Flags {
@@ -91,6 +129,7 @@ impl StoatKeymapState {
             user_vars: stoat.user_vars.clone(),
             ..Self::with_flags(stoat.focused_mode(), flags)
         }
+        .with_token(cursor_token(ws))
     }
 }
 
@@ -102,9 +141,40 @@ impl KeymapState for StoatKeymapState {
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
+            "token" => self.token.as_ref(),
+            "token_known" => Some(&self.token_known),
             other => self.user_vars.get(other),
         }
     }
+}
+
+/// The [`LspSymbolKind`] under the focused editor's cursor, the non-mutating
+/// counterpart of `render`'s `lsp_cursor_kind` so [`StoatKeymapState::from_stoat`]
+/// can derive `token`/`token_known` from a `&Stoat`.
+///
+/// `None` when the focused pane is not an editor or its buffer is gone,
+/// `Some(None)` when an index exists but no token covers the cursor, and
+/// `Some(Some(kind))` when one does. The cursor offset resolves against the
+/// buffer's own snapshot (a read lock) rather than the editor's display map,
+/// which would need `&mut`.
+pub(crate) fn cursor_token(ws: &Workspace) -> Option<Option<LspSymbolKind>> {
+    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+        return None;
+    };
+    let editor = ws.editors.get(editor_id)?;
+    let buffer_id = editor.buffer_id;
+    let offset = {
+        let buffer = ws.buffers.get(buffer_id)?;
+        let guard = buffer.read().ok()?;
+        let snapshot = &guard.snapshot;
+        let sel = editor.selections.newest_anchor();
+        stoat_text::cursor_offset(
+            &snapshot.visible_text,
+            snapshot.resolve_anchor(&sel.tail()),
+            snapshot.resolve_anchor(&sel.head()),
+        )
+    };
+    ws.buffers.lsp_symbol_kind_at(buffer_id, offset)
 }
 
 /// The `View` of the active workspace's focused pane or dock.
@@ -352,6 +422,76 @@ mod tests {
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "pane"), Some("run".to_string()));
         assert_eq!(state.get("view"), None);
+    }
+
+    fn open_foo_bar(h: &mut crate::test_harness::TestHarness) -> crate::buffer::BufferId {
+        let root = std::path::PathBuf::from("/lsp");
+        let path = root.join("a.rs");
+        h.fake_fs().insert_file(&path, b"Foo bar");
+        h.stoat.active_workspace_mut().git_root = root;
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path });
+        h.settle();
+        let ws = h.stoat.active_workspace();
+        match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => ws.editors[id].buffer_id,
+            _ => panic!("focused pane is not an editor"),
+        }
+    }
+
+    /// Seed a symbol-kind index over "Foo bar": `Foo` [0,3) a trait, `bar` [4,7)
+    /// a function, leaving the space at offset 3 uncovered.
+    fn seed_foo_bar_kinds(h: &mut crate::test_harness::TestHarness, id: crate::buffer::BufferId) {
+        let ws = h.stoat.active_workspace_mut();
+        let snapshot = ws
+            .buffers
+            .get(id)
+            .expect("buffer")
+            .read()
+            .unwrap()
+            .snapshot
+            .clone();
+        let start = |o| snapshot.anchors_at_batch(&[o], stoat_text::Bias::Right)[0];
+        let end = |o| snapshot.anchors_at_batch(&[o], stoat_text::Bias::Left)[0];
+        let kinds = std::sync::Arc::from(vec![
+            (start(0usize)..end(3usize), LspSymbolKind::Trait),
+            (start(4usize)..end(7usize), LspSymbolKind::Function),
+        ]);
+        ws.buffers.store_lsp_symbol_kinds(id, kinds);
+    }
+
+    #[test]
+    fn from_stoat_token_absent_without_an_index() {
+        let mut h = Stoat::test();
+        open_foo_bar(&mut h);
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(state.get("token_known"), Some(&StateValue::Bool(false)));
+        assert_eq!(state.get("token"), None);
+    }
+
+    #[test]
+    fn from_stoat_token_known_but_absent_on_plain_text() {
+        let mut h = Stoat::test();
+        let id = open_foo_bar(&mut h);
+        seed_foo_bar_kinds(&mut h, id);
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 3);
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(state.get("token_known"), Some(&StateValue::Bool(true)));
+        assert_eq!(
+            state.get("token"),
+            None,
+            "the space between tokens is untyped"
+        );
+    }
+
+    #[test]
+    fn from_stoat_token_is_the_kind_under_the_cursor() {
+        let mut h = Stoat::test();
+        let id = open_foo_bar(&mut h);
+        seed_foo_bar_kinds(&mut h, id);
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 4);
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(state.get("token_known"), Some(&StateValue::Bool(true)));
+        assert_eq!(field(&state, "token"), Some("function".to_string()));
     }
 
     #[test]
