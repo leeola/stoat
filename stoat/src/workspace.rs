@@ -843,6 +843,9 @@ impl Workspace {
             .split_panes()
             .filter_map(|(_, pane)| match pane.view {
                 View::Agent(id) | View::Terminal(id) => {
+                    if pane.area.width == 0 || pane.area.height == 0 {
+                        return None;
+                    }
                     let (content, _) = split_pane_status(pane.area);
                     Some((id, content.height, content.width))
                 },

@@ -193,6 +193,10 @@ pub struct PaneTree {
     /// [`Self::last_split_focus`] which falls back when it goes stale.
     #[serde(skip)]
     last_split_focus: PaneId,
+    /// The split pane currently expanded to full tree width, hiding the panes it
+    /// covers. Transient view scratch: a restored session opens unwidened.
+    #[serde(skip)]
+    widened: Option<PaneId>,
 }
 
 impl PaneTree {
@@ -224,6 +228,7 @@ impl PaneTree {
             next_index: 1,
             stack: Vec::new(),
             last_split_focus: pane_id,
+            widened: None,
         }
     }
 
@@ -233,6 +238,11 @@ impl PaneTree {
 
     pub fn set_focus(&mut self, id: PaneId) {
         if self.panes.contains_key(id) {
+            // Focus leaving the widened pane restores the natural layout, so a
+            // covered pane is revealed before focus lands on it.
+            if self.widened.is_some() && self.widened != Some(id) {
+                self.unwiden();
+            }
             self.focus = id;
             // Remember the split-layout focus so it can be restored after focus
             // leaves a detached pane. A windowed pane is not a valid return point.
@@ -251,6 +261,57 @@ impl PaneTree {
         } else {
             self.split_panes().next().map(|(id, _)| id)
         }
+    }
+
+    /// The split pane expanded to full tree width, or `None` when the layout is
+    /// unwidened.
+    pub fn widened(&self) -> Option<PaneId> {
+        self.widened
+    }
+
+    /// Expand `id` to full tree width, hiding the panes it covers, and report
+    /// whether the widen took.
+    ///
+    /// Succeeds only when `id` is a live split pane whose row band contains
+    /// every other split pane fully-inside or fully-outside. A partial vertical
+    /// overlap would leave a covered region that is not a clean rectangle, so it
+    /// is refused and the layout is left unwidened.
+    pub fn widen(&mut self, id: PaneId) -> bool {
+        if self.widened == Some(id) {
+            return true;
+        }
+        self.widened = None;
+        self.recalculate();
+        if self.leaf_node(id).is_none() || !self.widen_legal(id) {
+            return false;
+        }
+        self.widened = Some(id);
+        self.recalculate();
+        true
+    }
+
+    /// Restore the natural layout, if a pane is currently widened.
+    pub fn unwiden(&mut self) {
+        if self.widened.is_some() {
+            self.widened = None;
+            self.recalculate();
+        }
+    }
+
+    /// Whether every other split pane lies fully inside or fully outside `id`'s
+    /// row band, evaluated against the current (natural) areas.
+    fn widen_legal(&self, id: PaneId) -> bool {
+        let anchor = self.panes[id].area;
+        let (start, end) = (anchor.y, anchor.y + anchor.height);
+        self.split_panes().all(|(pid, pane)| {
+            if pid == id {
+                return true;
+            }
+            let (top, bottom) = (pane.area.y, pane.area.y + pane.area.height);
+            let inside = top >= start && bottom <= end;
+            let outside = bottom <= start || top >= end;
+            inside || outside
+        })
     }
 
     pub fn pane(&self, id: PaneId) -> &Pane {
@@ -539,11 +600,24 @@ impl PaneTree {
     /// subtrees flanking the gap contains the currently focused leaf.
     pub fn dividers(&self) -> Vec<Divider> {
         let focus = self.focus;
+        let widened_band = self.widened.map(|id| {
+            let a = self.panes[id].area;
+            (a.y, a.y + a.height)
+        });
         let mut out = Vec::new();
         let mut stack = vec![self.root];
         while let Some(nid) = stack.pop() {
             if let NodeContent::Split(split) = &self.nodes[nid].content {
                 stack.extend(split.children.iter().copied());
+                // A split lying entirely within the widened band separates only
+                // covered panes, so its dividers are hidden with them. The band
+                // edge falls on a split that straddles it, whose divider stays.
+                if let Some((start, end)) = widened_band
+                    && split.area.y >= start
+                    && split.area.y + split.area.height <= end
+                {
+                    continue;
+                }
                 let children: Vec<(NodeId, Rect)> = split
                     .children
                     .iter()
@@ -787,6 +861,39 @@ impl PaneTree {
                 },
             }
         }
+
+        self.apply_widen();
+    }
+
+    /// Overlay the widen onto the natural areas the stack walk just computed.
+    ///
+    /// The widened pane expands to full tree width and the panes it covers
+    /// collapse to zero area. A widen that no longer names a live,
+    /// legally-widenable pane is dropped, so an illegal layout never keeps a
+    /// dormant flag.
+    fn apply_widen(&mut self) {
+        let Some(wid) = self.widened else {
+            return;
+        };
+        if self.leaf_node(wid).is_none() || !self.widen_legal(wid) {
+            self.widened = None;
+            return;
+        }
+
+        let anchor = self.panes[wid].area;
+        let (start, end) = (anchor.y, anchor.y + anchor.height);
+        let covered: Vec<PaneId> = self
+            .split_panes()
+            .filter(|(pid, pane)| {
+                *pid != wid && pane.area.y >= start && pane.area.y + pane.area.height <= end
+            })
+            .map(|(pid, _)| pid)
+            .collect();
+
+        for pid in covered {
+            self.panes[pid].area = Rect::default();
+        }
+        self.panes[wid].area = Rect::new(self.area.x, anchor.y, self.area.width, anchor.height);
     }
 
     fn find_split_in_direction(&self, id: NodeId, direction: Direction) -> Option<NodeId> {
@@ -1372,5 +1479,172 @@ mod tests {
             33,
             "weights reset to even when a child is added"
         );
+    }
+
+    /// One full-height left pane beside a right column split into three stacked
+    /// panes. Returns the tree, the left pane, and the three right panes.
+    fn one_left_three_right() -> (PaneTree, PaneId, [PaneId; 3]) {
+        let mut tree = PaneTree::new(area());
+        let left = tree.focus();
+        let r1 = tree.split(Axis::Vertical);
+        let r2 = tree.split(Axis::Horizontal);
+        let r3 = tree.split(Axis::Horizontal);
+        (tree, left, [r1, r2, r3])
+    }
+
+    /// A 2x2 grid of two columns, each split into a top and bottom pane.
+    /// Returns the tree and the panes as (top-left, bottom-left, top-right,
+    /// bottom-right).
+    fn grid_2x2() -> (PaneTree, PaneId, PaneId, PaneId, PaneId) {
+        let mut tree = PaneTree::new(area());
+        let tl = tree.focus();
+        let tr = tree.split(Axis::Vertical);
+        tree.set_focus(tl);
+        let bl = tree.split(Axis::Horizontal);
+        tree.set_focus(tr);
+        let br = tree.split(Axis::Horizontal);
+        (tree, tl, bl, tr, br)
+    }
+
+    #[test]
+    fn widen_refuses_partial_overlap() {
+        let mut tree = PaneTree::new(area());
+        let tl = tree.focus();
+        let tr = tree.split(Axis::Vertical);
+        tree.set_focus(tl);
+        tree.split(Axis::Horizontal);
+        tree.set_focus(tr);
+        tree.split(Axis::Horizontal);
+        tree.split(Axis::Horizontal);
+
+        let before: Vec<Rect> = tree.split_panes().map(|(_, p)| p.area).collect();
+        assert!(
+            !tree.widen(tl),
+            "a band that straddles a right pane is illegal"
+        );
+        assert_eq!(tree.widened(), None);
+        let after: Vec<Rect> = tree.split_panes().map(|(_, p)| p.area).collect();
+        assert_eq!(after, before, "a refused widen leaves every area unchanged");
+    }
+
+    #[test]
+    fn widen_full_height_zeroes_covered_panes() {
+        let (mut tree, left, right) = one_left_three_right();
+        assert!(tree.widen(left));
+        assert_eq!(tree.widened(), Some(left));
+        assert_eq!(tree.pane(left).area, Rect::new(0, 0, 120, 40));
+        for id in right {
+            assert_eq!(
+                tree.pane(id).area,
+                Rect::default(),
+                "covered pane collapses"
+            );
+        }
+    }
+
+    #[test]
+    fn widen_band_covers_one_row_keeps_the_other() {
+        let (mut tree, tl, bl, tr, br) = grid_2x2();
+        let bl_area = tree.pane(bl).area;
+        let br_area = tree.pane(br).area;
+        let tl_height = tree.pane(tl).area.height;
+
+        assert!(tree.widen(tl));
+        assert_eq!(tree.pane(tl).area, Rect::new(0, 0, 120, tl_height));
+        assert_eq!(
+            tree.pane(tr).area,
+            Rect::default(),
+            "the top-right is covered"
+        );
+        assert_eq!(tree.pane(bl).area, bl_area, "the bottom row stays put");
+        assert_eq!(tree.pane(br).area, br_area, "the bottom row stays put");
+    }
+
+    #[test]
+    fn set_focus_away_unwidens() {
+        let (mut tree, tl, bl, tr, _br) = grid_2x2();
+        let tl_area = tree.pane(tl).area;
+        let tr_area = tree.pane(tr).area;
+        assert!(tree.widen(tl));
+        assert_eq!(tree.widened(), Some(tl));
+
+        tree.set_focus(bl);
+        assert_eq!(tree.widened(), None, "focusing another pane unwidens");
+        assert_eq!(tree.pane(tl).area, tl_area, "the widened pane is restored");
+        assert_eq!(tree.pane(tr).area, tr_area, "the covered pane is restored");
+    }
+
+    #[test]
+    fn resize_keeps_legal_widen() {
+        let (mut tree, tl, ..) = grid_2x2();
+        assert!(tree.widen(tl));
+        tree.resize(Rect::new(0, 0, 120, 80));
+
+        assert_eq!(
+            tree.widened(),
+            Some(tl),
+            "a still-legal widen survives resize"
+        );
+        assert_eq!(tree.pane(tl).area.x, 0);
+        assert_eq!(
+            tree.pane(tl).area.width,
+            120,
+            "the widened pane re-expands to full width"
+        );
+    }
+
+    #[test]
+    fn resize_drops_illegalized_widen() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 120, 12));
+        let a = tree.focus();
+        let b = tree.split(Axis::Vertical);
+        tree.set_focus(a);
+        tree.split(Axis::Horizontal);
+        tree.set_focus(b);
+        tree.split(Axis::Horizontal);
+
+        let left_col = match &tree.nodes[tree.root].content {
+            NodeContent::Split(split) => split.children[0],
+            NodeContent::Leaf(_) => unreachable!("root is a split"),
+        };
+        tree.set_divider(left_col, 0, 0, 6);
+
+        assert!(tree.widen(a), "the widen is legal at the short height");
+        tree.resize(Rect::new(0, 0, 120, 40));
+        assert_eq!(
+            tree.widened(),
+            None,
+            "a resize that straddles a pane drops the widen"
+        );
+    }
+
+    #[test]
+    fn closing_the_widened_pane_clears_the_flag() {
+        let (mut tree, tl, ..) = grid_2x2();
+        assert!(tree.widen(tl));
+        assert!(tree.close(tl));
+        assert_eq!(
+            tree.widened(),
+            None,
+            "closing the widened pane drops the flag"
+        );
+    }
+
+    #[test]
+    fn dividers_inside_the_band_are_hidden() {
+        let mut tree = PaneTree::new(area());
+        let tl = tree.focus();
+        tree.split(Axis::Horizontal);
+        tree.set_focus(tl);
+        tree.split(Axis::Vertical);
+
+        let band_edge = tree.pane(tl).area.height;
+        assert_eq!(tree.dividers().len(), 2, "natural layout has both dividers");
+
+        assert!(tree.widen(tl));
+        let dividers = tree.dividers();
+        assert_eq!(dividers.len(), 1, "the in-band vertical divider is hidden");
+        assert_eq!(dividers[0].orientation, DividerOrientation::Horizontal);
+        assert_eq!(dividers[0].y, band_edge, "the band-edge divider survives");
     }
 }

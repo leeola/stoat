@@ -436,6 +436,9 @@ pub(crate) fn frame(
         if Some(id) == overlay_pane {
             continue;
         }
+        if pane.area.width == 0 || pane.area.height == 0 {
+            continue;
+        }
         pane::render_pane(
             pane,
             is_focused,
@@ -950,6 +953,9 @@ fn render_pane_id_badges(
         let Some(digit) = char::from_digit((i as u32 + 1) % 10, 10) else {
             continue;
         };
+        if pane.area.width == 0 || pane.area.height == 0 {
+            continue;
+        }
         let scale = pane
             .area
             .width
