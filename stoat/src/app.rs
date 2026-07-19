@@ -390,6 +390,10 @@ pub struct Stoat {
     /// Whether the detailed LSP status popout is pinned open, toggled by
     /// `ToggleLspStatus`. Off by default. A runtime session flag, not persisted.
     pub(crate) lsp_status_pinned: bool,
+    /// Whether the pointer currently rests on the LSP badge, which opens the
+    /// status popout for as long as it does. Set from [`Self::lsp_badge_rect`] by
+    /// the hover handler and cleared when no badge paints.
+    pub(crate) lsp_badge_hovered: bool,
     /// Whether the keybinding hints overlay is force-shown in a primary mode,
     /// toggled by `ToggleKeyHints`, off by default. A runtime session flag like
     /// [`Self::syntax_highlight`], not persisted. Contexts that already
@@ -1275,6 +1279,7 @@ impl Stoat {
             single_minimap_rect: None,
             lsp_badge_rect: None,
             lsp_status_pinned: false,
+            lsp_badge_hovered: false,
             key_hints_visible: false,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: None,
@@ -3962,10 +3967,17 @@ impl Stoat {
     fn handle_hover(&mut self, column: u16, row: u16) -> UpdateEffect {
         self.hover_cell = Some((column, row));
         let resolved = self.resolve_hover_diagnostic(column, row);
-        if self.hover_diag == resolved {
+        let badge_hovered = self.lsp_badge_rect.is_some_and(|rect| {
+            column >= rect.x
+                && column < rect.x + rect.width
+                && row >= rect.y
+                && row < rect.y + rect.height
+        });
+        if self.hover_diag == resolved && self.lsp_badge_hovered == badge_hovered {
             return UpdateEffect::None;
         }
         self.hover_diag = resolved;
+        self.lsp_badge_hovered = badge_hovered;
         UpdateEffect::Redraw
     }
 
@@ -14412,6 +14424,50 @@ mod tests {
         h.drain_lsp();
         dispatch(&mut h.stoat, &stoat_action::ToggleLspStatus);
         h.assert_snapshot("lsp_progress_indexing");
+    }
+
+    #[test]
+    fn hovering_the_lsp_badge_rect_opens_and_closes() {
+        let mut h = Stoat::test();
+        h.stoat.lsp_badge_rect = Some(Rect::new(10, 5, 6, 1));
+
+        assert_eq!(
+            h.stoat.handle_hover(12, 5),
+            UpdateEffect::Redraw,
+            "hovering onto the badge redraws"
+        );
+        assert!(h.stoat.lsp_badge_hovered, "hovering sets the flag");
+
+        assert_eq!(
+            h.stoat.handle_hover(11, 5),
+            UpdateEffect::None,
+            "still inside the badge is a no-op"
+        );
+        assert!(h.stoat.lsp_badge_hovered);
+
+        assert_eq!(
+            h.stoat.handle_hover(0, 0),
+            UpdateEffect::Redraw,
+            "moving off the badge redraws"
+        );
+        assert!(!h.stoat.lsp_badge_hovered, "moving off clears the flag");
+    }
+
+    #[test]
+    fn badge_disappearing_clears_the_hover_flag() {
+        let mut h = Stoat::test();
+        h.stoat.lsp_badge_rect = Some(Rect::new(10, 5, 6, 1));
+        h.stoat.handle_hover(12, 5);
+        assert!(h.stoat.lsp_badge_hovered);
+
+        // The scratch buffer has no language server, so the next paint stamps no
+        // badge rect.
+        let _ = h.stoat.render();
+        assert!(h.stoat.lsp_badge_rect.is_none(), "no badge painted");
+        assert!(
+            !h.stoat.lsp_badge_hovered,
+            "the hover flag clears when the badge vanishes"
+        );
     }
 
     #[test]

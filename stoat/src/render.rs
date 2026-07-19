@@ -390,7 +390,7 @@ pub(crate) fn frame(
         screen,
         theme: &stoat.theme,
         pending_count: stoat.pending_count,
-        lsp_status_open: stoat.lsp_status_pinned,
+        lsp_status_open: stoat.lsp_status_pinned || stoat.lsp_badge_hovered,
         lsp_progress_entries: &lsp_progress_entries,
         spinner_phase: app::spinner_phase(stoat.spinner_clock),
         lsp_servers: &lsp_servers,
@@ -450,6 +450,9 @@ pub(crate) fn frame(
         );
     }
     stoat.lsp_badge_rect = lsp_badge_rect;
+    if lsp_badge_rect.is_none() {
+        stoat.lsp_badge_hovered = false;
+    }
 
     // Single mode declares one strip over the reserved right-edge band for the
     // focused split pane's buffer. The scene re-stamps every paint, so a focus

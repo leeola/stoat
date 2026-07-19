@@ -1273,6 +1273,36 @@ mod tests {
     }
 
     #[test]
+    fn badge_hover_opens_the_status_card() {
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+
+        assert!(
+            !full_render(&mut h).contains("RA idle"),
+            "no card without hover or pin"
+        );
+
+        h.stoat.lsp_badge_hovered = true;
+        assert!(
+            full_render(&mut h).contains("RA idle"),
+            "hovering the badge opens the idle card"
+        );
+
+        h.stoat.lsp_badge_hovered = false;
+        assert!(
+            !full_render(&mut h).contains("RA idle"),
+            "un-hovering closes the card"
+        );
+
+        h.stoat.lsp_status_pinned = true;
+        assert!(
+            full_render(&mut h).contains("RA idle"),
+            "pinning keeps the card open regardless of hover"
+        );
+    }
+
+    #[test]
     fn snapshot_status_bar_diagnostic_badge_warning_color() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/diag-status");
