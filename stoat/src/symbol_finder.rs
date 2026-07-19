@@ -1,20 +1,39 @@
 use crate::{
     buffer::BufferId,
     fuzzy,
+    host::OffsetEncoding,
     input_view::{InputView, SubmitTarget},
     workspace::Workspace,
 };
-use lsp_types::SymbolKind;
+use lsp_types::{Position, SymbolKind};
+use std::path::PathBuf;
 use stoat_scheduler::Executor;
+
+/// Whether the finder lists the focused buffer's document symbols or the whole
+/// workspace's symbols.
+///
+/// Document scope filters a fixed list locally. Workspace scope re-issues the
+/// server request as the query changes, so its results also come from the
+/// server, not just a local filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SymbolFinderScope {
+    Document,
+    Workspace,
+}
 
 /// Where selecting a [`SymbolFinderEntry`] takes the cursor.
 ///
 /// Document-symbol entries carry an [`Self::Offset`] into the finder's source
-/// buffer. The variant exists so later scopes (workspace symbols) can add a
-/// cross-file target without reshaping the entry.
+/// buffer. Workspace entries carry the target file and LSP position, resolved
+/// against that file's server encoding when opened.
 #[derive(Debug, Clone)]
 pub(crate) enum SymbolTarget {
     Offset(usize),
+    Workspace {
+        path: PathBuf,
+        position: Position,
+        encoding: OffsetEncoding,
+    },
 }
 
 /// One row in the [`SymbolFinder`] list.
@@ -38,28 +57,46 @@ pub(crate) struct SymbolFinderEntry {
 /// in document order, since symbol order is meaningful (unlike a path list).
 pub(crate) struct SymbolFinder {
     pub(crate) input: InputView,
+    pub(crate) scope: SymbolFinderScope,
     pub(crate) entries: Vec<SymbolFinderEntry>,
     pub(crate) filtered: Vec<usize>,
     pub(crate) match_indices: Vec<Vec<u32>>,
     pub(crate) selected: usize,
     pub(crate) viewport_rows: Option<usize>,
-    /// Buffer the symbols were resolved against. Unread until the preview scope
-    /// lands, which loads this buffer to scroll it to the selected symbol.
-    #[allow(dead_code)]
+    /// Buffer the finder opened over. The workspace scope routes re-issued
+    /// requests through it when its named servers no longer resolve.
     pub(crate) buffer_id: BufferId,
+    /// Workspace-symbol servers routed at open. Empty for document scope.
+    pub(crate) servers: Vec<String>,
+    /// Query a workspace re-issue last fired for, so a changed input triggers a
+    /// fresh request. Unused for document scope, which filters locally.
+    pub(crate) last_query: String,
+    /// A query changed while a workspace request was in flight, so the pump
+    /// re-fires with the current text once the in-flight request lands.
+    pub(crate) query_dirty: bool,
 }
 
 impl SymbolFinder {
-    pub(crate) fn new(ws: &mut Workspace, executor: Executor, buffer_id: BufferId) -> Self {
+    pub(crate) fn new(
+        ws: &mut Workspace,
+        executor: Executor,
+        buffer_id: BufferId,
+        scope: SymbolFinderScope,
+        servers: Vec<String>,
+    ) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::SymbolFinder, "", "insert", 1);
         Self {
             input,
+            scope,
             entries: Vec::new(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
             selected: 0,
             viewport_rows: None,
             buffer_id,
+            servers,
+            last_query: String::new(),
+            query_dirty: false,
         }
     }
 
@@ -150,7 +187,7 @@ fn rank_entries(entries: &[SymbolFinderEntry], query: &str) -> (Vec<usize>, Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::{rank_entries, SymbolFinder, SymbolFinderEntry, SymbolTarget};
+    use super::{rank_entries, SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget};
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
@@ -175,12 +212,16 @@ mod tests {
         };
         let mut f = SymbolFinder {
             input,
+            scope: SymbolFinderScope::Document,
             entries: titles.iter().map(|t| entry(t)).collect(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
             selected: 0,
             viewport_rows: None,
             buffer_id: BufferId::new(0),
+            servers: Vec::new(),
+            last_query: String::new(),
+            query_dirty: false,
         };
         f.refilter("");
         f

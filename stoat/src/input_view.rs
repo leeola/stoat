@@ -45,7 +45,6 @@ pub(crate) enum SubmitTarget {
     FileFinder,
     SymbolFinder,
     RenameSymbol,
-    WorkspaceSymbolPicker,
     Search,
     GlobalSearch,
     SplitSelection,

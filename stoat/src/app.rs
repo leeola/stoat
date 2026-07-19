@@ -904,23 +904,12 @@ pub struct Stoat {
     /// choose a symbol to jump to (number keys 1-9) or cancel.
     pub(crate) pending_symbol_picker: Option<action_handlers::lsp::SymbolPicker>,
 
-    /// One-line input modal for the workspace-symbol query. Created
-    /// by `open_workspace_symbol_picker`; consumed by
-    /// `workspace_symbol_submit` (Enter) which fires the request, or
-    /// `workspace_symbol_cancel` (Escape) which discards.
-    pub(crate) workspace_symbol_input: Option<action_handlers::lsp::WorkspaceSymbolInputState>,
-
-    /// In-flight `workspace/symbol` request, fanned out across every capable
-    /// server. Polled by [`action_handlers::lsp::pump_lsp_workspace_symbol`],
-    /// which installs the merged entries into
-    /// [`Self::pending_workspace_symbol_picker`].
+    /// In-flight `workspace/symbol` request for the [`Self::symbol_finder`]
+    /// modal's workspace scope, re-issued as the query changes. Polled by
+    /// [`action_handlers::lsp::pump_lsp_workspace_symbol`], which installs the
+    /// merged entries into the finder.
     pub(crate) pending_workspace_symbol_request:
         Option<stoat_scheduler::Task<Vec<action_handlers::lsp::WorkspaceSymbolEntry>>>,
-
-    /// Selectable workspace-symbol picker. The user chose a query
-    /// from the input modal; this picker shows up to nine matching
-    /// symbols. Picking opens the symbol's file at its location.
-    pub(crate) pending_workspace_symbol_picker: Option<action_handlers::lsp::WorkspaceSymbolPicker>,
 
     /// In-flight `textDocument/rangeFormatting` request triggered by
     /// `FormatSelections`. Polled by
@@ -1394,9 +1383,7 @@ impl Stoat {
             pending_rename: None,
             pending_symbol_picker_request: None,
             pending_symbol_picker: None,
-            workspace_symbol_input: None,
             pending_workspace_symbol_request: None,
-            pending_workspace_symbol_picker: None,
             pending_format_request: None,
             pending_format_on_save: None,
             quit_after_save: false,
@@ -4583,63 +4570,6 @@ impl Stoat {
             self.pending_symbol_picker_request = None;
         }
 
-        if (self.focused_mode() == "normal" || self.focused_mode() == "select")
-            && self.pending_workspace_symbol_picker.is_some()
-        {
-            if let KeyCode::Char(ch) = key.code {
-                match ch {
-                    'j' => {
-                        if let Some(picker) = self.pending_workspace_symbol_picker.as_mut() {
-                            let max = picker.entries.len().saturating_sub(1);
-                            picker.selected_idx = (picker.selected_idx + 1).min(max);
-                        }
-                        return UpdateEffect::Redraw;
-                    },
-                    'k' => {
-                        if let Some(picker) = self.pending_workspace_symbol_picker.as_mut() {
-                            picker.selected_idx = picker.selected_idx.saturating_sub(1);
-                        }
-                        return UpdateEffect::Redraw;
-                    },
-                    _ => {},
-                }
-                if let Some(digit) = ch.to_digit(10)
-                    && (1..=9).contains(&digit)
-                {
-                    let viewport_top = self
-                        .pending_workspace_symbol_picker
-                        .as_ref()
-                        .map(|p| {
-                            crate::render::symbol_picker::viewport_top_for_picker(
-                                p.selected_idx,
-                                p.entries.len(),
-                            )
-                        })
-                        .unwrap_or(0);
-                    let index = viewport_top + (digit as usize - 1);
-                    action_handlers::lsp::pick_workspace_symbol(self, index);
-                    return UpdateEffect::Redraw;
-                }
-            }
-            if matches!(key.code, KeyCode::Enter) {
-                let index = self
-                    .pending_workspace_symbol_picker
-                    .as_ref()
-                    .map(|p| p.selected_idx);
-                if let Some(index) = index {
-                    action_handlers::lsp::pick_workspace_symbol(self, index);
-                    return UpdateEffect::Redraw;
-                }
-            }
-            if matches!(key.code, KeyCode::Esc) {
-                self.pending_workspace_symbol_picker = None;
-                self.pending_workspace_symbol_request = None;
-                return UpdateEffect::Redraw;
-            }
-            self.pending_workspace_symbol_picker = None;
-            self.pending_workspace_symbol_request = None;
-        }
-
         // A hover popup consumes half-page scroll keys and auto-closes on any
         // other key (Helix's popup behavior). Ctrl-d/PageDown and Ctrl-u/PageUp
         // scroll it while open, shadowing normal-mode half-page motion. Escape
@@ -4848,7 +4778,6 @@ impl Stoat {
         let mut dispatched_code_action = false;
         let mut dispatched_rename_symbol = false;
         let mut dispatched_symbol_picker = false;
-        let mut dispatched_workspace_symbol_picker = false;
         for ra in &actions {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
@@ -4873,9 +4802,6 @@ impl Stoat {
             }
             if ra.name == "OpenSymbolPicker" {
                 dispatched_symbol_picker = true;
-            }
-            if ra.name == "OpenWorkspaceSymbolPicker" {
-                dispatched_workspace_symbol_picker = true;
             }
             if let Some(action) = resolve_action(&ra.name, &ra.args) {
                 dispatched_action = true;
@@ -4903,10 +4829,6 @@ impl Stoat {
             if !dispatched_symbol_picker {
                 self.pending_symbol_picker = None;
                 self.pending_symbol_picker_request = None;
-            }
-            if !dispatched_workspace_symbol_picker {
-                self.pending_workspace_symbol_picker = None;
-                self.pending_workspace_symbol_request = None;
             }
         }
         effect
@@ -5099,10 +5021,6 @@ impl Stoat {
 
         if let Some(rename) = &self.rename_input {
             return Some((rename.input.editor_id, rename.input.buffer_id));
-        }
-
-        if let Some(ws_sym) = &self.workspace_symbol_input {
-            return Some((ws_sym.input.editor_id, ws_sym.input.buffer_id));
         }
 
         if let Some(search) = &self.search_input {

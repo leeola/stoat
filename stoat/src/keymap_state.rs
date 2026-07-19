@@ -374,8 +374,6 @@ pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
         Some("help")
     } else if stoat.rename_input.is_some() {
         Some("rename")
-    } else if stoat.workspace_symbol_input.is_some() {
-        Some("workspace_symbol")
     } else if stoat.search_input.is_some() {
         Some("isearch")
     } else if stoat.global_search_input.is_some() {

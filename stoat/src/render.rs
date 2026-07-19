@@ -33,7 +33,6 @@ pub(crate) mod term_pane;
 pub(crate) mod text;
 pub(crate) mod undercurl;
 pub(crate) mod workspace_picker;
-pub(crate) mod workspace_symbol_picker;
 
 use self::undercurl::UndercurlSpan;
 use crate::{
@@ -600,11 +599,6 @@ pub(crate) fn frame(
     code_action::render_code_action(stoat, buf, stoat.stoatty.then_some(&mut *scene));
     rename_input::render_rename_input(stoat, buf, stoat.stoatty.then_some(&mut *scene));
     symbol_picker::render_symbol_picker(stoat, buf, stoat.stoatty.then_some(&mut *scene));
-    workspace_symbol_picker::render_workspace_symbol(
-        stoat,
-        buf,
-        stoat.stoatty.then_some(&mut *scene),
-    );
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
     badges::render_badges(

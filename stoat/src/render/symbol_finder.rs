@@ -1,6 +1,7 @@
 use crate::{
+    paths,
     render::text::{write_str, write_str_clipped},
-    symbol_finder::SymbolFinder,
+    symbol_finder::{SymbolFinder, SymbolFinderScope, SymbolTarget},
     theme::{scope, Theme},
     workspace::Workspace,
 };
@@ -10,6 +11,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Borders, Clear, Widget},
 };
+use std::path::Path;
 
 /// Lay out the centered document-symbol finder modal within `area`, or `None`
 /// when `area` is too small to host it.
@@ -52,12 +54,16 @@ pub(crate) fn render_symbol_finder(
         return;
     };
 
+    let title = match finder.scope {
+        SymbolFinderScope::Document => " symbols (document) ",
+        SymbolFinderScope::Workspace => " symbols (workspace) ",
+    };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     Clear.render(modal, buf);
     crate::render::chrome::modal_frame(
         buf,
         modal,
-        Some(" symbols (document) "),
+        Some(title),
         modal_style,
         theme,
         scene.as_deref_mut(),
@@ -87,14 +93,21 @@ pub(crate) fn render_symbol_finder(
         scene,
     );
 
+    let git_root = ws.git_root.clone();
     finder.viewport_rows = Some(list.height as usize);
-    paint_symbol_rows(finder, list, theme, buf);
+    paint_symbol_rows(finder, list, &git_root, theme, buf);
 }
 
 /// Paint the symbol list into `area`, following the selection so the selected
 /// row stays visible. Each row shows the title with fuzzy-match highlighting on
 /// the left and a dim kind and 1-based line suffix on the right.
-fn paint_symbol_rows(finder: &SymbolFinder, area: Rect, theme: &Theme, buf: &mut Buffer) {
+fn paint_symbol_rows(
+    finder: &SymbolFinder,
+    area: Rect,
+    git_root: &Path,
+    theme: &Theme,
+    buf: &mut Buffer,
+) {
     let rows = area.height as usize;
     if rows == 0 {
         return;
@@ -130,7 +143,18 @@ fn paint_symbol_rows(finder: &SymbolFinder, area: Rect, theme: &Theme, buf: &mut
 
         let entry = &finder.entries[idx];
 
-        let suffix = format!(" {} :{}", symbol_kind_label(entry.kind), entry.line + 1);
+        let suffix = match &entry.target {
+            SymbolTarget::Workspace { path, .. } => {
+                format!(
+                    " {}:{}",
+                    paths::display_relative(path, git_root),
+                    entry.line + 1
+                )
+            },
+            SymbolTarget::Offset(_) => {
+                format!(" {} :{}", symbol_kind_label(entry.kind), entry.line + 1)
+            },
+        };
         let suffix_x = end_x.saturating_sub(suffix.chars().count() as u16);
         if suffix_x > label_x {
             let suffix_style = if is_selected { style } else { dim_style };
