@@ -2816,14 +2816,17 @@ pub(crate) enum CodeActionEntry {
         title: String,
         edit: Box<WorkspaceEdit>,
         command: Option<lsp_types::Command>,
+        server: String,
     },
     NeedsResolve {
         title: String,
         action: Box<lsp_types::CodeAction>,
+        server: String,
     },
     Command {
         title: String,
         command: lsp_types::Command,
+        server: String,
     },
 }
 
@@ -2847,6 +2850,9 @@ pub(crate) struct CodeActionPicker {
     pub(crate) entries: Vec<CodeActionEntry>,
     pub(crate) anchor_offset: usize,
     pub(crate) selected_idx: usize,
+    /// The routed server that produced these actions, so resolve and execute
+    /// route back to it rather than the sole host.
+    pub(crate) server: String,
 }
 
 /// Issue a `textDocument/codeAction` request for the focused editor's
@@ -2881,7 +2887,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         ((lo, hi), head, editor.buffer_id, buf_snap.rope().clone())
     };
 
-    let Some((_, host)) = stoat
+    let Some((server, host)) = stoat
         .feature_hosts(buffer_id, LanguageServerFeature::CodeAction)
         .into_iter()
         .next()
@@ -2935,6 +2941,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         entries: Vec::new(),
         anchor_offset,
         selected_idx: 0,
+        server,
     });
     // The picker is reset to an empty list above so a stale popup
     // from a prior request does not persist while the new one is
@@ -2956,6 +2963,11 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(Some(actions)) => {
+            let server = stoat
+                .pending_code_action_picker
+                .as_ref()
+                .map(|picker| picker.server.clone())
+                .unwrap_or_default();
             let entries: Vec<CodeActionEntry> = actions
                 .into_iter()
                 .filter_map(|item| match item {
@@ -2965,14 +2977,17 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
                                 title: ca.title.clone(),
                                 edit: Box::new(edit),
                                 command,
+                                server: server.clone(),
                             }),
                             (None, Some(_), _) => Some(CodeActionEntry::NeedsResolve {
                                 title: ca.title.clone(),
                                 action: Box::new(ca),
+                                server: server.clone(),
                             }),
                             (None, None, Some(command)) => Some(CodeActionEntry::Command {
                                 title: ca.title.clone(),
                                 command,
+                                server: server.clone(),
                             }),
                             (None, None, None) => None,
                         }
@@ -2980,6 +2995,7 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
                     CodeActionOrCommand::Command(command) => Some(CodeActionEntry::Command {
                         title: command.title.clone(),
                         command,
+                        server: server.clone(),
                     }),
                 })
                 .collect();
@@ -3054,15 +3070,21 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
     let Some(entry) = picker.entries.into_iter().nth(index) else {
         return false;
     };
+    let buffer_id = stoat.focused_editor_ids().map(|(_, id)| id);
     match entry {
-        CodeActionEntry::Direct { edit, command, .. } => {
+        CodeActionEntry::Direct {
+            edit,
+            command,
+            server,
+            ..
+        } => {
             apply_code_action_edit(stoat, *edit);
             if let Some(command) = command {
-                dispatch_execute_command(stoat, command);
+                dispatch_execute_command(stoat, &server, buffer_id, command);
             }
         },
-        CodeActionEntry::NeedsResolve { action, .. } => {
-            let lsp = stoat.lsp_host();
+        CodeActionEntry::NeedsResolve { action, server, .. } => {
+            let lsp = resolve_code_action_host(stoat, &server, buffer_id);
             let task = stoat.spawn_woken(async move {
                 match lsp.code_action_resolve(*action).await {
                     Ok(resolved) => resolved.edit,
@@ -3078,11 +3100,30 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
             });
             stoat.pending_code_action_resolve = Some(task);
         },
-        CodeActionEntry::Command { command, .. } => {
-            dispatch_execute_command(stoat, command);
+        CodeActionEntry::Command {
+            command, server, ..
+        } => {
+            dispatch_execute_command(stoat, &server, buffer_id, command);
         },
     }
     true
+}
+
+/// Resolve the host a code action's resolve or command should target: the named
+/// producing server, falling back to the buffer's code-action host and then the
+/// sole host.
+fn resolve_code_action_host(
+    stoat: &Stoat,
+    server: &str,
+    buffer_id: Option<BufferId>,
+) -> Arc<dyn LspHost> {
+    if let Some(host) = stoat.lsp_registry.client(server) {
+        return host;
+    }
+    match buffer_id {
+        Some(id) => stoat.lsp_for_feature(id, LanguageServerFeature::CodeAction),
+        None => stoat.lsp_host(),
+    }
 }
 
 /// Spawn a `workspace/executeCommand` request through
@@ -3090,8 +3131,13 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
 /// is generally a server-side side-effect (servers that produce edits
 /// reply via the `workspace/applyEdit` request path); errors are
 /// logged and swallowed so a failing command does not crash the app.
-fn dispatch_execute_command(stoat: &Stoat, command: lsp_types::Command) {
-    let lsp = stoat.lsp_host();
+fn dispatch_execute_command(
+    stoat: &Stoat,
+    server: &str,
+    buffer_id: Option<BufferId>,
+    command: lsp_types::Command,
+) {
+    let lsp = resolve_code_action_host(stoat, server, buffer_id);
     let label = command.command.clone();
     let params = lsp_types::ExecuteCommandParams {
         command: command.command,
@@ -6587,6 +6633,63 @@ mod tests {
         h.settle();
         assert!(h.stoat.pending_code_action_picker.is_none());
         assert!(h.stoat.pending_code_action_resolve.is_none());
+    }
+
+    #[test]
+    fn code_action_resolve_routes_back_to_the_producing_server() {
+        use crate::lsp::registry::ServerSelector;
+        use lsp_types::{
+            request::CodeActionResolveRequest, CodeActionProviderCapability, ServerCapabilities,
+        };
+
+        let mut h = TestHarness::with_size(80, 24);
+        let primary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        primary.set_capabilities(ServerCapabilities::default());
+        let producer = std::sync::Arc::new(crate::host::FakeLsp::new());
+        producer.set_capabilities(ServerCapabilities {
+            code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+            ..ServerCapabilities::default()
+        });
+        h.stoat
+            .lsp_registry
+            .insert("primary".into(), primary.clone());
+        h.stoat
+            .lsp_registry
+            .insert("producer".into(), producer.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                ServerSelector::all("producer".into()),
+            ],
+        );
+
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        producer.set_code_actions(path.to_str().unwrap(), vec![unresolved_action("Refactor")]);
+        producer.set_pending_mode::<CodeActionResolveRequest>(true);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+        assert!(
+            h.stoat.pending_code_action_picker.is_some(),
+            "the producing server served the code action"
+        );
+
+        crate::action_handlers::lsp::pick_code_action(&mut h.stoat, 0);
+        h.settle();
+
+        assert_eq!(
+            producer.pending_count("codeAction/resolve"),
+            1,
+            "resolve routes back to the producing server"
+        );
+        assert_eq!(
+            primary.pending_count("codeAction/resolve"),
+            0,
+            "resolve does not go to the primary that never saw the action"
+        );
     }
 
     #[test]
