@@ -36,7 +36,7 @@ use std::{
 use stoat_cli::CommonArgs;
 use stoatty_protocol::{
     command::{PoolRegionCommand, WindowOpenCommand, NON_PANE_POOL_BASE},
-    window_ipc::WindowIpcEvent,
+    window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
 };
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, PoolComposite, Scroll},
@@ -338,6 +338,14 @@ struct AuxWindow {
     /// Feeds the app-wide DECSET 1004 report so a switch between stoatty windows
     /// keeps the app focused.
     focused: bool,
+    /// The last pointer cell, tracked from `CursorMoved` so a `MouseInput` press
+    /// or release -- which carries no position -- reports at the right cell.
+    pointer_cell: (u16, u16),
+    /// The button held down, so a `CursorMoved` while pressed reports a drag.
+    pressed: Option<MouseButton>,
+    /// Sub-line wheel remainder, so pixel-precise trackpad deltas accumulate
+    /// into whole-line scroll reports rather than rounding each event to zero.
+    wheel_pixels: f64,
 }
 
 /// The renderer-construction inputs an aux window needs, read from [`App`]
@@ -875,11 +883,11 @@ impl ApplicationHandler<PtyEvent> for App {
         };
 
         // Aux windows are second render targets for detached panes. Their
-        // lifecycle events are handled here and consumed. Keyboard and modifier
-        // events fall through to the primary handling below so an aux keypress
-        // drives the one PTY exactly as a primary keypress does. Every other aux
-        // event (mouse, focus reporting) belongs to a later change and is
-        // ignored, so it never reaches the primary arms with aux coordinates.
+        // lifecycle and pointer events are handled here and consumed, the
+        // pointer ones translated to window-relative cells and reported over the
+        // socket so they never reach the primary arms with aux coordinates.
+        // Keyboard and modifier events fall through to the primary handling
+        // below so an aux keypress drives the one PTY like a primary keypress.
         let primary = id == state.window.id();
         if !primary {
             match &event {
@@ -935,6 +943,104 @@ impl ApplicationHandler<PtyEvent> for App {
                         send_window_event(state, WindowIpcEvent::Closed { window });
                     }
                     state.aux.retain(|aux| aux.window.id() != id);
+                    return;
+                },
+                WindowEvent::CursorMoved { position, .. } => {
+                    let position = *position;
+                    let cell_size = render::cell_size(state.font_size, state.scale_factor as f32);
+                    let mods = modifier_bits(state.modifiers);
+                    let event = state
+                        .aux
+                        .iter_mut()
+                        .find(|aux| aux.window.id() == id)
+                        .and_then(|aux| {
+                            let (rows, cols) = aux.gpu.as_ref()?.grid_size();
+                            let (col, row) = cell_at(position.x, position.y, cell_size, rows, cols);
+                            aux.pointer_cell = (col as u16, row as u16);
+                            aux.pressed
+                                .and_then(ipc_button)
+                                .map(|button| WindowIpcEvent::Mouse {
+                                    window: aux.id,
+                                    kind: MouseKind::Drag(button),
+                                    col: col as u16,
+                                    row: row as u16,
+                                    mods,
+                                })
+                        });
+                    if let Some(event) = event {
+                        send_window_event(state, event);
+                    }
+                    return;
+                },
+                WindowEvent::MouseInput {
+                    state: element_state,
+                    button,
+                    ..
+                } => {
+                    let pressed = *element_state == ElementState::Pressed;
+                    let button = *button;
+                    let mods = modifier_bits(state.modifiers);
+                    let event = state
+                        .aux
+                        .iter_mut()
+                        .find(|aux| aux.window.id() == id)
+                        .and_then(|aux| {
+                            let ipc = ipc_button(button)?;
+                            aux.pressed = pressed.then_some(button);
+                            let (col, row) = aux.pointer_cell;
+                            let kind = if pressed {
+                                MouseKind::Press(ipc)
+                            } else {
+                                MouseKind::Release(ipc)
+                            };
+                            Some(WindowIpcEvent::Mouse {
+                                window: aux.id,
+                                kind,
+                                col,
+                                row,
+                                mods,
+                            })
+                        });
+                    if let Some(event) = event {
+                        send_window_event(state, event);
+                    }
+                    return;
+                },
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let delta = *delta;
+                    let cell_height =
+                        render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
+                    let mods = modifier_bits(state.modifiers);
+                    let report = state
+                        .aux
+                        .iter_mut()
+                        .find(|aux| aux.window.id() == id)
+                        .and_then(|aux| {
+                            let lines = wheel_lines(delta, &mut aux.wheel_pixels, cell_height);
+                            (lines != 0).then(|| {
+                                let kind = if lines > 0 {
+                                    MouseKind::WheelUp
+                                } else {
+                                    MouseKind::WheelDown
+                                };
+                                let (col, row) = aux.pointer_cell;
+                                (aux.id, kind, col, row, lines.unsigned_abs())
+                            })
+                        });
+                    if let Some((window, kind, col, row, count)) = report {
+                        for _ in 0..count {
+                            send_window_event(
+                                state,
+                                WindowIpcEvent::Mouse {
+                                    window,
+                                    kind,
+                                    col,
+                                    row,
+                                    mods,
+                                },
+                            );
+                        }
+                    }
                     return;
                 },
                 _ => return,
@@ -1992,6 +2098,26 @@ fn ctrl_byte(s: &str) -> Option<Vec<u8>> {
 /// `cell_height` into the same accumulator, so a whole-notch mouse (`y = 1.0`)
 /// still moves one line per event while a hi-res wheel's fractional line deltas
 /// carry across events instead of rounding to zero.
+/// Map a winit pointer button to the protocol button, or `None` for a button
+/// the pane mouse path does not act on (back, forward, extra).
+fn ipc_button(button: MouseButton) -> Option<IpcMouseButton> {
+    match button {
+        MouseButton::Left => Some(IpcMouseButton::Left),
+        MouseButton::Middle => Some(IpcMouseButton::Middle),
+        MouseButton::Right => Some(IpcMouseButton::Right),
+        _ => None,
+    }
+}
+
+/// Pack the active keyboard modifiers into a bitmask, with shift at `0x1`,
+/// control at `0x2`, alt at `0x4`, and super at `0x8`.
+fn modifier_bits(mods: ModifiersState) -> u8 {
+    u8::from(mods.shift_key())
+        | u8::from(mods.control_key()) << 1
+        | u8::from(mods.alt_key()) << 2
+        | u8::from(mods.super_key()) << 3
+}
+
 fn wheel_lines(delta: MouseScrollDelta, pixels: &mut f64, cell_height: f64) -> i32 {
     match delta {
         MouseScrollDelta::LineDelta(_, y) => *pixels += f64::from(y) * cell_height,
@@ -2127,6 +2253,9 @@ fn open_aux_window(
         grid: Grid::new(0, 0),
         scratch: Grid::new(0, 0),
         focused: false,
+        pointer_cell: (0, 0),
+        pressed: None,
+        wheel_pixels: 0.0,
     });
 
     let size = window.inner_size();
@@ -2768,11 +2897,11 @@ mod tests {
     use super::{
         alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, bell_should_ring,
         block_corners, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners, encode_key,
-        font_step, paste_bytes, popover_overflow, seed_settle_flight, selection_copy_text,
-        sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll,
-        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
-        swallow_super_combo, wheel_lines, CursorAnimation, EASE_BASELINE_FRAME,
-        SCROLLBACK_MIN_STEP,
+        font_step, modifier_bits, paste_bytes, popover_overflow, seed_settle_flight,
+        selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor,
+        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
+        step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation,
+        EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{window_socket_path, PathBuf};
@@ -3395,6 +3524,19 @@ mod tests {
             sgr_motion_bytes(None, 0, 0),
             b"\x1b[<35;1;1M".to_vec(),
             "buttonless any-motion is the no-button code 3+32=35 at the origin"
+        );
+    }
+
+    #[test]
+    fn modifier_bits_packs_each_modifier() {
+        assert_eq!(modifier_bits(ModifiersState::empty()), 0);
+        assert_eq!(modifier_bits(ModifiersState::SHIFT), 0x1);
+        assert_eq!(modifier_bits(ModifiersState::CONTROL), 0x2);
+        assert_eq!(modifier_bits(ModifiersState::ALT), 0x4);
+        assert_eq!(modifier_bits(ModifiersState::SUPER), 0x8);
+        assert_eq!(
+            modifier_bits(ModifiersState::SHIFT | ModifiersState::SUPER),
+            0x9
         );
     }
 
