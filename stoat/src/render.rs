@@ -146,6 +146,11 @@ pub(crate) struct FrameCtx<'a> {
     /// focused buffer's path and paints a compact severity badge when
     /// any diagnostics are present.
     pub(crate) diagnostics: &'a crate::diagnostics::DiagnosticSet,
+    /// Each server's negotiated offset encoding, built per frame from the LSP
+    /// registry. The editor render path converts a diagnostic's LSP position to
+    /// a byte column through its publishing server's encoding, so a utf-16
+    /// server's undercurl paints on the right column of a multibyte line.
+    pub(crate) diagnostic_encodings: &'a HashMap<String, crate::host::OffsetEncoding>,
     /// Most-recently submitted in-buffer search query. When `Some`,
     /// every editor pane paints visible matches with the
     /// `ui.search.match` style so users see all hits at once.
@@ -343,6 +348,7 @@ pub(crate) fn frame(
             .to_string()
     };
 
+    let diagnostic_encodings = stoat.lsp_registry.offset_encodings();
     let frame = FrameCtx {
         workspace_name: &workspace_name,
         workspace_root: &ws.git_root,
@@ -361,6 +367,7 @@ pub(crate) fn frame(
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_badges: &stoat.settings.mode_badges,
         diagnostics: &stoat.diagnostics,
+        diagnostic_encodings: &diagnostic_encodings,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         stoatty: stoat.stoatty,
         line_numbers: stoat

@@ -82,7 +82,7 @@ pub(crate) fn render_pane(
                 };
                 let diagnostic_info = buffers
                     .path_for(editor.buffer_id)
-                    .map(|path| (path, frame.diagnostics));
+                    .map(|path| (path, frame.diagnostics, frame.diagnostic_encodings));
                 render_editor_with_overlay(
                     editor,
                     content_area,

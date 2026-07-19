@@ -3,6 +3,7 @@ use crate::{
     diff_map::DiffHunkStatus,
     display_map::{tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
+    host::OffsetEncoding,
     minimap::color_to_rgb,
     render::{
         review::{dim_rgb, render_diff_view, render_review, style_rgb},
@@ -18,14 +19,14 @@ use ratatui::{
 };
 use std::{
     cmp::Reverse,
-    collections::{hash_map::DefaultHasher, BTreeMap, HashSet},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet},
     hash::{Hash, Hasher},
     ops::Range,
     path::Path,
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, Bias, Point, Rope};
+use stoat_text::{cursor_offset, Bias, Rope};
 use stoatty_protocol::command::IconKind;
 use stoatty_widgets::{
     bar::Bar,
@@ -42,6 +43,10 @@ pub(super) const MINIMAP_STRIP_COLS: u16 = 8;
 /// Narrowest pane, in columns, that still reserves a minimap strip. Below this
 /// the strip would crowd the remaining text, so the pane keeps its full width.
 pub(super) const MINIMAP_MIN_PANE_COLS: u16 = 60;
+
+/// Each server name mapped to its negotiated offset encoding, so a diagnostic's
+/// LSP position converts to a byte column through the server that published it.
+pub(crate) type DiagnosticEncodings = HashMap<String, OffsetEncoding>;
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -89,7 +94,11 @@ pub(crate) fn render_editor_with_overlay(
     hover_cell: Option<(u16, u16)>,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
-    diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
+    diagnostic_info: Option<(
+        &Path,
+        &crate::diagnostics::DiagnosticSet,
+        &DiagnosticEncodings,
+    )>,
     mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut Vec<UndercurlSpan>>,
     dim: f32,
@@ -125,7 +134,7 @@ pub(crate) fn render_editor_with_overlay(
         measure_gutter_width(&snapshot, gutter_is_rich)
     } else {
         match diagnostic_info {
-            Some((path, set)) if !set.get(path).is_empty() => 1,
+            Some((path, set, _)) if !set.get(path).is_empty() => 1,
             _ => 0,
         }
     };
@@ -155,7 +164,7 @@ pub(crate) fn render_editor_with_overlay(
 
     let empty_severity = BTreeMap::new();
     let row_severity: &BTreeMap<u32, DiagnosticSeverity> = match diagnostic_info {
-        Some((path, set)) => {
+        Some((path, set, _)) => {
             let version = set.version();
             let stale = match &editor.gutter_severity_cache {
                 Some(cache) => cache.version != version,
@@ -196,7 +205,7 @@ pub(crate) fn render_editor_with_overlay(
             rope.offset_to_point(cursor).row + 1
         });
 
-    let severity_version = diagnostic_info.map_or(0, |(_, set)| set.version());
+    let severity_version = diagnostic_info.map_or(0, |(_, set, _)| set.version());
 
     let gutter_w = if line_numbers != LineNumbers::Off {
         draw_line_number_gutter(
@@ -356,9 +365,16 @@ pub(crate) fn render_editor_with_overlay(
         end_row,
     );
 
-    if let Some((path, set)) = diagnostic_info {
+    if let Some((path, set, encodings)) = diagnostic_info {
         let rope = buffer_snapshot.rope();
-        build_diagnostic_span_cache(editor, set, path, rope, buffer_snapshot.version());
+        build_diagnostic_span_cache(
+            editor,
+            set,
+            path,
+            rope,
+            encodings,
+            buffer_snapshot.version(),
+        );
         let spans: &[ResolvedDiag] = editor
             .diagnostic_span_cache
             .as_ref()
@@ -515,8 +531,15 @@ pub(crate) fn render_editor_with_overlay(
 
     editor.cursor_screen_cell = primary_cell;
 
-    if let Some((path, set)) = diagnostic_info {
-        build_diagnostic_span_cache(editor, set, path, rope, buffer_snapshot.version());
+    if let Some((path, set, encodings)) = diagnostic_info {
+        build_diagnostic_span_cache(
+            editor,
+            set,
+            path,
+            rope,
+            encodings,
+            buffer_snapshot.version(),
+        );
         let spans: &[ResolvedDiag] = editor
             .diagnostic_span_cache
             .as_ref()
@@ -550,10 +573,12 @@ pub(crate) fn render_editor_with_overlay(
             if let (Some(scene), Some(colors), Some(bg)) = (scene, severity.as_ref(), bg) {
                 let diag = &set.get(path)[index];
                 let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
-                let start = rope.point_to_offset(Point::new(
-                    diag.range.start.line,
-                    diag.range.start.character,
-                ));
+                // Reuse the span resolved with this diagnostic's server encoding
+                // rather than re-deriving the offset from its raw character column.
+                let start = spans
+                    .iter()
+                    .find(|s| s.index == index)
+                    .map_or(0, |s| s.start);
                 let display = snapshot.buffer_to_display(rope.offset_to_point(start));
                 let rel_col = display.column.min(u32::from(content_area.width)) as u16;
                 let rel_row = display
@@ -702,29 +727,27 @@ pub(crate) struct DiagnosticSpanCache {
 
 /// Resolve every diagnostic for `path` to byte offsets, sorted by start.
 ///
-/// Each LSP range is resolved with the same clamping the render paths applied
-/// inline, and its index into `set.get(path)` is retained so callers can recover
-/// the source diagnostic.
+/// Each range is converted through the offset encoding its publishing server
+/// negotiated (a server absent from `encodings` falls back to UTF-16), so a
+/// utf-16 server's diagnostic on a multibyte line lands on the right byte. The
+/// index into `set.get(path)` is retained so callers can recover the source
+/// diagnostic.
 pub(crate) fn resolve_diagnostic_spans(
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
     rope: &Rope,
+    encodings: &DiagnosticEncodings,
 ) -> Vec<ResolvedDiag> {
-    let rope_len = rope.len();
     let mut spans: Vec<ResolvedDiag> = set
-        .get(path)
-        .iter()
+        .attributed(path)
         .enumerate()
-        .map(|(index, diag)| {
-            let start = rope
-                .point_to_offset(Point::new(
-                    diag.range.start.line,
-                    diag.range.start.character,
-                ))
-                .min(rope_len);
-            let end = rope
-                .point_to_offset(Point::new(diag.range.end.line, diag.range.end.character))
-                .min(rope_len);
+        .map(|(index, (server, diag))| {
+            let encoding = encodings
+                .get(server)
+                .copied()
+                .unwrap_or(OffsetEncoding::Utf16);
+            let start = crate::lsp::util::lsp_pos_to_byte_offset(rope, diag.range.start, encoding);
+            let end = crate::lsp::util::lsp_pos_to_byte_offset(rope, diag.range.end, encoding);
             ResolvedDiag {
                 start,
                 end,
@@ -747,6 +770,7 @@ fn build_diagnostic_span_cache(
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
     rope: &Rope,
+    encodings: &DiagnosticEncodings,
     buffer_version: u64,
 ) {
     let set_version = set.version();
@@ -758,7 +782,7 @@ fn build_diagnostic_span_cache(
         editor.diagnostic_span_cache = Some(DiagnosticSpanCache {
             set_version,
             buffer_version,
-            spans: resolve_diagnostic_spans(set, path, rope),
+            spans: resolve_diagnostic_spans(set, path, rope, encodings),
         });
     }
 }
@@ -2947,13 +2971,47 @@ mod tests {
             ],
         );
 
-        let spans = super::resolve_diagnostic_spans(&set, &path, &rope);
+        let spans =
+            super::resolve_diagnostic_spans(&set, &path, &rope, &super::DiagnosticEncodings::new());
         // Offset 4 is in both, so the worse severity (the error) wins.
         assert_eq!(super::diagnostic_at_offset(&spans, 4), Some(1));
         // Offset 7 is inside only the error span.
         assert_eq!(super::diagnostic_at_offset(&spans, 7), Some(1));
         // Offset 0 is outside both.
         assert_eq!(super::diagnostic_at_offset(&spans, 0), None);
+    }
+
+    #[test]
+    fn resolve_diagnostic_spans_uses_each_servers_encoding() {
+        use crate::host::OffsetEncoding;
+        use stoat_text::Rope;
+
+        // "éxy": é is two UTF-8 bytes but one UTF-16 unit, so char 2 is byte 2
+        // (x) under UTF-8 and byte 3 (y) under UTF-16.
+        let rope = Rope::from("\u{e9}xy\n");
+        let path = PathBuf::from("/a");
+        let mut set = crate::diagnostics::DiagnosticSet::new();
+        set.replace_from_server(
+            path.clone(),
+            "utf8".into(),
+            vec![span_diag(2, 3, DiagnosticSeverity::ERROR)],
+        );
+        set.replace_from_server(
+            path.clone(),
+            "utf16".into(),
+            vec![span_diag(2, 3, DiagnosticSeverity::ERROR)],
+        );
+        let mut encodings = super::DiagnosticEncodings::new();
+        encodings.insert("utf8".into(), OffsetEncoding::Utf8);
+        encodings.insert("utf16".into(), OffsetEncoding::Utf16);
+
+        let spans = super::resolve_diagnostic_spans(&set, &path, &rope, &encodings);
+        let starts: Vec<usize> = spans.iter().map(|s| s.start).collect();
+        assert_eq!(
+            starts,
+            vec![2, 3],
+            "utf-8 char 2 lands on x (byte 2), utf-16 char 2 on y (byte 3)"
+        );
     }
 
     #[test]

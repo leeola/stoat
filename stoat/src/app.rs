@@ -3938,7 +3938,13 @@ impl Stoat {
         let rope = snapshot.buffer_snapshot().rope();
         // This runs per mouse-motion (deduped in handle_hover), not per frame,
         // so it resolves a local span list rather than the render-side cache.
-        let spans = crate::render::editor::resolve_diagnostic_spans(&self.diagnostics, &path, rope);
+        let encodings = self.lsp_registry.offset_encodings();
+        let spans = crate::render::editor::resolve_diagnostic_spans(
+            &self.diagnostics,
+            &path,
+            rope,
+            &encodings,
+        );
         crate::render::editor::diagnostic_at_offset(&spans, offset)
     }
 
@@ -6394,6 +6400,7 @@ impl Stoat {
         let focus_target = ws.focus;
         let focus_id = ws.panes.focus();
 
+        let diagnostic_encodings = self.lsp_registry.offset_encodings();
         let frame = crate::render::FrameCtx {
             workspace_name: &workspace_name,
             workspace_root: &ws.git_root,
@@ -6412,6 +6419,7 @@ impl Stoat {
             goto_word_labels: None,
             mode_badges: &self.settings.mode_badges,
             diagnostics: &self.diagnostics,
+            diagnostic_encodings: &diagnostic_encodings,
             search_query: None,
             stoatty: self.stoatty,
             line_numbers: LineNumbers::Relative,
