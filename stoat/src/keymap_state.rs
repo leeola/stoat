@@ -1,7 +1,10 @@
 use crate::{
     app::Stoat,
+    buffer::BufferId,
+    diagnostics::DiagnosticSet,
+    editor_state::EditorState,
     keymap::{KeymapState, ResolvedAction, ResolvedArg, StateValue},
-    lsp::LspSymbolKind,
+    lsp::{registry::LspRegistry, LspSymbolKind},
     pane::{FocusTarget, View},
     rebase::RebasePause,
     workspace::Workspace,
@@ -20,6 +23,11 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "rebase_exec",
     "token",
     "token_known",
+    "lsp",
+    "lang",
+    "diags",
+    "has_selection",
+    "modified",
 ];
 
 /// The hand-set booleans a keymap state carries besides the derived
@@ -55,6 +63,18 @@ pub(crate) struct StoatKeymapState {
     /// answered). `Bool(false)` when none, so `!token_known` fails token
     /// conditions open when the index is missing or still pending.
     token_known: StateValue,
+    /// Whether a language server is registered for the focused buffer's language.
+    lsp: StateValue,
+    /// The focused buffer's tree-sitter grammar name, absent for a grammarless
+    /// buffer so `lang ~ "..."` can glob-match a family and bare `lang` reads
+    /// false without a grammar.
+    lang: Option<StateValue>,
+    /// Whether the focused buffer's path has any published diagnostics.
+    diags: StateValue,
+    /// Whether the newest selection is non-empty (its head and tail differ).
+    has_selection: StateValue,
+    /// Whether the focused buffer has unsaved edits.
+    modified: StateValue,
     /// Config-defined session variables, read only after the built-in fields so
     /// a variable can never shadow one.
     user_vars: HashMap<String, StateValue>,
@@ -75,6 +95,11 @@ impl StoatKeymapState {
             modal: None,
             token: None,
             token_known: StateValue::Bool(false),
+            lsp: StateValue::Bool(false),
+            lang: None,
+            diags: StateValue::Bool(false),
+            has_selection: StateValue::Bool(false),
+            modified: StateValue::Bool(false),
             user_vars: HashMap::new(),
         }
     }
@@ -117,6 +142,17 @@ impl StoatKeymapState {
         self
     }
 
+    /// Set the `lsp`/`lang`/`diags`/`has_selection`/`modified` predicate values
+    /// from a focused-buffer derivation (see [`focus_flags`]).
+    pub(crate) fn with_focus_flags(mut self, flags: FocusFlags) -> Self {
+        self.lsp = StateValue::Bool(flags.lsp);
+        self.lang = flags.lang.map(|l| StateValue::String(l.into()));
+        self.diags = StateValue::Bool(flags.diags);
+        self.has_selection = StateValue::Bool(flags.has_selection);
+        self.modified = StateValue::Bool(flags.modified);
+        self
+    }
+
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         let ws = stoat.active_workspace();
         let flags = Flags {
@@ -130,6 +166,7 @@ impl StoatKeymapState {
             ..Self::with_flags(stoat.focused_mode(), flags)
         }
         .with_token(cursor_token(ws))
+        .with_focus_flags(focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry))
     }
 }
 
@@ -143,6 +180,11 @@ impl KeymapState for StoatKeymapState {
             "modal" => self.modal.as_ref(),
             "token" => self.token.as_ref(),
             "token_known" => Some(&self.token_known),
+            "lsp" => Some(&self.lsp),
+            "lang" => self.lang.as_ref(),
+            "diags" => Some(&self.diags),
+            "has_selection" => Some(&self.has_selection),
+            "modified" => Some(&self.modified),
             other => self.user_vars.get(other),
         }
     }
@@ -158,11 +200,7 @@ impl KeymapState for StoatKeymapState {
 /// buffer's own snapshot (a read lock) rather than the editor's display map,
 /// which would need `&mut`.
 pub(crate) fn cursor_token(ws: &Workspace) -> Option<Option<LspSymbolKind>> {
-    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
-        return None;
-    };
-    let editor = ws.editors.get(editor_id)?;
-    let buffer_id = editor.buffer_id;
+    let (editor, buffer_id) = resolve_focus(ws)?;
     let offset = {
         let buffer = ws.buffers.get(buffer_id)?;
         let guard = buffer.read().ok()?;
@@ -175,6 +213,65 @@ pub(crate) fn cursor_token(ws: &Workspace) -> Option<Option<LspSymbolKind>> {
         )
     };
     ws.buffers.lsp_symbol_kind_at(buffer_id, offset)
+}
+
+/// Resolve the focused split pane to its editor and buffer, the shared lookup
+/// [`cursor_token`] and [`focus_flags`] both derive their fields from.
+///
+/// `None` when the focused pane is not an editor or its editor is gone.
+fn resolve_focus(ws: &Workspace) -> Option<(&EditorState, BufferId)> {
+    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+        return None;
+    };
+    let editor = ws.editors.get(editor_id)?;
+    let buffer_id = editor.buffer_id;
+    Some((editor, buffer_id))
+}
+
+/// The focused-buffer predicate values, all false or absent when no editor is
+/// focused.
+#[derive(Default)]
+pub(crate) struct FocusFlags {
+    lsp: bool,
+    lang: Option<String>,
+    diags: bool,
+    has_selection: bool,
+    modified: bool,
+}
+
+/// Derive [`FocusFlags`] for the focused buffer, sharing [`resolve_focus`] with
+/// [`cursor_token`] so the focus lookup is written once.
+pub(crate) fn focus_flags(
+    ws: &Workspace,
+    diagnostics: &DiagnosticSet,
+    registry: &LspRegistry,
+) -> FocusFlags {
+    let Some((editor, buffer_id)) = resolve_focus(ws) else {
+        return FocusFlags::default();
+    };
+    let lang = ws
+        .buffers
+        .language_for(buffer_id)
+        .map(|l| l.name.to_string());
+    let lsp = crate::action_handlers::lsp::lsp_language_name(&ws.buffers, buffer_id)
+        .is_some_and(|name| !registry.hosts_for_language(&name).is_empty());
+    let diags = ws
+        .buffers
+        .path_for(buffer_id)
+        .is_some_and(|path| !diagnostics.get(path).is_empty());
+    let has_selection = !editor.selections.newest_anchor().is_empty();
+    let modified = ws
+        .buffers
+        .get(buffer_id)
+        .and_then(|b| b.read().ok().map(|g| g.dirty))
+        .unwrap_or(false);
+    FocusFlags {
+        lsp,
+        lang,
+        diags,
+        has_selection,
+        modified,
+    }
 }
 
 /// The `View` of the active workspace's focused pane or dock.
@@ -424,7 +521,7 @@ mod tests {
         assert_eq!(state.get("view"), None);
     }
 
-    fn open_foo_bar(h: &mut crate::test_harness::TestHarness) -> crate::buffer::BufferId {
+    fn open_foo_bar(h: &mut crate::test_harness::TestHarness) -> BufferId {
         let root = std::path::PathBuf::from("/lsp");
         let path = root.join("a.rs");
         h.fake_fs().insert_file(&path, b"Foo bar");
@@ -440,7 +537,7 @@ mod tests {
 
     /// Seed a symbol-kind index over "Foo bar": `Foo` [0,3) a trait, `bar` [4,7)
     /// a function, leaving the space at offset 3 uncovered.
-    fn seed_foo_bar_kinds(h: &mut crate::test_harness::TestHarness, id: crate::buffer::BufferId) {
+    fn seed_foo_bar_kinds(h: &mut crate::test_harness::TestHarness, id: BufferId) {
         let ws = h.stoat.active_workspace_mut();
         let snapshot = ws
             .buffers
@@ -492,6 +589,62 @@ mod tests {
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(state.get("token_known"), Some(&StateValue::Bool(true)));
         assert_eq!(field(&state, "token"), Some("function".to_string()));
+    }
+
+    #[test]
+    fn from_stoat_lsp_lang_and_diags_for_a_rust_buffer() {
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+        let mut h = Stoat::test();
+        open_foo_bar(&mut h);
+        h.stoat.diagnostics.replace_for_path(
+            std::path::PathBuf::from("/lsp/a.rs"),
+            vec![Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: None,
+                message: String::new(),
+                related_information: None,
+                tags: None,
+                data: None,
+            }],
+        );
+
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(field(&state, "lang"), Some("rust".to_string()));
+        assert_eq!(
+            state.get("lsp"),
+            Some(&StateValue::Bool(true)),
+            "the fake client serves rust",
+        );
+        assert_eq!(state.get("diags"), Some(&StateValue::Bool(true)));
+    }
+
+    #[test]
+    fn from_stoat_modified_true_after_an_edit() {
+        let mut h = Stoat::test();
+        open_foo_bar(&mut h);
+        h.type_keys("i x escape");
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(state.get("modified"), Some(&StateValue::Bool(true)));
+    }
+
+    #[test]
+    fn from_stoat_has_selection_true_with_an_active_selection() {
+        let mut h = Stoat::test();
+        open_foo_bar(&mut h);
+        h.type_keys("v l");
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(state.get("has_selection"), Some(&StateValue::Bool(true)));
+    }
+
+    #[test]
+    fn from_stoat_lang_absent_for_a_scratch_buffer() {
+        let h = Stoat::test();
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(state.get("lang"), None, "a scratch buffer has no grammar");
+        assert_eq!(state.get("lsp"), Some(&StateValue::Bool(false)));
     }
 
     #[test]

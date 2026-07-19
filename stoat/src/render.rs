@@ -40,7 +40,7 @@ use crate::{
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
-    keymap_state::{action_display_desc, cursor_token, Flags, StoatKeymapState},
+    keymap_state::{action_display_desc, cursor_token, focus_flags, Flags, StoatKeymapState},
     lsp::LspSymbolKind,
     minimap::MinimapContent,
     pane::{DockVisibility, FocusTarget, View},
@@ -798,7 +798,8 @@ pub(crate) fn frame(
             },
         )
         .with_view(screen)
-        .with_token(cursor_token(ws));
+        .with_token(cursor_token(ws))
+        .with_focus_flags(focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry));
         // The review screen rides on normal mode, so scope to its own `view ==
         // review` bindings. A chord sub-mode owns its whole mode, so take them all.
         let raw = if screen == Some("review") {
