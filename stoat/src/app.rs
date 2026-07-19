@@ -326,6 +326,10 @@ pub struct Stoat {
     /// Whether the window-event socket is currently connected. Gates pane
     /// detach, which needs stoatty to host the aux window and report its events.
     pub(crate) window_ipc_connected: bool,
+    /// Aux windows stoatty has been told to open, keyed by window id with the
+    /// cell size last sent. [`Self::emit_windows`] diffs it against the detached
+    /// panes each frame to emit the WindowOpen and WindowClose commands.
+    aux_windows: std::collections::BTreeMap<u32, (u16, u16)>,
     /// Cold-build worker, held only to keep the spawned scan alive while it
     /// runs. Progress arrives through [`Self::index_update_rx`].
     _index_build_task: Option<stoat_scheduler::Task<()>>,
@@ -1243,6 +1247,7 @@ impl Stoat {
             window_ipc_tx,
             window_ipc_rx,
             window_ipc_connected: false,
+            aux_windows: std::collections::BTreeMap::new(),
             _index_build_task: None,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -1927,6 +1932,7 @@ impl Stoat {
                         self.perf.record_input_to_publish(started.elapsed());
                     }
                     self.emit_apc_scene();
+                    self.emit_windows();
                     self.emit_smooth_scroll();
                     self.emit_minimap();
                     if render.is_closed() {
@@ -6208,6 +6214,71 @@ impl Stoat {
         }
     }
 
+    /// Open and close the aux windows detached panes render into.
+    ///
+    /// Diffs the [`Self::aux_windows`] ledger against the active workspace's
+    /// detached panes. A newly detached pane emits a WindowOpen sized to its
+    /// window-relative area and titled by its buffer, and a ledger window whose
+    /// pane has reattached or closed emits a WindowClose. Runs at the frame seam
+    /// before [`Self::emit_smooth_scroll`], so a window exists before its pool
+    /// content ships. An unchanged set sends nothing.
+    fn emit_windows(&mut self) {
+        if !self.stoatty {
+            return;
+        }
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+
+        let (out, current) = {
+            let ws = self.active_workspace();
+            let mut out = Vec::new();
+            let mut current: std::collections::BTreeMap<u32, (u16, u16)> =
+                std::collections::BTreeMap::new();
+            for (pane_id, window) in ws.panes.windowed_panes() {
+                let pane = ws.panes.pane(pane_id);
+                let size = (pane.area.width, pane.area.height);
+                current.insert(window, size);
+                if !self.aux_windows.contains_key(&window) {
+                    let title = match &pane.view {
+                        View::Editor(editor_id) => ws
+                            .editors
+                            .get(*editor_id)
+                            .and_then(|editor| ws.buffers.path_for(editor.buffer_id))
+                            .and_then(|path| path.file_name())
+                            .and_then(|name| name.to_str())
+                            .map(String::from)
+                            .unwrap_or_else(|| "stoat".to_string()),
+                        _ => "stoat".to_string(),
+                    };
+                    stoatty_protocol::command::encode_window_open_into(
+                        &mut out,
+                        &stoatty_protocol::command::WindowOpenCommand {
+                            window,
+                            cols: size.0,
+                            rows: size.1,
+                            title,
+                        },
+                    );
+                }
+            }
+            for &window in self.aux_windows.keys() {
+                if !current.contains_key(&window) {
+                    stoatty_protocol::command::encode_window_close_into(
+                        &mut out,
+                        &stoatty_protocol::command::WindowCloseCommand { window },
+                    );
+                }
+            }
+            (out, current)
+        };
+
+        self.aux_windows = current;
+        if !out.is_empty() {
+            let _ = apc_tx.send(out);
+        }
+    }
+
     /// Assign a `content_id` to each visible split-editor buffer a minimap strip
     /// may render, so the declare widget can read the id while the frame paints.
     ///
@@ -10235,6 +10306,46 @@ mod tests {
                 .iter()
                 .any(|cmd| matches!(cmd, Command::MinimapLines(_))),
             "an edit splices the changed line, got {edited:?}"
+        );
+    }
+
+    #[test]
+    fn detach_emits_window_open_and_reattach_emits_window_close() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.window_ipc_connected = true;
+
+        let path = std::path::PathBuf::from("/w/a.txt");
+        h.fake_fs().insert_file(&path, b"hello\n");
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+        h.type_action("SplitRight()");
+        h.settle();
+
+        h.type_action("DetachPane()");
+        h.stoat.emit_windows();
+        let opened = drain_apc(&mut rx);
+        assert!(
+            opened.iter().any(|c| matches!(c, Command::WindowOpen(_))),
+            "detach opens a window, got {opened:?}"
+        );
+
+        h.stoat.emit_windows();
+        assert!(
+            drain_apc(&mut rx).is_empty(),
+            "an unchanged frame emits no window commands"
+        );
+
+        h.type_action("ReattachPane()");
+        h.stoat.emit_windows();
+        let closed = drain_apc(&mut rx);
+        assert!(
+            closed.iter().any(|c| matches!(c, Command::WindowClose(_))),
+            "reattach closes the window, got {closed:?}"
         );
     }
 

@@ -765,6 +765,8 @@ on key {
         v -> [SplitDown(), SetMode(normal)];
         n -> SetMode(space_pane_nav_new);
         e -> SetMode(space_pane_display);
+        d -> [DetachPane(), SetMode(normal)];
+        r -> [ReattachPane(), SetMode(normal)];
         f -> OpenFileFinderHSplit();
         F -> OpenFileFinderVSplit();
         q -> [ClosePane(), SetMode(normal)];
