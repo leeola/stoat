@@ -7,7 +7,9 @@ use crate::{
         chrome,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
-        popout::{paint_popout_card, popout_area, scaled_char_capacity, wrap_popout_lines},
+        popout::{
+            paint_popout_card, popout_area, popout_inset, scaled_char_capacity, wrap_popout_lines,
+        },
         review::{dim_rgb, style_rgb},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
@@ -235,7 +237,11 @@ pub(crate) fn render_pane(
         && let Some((typ, msg)) = frame.lsp_message
         && typ == lsp_types::MessageType::ERROR
     {
-        let cell_width = status_area.width.saturating_sub(2) as usize;
+        let inset = popout_inset(status_area.width);
+        let cell_width = status_area
+            .width
+            .saturating_sub(inset * 2)
+            .saturating_sub(2) as usize;
         let width = if frame.stoatty {
             scaled_char_capacity(cell_width, TEXT_SCALE_COMPACT)
         } else {
