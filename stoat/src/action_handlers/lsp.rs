@@ -432,81 +432,117 @@ fn report_lsp_unavailable(stoat: &mut Stoat, what: &str) -> UpdateEffect {
 /// [`TextDocumentSyncKind::INCREMENTAL`] (per-edit ranges via
 /// [`patch_to_content_changes`]). `NONE` skips silently.
 pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
-    let sync_kind = resolve_sync_kind(&stoat.lsp_host().capabilities().text_document_sync);
-    if !matches!(
-        sync_kind,
-        TextDocumentSyncKind::FULL | TextDocumentSyncKind::INCREMENTAL
-    ) {
-        for id in stoat.lsp_opened.iter().copied().collect::<Vec<_>>() {
-            if let Some(buffer) = stoat.active_workspace().buffers.get(id) {
-                let v = buffer.read().expect("buffer lock").version();
-                stoat.lsp_buffer_versions.insert(id, v);
+    for id in stoat.lsp_opened.iter().copied().collect::<Vec<_>>() {
+        // Group the buffer's hosts by the sync kind and encoding each
+        // negotiated, so a FULL host and an INCREMENTAL one -- or two hosts on
+        // different encodings -- each get content changes shaped their own way.
+        // A host on sync NONE takes no change.
+        let mut groups: HostSyncGroups = Vec::new();
+        for host in stoat.hosts_for_buffer(id) {
+            let sync_kind = resolve_sync_kind(&host.capabilities().text_document_sync);
+            if !matches!(
+                sync_kind,
+                TextDocumentSyncKind::FULL | TextDocumentSyncKind::INCREMENTAL
+            ) {
+                continue;
+            }
+            let key = (sync_kind, host.offset_encoding());
+            match groups.iter_mut().find(|(existing, _)| *existing == key) {
+                Some((_, group)) => group.push(host),
+                None => groups.push((key, vec![host])),
             }
         }
-        return;
-    }
 
-    let encoding = stoat.lsp_host().offset_encoding();
+        // Each group reads the same last-seen and last-delivered baseline, which
+        // advance only after the plans are built.
+        let plans: Vec<(DispatchPlan, Vec<Arc<dyn LspHost>>)> = groups
+            .into_iter()
+            .filter_map(|((sync_kind, encoding), hosts)| {
+                build_dispatch_plan(stoat, id, sync_kind, encoding).map(|plan| (plan, hosts))
+            })
+            .collect();
 
-    let dispatches: Vec<DispatchPlan> = stoat
-        .lsp_opened
-        .iter()
-        .copied()
-        .filter_map(|id| build_dispatch_plan(stoat, id, sync_kind, encoding))
-        .collect();
+        // The change is consumed for this buffer once seen, whether or not any
+        // group took it, mirroring the sync-NONE path.
+        if let Some(buffer) = stoat.active_workspace().buffers.get(id) {
+            let v = buffer.read().expect("buffer lock").version();
+            stoat.lsp_buffer_versions.insert(id, v);
+        }
 
-    for plan in dispatches {
-        stoat
-            .lsp_buffer_versions
-            .insert(plan.id, plan.target_buffer_version);
-        let lsp_version = stoat.lsp_doc_versions.entry(plan.id).or_insert(0);
-        *lsp_version += 1;
-        let lsp_version_value = *lsp_version;
+        if plans.is_empty() {
+            continue;
+        }
 
-        let params = DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier {
-                uri: plan.uri,
-                version: lsp_version_value,
-            },
-            content_changes: plan.content_changes,
+        // One monotonic LSP document version per buffer, shared across groups --
+        // a per-server counter buys nothing since each server still sees it rise.
+        let lsp_version = {
+            let version = stoat.lsp_doc_versions.entry(id).or_insert(0);
+            *version += 1;
+            *version
         };
 
-        let hosts = stoat.hosts_for_buffer(plan.id);
+        // The delivered baseline is per-buffer, so every group targets the same
+        // text and version.
+        let target_text = plans[0].0.target_text.clone();
+        let target_version = plans[0].0.target_buffer_version;
+
+        let dispatches: Vec<(DidChangeTextDocumentParams, Vec<Arc<dyn LspHost>>)> = plans
+            .into_iter()
+            .map(|(plan, hosts)| {
+                (
+                    DidChangeTextDocumentParams {
+                        text_document: VersionedTextDocumentIdentifier {
+                            uri: plan.uri,
+                            version: lsp_version,
+                        },
+                        content_changes: plan.content_changes,
+                    },
+                    hosts,
+                )
+            })
+            .collect();
+
         let executor = stoat.executor.clone();
         let last_text = stoat.lsp_last_delivered_text.clone();
         let last_version = stoat.lsp_last_delivered_buffer_version.clone();
-        let buffer_id = plan.id;
-        let target_text = plan.target_text;
-        let target_version = plan.target_buffer_version;
 
         let task = stoat.executor.spawn(async move {
             executor.timer(LSP_DID_CHANGE_DEBOUNCE).await;
             let mut delivered = true;
-            for lsp in hosts {
-                if let Err(err) = lsp.did_change(params.clone()).await {
-                    tracing::warn!(target: "stoat::lsp", ?err, "did_change notification failed");
-                    delivered = false;
+            for (params, hosts) in dispatches {
+                for lsp in hosts {
+                    if let Err(err) = lsp.did_change(params.clone()).await {
+                        tracing::warn!(target: "stoat::lsp", ?err, "did_change notification failed");
+                        delivered = false;
+                    }
                 }
             }
-            // Only advance the delivered baseline when every server received
-            // the change, so a failed server's next delta still replays it.
+            // Only advance the delivered baseline when every server in every
+            // group received the change, so a failed server's next delta still
+            // replays it.
             if delivered {
                 last_text
                     .lock()
                     .expect("lsp text mutex")
-                    .insert(buffer_id, target_text);
+                    .insert(id, target_text);
                 last_version
                     .lock()
                     .expect("lsp version mutex")
-                    .insert(buffer_id, target_version);
+                    .insert(id, target_version);
             }
         });
-        stoat.lsp_pending_changes.insert(plan.id, task);
+        stoat.lsp_pending_changes.insert(id, task);
     }
 }
 
+/// A buffer's fanned-out hosts grouped by the sync kind and encoding each
+/// negotiated, so one shaped [`DispatchPlan`] serves every host in a group.
+type HostSyncGroups = Vec<(
+    (TextDocumentSyncKind, OffsetEncoding),
+    Vec<Arc<dyn LspHost>>,
+)>;
+
 struct DispatchPlan {
-    id: BufferId,
     uri: Uri,
     content_changes: Vec<TextDocumentContentChangeEvent>,
     target_text: Arc<String>,
@@ -565,7 +601,6 @@ fn build_dispatch_plan(
     }
 
     Some(DispatchPlan {
-        id,
         uri,
         content_changes,
         target_text: Arc::new(new_text),
@@ -4757,6 +4792,92 @@ mod tests {
         arm_change(&mut h);
         h.advance_clock(Duration::from_millis(60));
         assert!(h.fake_lsp().observed_changes().is_empty());
+    }
+
+    #[test]
+    fn did_change_shapes_params_per_host_sync_kind() {
+        use crate::lsp::registry::ServerSelector;
+
+        let mut h = TestHarness::with_size(80, 24);
+        let full = std::sync::Arc::new(crate::host::FakeLsp::new());
+        full.set_text_document_sync(TextDocumentSyncKind::FULL);
+        let incremental = std::sync::Arc::new(crate::host::FakeLsp::new());
+        incremental.set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        h.stoat.lsp_registry.insert("full".into(), full.clone());
+        h.stoat
+            .lsp_registry
+            .insert("incremental".into(), incremental.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("full".into()),
+                ServerSelector::all("incremental".into()),
+            ],
+        );
+
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        edit_buffer(&mut h, 0..0, "X");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+
+        let full_changes = full.observed_changes();
+        assert_eq!(full_changes.len(), 1);
+        assert_eq!(
+            full_changes[0].content_changes[0].range, None,
+            "the FULL host receives whole-document text"
+        );
+        assert_eq!(full_changes[0].content_changes[0].text, "Xabc\n");
+
+        let inc_changes = incremental.observed_changes();
+        assert_eq!(inc_changes.len(), 1);
+        assert_eq!(
+            inc_changes[0].content_changes[0].range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, 0),
+                lsp_types::Position::new(0, 0),
+            )),
+            "the INCREMENTAL host receives a ranged change for the same edit"
+        );
+        assert_eq!(inc_changes[0].content_changes[0].text, "X");
+    }
+
+    #[test]
+    fn did_change_reaches_the_full_host_past_a_sync_none_peer() {
+        use crate::lsp::registry::ServerSelector;
+
+        let mut h = TestHarness::with_size(80, 24);
+        // No sync set defaults to NONE.
+        let none = std::sync::Arc::new(crate::host::FakeLsp::new());
+        let full = std::sync::Arc::new(crate::host::FakeLsp::new());
+        full.set_text_document_sync(TextDocumentSyncKind::FULL);
+        h.stoat.lsp_registry.insert("none".into(), none.clone());
+        h.stoat.lsp_registry.insert("full".into(), full.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("none".into()),
+                ServerSelector::all("full".into()),
+            ],
+        );
+
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        edit_buffer(&mut h, 0..0, "X");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+
+        let full_changes = full.observed_changes();
+        assert_eq!(
+            full_changes.len(),
+            1,
+            "the FULL host gets the change even though a sync-NONE peer sorts first"
+        );
+        assert_eq!(full_changes[0].content_changes[0].text, "Xabc\n");
+        assert!(
+            none.observed_changes().is_empty(),
+            "the sync-NONE host takes no change"
+        );
     }
 
     #[test]
