@@ -4780,8 +4780,10 @@ impl Stoat {
             return UpdateEffect::Redraw;
         }
 
-        let state = StoatKeymapState::from_stoat(self);
-        let actions = self.keymap.lookup(&state, &key).map(|a| a.to_vec());
+        let actions = {
+            let state = StoatKeymapState::from_stoat(self);
+            self.keymap.lookup(&state, &key).map(|a| a.to_vec())
+        };
         let Some(actions) = actions else {
             if count_active_mode
                 && let KeyCode::Char(ch) = key.code

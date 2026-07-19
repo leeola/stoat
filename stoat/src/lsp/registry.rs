@@ -191,6 +191,20 @@ impl LspRegistry {
         self.sole.iter().cloned().collect()
     }
 
+    /// Whether any up host would serve `language`, the allocation-free predicate
+    /// counterpart of [`Self::hosts_for_language`] for callers that only need to
+    /// know a server exists rather than the hosts themselves.
+    pub(crate) fn has_host_for_language(&self, language: &str) -> bool {
+        if let Some(selectors) = self.languages.get(language)
+            && selectors
+                .iter()
+                .any(|selector| self.clients.contains_key(&selector.name))
+        {
+            return true;
+        }
+        self.sole.is_some()
+    }
+
     /// The names of `language`'s running servers, in selector (routing) order.
     ///
     /// Only named per-language servers appear. The nameless sole client is

@@ -42,7 +42,7 @@ pub(crate) struct Flags {
     pub(crate) rebase_exec: bool,
 }
 
-pub(crate) struct StoatKeymapState {
+pub(crate) struct StoatKeymapState<'a> {
     mode_value: StateValue,
     rebase_exec: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
@@ -76,11 +76,12 @@ pub(crate) struct StoatKeymapState {
     /// Whether the focused buffer has unsaved edits.
     modified: StateValue,
     /// Config-defined session variables, read only after the built-in fields so
-    /// a variable can never shadow one.
-    user_vars: HashMap<String, StateValue>,
+    /// a variable can never shadow one. Borrowed from the owning [`Stoat`];
+    /// `None` for the flag-built states that carry no user vars.
+    user_vars: Option<&'a HashMap<String, StateValue>>,
 }
 
-impl StoatKeymapState {
+impl<'a> StoatKeymapState<'a> {
     #[cfg(test)]
     pub(crate) fn new(mode: &str) -> Self {
         Self::with_flags(mode, Flags::default())
@@ -100,7 +101,7 @@ impl StoatKeymapState {
             diags: StateValue::Bool(false),
             has_selection: StateValue::Bool(false),
             modified: StateValue::Bool(false),
-            user_vars: HashMap::new(),
+            user_vars: None,
         }
     }
 
@@ -153,7 +154,7 @@ impl StoatKeymapState {
         self
     }
 
-    pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
+    pub(crate) fn from_stoat(stoat: &'a Stoat) -> Self {
         let ws = stoat.active_workspace();
         let flags = Flags {
             rebase_exec: ws.rebase_active.is_some(),
@@ -162,7 +163,7 @@ impl StoatKeymapState {
             pane: pane_predicate(ws).map(|s| StateValue::String(s.into())),
             view: view_predicate(ws).map(|s| StateValue::String(s.into())),
             modal: modal_predicate(stoat).map(|s| StateValue::String(s.into())),
-            user_vars: stoat.user_vars.clone(),
+            user_vars: Some(&stoat.user_vars),
             ..Self::with_flags(stoat.focused_mode(), flags)
         }
         .with_token(cursor_token(ws))
@@ -170,7 +171,7 @@ impl StoatKeymapState {
     }
 }
 
-impl KeymapState for StoatKeymapState {
+impl KeymapState for StoatKeymapState<'_> {
     fn get(&self, field: &str) -> Option<&StateValue> {
         match field {
             "mode" => Some(&self.mode_value),
@@ -185,7 +186,7 @@ impl KeymapState for StoatKeymapState {
             "diags" => Some(&self.diags),
             "has_selection" => Some(&self.has_selection),
             "modified" => Some(&self.modified),
-            other => self.user_vars.get(other),
+            other => self.user_vars.and_then(|m| m.get(other)),
         }
     }
 }
@@ -254,7 +255,7 @@ pub(crate) fn focus_flags(
         .language_for(buffer_id)
         .map(|l| l.name.to_string());
     let lsp = crate::action_handlers::lsp::lsp_language_name(&ws.buffers, buffer_id)
-        .is_some_and(|name| !registry.hosts_for_language(&name).is_empty());
+        .is_some_and(|name| registry.has_host_for_language(&name));
     let diags = ws
         .buffers
         .path_for(buffer_id)
@@ -490,7 +491,7 @@ mod tests {
     use super::*;
     use crate::run::RunId;
 
-    fn field(state: &StoatKeymapState, name: &str) -> Option<String> {
+    fn field(state: &StoatKeymapState<'_>, name: &str) -> Option<String> {
         match state.get(name) {
             Some(StateValue::String(s)) => Some(s.to_string()),
             _ => None,
