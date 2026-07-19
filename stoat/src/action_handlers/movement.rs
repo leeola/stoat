@@ -4223,6 +4223,15 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
 /// the display map, so folds and soft wraps are accounted for rather than the raw
 /// buffer line.
 pub(crate) fn cursor_display_row(editor: &mut EditorState) -> u32 {
+    cursor_display_cell(editor).0
+}
+
+/// The display row and column the primary cursor's caret sits on.
+///
+/// Like [`cursor_display_row`] but also returns the column, for callers placing
+/// a pool cursor in a detached pane's window where no live paint recorded the
+/// screen cell.
+pub(crate) fn cursor_display_cell(editor: &mut EditorState) -> (u32, u32) {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -4230,7 +4239,8 @@ pub(crate) fn cursor_display_row(editor: &mut EditorState) -> u32 {
     let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
     let head_off = buffer_snapshot.resolve_anchor(&sel.head());
     let cursor = cursor_offset(rope, tail_off, head_off);
-    snapshot.buffer_to_display(rope.offset_to_point(cursor)).row
+    let display = snapshot.buffer_to_display(rope.offset_to_point(cursor));
+    (display.row, display.column)
 }
 
 /// The dual of [`ensure_cursor_in_view`]: move the cursor to the view rather

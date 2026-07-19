@@ -330,6 +330,10 @@ pub struct Stoat {
     /// cell size last sent. [`Self::emit_windows`] diffs it against the detached
     /// panes each frame to emit the WindowOpen and WindowClose commands.
     aux_windows: std::collections::BTreeMap<u32, (u16, u16)>,
+    /// The pool cursor last shipped for a focused detached pane, as `(pool, row,
+    /// col)`, so [`Self::emit_smooth_scroll`] re-emits only when it moves and an
+    /// idle frame ships nothing. `None` when no detached pane holds focus.
+    aux_cursor: Option<(u32, u64, u16)>,
     /// Cold-build worker, held only to keep the spawned scan alive while it
     /// runs. Progress arrives through [`Self::index_update_rx`].
     _index_build_task: Option<stoat_scheduler::Task<()>>,
@@ -1248,6 +1252,7 @@ impl Stoat {
             window_ipc_rx,
             window_ipc_connected: false,
             aux_windows: std::collections::BTreeMap::new(),
+            aux_cursor: None,
             _index_build_task: None,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -6669,6 +6674,9 @@ impl Stoat {
         let focused_editor = self.focused_editor_ids().map(|(id, _)| id);
         let focused_insert = self.focused_mode() == "insert";
         let single_minimap = self.single_minimap_rect.is_some();
+        // The focused detached pane's pool cursor, collected during the pane loop
+        // and emitted after it, past the workspace borrow.
+        let mut detached_cursor: Option<(u32, u64, u16)> = None;
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -6786,8 +6794,8 @@ impl Stoat {
             // While the focused pane glides, ship the cursor's content anchor so
             // the terminal draws it riding the eased offset. A None cell (cursor
             // off-view at the last paint) skips the emit, so the terminal falls
-            // back to its plain ease. A detached pane's cursor rides its own
-            // window pool via emit_detached_cursor instead, so it is excluded.
+            // back to its plain ease. A detached pane's cursor is handled just
+            // below instead, so it is excluded here.
             if region.window == 0
                 && focused_editor == Some(*editor_id)
                 && editor.scroll_glide != ScrollGlide::None
@@ -6802,6 +6810,15 @@ impl Stoat {
                         col,
                     },
                 );
+            }
+
+            // A focused detached pane draws its cursor from its window pool. No
+            // live paint records its screen cell, so derive the display cell
+            // directly. The actual emit is change-gated after the loop.
+            if region.window != 0 && focused_editor == Some(*editor_id) {
+                let (row, column) = action_handlers::movement::cursor_display_cell(editor);
+                let col = region.left + editor.gutter_width + column as u16;
+                detached_cursor = Some((region.pool, row as u64, col));
             }
 
             if !entered.is_empty() {
@@ -6845,6 +6862,18 @@ impl Stoat {
                     });
                 }
             }
+        }
+
+        // Ship the focused detached pane's cursor when it moved. An idle frame,
+        // or focus leaving every detached pane, ships nothing.
+        if detached_cursor != self.aux_cursor {
+            if let Some((pool, row, col)) = detached_cursor {
+                stoatty_protocol::command::encode_pool_cursor_into(
+                    &mut out,
+                    &stoatty_protocol::command::PoolCursorCommand { pool, row, col },
+                );
+            }
+            self.aux_cursor = detached_cursor;
         }
 
         if let (Some(list), Some(finder)) = (finder_list, self.file_finder.as_ref()) {
@@ -12913,6 +12942,46 @@ mod tests {
             h.stoat.primary_cursor_screen_pos(),
             None,
             "a detached focus draws its cursor in its window, not the primary"
+        );
+    }
+
+    #[test]
+    fn detached_focus_ships_a_pool_cursor_that_goes_quiet_when_idle() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.window_ipc_connected = true;
+
+        let root = std::path::PathBuf::from("/detach-cursor");
+        let path = root.join("a.txt");
+        let body = (0..30).map(|i| format!("line {i}\n")).collect::<String>();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        h.type_action("SplitRight()");
+        h.settle();
+        h.type_action("DetachPane()");
+        while rx.try_recv().is_ok() {}
+
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            drain_apc(&mut rx)
+                .iter()
+                .any(|c| matches!(c, Command::PoolCursor(_))),
+            "the detached focus ships a pool cursor"
+        );
+
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            !drain_apc(&mut rx)
+                .iter()
+                .any(|c| matches!(c, Command::PoolCursor(_))),
+            "an unchanged frame ships no pool cursor"
         );
     }
 
