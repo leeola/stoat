@@ -35,7 +35,14 @@ fn main() {
         std::process::exit(1);
     }
     install_panic_hook();
-    tracing::info!(log_id = %installed.id, hostname = %ident::hostname(), "starting stoatty");
+    tracing::info!(
+        log_id = %installed.id,
+        hostname = %ident::hostname(),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        cpus = std::thread::available_parallelism().map_or(0, |n| n.get()),
+        "starting stoatty"
+    );
 
     match cli.command_sub.take() {
         Some(TtyCommand::Fixture(args)) => match (args.sub, args.name) {

@@ -866,6 +866,21 @@ impl GpuContext {
         };
         let adapter_time = t_adapter.elapsed();
 
+        // Before request_device so a device-creation panic still records which
+        // adapter was selected. driver/driver_info are empty on backends that do
+        // not report them.
+        let adapter_info = adapter.get_info();
+        tracing::info!(
+            name = %adapter_info.name,
+            backend = ?adapter_info.backend,
+            device_type = ?adapter_info.device_type,
+            driver = %adapter_info.driver,
+            driver_info = %adapter_info.driver_info,
+            vendor = adapter_info.vendor,
+            device = adapter_info.device,
+            "gpu adapter",
+        );
+
         let t_device = Instant::now();
         let (device, queue) =
             executor::block_on(adapter.request_device(&device_descriptor(&adapter)))

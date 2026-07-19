@@ -741,6 +741,17 @@ impl ApplicationHandler<PtyEvent> for App {
 
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
+
+        let monitor = window.current_monitor();
+        tracing::info!(
+            monitor = ?monitor.as_ref().and_then(|m| m.name()),
+            monitor_size = ?monitor.as_ref().map(|m| m.size()),
+            refresh_mhz = ?monitor.as_ref().and_then(|m| m.refresh_rate_millihertz()),
+            scale_factor,
+            window_size = ?size,
+            "display",
+        );
+
         let gpu = GpuContext::new(
             window.clone(),
             size.width.max(1),
