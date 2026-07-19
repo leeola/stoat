@@ -177,6 +177,14 @@ define_action!(
     "close other panes",
     "Close every split pane except the focused one. No-op when the focused pane is the only one."
 );
+define_action!(
+    TogglePaneWidenDef,
+    TogglePaneWiden,
+    "TogglePaneWiden",
+    ActionKind::TogglePaneWiden,
+    "toggle pane widen",
+    "Horizontally expand the focused pane to full workspace width when neighboring pane edges align, and restore it when already widened or when focus leaves."
+);
 
 define_action!(
     ToggleDockRightDef,

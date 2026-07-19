@@ -71,6 +71,27 @@ pub(super) fn close_other_panes(stoat: &mut Stoat) {
     }
 }
 
+/// Toggles the focused pane's full-width widen, reporting the outcome in the
+/// status line.
+///
+/// Unwidens when the focused pane is already widened. Otherwise widens it, or
+/// reports that its neighbors' edges do not align to permit a clean cover.
+pub(super) fn toggle_pane_widen(stoat: &mut Stoat) {
+    let status = {
+        let panes = &mut stoat.active_workspace_mut().panes;
+        let focused = panes.focus();
+        if panes.widened() == Some(focused) {
+            panes.unwiden();
+            "pane widen off"
+        } else if panes.widen(focused) {
+            "pane widened"
+        } else {
+            "cannot widen: pane edges don't align"
+        }
+    };
+    stoat.set_status(status);
+}
+
 /// Closes a specific pane by id and disposes its backing view state. Returns
 /// `false` when the pane tree refused to close (only one split pane
 /// remains); in that case no state is touched.

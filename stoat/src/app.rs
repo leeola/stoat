@@ -12856,6 +12856,54 @@ mod tests {
     }
 
     #[test]
+    fn space_a_z_widens_and_restores_the_focused_pane() {
+        let mut h = Stoat::test();
+        let full_width = {
+            let panes = &h.stoat.active_workspace().panes;
+            panes.pane(panes.focus()).area.width
+        };
+
+        h.type_keys("space a s");
+        assert_eq!(h.stoat.active_workspace().panes.pane_count(), 2);
+
+        h.type_keys("space a z");
+        {
+            let panes = &h.stoat.active_workspace().panes;
+            let focused = panes.focus();
+            assert_eq!(panes.widened(), Some(focused));
+            assert_eq!(
+                panes.pane(focused).area.width,
+                full_width,
+                "the widened pane spans full width"
+            );
+        }
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("pane widened"));
+
+        h.type_keys("space a z");
+        assert_eq!(
+            h.stoat.active_workspace().panes.widened(),
+            None,
+            "toggling again restores the layout"
+        );
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("pane widen off"));
+    }
+
+    #[test]
+    fn space_a_z_reports_when_the_layout_blocks_widen() {
+        let mut h = Stoat::test();
+        h.type_keys("space a s");
+        h.type_keys("space a v");
+        h.type_keys("space a k");
+        h.type_keys("space a z");
+
+        assert_eq!(h.stoat.active_workspace().panes.widened(), None);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("cannot widen: pane edges don't align"),
+        );
+    }
+
+    #[test]
     fn diagnostic_popover_dodges_a_cursor_under_the_below_placement() {
         use stoatty_protocol::command::Command;
 
