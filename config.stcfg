@@ -739,7 +739,7 @@ on key {
         l -> SetMode(space_lsp);
         " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
-        g -> OpenChangedFilePicker();
+        g -> SetMode(space_git);
         d -> [Diff(), SetMode(normal)];
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
@@ -758,6 +758,19 @@ on key {
         Escape -> SetMode(normal);
         b -> OpenBufferPicker();
         d -> [CloseBuffer(), SetMode(normal)];
+    }
+    mode == space_git {
+        Escape -> SetMode(normal);
+        d -> [Diff(), SetMode(normal)];
+        s -> [StageHunk(), SetMode(normal)];
+        u -> [UnstageHunk(), SetMode(normal)];
+        S -> [StageLine(), SetMode(normal)];
+        U -> [UnstageLine(), SetMode(normal)];
+        t -> [ToggleStageHunk(), SetMode(normal)];
+        n -> [GotoNextChange(), SetMode(normal)];
+        p -> [GotoPrevChange(), SetMode(normal)];
+        m -> [JumpToMoveSource(), SetMode(normal)];
+        M -> [JumpToMoveTarget(), SetMode(normal)];
     }
     mode == space_lsp {
         Escape -> SetMode(normal);

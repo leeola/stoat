@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn space_g_opens_finder_in_modified_scope() {
+    fn changed_file_picker_opens_in_modified_scope() {
         let mut h = crate::Stoat::test();
         let root = seed_finder_workspace(
             &mut h,
@@ -695,7 +695,7 @@ mod tests {
             builder.head_file("c.rs", "v1\n");
         }
 
-        h.type_keys("space g");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenChangedFilePicker);
         let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
         assert_eq!(finder.scope(), &FinderScope::Modified);
         let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
@@ -829,7 +829,7 @@ mod tests {
             builder.head_file("c.rs", "v1\n");
         }
 
-        h.type_keys("space g");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenChangedFilePicker);
         h.type_keys("backtab");
         let finder = h.stoat.file_finder.as_ref().unwrap();
         assert_eq!(finder.scope(), &FinderScope::All);
