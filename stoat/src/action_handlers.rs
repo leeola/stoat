@@ -284,11 +284,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::ToggleInlayHints => {
             stoat.inlay_hints_enabled = !stoat.inlay_hints_enabled;
-            if !stoat.inlay_hints_enabled {
-                lsp::clear_inlay_hints(stoat);
-            }
             stoat.last_inlay_hint_key = None;
             stoat.pending_inlay_hint_request = None;
+            if stoat.inlay_hints_enabled {
+                lsp::enable_inlay_hints_now(stoat);
+            } else {
+                lsp::clear_inlay_hints(stoat);
+                stoat.set_status("inlay hints off");
+            }
             UpdateEffect::Redraw
         },
         ActionKind::MoveLeft => movement::move_horizontal(stoat, -1, false),

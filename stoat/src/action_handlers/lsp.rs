@@ -1817,20 +1817,31 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
     if !stoat.inlay_hints_enabled {
         return;
     }
+    request_inlay_hints(stoat, INLAY_HINT_DEBOUNCE);
+}
 
+/// Issue a viewport inlay-hint request for the focused editor, waiting
+/// `debounce` before the server call (pass [`Duration::ZERO`] to skip it).
+///
+/// Returns whether a server capable of inlay hints was found. A capable server
+/// with no buildable request yet (no viewport, review view) or an unchanged
+/// (buffer, version, visible rows) key still returns `true` without spawning:
+/// the caller treats inlay hints as available and the per-frame trigger will
+/// request once viable. The response is applied by [`pump_lsp_inlay_hints`].
+fn request_inlay_hints(stoat: &mut Stoat, debounce: Duration) -> bool {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
-        return;
+        return false;
     };
     let Some((_, host)) = stoat
         .feature_hosts(buffer_id, LanguageServerFeature::InlayHints)
         .into_iter()
         .next()
     else {
-        return;
+        return false;
     };
     let encoding = host.offset_encoding();
     let Some(request) = build_inlay_hint_request(stoat, encoding) else {
-        return;
+        return true;
     };
 
     let key = (
@@ -1840,7 +1851,7 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
         request.end_row,
     );
     if stoat.last_inlay_hint_key == Some(key) {
-        return;
+        return true;
     }
     stoat.last_inlay_hint_key = Some(key);
 
@@ -1852,7 +1863,9 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
     } = request;
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
-        executor.timer(INLAY_HINT_DEBOUNCE).await;
+        if !debounce.is_zero() {
+            executor.timer(debounce).await;
+        }
         match host.range_inlay_hint(params).await {
             Ok(Some(hints)) => Some((buffer_id, convert_inlay_hints(hints, &rope, encoding))),
             Ok(None) => None,
@@ -1863,6 +1876,22 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
         }
     });
     stoat.pending_inlay_hint_request = Some(task);
+    true
+}
+
+/// Enable inlay hints from the ToggleInlayHints action, requesting the focused
+/// viewport immediately and acknowledging in the status bar.
+///
+/// Skips the scroll debounce so hints appear on the keystroke rather than after
+/// the settle delay. Reports "inlay hints on" when a capable server was found,
+/// even if the request cannot be built yet, since the per-frame trigger issues
+/// it once viable. Reports the [`report_lsp_unavailable`] reason otherwise.
+pub(crate) fn enable_inlay_hints_now(stoat: &mut Stoat) {
+    if request_inlay_hints(stoat, Duration::ZERO) {
+        set_lsp_status(stoat, "inlay hints on".to_string());
+    } else {
+        report_lsp_unavailable(stoat, "inlay hints");
+    }
 }
 
 fn build_inlay_hint_request(
@@ -8406,6 +8435,70 @@ mod tests {
             editor_hint_ids_len(&h, a_editor),
             0,
             "toggle-off clears hints from the unfocused a.rs editor"
+        );
+    }
+
+    #[test]
+    fn inlay_hints_toggle_on_requests_without_the_debounce() {
+        let mut h = TestHarness::with_size(40, 8);
+        enable_inlay_hints(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = 1\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_range_inlay_hints(path.to_str().unwrap(), vec![type_hint(0, 5, ": u32")]);
+        h.capture("prime");
+        h.type_keys("space l h");
+        h.settle();
+        assert_eq!(
+            hint_ids_len(&mut h),
+            1,
+            "toggle-on applies hints without advancing the debounce clock"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("inlay hints on"),
+            "toggle-on acknowledges in the status bar"
+        );
+    }
+
+    #[test]
+    fn inlay_hints_toggle_off_acknowledges() {
+        let mut h = TestHarness::with_size(40, 8);
+        enable_inlay_hints(&h);
+        let root = seed(&mut h, &[("main.rs", "let x = 1\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_range_inlay_hints(path.to_str().unwrap(), vec![type_hint(0, 5, ": u32")]);
+        h.capture("prime");
+        h.type_keys("space l h");
+        h.settle();
+        h.type_keys("space l h");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("inlay hints off"),
+            "toggle-off acknowledges in the status bar"
+        );
+    }
+
+    #[test]
+    fn inlay_hints_toggle_on_without_a_capable_server_reports_why() {
+        let mut h = TestHarness::with_size(40, 8);
+        let root = seed(&mut h, &[("main.rs", "let x = 1\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.type_keys("space l h");
+        h.settle();
+        assert_eq!(
+            hint_ids_len(&mut h),
+            0,
+            "no capable server means no hints are applied"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: server does not support inlay hints"),
+            "toggle-on with no inlay capability reports why"
         );
     }
 
