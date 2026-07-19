@@ -47,14 +47,18 @@ pub struct Gutter<'a> {
     pub bg: [u8; 3],
 }
 
-/// A line's git-diff mark: the bar color and whether it is a deletion seam.
+/// A line's git-diff marks: the change-kind bar color, the staged-state bar
+/// color, and whether the change is a deletion seam.
 ///
-/// A seam renders as a short top-aligned bar, since a deletion occupies no line
-/// of its own and marks the row that now sits below the removed content. A
-/// normal change renders as the full-height bar.
+/// Two bars sit right of the line number. The change-kind bar takes [`Self::color`];
+/// a seam renders it as a short top-aligned bar, since a deletion occupies no
+/// line of its own and marks the row that now sits below the removed content,
+/// while a normal change fills the row height. The staged-state bar takes
+/// [`Self::staged_color`] and always fills the row height.
 #[derive(Clone, Copy)]
 pub struct GitMark {
     pub color: [u8; 3],
+    pub staged_color: [u8; 3],
     pub seam: bool,
 }
 
@@ -90,23 +94,29 @@ impl StatefulWidget for Gutter<'_> {
 impl Gutter<'_> {
     /// The whole-cell columns the gutter reserves, from its sixteenth layout.
     ///
-    /// Sized to fit the bars, number column, and a fixed quarter-cell gap on
-    /// each side of the hairline. [`Self::separator_x`] and
-    /// [`Self::number_right_edge`] derive backward from this, so the rounding
-    /// slack lands in the blank field left of the right-aligned numbers rather
-    /// than around the hairline.
+    /// Sized to fit the diagnostic bar, the number column, the change-kind and
+    /// staged-state bars right of the number, and a quarter-cell gap on each
+    /// side of the hairline. [`Self::separator_x`] and [`Self::number_right_edge`]
+    /// derive backward from this, so the rounding slack lands in the blank field
+    /// left of the right-aligned numbers rather than around the bars.
     pub fn cell_width(&self) -> u16 {
-        (2 * self.bar_width
-            + 2 * self.pad
+        (3 * self.bar_width
+            + self.pad
             + self.number_advance(self.width_digits)
-            + NUMBER_GAP
+            + 2 * NUMBER_GAP
             + 1
             + TEXT_GAP)
             .div_ceil(16)
     }
 
+    /// The change-kind bar's left edge, a gap right of the line number.
     fn git_x(&self) -> u16 {
-        self.bar_width + self.pad
+        self.number_right_edge() + NUMBER_GAP
+    }
+
+    /// The staged-state bar's left edge, a pad right of the change-kind bar.
+    fn staged_x(&self) -> u16 {
+        self.git_x() + self.bar_width + self.pad
     }
 
     /// Sixteenths a run of `digits` numerals advances at [`Self::number_scale`].
@@ -115,7 +125,7 @@ impl Gutter<'_> {
     }
 
     fn number_right_edge(&self) -> u16 {
-        self.separator_x() - NUMBER_GAP
+        self.separator_x() - 2 * NUMBER_GAP - 2 * self.bar_width - self.pad
     }
 
     fn separator_x(&self) -> u16 {
@@ -134,6 +144,7 @@ impl Gutter<'_> {
     pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
         let number_right = self.number_right_edge();
         let git_x = self.git_x();
+        let staged_x = self.staged_x();
 
         let mut top = 0u16;
         for line in self.lines {
@@ -169,6 +180,14 @@ impl Gutter<'_> {
                     width: self.bar_width,
                     height: if git.seam { 6 } else { 16 },
                     color: git.color,
+                }
+                .render(area, buf, scene);
+                Bar {
+                    x: staged_x,
+                    y,
+                    width: self.bar_width,
+                    height: line.height * 16,
+                    color: git.staged_color,
                 }
                 .render(area, buf, scene);
             }
@@ -276,10 +295,10 @@ mod tests {
 
     #[test]
     fn cell_width_derives_from_the_sixteenth_layout() {
-        // number_advance(2) = 2*160/16 = 20; content = 10 + 4 + 20 + 4 + 1 + 4 = 43
-        // (2*bar + 2*pad + number + NUMBER_GAP + separator + TEXT_GAP);
-        // cell_width = ceil(43/16) = 3.
-        assert_eq!(config(&[]).cell_width(), 3);
+        // number_advance(2) = 2*160/16 = 20; content = 15 + 2 + 20 + 8 + 1 + 4 = 50
+        // (3*bar + pad + number + 2*NUMBER_GAP + separator + TEXT_GAP);
+        // cell_width = ceil(50/16) = 4.
+        assert_eq!(config(&[]).cell_width(), 4);
     }
 
     #[test]
@@ -301,7 +320,7 @@ mod tests {
         gutter.render(area, &mut buf, &mut scene);
 
         assert_eq!(buf.cell((0u16, 0u16)).expect("cell").symbol(), "E");
-        assert_eq!(buf.cell((2u16, 0u16)).expect("cell").symbol(), "7");
+        assert_eq!(buf.cell((3u16, 0u16)).expect("cell").symbol(), "7");
     }
 
     #[test]
@@ -323,7 +342,7 @@ mod tests {
         gutter.render(area, &mut buf, &mut scene);
 
         let separator = encode_bar(&BarCommand {
-            x: 43,
+            x: 59,
             y: 0,
             width: 1,
             height: 16,
@@ -347,6 +366,7 @@ mod tests {
             height: 2,
             git: Some(GitMark {
                 color: [152, 195, 121],
+                staged_color: [80, 90, 100],
                 seam: false,
             }),
             diagnostic: Some(Diagnostic {
@@ -369,11 +389,18 @@ mod tests {
             color: [224, 108, 117],
         });
         let git_bar = encode_bar(&BarCommand {
-            x: 7,
+            x: 43,
             y: 0,
             width: 5,
             height: 16,
             color: [152, 195, 121],
+        });
+        let staged_bar = encode_bar(&BarCommand {
+            x: 50,
+            y: 0,
+            width: 5,
+            height: 32,
+            color: [80, 90, 100],
         });
         assert!(
             contains(scene.buffer(), &diag_bar),
@@ -381,7 +408,11 @@ mod tests {
         );
         assert!(
             contains(scene.buffer(), &git_bar),
-            "git bar marks only the code row"
+            "change-kind bar marks only the code row"
+        );
+        assert!(
+            contains(scene.buffer(), &staged_bar),
+            "staged-state bar spans the full line height"
         );
     }
 
@@ -392,6 +423,7 @@ mod tests {
             height: 1,
             git: Some(GitMark {
                 color: [224, 108, 117],
+                staged_color: [80, 90, 100],
                 seam: true,
             }),
             diagnostic: None,
@@ -404,7 +436,7 @@ mod tests {
         gutter.render(area, &mut buf, &mut scene);
 
         let seam_bar = encode_bar(&BarCommand {
-            x: 7,
+            x: 43,
             y: 0,
             width: 5,
             height: 6,

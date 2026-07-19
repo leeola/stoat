@@ -328,6 +328,7 @@ fn gutter_lines() -> Vec<GutterLine> {
             height: line_height(line),
             git: line.git.map(|g| GitMark {
                 color: git_color(g),
+                staged_color: git_color(g),
                 seam: false,
             }),
             diagnostic: line.diag.map(|diag| Diagnostic {

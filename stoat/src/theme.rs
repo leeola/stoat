@@ -514,6 +514,8 @@ pub mod scope {
     pub const DIFF_MOVED: &str = "diff.moved";
     pub const DIFF_CONTEXT: &str = "diff.context";
     pub const DIFF_CURRENT_HUNK: &str = "diff.current_hunk";
+    pub const DIFF_STAGED: &str = "diff.staged";
+    pub const DIFF_UNSTAGED: &str = "diff.unstaged";
 
     pub const UI_DIAGNOSTIC_ERROR: &str = "ui.diagnostic.error";
     pub const UI_DIAGNOSTIC_WARNING: &str = "ui.diagnostic.warning";

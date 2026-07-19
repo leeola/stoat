@@ -83,6 +83,8 @@ theme default_dark {
     diff.moved.fg        = info;
     diff.context.fg      = muted;
     diff.current_hunk    = { fg: info, modifiers: [bold] };
+    diff.staged.fg       = success;
+    diff.unstaged.fg     = danger;
 
     ui.diagnostic.error.fg   = danger;
     ui.diagnostic.warning.fg = warning;

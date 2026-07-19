@@ -597,7 +597,6 @@ fn paint_page_gutter(
                 &gutter.severity,
                 &diff_marks,
                 &rich.diff,
-                rich.bg,
                 &rich.colors,
                 gutter.current_line,
             );

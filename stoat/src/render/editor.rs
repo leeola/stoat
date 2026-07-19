@@ -880,6 +880,8 @@ pub(crate) struct DiffMarkColors {
     modified: [u8; 3],
     moved: [u8; 3],
     deleted: [u8; 3],
+    staged: [u8; 3],
+    unstaged: [u8; 3],
 }
 
 impl DiffMarkColors {
@@ -891,6 +893,8 @@ impl DiffMarkColors {
             modified: get(s::DIFF_MODIFIED),
             moved: get(s::DIFF_MOVED),
             deleted: get(s::DIFF_DELETED),
+            staged: get(s::DIFF_STAGED),
+            unstaged: get(s::DIFF_UNSTAGED),
         }
     }
 
@@ -911,18 +915,10 @@ impl DiffMarkColors {
             modified: dim_rgb(self.modified, bg, amount),
             moved: dim_rgb(self.moved, bg, amount),
             deleted: dim_rgb(self.deleted, bg, amount),
+            staged: dim_rgb(self.staged, bg, amount),
+            unstaged: dim_rgb(self.unstaged, bg, amount),
         }
     }
-}
-
-/// Blend `color` halfway toward `bg`, dimming a staged mark so it stays legible
-/// without owning the full status color a live hunk mark shows.
-fn dim_toward(color: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
-    [
-        ((color[0] as u16 + bg[0] as u16) / 2) as u8,
-        ((color[1] as u16 + bg[1] as u16) / 2) as u8,
-        ((color[2] as u16 + bg[2] as u16) / 2) as u8,
-    ]
 }
 
 /// The resolved colors the rich sub-cell page gutter needs.
@@ -1172,7 +1168,6 @@ pub(crate) fn gutter_component_lines(
     row_severity: &BTreeMap<u32, DiagnosticSeverity>,
     diff_marks: &BTreeMap<u32, (DiffHunkStatus, bool)>,
     diff_colors: &DiffMarkColors,
-    bg: [u8; 3],
     colors: &SeverityColors,
     current_line: Option<u32>,
 ) -> Vec<GutterLine> {
@@ -1181,13 +1176,17 @@ pub(crate) fn gutter_component_lines(
         .map(|&(number, height)| GutterLine {
             number: gutter_display_number(number, current_line),
             height,
-            git: diff_marks.get(&(number - 1)).map(|&(status, staged)| {
-                let base = diff_colors.for_status(status);
-                GitMark {
-                    color: if staged { dim_toward(base, bg) } else { base },
+            git: diff_marks
+                .get(&(number - 1))
+                .map(|&(status, staged)| GitMark {
+                    color: diff_colors.for_status(status),
+                    staged_color: if staged {
+                        diff_colors.staged
+                    } else {
+                        diff_colors.unstaged
+                    },
                     seam: status == DiffHunkStatus::Deleted,
-                }
-            }),
+                }),
             diagnostic: row_severity.get(&(number - 1)).map(|sev| Diagnostic {
                 color: severity_color(*sev, colors),
                 mark: severity_mark(*sev),
@@ -1335,12 +1334,11 @@ fn draw_line_number_gutter(
         let (folded, width_digits) = gutter_geometry(snapshot, scroll_row, visible);
         let marks = gutter_diff_marks(snapshot, &folded);
         let lines = match gutter_rgb {
-            Some((colors, _, _, bg)) => gutter_component_lines(
+            Some((colors, _, _, _)) => gutter_component_lines(
                 &folded,
                 row_severity,
                 &marks,
                 &diff_colors,
-                bg,
                 colors,
                 current_line,
             ),
@@ -2812,7 +2810,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_gutter_marks_color_by_status_and_dim_when_staged() {
+    fn rich_gutter_change_bar_by_status_staged_bar_by_state() {
         use crate::diff_map::DiffHunkStatus;
         let folded = [(1u32, 1u16), (2, 1), (3, 1)];
         let diff_colors = super::DiffMarkColors {
@@ -2820,6 +2818,8 @@ mod tests {
             modified: [40, 50, 60],
             moved: [70, 80, 90],
             deleted: [100, 110, 120],
+            staged: [1, 2, 3],
+            unstaged: [4, 5, 6],
         };
         let severity = super::SeverityColors {
             error: [0, 0, 0],
@@ -2837,18 +2837,26 @@ mod tests {
             &std::collections::BTreeMap::new(),
             &diff_marks,
             &diff_colors,
-            [0, 0, 0],
             &severity,
             None,
         );
 
         let git = |i: usize| lines[i].git.expect("a marked row has a git mark");
-        assert_eq!(git(0).color, [40, 50, 60], "modified takes diff.modified");
-        assert!(!git(0).seam);
         assert_eq!(
+            git(0).color,
             git(1).color,
-            [20, 25, 30],
-            "a staged mark blends halfway toward the gutter bg",
+            "the change bar keeps the status color whether staged or not",
+        );
+        assert_eq!(git(0).color, [40, 50, 60], "modified takes diff.modified");
+        assert_eq!(
+            git(0).staged_color,
+            [4, 5, 6],
+            "an unstaged row's staged bar takes diff.unstaged",
+        );
+        assert_eq!(
+            git(1).staged_color,
+            [1, 2, 3],
+            "a staged row's staged bar takes diff.staged",
         );
         assert!(git(2).seam, "a deletion is a seam mark");
     }
@@ -3436,14 +3444,14 @@ mod tests {
 
         h.stoat.stoatty = true;
         h.snapshot();
-        // Column 3 is the line-number gutter width the cursor sits past.
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((3, 0)));
+        // Column 4 is the line-number gutter width the cursor sits past.
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((4, 0)));
 
         for _ in 0..6 {
             dispatch(&mut h.stoat, &MoveRight);
         }
         h.snapshot();
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((9, 0)));
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((10, 0)));
 
         h.stoat.stoatty = false;
         h.snapshot();
@@ -3462,8 +3470,8 @@ mod tests {
 
         h.stoat.stoatty = true;
         h.snapshot();
-        // Column 3 is the line-number gutter width the cursor sits past.
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((3, 0)));
+        // Column 4 is the line-number gutter width the cursor sits past.
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((4, 0)));
 
         dispatch(&mut h.stoat, &OpenFileFinder);
         h.settle();
