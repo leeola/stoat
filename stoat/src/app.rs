@@ -7022,6 +7022,7 @@ impl Stoat {
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
+        let base_rich = crate::render::editor::resolve_rich_gutter(theme, fallback_style, stoatty);
         for (_, editor_id, region) in &panes {
             let region = *region;
             let Some(editor) = ws.editors.get_mut(*editor_id) else {
@@ -7183,9 +7184,7 @@ impl Stoat {
                         .as_ref()
                         .map(|cache| cache.map.clone())
                         .unwrap_or_default();
-                    let rich =
-                        crate::render::editor::resolve_rich_gutter(theme, fallback_style, stoatty)
-                            .map(|r| r.dim(dim));
+                    let rich = base_rich.clone().map(|r| r.dim(dim));
                     async_jobs.push(PoolFill::Editor {
                         snapshot,
                         pages: entered,
