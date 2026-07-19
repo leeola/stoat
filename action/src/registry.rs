@@ -45,8 +45,9 @@ use crate::{
             ShrinkSelection, ShrinkToLineBounds, SmartTab, SplitSelection, SplitSelectionOnNewline,
             SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
             SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, ToggleInlayHints,
-            ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion, TrimSelections, Undo,
-            UnindentSelection, WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
+            ToggleLspStatus, ToggleSyntaxHighlight, TrailNext, TrailPrev, TriggerCompletion,
+            TrimSelections, Undo, UnindentSelection, WriteQuit, Yank, YankMainToClipboard,
+            YankToClipboard,
         },
         file::{
             AutoReload, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ToggleMinimap,
@@ -589,6 +590,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ToggleSyntaxHighlight::DEF, |_| {
         Ok(Box::new(ToggleSyntaxHighlight))
     });
+    add(ToggleLspStatus::DEF, |_| Ok(Box::new(ToggleLspStatus)));
     add(ToggleInlayHints::DEF, |_| Ok(Box::new(ToggleInlayHints)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
@@ -977,6 +979,7 @@ mod tests {
         "RotateSelectionsBackward",
         "TrimSelections",
         "ToggleSyntaxHighlight",
+        "ToggleLspStatus",
         "ToggleInlayHints",
         "ReviewNextChunk",
         "ReviewPrevChunk",
@@ -1313,6 +1316,7 @@ mod tests {
         // + 1 ToggleKeyHints.
         // + 1 DismissKeyHints.
         // + 1 ToggleSyntaxHighlight.
+        // + 1 ToggleLspStatus.
         // + 1 ToggleInlayHints.
         // + 1 ShowVersion.
         // + 1 OpenLogs.
@@ -1340,7 +1344,7 @@ mod tests {
         // + 2 PaletteHistoryPrev/Next.
         // + 1 SetTheme.
         // + 2 DetachPane, ReattachPane.
-        assert_eq!(all().count(), 352);
+        assert_eq!(all().count(), 353);
     }
 
     #[test]

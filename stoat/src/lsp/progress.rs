@@ -106,6 +106,14 @@ impl LspProgressMap {
         self.entries.keys().any(|(name, _)| name == server)
     }
 
+    /// Every in-flight entry across servers, freshest (most recently updated)
+    /// first, for the detailed status popout to list.
+    pub(crate) fn entries_by_freshness(&self) -> Vec<&LspProgressEntry> {
+        let mut entries: Vec<&LspProgressEntry> = self.entries.values().collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.sequence));
+        entries
+    }
+
     fn bump_sequence(&mut self) -> u64 {
         let s = self.next_sequence;
         self.next_sequence += 1;

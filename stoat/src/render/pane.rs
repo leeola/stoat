@@ -187,53 +187,72 @@ pub(crate) fn render_pane(
         Some(scene),
     );
 
-    let spinner_painted = if is_focused
-        && let Some(entry) = frame.lsp_progress
-        && let Some(area) = popout_area(status_area, content_area, 1, 0)
-    {
-        let bg = theme
-            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
-            .bg
-            .unwrap_or(Color::Reset);
-        let border = theme
-            .get(crate::theme::scope::UI_BORDER_INACTIVE)
-            .fg
-            .unwrap_or(Color::Reset);
-        let content = paint_popout_card(
-            buf,
-            area,
-            bg,
-            border,
-            theme,
-            frame.stoatty.then_some(&mut *scene),
-        );
+    let status_rows: u16 = if is_focused && frame.lsp_status_open {
+        let mut rows: Vec<String> = frame
+            .lsp_progress_entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    " {} {} {}",
+                    SPINNER_FRAMES[frame.spinner_phase as usize],
+                    lsp_short_name(&entry.server),
+                    lsp_progress_label(entry).trim()
+                )
+            })
+            .collect();
+        if rows.is_empty() {
+            rows = frame
+                .lsp_servers
+                .iter()
+                .map(|(short, _)| format!(" {short} idle "))
+                .collect();
+        }
+        rows.truncate(6);
 
-        let cap = scaled_char_capacity(content.width as usize, TEXT_SCALE_COMPACT);
-        let text: String = format!(
-            "{} {}",
-            SPINNER_FRAMES[frame.spinner_phase as usize],
-            lsp_progress_label(entry).trim()
-        )
-        .chars()
-        .take(cap)
-        .collect();
-        let style = theme
-            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
-            .add_modifier(Modifier::ITALIC);
-        chrome::text(
-            buf,
-            content.x,
-            content.y,
-            content.x + content.width,
-            &text,
-            style,
-            style_rgb(Some(bg)),
-            TEXT_SCALE_COMPACT,
-            frame.stoatty.then_some(&mut *scene),
-        );
-        true
+        if !rows.is_empty()
+            && let Some(area) = popout_area(status_area, content_area, rows.len() as u16, 0)
+        {
+            let bg = theme
+                .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+                .bg
+                .unwrap_or(Color::Reset);
+            let border = theme
+                .get(crate::theme::scope::UI_BORDER_INACTIVE)
+                .fg
+                .unwrap_or(Color::Reset);
+            let content = paint_popout_card(
+                buf,
+                area,
+                bg,
+                border,
+                theme,
+                frame.stoatty.then_some(&mut *scene),
+            );
+
+            let cap = scaled_char_capacity(content.width as usize, TEXT_SCALE_COMPACT);
+            let style = theme
+                .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+                .add_modifier(Modifier::ITALIC);
+            for (i, row) in rows.iter().enumerate() {
+                let text: String = row.chars().take(cap).collect();
+                chrome::text(
+                    buf,
+                    content.x,
+                    content.y + i as u16,
+                    content.x + content.width,
+                    &text,
+                    style,
+                    style_rgb(Some(bg)),
+                    TEXT_SCALE_COMPACT,
+                    frame.stoatty.then_some(&mut *scene),
+                );
+            }
+            rows.len() as u16
+        } else {
+            0
+        }
     } else {
-        false
+        0
     };
 
     if is_focused
@@ -252,12 +271,8 @@ pub(crate) fn render_pane(
         };
         let lines = wrap_popout_lines(msg, width, 4);
         if !lines.is_empty()
-            && let Some(area) = popout_area(
-                status_area,
-                content_area,
-                lines.len() as u16,
-                spinner_painted as u16,
-            )
+            && let Some(area) =
+                popout_area(status_area, content_area, lines.len() as u16, status_rows)
         {
             let bg = theme
                 .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
@@ -862,8 +877,10 @@ fn diagnostic_severity_scope(severity: DiagnosticSeverity) -> &'static str {
     }
 }
 
-/// Formats an LSP progress entry for the status bar. Always padded with
-/// leading and trailing spaces so adjacent segments stay separated.
+/// Formats an LSP progress entry's `title: message pct%` body for a status
+/// popout row. Padded with leading and trailing spaces so adjacent segments stay
+/// separated. The server is attributed by the row's short-name badge, so the
+/// body carries no server prefix.
 fn lsp_progress_label(entry: &crate::lsp::progress::LspProgressEntry) -> String {
     let mut body = entry.title.clone();
     if let Some(message) = &entry.message {
@@ -881,7 +898,7 @@ fn lsp_progress_label(entry: &crate::lsp::progress::LspProgressEntry) -> String 
     if body.is_empty() {
         body.push_str("...");
     }
-    format!(" {}: {body} ", entry.server)
+    format!(" {body} ")
 }
 
 /// A short uppercase abbreviation of an LSP server name for its status-bar badge.
@@ -1162,6 +1179,96 @@ mod tests {
         assert!(
             span.contains("RA"),
             "the recorded rect covers the painted badge columns:\n{span}"
+        );
+    }
+
+    fn full_render(h: &mut crate::test_harness::TestHarness) -> String {
+        let buf = h.stoat.render();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn toggle_lsp_status_shows_and_hides_the_card() {
+        use crate::host::LspNotification;
+        use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
+
+        let mut h = Stoat::test();
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        fake.push_notification(LspNotification::Progress {
+            token: NumberOrString::Number(1),
+            value: WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "indexing".into(),
+                cancellable: None,
+                message: None,
+                percentage: None,
+            }),
+        });
+        h.drain_lsp();
+
+        assert!(
+            !full_render(&mut h).contains("indexing"),
+            "the card stays hidden until toggled open"
+        );
+
+        dispatch(&mut h.stoat, &stoat_action::ToggleLspStatus);
+        assert!(
+            full_render(&mut h).contains("indexing"),
+            "toggling pins the card with the in-flight entry row"
+        );
+
+        dispatch(&mut h.stoat, &stoat_action::ToggleLspStatus);
+        assert!(
+            !full_render(&mut h).contains("indexing"),
+            "toggling again hides the card"
+        );
+    }
+
+    #[test]
+    fn pinned_lsp_status_lists_idle_servers() {
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        dispatch(&mut h.stoat, &stoat_action::ToggleLspStatus);
+
+        assert!(
+            full_render(&mut h).contains("RA idle"),
+            "pinned with no in-flight work lists each running server as idle"
+        );
+    }
+
+    #[test]
+    fn error_card_stacks_above_the_pinned_status_card() {
+        use lsp_types::MessageType;
+
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        dispatch(&mut h.stoat, &stoat_action::ToggleLspStatus);
+        h.stoat.lsp_message = Some((MessageType::ERROR, "workspace load failed".to_string()));
+
+        let buf = h.stoat.render();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let status_y = rows
+            .iter()
+            .position(|r| r.contains("RA idle"))
+            .expect("pinned status card painted");
+        let error_y = rows
+            .iter()
+            .position(|r| r.contains("workspace"))
+            .expect("error card painted");
+        assert!(
+            error_y < status_y,
+            "the error card auto-shows and stacks above the pinned status card"
         );
     }
 

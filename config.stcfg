@@ -764,6 +764,7 @@ on key {
         n -> [TrailNext(), SetMode(normal)];
         p -> [TrailPrev(), SetMode(normal)];
         D -> [OpenWorkspaceDiagnosticsPicker(), SetMode(normal)];
+        l -> [ToggleLspStatus(), SetMode(normal)];
 
         diags {
             w -> [GotoNextDiagnostic(), SetMode(normal)];

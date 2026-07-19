@@ -161,6 +161,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleLspStatusDef,
+    ToggleLspStatus,
+    "ToggleLspStatus",
+    ActionKind::ToggleLspStatus,
+    "toggle the LSP status popout",
+    "Pin the detailed LSP status popout open or closed above the focused status bar. When open it lists each in-flight work-done operation across servers, freshest first, or one idle row per running server when nothing is in flight. Opens and closes instantly; the setting is not persisted across restarts.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ToggleInlayHintsDef,
     ToggleInlayHints,
     "ToggleInlayHints",

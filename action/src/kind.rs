@@ -212,6 +212,7 @@ pub enum ActionKind {
     UnindentSelection,
     ToggleComments,
     ToggleSyntaxHighlight,
+    ToggleLspStatus,
     ToggleInlayHints,
     ExtendToLineStart,
     ExtendToLineEnd,

@@ -114,10 +114,12 @@ pub(crate) struct FrameCtx<'a> {
     /// user knows a partial count is in flight; cleared after every
     /// action dispatch.
     pub(crate) pending_count: Option<u32>,
-    /// Most recently updated in-progress LSP work-done entry, if any. Painted as
-    /// an animated spinner popout above the focused pane's status bar while work
-    /// is in flight.
-    pub(crate) lsp_progress: Option<&'a crate::lsp::progress::LspProgressEntry>,
+    /// Whether the detailed LSP status popout is open (pinned) above the focused
+    /// pane's status bar. Drives whether the multi-row status card paints.
+    pub(crate) lsp_status_open: bool,
+    /// Every in-flight LSP work-done entry across servers, freshest first, painted
+    /// as rows of the detailed status card when it is open.
+    pub(crate) lsp_progress_entries: &'a [&'a crate::lsp::progress::LspProgressEntry],
     /// Braille spinner glyph index for the [`lsp_progress`](Self::lsp_progress)
     /// popout, advanced by the frame tick so the spinner animates.
     pub(crate) spinner_phase: u8,
@@ -379,6 +381,8 @@ pub(crate) fn frame(
         })
         .unwrap_or_default();
 
+    let lsp_progress_entries = stoat.lsp_progress.entries_by_freshness();
+
     let frame = FrameCtx {
         workspace_name: &workspace_name,
         workspace_root: &ws.git_root,
@@ -386,7 +390,8 @@ pub(crate) fn frame(
         screen,
         theme: &stoat.theme,
         pending_count: stoat.pending_count,
-        lsp_progress: stoat.lsp_progress.current(),
+        lsp_status_open: stoat.lsp_status_pinned,
+        lsp_progress_entries: &lsp_progress_entries,
         spinner_phase: app::spinner_phase(stoat.spinner_clock),
         lsp_servers: &lsp_servers,
         hover_pending: stoat.pending_hover_request.is_some(),

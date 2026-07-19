@@ -387,6 +387,9 @@ pub struct Stoat {
     /// paint. `Some` only when a badge painted, `None` when the focused bar shows
     /// no server badge. The badge-hover hit test consumes it.
     pub(crate) lsp_badge_rect: Option<Rect>,
+    /// Whether the detailed LSP status popout is pinned open, toggled by
+    /// `ToggleLspStatus`. Off by default. A runtime session flag, not persisted.
+    pub(crate) lsp_status_pinned: bool,
     /// Whether the keybinding hints overlay is force-shown in a primary mode,
     /// toggled by `ToggleKeyHints`, off by default. A runtime session flag like
     /// [`Self::syntax_highlight`], not persisted. Contexts that already
@@ -1271,6 +1274,7 @@ impl Stoat {
             minimap_override: None,
             single_minimap_rect: None,
             lsp_badge_rect: None,
+            lsp_status_pinned: false,
             key_hints_visible: false,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: None,
@@ -6413,7 +6417,8 @@ impl Stoat {
             screen,
             theme: &self.theme,
             pending_count: self.pending_count,
-            lsp_progress: None,
+            lsp_status_open: false,
+            lsp_progress_entries: &[],
             spinner_phase: 0,
             lsp_servers: &[],
             hover_pending: self.pending_hover_request.is_some(),
@@ -14392,7 +14397,7 @@ mod tests {
 
     #[test]
     fn snapshot_lsp_progress_indexing() {
-        use crate::host::LspNotification;
+        use crate::{action_handlers::dispatch, host::LspNotification};
         use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
         let mut h = Stoat::test();
         h.fake_lsp().push_notification(LspNotification::Progress {
@@ -14405,6 +14410,7 @@ mod tests {
             }),
         });
         h.drain_lsp();
+        dispatch(&mut h.stoat, &stoat_action::ToggleLspStatus);
         h.assert_snapshot("lsp_progress_indexing");
     }
 

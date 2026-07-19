@@ -278,6 +278,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.syntax_highlight = !stoat.syntax_highlight;
             UpdateEffect::Redraw
         },
+        ActionKind::ToggleLspStatus => {
+            stoat.lsp_status_pinned = !stoat.lsp_status_pinned;
+            UpdateEffect::Redraw
+        },
         ActionKind::ToggleInlayHints => {
             stoat.inlay_hints_enabled = !stoat.inlay_hints_enabled;
             if !stoat.inlay_hints_enabled {
