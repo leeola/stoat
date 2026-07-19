@@ -134,7 +134,7 @@ impl ActionDef for FocusPaneDef {
     }
 
     fn long_desc(&self) -> &'static str {
-        "Move focus to the pane at the given 1-based position in layout order, the same order pane-ID badges number panes. Out-of-range indices leave focus unchanged."
+        "Move focus to the pane at the given 1-based position in layout order, including panes detached to other windows, the same order pane-ID badges number panes. Focusing a detached pane raises its window. Out-of-range indices leave focus unchanged."
     }
 
     fn priority(&self) -> ActionPriority {

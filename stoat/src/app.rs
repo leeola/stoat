@@ -6356,7 +6356,10 @@ impl Stoat {
             perf: None,
         };
 
-        for (pane_id, window) in windowed {
+        let split_count = ws.panes.split_panes().count();
+        let show_badges = mode == "space_pane_display";
+
+        for (windowed_index, (pane_id, window)) in windowed.into_iter().enumerate() {
             let (content, status, view, index, is_focused, area) = {
                 let pane = ws.panes.pane(pane_id);
                 let (content, status) = crate::render::layout::split_pane_status(pane.area);
@@ -6439,6 +6442,11 @@ impl Stoat {
                 continue;
             }
 
+            let badge = show_badges
+                .then(|| split_count + windowed_index)
+                .filter(|&position| position < 10)
+                .map(|position| (position as u32 + 1) % 10);
+
             let row = Rect::new(0, 0, status.width, 1);
             let mut buf = Buffer::empty(row);
             crate::render::pane::paint_pane_status_cells(
@@ -6448,6 +6456,7 @@ impl Stoat {
                 frame,
                 &mut ws.editors,
                 &ws.buffers,
+                badge,
                 &mut buf,
             );
 
@@ -13302,6 +13311,64 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Command::Fill(f) if f.pool == index)),
             "terminal output repaints the content pool, got {after:?}"
+        );
+    }
+
+    #[test]
+    fn focus_pane_by_number_reaches_and_raises_a_detached_window() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.window_ipc_connected = true;
+        h.resize(80, 24);
+        h.type_action("SplitRight()");
+        h.settle();
+        h.type_action("DetachPane()");
+        h.settle();
+
+        let detached = h.stoat.active_workspace().panes.windowed_panes()[0].0;
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusPane { index: 1 });
+        while rx.try_recv().is_ok() {}
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusPane { index: 2 });
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            detached,
+            "FocusPane reaches the detached pane at selectable position 2"
+        );
+        assert!(
+            drain_apc(&mut rx)
+                .iter()
+                .any(|c| matches!(c, Command::WindowFocus(_))),
+            "focusing a detached pane raises its OS window"
+        );
+    }
+
+    #[test]
+    fn detached_pane_status_badge_continues_the_split_count() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.window_ipc_connected = true;
+        h.resize(80, 24);
+        h.type_action("SplitRight()");
+        h.settle();
+        h.type_action("DetachPane()");
+        h.settle();
+
+        h.stoat.set_focused_mode("space_pane_display".to_string());
+        while rx.try_recv().is_ok() {}
+        h.stoat.emit_smooth_scroll();
+
+        let mut bytes = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            bytes.extend(chunk);
+        }
+        assert!(
+            bytes.windows(3).any(|w| w == b"[2]"),
+            "a detached pane's status badge continues the split count to 2"
         );
     }
 

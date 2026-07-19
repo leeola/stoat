@@ -243,10 +243,21 @@ pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {
 /// An out-of-range index leaves focus unchanged and sets a status message, so a
 /// mistyped pane number is visible rather than a silent no-op.
 pub(super) fn focus_pane_by_index(stoat: &mut Stoat, index: usize) {
-    let ids = stoat.active_workspace().panes.split_pane_ids();
-    match index.checked_sub(1).and_then(|i| ids.get(i).copied()) {
-        Some(id) => stoat.active_workspace_mut().panes.set_focus(id),
-        None => stoat.set_status(format!("no pane {index}")),
+    let ids = stoat.active_workspace().panes.selectable_pane_ids();
+    let Some(id) = index.checked_sub(1).and_then(|i| ids.get(i).copied()) else {
+        stoat.set_status(format!("no pane {index}"));
+        return;
+    };
+    stoat.active_workspace_mut().panes.set_focus(id);
+
+    // A detached pane lives in its own OS window. Keys route by the focused
+    // pane, so raise the window or they land where the user cannot see them.
+    if let Placement::Window(window) = &stoat.active_workspace().panes.pane(id).placement
+        && let Some(tx) = &stoat.apc_tx
+    {
+        let _ = tx.send(stoatty_protocol::command::encode_window_focus(
+            &stoatty_protocol::command::WindowFocusCommand { window: *window },
+        ));
     }
 }
 

@@ -435,6 +435,7 @@ fn render_pane_status(
 ///
 /// Shares the segment assembly ([`status_segments`]) with [`render_pane_status`]
 /// but always takes the cell fallback rather than the rich components.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_pane_status_cells(
     view: &View,
     is_focused: bool,
@@ -442,6 +443,7 @@ pub(crate) fn paint_pane_status_cells(
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    badge: Option<u32>,
     buf: &mut Buffer,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -460,7 +462,18 @@ pub(crate) fn paint_pane_status_cells(
         buf[(x, y)].set_char(' ').set_style(base_style);
     }
 
-    let (left, right) = status_segments(view, is_focused, area, frame, editors, buffers);
+    let (mut left, right) = status_segments(view, is_focused, area, frame, editors, buffers);
+
+    // A detached pane cannot host a primary-scene digit popover, so its numeric
+    // selection badge rides the status row instead.
+    if let Some(digit) = badge {
+        let badge_style = frame
+            .theme
+            .get(crate::theme::scope::UI_SELECTION_EDITOR)
+            .add_modifier(Modifier::BOLD);
+        left.insert(0, (format!("[{digit}]"), badge_style));
+    }
+
     paint_status_fallback(buf, area, &left, &right);
 }
 
