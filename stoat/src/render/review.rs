@@ -114,7 +114,7 @@ pub(crate) fn paint_diff_rows(
     }
 
     let full_w = inner.width as usize;
-    let status_w: usize = 1;
+    let status_w: usize = 2;
     let num_w: usize = 5;
     let gutter_w = status_w + num_w;
     let sep: usize = 1;
@@ -187,6 +187,18 @@ pub(crate) fn paint_diff_rows(
                     tints.as_ref().map(|t| t.removed_span),
                     tints.as_ref().map(|t| t.moved_span),
                 );
+                if let Some(staged) = snapshot
+                    .diff_map()
+                    .and_then(|dm| dm.base_line_staged(base_line))
+                {
+                    let change_scope =
+                        if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Moved)) {
+                            s::DIFF_MOVED
+                        } else {
+                            s::DIFF_DELETED
+                        };
+                    paint_status_bars(buf, inner.x, y, change_scope, staged, theme);
+                }
                 base_line += 1;
             },
             BlockRowKind::BufferRow { buffer_row } => {
@@ -236,7 +248,13 @@ pub(crate) fn paint_diff_rows(
                     .diff_map()
                     .and_then(|dm| dm.staged_for_line(buffer_row))
                 {
-                    paint_staged_glyph(buf, right_start, y, staged, theme);
+                    let change_scope = match snapshot.line_diff_status(buffer_row) {
+                        DiffStatus::Added => s::DIFF_ADDED,
+                        DiffStatus::Modified => s::DIFF_MODIFIED,
+                        DiffStatus::Moved => s::DIFF_MOVED,
+                        DiffStatus::Unchanged => s::DIFF_CONTEXT,
+                    };
+                    paint_status_bars(buf, right_start, y, change_scope, staged, theme);
                 }
                 if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
                     line_buf.clear();
@@ -411,20 +429,35 @@ fn paint_base_row(
     }
 }
 
-/// Paint the git-index staged glyph for a hunk row into a 1-cell status
-/// column. Staged hunks show `+` in the add color, unstaged `-` in the delete
-/// color, matching [`paint_status_gutter`]'s convention.
-fn paint_staged_glyph(buf: &mut Buffer, x: u16, y: u16, staged: bool, theme: &crate::theme::Theme) {
+/// Paint the diff view's two-cell status column for a hunk row.
+///
+/// The first cell carries the change-kind bar in `change_scope`. The second
+/// carries a staged-state bar scoped `diff.staged` when `staged` else
+/// `diff.unstaged`. Both use the `▎` bar, mirroring the editor gutter's two
+/// bars. The staged cell is skipped when it would fall outside the buffer.
+fn paint_status_bars(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    change_scope: &str,
+    staged: bool,
+    theme: &crate::theme::Theme,
+) {
     use crate::theme::scope as s;
     if x >= buf.area.x + buf.area.width {
         return;
     }
-    let (ch, style) = if staged {
-        ('+', theme.get(s::DIFF_ADDED))
-    } else {
-        ('-', theme.get(s::DIFF_DELETED))
-    };
-    buf[(x, y)].set_char(ch).set_style(style);
+    buf[(x, y)].set_char('▎').set_style(theme.get(change_scope));
+    if x + 1 < buf.area.x + buf.area.width {
+        let staged_scope = if staged {
+            s::DIFF_STAGED
+        } else {
+            s::DIFF_UNSTAGED
+        };
+        buf[(x + 1, y)]
+            .set_char('▎')
+            .set_style(theme.get(staged_scope));
+    }
 }
 
 /// Base-file line number at the top of the viewport (display row `scroll_row`).
@@ -1290,10 +1323,12 @@ mod tests {
     /// engage when rendering a hand-built diff editor off the harness.
     fn rgb_diff_theme() -> Theme {
         let src = r##"theme rgbtest {
-            diff.context.fg = "#808080";
-            diff.added.fg   = "#00ff00";
-            diff.deleted.fg = "#ff0000";
-            diff.moved.fg   = "#0000ff";
+            diff.context.fg  = "#808080";
+            diff.added.fg    = "#00ff00";
+            diff.deleted.fg  = "#ff0000";
+            diff.moved.fg    = "#0000ff";
+            diff.staged.fg   = "#00ffff";
+            diff.unstaged.fg = "#ff00ff";
             ui.background.bg = "#282c34";
         }"##;
         let (config, _) = stoat_config::parse(src);
@@ -1324,32 +1359,42 @@ mod tests {
 
     #[test]
     fn diff_view_marks_staged_and_unstaged_hunks_in_the_status_column() {
+        use crate::theme::scope as sc;
+
         // HEAD a/b/c/d; buffer changes line 1 (B) and line 3 (D); the index
         // holds only the line-1 change, so line 1 is staged, line 3 is not.
         let mut editor = diff_editor_staged("a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n");
         let area = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(area);
-        render_diff_view(
-            &mut editor,
-            area,
-            Style::default(),
-            &Theme::empty(),
-            &mut buf,
-            false,
-        );
+        let theme = rgb_diff_theme();
+        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, false);
 
-        // The right (buffer) status column sits at right_start = (width-1)/2 + 1.
-        let status_col = (40 - 1) / 2 + 1;
-        let glyphs: String = (0..area.height)
-            .map(|y| buf[(status_col, y)].symbol().chars().next().unwrap_or(' '))
+        // The right (buffer) status column: change bar at right_start, staged
+        // bar in the cell after it.
+        let change_col = ((40 - 1) / 2 + 1) as u16;
+        let staged_col = change_col + 1;
+        let staged_fg = theme.get(sc::DIFF_STAGED).fg.expect("staged fg");
+        let unstaged_fg = theme.get(sc::DIFF_UNSTAGED).fg.expect("unstaged fg");
+
+        let change_glyphs: String = (0..area.height)
+            .map(|y| buf[(change_col, y)].symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(
-            glyphs.contains('+'),
-            "the staged hunk shows + in the status column: {glyphs:?}"
+            change_glyphs.contains('▎'),
+            "changed rows show the change bar instead of +/-: {change_glyphs:?}"
+        );
+
+        let staged_colors: Vec<Color> = (0..area.height)
+            .filter(|&y| buf[(staged_col, y)].symbol() == "▎")
+            .map(|y| buf[(staged_col, y)].fg)
+            .collect();
+        assert!(
+            staged_colors.contains(&staged_fg),
+            "the staged hunk's bar uses the staged color: {staged_colors:?}"
         );
         assert!(
-            glyphs.contains('-'),
-            "the unstaged hunk shows - in the status column: {glyphs:?}"
+            staged_colors.contains(&unstaged_fg),
+            "the unstaged hunk's bar uses the unstaged color: {staged_colors:?}"
         );
     }
 
@@ -1367,49 +1412,51 @@ mod tests {
             false,
         );
 
-        // For width 40, left text spans cols 6..19, the separator sits at col 19,
-        // and right text spans cols 26..40.
-        let rows: Vec<String> = (0..4).map(|y| buffer_text(&buf, y)).collect();
+        // For width 40, left text spans cols 7..19, the separator sits at col 19,
+        // and right text spans cols 27..40. The status column takes two cells.
+        let left = |y| line_text(&buf, y, 7..19);
+        let right = |y| line_text(&buf, y, 27..40);
 
         assert!(
-            rows[0][6..19].contains("keep"),
+            left(0).contains("keep"),
             "row0 left mirrors context: {:?}",
-            rows[0]
+            left(0)
         );
         assert!(
-            rows[0][26..40].contains("keep"),
+            right(0).contains("keep"),
             "row0 right shows buffer: {:?}",
-            rows[0]
+            right(0)
         );
 
         assert!(
-            rows[1][6..19].contains("old"),
+            left(1).contains("old"),
             "row1 left shows deleted base: {:?}",
-            rows[1]
+            left(1)
         );
         assert_eq!(
-            rows[1][26..40].trim(),
+            right(1).trim(),
             "",
             "row1 right blank for a deletion: {:?}",
-            rows[1]
+            right(1)
         );
 
         assert!(
-            rows[2][26..40].contains("new"),
+            right(2).contains("new"),
             "row2 right shows the new line: {:?}",
-            rows[2]
+            right(2)
         );
         assert_eq!(
-            rows[2][6..19].trim(),
+            left(2).trim(),
             "",
             "row2 left blank for a modified line: {:?}",
-            rows[2]
+            left(2)
         );
 
         assert!(
-            rows[3][6..19].contains("tail") && rows[3][26..40].contains("tail"),
-            "row3 context mirrors both sides: {:?}",
-            rows[3]
+            left(3).contains("tail") && right(3).contains("tail"),
+            "row3 context mirrors both sides: left={:?} right={:?}",
+            left(3),
+            right(3)
         );
 
         assert_eq!(
@@ -1603,10 +1650,10 @@ mod tests {
         assert!(!underlined, "a pure added line underlines nothing");
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 36..60).contains("fn b"))
+            .find(|&y| line_text(buf, y, 37..60).contains("fn b"))
             .expect("added line rendered on the right");
         assert!(
-            (36..60).all(|x| buf[(x, row)].bg == added_line),
+            (37..60).all(|x| buf[(x, row)].bg == added_line),
             "the added line's right-column cells all carry the added line wash"
         );
     }
@@ -1620,10 +1667,10 @@ mod tests {
         let buf = h.rendered_buffer();
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 6..29).contains("old"))
+            .find(|&y| line_text(buf, y, 7..29).contains("old"))
             .expect("deleted base line rendered on the left");
         assert!(
-            (6..29).all(|x| buf[(x, row)].bg == removed_line),
+            (7..29).all(|x| buf[(x, row)].bg == removed_line),
             "the deleted base line's left-column cells all carry the removed line wash"
         );
     }
@@ -1639,10 +1686,10 @@ mod tests {
         let buf = h.rendered_buffer();
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 6..29).contains("keep"))
+            .find(|&y| line_text(buf, y, 7..29).contains("keep"))
             .expect("unchanged base line mirrored on the left");
         assert!(
-            (6..29).all(|x| buf[(x, row)].bg != removed_line && buf[(x, row)].bg != removed_span),
+            (7..29).all(|x| buf[(x, row)].bg != removed_line && buf[(x, row)].bg != removed_span),
             "an unchanged mirrored base row carries no removed wash"
         );
     }
@@ -1684,8 +1731,10 @@ mod tests {
         let moved_line = tint(&theme, sc::DIFF_MOVED, LINE_TINT);
         let moved_span = tint(&theme, sc::DIFF_MOVED, SPAN_TINT);
 
-        // "bb" sits on display row 1; the right text starts at right_text_x(area).
-        let rx = right_text_x(area);
+        // "bb" sits on display row 1. The diff view's status column is one cell
+        // wider than the review session's, so the right text starts one past
+        // right_text_x.
+        let rx = right_text_x(area) + 1;
         assert_eq!(
             buf[(rx, 1)].symbol(),
             "b",

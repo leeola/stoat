@@ -178,6 +178,8 @@ pub type BaseHighlights = Vec<Vec<(Range<usize>, HighlightStyle)>>;
 /// column can wash each span by kind.
 pub(crate) type BaseChangeSpans = BTreeMap<u32, Vec<(Range<usize>, ChangeKind)>>;
 
+type BaseStaged = BTreeMap<u32, bool>;
+
 #[derive(Clone, Debug, Default)]
 pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
@@ -188,6 +190,11 @@ pub struct DiffMap {
     /// behind `Arc` so the per-frame accessor hands out a handle instead of
     /// rebuilding the map.
     base_changes: Arc<BaseChangeSpans>,
+    /// Git-index staged state keyed by base line, for the diff view's removed
+    /// (left-column) rows. Resolved once at construction alongside
+    /// [`Self::base_changes`], mapping each base line a hunk removed to that
+    /// hunk's [`DiffHunk::staged`]. Added hunks contribute no base line.
+    base_staged: Arc<BaseStaged>,
     version: usize,
 }
 
@@ -202,11 +209,13 @@ impl DiffMap {
     ) -> Self {
         let hunks = SumTree::from_iter(hunks, ());
         let base_changes = Arc::new(compute_base_change_spans(&hunks, base_text.as_ref()));
+        let base_staged = Arc::new(compute_base_staged(&hunks, base_text.as_ref()));
         Self {
             hunks,
             base_text,
             base_highlights: None,
             base_changes,
+            base_staged,
             version: Self::next_version(),
         }
     }
@@ -487,6 +496,15 @@ impl DiffMap {
         self.base_changes.clone()
     }
 
+    /// The git-index staged state of the hunk that removed content at base
+    /// `line`, or `None` when no hunk did.
+    ///
+    /// Serves the diff view's removed left-column rows, whose base lines have no
+    /// buffer counterpart for [`Self::staged_for_line`] to resolve.
+    pub(crate) fn base_line_staged(&self, line: u32) -> Option<bool> {
+        self.base_staged.get(&line).copied()
+    }
+
     pub fn total_deleted_lines(&self) -> u32 {
         let base_text = match &self.base_text {
             Some(t) => t,
@@ -512,6 +530,7 @@ impl DiffMap {
             &self.hunks,
             self.base_text.as_ref(),
         ));
+        self.base_staged = Arc::new(compute_base_staged(&self.hunks, self.base_text.as_ref()));
         self.version = Self::next_version();
     }
 
@@ -522,6 +541,7 @@ impl DiffMap {
             &self.hunks,
             self.base_text.as_ref(),
         ));
+        self.base_staged = Arc::new(compute_base_staged(&self.hunks, self.base_text.as_ref()));
         self.version = Self::next_version();
     }
 }
@@ -802,6 +822,33 @@ fn replaced_change_spans(change: &stoat_language::structural_diff::DiffChange) -
             move_metadata: None,
         })
         .collect()
+}
+
+/// Map each base line a hunk removed to that hunk's staged state.
+///
+/// A hunk's [`DiffHunk::base_byte_range`] spans the base content it removed,
+/// including the trailing newline, so the covered line count comes from
+/// [`str::lines`] rather than the byte-to-line range, which would over-count by
+/// one at a newline boundary. Added hunks have an empty base range and map no
+/// line.
+fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>>) -> BaseStaged {
+    let Some(base_text) = base_text else {
+        return BTreeMap::new();
+    };
+    let starts = line_starts(base_text);
+    let mut out = BTreeMap::new();
+    for hunk in hunks.iter() {
+        if hunk.base_byte_range.is_empty() {
+            continue;
+        }
+        let start_line = line_of(&starts, hunk.base_byte_range.start);
+        let count = base_text[hunk.base_byte_range.clone()].lines().count() as u32;
+        let staged = hunk.staged();
+        for line in start_line..start_line + count {
+            out.insert(line, staged);
+        }
+    }
+    out
 }
 
 /// Distribute every hunk's base change spans across the base lines they cover,
