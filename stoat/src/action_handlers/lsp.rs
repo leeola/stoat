@@ -1128,18 +1128,10 @@ pub(crate) struct HoverPopup {
 /// drops it, cancelling its spawned future -- only one in-flight hover
 /// is tracked at a time.
 pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::Hover)
-    {
-        return report_lsp_unavailable(stoat, "hover");
-    }
-
     let Some((editor_id, _)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
 
-    let encoding = stoat.lsp_host().offset_encoding();
     let (anchor_offset, buffer_id, focused_rope, is_review) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -1157,6 +1149,15 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
             editor.review_view.is_some(),
         )
     };
+
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::Hover)
+        .into_iter()
+        .next()
+    else {
+        return report_lsp_unavailable(stoat, "hover");
+    };
+    let encoding = host.offset_encoding();
 
     // A review cursor requests against the real working-tree file, but the
     // popup still anchors at the placeholder cursor cell, so `anchor_offset`
@@ -1190,9 +1191,8 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::Hover);
     let task = stoat.spawn_woken(async move {
-        match lsp.hover(params).await {
+        match host.hover(params).await {
             Ok(Some(hover)) => {
                 let (text, plain) = flatten_hover_contents(hover.contents);
                 HoverOutcome::Content(HoverResponse {
@@ -1435,13 +1435,6 @@ pub(crate) fn signature_help_trigger(stoat: &mut Stoat) {
         return;
     }
 
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::SignatureHelp)
-    {
-        return;
-    }
-
     let Some((buffer_id, version, rope, cursor_offset)) = focused_edit_snapshot(stoat) else {
         return;
     };
@@ -1456,7 +1449,14 @@ pub(crate) fn signature_help_trigger(stoat: &mut Stoat) {
     };
     let ch = ch.to_string();
 
-    let caps = stoat.lsp_host().capabilities();
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::SignatureHelp)
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let caps = host.capabilities();
     let Some(opts) = caps.signature_help_provider.as_ref() else {
         return;
     };
@@ -1499,14 +1499,6 @@ fn focused_edit_snapshot(stoat: &mut Stoat) -> Option<(BufferId, u64, Rope, usiz
 /// [`pump_lsp_signature_help`]. No-op when the pane is not an editor, the buffer
 /// has no path, or the server does not advertise the capability.
 pub(crate) fn request_signature_help(stoat: &mut Stoat) {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::SignatureHelp)
-    {
-        return;
-    }
-
-    let encoding = stoat.lsp_host().offset_encoding();
     let (anchor_offset, buffer_id, focused_rope, is_review) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return;
@@ -1524,6 +1516,15 @@ pub(crate) fn request_signature_help(stoat: &mut Stoat) {
             editor.review_view.is_some(),
         )
     };
+
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::SignatureHelp)
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let encoding = host.offset_encoding();
 
     let (source_path, source_rope, cursor_offset) = if is_review {
         match review_lsp_source(stoat) {
@@ -1555,9 +1556,8 @@ pub(crate) fn request_signature_help(stoat: &mut Stoat) {
         work_done_progress_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::SignatureHelp);
     let task = stoat.spawn_woken(async move {
-        match lsp.signature_help(params).await {
+        match host.signature_help(params).await {
             Ok(Some(help)) => signature_help_to_popup(help, anchor_offset),
             Ok(None) => None,
             Err(err) => {
@@ -1674,15 +1674,21 @@ struct InlayHintRequest {
 /// since the last request. Buffer edits and scrolls change the key and
 /// re-request. The response is applied by [`pump_lsp_inlay_hints`].
 pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
-    if !stoat.inlay_hints_enabled
-        || !stoat
-            .lsp_host()
-            .supports_feature(LanguageServerFeature::InlayHints)
-    {
+    if !stoat.inlay_hints_enabled {
         return;
     }
 
-    let encoding = stoat.lsp_host().offset_encoding();
+    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
+        return;
+    };
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::InlayHints)
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let encoding = host.offset_encoding();
     let Some(request) = build_inlay_hint_request(stoat, encoding) else {
         return;
     };
@@ -1704,11 +1710,10 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
         params,
         ..
     } = request;
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::InlayHints);
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(INLAY_HINT_DEBOUNCE).await;
-        match lsp.range_inlay_hint(params).await {
+        match host.range_inlay_hint(params).await {
             Ok(Some(hints)) => Some((buffer_id, convert_inlay_hints(hints, &rope, encoding))),
             Ok(None) => None,
             Err(err) => {
@@ -1887,13 +1892,6 @@ pub(crate) type DocumentHighlightResponse = (BufferId, Vec<(std::ops::Range<usiz
 /// request. Occurrences therefore vanish while navigating and reappear once the
 /// cursor settles. [`pump_lsp_document_highlight`] applies the response.
 pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::DocumentHighlight)
-    {
-        return;
-    }
-
     if stoat.focused_mode() != "normal" {
         if stoat.last_document_highlight_key.is_some() {
             clear_document_highlights(stoat);
@@ -1903,7 +1901,17 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let encoding = stoat.lsp_host().offset_encoding();
+    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
+        return;
+    };
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::DocumentHighlight)
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let encoding = host.offset_encoding();
     let Some((buffer_id, version, offset, rope, params)) =
         build_document_highlight_request(stoat, encoding)
     else {
@@ -1917,11 +1925,10 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
     stoat.last_document_highlight_key = Some(key);
     clear_document_highlights(stoat);
 
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::DocumentHighlight);
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(DOCUMENT_HIGHLIGHT_DEBOUNCE).await;
-        match lsp.document_highlight(params).await {
+        match host.document_highlight(params).await {
             Ok(Some(highlights)) => Some((
                 buffer_id,
                 convert_document_highlights(highlights, &rope, encoding),
@@ -2114,17 +2121,17 @@ pub(crate) enum PullDiagnosticsOutcome {
 /// result id so the server may answer Unchanged. [`pump_lsp_pull_diagnostics`]
 /// applies the responses.
 pub(crate) fn pull_diagnostics_trigger(stoat: &mut Stoat) {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::PullDiagnostics)
-    {
-        return;
-    }
-
     let plans: Vec<PullPlan> = stoat
         .lsp_opened
         .iter()
         .copied()
+        .filter(|&id| {
+            stoat
+                .feature_hosts(id, LanguageServerFeature::PullDiagnostics)
+                .into_iter()
+                .next()
+                .is_some()
+        })
         .filter_map(|id| build_pull_plan(stoat, id))
         .collect();
 
@@ -2316,12 +2323,16 @@ pub(crate) type SemanticTokensOutcome = (
 /// tree-sitter baseline, so they never replace it -- only recolor on top.
 /// [`pump_lsp_semantic_tokens`] applies the response.
 pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
-    let capabilities = stoat.lsp_host().capabilities();
+    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
+        return;
+    };
+    let lsp = stoat.lsp_for(buffer_id);
+    let capabilities = lsp.capabilities();
     let Some(legend) = semantic_tokens_legend(&capabilities) else {
         return;
     };
     let legend = legend.to_vec();
-    let encoding = stoat.lsp_host().offset_encoding();
+    let encoding = lsp.offset_encoding();
 
     let Some((buffer_id, version, rope, params)) = build_semantic_tokens_request(stoat) else {
         return;
@@ -2352,7 +2363,6 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
         editor.display_map.invalidate_lsp_highlights(buffer_id);
     }
 
-    let lsp = stoat.lsp_for(buffer_id);
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(SEMANTIC_TOKENS_DEBOUNCE).await;
@@ -2650,12 +2660,11 @@ pub(crate) type FoldingRangesOutcome = (BufferId, Vec<(std::ops::Range<usize>, O
 /// [`pump_lsp_folding_ranges`] feeds the response into the display map's
 /// `set_lsp_folding_ranges` hook, which replaces the buffer's foldable creases.
 pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
-    if stoat
-        .lsp_host()
-        .capabilities()
-        .folding_range_provider
-        .is_none()
-    {
+    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
+        return;
+    };
+    let lsp = stoat.lsp_for(buffer_id);
+    if lsp.capabilities().folding_range_provider.is_none() {
         return;
     }
 
@@ -2669,7 +2678,6 @@ pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
     }
     stoat.last_folding_range_key = Some(key);
 
-    let lsp = stoat.lsp_for(buffer_id);
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(FOLDING_RANGE_DEBOUNCE).await;
@@ -2845,14 +2853,6 @@ pub(crate) struct CodeActionPicker {
 /// task drops it, cancelling its spawned future -- only one in-flight
 /// code-action request is tracked at a time.
 pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::CodeAction)
-    {
-        return report_lsp_unavailable(stoat, "code actions");
-    }
-
-    let encoding = stoat.lsp_host().offset_encoding();
     let (range_byte, anchor_offset, buffer_id, source_rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -2872,6 +2872,15 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         };
         ((lo, hi), head, editor.buffer_id, buf_snap.rope().clone())
     };
+
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::CodeAction)
+        .into_iter()
+        .next()
+    else {
+        return report_lsp_unavailable(stoat, "code actions");
+    };
+    let encoding = host.offset_encoding();
 
     let Some(source_path) = stoat
         .active_workspace()
@@ -2903,9 +2912,8 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::CodeAction);
     let task = stoat.spawn_woken(async move {
-        match lsp.code_action(params).await {
+        match host.code_action(params).await {
             Ok(Some(actions)) => Some(actions),
             Ok(None) => None,
             Err(err) => {
@@ -3106,6 +3114,11 @@ pub(crate) struct RenamePrep {
     pub(crate) source_uri: Uri,
     pub(crate) symbol_position: Position,
     pub(crate) placeholder: String,
+    /// The routed server that answered prepare, carried so submit targets the
+    /// same one. `buffer_id` is its fallback route when the name no longer
+    /// resolves at submit time.
+    pub(crate) server: Option<String>,
+    pub(crate) buffer_id: BufferId,
 }
 
 /// Open input-modal state for the rename flow. Carries the
@@ -3119,6 +3132,10 @@ pub(crate) struct RenameInputState {
     pub(crate) source_uri: Uri,
     pub(crate) symbol_position: Position,
     pub(crate) anchor_offset: usize,
+    /// The server that answered prepare, resolved again at submit so both halves
+    /// of the rename hit the same one. `buffer_id` is the fallback route.
+    pub(crate) server: Option<String>,
+    pub(crate) buffer_id: BufferId,
 }
 
 /// Issue a `textDocument/prepareRename` request for the symbol under
@@ -3131,14 +3148,6 @@ pub(crate) struct RenameInputState {
 /// [`LanguageServerFeature::RenameSymbol`], reports the language-server
 /// state to the status bar instead.
 pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::RenameSymbol)
-    {
-        return report_lsp_unavailable(stoat, "rename");
-    }
-
-    let encoding = stoat.lsp_host().offset_encoding();
     let (cursor_offset, buffer_id, source_rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -3151,6 +3160,16 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
         let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
         (offset, editor.buffer_id, buf_snap.rope().clone())
     };
+
+    let Some((server, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::RenameSymbol)
+        .into_iter()
+        .next()
+    else {
+        return report_lsp_unavailable(stoat, "rename");
+    };
+    let server = Some(server);
+    let encoding = host.offset_encoding();
 
     let Some(source_path) = stoat
         .active_workspace()
@@ -3173,9 +3192,8 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
         position,
     };
 
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::RenameSymbol);
     let task = stoat.spawn_woken(async move {
-        let response = match lsp.prepare_rename(params).await {
+        let response = match host.prepare_rename(params).await {
             Ok(Some(resp)) => resp,
             Ok(None) => return None,
             Err(err) => {
@@ -3198,6 +3216,8 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
             source_uri,
             symbol_position: position,
             placeholder,
+            server,
+            buffer_id,
         })
     });
     stoat.pending_prepare_rename = Some(task);
@@ -3242,6 +3262,8 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 source_uri: prep.source_uri,
                 symbol_position: prep.symbol_position,
                 anchor_offset,
+                server: prep.server,
+                buffer_id: prep.buffer_id,
             });
             true
         },
@@ -3279,7 +3301,13 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
         new_name,
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
-    let lsp = stoat.lsp_host();
+    let lsp = rename_state
+        .server
+        .as_deref()
+        .and_then(|name| stoat.lsp_registry.client(name))
+        .unwrap_or_else(|| {
+            stoat.lsp_for_feature(rename_state.buffer_id, LanguageServerFeature::RenameSymbol)
+        });
     let task = stoat.spawn_woken(async move {
         match lsp.rename(params).await {
             Ok(edit) => edit,
@@ -3356,6 +3384,9 @@ pub(crate) struct SymbolPicker {
     pub(crate) entries: Vec<SymbolEntry>,
     pub(crate) anchor_offset: usize,
     pub(crate) selected_idx: usize,
+    /// The routed server's offset encoding, captured at request time so the pump
+    /// converts response positions with the server the request actually hit.
+    pub(crate) encoding: OffsetEncoding,
 }
 
 /// Issue a `textDocument/documentSymbol` request for the focused
@@ -3368,13 +3399,6 @@ pub(crate) struct SymbolPicker {
 /// [`LanguageServerFeature::DocumentSymbols`], reports the
 /// language-server state to the status bar instead.
 pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::DocumentSymbols)
-    {
-        return report_lsp_unavailable(stoat, "document symbols");
-    }
-
     let (anchor_offset, buffer_id) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -3389,6 +3413,15 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
             editor.buffer_id,
         )
     };
+
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::DocumentSymbols)
+        .into_iter()
+        .next()
+    else {
+        return report_lsp_unavailable(stoat, "document symbols");
+    };
+    let encoding = host.offset_encoding();
 
     let Some(source_path) = stoat
         .active_workspace()
@@ -3408,9 +3441,8 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::DocumentSymbols);
     let task = stoat.spawn_woken(async move {
-        match lsp.document_symbol(params).await {
+        match host.document_symbol(params).await {
             Ok(resp) => resp,
             Err(err) => {
                 tracing::warn!(target: "stoat::lsp", ?err, "document_symbol request failed");
@@ -3423,6 +3455,7 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         entries: Vec::new(),
         anchor_offset,
         selected_idx: 0,
+        encoding,
     });
     UpdateEffect::None
 }
@@ -3440,7 +3473,13 @@ pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(Some(response)) => {
-            let encoding = stoat.lsp_host().offset_encoding();
+            let Some(encoding) = stoat
+                .pending_symbol_picker
+                .as_ref()
+                .map(|picker| picker.encoding)
+            else {
+                return true;
+            };
             let rope = {
                 let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
                     stoat.pending_symbol_picker = None;
@@ -3796,14 +3835,6 @@ pub(crate) struct FormatResponse {
 /// [`LanguageServerFeature::Format`], reports the language-server state
 /// to the status bar instead.
 pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::Format)
-    {
-        return report_lsp_unavailable(stoat, "format");
-    }
-
-    let encoding = stoat.lsp_host().offset_encoding();
     let (range_byte, buffer_id, source_rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -3820,6 +3851,15 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
         };
         ((lo, hi), editor.buffer_id, buf_snap.rope().clone())
     };
+
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::Format)
+        .into_iter()
+        .next()
+    else {
+        return report_lsp_unavailable(stoat, "format");
+    };
+    let encoding = host.offset_encoding();
 
     let Some(source_path) = stoat
         .active_workspace()
@@ -3848,9 +3888,8 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::Format);
     let task = stoat.spawn_woken(async move {
-        match lsp.range_formatting(params).await {
+        match host.range_formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
                 uri: source_uri,
                 edits,
@@ -3877,16 +3916,16 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
 /// [`LanguageServerFeature::Format`], reports the language-server state
 /// to the status bar instead.
 pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::Format)
-    {
-        return report_lsp_unavailable(stoat, "format");
-    }
-
     let Some(buffer_id) = crate::action_handlers::focused_editor_mut(stoat).map(|e| e.buffer_id)
     else {
         return UpdateEffect::None;
+    };
+    let Some((_, host)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::Format)
+        .into_iter()
+        .next()
+    else {
+        return report_lsp_unavailable(stoat, "format");
     };
 
     let Some(source_path) = stoat
@@ -3913,9 +3952,8 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
-    let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::Format);
     let task = stoat.spawn_woken(async move {
-        match lsp.formatting(params).await {
+        match host.formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
                 uri: source_uri,
                 edits,
@@ -4345,6 +4383,109 @@ mod tests {
                 &completion,
             ),
             "completion routes to the completion-capable server"
+        );
+    }
+
+    #[test]
+    fn hover_routes_to_a_secondary_when_the_primary_lacks_it() {
+        use crate::lsp::registry::ServerSelector;
+        use lsp_types::{HoverProviderCapability, ServerCapabilities};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let primary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        primary.set_capabilities(ServerCapabilities::default());
+        let secondary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        secondary.set_capabilities(ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..ServerCapabilities::default()
+        });
+        h.stoat
+            .lsp_registry
+            .insert("primary".into(), primary.clone());
+        h.stoat
+            .lsp_registry
+            .insert("secondary".into(), secondary.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                ServerSelector::all("secondary".into()),
+            ],
+        );
+
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        secondary.set_hover(path.to_str().unwrap(), 0, 0, "from secondary");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        let popup = h
+            .stoat
+            .pending_hover
+            .as_ref()
+            .expect("the hover-capable secondary answered");
+        assert_eq!(
+            popup.lines,
+            vec![vec![("from secondary".to_string(), Style::default())]]
+        );
+        assert_ne!(
+            h.stoat.pending_message.as_deref(),
+            Some("lsp: server does not support hover"),
+            "a capable secondary means the noop sole host never gates hover out"
+        );
+    }
+
+    #[test]
+    fn hover_position_encodes_with_the_routed_host() {
+        use crate::{host::OffsetEncoding, lsp::registry::ServerSelector};
+        use lsp_types::{HoverProviderCapability, ServerCapabilities};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let primary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        primary.set_capabilities(ServerCapabilities::default());
+        let secondary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        secondary.set_capabilities(ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..ServerCapabilities::default()
+        });
+        secondary.set_offset_encoding(OffsetEncoding::Utf8);
+        h.stoat
+            .lsp_registry
+            .insert("primary".into(), primary.clone());
+        h.stoat
+            .lsp_registry
+            .insert("secondary".into(), secondary.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                ServerSelector::all("secondary".into()),
+            ],
+        );
+
+        // The cursor sits after a 2-byte char, so the LSP column is 2 under UTF-8
+        // and 1 under UTF-16. Placing the hover at column 2 means the popup only
+        // appears when the position encodes with the routed host's UTF-8, not the
+        // noop sole host's default UTF-16.
+        let root = seed(&mut h, &[("a.rs", "\u{e9}x\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
+        secondary.set_hover(path.to_str().unwrap(), 0, 2, "utf8 routed");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        let popup = h
+            .stoat
+            .pending_hover
+            .as_ref()
+            .expect("hover position encoded with the routed host's UTF-8");
+        assert_eq!(
+            popup.lines,
+            vec![vec![("utf8 routed".to_string(), Style::default())]]
         );
     }
 
