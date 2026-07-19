@@ -64,6 +64,7 @@ pub use defs::{
         CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition, GotoImplementation,
         GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenDiagnosticsPicker,
         OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker, OpenWorkspaceSymbolPicker, RenameSymbol,
+        SymbolFinderPageDown, SymbolFinderPageUp, SymbolFinderSelectNext, SymbolFinderSelectPrev,
     },
     palette::OpenCommandPalette,
     pane::{

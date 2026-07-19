@@ -67,7 +67,8 @@ use crate::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
             GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
             OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
-            OpenWorkspaceSymbolPicker, RenameSymbol,
+            OpenWorkspaceSymbolPicker, RenameSymbol, SymbolFinderPageDown, SymbolFinderPageUp,
+            SymbolFinderSelectNext, SymbolFinderSelectPrev,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -239,6 +240,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CodeAction::DEF, |_| Ok(Box::new(CodeAction)));
     add(RenameSymbol::DEF, |_| Ok(Box::new(RenameSymbol)));
     add(OpenSymbolPicker::DEF, |_| Ok(Box::new(OpenSymbolPicker)));
+    add(SymbolFinderSelectPrev::DEF, |_| {
+        Ok(Box::new(SymbolFinderSelectPrev))
+    });
+    add(SymbolFinderSelectNext::DEF, |_| {
+        Ok(Box::new(SymbolFinderSelectNext))
+    });
+    add(SymbolFinderPageUp::DEF, |_| {
+        Ok(Box::new(SymbolFinderPageUp))
+    });
+    add(SymbolFinderPageDown::DEF, |_| {
+        Ok(Box::new(SymbolFinderPageDown))
+    });
     add(OpenWorkspaceSymbolPicker::DEF, |_| {
         Ok(Box::new(OpenWorkspaceSymbolPicker))
     });
@@ -1288,6 +1301,7 @@ mod tests {
         // + 1 CodeAction.
         // + 1 RenameSymbol.
         // + 1 OpenSymbolPicker.
+        // + 4 SymbolFinder SelectPrev/Next/PageUp/PageDown.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
         // + 1 Format.
@@ -1349,7 +1363,7 @@ mod tests {
         // + 2 PaletteHistoryPrev/Next.
         // + 1 SetTheme.
         // + 2 DetachPane, ReattachPane.
-        assert_eq!(all().count(), 356);
+        assert_eq!(all().count(), 360);
     }
 
     #[test]

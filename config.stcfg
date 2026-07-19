@@ -690,6 +690,14 @@ on key {
         Ctrl-b -> FileFinderPageUp();
         BackTab -> FileFinderScopeToggle();
     }
+    modal == symbols && mode == insert {
+        Up -> SymbolFinderSelectPrev();
+        Down -> SymbolFinderSelectNext();
+        Ctrl-p -> SymbolFinderSelectPrev();
+        Ctrl-n -> SymbolFinderSelectNext();
+        Ctrl-f -> SymbolFinderPageDown();
+        Ctrl-b -> SymbolFinderPageUp();
+    }
     modal == palette && mode == insert {
         Up -> PaletteHistoryPrev();
         Down -> PaletteHistoryNext();
@@ -793,7 +801,7 @@ on key {
             f -> [Format(), SetMode(normal)];
             h -> [ToggleInlayHints(), SetMode(normal)];
             a -> [CodeAction(), SetMode(normal)];
-            s -> [OpenSymbolPicker(), SetMode(normal)];
+            s -> OpenSymbolPicker();
             S -> OpenWorkspaceSymbolPicker();
 
             !token_known || token {

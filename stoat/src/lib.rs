@@ -59,6 +59,7 @@ mod review_session;
 pub mod run;
 mod selection;
 mod smooth_scroll;
+pub(crate) mod symbol_finder;
 pub mod term_screen;
 pub mod term_session;
 pub mod theme;

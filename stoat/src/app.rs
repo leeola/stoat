@@ -23,6 +23,7 @@ use crate::{
     render::undercurl::{self, UndercurlSpan},
     review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
+    symbol_finder::SymbolFinder,
     term_session::{TermId, TermSelection},
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
@@ -221,6 +222,10 @@ pub struct Stoat {
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
+    /// Open document-symbol finder modal, or `None`. Fed by
+    /// [`action_handlers::lsp::pump_lsp_symbol_picker`] and refiltered on the
+    /// render path.
+    pub(crate) symbol_finder: Option<SymbolFinder>,
     pub(crate) workspace_picker: Option<WorkspacePicker>,
     /// Confirmation modal shown when [`stoat_action::QuitAll`] fires
     /// with at least one dirty buffer in any workspace. `Some` while
@@ -890,12 +895,12 @@ pub struct Stoat {
     pub(crate) pending_rename: Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>>,
 
     /// In-flight `textDocument/documentSymbol` request. Polled by
-    /// [`action_handlers::lsp::pump_lsp_symbol_picker`]; on response
-    /// populates [`Self::pending_symbol_picker`].
+    /// [`action_handlers::lsp::pump_lsp_symbol_picker`], which installs the
+    /// entries into [`Self::symbol_finder`] on response.
     pub(crate) pending_symbol_picker_request:
-        Option<stoat_scheduler::Task<Vec<action_handlers::lsp::SymbolEntry>>>,
+        Option<stoat_scheduler::Task<Vec<crate::symbol_finder::SymbolFinderEntry>>>,
 
-    /// Selectable document-symbol picker waiting for the user to
+    /// Selectable code-graph navigation picker waiting for the user to
     /// choose a symbol to jump to (number keys 1-9) or cancel.
     pub(crate) pending_symbol_picker: Option<action_handlers::lsp::SymbolPicker>,
 
@@ -1230,6 +1235,7 @@ impl Stoat {
             command_palette: None,
             help: None,
             file_finder: None,
+            symbol_finder: None,
             workspace_picker: None,
             quit_all_confirm: None,
             jumplist_picker: None,
@@ -4344,6 +4350,10 @@ impl Stoat {
                 action_handlers::close_file_finder(self);
                 return UpdateEffect::Redraw;
             }
+            if self.symbol_finder.is_some() {
+                action_handlers::lsp::close_symbol_finder(self);
+                return UpdateEffect::Redraw;
+            }
             if let Some(palette) = self.command_palette.take() {
                 let active_idx = self.active_workspace;
                 palette.dispose(&mut self.workspaces[active_idx]);
@@ -5070,6 +5080,10 @@ impl Stoat {
         let ws = self.active_workspace();
 
         if let Some(finder) = &self.file_finder {
+            return Some((finder.input.editor_id, finder.input.buffer_id));
+        }
+
+        if let Some(finder) = &self.symbol_finder {
             return Some((finder.input.editor_id, finder.input.buffer_id));
         }
 
@@ -7789,6 +7803,7 @@ impl Stoat {
         action_handlers::file::install_pending_opens(self);
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
+        action_handlers::lsp::sync_symbol_finder(self);
         action_handlers::file::pump_auto_reload(self);
         self.drive_parse_jobs();
         self.drive_diff_jobs();

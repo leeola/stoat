@@ -27,6 +27,7 @@ pub(crate) mod reword;
 pub(crate) mod run_pane;
 pub(crate) mod sanitize;
 pub(crate) mod signature_help;
+pub(crate) mod symbol_finder;
 pub(crate) mod symbol_picker;
 pub(crate) mod term_pane;
 pub(crate) mod text;
@@ -266,6 +267,7 @@ fn modal_overlay_open(stoat: &Stoat) -> bool {
     stoat.modal_run.is_some()
         || stoat.help.is_some()
         || stoat.file_finder.is_some()
+        || stoat.symbol_finder.is_some()
         || stoat.command_palette.is_some()
         || stoat.workspace_picker.is_some()
         || stoat.quit_all_confirm.is_some()
@@ -672,6 +674,33 @@ pub(crate) fn frame(
             .collect();
         hints::render_hints(
             "finder",
+            &bindings,
+            None,
+            &stoat.theme,
+            full,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
+    } else if let Some(finder) = &mut stoat.symbol_finder {
+        symbol_finder::render_symbol_finder(
+            finder,
+            ws,
+            &stoat.theme,
+            full,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
+        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("symbols");
+        let raw = stoat.keymap.scoped_bindings(&state, "modal", "symbols");
+        let bindings: Vec<_> = raw
+            .iter()
+            .map(|(key, actions)| {
+                let desc = actions.first().map(action_display_desc).unwrap_or_default();
+                (key.as_str(), desc)
+            })
+            .collect();
+        hints::render_hints(
+            "symbols",
             &bindings,
             None,
             &stoat.theme,

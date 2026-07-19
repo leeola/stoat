@@ -331,11 +331,7 @@ fn open_symbol_pick(stoat: &mut Stoat, candidates: Vec<SymbolKey>) -> UpdateEffe
                     Some(path) => format!("{}  {}", symbol.name, path.display()),
                     None => symbol.name.clone(),
                 };
-                Some(SymbolEntry {
-                    title,
-                    anchor_offset: symbol.def_range.start,
-                    symbol: Some(key),
-                })
+                Some(SymbolEntry { title, symbol: key })
             })
             .collect()
     };
@@ -486,9 +482,9 @@ mod tests {
             .pending_symbol_picker
             .as_ref()
             .expect("several candidates open the picker");
-        assert_eq!(picker.entries.len(), 2);
-        assert!(
-            picker.entries.iter().all(|e| e.symbol.is_some()),
+        assert_eq!(
+            picker.entries.iter().map(|e| e.symbol).collect::<Vec<_>>(),
+            vec![foo, bar],
             "nav picker entries carry their symbol key",
         );
     }

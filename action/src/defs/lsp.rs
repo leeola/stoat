@@ -157,11 +157,59 @@ define_action!(
     ActionKind::OpenSymbolPicker,
     "show document symbols",
     "Issue an LSP `textDocument/documentSymbol` request for the focused \
-     buffer and present the response as a numbered popup. Number keys \
-     1-9 select a symbol; on select the cursor jumps to the symbol's \
-     definition. No-op when the server does not advertise the \
-     capability or returns no symbols.",
+     buffer and present the response as a fuzzy-filtered finder modal. \
+     Type to filter the symbol list, Enter jumps to the selected symbol's \
+     definition, Escape closes. No-op when the server does not advertise \
+     the capability.",
     ActionPriority::Common
+);
+
+define_action!(
+    SymbolFinderSelectPrevDef,
+    SymbolFinderSelectPrev,
+    "SymbolFinderSelectPrev",
+    ActionKind::SymbolFinderSelectPrev,
+    "select previous symbol",
+    "Move the symbol finder selection up by one row. Bound by default to \
+     Up and Ctrl-P while the symbol finder is open.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    SymbolFinderSelectNextDef,
+    SymbolFinderSelectNext,
+    "SymbolFinderSelectNext",
+    ActionKind::SymbolFinderSelectNext,
+    "select next symbol",
+    "Move the symbol finder selection down by one row. Bound by default to \
+     Down and Ctrl-N while the symbol finder is open.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    SymbolFinderPageUpDef,
+    SymbolFinderPageUp,
+    "SymbolFinderPageUp",
+    ActionKind::SymbolFinderPageUp,
+    "page symbol finder up",
+    "Move the symbol finder selection up by half the visible list height. \
+     Bound by default to Ctrl-B while the symbol finder is open.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    SymbolFinderPageDownDef,
+    SymbolFinderPageDown,
+    "SymbolFinderPageDown",
+    ActionKind::SymbolFinderPageDown,
+    "page symbol finder down",
+    "Move the symbol finder selection down by half the visible list height. \
+     Bound by default to Ctrl-F while the symbol finder is open.",
+    ActionPriority::Rare,
+    palette_visible = false
 );
 
 define_action!(

@@ -366,6 +366,8 @@ pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
         Some("search")
     } else if stoat.file_finder.is_some() {
         Some("finder")
+    } else if stoat.symbol_finder.is_some() {
+        Some("symbols")
     } else if stoat.command_palette.is_some() {
         Some("palette")
     } else if stoat.help.is_some() {

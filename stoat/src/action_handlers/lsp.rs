@@ -22,6 +22,7 @@ use crate::{
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
     lsp::{servers::ServerSource, LspSymbolKind},
+    symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolTarget},
     theme::scope,
     workspace::WorkspaceUid,
 };
@@ -38,7 +39,7 @@ use lsp_types::{
     MarkedString, MarkupKind, OneOf, ParameterLabel, Position, PrepareRenameResponse, Range,
     ReferenceContext, ReferenceParams, RenameParams, SemanticToken, SemanticTokenType,
     SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities, ServerInfo,
-    SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation,
+    SignatureHelp, SignatureHelpParams, SignatureInformation, SymbolInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbol,
@@ -3582,27 +3583,24 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
     }
 }
 
-/// One entry in [`SymbolPicker`]. `title` is the symbol name as
-/// painted in the popup; `anchor_offset` is the byte offset in the
-/// focused buffer that the cursor jumps to on selection (resolved
-/// from the symbol's `selection_range.start` for nested responses or
-/// `location.range.start` for flat responses).
+/// One entry in the graph-navigation [`SymbolPicker`]. `title` is the symbol
+/// name as painted in the popup and `symbol` the graph node the entry jumps to
+/// on selection.
 #[derive(Debug, Clone)]
 pub(crate) struct SymbolEntry {
     pub(crate) title: String,
-    pub(crate) anchor_offset: usize,
-    /// Graph symbol to jump to when picked, for graph-navigation pickers.
-    /// `None` for LSP document-symbol entries, which jump to
-    /// [`Self::anchor_offset`] in the current buffer instead.
-    pub(crate) symbol: Option<SymbolKey>,
+    pub(crate) symbol: SymbolKey,
 }
 
-/// Cursor-anchored document-symbol picker. Painted as a numbered
+/// Cursor-anchored graph-navigation picker. Painted as a numbered
 /// popup over a viewport of up to 9 visible entries that follows
-/// [`Self::selected_idx`]; the user navigates with `j`/`k`, picks
+/// [`Self::selected_idx`]. The user navigates with `j`/`k`, picks
 /// the selected entry with Enter, picks visible entries 1..=9 with
 /// the corresponding digit keys, and dismisses with Escape or any
 /// other action.
+///
+/// Document symbols use the [`crate::symbol_finder::SymbolFinder`] modal
+/// instead. Only code-graph navigation still populates this popup.
 #[derive(Debug, Clone)]
 pub(crate) struct SymbolPicker {
     pub(crate) entries: Vec<SymbolEntry>,
@@ -3620,20 +3618,13 @@ pub(crate) struct SymbolPicker {
 /// [`LanguageServerFeature::DocumentSymbols`], reports the
 /// language-server state to the status bar instead.
 pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let (anchor_offset, buffer_id, rope) = {
+    let (buffer_id, rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let tail_off = buf_snap.resolve_anchor(&sel.tail());
-        let head_off = buf_snap.resolve_anchor(&sel.head());
-        (
-            stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off),
-            editor.buffer_id,
-            buf_snap.rope().clone(),
-        )
+        (editor.buffer_id, buf_snap.rope().clone())
     };
 
     let hosts = stoat.feature_hosts(buffer_id, LanguageServerFeature::DocumentSymbols);
@@ -3682,19 +3673,23 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         entries
     });
     stoat.pending_symbol_picker_request = Some(task);
-    stoat.pending_symbol_picker = Some(SymbolPicker {
-        entries: Vec::new(),
-        anchor_offset,
-        selected_idx: 0,
-    });
+    stoat.set_focused_mode("normal".into());
+    let executor = stoat.executor.clone();
+    let finder = {
+        let ws = stoat.active_workspace_mut();
+        SymbolFinder::new(ws, executor, buffer_id)
+    };
+    stoat.symbol_finder = Some(finder);
     UpdateEffect::None
 }
 
-/// Poll any in-flight document-symbol request and fill the
-/// [`SymbolPicker`] with the entries every capable server merged.
+/// Poll any in-flight document-symbol request and fill the open
+/// [`SymbolFinder`] with the entries every capable server merged, refiltering
+/// against the current query.
 ///
 /// The request task converts and concatenates each server's response, so this
-/// only installs the result. Drops the picker when no server returned an entry.
+/// only installs the result. An empty result keeps the modal open over an empty
+/// list, matching finder behavior.
 pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_symbol_picker_request.take() else {
         return false;
@@ -3703,10 +3698,9 @@ pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(entries) => {
-            if entries.is_empty() {
-                stoat.pending_symbol_picker = None;
-            } else if let Some(picker) = stoat.pending_symbol_picker.as_mut() {
-                picker.entries = entries;
+            let query = symbol_finder_query(stoat);
+            if let Some(finder) = stoat.symbol_finder.as_mut() {
+                finder.set_entries(entries, &query);
             }
             true
         },
@@ -3714,6 +3708,84 @@ pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
             stoat.pending_symbol_picker_request = Some(task);
             false
         },
+    }
+}
+
+/// The text currently typed into the symbol finder's input, or empty when no
+/// finder is open.
+fn symbol_finder_query(stoat: &Stoat) -> String {
+    stoat
+        .symbol_finder
+        .as_ref()
+        .map(|finder| finder.input.text(stoat.active_workspace()))
+        .unwrap_or_default()
+}
+
+/// Refilter the open symbol finder against its current input. Called on the
+/// render/idle path so typing narrows the list without a dedicated key handler.
+pub(crate) fn sync_symbol_finder(stoat: &mut Stoat) {
+    let query = symbol_finder_query(stoat);
+    if let Some(finder) = stoat.symbol_finder.as_mut() {
+        finder.refilter(&query);
+    }
+}
+
+/// Move the symbol finder selection by `delta`, saturating at list bounds.
+pub(crate) fn symbol_finder_move_selection(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    match stoat.symbol_finder.as_mut() {
+        Some(finder) => {
+            finder.move_selection(delta);
+            UpdateEffect::Redraw
+        },
+        None => UpdateEffect::None,
+    }
+}
+
+/// Page the symbol finder selection by half the list height in `dir`.
+pub(crate) fn symbol_finder_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    match stoat.symbol_finder.as_mut() {
+        Some(finder) => {
+            finder.page(dir);
+            UpdateEffect::Redraw
+        },
+        None => UpdateEffect::None,
+    }
+}
+
+/// Jump to the selected symbol and close the finder.
+///
+/// Returns `None` when no finder is open so [`super::submit_prompt_input`] falls
+/// through to the next probe. An empty list closes without jumping.
+pub(crate) fn symbol_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    stoat.symbol_finder.as_ref()?;
+    let target = stoat
+        .symbol_finder
+        .as_ref()
+        .and_then(|finder| finder.selected_entry())
+        .map(|entry| entry.target.clone());
+    close_symbol_finder(stoat);
+    if let Some(SymbolTarget::Offset(offset)) = target {
+        crate::action_handlers::movement::jump_to_offset(stoat, offset);
+    }
+    Some(UpdateEffect::Redraw)
+}
+
+/// Close the symbol finder on Escape.
+///
+/// Returns `None` when no finder is open so [`super::cancel_prompt_input`] falls
+/// through to the next probe.
+pub(crate) fn symbol_finder_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    if stoat.symbol_finder.is_some() {
+        close_symbol_finder(stoat);
+        return Some(UpdateEffect::Redraw);
+    }
+    None
+}
+
+/// Close the symbol finder, disposing its input editor.
+pub(crate) fn close_symbol_finder(stoat: &mut Stoat) {
+    if let Some(finder) = stoat.symbol_finder.take() {
+        finder.dispose(stoat.active_workspace_mut());
     }
 }
 
@@ -3727,18 +3799,20 @@ fn symbol_picker_entries(
     rope: &Rope,
     encoding: OffsetEncoding,
     response: DocumentSymbolResponse,
-) -> Vec<SymbolEntry> {
-    let mut entries: Vec<SymbolEntry> = Vec::new();
+) -> Vec<SymbolFinderEntry> {
+    let mut entries: Vec<SymbolFinderEntry> = Vec::new();
     match response {
         DocumentSymbolResponse::Flat(items) => {
-            for SymbolInformation { name, location, .. } in items {
+            for SymbolInformation {
+                name,
+                location,
+                kind,
+                ..
+            } in items
+            {
                 let offset =
                     crate::lsp::util::lsp_pos_to_byte_offset(rope, location.range.start, encoding);
-                entries.push(SymbolEntry {
-                    title: name,
-                    anchor_offset: offset,
-                    symbol: None,
-                });
+                entries.push(finder_entry(rope, name, kind, offset));
             }
         },
         DocumentSymbolResponse::Nested(items) => {
@@ -3747,7 +3821,7 @@ fn symbol_picker_entries(
                 encoding: OffsetEncoding,
                 items: Vec<DocumentSymbol>,
                 ancestors: &mut Vec<String>,
-                out: &mut Vec<SymbolEntry>,
+                out: &mut Vec<SymbolFinderEntry>,
             ) {
                 for symbol in items {
                     let offset = crate::lsp::util::lsp_pos_to_byte_offset(
@@ -3760,11 +3834,7 @@ fn symbol_picker_entries(
                     } else {
                         format!("{}.{}", ancestors.join("."), symbol.name)
                     };
-                    out.push(SymbolEntry {
-                        title,
-                        anchor_offset: offset,
-                        symbol: None,
-                    });
+                    out.push(finder_entry(rope, title, symbol.kind, offset));
                     if let Some(children) = symbol.children {
                         ancestors.push(symbol.name);
                         walk(rope, encoding, children, ancestors, out);
@@ -3779,12 +3849,21 @@ fn symbol_picker_entries(
     entries
 }
 
-/// Apply the user's pick from the open symbol picker and clear the picker.
+/// Build a document-symbol finder entry, deriving the display line from the
+/// resolved byte `offset`.
+fn finder_entry(rope: &Rope, title: String, kind: SymbolKind, offset: usize) -> SymbolFinderEntry {
+    SymbolFinderEntry {
+        title,
+        kind: Some(kind),
+        line: rope.offset_to_point(offset).row,
+        target: SymbolTarget::Offset(offset),
+    }
+}
+
+/// Apply the user's pick from the open graph-navigation picker, jumping to the
+/// entry's symbol and opening another file if needed, and clear the picker.
 ///
-/// A graph-navigation entry jumps to its symbol (opening another file if
-/// needed); an LSP document-symbol entry jumps the primary cursor to the
-/// entry's anchor offset in the current buffer. No-op when no picker is
-/// open or `index` is out of range.
+/// No-op when no picker is open or `index` is out of range.
 pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
     let Some(picker) = stoat.pending_symbol_picker.take() else {
         return false;
@@ -3792,14 +3871,7 @@ pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
     let Some(entry) = picker.entries.into_iter().nth(index) else {
         return false;
     };
-    match entry.symbol {
-        Some(key) => {
-            crate::code_index::nav::jump_to_symbol(stoat, key);
-        },
-        None => {
-            crate::action_handlers::movement::jump_to_offset(stoat, entry.anchor_offset);
-        },
-    }
+    crate::code_index::nav::jump_to_symbol(stoat, entry.symbol);
     true
 }
 
@@ -7584,19 +7656,20 @@ mod tests {
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
-        assert!(h.stoat.pending_symbol_picker.is_none());
+        assert!(h.stoat.symbol_finder.is_none());
         assert!(h.stoat.pending_symbol_picker_request.is_none());
     }
 
     #[test]
-    fn symbol_picker_no_response_clears_picker() {
+    fn symbol_picker_no_response_keeps_modal_open() {
         let mut h = TestHarness::with_size(80, 24);
         enable_document_symbols(&h);
         let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
         open_buffer(&mut h, root.join("main.rs"));
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
-        assert!(h.stoat.pending_symbol_picker.is_none());
+        let finder = h.stoat.symbol_finder.as_ref().expect("modal stays open");
+        assert!(finder.entries.is_empty(), "no symbols yields an empty list");
     }
 
     #[test]
@@ -7615,8 +7688,8 @@ mod tests {
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
-        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
-        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+        let titles: Vec<&str> = finder.entries.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["foo", "bar"]);
     }
 
@@ -7661,8 +7734,8 @@ mod tests {
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
-        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
-        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+        let titles: Vec<&str> = finder.entries.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["outer", "outer.inner"]);
     }
 
@@ -7682,8 +7755,9 @@ mod tests {
         );
         h.type_keys("space l s");
         h.settle();
-        h.type_keys("2");
-        assert!(h.stoat.pending_symbol_picker.is_none());
+        h.type_keys("down");
+        h.type_keys("enter");
+        assert!(h.stoat.symbol_finder.is_none());
         assert_eq!(cursor_offset(&mut h), 15);
     }
 
@@ -7701,13 +7775,13 @@ mod tests {
             .set_document_symbols(path.to_str().unwrap(), DocumentSymbolResponse::Flat(many));
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
-        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
-        assert_eq!(picker.entries.len(), 15);
-        assert_eq!(picker.selected_idx, 0);
+        let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+        assert_eq!(finder.entries.len(), 15);
+        assert_eq!(finder.selected, 0);
     }
 
     #[test]
-    fn symbol_picker_navigates_with_jk_and_picks_with_enter() {
+    fn symbol_picker_navigates_with_arrows_and_picks_with_enter() {
         let mut h = TestHarness::with_size(80, 24);
         enable_document_symbols(&h);
         let mut text = String::new();
@@ -7726,13 +7800,13 @@ mod tests {
         h.type_keys("space l s");
         h.settle();
         for _ in 0..11 {
-            h.type_keys("j");
+            h.type_keys("down");
         }
-        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_idx, 11);
+        let finder = h.stoat.symbol_finder.as_ref().expect("finder");
+        assert_eq!(finder.selected, 11);
 
         h.type_keys("enter");
-        assert!(h.stoat.pending_symbol_picker.is_none());
+        assert!(h.stoat.symbol_finder.is_none());
         assert_eq!(cursor_offset(&mut h), 11 * 10 + 3);
     }
 
@@ -7749,9 +7823,9 @@ mod tests {
         );
         h.type_keys("space l s");
         h.settle();
-        assert!(h.stoat.pending_symbol_picker.is_some());
+        assert!(h.stoat.symbol_finder.is_some());
         h.type_keys("escape");
-        assert!(h.stoat.pending_symbol_picker.is_none());
+        assert!(h.stoat.symbol_finder.is_none());
     }
 
     #[test]
@@ -7767,13 +7841,13 @@ mod tests {
         );
         h.type_keys("space l s");
         h.settle();
-        assert!(h.stoat.pending_symbol_picker.is_some());
-        assert_eq!(h.stoat.focused_mode(), "normal");
+        assert!(h.stoat.symbol_finder.is_some());
+        assert_eq!(h.stoat.focused_mode(), "insert");
     }
 
     #[test]
     fn snapshot_symbol_picker() {
-        let mut h = TestHarness::with_size(40, 12);
+        let mut h = TestHarness::with_size(60, 16);
         enable_document_symbols(&h);
         let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
         let path = root.join("main.rs");
@@ -7848,8 +7922,8 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
 
-        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
-        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+        let titles: Vec<&str> = finder.entries.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(
             titles,
             vec!["foo", "bar"],
@@ -7859,7 +7933,7 @@ mod tests {
 
     #[test]
     fn document_symbols_convert_each_with_its_servers_encoding() {
-        use crate::host::OffsetEncoding;
+        use crate::{host::OffsetEncoding, symbol_finder::SymbolTarget};
         let mut h = TestHarness::with_size(80, 24);
         let (primary, secondary) = install_two_servers(&mut h, document_symbol_caps());
         primary.set_offset_encoding(OffsetEncoding::Utf8);
@@ -7883,11 +7957,14 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
 
-        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
-        let resolved: Vec<(&str, usize)> = picker
+        let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+        let resolved: Vec<(&str, usize)> = finder
             .entries
             .iter()
-            .map(|e| (e.title.as_str(), e.anchor_offset))
+            .map(|e| {
+                let SymbolTarget::Offset(offset) = &e.target;
+                (e.title.as_str(), *offset)
+            })
             .collect();
         assert_eq!(
             resolved,
