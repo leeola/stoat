@@ -3556,9 +3556,6 @@ pub(crate) struct SymbolPicker {
     pub(crate) entries: Vec<SymbolEntry>,
     pub(crate) anchor_offset: usize,
     pub(crate) selected_idx: usize,
-    /// The routed server's offset encoding, captured at request time so the pump
-    /// converts response positions with the server the request actually hit.
-    pub(crate) encoding: OffsetEncoding,
 }
 
 /// Issue a `textDocument/documentSymbol` request for the focused
@@ -3571,7 +3568,7 @@ pub(crate) struct SymbolPicker {
 /// [`LanguageServerFeature::DocumentSymbols`], reports the
 /// language-server state to the status bar instead.
 pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let (anchor_offset, buffer_id) = {
+    let (anchor_offset, buffer_id, rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
         };
@@ -3583,17 +3580,14 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         (
             stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off),
             editor.buffer_id,
+            buf_snap.rope().clone(),
         )
     };
 
-    let Some((_, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::DocumentSymbols)
-        .into_iter()
-        .next()
-    else {
+    let hosts = stoat.feature_hosts(buffer_id, LanguageServerFeature::DocumentSymbols);
+    if hosts.is_empty() {
         return report_lsp_unavailable(stoat, "document symbols");
-    };
-    let encoding = host.offset_encoding();
+    }
 
     let Some(source_path) = stoat
         .active_workspace()
@@ -3614,29 +3608,41 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let task = stoat.spawn_woken(async move {
-        match host.document_symbol(params).await {
-            Ok(resp) => resp,
-            Err(err) => {
-                tracing::warn!(target: "stoat::lsp", ?err, "document_symbol request failed");
-                None
-            },
+        let requests = hosts.iter().map(|(_, host)| {
+            let encoding = host.offset_encoding();
+            let params = params.clone();
+            async move { (encoding, host.document_symbol(params).await) }
+        });
+        let responses = futures::future::join_all(requests).await;
+
+        let mut entries = Vec::new();
+        for (encoding, result) in responses {
+            match result {
+                Ok(Some(response)) => {
+                    entries.extend(symbol_picker_entries(&rope, encoding, response))
+                },
+                Ok(None) => {},
+                Err(err) => {
+                    tracing::warn!(target: "stoat::lsp", ?err, "document_symbol request failed")
+                },
+            }
         }
+        entries
     });
     stoat.pending_symbol_picker_request = Some(task);
     stoat.pending_symbol_picker = Some(SymbolPicker {
         entries: Vec::new(),
         anchor_offset,
         selected_idx: 0,
-        encoding,
     });
     UpdateEffect::None
 }
 
-/// Poll any in-flight document-symbol request and translate the
-/// response into a [`SymbolPicker`]. Flattens the nested
-/// `DocumentSymbol` tree via DFS so a single keystroke (1-9)
-/// selects from the leading 9 entries in document order. Drops the
-/// picker when the response is empty or `None`.
+/// Poll any in-flight document-symbol request and fill the
+/// [`SymbolPicker`] with the entries every capable server merged.
+///
+/// The request task converts and concatenates each server's response, so this
+/// only installs the result. Drops the picker when no server returned an entry.
 pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_symbol_picker_request.take() else {
         return false;
@@ -3644,33 +3650,12 @@ pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(response)) => {
-            let Some(encoding) = stoat
-                .pending_symbol_picker
-                .as_ref()
-                .map(|picker| picker.encoding)
-            else {
-                return true;
-            };
-            let rope = {
-                let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
-                    stoat.pending_symbol_picker = None;
-                    return true;
-                };
-                let snapshot = editor.display_map.snapshot();
-                let buf_snap = snapshot.buffer_snapshot();
-                buf_snap.rope().clone()
-            };
-            let entries = symbol_picker_entries(&rope, encoding, response);
+        Poll::Ready(entries) => {
             if entries.is_empty() {
                 stoat.pending_symbol_picker = None;
             } else if let Some(picker) = stoat.pending_symbol_picker.as_mut() {
                 picker.entries = entries;
             }
-            true
-        },
-        Poll::Ready(None) => {
-            stoat.pending_symbol_picker = None;
             true
         },
         Poll::Pending => {
@@ -3774,20 +3759,25 @@ pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
 pub(crate) struct WorkspaceSymbolInputState {
     pub(crate) input: crate::input_view::InputView,
     pub(crate) anchor_offset: usize,
-    /// The server routed at open, resolved again at submit so a focus change
-    /// mid-query does not re-route. `buffer_id` is the fallback route.
-    pub(crate) server: Option<String>,
+    /// Every workspace-symbol server routed at open, resolved by name again at
+    /// submit so a focus change mid-query does not re-route. `buffer_id` is the
+    /// fallback route when none of the names still resolve.
+    pub(crate) servers: Vec<String>,
     pub(crate) buffer_id: BufferId,
 }
 
-/// One entry in [`WorkspaceSymbolPicker`]. `title` is the symbol
-/// name; `path` is the absolute filesystem path to open; `position`
-/// is the LSP position in the target file.
+/// One entry in [`WorkspaceSymbolPicker`].
+///
+/// `title` is the symbol name, `path` the absolute filesystem path to open, and
+/// `position` the LSP position in the target file. `encoding` is the offset
+/// encoding of the server that produced this entry, so a fan-out across servers
+/// that negotiated different encodings still resolves each position on accept.
 #[derive(Debug, Clone)]
 pub(crate) struct WorkspaceSymbolEntry {
     pub(crate) title: String,
     pub(crate) path: PathBuf,
     pub(crate) position: Position,
+    pub(crate) encoding: OffsetEncoding,
 }
 
 /// Cursor-anchored workspace-symbol picker. Painted as a numbered
@@ -3800,9 +3790,6 @@ pub(crate) struct WorkspaceSymbolPicker {
     pub(crate) entries: Vec<WorkspaceSymbolEntry>,
     pub(crate) anchor_offset: usize,
     pub(crate) selected_idx: usize,
-    /// The routed server's offset encoding, captured at request time so pick
-    /// converts a result position with the server that produced it.
-    pub(crate) encoding: OffsetEncoding,
 }
 
 /// Open the workspace-symbol query input modal. When the server does not
@@ -3815,13 +3802,14 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
-    let Some((server, _)) = stoat
+    let servers: Vec<String> = stoat
         .feature_hosts(buffer_id, LanguageServerFeature::WorkspaceSymbols)
         .into_iter()
-        .next()
-    else {
+        .map(|(name, _)| name)
+        .collect();
+    if servers.is_empty() {
         return report_lsp_unavailable(stoat, "workspace symbols");
-    };
+    }
 
     let anchor_offset = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
@@ -3848,7 +3836,7 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     stoat.workspace_symbol_input = Some(WorkspaceSymbolInputState {
         input,
         anchor_offset,
-        server: Some(server),
+        servers,
         buffer_id,
     });
     UpdateEffect::Redraw
@@ -3872,29 +3860,44 @@ pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
         partial_result_params: Default::default(),
     };
 
-    let lsp = state
-        .server
-        .as_deref()
-        .and_then(|name| stoat.lsp_registry.client(name))
-        .unwrap_or_else(|| {
-            stoat.lsp_for_feature(state.buffer_id, LanguageServerFeature::WorkspaceSymbols)
-        });
-    let encoding = lsp.offset_encoding();
+    let mut hosts: Vec<Arc<dyn LspHost>> = state
+        .servers
+        .iter()
+        .filter_map(|name| stoat.lsp_registry.client(name))
+        .collect();
+    if hosts.is_empty() {
+        hosts = stoat
+            .feature_hosts(state.buffer_id, LanguageServerFeature::WorkspaceSymbols)
+            .into_iter()
+            .map(|(_, host)| host)
+            .collect();
+    }
+
     let task = stoat.spawn_woken(async move {
-        match lsp.workspace_symbol(params).await {
-            Ok(resp) => resp,
-            Err(err) => {
-                tracing::warn!(target: "stoat::lsp", ?err, "workspace_symbol request failed");
-                None
-            },
+        let requests = hosts.iter().map(|host| {
+            let encoding = host.offset_encoding();
+            let params = params.clone();
+            async move { (encoding, host.workspace_symbol(params).await) }
+        });
+        let responses = futures::future::join_all(requests).await;
+
+        let mut entries = Vec::new();
+        for (encoding, result) in responses {
+            match result {
+                Ok(Some(response)) => entries.extend(workspace_symbol_entries(response, encoding)),
+                Ok(None) => {},
+                Err(err) => {
+                    tracing::warn!(target: "stoat::lsp", ?err, "workspace_symbol request failed")
+                },
+            }
         }
+        entries
     });
     stoat.pending_workspace_symbol_request = Some(task);
     stoat.pending_workspace_symbol_picker = Some(WorkspaceSymbolPicker {
         entries: Vec::new(),
         anchor_offset,
         selected_idx: 0,
-        encoding,
     });
     true
 }
@@ -3910,12 +3913,11 @@ pub(crate) fn workspace_symbol_cancel(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// Poll any in-flight workspace-symbol request and translate the
-/// response into a [`WorkspaceSymbolPicker`]. Drops the picker when
-/// the response is empty or `None`. v1 caps at the first 9
-/// entries (number-key cap). Handles only the
-/// [`WorkspaceSymbolResponse::Flat`] variant in v1; nested
-/// `WorkspaceSymbol` entries are dropped (rare in practice).
+/// Poll any in-flight workspace-symbol request and fill the
+/// [`WorkspaceSymbolPicker`] with the entries every capable server merged.
+///
+/// The request task converts and concatenates each server's response, so this
+/// only installs the result. Drops the picker when no server returned an entry.
 pub(crate) fn pump_lsp_workspace_symbol(stoat: &mut Stoat) -> bool {
     let Some(mut task) = stoat.pending_workspace_symbol_request.take() else {
         return false;
@@ -3923,17 +3925,12 @@ pub(crate) fn pump_lsp_workspace_symbol(stoat: &mut Stoat) -> bool {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(response)) => {
-            let entries = workspace_symbol_entries(response);
+        Poll::Ready(entries) => {
             if entries.is_empty() {
                 stoat.pending_workspace_symbol_picker = None;
             } else if let Some(picker) = stoat.pending_workspace_symbol_picker.as_mut() {
                 picker.entries = entries;
             }
-            true
-        },
-        Poll::Ready(None) => {
-            stoat.pending_workspace_symbol_picker = None;
             true
         },
         Poll::Pending => {
@@ -3943,7 +3940,10 @@ pub(crate) fn pump_lsp_workspace_symbol(stoat: &mut Stoat) -> bool {
     }
 }
 
-fn workspace_symbol_entries(response: WorkspaceSymbolResponse) -> Vec<WorkspaceSymbolEntry> {
+fn workspace_symbol_entries(
+    response: WorkspaceSymbolResponse,
+    encoding: OffsetEncoding,
+) -> Vec<WorkspaceSymbolEntry> {
     let mut entries: Vec<WorkspaceSymbolEntry> = Vec::new();
     match response {
         WorkspaceSymbolResponse::Flat(items) => {
@@ -3955,6 +3955,7 @@ fn workspace_symbol_entries(response: WorkspaceSymbolResponse) -> Vec<WorkspaceS
                     title: name,
                     path,
                     position: location.range.start,
+                    encoding,
                 });
             }
         },
@@ -3963,7 +3964,7 @@ fn workspace_symbol_entries(response: WorkspaceSymbolResponse) -> Vec<WorkspaceS
                 let (uri, position) = match location {
                     OneOf::Left(loc) => (loc.uri, loc.range.start),
                     OneOf::Right(workspace_loc) => {
-                        // `WorkspaceLocation` carries no range; fall back to
+                        // `WorkspaceLocation` carries no range, so fall back to
                         // the start of file. A future `workspaceSymbol/resolve`
                         // round-trip would refine this.
                         (workspace_loc.uri, Position::new(0, 0))
@@ -3976,6 +3977,7 @@ fn workspace_symbol_entries(response: WorkspaceSymbolResponse) -> Vec<WorkspaceS
                     title: name,
                     path,
                     position,
+                    encoding,
                 });
             }
         },
@@ -3996,7 +3998,7 @@ pub(crate) fn pick_workspace_symbol(stoat: &mut Stoat, index: usize) -> bool {
     let focused = stoat.active_workspace().panes.focus();
     crate::action_handlers::file::open_file_in_pane(stoat, focused, &entry.path);
 
-    let encoding = picker.encoding;
+    let encoding = entry.encoding;
     let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
         return true;
     };
@@ -7622,6 +7624,166 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
         h.assert_snapshot("snapshot_symbol_picker");
+    }
+
+    /// Install two identically-capable fakes routed primary-then-secondary for
+    /// `rust`. The caller seeds and opens its own buffer.
+    fn install_two_servers(
+        h: &mut TestHarness,
+        caps: lsp_types::ServerCapabilities,
+    ) -> (
+        std::sync::Arc<crate::host::FakeLsp>,
+        std::sync::Arc<crate::host::FakeLsp>,
+    ) {
+        use crate::lsp::registry::ServerSelector;
+        let primary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        primary.set_capabilities(caps.clone());
+        let secondary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        secondary.set_capabilities(caps);
+        h.stoat
+            .lsp_registry
+            .insert("primary".into(), primary.clone());
+        h.stoat
+            .lsp_registry
+            .insert("secondary".into(), secondary.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                ServerSelector::all("secondary".into()),
+            ],
+        );
+        (primary, secondary)
+    }
+
+    fn document_symbol_caps() -> lsp_types::ServerCapabilities {
+        use lsp_types::{OneOf, ServerCapabilities};
+        ServerCapabilities {
+            document_symbol_provider: Some(OneOf::Left(true)),
+            ..ServerCapabilities::default()
+        }
+    }
+
+    #[test]
+    fn document_symbols_merge_from_two_servers() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (primary, secondary) = install_two_servers(&mut h, document_symbol_caps());
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\nfn bar() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let p = path.to_str().unwrap();
+        primary.set_document_symbols(
+            p,
+            DocumentSymbolResponse::Flat(vec![flat_symbol("foo", p, 0, 3)]),
+        );
+        secondary.set_document_symbols(
+            p,
+            DocumentSymbolResponse::Flat(vec![flat_symbol("bar", p, 1, 3)]),
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+
+        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
+        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["foo", "bar"],
+            "both servers' symbols, primary first"
+        );
+    }
+
+    #[test]
+    fn document_symbols_convert_each_with_its_servers_encoding() {
+        use crate::host::OffsetEncoding;
+        let mut h = TestHarness::with_size(80, 24);
+        let (primary, secondary) = install_two_servers(&mut h, document_symbol_caps());
+        primary.set_offset_encoding(OffsetEncoding::Utf8);
+        secondary.set_offset_encoding(OffsetEncoding::Utf16);
+        let root = seed(&mut h, &[("main.rs", "\u{e9}x\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let p = path.to_str().unwrap();
+
+        // `x` sits at byte offset 2. `é` is two UTF-8 bytes but one UTF-16 unit,
+        // so each server names `x`'s column in its own encoding.
+        primary.set_document_symbols(
+            p,
+            DocumentSymbolResponse::Flat(vec![flat_symbol("utf8", p, 0, 2)]),
+        );
+        secondary.set_document_symbols(
+            p,
+            DocumentSymbolResponse::Flat(vec![flat_symbol("utf16", p, 0, 1)]),
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+
+        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
+        let resolved: Vec<(&str, usize)> = picker
+            .entries
+            .iter()
+            .map(|e| (e.title.as_str(), e.anchor_offset))
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![("utf8", 2), ("utf16", 2)],
+            "each server's column resolves with its own encoding"
+        );
+    }
+
+    #[test]
+    fn workspace_symbols_merge_from_two_servers() {
+        use lsp_types::{OneOf, ServerCapabilities, SymbolKind};
+        let mut h = TestHarness::with_size(80, 24);
+        let (primary, secondary) = install_two_servers(
+            &mut h,
+            ServerCapabilities {
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                ..ServerCapabilities::default()
+            },
+        );
+        let root = seed(
+            &mut h,
+            &[("main.rs", "fn foo() {}\n"), ("lib.rs", "fn bar() {}\n")],
+        );
+        let main = root.join("main.rs");
+        let lib = root.join("lib.rs");
+        open_buffer(&mut h, main.clone());
+        primary.add_workspace_symbol(
+            "f",
+            "foo",
+            SymbolKind::FUNCTION,
+            main.to_str().unwrap(),
+            0,
+            3,
+        );
+        secondary.add_workspace_symbol(
+            "f",
+            "bar",
+            SymbolKind::FUNCTION,
+            lib.to_str().unwrap(),
+            0,
+            3,
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        h.type_keys("f");
+        crate::action_handlers::lsp::workspace_symbol_submit(&mut h.stoat);
+        h.settle();
+
+        let picker = h
+            .stoat
+            .pending_workspace_symbol_picker
+            .as_ref()
+            .expect("picker open");
+        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["foo", "bar"],
+            "both servers' symbols, primary first"
+        );
     }
 
     fn enable_workspace_symbols(h: &TestHarness) {

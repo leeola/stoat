@@ -882,7 +882,7 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_symbol_picker`]; on response
     /// populates [`Self::pending_symbol_picker`].
     pub(crate) pending_symbol_picker_request:
-        Option<stoat_scheduler::Task<Option<lsp_types::DocumentSymbolResponse>>>,
+        Option<stoat_scheduler::Task<Vec<action_handlers::lsp::SymbolEntry>>>,
 
     /// Selectable document-symbol picker waiting for the user to
     /// choose a symbol to jump to (number keys 1-9) or cancel.
@@ -894,11 +894,12 @@ pub struct Stoat {
     /// `workspace_symbol_cancel` (Escape) which discards.
     pub(crate) workspace_symbol_input: Option<action_handlers::lsp::WorkspaceSymbolInputState>,
 
-    /// In-flight `workspace/symbol` request. Polled by
-    /// [`action_handlers::lsp::pump_lsp_workspace_symbol`]; on
-    /// `Ready(Some)` populates [`Self::pending_workspace_symbol_picker`].
+    /// In-flight `workspace/symbol` request, fanned out across every capable
+    /// server. Polled by [`action_handlers::lsp::pump_lsp_workspace_symbol`],
+    /// which installs the merged entries into
+    /// [`Self::pending_workspace_symbol_picker`].
     pub(crate) pending_workspace_symbol_request:
-        Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceSymbolResponse>>>,
+        Option<stoat_scheduler::Task<Vec<action_handlers::lsp::WorkspaceSymbolEntry>>>,
 
     /// Selectable workspace-symbol picker. The user chose a query
     /// from the input modal; this picker shows up to nine matching

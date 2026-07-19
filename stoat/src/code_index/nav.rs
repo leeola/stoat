@@ -347,8 +347,6 @@ fn open_symbol_pick(stoat: &mut Stoat, candidates: Vec<SymbolKey>) -> UpdateEffe
         entries,
         anchor_offset,
         selected_idx: 0,
-        // Code-graph entries carry resolved offsets, so no LSP pump reads this.
-        encoding: Default::default(),
     });
     UpdateEffect::Redraw
 }
