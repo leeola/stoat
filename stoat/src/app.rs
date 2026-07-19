@@ -7741,6 +7741,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_rename(self);
         action_handlers::lsp::pump_lsp_symbol_picker(self);
         action_handlers::lsp::pump_lsp_workspace_symbol(self);
+        action_handlers::lsp::pump_symbol_finder_doc(self);
         action_handlers::lsp::sync_symbol_finder(self);
         action_handlers::lsp::pump_lsp_format(self);
         action_handlers::file::pump_format_on_save(self);

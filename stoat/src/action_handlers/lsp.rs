@@ -3764,6 +3764,124 @@ pub(crate) fn sync_symbol_finder(stoat: &mut Stoat) {
     }
 
     sync_symbol_finder_preview(stoat);
+    sync_symbol_finder_doc(stoat);
+}
+
+/// Fire a hover request for the selected symbol's documentation when the
+/// selection changes, coalesced to one request in flight keyed by the filtered
+/// index it targets. A moved selection clears the stale doc. The next tick
+/// re-fires once the in-flight request lands.
+fn sync_symbol_finder_doc(stoat: &mut Stoat) {
+    let Some((buffer_id, sel_key, target)) = stoat.symbol_finder.as_ref().map(|finder| {
+        let target = finder.selected_entry().map(|e| e.target.clone());
+        let sel_key = target.as_ref().map(|_| finder.selected);
+        (finder.buffer_id, sel_key, target)
+    }) else {
+        return;
+    };
+
+    let (doc_for, in_flight) = match stoat.symbol_finder.as_ref() {
+        Some(finder) => (finder.doc_for, finder.pending_doc.is_some()),
+        None => return,
+    };
+
+    if doc_for == sel_key {
+        return;
+    }
+
+    if let Some(finder) = stoat.symbol_finder.as_mut() {
+        finder.doc_markdown = None;
+    }
+    if in_flight {
+        return;
+    }
+
+    let Some(target) = target else {
+        if let Some(finder) = stoat.symbol_finder.as_mut() {
+            finder.doc_for = None;
+        }
+        return;
+    };
+
+    let task = spawn_symbol_doc_request(stoat, buffer_id, &target);
+    if let Some(finder) = stoat.symbol_finder.as_mut() {
+        finder.pending_doc = task;
+        finder.doc_for = sel_key;
+    }
+}
+
+/// Fire one `textDocument/hover` for a symbol entry's documentation, returning
+/// the flattened markdown or `None` on an empty, failed, or unroutable response.
+///
+/// Document entries convert their buffer offset to an LSP position. Workspace
+/// entries use their stored position and path. Best-effort: a server that never
+/// received the file may reject the request, which yields `None`.
+fn spawn_symbol_doc_request(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    target: &SymbolTarget,
+) -> Option<stoat_scheduler::Task<Option<String>>> {
+    let (_, host) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::Hover)
+        .into_iter()
+        .next()?;
+    let encoding = host.offset_encoding();
+
+    let (uri, position) = match target {
+        SymbolTarget::Offset(offset) => {
+            let ws = stoat.active_workspace();
+            let path = ws.buffers.path_for(buffer_id).map(Path::to_path_buf)?;
+            let uri = path_to_uri(&path)?;
+            let rope = ws.buffers.get(buffer_id)?.read().ok()?.rope().clone();
+            let position = crate::lsp::util::byte_offset_to_lsp_pos(&rope, *offset, encoding);
+            (uri, position)
+        },
+        SymbolTarget::Workspace { path, position, .. } => (path_to_uri(path)?, *position),
+    };
+
+    let params = HoverParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+    };
+
+    Some(stoat.spawn_woken(async move {
+        match host.hover(params).await {
+            Ok(Some(hover)) => {
+                let (text, _plain) = flatten_hover_contents(hover.contents);
+                (!text.is_empty()).then_some(text)
+            },
+            _ => None,
+        }
+    }))
+}
+
+/// Poll the in-flight symbol-doc hover and install its markdown, discarding a
+/// response whose selection has since moved so the pump's next sync re-fires.
+pub(crate) fn pump_symbol_finder_doc(stoat: &mut Stoat) -> bool {
+    let Some(finder) = stoat.symbol_finder.as_mut() else {
+        return false;
+    };
+    let Some(mut task) = finder.pending_doc.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(doc) => {
+            let sel_key = finder.selected_entry().map(|_| finder.selected);
+            if finder.doc_for == sel_key {
+                finder.doc_markdown = doc;
+            }
+            true
+        },
+        Poll::Pending => {
+            finder.pending_doc = Some(task);
+            false
+        },
+    }
 }
 
 /// Sync the finder's preview pane to the selected entry.
@@ -8086,6 +8204,123 @@ mod tests {
         assert!(
             h.stoat.active_workspace().buffers.get(buffer_id).is_none(),
             "the preview scratch buffer is disposed on close",
+        );
+    }
+
+    fn enable_document_symbols_and_hover(h: &TestHarness) {
+        use lsp_types::{HoverProviderCapability, OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            document_symbol_provider: Some(OneOf::Left(true)),
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn symbol_finder_renders_hover_doc_above_source() {
+        let mut h = TestHarness::with_size(120, 30);
+        enable_document_symbols_and_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "fn target() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![flat_symbol("target", path.to_str().unwrap(), 0, 3)]),
+        );
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 3, "TARGETDOC");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+
+        assert_eq!(
+            h.stoat
+                .symbol_finder
+                .as_ref()
+                .unwrap()
+                .doc_markdown
+                .as_deref(),
+            Some("TARGETDOC"),
+        );
+        let buf = h.stoat.render();
+        let shown = (0..buf.area.height).any(|y| {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            row.contains("TARGETDOC")
+        });
+        assert!(shown, "the hover doc renders in the preview pane");
+    }
+
+    #[test]
+    fn symbol_finder_hover_none_leaves_doc_empty() {
+        let mut h = TestHarness::with_size(120, 30);
+        enable_document_symbols_and_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "fn target() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![flat_symbol("target", path.to_str().unwrap(), 0, 3)]),
+        );
+        // No set_hover, so the server answers None. The doc stays empty and no
+        // error surfaces.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+
+        assert!(
+            h.stoat
+                .symbol_finder
+                .as_ref()
+                .unwrap()
+                .doc_markdown
+                .is_none(),
+            "an empty hover response leaves the doc area empty",
+        );
+        assert!(
+            h.stoat.pending_message.is_none(),
+            "a missing doc surfaces no error",
+        );
+    }
+
+    #[test]
+    fn symbol_finder_hover_doc_follows_selection() {
+        let mut h = TestHarness::with_size(120, 30);
+        enable_document_symbols_and_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "fn aaa() {}\nfn bbb() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![
+                flat_symbol("aaa", path.to_str().unwrap(), 0, 3),
+                flat_symbol("bbb", path.to_str().unwrap(), 1, 3),
+            ]),
+        );
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 3, "AAA DOC");
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 1, 3, "BBB DOC");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+        assert_eq!(
+            h.stoat
+                .symbol_finder
+                .as_ref()
+                .unwrap()
+                .doc_markdown
+                .as_deref(),
+            Some("AAA DOC"),
+        );
+
+        h.type_keys("down");
+        h.settle();
+        assert_eq!(
+            h.stoat
+                .symbol_finder
+                .as_ref()
+                .unwrap()
+                .doc_markdown
+                .as_deref(),
+            Some("BBB DOC"),
+            "the doc follows the selection, discarding the previous entry's doc",
         );
     }
 

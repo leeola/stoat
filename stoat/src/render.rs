@@ -680,6 +680,7 @@ pub(crate) fn frame(
             finder,
             ws,
             &stoat.theme,
+            &stoat.language_registry,
             full,
             buf,
             stoat.stoatty.then_some(&mut *scene),

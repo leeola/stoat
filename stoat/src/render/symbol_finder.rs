@@ -9,9 +9,11 @@ use lsp_types::SymbolKind;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Style,
     widgets::{Block, Borders, Clear, Widget},
 };
 use std::path::Path;
+use stoat_language::LanguageRegistry;
 
 /// Lay out the centered symbol finder modal within `area`, or `None` when
 /// `area` is too small to host it.
@@ -53,6 +55,7 @@ pub(crate) fn render_symbol_finder(
     finder: &mut SymbolFinder,
     ws: &mut Workspace,
     theme: &Theme,
+    languages: &LanguageRegistry,
     area: Rect,
     buf: &mut Buffer,
     mut scene: Option<&mut stoatty_widgets::ApcScene>,
@@ -110,7 +113,11 @@ pub(crate) fn render_symbol_finder(
             scene,
         );
         finder.preview_rows = Some(preview_rect.height as usize);
-        crate::render::picker::render_picker_preview(&finder.preview, preview_rect, theme, ws, buf);
+        let source_rect = match &finder.doc_markdown {
+            Some(doc) => render_doc_pane(doc, preview_rect, separator_style, theme, languages, buf),
+            None => preview_rect,
+        };
+        crate::render::picker::render_picker_preview(&finder.preview, source_rect, theme, ws, buf);
     }
 
     let git_root = ws.git_root.clone();
@@ -208,6 +215,53 @@ fn paint_symbol_rows(
             }
         }
     }
+}
+
+/// Render the hover doc `markdown` into the top half of `area`, with an hline
+/// below it, and return the rect the source preview should fill in the lower
+/// rows. Lines beyond the pane width are clipped.
+fn render_doc_pane(
+    markdown: &str,
+    area: Rect,
+    separator_style: Style,
+    theme: &Theme,
+    languages: &LanguageRegistry,
+    buf: &mut Buffer,
+) -> Rect {
+    let lines = crate::markdown::render_markdown(markdown, theme, languages);
+    let max_doc_rows = (area.height / 2).max(1);
+    let doc_rows = (lines.len() as u16).min(max_doc_rows);
+    if doc_rows == 0 {
+        return area;
+    }
+
+    let end_x = area.x + area.width;
+    for (row_idx, line) in lines.iter().take(doc_rows as usize).enumerate() {
+        let y = area.y + row_idx as u16;
+        let mut x = area.x;
+        for (text, style) in line {
+            for ch in text.chars() {
+                if x >= end_x {
+                    break;
+                }
+                buf[(x, y)].set_char(ch).set_style(*style);
+                x += 1;
+            }
+        }
+    }
+
+    let separator_row = area.y + doc_rows;
+    crate::render::chrome::hline(
+        buf,
+        area.x,
+        separator_row,
+        area.width,
+        separator_style,
+        None,
+    );
+    let source_y = separator_row + 1;
+    let source_height = (area.y + area.height).saturating_sub(source_y);
+    Rect::new(area.x, source_y, area.width, source_height)
 }
 
 /// Short display label for a symbol's [`SymbolKind`], or empty when the server

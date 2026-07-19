@@ -8,7 +8,7 @@ use crate::{
 };
 use lsp_types::{Position, SymbolKind};
 use std::path::PathBuf;
-use stoat_scheduler::Executor;
+use stoat_scheduler::{Executor, Task};
 
 /// Whether the finder lists the focused buffer's document symbols or the whole
 /// workspace's symbols.
@@ -81,6 +81,15 @@ pub(crate) struct SymbolFinder {
     /// A query changed while a workspace request was in flight, so the pump
     /// re-fires with the current text once the in-flight request lands.
     pub(crate) query_dirty: bool,
+    /// In-flight `textDocument/hover` for the selected symbol's documentation.
+    pub(crate) pending_doc: Option<Task<Option<String>>>,
+    /// Filtered index the pending or resolved doc corresponds to, so a stale
+    /// response landing after the selection moved is discarded. `None` when no
+    /// entry is selected.
+    pub(crate) doc_for: Option<usize>,
+    /// Resolved hover markdown for the selected symbol, rendered above the source
+    /// preview. `None` when unresolved, empty, or the request failed.
+    pub(crate) doc_markdown: Option<String>,
 }
 
 impl SymbolFinder {
@@ -107,6 +116,9 @@ impl SymbolFinder {
             servers,
             last_query: String::new(),
             query_dirty: false,
+            pending_doc: None,
+            doc_for: None,
+            doc_markdown: None,
         }
     }
 
@@ -236,6 +248,9 @@ mod tests {
             servers: Vec::new(),
             last_query: String::new(),
             query_dirty: false,
+            pending_doc: None,
+            doc_for: None,
+            doc_markdown: None,
         };
         f.refilter("");
         f
