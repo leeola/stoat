@@ -6,7 +6,7 @@
 //! whether an override wins. Consumers read via
 //! `settings.field.unwrap_or(default)` at the point of use.
 
-use crate::ast::{Config, EventType, Setting, Statement, Value};
+use crate::ast::{Config, EventType, Setting, Spanned, Statement, Value};
 use std::collections::BTreeMap;
 
 /// Mouse-capture policy applied at terminal startup. `Auto` keeps the
@@ -153,6 +153,24 @@ pub struct Settings {
     /// and disables the primary when the argv is empty. A language with no
     /// entry falls back to the builtin.
     pub lsp_servers: BTreeMap<String, Vec<String>>,
+    /// Ordered per-language server lists, keyed by language name, in routing
+    /// priority order. Set via `lsp.servers.<language> = [name, ...];` in stcfg.
+    /// A language with an entry uses these named servers instead of the builtin
+    /// list. The `lsp.server.<language>` primary override still applies on top.
+    pub lsp_server_lists: BTreeMap<String, Vec<String>>,
+    /// Named server command definitions, keyed by server name. Set via
+    /// `lsp.command.<name> = ["cmd", "arg"];` in stcfg. A name an `lsp.servers`
+    /// list references resolves its argv here, else from the builtin table by
+    /// name, else the name itself is the command.
+    pub lsp_commands: BTreeMap<String, Vec<String>>,
+    /// Per-server feature allowlists, keyed by server name. Set via
+    /// `lsp.only.<name> = [feature, ...];` in stcfg with Helix kebab-case feature
+    /// names. A server with an entry routes only the listed features.
+    pub lsp_only: BTreeMap<String, Vec<String>>,
+    /// Per-server feature denylists, keyed by server name. Set via
+    /// `lsp.except.<name> = [feature, ...];` in stcfg. A server with an entry
+    /// routes every feature except those listed.
+    pub lsp_except: BTreeMap<String, Vec<String>>,
     /// Named finder scopes, each a list of globs (relative to the workspace
     /// root) that scope lists. Set via `finder.scope.<name> = ["src/**"];` in
     /// stcfg. Shift-Tab in the finder cycles through these after All/Modified.
@@ -190,6 +208,14 @@ impl Settings {
         mode_badges.extend(other.mode_badges);
         let mut lsp_servers = self.lsp_servers;
         lsp_servers.extend(other.lsp_servers);
+        let mut lsp_server_lists = self.lsp_server_lists;
+        lsp_server_lists.extend(other.lsp_server_lists);
+        let mut lsp_commands = self.lsp_commands;
+        lsp_commands.extend(other.lsp_commands);
+        let mut lsp_only = self.lsp_only;
+        lsp_only.extend(other.lsp_only);
+        let mut lsp_except = self.lsp_except;
+        lsp_except.extend(other.lsp_except);
         let mut finder_scopes = self.finder_scopes;
         finder_scopes.extend(other.finder_scopes);
         Settings {
@@ -214,6 +240,10 @@ impl Settings {
             direnv_unset_on_exit: other.direnv_unset_on_exit.or(self.direnv_unset_on_exit),
             mode_badges,
             lsp_servers,
+            lsp_server_lists,
+            lsp_commands,
+            lsp_only,
+            lsp_except,
             finder_scopes,
             finder_default_scope: other.finder_default_scope.or(self.finder_default_scope),
         }
@@ -360,14 +390,32 @@ impl Settings {
             },
             ["lsp", "server", language] => {
                 if let Value::Array(items) = &setting.value.node {
-                    let argv: Vec<String> = items
-                        .iter()
-                        .filter_map(|item| match &item.node {
-                            Value::String(s) | Value::Ident(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    self.lsp_servers.insert((*language).to_string(), argv);
+                    self.lsp_servers
+                        .insert((*language).to_string(), string_array(items));
+                }
+            },
+            ["lsp", "servers", language] => {
+                if let Value::Array(items) = &setting.value.node {
+                    self.lsp_server_lists
+                        .insert((*language).to_string(), string_array(items));
+                }
+            },
+            ["lsp", "command", name] => {
+                if let Value::Array(items) = &setting.value.node {
+                    self.lsp_commands
+                        .insert((*name).to_string(), string_array(items));
+                }
+            },
+            ["lsp", "only", name] => {
+                if let Value::Array(items) = &setting.value.node {
+                    self.lsp_only
+                        .insert((*name).to_string(), string_array(items));
+                }
+            },
+            ["lsp", "except", name] => {
+                if let Value::Array(items) = &setting.value.node {
+                    self.lsp_except
+                        .insert((*name).to_string(), string_array(items));
                 }
             },
             ["finder", "scope", name] => {
@@ -405,6 +453,18 @@ impl Settings {
             _ => {},
         }
     }
+}
+
+/// Collect the string and identifier elements of a setting's array value,
+/// dropping any non-string elements.
+fn string_array(items: &[Spanned<Value>]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| match &item.node {
+            Value::String(s) | Value::Ident(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -445,6 +505,10 @@ mod tests {
                 direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                lsp_server_lists: BTreeMap::new(),
+                lsp_commands: BTreeMap::new(),
+                lsp_only: BTreeMap::new(),
+                lsp_except: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -597,6 +661,41 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_lsp_multi_server() {
+        let config = parse_ok(
+            r#"on init {
+                lsp.servers.rust = ["ra", "linter"];
+                lsp.command.linter = ["some-linter", "--stdio"];
+                lsp.only.linter = ["diagnostics"];
+                lsp.except.ra = ["format"];
+            }"#,
+        );
+        let settings = Settings::from_config(&config);
+        assert_eq!(
+            settings.lsp_server_lists,
+            BTreeMap::from([(
+                "rust".to_string(),
+                vec!["ra".to_string(), "linter".to_string()]
+            )]),
+        );
+        assert_eq!(
+            settings.lsp_commands,
+            BTreeMap::from([(
+                "linter".to_string(),
+                vec!["some-linter".to_string(), "--stdio".to_string()]
+            )]),
+        );
+        assert_eq!(
+            settings.lsp_only,
+            BTreeMap::from([("linter".to_string(), vec!["diagnostics".to_string()])]),
+        );
+        assert_eq!(
+            settings.lsp_except,
+            BTreeMap::from([("ra".to_string(), vec!["format".to_string()])]),
+        );
+    }
+
+    #[test]
     fn from_config_extracts_finder_scope() {
         let config = parse_ok(r#"on init { finder.scope.src = ["src/**", "language/**"]; }"#);
         assert_eq!(
@@ -667,6 +766,10 @@ mod tests {
                 direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                lsp_server_lists: BTreeMap::new(),
+                lsp_commands: BTreeMap::new(),
+                lsp_only: BTreeMap::new(),
+                lsp_except: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -700,6 +803,10 @@ mod tests {
                 direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                lsp_server_lists: BTreeMap::new(),
+                lsp_commands: BTreeMap::new(),
+                lsp_only: BTreeMap::new(),
+                lsp_except: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -742,6 +849,10 @@ mod tests {
             direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            lsp_server_lists: BTreeMap::new(),
+            lsp_commands: BTreeMap::new(),
+            lsp_only: BTreeMap::new(),
+            lsp_except: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };
@@ -767,6 +878,10 @@ mod tests {
             direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            lsp_server_lists: BTreeMap::new(),
+            lsp_commands: BTreeMap::new(),
+            lsp_only: BTreeMap::new(),
+            lsp_except: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };
@@ -794,6 +909,10 @@ mod tests {
                 direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                lsp_server_lists: BTreeMap::new(),
+                lsp_commands: BTreeMap::new(),
+                lsp_only: BTreeMap::new(),
+                lsp_except: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -824,6 +943,10 @@ mod tests {
             direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            lsp_server_lists: BTreeMap::new(),
+            lsp_commands: BTreeMap::new(),
+            lsp_only: BTreeMap::new(),
+            lsp_except: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };
@@ -852,6 +975,10 @@ mod tests {
                 direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                lsp_server_lists: BTreeMap::new(),
+                lsp_commands: BTreeMap::new(),
+                lsp_only: BTreeMap::new(),
+                lsp_except: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -893,6 +1020,10 @@ mod tests {
                 direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                lsp_server_lists: BTreeMap::new(),
+                lsp_commands: BTreeMap::new(),
+                lsp_only: BTreeMap::new(),
+                lsp_except: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -926,6 +1057,10 @@ mod tests {
                 direnv_unset_on_exit: None,
                 mode_badges: BTreeMap::new(),
                 lsp_servers: BTreeMap::new(),
+                lsp_server_lists: BTreeMap::new(),
+                lsp_commands: BTreeMap::new(),
+                lsp_only: BTreeMap::new(),
+                lsp_except: BTreeMap::new(),
                 finder_scopes: BTreeMap::new(),
                 finder_default_scope: None,
             }
@@ -956,6 +1091,10 @@ mod tests {
             direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            lsp_server_lists: BTreeMap::new(),
+            lsp_commands: BTreeMap::new(),
+            lsp_only: BTreeMap::new(),
+            lsp_except: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };
@@ -981,6 +1120,10 @@ mod tests {
             direnv_unset_on_exit: None,
             mode_badges: BTreeMap::new(),
             lsp_servers: BTreeMap::new(),
+            lsp_server_lists: BTreeMap::new(),
+            lsp_commands: BTreeMap::new(),
+            lsp_only: BTreeMap::new(),
+            lsp_except: BTreeMap::new(),
             finder_scopes: BTreeMap::new(),
             finder_default_scope: None,
         };

@@ -223,6 +223,15 @@ on init {
     # the executable and the rest are arguments. An empty list disables it.
     # lsp.server.rust = ["rust-analyzer"];
 
+    # Run several servers for one language, in routing priority order. Each name
+    # resolves its command from lsp.command below, else a built-in of that name,
+    # else the name itself. lsp.only / lsp.except filter a server's features by
+    # Helix kebab-case name (e.g. hover, goto-definition, format).
+    # lsp.servers.rust = ["rust-analyzer", "extra-linter"];
+    # lsp.command.extra-linter = ["some-linter", "--stdio"];
+    # lsp.only.extra-linter = ["diagnostics"];
+    # lsp.except.rust-analyzer = ["format"];
+
     # Status-line badge label for a mode, overriding the builtin table so a
     # user-defined mode shows something clearer than `---`.
     # ui.mode_badge.mymode = "MYM";

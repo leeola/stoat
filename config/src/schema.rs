@@ -174,6 +174,31 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "built-in",
         },
         SettingDef {
+            path: &[Lit("lsp"), Lit("servers"), Wildcard("language")],
+            shape: ValueShape::StringArray,
+            doc: "Ordered list of language-server names for a language, in routing \
+                  priority order.",
+            default: "built-in",
+        },
+        SettingDef {
+            path: &[Lit("lsp"), Lit("command"), Wildcard("name")],
+            shape: ValueShape::StringArray,
+            doc: "Argv for a named language server referenced by an lsp.servers list.",
+            default: "resolved from built-ins by name",
+        },
+        SettingDef {
+            path: &[Lit("lsp"), Lit("only"), Wildcard("name")],
+            shape: ValueShape::StringArray,
+            doc: "Feature allowlist for a named server, kebab-case feature names.",
+            default: "all features",
+        },
+        SettingDef {
+            path: &[Lit("lsp"), Lit("except"), Wildcard("name")],
+            shape: ValueShape::StringArray,
+            doc: "Feature denylist for a named server, kebab-case feature names.",
+            default: "none",
+        },
+        SettingDef {
             path: &[Lit("finder"), Lit("scope"), Wildcard("name")],
             shape: ValueShape::StringArray,
             doc: "Named finder scope, a list of workspace-relative globs.",

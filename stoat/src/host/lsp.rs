@@ -202,6 +202,36 @@ pub enum LanguageServerFeature {
     DocumentColors,
 }
 
+impl LanguageServerFeature {
+    /// Resolve a feature from its Helix-style kebab-case config name, as used in
+    /// `lsp.only.<name>` / `lsp.except.<name>`. Returns `None` for an
+    /// unrecognized name so the caller can warn and drop it.
+    pub fn from_config_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "format" => Self::Format,
+            "goto-declaration" => Self::GotoDeclaration,
+            "goto-definition" => Self::GotoDefinition,
+            "goto-type-definition" => Self::GotoTypeDefinition,
+            "goto-reference" => Self::GotoReference,
+            "goto-implementation" => Self::GotoImplementation,
+            "signature-help" => Self::SignatureHelp,
+            "hover" => Self::Hover,
+            "document-highlight" => Self::DocumentHighlight,
+            "completion" => Self::Completion,
+            "code-action" => Self::CodeAction,
+            "workspace-command" => Self::WorkspaceCommand,
+            "document-symbols" => Self::DocumentSymbols,
+            "workspace-symbols" => Self::WorkspaceSymbols,
+            "diagnostics" => Self::Diagnostics,
+            "pull-diagnostics" => Self::PullDiagnostics,
+            "rename-symbol" => Self::RenameSymbol,
+            "inlay-hints" => Self::InlayHints,
+            "document-colors" => Self::DocumentColors,
+            _ => return None,
+        })
+    }
+}
+
 #[async_trait]
 pub trait LspHost: Send + Sync {
     /// Capabilities the server reported in its `InitializeResult`.

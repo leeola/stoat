@@ -96,32 +96,116 @@ pub(crate) fn lsp_language_for_extension(extension: &str) -> Option<&'static str
 
 /// Resolve the ordered language servers for `language`.
 ///
-/// The `lsp.server.<language>` [`Settings`] override, when present, replaces the
-/// primary server. Its first element is the executable and the rest arguments,
-/// and the server is renamed after that executable. An empty configured argv
-/// disables the primary, dropping it. Builtin secondary servers are kept
-/// unchanged. A language with no builtin and no override yields an empty list.
+/// A `lsp.servers.<language>` list, when present, names the servers to run in
+/// routing priority order. Otherwise the builtin list for the language is used.
+/// Either way, the `lsp.server.<language>` override still replaces the primary
+/// server's argv (or drops it when the argv is empty), and per-server
+/// `lsp.only`/`lsp.except` filters override the builtins'. A language with no
+/// list, no builtin, and no override yields an empty list.
 pub(crate) fn resolve_servers(settings: &Settings, language: &str) -> Vec<ResolvedServer> {
-    let builtin = builtin_servers(language);
-    let Some(override_argv) = settings.lsp_servers.get(language) else {
-        return builtin.iter().map(resolve_builtin).collect();
+    let mut resolved: Vec<ResolvedServer> = match settings.lsp_server_lists.get(language) {
+        Some(names) => names
+            .iter()
+            .map(|name| resolve_named(settings, name))
+            .collect(),
+        None => builtin_servers(language)
+            .iter()
+            .map(|server| resolve_named(settings, server.name))
+            .collect(),
     };
-
-    let mut resolved = Vec::new();
-    if let Some((command, _)) = override_argv.split_first() {
-        let (only, except) = builtin
-            .first()
-            .map(|server| (feature_set(server.only), feature_set(server.except)))
-            .unwrap_or_default();
-        resolved.push(ResolvedServer {
-            name: command.clone(),
-            source: ServerSource::Command(override_argv.clone()),
-            only,
-            except,
-        });
-    }
-    resolved.extend(builtin.iter().skip(1).map(resolve_builtin));
+    apply_primary_override(settings, language, &mut resolved);
     resolved
+}
+
+/// Resolve a single server by name, drawing its argv and feature filters from
+/// config where set and the builtin of that name otherwise.
+///
+/// Argv comes from `lsp.command.<name>`, else the builtin (which may be
+/// in-process), else the name itself as the command. Filters come from
+/// `lsp.only`/`lsp.except`, else the builtin's, else empty.
+fn resolve_named(settings: &Settings, name: &str) -> ResolvedServer {
+    let mut resolved = match builtin_by_name(name) {
+        Some(server) => resolve_builtin(server),
+        None => ResolvedServer {
+            name: name.to_string(),
+            source: ServerSource::Command(vec![name.to_string()]),
+            only: HashSet::new(),
+            except: HashSet::new(),
+        },
+    };
+    if let Some(argv) = settings.lsp_commands.get(name) {
+        resolved.source = ServerSource::Command(argv.clone());
+    }
+    if let Some(only) = configured_features(settings.lsp_only.get(name)) {
+        resolved.only = only;
+    }
+    if let Some(except) = configured_features(settings.lsp_except.get(name)) {
+        resolved.except = except;
+    }
+    resolved
+}
+
+/// Apply the `lsp.server.<language>` primary override to an already-resolved
+/// list. Replaces the first server's name and argv, or drops it when the argv is
+/// empty. A language with no resolved servers gains the override as its sole
+/// server, keeping the pre-list behavior for a language without a builtin.
+fn apply_primary_override(settings: &Settings, language: &str, resolved: &mut Vec<ResolvedServer>) {
+    let Some(argv) = settings.lsp_servers.get(language) else {
+        return;
+    };
+    let Some((command, _)) = argv.split_first() else {
+        if !resolved.is_empty() {
+            resolved.remove(0);
+        }
+        return;
+    };
+    match resolved.first_mut() {
+        Some(primary) => {
+            primary.name = command.clone();
+            primary.source = ServerSource::Command(argv.clone());
+        },
+        None => resolved.push(ResolvedServer {
+            name: command.clone(),
+            source: ServerSource::Command(argv.clone()),
+            only: HashSet::new(),
+            except: HashSet::new(),
+        }),
+    }
+}
+
+/// Languages the builtin table serves. Must list every arm of
+/// [`builtin_servers`] so [`builtin_by_name`] can search them all.
+const BUILTIN_LANGUAGES: &[&str] = &["rust", "stcfg"];
+
+/// The builtin server of a given name across all languages, if any. Server names
+/// are unique across the builtin table.
+fn builtin_by_name(name: &str) -> Option<&'static BuiltinServer> {
+    BUILTIN_LANGUAGES
+        .iter()
+        .flat_map(|&language| builtin_servers(language))
+        .find(|server| server.name == name)
+}
+
+/// Convert configured kebab-case feature names to a feature set, dropping and
+/// warning on any name that does not resolve. `None` when no filter is set.
+fn configured_features(names: Option<&Vec<String>>) -> Option<HashSet<LanguageServerFeature>> {
+    let names = names?;
+    Some(
+        names
+            .iter()
+            .filter_map(|name| {
+                let feature = LanguageServerFeature::from_config_name(name);
+                if feature.is_none() {
+                    tracing::warn!(
+                        target: "stoat::lsp",
+                        feature = %name,
+                        "unknown lsp feature name in config",
+                    );
+                }
+                feature
+            })
+            .collect(),
+    )
 }
 
 fn resolve_builtin(server: &BuiltinServer) -> ResolvedServer {
@@ -224,5 +308,97 @@ mod tests {
     fn stcfg_extension_resolves_to_the_stcfg_language() {
         assert_eq!(lsp_language_for_extension("stcfg"), Some("stcfg"));
         assert_eq!(lsp_language_for_extension("rs"), None);
+    }
+
+    #[test]
+    fn server_list_resolves_names_in_declared_order() {
+        let mut settings = Settings::default();
+        settings.lsp_server_lists.insert(
+            "rust".to_string(),
+            vec!["ra-full".to_string(), "ra-lite".to_string()],
+        );
+        settings
+            .lsp_commands
+            .insert("ra-full".to_string(), vec!["rust-analyzer".to_string()]);
+        settings.lsp_commands.insert(
+            "ra-lite".to_string(),
+            vec!["ra".to_string(), "--lite".to_string()],
+        );
+        assert_eq!(
+            names_and_argv(&settings, "rust"),
+            vec![
+                ("ra-full".to_string(), vec!["rust-analyzer".to_string()]),
+                (
+                    "ra-lite".to_string(),
+                    vec!["ra".to_string(), "--lite".to_string()]
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn bare_name_without_command_resolves_name_as_argv() {
+        let mut settings = Settings::default();
+        settings
+            .lsp_server_lists
+            .insert("rust".to_string(), vec!["pyright".to_string()]);
+        assert_eq!(
+            names_and_argv(&settings, "rust"),
+            vec![("pyright".to_string(), vec!["pyright".to_string()])],
+        );
+    }
+
+    #[test]
+    fn only_and_except_filters_land_on_the_server() {
+        use crate::host::LanguageServerFeature;
+        use std::collections::HashSet;
+
+        let mut settings = Settings::default();
+        settings
+            .lsp_server_lists
+            .insert("rust".to_string(), vec!["ra".to_string()]);
+        settings.lsp_only.insert(
+            "ra".to_string(),
+            vec!["hover".to_string(), "goto-definition".to_string()],
+        );
+        settings
+            .lsp_except
+            .insert("ra".to_string(), vec!["format".to_string()]);
+
+        let servers = resolve_servers(&settings, "rust");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0].only,
+            HashSet::from([
+                LanguageServerFeature::Hover,
+                LanguageServerFeature::GotoDefinition
+            ]),
+        );
+        assert_eq!(
+            servers[0].except,
+            HashSet::from([LanguageServerFeature::Format]),
+        );
+    }
+
+    #[test]
+    fn primary_override_applies_on_top_of_a_list() {
+        let mut settings = Settings::default();
+        settings
+            .lsp_server_lists
+            .insert("rust".to_string(), vec!["a".to_string(), "b".to_string()]);
+        settings.lsp_servers.insert(
+            "rust".to_string(),
+            vec!["custom".to_string(), "--x".to_string()],
+        );
+        assert_eq!(
+            names_and_argv(&settings, "rust"),
+            vec![
+                (
+                    "custom".to_string(),
+                    vec!["custom".to_string(), "--x".to_string()]
+                ),
+                ("b".to_string(), vec!["b".to_string()]),
+            ],
+        );
     }
 }
