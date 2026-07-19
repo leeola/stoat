@@ -30,6 +30,16 @@ const LINE_TINT: f32 = 0.90;
 /// changed chars stand out within an already-washed line.
 const SPAN_TINT: f32 = 0.72;
 
+/// Line wash for content already applied to the git index, leaving 5% of the
+/// diff color. One step past [`LINE_TINT`] toward the background so staged
+/// changes read as receding while unstaged ones stay vivid.
+const STAGED_LINE_TINT: f32 = 0.95;
+
+/// Span wash for content already applied to the git index, leaving 14% of the
+/// diff color. The staged counterpart to [`SPAN_TINT`], receding a step further
+/// like [`STAGED_LINE_TINT`].
+const STAGED_SPAN_TINT: f32 = 0.86;
+
 pub(crate) fn render_review(
     editor: &mut EditorState,
     inner: Rect,
@@ -167,11 +177,15 @@ pub(crate) fn paint_diff_rows(
                     .get(&base_line)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                if let Some(t) = tints.as_ref() {
+                let staged = snapshot
+                    .diff_map()
+                    .and_then(|dm| dm.base_line_staged(base_line));
+                let side = tints.as_ref().map(|t| t.side(staged.unwrap_or(false)));
+                if let Some(side) = side {
                     let line_tint = if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Moved)) {
-                        t.moved_line
+                        side.moved_line
                     } else {
-                        t.removed_line
+                        side.removed_line
                     };
                     fill_line_tint(buf, left_text_x, y, left_content_w, line_tint);
                 }
@@ -184,13 +198,10 @@ pub(crate) fn paint_diff_rows(
                     token_spans,
                     del_style,
                     changes,
-                    tints.as_ref().map(|t| t.removed_span),
-                    tints.as_ref().map(|t| t.moved_span),
+                    side.map(|c| c.removed_span),
+                    side.map(|c| c.moved_span),
                 );
-                if let Some(staged) = snapshot
-                    .diff_map()
-                    .and_then(|dm| dm.base_line_staged(base_line))
-                {
+                if let Some(staged) = staged {
                     let change_scope =
                         if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Moved)) {
                             s::DIFF_MOVED
@@ -204,10 +215,14 @@ pub(crate) fn paint_diff_rows(
             BlockRowKind::BufferRow { buffer_row } => {
                 render_side_num(buf, right_num_x, y, buffer_row + 1, dim_style);
                 let changes = buffer_row_change_spans(snapshot, buffer_row);
-                if let Some(t) = tints.as_ref() {
+                let staged = snapshot
+                    .diff_map()
+                    .and_then(|dm| dm.staged_for_line(buffer_row));
+                let side = tints.as_ref().map(|t| t.side(staged.unwrap_or(false)));
+                if let Some(side) = side {
                     let line_tint = match snapshot.line_diff_status(buffer_row) {
-                        DiffStatus::Added | DiffStatus::Modified => Some(t.added_line),
-                        DiffStatus::Moved => Some(t.moved_line),
+                        DiffStatus::Added | DiffStatus::Modified => Some(side.added_line),
+                        DiffStatus::Moved => Some(side.moved_line),
                         DiffStatus::Unchanged => None,
                     };
                     if let Some(tint) = line_tint {
@@ -224,8 +239,8 @@ pub(crate) fn paint_diff_rows(
                     fallback_style,
                     inlay_style,
                     &changes,
-                    tints.as_ref().map(|t| t.added_span),
-                    tints.as_ref().map(|t| t.moved_span),
+                    side.map(|c| c.added_span),
+                    side.map(|c| c.moved_span),
                     &row_endpoints,
                 );
                 if snapshot.line_diff_status(buffer_row) == DiffStatus::Moved
@@ -244,10 +259,7 @@ pub(crate) fn paint_diff_rows(
                         theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC),
                     );
                 }
-                if let Some(staged) = snapshot
-                    .diff_map()
-                    .and_then(|dm| dm.staged_for_line(buffer_row))
-                {
+                if let Some(staged) = staged {
                     let change_scope = match snapshot.line_diff_status(buffer_row) {
                         DiffStatus::Added => s::DIFF_ADDED,
                         DiffStatus::Modified => s::DIFF_MODIFIED,
@@ -287,11 +299,31 @@ pub(crate) fn paint_diff_rows(
 /// columns, resolved once per paint from the theme's diff colors blended toward
 /// the editor background.
 ///
+/// The washes come in a staged set and an unstaged set. Staged content recedes
+/// an extra step toward the background so it reads as fading into the index
+/// while unstaged changes stay vivid. Select a set for a row with [`Self::side`].
+struct DiffTints {
+    unstaged: ChangeTints,
+    staged: ChangeTints,
+}
+
+impl DiffTints {
+    fn side(&self, staged: bool) -> &ChangeTints {
+        if staged {
+            &self.staged
+        } else {
+            &self.unstaged
+        }
+    }
+}
+
+/// The six change washes for one staged state.
+///
 /// A line-level wash ([`LINE_TINT`]) fills a changed line and a stronger
 /// span-level wash ([`SPAN_TINT`]) marks the exact changed chars within it.
 /// `added` and `removed` key the buffer (right) and base (left) sides. `moved`
 /// keys relocated content on either side.
-struct DiffTints {
+struct ChangeTints {
     added_line: [u8; 3],
     removed_line: [u8; 3],
     moved_line: [u8; 3],
@@ -300,8 +332,8 @@ struct DiffTints {
     moved_span: [u8; 3],
 }
 
-/// Resolve the six diff-change washes from the theme, or `None` when the
-/// background or any diff color is not an RGB color.
+/// Resolve the staged and unstaged diff-change washes from the theme, or `None`
+/// when the background or any diff color is not an RGB color.
 ///
 /// A `None` disables tinting for the whole frame, so the diff view falls back to
 /// [`Modifier::UNDERLINED`] on change spans and skips line washes, keeping
@@ -312,13 +344,17 @@ fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
     let added = style_rgb(theme.get(s::DIFF_ADDED).fg)?;
     let removed = style_rgb(theme.get(s::DIFF_DELETED).fg)?;
     let moved = style_rgb(theme.get(s::DIFF_MOVED).fg)?;
+    let set = |line: f32, span: f32| ChangeTints {
+        added_line: dim_rgb(added, bg, line),
+        removed_line: dim_rgb(removed, bg, line),
+        moved_line: dim_rgb(moved, bg, line),
+        added_span: dim_rgb(added, bg, span),
+        removed_span: dim_rgb(removed, bg, span),
+        moved_span: dim_rgb(moved, bg, span),
+    };
     Some(DiffTints {
-        added_line: dim_rgb(added, bg, LINE_TINT),
-        removed_line: dim_rgb(removed, bg, LINE_TINT),
-        moved_line: dim_rgb(moved, bg, LINE_TINT),
-        added_span: dim_rgb(added, bg, SPAN_TINT),
-        removed_span: dim_rgb(removed, bg, SPAN_TINT),
-        moved_span: dim_rgb(moved, bg, SPAN_TINT),
+        unstaged: set(LINE_TINT, SPAN_TINT),
+        staged: set(STAGED_LINE_TINT, STAGED_SPAN_TINT),
     })
 }
 
@@ -1754,6 +1790,97 @@ mod tests {
             buf[(rx + 3, 1)].bg,
             moved_line,
             "the rest of the moved line takes the moved line wash"
+        );
+    }
+
+    #[test]
+    fn diff_view_staged_line_wash_recedes_further_than_unstaged() {
+        use crate::theme::scope as sc;
+
+        // The base is a/b. The buffer inserts S before a and U before b. The
+        // index holds S but not U, so S is a staged add and U an unstaged one.
+        let mut editor = diff_editor_staged("a\nb\n", "S\na\nb\n", "S\na\nU\nb\n");
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(area);
+        let theme = rgb_diff_theme();
+        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, false);
+
+        let staged_line = tint(&theme, sc::DIFF_ADDED, STAGED_LINE_TINT);
+        let unstaged_line = tint(&theme, sc::DIFF_ADDED, LINE_TINT);
+        assert_ne!(
+            staged_line, unstaged_line,
+            "the staged wash must differ from the unstaged one"
+        );
+
+        let rx = right_text_x(area) + 1;
+        let row_of = |ch: char| {
+            (0..area.height)
+                .find(|&y| buf[(rx, y)].symbol().starts_with(ch))
+                .unwrap_or_else(|| panic!("no right-column row starts with {ch}"))
+        };
+        assert_eq!(
+            buf[(rx, row_of('S'))].bg,
+            staged_line,
+            "the staged added line takes the receding staged wash"
+        );
+        assert_eq!(
+            buf[(rx, row_of('U'))].bg,
+            unstaged_line,
+            "the unstaged added line takes the vivid unstaged wash"
+        );
+        let context = buf[(rx, row_of('a'))].bg;
+        assert!(
+            context != staged_line && context != unstaged_line,
+            "an unchanged context row carries no line wash"
+        );
+    }
+
+    #[test]
+    fn diff_view_staged_span_takes_the_dimmer_span_wash() {
+        use crate::theme::scope as sc;
+
+        // A staged Modified hunk on buffer line 1 with a change span over "bb"
+        // (bytes 3..5). Empty unstaged_lines marks the whole hunk staged.
+        let dm = {
+            let detail = Arc::new(TokenDetail {
+                buffer_spans: vec![ChangeSpan {
+                    byte_range: 3..5,
+                    kind: ChangeKind::Replaced,
+                    move_metadata: None,
+                }],
+                base_spans: Vec::new(),
+            });
+            DiffMap::from_hunks(
+                [DiffHunk {
+                    status: DiffHunkStatus::Modified,
+                    unstaged_lines: Vec::new(),
+                    buffer_start_line: 1,
+                    buffer_line_range: 1..2,
+                    base_byte_range: 0..0,
+                    anchor_range: None,
+                    token_detail: Some(detail),
+                }],
+                None,
+            )
+        };
+        let mut editor = diff_editor_with_map("aa\nbb\ncc\n", dm);
+        let theme = rgb_diff_theme();
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, false);
+
+        let staged_span = tint(&theme, sc::DIFF_ADDED, STAGED_SPAN_TINT);
+        let unstaged_span = tint(&theme, sc::DIFF_ADDED, SPAN_TINT);
+        assert_ne!(
+            staged_span, unstaged_span,
+            "the staged span wash must differ from the unstaged one"
+        );
+
+        let rx = right_text_x(area) + 1;
+        assert_eq!(
+            buf[(rx, 1)].bg,
+            staged_span,
+            "a span on a staged line takes the dimmer staged span wash"
         );
     }
 
