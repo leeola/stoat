@@ -7726,7 +7726,12 @@ impl Stoat {
     /// Resolve a `(line, column)` 0-based point to a byte
     /// offset in the focused editor's rope. Returns `None`
     /// when the focused pane is not an editor.
-    pub(crate) fn offset_for_focused_point(&mut self, line: u32, column: u32) -> Option<usize> {
+    pub(crate) fn offset_for_focused_point(
+        &mut self,
+        line: u32,
+        column: u32,
+        encoding: crate::host::OffsetEncoding,
+    ) -> Option<usize> {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
             FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
@@ -7739,8 +7744,10 @@ impl Stoat {
         let snapshot = editor.display_map.snapshot();
         let buf_snap = snapshot.buffer_snapshot();
         let rope = buf_snap.rope();
-        let point = stoat_text::Point::new(line, column);
-        Some(rope.point_to_offset(point).min(rope.len()))
+        let pos = lsp_types::Position::new(line, column);
+        Some(crate::lsp::util::lsp_pos_to_byte_offset(
+            rope, pos, encoding,
+        ))
     }
 
     /// Collapse the focused editor's primary selection at

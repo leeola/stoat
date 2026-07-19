@@ -1,7 +1,6 @@
-use crate::{buffer::TextBuffer, diagnostics::DiagnosticSet};
+use crate::{buffer::TextBuffer, diagnostics::DiagnosticSet, host::OffsetEncoding};
 use lsp_types::{Diagnostic, DiagnosticSeverity};
-use std::path::PathBuf;
-use stoat_text::Point;
+use std::{collections::HashMap, path::PathBuf};
 
 /// Whether the picker lists the focused buffer's diagnostics
 /// only (`Local`) or every workspace path (`Workspace`). The
@@ -46,28 +45,32 @@ pub struct DiagnosticsEntry {
     /// focused editor's path); `Some` for Workspace-scope
     /// entries.
     pub path: Option<PathBuf>,
+    /// Offset encoding of the server that published the diagnostic. The select
+    /// handler converts `(line, column)` back to a byte offset through it, so a
+    /// utf-16 server's column lands on the right byte of a multibyte line.
+    pub encoding: OffsetEncoding,
 }
 
 const MESSAGE_MAX_CHARS: usize = 80;
 
 impl DiagnosticsPicker {
-    /// Build a picker from a buffer's diagnostic list. Each
-    /// diagnostic's `range.start` is converted to a byte offset
-    /// (clamped to the rope's length) plus a `(line, column)`
-    /// pair shown in the position column. The message is
-    /// truncated to [`MESSAGE_MAX_CHARS`] and stripped of any
-    /// embedded newlines so it fits the single-row layout.
-    /// Entries are sorted by `(line, column)` ascending.
-    pub fn new(diagnostics: &[Diagnostic], buffer: &TextBuffer) -> Self {
+    /// Build a picker from a buffer's diagnostics, each paired with the offset
+    /// encoding of the server that published it.
+    ///
+    /// Each `range.start` is converted to a byte offset through its server's
+    /// encoding plus a `(line, column)` pair shown in the position column. The
+    /// message is truncated to [`MESSAGE_MAX_CHARS`] and stripped of any embedded
+    /// newlines so it fits the single-row layout. Entries are sorted by
+    /// `(line, column)` ascending.
+    pub fn new(diagnostics: &[(OffsetEncoding, Diagnostic)], buffer: &TextBuffer) -> Self {
         let rope = buffer.rope();
-        let rope_len = rope.len();
         let mut entries: Vec<DiagnosticsEntry> = diagnostics
             .iter()
-            .map(|diag| {
+            .map(|(encoding, diag)| {
                 let line = diag.range.start.line;
                 let column = diag.range.start.character;
-                let point = Point::new(line, column);
-                let offset = rope.point_to_offset(point).min(rope_len);
+                let offset =
+                    crate::lsp::util::lsp_pos_to_byte_offset(rope, diag.range.start, *encoding);
                 DiagnosticsEntry {
                     offset,
                     line: line + 1,
@@ -75,6 +78,7 @@ impl DiagnosticsPicker {
                     severity: diag.severity,
                     message: render_message(&diag.message),
                     path: None,
+                    encoding: *encoding,
                 }
             })
             .collect();
@@ -92,23 +96,27 @@ impl DiagnosticsPicker {
     /// recomputes the real byte offset after opening the
     /// target file. Entries are sorted by `(path, line,
     /// column)` so the picker reads predictably.
-    pub fn workspace(diagnostics: &DiagnosticSet) -> Self {
+    pub fn workspace(
+        diagnostics: &DiagnosticSet,
+        encodings: &HashMap<String, OffsetEncoding>,
+    ) -> Self {
         let mut entries: Vec<DiagnosticsEntry> = diagnostics
-            .iter()
-            .flat_map(|(path, diags)| {
-                let path = path.to_path_buf();
-                diags.iter().map(move |diag| {
-                    let line = diag.range.start.line;
-                    let column = diag.range.start.character;
-                    DiagnosticsEntry {
-                        offset: 0,
-                        line: line + 1,
-                        column: column + 1,
-                        severity: diag.severity,
-                        message: render_message(&diag.message),
-                        path: Some(path.clone()),
-                    }
-                })
+            .iter_attributed()
+            .map(|(path, server, diag)| {
+                let line = diag.range.start.line;
+                let column = diag.range.start.character;
+                DiagnosticsEntry {
+                    offset: 0,
+                    line: line + 1,
+                    column: column + 1,
+                    severity: diag.severity,
+                    message: render_message(&diag.message),
+                    path: Some(path.to_path_buf()),
+                    encoding: encodings
+                        .get(server)
+                        .copied()
+                        .unwrap_or(OffsetEncoding::Utf16),
+                }
             })
             .collect();
         entries.sort_by(|a, b| {
@@ -205,14 +213,24 @@ mod tests {
         }
     }
 
+    /// Pair each diagnostic with UTF-16, the default the picker assumes when a
+    /// server is absent from the encoding map. These tests use ASCII content, so
+    /// UTF-16 and UTF-8 resolve to the same byte offsets.
+    fn utf16(diags: Vec<Diagnostic>) -> Vec<(OffsetEncoding, Diagnostic)> {
+        diags
+            .into_iter()
+            .map(|d| (OffsetEncoding::Utf16, d))
+            .collect()
+    }
+
     #[test]
     fn new_lists_every_diagnostic_with_position() {
         let buffer = buf("alpha\nbeta\ngamma\n");
-        let diagnostics = vec![
+        let diagnostics = utf16(vec![
             diag(0, 0, "first", DiagnosticSeverity::ERROR),
             diag(2, 2, "third", DiagnosticSeverity::WARNING),
             diag(1, 1, "second", DiagnosticSeverity::INFORMATION),
-        ];
+        ]);
         let picker = DiagnosticsPicker::new(&diagnostics, &buffer);
         let entries = picker.entries();
         assert_eq!(entries.len(), 3);
@@ -248,7 +266,7 @@ mod tests {
                 diag(2, 0, "a-second", DiagnosticSeverity::ERROR),
             ],
         );
-        let picker = DiagnosticsPicker::workspace(&set);
+        let picker = DiagnosticsPicker::workspace(&set, &HashMap::new());
         assert_eq!(picker.scope(), PickerScope::Workspace);
         let entries = picker.entries();
         assert_eq!(entries.len(), 4);
@@ -272,7 +290,7 @@ mod tests {
         let buffer = buf("x\n");
         let long = "a".repeat(200);
         let multi = format!("first\nsecond\n{long}");
-        let diagnostics = vec![diag(0, 0, &multi, DiagnosticSeverity::ERROR)];
+        let diagnostics = utf16(vec![diag(0, 0, &multi, DiagnosticSeverity::ERROR)]);
         let picker = DiagnosticsPicker::new(&diagnostics, &buffer);
         let entry = &picker.entries()[0];
         assert_eq!(entry.message.chars().count(), MESSAGE_MAX_CHARS);
@@ -282,11 +300,11 @@ mod tests {
     #[test]
     fn select_next_prev_clamp_at_ends() {
         let buffer = buf("a\nb\nc\n");
-        let diagnostics = vec![
+        let diagnostics = utf16(vec![
             diag(0, 0, "first", DiagnosticSeverity::ERROR),
             diag(1, 0, "second", DiagnosticSeverity::ERROR),
             diag(2, 0, "third", DiagnosticSeverity::ERROR),
-        ];
+        ]);
         let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
         picker.select_prev();
         picker.select_prev();

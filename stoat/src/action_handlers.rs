@@ -1165,7 +1165,9 @@ fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.diagnostics.iter().next().is_none() {
         return UpdateEffect::None;
     }
-    let picker = crate::diagnostics_picker::DiagnosticsPicker::workspace(&stoat.diagnostics);
+    let encodings = stoat.lsp_registry.offset_encodings();
+    let picker =
+        crate::diagnostics_picker::DiagnosticsPicker::workspace(&stoat.diagnostics, &encodings);
     if picker.entries().is_empty() {
         return UpdateEffect::None;
     }
@@ -1195,7 +1197,18 @@ fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
         Some(p) => p.to_path_buf(),
         None => return UpdateEffect::None,
     };
-    let diagnostics = stoat.diagnostics.get(&path).to_vec();
+    let encodings = stoat.lsp_registry.offset_encodings();
+    let diagnostics: Vec<(crate::host::OffsetEncoding, lsp_types::Diagnostic)> = stoat
+        .diagnostics
+        .attributed(&path)
+        .map(|(server, diag)| {
+            let encoding = encodings
+                .get(server)
+                .copied()
+                .unwrap_or(crate::host::OffsetEncoding::Utf16);
+            (encoding, diag.clone())
+        })
+        .collect();
     if diagnostics.is_empty() {
         return UpdateEffect::None;
     }

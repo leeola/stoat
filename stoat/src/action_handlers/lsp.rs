@@ -78,7 +78,6 @@ pub(crate) enum DiagnosticDirection {
 /// not an editor, the buffer has no path, or no diagnostic lies in
 /// the requested direction.
 pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection) -> UpdateEffect {
-    let encoding = stoat.lsp_host().offset_encoding();
     let (cursor_offset, buffer_id, rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -97,11 +96,17 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
         None => return UpdateEffect::None,
     };
 
+    let encodings = stoat.lsp_registry.offset_encodings();
     let mut offsets: Vec<usize> = stoat
         .diagnostics
-        .get(&path)
-        .iter()
-        .map(|d| crate::lsp::util::lsp_pos_to_byte_offset(&rope, d.range.start, encoding))
+        .attributed(&path)
+        .map(|(server, d)| {
+            let encoding = encodings
+                .get(server)
+                .copied()
+                .unwrap_or(OffsetEncoding::Utf16);
+            crate::lsp::util::lsp_pos_to_byte_offset(&rope, d.range.start, encoding)
+        })
         .collect();
     offsets.sort_unstable();
 
@@ -5423,6 +5428,41 @@ mod tests {
         assert_eq!(cursor_offset(&mut h), 4);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
         assert_eq!(cursor_offset(&mut h), 8);
+    }
+
+    #[test]
+    fn goto_diagnostic_converts_each_servers_position_with_its_encoding() {
+        use crate::host::OffsetEncoding;
+        let mut h = TestHarness::with_size(80, 24);
+        let ra = std::sync::Arc::new(crate::host::FakeLsp::new());
+        ra.set_offset_encoding(OffsetEncoding::Utf8);
+        let clippy = std::sync::Arc::new(crate::host::FakeLsp::new());
+        clippy.set_offset_encoding(OffsetEncoding::Utf16);
+        h.stoat.lsp_registry.insert("ra".into(), ra);
+        h.stoat.lsp_registry.insert("clippy".into(), clippy);
+
+        // Line 0 "éx" and line 1 "éy": é is two UTF-8 bytes but one UTF-16 unit,
+        // so x sits at byte 2 and y at byte 6.
+        let root = seed(&mut h, &[("a.rs", "\u{e9}x\n\u{e9}y\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+
+        // ra (utf-8) names x at char 2; clippy (utf-16) names y at char 1.
+        h.stoat
+            .diagnostics
+            .replace_from_server(path.clone(), "ra".into(), vec![diag(0, 2, "ra")]);
+        h.stoat
+            .diagnostics
+            .replace_from_server(path, "clippy".into(), vec![diag(1, 1, "clippy")]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 2, "ra's utf-8 column lands on x");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(
+            cursor_offset(&mut h),
+            6,
+            "clippy's utf-16 column lands on y"
+        );
     }
 
     #[test]

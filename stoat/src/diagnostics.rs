@@ -118,6 +118,34 @@ impl DiagnosticSet {
             .unwrap_or(&[])
     }
 
+    /// Iterate `path`'s diagnostics paired with the server that published each,
+    /// in the same order [`Self::get`] yields.
+    ///
+    /// A consumer converting an LSP position to a byte offset needs the encoding
+    /// the publishing server negotiated, which `get()` discards. Empty when the
+    /// path is unknown.
+    pub fn attributed(&self, path: &Path) -> impl Iterator<Item = (&str, &Diagnostic)> {
+        self.by_path.get(path).into_iter().flat_map(|entry| {
+            entry
+                .by_server
+                .iter()
+                .flat_map(|(server, diags)| diags.iter().map(move |diag| (server.as_str(), diag)))
+        })
+    }
+
+    /// Iterate every `(path, server, diagnostic)` triple in the set, attributing
+    /// each diagnostic to its publishing server. The workspace-scope diagnostics
+    /// picker uses this to convert each position with the right encoding.
+    pub fn iter_attributed(&self) -> impl Iterator<Item = (&Path, &str, &Diagnostic)> {
+        self.by_path.iter().flat_map(|(path, entry)| {
+            entry.by_server.iter().flat_map(move |(server, diags)| {
+                diags
+                    .iter()
+                    .map(move |diag| (path.as_path(), server.as_str(), diag))
+            })
+        })
+    }
+
     /// Monotonic counter bumped on every [`Self::replace_from_server`]. A
     /// render-side cache keyed off this can skip recomputing while the
     /// diagnostics are unchanged.

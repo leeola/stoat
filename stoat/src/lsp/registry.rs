@@ -1,4 +1,4 @@
-use crate::host::{LanguageServerFeature, LspHost, NoopLsp};
+use crate::host::{LanguageServerFeature, LspHost, NoopLsp, OffsetEncoding};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -238,6 +238,18 @@ impl LspRegistry {
             hosts.push((String::from("default"), sole.clone()));
         }
         hosts
+    }
+
+    /// Map each server name to the offset encoding it negotiated.
+    ///
+    /// Consumers that convert a published position (a diagnostic's range) to a
+    /// byte offset look the reporting server up here. A server absent from the
+    /// map is treated as UTF-16 by the caller, matching the LSP default.
+    pub(crate) fn offset_encodings(&self) -> HashMap<String, OffsetEncoding> {
+        self.named_hosts()
+            .into_iter()
+            .map(|(name, host)| (name, host.offset_encoding()))
+            .collect()
     }
 
     /// Record that a spawn was attempted for server `name`.

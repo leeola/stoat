@@ -75,12 +75,15 @@ pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let line = entry.line.saturating_sub(1);
     let column = entry.column.saturating_sub(1);
     let local_offset = entry.offset;
+    let encoding = entry.encoding;
 
     super::jump::push_jump(stoat);
     let offset = match path {
         Some(path) => {
             super::file::open_file(stoat, &path);
-            stoat.offset_for_focused_point(line, column).unwrap_or(0)
+            stoat
+                .offset_for_focused_point(line, column, encoding)
+                .unwrap_or(0)
         },
         None => local_offset,
     };
