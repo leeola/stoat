@@ -1146,7 +1146,7 @@ mod tests {
         dm.set_base_text(Arc::new(base_text.to_string()));
         dm.push_hunk(DiffHunk {
             status: DiffHunkStatus::Deleted,
-            staged: false,
+            unstaged_lines: std::iter::once((after_line + 1)..(after_line + 1)).collect(),
             buffer_start_line: after_line + 1,
             buffer_line_range: (after_line + 1)..(after_line + 1),
             base_byte_range: byte_range,
@@ -1679,7 +1679,7 @@ mod tests {
         let diff = DiffMap::from_hunks(
             [DiffHunk {
                 status: DiffHunkStatus::Deleted,
-                staged: false,
+                unstaged_lines: std::iter::once(2..2).collect(),
                 buffer_start_line: 2,
                 buffer_line_range: 2..2,
                 base_byte_range: 0..7,

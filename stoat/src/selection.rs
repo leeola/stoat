@@ -2886,7 +2886,7 @@ mod tests {
             .iter()
             .map(|&start| DiffHunk {
                 status: DiffHunkStatus::Added,
-                staged: false,
+                unstaged_lines: std::iter::once(start..(start + 1)).collect(),
                 buffer_start_line: start,
                 buffer_line_range: start..(start + 1),
                 base_byte_range: 0..0,

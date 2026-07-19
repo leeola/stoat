@@ -1663,7 +1663,7 @@ mod tests {
             DiffMap::from_hunks(
                 [DiffHunk {
                     status: DiffHunkStatus::Moved,
-                    staged: false,
+                    unstaged_lines: std::iter::once(1..2).collect(),
                     buffer_start_line: 1,
                     buffer_line_range: 1..2,
                     base_byte_range: 0..0,
@@ -1724,7 +1724,7 @@ mod tests {
         let dm = DiffMap::from_hunks(
             [DiffHunk {
                 status: DiffHunkStatus::Moved,
-                staged: false,
+                unstaged_lines: std::iter::once(1..2).collect(),
                 buffer_start_line: 1,
                 buffer_line_range: 1..2,
                 base_byte_range: 0..0,

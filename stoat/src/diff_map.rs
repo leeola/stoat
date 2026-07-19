@@ -59,12 +59,37 @@ pub struct DiffHunk {
     pub base_byte_range: Range<usize>,
     pub anchor_range: Option<Range<Anchor>>,
     pub token_detail: Option<Arc<TokenDetail>>,
-    /// Whether this hunk's change is already applied to the git index.
+    /// Buffer-row ranges within this hunk that still differ from the git index.
     ///
-    /// Set only by [`DiffMap::from_structural_changes_staged`]. The plain
-    /// [`DiffMap::from_structural_changes`] leaves it `false`, so a map built
-    /// without index awareness reads as entirely unstaged.
-    pub staged: bool,
+    /// Populated by [`DiffMap::from_structural_changes_staged`] from the
+    /// index-vs-buffer pass. An empty vec means every changed row is staged. The
+    /// full [`Self::buffer_line_range`] means entirely unstaged, the default
+    /// from the index-unaware [`DiffMap::from_structural_changes`]. A zero-width
+    /// deletion or move hunk stores its anchor point `start..start` when
+    /// unstaged. Read through [`Self::staged`] and [`Self::line_staged`], never
+    /// as raw ranges.
+    pub(crate) unstaged_lines: Vec<Range<u32>>,
+}
+
+impl DiffHunk {
+    /// Whether every changed row in this hunk is applied to the git index.
+    ///
+    /// A partially line-staged hunk keeps its unstaged rows in
+    /// [`Self::unstaged_lines`], so it reads as not fully staged.
+    pub(crate) fn staged(&self) -> bool {
+        self.unstaged_lines.is_empty()
+    }
+
+    /// Whether buffer `row` is applied to the git index.
+    ///
+    /// Staged when no [`Self::unstaged_lines`] range covers `row`. A zero-width
+    /// anchor is matched by [`ranges_overlap`] point semantics.
+    fn line_staged(&self, row: u32) -> bool {
+        !self
+            .unstaged_lines
+            .iter()
+            .any(|range| ranges_overlap(range, &(row..row + 1)))
+    }
 }
 
 // --- SumTree plumbing (follows TreeMap/MapKey pattern from text/src/tree_map.rs) ---
@@ -233,9 +258,19 @@ impl DiffMap {
     ) -> Self {
         let mut hunks = changes_to_hunks(&result.changes, lhs_text, rhs_text);
         for hunk in &mut hunks {
-            hunk.staged = !index_changed
-                .iter()
-                .any(|changed| ranges_overlap(changed, &hunk.buffer_line_range));
+            let range = hunk.buffer_line_range.clone();
+            if range.start == range.end {
+                // Zero-width hunk (deletion seam or move anchor): unstaged when
+                // an index change touches its anchor, stored as the anchor.
+                let unstaged = index_changed.iter().any(|c| ranges_overlap(c, &range));
+                hunk.unstaged_lines = if unstaged { vec![range] } else { Vec::new() };
+            } else {
+                hunk.unstaged_lines = index_changed
+                    .iter()
+                    .filter(|c| ranges_overlap(c, &range))
+                    .map(|c| c.start.max(range.start)..c.end.min(range.end))
+                    .collect();
+            }
         }
         Self::from_hunks(hunks, Some(Arc::new(lhs_text.to_string())))
     }
@@ -274,7 +309,8 @@ impl DiffMap {
     /// A row inside a hunk's `buffer_line_range` reports that hunk's status. A
     /// row a [`DiffHunkStatus::Deleted`] hunk anchors -- its removed content
     /// rendered just above -- reports `Deleted`, the deletion seam. The bool is
-    /// the hunk's git-index staged state.
+    /// the row's git-index staged state for a contained row, or the whole
+    /// hunk's for a deletion or move seam.
     pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
         let target = HunkKeyRef(Some(&line));
         let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
@@ -282,16 +318,16 @@ impl DiffMap {
         cursor.prev();
         let hunk = cursor.item()?;
         if hunk.buffer_line_range.contains(&line) {
-            return Some((hunk.status, hunk.staged));
+            return Some((hunk.status, hunk.line_staged(line)));
         }
         if hunk.status == DiffHunkStatus::Deleted && hunk.buffer_start_line == line {
-            return Some((DiffHunkStatus::Deleted, hunk.staged));
+            return Some((DiffHunkStatus::Deleted, hunk.staged()));
         }
         if hunk.status == DiffHunkStatus::Moved
             && hunk.buffer_line_range.is_empty()
             && hunk.buffer_start_line == line
         {
-            return Some((DiffHunkStatus::Moved, hunk.staged));
+            return Some((DiffHunkStatus::Moved, hunk.staged()));
         }
         None
     }
@@ -310,13 +346,16 @@ impl DiffMap {
         cursor
             .item()
             .filter(|hunk| hunk.buffer_line_range.contains(&line))
-            .map(|hunk| hunk.staged)
+            .map(|hunk| hunk.line_staged(line))
     }
 
     /// Count hunks by staged state as `(staged, unstaged)` for a statusline.
+    ///
+    /// A partially line-staged hunk counts as unstaged, so the statusline
+    /// reports it staged only once every changed row is in the index.
     pub fn staged_counts(&self) -> (usize, usize) {
         self.hunks.iter().fold((0, 0), |(staged, unstaged), hunk| {
-            if hunk.staged {
+            if hunk.staged() {
                 (staged + 1, unstaged)
             } else {
                 (staged, unstaged + 1)
@@ -603,7 +642,7 @@ fn changes_to_hunks(
                 .collect();
             hunks.push(DiffHunk {
                 status: DiffHunkStatus::Moved,
-                staged: false,
+                unstaged_lines: Vec::new(),
                 buffer_start_line: line_range.start,
                 buffer_line_range: line_range,
                 base_byte_range: base_range,
@@ -641,7 +680,7 @@ fn changes_to_hunks(
                 .collect();
             hunks.push(DiffHunk {
                 status: DiffHunkStatus::Moved,
-                staged: false,
+                unstaged_lines: Vec::new(),
                 buffer_start_line: lhs_line,
                 buffer_line_range: lhs_line..lhs_line,
                 base_byte_range: full_range,
@@ -683,7 +722,7 @@ fn changes_to_hunks(
             byte_range_to_line_range(&rhs_starts, rhs_text.len(), &rhs_change.byte_range);
         hunks.push(DiffHunk {
             status: DiffHunkStatus::Modified,
-            staged: false,
+            unstaged_lines: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: lhs_change.byte_range.clone(),
@@ -707,7 +746,7 @@ fn changes_to_hunks(
                     byte_range_to_line_range(&rhs_starts, rhs_text.len(), &cur.byte_range);
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Added,
-                    staged: false,
+                    unstaged_lines: Vec::new(),
                     buffer_start_line: line_range.start,
                     buffer_line_range: line_range,
                     base_byte_range: 0..0,
@@ -725,7 +764,7 @@ fn changes_to_hunks(
                     .unwrap_or_else(|| line_of(&lhs_starts, cur.byte_range.start));
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Deleted,
-                    staged: false,
+                    unstaged_lines: Vec::new(),
                     buffer_start_line: buffer_line,
                     buffer_line_range: buffer_line..buffer_line,
                     base_byte_range: cur.byte_range.clone(),
@@ -734,6 +773,9 @@ fn changes_to_hunks(
                 });
             },
         }
+    }
+    for hunk in &mut hunks {
+        hunk.unstaged_lines = vec![hunk.buffer_line_range.clone()];
     }
     hunks.sort_by_key(|h| h.buffer_start_line);
     hunks
@@ -914,7 +956,7 @@ mod tests {
     fn added_hunk(line_range: std::ops::Range<u32>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Added,
-            staged: false,
+            unstaged_lines: vec![line_range.clone()],
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: 0..0,
@@ -926,7 +968,7 @@ mod tests {
     fn deleted_hunk(after_line: u32, base_byte_range: std::ops::Range<usize>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Deleted,
-            staged: false,
+            unstaged_lines: std::iter::once((after_line + 1)..(after_line + 1)).collect(),
             buffer_start_line: after_line + 1,
             buffer_line_range: (after_line + 1)..(after_line + 1),
             base_byte_range,
@@ -941,7 +983,7 @@ mod tests {
     ) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Modified,
-            staged: false,
+            unstaged_lines: vec![line_range.clone()],
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range,
@@ -953,10 +995,10 @@ mod tests {
     #[test]
     fn gutter_mark_reports_status_and_deletion_seam() {
         let mut a = added_hunk(1..3);
-        a.staged = true;
+        a.unstaged_lines.clear();
         let m = modified_hunk(5..6, 10..14);
         let mut d = deleted_hunk(8, 20..30);
-        d.staged = true;
+        d.unstaged_lines.clear();
 
         let dm = DiffMap::from_hunks([a, m, d], None);
 
@@ -991,7 +1033,7 @@ mod tests {
         // anchored at line 3.
         let seam = DiffHunk {
             status: DiffHunkStatus::Moved,
-            staged: false,
+            unstaged_lines: std::iter::once(3..3).collect(),
             buffer_start_line: 3,
             buffer_line_range: 3..3,
             base_byte_range: 0..0,
@@ -1488,7 +1530,7 @@ mod tests {
         let result = stoat_language::structural_diff::diff(lhs, rhs);
         let dm = DiffMap::from_structural_changes(result, lhs, rhs);
         assert!(
-            dm.hunks_in_range(0..u32::MAX).iter().all(|h| !h.staged),
+            dm.hunks_in_range(0..u32::MAX).iter().all(|h| !h.staged()),
             "index-unaware construction reads as entirely unstaged"
         );
     }
@@ -1514,12 +1556,57 @@ mod tests {
         let flags: Vec<(u32, bool)> = dm
             .hunks_in_range(0..u32::MAX)
             .iter()
-            .map(|h| (h.buffer_start_line, h.staged))
+            .map(|h| (h.buffer_start_line, h.staged()))
             .collect();
         assert_eq!(
             flags,
             vec![(1, true), (3, false)],
             "line-1 change staged, line-3 change unstaged"
+        );
+    }
+
+    #[test]
+    fn from_structural_changes_staged_marks_lines_within_a_hunk() {
+        // HEAD is a/b/c. The buffer rewrites both b and c, but the index holds
+        // only the line-1 rewrite, so index-vs-buffer still differs on line 2.
+        let base = "a\nb\nc\n";
+        let buffer = "a\nB\nC\n";
+        let index_changed = std::iter::once(2..3).collect::<Vec<_>>();
+        let result = stoat_language::structural_diff::diff(base, buffer);
+        let dm = DiffMap::from_structural_changes_staged(result, base, buffer, &index_changed);
+        assert_eq!(
+            dm.staged_for_line(1),
+            Some(true),
+            "line 1 matches the index, so it reads staged"
+        );
+        assert_eq!(
+            dm.staged_for_line(2),
+            Some(false),
+            "line 2 still differs from the index, so it reads unstaged"
+        );
+    }
+
+    #[test]
+    fn partially_staged_hunk_reads_per_line() {
+        let mut hunk = modified_hunk(1..3, 10..14);
+        hunk.unstaged_lines = std::iter::once(2..3).collect();
+        let dm = DiffMap::from_hunks([hunk], None);
+        assert_eq!(
+            dm.gutter_mark_for_line(1),
+            Some((DiffHunkStatus::Modified, true)),
+            "row one is staged within the hunk"
+        );
+        assert_eq!(
+            dm.gutter_mark_for_line(2),
+            Some((DiffHunkStatus::Modified, false)),
+            "row two is still unstaged"
+        );
+        assert_eq!(dm.staged_for_line(1), Some(true));
+        assert_eq!(dm.staged_for_line(2), Some(false));
+        assert_eq!(
+            dm.staged_counts(),
+            (0, 1),
+            "a partially staged hunk counts as unstaged"
         );
     }
 

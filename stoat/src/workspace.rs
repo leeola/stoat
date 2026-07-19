@@ -1117,7 +1117,7 @@ mod tests {
         let flags: Vec<(u32, bool)> = dm
             .hunks_in_range(0..u32::MAX)
             .iter()
-            .map(|hunk| (hunk.buffer_start_line, hunk.staged))
+            .map(|hunk| (hunk.buffer_start_line, hunk.staged()))
             .collect();
         assert_eq!(
             flags,

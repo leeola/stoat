@@ -4421,7 +4421,7 @@ mod tests {
         });
         let hunk = DiffHunk {
             status: DiffHunkStatus::Moved,
-            staged: false,
+            unstaged_lines: std::iter::once(moved_line..(moved_line + 1)).collect(),
             buffer_start_line: moved_line,
             buffer_line_range: moved_line..(moved_line + 1),
             base_byte_range: 0..0,
@@ -4499,7 +4499,7 @@ mod tests {
         };
         DiffHunk {
             status: DiffHunkStatus::Moved,
-            staged: false,
+            unstaged_lines: vec![line_range.clone()],
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: 0..0,
@@ -4794,7 +4794,7 @@ mod tests {
             dm.set_base_text(Arc::new("a\nb\nc\n".to_string()));
             dm.push_hunk(DiffHunk {
                 status: DiffHunkStatus::Deleted,
-                staged: false,
+                unstaged_lines: std::iter::once(1..1).collect(),
                 buffer_start_line: 1,
                 buffer_line_range: 1..1,
                 base_byte_range: 0..5,
@@ -5252,7 +5252,7 @@ mod tests {
         });
         let hunk = DiffHunk {
             status: DiffHunkStatus::Moved,
-            staged: false,
+            unstaged_lines: std::iter::once(2..3).collect(),
             buffer_start_line: 2,
             buffer_line_range: 2..3,
             base_byte_range: 0..0,
