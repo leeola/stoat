@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub(crate) mod apc;
 pub(crate) mod editor;
 pub(crate) mod keys;
 
@@ -723,7 +724,7 @@ impl TestHarness {
     /// the parse scheduler has been pumped past the first frame.
     pub fn assert_snapshot_one_frame(&mut self, name: &str) {
         self.stoat.drive_background();
-        let buf = self.stoat.render();
+        let buf = self.render_composited();
         let (pane_count, focused_pane) = self.pane_metadata();
         let frame = Frame {
             number: self.step + self.sub_frame,
@@ -934,7 +935,7 @@ impl TestHarness {
         let _ = self.stoat.render();
         self.scheduler.run_until_parked();
         self.stoat.drive_background();
-        let buf = self.stoat.render();
+        let buf = self.render_composited();
         if self.last_buffer.as_ref() == Some(&buf) {
             if let Some(last) = self.frames.last_mut() {
                 last.actions.push(action.to_string());
@@ -1058,6 +1059,18 @@ impl TestHarness {
         editor::editor_scroll_row(&self.stoat, editor_id)
     }
 
+    /// Render one frame and composite its APC scene into the returned buffer, so
+    /// rich (stoatty) chrome shows up in the same cells the fallback paints.
+    ///
+    /// With the default non-stoatty harness the scene is empty, so this is a
+    /// no-op over [`Stoat::render`].
+    fn render_composited(&mut self) -> Buffer {
+        let mut buf = self.stoat.render();
+        let cmds = apc::decode_apc_stream(self.stoat.apc_scene.bytes());
+        apc::composite_scene(&mut buf, &cmds);
+        buf
+    }
+
     pub(crate) fn capture(&mut self, action: &str) {
         // First render spawns any pending parse jobs. Settling the test
         // scheduler runs them to completion. The second render polls the
@@ -1066,7 +1079,7 @@ impl TestHarness {
         let _ = self.stoat.render();
         self.scheduler.run_until_parked();
         self.stoat.drive_background();
-        let buf = self.stoat.render();
+        let buf = self.render_composited();
         let is_different = self.last_buffer.as_ref() != Some(&buf);
         self.last_buffer = Some(buf.clone());
         if is_different {

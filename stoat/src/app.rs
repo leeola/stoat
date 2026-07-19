@@ -8346,7 +8346,9 @@ pub(crate) async fn parse_buffer_async(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{agent_status::AgentHookEvent, buffer::TextBuffer};
+    use crate::{
+        agent_status::AgentHookEvent, buffer::TextBuffer, test_harness::apc::decode_apc_stream,
+    };
     use std::path::{Path, PathBuf};
 
     fn stoat_with_detached_pane(window: u32) -> (Stoat, PaneId) {
@@ -14308,24 +14310,6 @@ mod tests {
 
         h.stoat.emit_smooth_scroll();
         assert!(rx.try_recv().is_err(), "no APC bytes outside stoatty");
-    }
-
-    /// Decode the sequence of stoatty commands in `bytes`, skipping the raw page
-    /// VT that rides between `fill`/`fill_end` markers.
-    fn decode_apc_stream(bytes: &[u8]) -> Vec<stoatty_protocol::command::Command> {
-        let mut out = Vec::new();
-        let mut rest = bytes;
-        while let Some(start) = rest.windows(2).position(|w| w == b"\x1b_") {
-            let after = &rest[start..];
-            let Some(end) = after.windows(2).position(|w| w == b"\x1b\\") else {
-                break;
-            };
-            if let Some(cmd) = stoatty_protocol::command::decode(&after[..end + 2]) {
-                out.push(cmd);
-            }
-            rest = &after[end + 2..];
-        }
-        out
     }
 
     /// Drain every APC batch currently queued on `rx` into one decoded command

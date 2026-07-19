@@ -55,6 +55,12 @@ impl ApcScene {
         &mut self.current
     }
 
+    /// The built scene bytes, for a reader that decodes the frame without
+    /// appending to it.
+    pub fn bytes(&self) -> &[u8] {
+        &self.current
+    }
+
     /// Append the surface's per-line row heights as a `line_layout` frame.
     ///
     /// Most lines are one row; a height above one is an integer-cell inline
