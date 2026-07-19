@@ -1232,14 +1232,10 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         )
     };
 
-    let Some((_, host)) = stoat
-        .feature_hosts(buffer_id, LanguageServerFeature::Hover)
-        .into_iter()
-        .next()
-    else {
+    let hosts = stoat.feature_hosts(buffer_id, LanguageServerFeature::Hover);
+    if hosts.is_empty() {
         return report_lsp_unavailable(stoat, "hover");
-    };
-    let encoding = host.offset_encoding();
+    }
 
     // A review cursor requests against the real working-tree file, but the
     // popup still anchors at the placeholder cursor cell, so `anchor_offset`
@@ -1264,31 +1260,52 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
-    let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, cursor_offset, encoding);
-    let params = HoverParams {
-        text_document_position_params: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: source_uri },
-            position,
-        },
-        work_done_progress_params: Default::default(),
-    };
-
     let task = stoat.spawn_woken(async move {
-        match host.hover(params).await {
-            Ok(Some(hover)) => {
-                let (text, plain) = flatten_hover_contents(hover.contents);
-                HoverOutcome::Content(HoverResponse {
-                    text,
-                    plain,
-                    anchor_offset,
-                    editor_id,
-                })
-            },
-            Ok(None) => HoverOutcome::Empty,
-            Err(err) => {
-                tracing::warn!(target: "stoat::lsp", ?err, "hover request failed");
+        let requests = hosts.iter().map(|(name, host)| {
+            let name = name.clone();
+            let encoding = host.offset_encoding();
+            let position =
+                crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, cursor_offset, encoding);
+            let params = HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier {
+                        uri: source_uri.clone(),
+                    },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+            };
+            async move { (name, host.hover(params).await) }
+        });
+        let responses = futures::future::join_all(requests).await;
+
+        let mut sections = Vec::new();
+        let mut any_empty = false;
+        for (name, result) in responses {
+            match result {
+                Ok(Some(hover)) => {
+                    let (text, plain) = flatten_hover_contents(hover.contents);
+                    sections.push((name, text, plain));
+                },
+                Ok(None) => any_empty = true,
+                Err(err) => tracing::warn!(target: "stoat::lsp", ?err, "hover request failed"),
+            }
+        }
+
+        if sections.is_empty() {
+            if any_empty {
+                HoverOutcome::Empty
+            } else {
                 HoverOutcome::Failed
-            },
+            }
+        } else {
+            let (text, plain) = merge_hovers(sections);
+            HoverOutcome::Content(HoverResponse {
+                text,
+                plain,
+                anchor_offset,
+                editor_id,
+            })
         }
     });
     stoat.pending_hover_request = Some(task);
@@ -1403,6 +1420,33 @@ fn flatten_hover_contents(contents: HoverContents) -> (String, bool) {
         ),
         HoverContents::Markup(markup) => (markup.value, markup.kind == MarkupKind::PlainText),
     }
+}
+
+/// Combine every responding server's hover markdown into one popup body.
+///
+/// A lone responder renders exactly as a single-server hover always has, its
+/// own text with no header. Two or more responders each get a `**{server}**`
+/// section header and are joined by a `---` rule so a reader can tell which
+/// server said what.
+///
+/// The merged body is plain only when every section is plain text. One markdown
+/// section makes the whole popup markdown.
+///
+/// `sections` is `(server_name, text, plain)` in server routing order, which the
+/// output preserves.
+fn merge_hovers(sections: Vec<(String, String, bool)>) -> (String, bool) {
+    if sections.len() == 1 {
+        let (_, text, plain) = sections.into_iter().next().expect("one section");
+        return (text, plain);
+    }
+
+    let plain = sections.iter().all(|(_, _, plain)| *plain);
+    let body = sections
+        .iter()
+        .map(|(server, text, _)| format!("**{server}**\n\n{text}"))
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+    (body, plain)
 }
 
 /// Poll any in-flight hover request ([`Stoat::pending_hover_request`])
@@ -4635,6 +4679,130 @@ mod tests {
         assert_eq!(
             popup.lines,
             vec![vec![("utf8 routed".to_string(), Style::default())]]
+        );
+    }
+
+    /// Install two hover-capable fakes routed primary-then-secondary for `rust`,
+    /// open a buffer, and return the fakes and its path.
+    fn two_hover_servers(
+        h: &mut TestHarness,
+    ) -> (
+        std::sync::Arc<crate::host::FakeLsp>,
+        std::sync::Arc<crate::host::FakeLsp>,
+        PathBuf,
+    ) {
+        use crate::lsp::registry::ServerSelector;
+        use lsp_types::{HoverProviderCapability, ServerCapabilities};
+
+        let caps = ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..ServerCapabilities::default()
+        };
+        let primary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        primary.set_capabilities(caps.clone());
+        let secondary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        secondary.set_capabilities(caps);
+        h.stoat
+            .lsp_registry
+            .insert("primary".into(), primary.clone());
+        h.stoat
+            .lsp_registry
+            .insert("secondary".into(), secondary.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                ServerSelector::all("secondary".into()),
+            ],
+        );
+
+        let root = seed(h, &[("a.rs", "abc\ndef\n")]);
+        let path = root.join("a.rs");
+        open_buffer(h, path.clone());
+        (primary, secondary, path)
+    }
+
+    fn hover_body(h: &TestHarness) -> String {
+        h.stoat
+            .pending_hover
+            .as_ref()
+            .expect("hover popup")
+            .lines
+            .iter()
+            .map(|line| line.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn hover_merges_sections_from_two_servers() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (primary, secondary, path) = two_hover_servers(&mut h);
+        let p = path.to_str().unwrap();
+        primary.set_hover(p, 0, 0, "alpha docs");
+        secondary.set_hover(p, 0, 0, "beta docs");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        let body = hover_body(&h);
+        for needle in ["primary", "secondary", "alpha docs", "beta docs"] {
+            assert!(
+                body.contains(needle),
+                "merged hover missing {needle:?}: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_omits_the_header_when_only_one_server_answers() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (_primary, secondary, path) = two_hover_servers(&mut h);
+        secondary.set_hover(path.to_str().unwrap(), 0, 0, "from secondary");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+
+        let popup = h
+            .stoat
+            .pending_hover
+            .as_ref()
+            .expect("the content section is shown");
+        assert_eq!(
+            popup.lines,
+            vec![vec![("from secondary".to_string(), Style::default())]],
+            "a lone responder renders unheaded"
+        );
+    }
+
+    #[test]
+    fn merge_hovers_single_section_passes_through_unheaded() {
+        assert_eq!(
+            super::merge_hovers(vec![("ra".into(), "hello".into(), false)]),
+            ("hello".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn merge_hovers_joins_sections_in_routing_order_with_headers() {
+        assert_eq!(
+            super::merge_hovers(vec![
+                ("ra".into(), "A".into(), false),
+                ("ty".into(), "B".into(), false),
+            ]),
+            ("**ra**\n\nA\n\n---\n\n**ty**\n\nB".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn merge_hovers_is_plain_only_when_every_section_is_plain() {
+        assert!(super::merge_hovers(vec![("a".into(), "x".into(), true)]).1);
+        assert!(
+            !super::merge_hovers(vec![
+                ("a".into(), "x".into(), true),
+                ("b".into(), "y".into(), false),
+            ])
+            .1
         );
     }
 
