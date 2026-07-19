@@ -346,6 +346,12 @@ struct AuxWindow {
     /// Sub-line wheel remainder, so pixel-precise trackpad deltas accumulate
     /// into whole-line scroll reports rather than rounding each event to zero.
     wheel_pixels: f64,
+    /// Per-pool ease state for this window's pools, in ascending-id (z) order,
+    /// so a scroll glides toward its target rather than jumping like the primary.
+    pool_anims: BTreeMap<u32, PoolAnim>,
+    /// Wall-clock of the previous redraw, driving this window's own ease step.
+    /// Aux windows redraw independently, so each keeps its own frame clock.
+    last_redraw: Option<Instant>,
 }
 
 /// The renderer-construction inputs an aux window needs, read from [`App`]
@@ -1009,8 +1015,18 @@ impl ApplicationHandler<PtyEvent> for App {
             match &event {
                 WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) => {},
                 WindowEvent::RedrawRequested => {
+                    let font_size = state.font_size;
+                    let scale = state.scale_factor as f32;
                     if let Some(aux) = state.aux.iter_mut().find(|aux| aux.window.id() == id) {
-                        redraw_aux(aux, &state.terminal);
+                        let now = Instant::now();
+                        let dt = aux
+                            .last_redraw
+                            .map(|prev| now.duration_since(prev).min(MAX_EASE_DT))
+                            .unwrap_or(EASE_BASELINE_FRAME);
+                        aux.last_redraw = Some(now);
+                        if redraw_aux(aux, &state.terminal, font_size, scale, dt) {
+                            aux.window.request_redraw();
+                        }
                     }
                     return;
                 },
@@ -2283,6 +2299,8 @@ fn open_aux_window(
         pointer_cell: (0, 0),
         pressed: None,
         wheel_pixels: 0.0,
+        pool_anims: BTreeMap::new(),
+        last_redraw: None,
     });
 
     let size = window.inner_size();
@@ -2320,21 +2338,37 @@ fn open_aux_window(
     }
 }
 
-/// Redraw one aux window, composing its window-bound pools into its grid and
-/// presenting it.
+/// Redraw one aux window, easing its window-bound pools toward their scroll
+/// targets and presenting the result. Returns whether any pool is still gliding,
+/// so the caller reschedules the next frame.
 ///
-/// The terminal is locked only for the read-only compose, then released before
-/// the GPU present, so the reader thread and the primary redraw path are never
-/// held off by an aux frame. Returns without drawing when the GPU is still
-/// building.
-fn redraw_aux(aux: &mut AuxWindow, terminal: &FairMutex<Terminal>) {
+/// A [`compose_aux_grid`] base holds every pool at its target, so a settled pool
+/// shows there while the gliding ones composite over their regions at the eased
+/// offset -- a pool drops its composite the instant it settles and the base's
+/// target content (its rested position) shows through, with no live grid to hand
+/// back to.
+///
+/// The terminal is locked only for the read-only compose and step, then released
+/// before the GPU present, so the reader thread and the primary redraw path are
+/// never held off by an aux frame. Returns `false` without drawing when the GPU
+/// is still building.
+fn redraw_aux(
+    aux: &mut AuxWindow,
+    terminal: &FairMutex<Terminal>,
+    font_size: u32,
+    scale: f32,
+    dt: Duration,
+) -> bool {
     let Some(gpu) = aux.gpu.as_mut() else {
-        return;
+        return false;
     };
     let (rows, cols) = gpu.grid_size();
+    let [cw, ch] = render::cell_size(font_size, scale);
 
+    let mut easing = false;
+    let mut active: Vec<ActivePool> = Vec::new();
     {
-        let terminal = terminal.lock();
+        let mut terminal = terminal.lock();
         compose_aux_grid(
             &terminal,
             aux.id,
@@ -2343,10 +2377,59 @@ fn redraw_aux(aux: &mut AuxWindow, terminal: &FairMutex<Terminal>) {
             rows,
             cols,
         );
+
+        // Step each window pool's ease and collect the ones still gliding, in
+        // ascending-id z-order, dropping anim state for pools the app retired.
+        let pools = terminal.window_pools(aux.id);
+        aux.pool_anims
+            .retain(|id, _| pools.iter().any(|pool| pool.id == *id));
+        for pool in &pools {
+            let anim = aux
+                .pool_anims
+                .entry(pool.id)
+                .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
+            let reposition = terminal.take_reposition(pool.id);
+            match advance_pool_glide(anim, pool, &terminal, reposition, dt) {
+                PoolStep::Settled => {},
+                PoolStep::Degraded => easing = true,
+                PoolStep::Gliding(tile) => {
+                    easing = true;
+                    active.push(tile);
+                },
+            }
+        }
     }
 
+    // Copy each gliding pool's composed rows over the base, then composite them
+    // scissored to their regions and shifted by the sub-cell fraction.
+    for pool in &active {
+        if !pool.content_changed {
+            continue;
+        }
+        let anim = aux
+            .pool_anims
+            .get_mut(&pool.id)
+            .expect("active pool has anim state");
+        copy_pool_region(
+            &mut anim.pool_grid,
+            &anim.document_grid,
+            &aux.grid,
+            pool.region,
+        );
+    }
+    let composites = active
+        .iter()
+        .map(|pool| PoolComposite {
+            grid: &aux.pool_anims[&pool.id].pool_grid,
+            scissor: region_scissor(pool.region, cw, ch),
+            shift_rows: -pool.frac,
+            content_changed: pool.content_changed,
+            occludable: pool.id < NON_PANE_POOL_BASE,
+        })
+        .collect::<Vec<_>>();
+
     let damage = Damage::Full;
-    gpu.render(
+    let heal = gpu.render_with_pools(
         &aux.grid,
         Frame {
             cursor: None,
@@ -2361,7 +2444,10 @@ fn redraw_aux(aux: &mut AuxWindow, terminal: &FairMutex<Terminal>) {
             damage: &damage,
             decoration_damage: &damage,
         },
+        &composites,
+        None,
     );
+    easing || heal
 }
 
 /// Compose every pool bound to aux `window` into `grid`, sized to `rows` x
