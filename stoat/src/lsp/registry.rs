@@ -191,6 +191,24 @@ impl LspRegistry {
         self.sole.iter().cloned().collect()
     }
 
+    /// The names of `language`'s running servers, in selector (routing) order.
+    ///
+    /// Only named per-language servers appear. The nameless sole client is
+    /// omitted, so the status bar can label each server it lists. Empty when no
+    /// named server for the language is up.
+    pub(crate) fn names_for_language(&self, language: &str) -> Vec<String> {
+        self.languages
+            .get(language)
+            .map(|selectors| {
+                selectors
+                    .iter()
+                    .filter(|selector| self.clients.contains_key(&selector.name))
+                    .map(|selector| selector.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Every up host serving `language` whose selector routes `feature` and
     /// whose capabilities support it, each paired with its server name.
     ///

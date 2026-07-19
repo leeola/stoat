@@ -39,6 +39,7 @@ pub(super) const MINIMAP_LINES_PER_CELL: u8 = 8;
 /// Widest line, in minimap columns, a strip renders before clipping.
 pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pane(
     pane: &Pane,
     is_focused: bool,
@@ -47,6 +48,7 @@ pub(crate) fn render_pane(
     buf: &mut Buffer,
     scene: &mut ApcScene,
     undercurls: &mut Vec<UndercurlSpan>,
+    badge_rect: &mut Option<Rect>,
 ) {
     let theme = frame.theme;
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -180,6 +182,7 @@ pub(crate) fn render_pane(
         frame,
         editors,
         buffers,
+        badge_rect,
         buf,
         Some(scene),
     );
@@ -437,6 +440,7 @@ fn render_pane_status(
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    badge_rect: &mut Option<Rect>,
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
 ) {
@@ -456,7 +460,8 @@ fn render_pane_status(
         buf[(x, y)].set_char(' ').set_style(base_style);
     }
 
-    let (left, right) = status_segments(view, is_focused, area, frame, editors, buffers);
+    let (left, right) =
+        status_segments(view, is_focused, area, frame, editors, buffers, badge_rect);
     render_status_segments(area, base_style, frame, &left, &right, buf, scene);
 }
 
@@ -492,7 +497,8 @@ pub(crate) fn paint_pane_status_cells(
         buf[(x, y)].set_char(' ').set_style(base_style);
     }
 
-    let (mut left, right) = status_segments(view, is_focused, area, frame, editors, buffers);
+    let (mut left, right) =
+        status_segments(view, is_focused, area, frame, editors, buffers, &mut None);
 
     // A detached pane cannot host a primary-scene digit popover, so its numeric
     // selection badge rides the status row instead.
@@ -566,6 +572,7 @@ fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style
 /// renderings stay in lockstep. The left cursor and right anchor track the same
 /// cell arithmetic [`paint_segment`] applies, so a segment enters the list only
 /// when it would be painted and the `lsp_message` truncation matches today's.
+#[allow(clippy::too_many_arguments)]
 fn status_segments(
     view: &View,
     is_focused: bool,
@@ -573,6 +580,7 @@ fn status_segments(
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    badge_rect: &mut Option<Rect>,
 ) -> (Vec<StatusSeg>, Vec<StatusSeg>) {
     let theme = frame.theme;
     let base_style = if is_focused {
@@ -636,6 +644,31 @@ fn status_segments(
         }
     }
     if is_focused {
+        let badge_right = right_anchor;
+        for (short, busy) in frame.lsp_servers {
+            let (text, style) = if *busy {
+                (
+                    format!(" {} {short} ", SPINNER_FRAMES[frame.spinner_phase as usize]),
+                    base_style,
+                )
+            } else {
+                (format!(" {short} "), base_style.add_modifier(Modifier::DIM))
+            };
+            let width = text.chars().count() as u16;
+            let start = right_anchor.saturating_sub(width);
+            if start >= cursor {
+                right.push((text, style));
+                right_anchor = start;
+            }
+        }
+        if right_anchor < badge_right {
+            *badge_rect = Some(Rect::new(
+                right_anchor,
+                area.y,
+                badge_right - right_anchor,
+                area.height,
+            ));
+        }
         if let Some(count) = frame.pending_count {
             let text = format!(" {count} ");
             let width = text.chars().count() as u16;
@@ -851,6 +884,28 @@ fn lsp_progress_label(entry: &crate::lsp::progress::LspProgressEntry) -> String 
     format!(" {}: {body} ", entry.server)
 }
 
+/// A short uppercase abbreviation of an LSP server name for its status-bar badge.
+///
+/// A multi-token name takes the initial of each token ("rust-analyzer" -> "RA");
+/// a single token takes its first two characters ("pyright" -> "PY"). Clamped to
+/// three characters so a long name still reads as a compact fixture.
+pub(crate) fn lsp_short_name(name: &str) -> String {
+    let tokens: Vec<&str> = name.split(['-', '_']).filter(|t| !t.is_empty()).collect();
+    let letters: String = if tokens.len() > 1 {
+        tokens
+            .iter()
+            .filter_map(|token| token.chars().next())
+            .collect()
+    } else {
+        name.chars().take(2).collect()
+    };
+    letters
+        .chars()
+        .take(3)
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
 fn paint_segment(
     buf: &mut Buffer,
     y: u16,
@@ -987,6 +1042,127 @@ mod tests {
             message: String::new(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn lsp_short_name_abbreviates_server_names() {
+        use super::lsp_short_name;
+        assert_eq!(lsp_short_name("rust-analyzer"), "RA");
+        assert_eq!(lsp_short_name("pyright"), "PY");
+        assert_eq!(lsp_short_name("typescript-language-server"), "TLS");
+        assert_eq!(lsp_short_name("gopls"), "GO");
+    }
+
+    fn open_rust(h: &mut crate::test_harness::TestHarness) {
+        let root = PathBuf::from("/lsp");
+        let path = root.join("a.rs");
+        h.fake_fs().insert_file(&path, b"fn main() {}");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+    }
+
+    fn bar_row(buf: &ratatui::buffer::Buffer) -> String {
+        let y = buf.area.height - 1;
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn lsp_badge_shows_dim_short_name_when_idle() {
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+
+        let buf = h.stoat.render();
+        let bar = bar_row(&buf);
+        assert!(
+            bar.contains("RA"),
+            "idle badge shows the short name:\n{bar}"
+        );
+        assert!(!bar.contains('⠋'), "no spinner glyph when idle:\n{bar}");
+    }
+
+    #[test]
+    fn lsp_badge_shows_spinner_when_busy() {
+        use crate::host::LspNotification;
+        use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
+
+        let mut h = Stoat::test();
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        fake.push_notification(LspNotification::Progress {
+            token: NumberOrString::Number(1),
+            value: WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "indexing".into(),
+                cancellable: None,
+                message: None,
+                percentage: None,
+            }),
+        });
+        h.drain_lsp();
+
+        let buf = h.stoat.render();
+        let bar = bar_row(&buf);
+        assert!(
+            bar.contains('⠋'),
+            "busy badge shows the spinner glyph:\n{bar}"
+        );
+        assert!(
+            bar.contains("RA"),
+            "busy badge keeps the short name:\n{bar}"
+        );
+    }
+
+    #[test]
+    fn lsp_badge_one_per_server() {
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        h.install_lsp_server("rust", "second-server");
+        open_rust(&mut h);
+
+        let buf = h.stoat.render();
+        let bar = bar_row(&buf);
+        assert!(
+            bar.contains("RA") && bar.contains("SS"),
+            "each running server gets its own badge:\n{bar}"
+        );
+    }
+
+    #[test]
+    fn lsp_badge_hidden_on_unfocused_pane() {
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        h.type_action("SplitRight()");
+        h.settle();
+
+        let buf = h.stoat.render();
+        let rendered: String = (buf.area.y..buf.area.y + buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert_eq!(
+            rendered.matches("RA").count(),
+            1,
+            "only the focused pane paints a badge:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn lsp_badge_rect_records_painted_columns() {
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+
+        let buf = h.stoat.render();
+        let rect = h.stoat.lsp_badge_rect.expect("badge rect stamped");
+        let span: String = (rect.x..rect.x + rect.width)
+            .map(|x| buf[(x, rect.y)].symbol())
+            .collect();
+        assert!(
+            span.contains("RA"),
+            "the recorded rect covers the painted badge columns:\n{span}"
+        );
     }
 
     #[test]

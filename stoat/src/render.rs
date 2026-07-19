@@ -121,6 +121,12 @@ pub(crate) struct FrameCtx<'a> {
     /// Braille spinner glyph index for the [`lsp_progress`](Self::lsp_progress)
     /// popout, advanced by the frame tick so the spinner animates.
     pub(crate) spinner_phase: u8,
+    /// The focused buffer's running language servers as `(short name, busy)`,
+    /// painted as compact badges at the focused pane's bar right edge. `busy` is
+    /// true while the server has work-done progress in flight, driving the badge's
+    /// spinner glyph. Empty for an unfocused pane or a buffer with no named
+    /// server.
+    pub(crate) lsp_servers: &'a [(String, bool)],
     /// Whether a `textDocument/hover` request is still in flight, so the status
     /// bar shows a "lsp: hover..." segment until the response lands.
     pub(crate) hover_pending: bool,
@@ -348,6 +354,31 @@ pub(crate) fn frame(
     };
 
     let diagnostic_encodings = stoat.lsp_registry.offset_encodings();
+
+    let focused_language = {
+        let focused = ws.panes.pane(ws.panes.focus());
+        if let View::Editor(editor_id) = &focused.view {
+            ws.editors.get(*editor_id).and_then(|editor| {
+                crate::action_handlers::lsp::lsp_language_name(&ws.buffers, editor.buffer_id)
+            })
+        } else {
+            None
+        }
+    };
+    let lsp_servers: Vec<(String, bool)> = focused_language
+        .map(|language| {
+            stoat
+                .lsp_registry
+                .names_for_language(&language)
+                .into_iter()
+                .map(|name| {
+                    let busy = stoat.lsp_progress.server_busy(&name);
+                    (pane::lsp_short_name(&name), busy)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let frame = FrameCtx {
         workspace_name: &workspace_name,
         workspace_root: &ws.git_root,
@@ -357,6 +388,7 @@ pub(crate) fn frame(
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
         spinner_phase: app::spinner_phase(stoat.spinner_clock),
+        lsp_servers: &lsp_servers,
         hover_pending: stoat.pending_hover_request.is_some(),
         lsp_message: stoat
             .lsp_message
@@ -390,6 +422,7 @@ pub(crate) fn frame(
     };
 
     let split_focused = ws.panes.focus();
+    let mut lsp_badge_rect: Option<Rect> = None;
     for (id, pane) in ws.panes.split_panes() {
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && id == split_focused;
         if Some(id) == overlay_pane {
@@ -408,8 +441,10 @@ pub(crate) fn frame(
             buf,
             scene,
             undercurls,
+            &mut lsp_badge_rect,
         );
     }
+    stoat.lsp_badge_rect = lsp_badge_rect;
 
     // Single mode declares one strip over the reserved right-edge band for the
     // focused split pane's buffer. The scene re-stamps every paint, so a focus

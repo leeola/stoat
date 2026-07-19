@@ -383,6 +383,10 @@ pub struct Stoat {
     /// paint. `Some` only under stoatty in [`stoat_config::MinimapMode::Single`]
     /// on a wide-enough window, and `None` in per-pane and off modes.
     pub(crate) single_minimap_rect: Option<Rect>,
+    /// The focused pane's status-bar LSP badge group, in cells, stamped every
+    /// paint. `Some` only when a badge painted, `None` when the focused bar shows
+    /// no server badge. The badge-hover hit test consumes it.
+    pub(crate) lsp_badge_rect: Option<Rect>,
     /// Whether the keybinding hints overlay is force-shown in a primary mode,
     /// toggled by `ToggleKeyHints`, off by default. A runtime session flag like
     /// [`Self::syntax_highlight`], not persisted. Contexts that already
@@ -1266,6 +1270,7 @@ impl Stoat {
             syntax_highlight: true,
             minimap_override: None,
             single_minimap_rect: None,
+            lsp_badge_rect: None,
             key_hints_visible: false,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: None,
@@ -6410,6 +6415,7 @@ impl Stoat {
             pending_count: self.pending_count,
             lsp_progress: None,
             spinner_phase: 0,
+            lsp_servers: &[],
             hover_pending: self.pending_hover_request.is_some(),
             lsp_message: self
                 .lsp_message
@@ -6472,6 +6478,7 @@ impl Stoat {
                         &mut buf,
                         &mut scene,
                         &mut undercurls,
+                        &mut None,
                     );
                 }
 

@@ -101,6 +101,11 @@ impl LspProgressMap {
         self.entries.values().max_by_key(|e| e.sequence)
     }
 
+    /// Whether `server` has any work-done operation in flight.
+    pub(crate) fn server_busy(&self, server: &str) -> bool {
+        self.entries.keys().any(|(name, _)| name == server)
+    }
+
     fn bump_sequence(&mut self) -> u64 {
         let s = self.next_sequence;
         self.next_sequence += 1;
