@@ -95,14 +95,15 @@ const POPOUT_INSET_PX: u8 = 4;
 
 /// Draw a popout card frame around `area`.
 ///
-/// The frame is a filled, rounded, drop-shadowed panel inset a few pixels from
-/// its cell rect. This draws only the frame, so the caller owns the interior.
+/// The frame is a filled, square-cornered, drop-shadowed panel inset a few pixels
+/// from its cell rect. This draws only the frame, so the caller owns the interior.
 ///
 /// The rich arm -- taken when `scene` is threaded and both `bg` and `border`
 /// resolve to RGB -- emits a `panel` APC frame with `fill` set to `bg`, a
-/// [`POPOUT_INSET_PX`] horizontal inset, a drop shadow, and a rounded hairline in
-/// `border`. The inset and shadow are what make the card read as tucked behind
-/// the bar, and a plain terminal cannot draw them.
+/// [`POPOUT_INSET_PX`] horizontal inset, a drop shadow, and a square light
+/// hairline in `border`. Square corners match the status bar the card extends, so
+/// the card reads as part of it. The inset and shadow are what make the card read
+/// as tucked behind the bar, and a plain terminal cannot draw them.
 ///
 /// The fallback draws a ratatui [`Block`] with [`Borders::ALL`] in `border`. It
 /// draws only when `area` spans at least two rows, because a one-row card has no
@@ -131,9 +132,9 @@ pub(crate) fn popout_frame(
                     left: area.x,
                     width: area.width,
                     height: area.height,
-                    style: BorderStyle::Rounded,
+                    style: BorderStyle::Light,
                     border,
-                    corner_radius: 6,
+                    corner_radius: 0,
                     fill: Some(bg),
                     shadow: true,
                     inset_x: POPOUT_INSET_PX,
@@ -267,7 +268,7 @@ pub(crate) fn text(
 
 #[cfg(test)]
 mod tests {
-    use super::{hline, modal_frame, text, vline};
+    use super::{hline, modal_frame, popout_frame, text, vline, POPOUT_INSET_PX};
     use crate::theme::Theme;
     use ratatui::{
         buffer::Buffer,
@@ -346,6 +347,45 @@ mod tests {
             text: " hi ".to_owned(),
         });
         assert_eq!(scene.buffer(), &[panel, title].concat());
+    }
+
+    #[test]
+    fn popout_arm_emits_a_square_cornered_panel() {
+        let area = Rect::new(2, 1, 8, 4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
+        let mut scene = ApcScene::new();
+        let theme = Theme::empty();
+
+        popout_frame(
+            &mut buf,
+            area,
+            Color::Rgb(4, 5, 6),
+            Color::Rgb(1, 2, 3),
+            &theme,
+            Some(&mut scene),
+        );
+
+        // No box-drawing glyph is painted. The panel is off-grid.
+        assert_eq!(buf.cell((2, 1)).unwrap().symbol(), " ");
+
+        // Square corners and a light hairline match the status bar the card
+        // extends, filled with the card background and inset so it tucks behind
+        // the bar.
+        assert_eq!(
+            scene.buffer(),
+            &encode_panel(&PanelCommand {
+                top: 1,
+                left: 2,
+                width: 8,
+                height: 4,
+                style: BorderStyle::Light,
+                border: [1, 2, 3],
+                corner_radius: 0,
+                fill: Some([4, 5, 6]),
+                shadow: true,
+                inset_x: POPOUT_INSET_PX,
+            }),
+        );
     }
 
     #[test]
