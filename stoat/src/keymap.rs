@@ -193,6 +193,7 @@ pub fn evaluate(predicate: &Predicate, state: &dyn KeymapState) -> bool {
             Some(_) => true,
             None => false,
         },
+        Predicate::Not(p) => !evaluate(&p.node, state),
         Predicate::And(l, r) => evaluate(&l.node, state) && evaluate(&r.node, state),
         Predicate::Or(l, r) => evaluate(&l.node, state) || evaluate(&r.node, state),
     }
@@ -202,8 +203,9 @@ pub fn evaluate(predicate: &Predicate, state: &dyn KeymapState) -> bool {
 /// contributes per predicate when resolving competing bindings.
 ///
 /// An `And` sums its branches, since satisfying it requires all of them. Every
-/// other form counts as one. Leaves are a single atom, and an `Or` scores one
-/// because it is satisfiable by its weakest branch.
+/// other form counts as one. Leaves are a single atom, an `Or` scores one
+/// because it is satisfiable by its weakest branch, and a `Not` scores one
+/// because a negation is broadly satisfiable and so earns no specificity.
 fn predicate_atoms(predicate: &Predicate) -> usize {
     match predicate {
         Predicate::And(l, r) => predicate_atoms(&l.node) + predicate_atoms(&r.node),
@@ -432,6 +434,8 @@ fn predicate_eq_matches(pred: &Predicate, field: &str, value: &str) -> bool {
             predicate_eq_matches(&l.node, field, value)
                 || predicate_eq_matches(&r.node, field, value)
         },
+        // A negated scope equality is not a scope claim, so `Not` is not walked.
+        Predicate::Not(_) => false,
         _ => false,
     }
 }
@@ -459,6 +463,9 @@ fn collect_mode_targets(predicate: &Predicate, out: &mut HashSet<String>) {
             collect_mode_targets(&l.node, out);
             collect_mode_targets(&r.node, out);
         },
+        // `!(mode == foo)` still targets foo, so it is registered to avoid a
+        // spurious unknown-mode warning for a mode the config does reference.
+        Predicate::Not(p) => collect_mode_targets(&p.node, out),
         _ => {},
     }
 }
@@ -705,6 +712,40 @@ mod tests {
 
         let state = TestState::new();
         assert!(!evaluate(&block.predicate.node, &state));
+    }
+
+    fn predicate_of(src: &str) -> Predicate {
+        let config = parse_config(src);
+        match &config.blocks[0].node.statements[0].node {
+            Statement::PredicateBlock(b) => b.predicate.node.clone(),
+            _ => panic!("expected predicate block"),
+        }
+    }
+
+    #[test]
+    fn eval_not() {
+        let not_selection = predicate_of("on key { !has_selection { d -> Cut(); } }");
+        let present = TestState::new().set("has_selection", StateValue::Bool(true));
+        assert!(
+            !evaluate(&not_selection, &present),
+            "Not of a true bool is false"
+        );
+        assert!(
+            evaluate(&not_selection, &TestState::new()),
+            "Not of an absent field is true",
+        );
+
+        let not_normal = predicate_of(r#"on key { !(mode == "normal") { q -> Quit(); } }"#);
+        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+        assert!(
+            !evaluate(&not_normal, &normal),
+            "Not of a matching Eq is false"
+        );
+        let insert = TestState::new().set("mode", StateValue::String("insert".into()));
+        assert!(
+            evaluate(&not_normal, &insert),
+            "Not of a failing Eq is true"
+        );
     }
 
     #[test]

@@ -450,6 +450,65 @@ mod tests {
     }
 
     #[test]
+    fn predicate_negation() {
+        let config = parse_ok("on key { !flag { d -> Cut(); } }");
+        let block = assert_predicate_block(&config.blocks[0].node.statements[0]);
+        match &block.predicate.node {
+            Predicate::Not(inner) => match &inner.node {
+                Predicate::Bool(name) => assert_eq!(name.node, "flag"),
+                _ => panic!("expected Bool inside Not"),
+            },
+            _ => panic!("expected Not predicate"),
+        }
+    }
+
+    #[test]
+    fn predicate_negation_binds_tighter_than_and() {
+        let config = parse_ok(r#"on key { !(a || b) && c { k -> MoveUp(); } }"#);
+        let block = assert_predicate_block(&config.blocks[0].node.statements[0]);
+        match &block.predicate.node {
+            Predicate::And(left, right) => {
+                match &left.node {
+                    Predicate::Not(inner) => {
+                        assert!(matches!(inner.node, Predicate::Or(_, _)), "!(a || b)")
+                    },
+                    _ => panic!("expected Not(Or) on the left"),
+                }
+                assert!(
+                    matches!(right.node, Predicate::Bool(_)),
+                    "bare c on the right"
+                );
+            },
+            _ => panic!("expected And at the top"),
+        }
+    }
+
+    #[test]
+    fn predicate_double_negation() {
+        let config = parse_ok("on key { !!flag { d -> Cut(); } }");
+        let block = assert_predicate_block(&config.blocks[0].node.statements[0]);
+        match &block.predicate.node {
+            Predicate::Not(outer) => match &outer.node {
+                Predicate::Not(inner) => {
+                    assert!(matches!(inner.node, Predicate::Bool(_)), "!!flag")
+                },
+                _ => panic!("expected Not(Not(...))"),
+            },
+            _ => panic!("expected outer Not"),
+        }
+    }
+
+    #[test]
+    fn negation_key_binding_coexists_with_negation_block() {
+        let config = parse_ok("on key { ! -> OpenHelp(); !flag { d -> Cut(); } }");
+        let stmts = &config.blocks[0].node.statements;
+        let binding = assert_binding(&stmts[0]);
+        assert_eq!(binding.key.node.keys, vec![key_char('!')]);
+        let block = assert_predicate_block(&stmts[1]);
+        assert!(matches!(block.predicate.node, Predicate::Not(_)));
+    }
+
+    #[test]
     fn nested_predicate_blocks() {
         let config = parse_ok(
             r#"

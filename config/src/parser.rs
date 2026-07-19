@@ -394,10 +394,21 @@ fn predicate_inner<'src>() -> impl Parser<'src, &'src str, Predicate, Extra<'src
             var.map_with(|node, e| Spanned::new(node, span_to_range(e.span()))),
         ));
 
-        let and_chain = atom.clone().foldl(
+        // Prefix `!` binds tighter than `&&`, so it wraps a single atom. Stacked
+        // negations (`!!x`) fold right into nested `Not`.
+        let unary = just('!')
+            .map_with(|_, e| span_to_range(e.span()))
+            .then_ignore(ws())
+            .repeated()
+            .foldr(atom.clone(), |bang: std::ops::Range<usize>, inner| {
+                let span = bang.start..inner.span.end;
+                Spanned::new(Predicate::Not(Box::new(inner)), span)
+            });
+
+        let and_chain = unary.clone().foldl(
             ws().ignore_then(just("&&"))
                 .ignore_then(ws())
-                .ignore_then(atom.clone())
+                .ignore_then(unary.clone())
                 .repeated(),
             |left, right| {
                 let span = left.span.start..right.span.end;

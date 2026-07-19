@@ -104,6 +104,7 @@ pub enum Predicate {
     Lte(Spanned<String>, Spanned<Value>),
     Matches(Spanned<String>, Spanned<String>),
     Bool(Spanned<String>),
+    Not(Box<Spanned<Predicate>>),
     And(Box<Spanned<Predicate>>, Box<Spanned<Predicate>>),
     Or(Box<Spanned<Predicate>>, Box<Spanned<Predicate>>),
 }
