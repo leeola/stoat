@@ -2004,14 +2004,23 @@ fn apply_inlay_hints(stoat: &mut Stoat, buffer_id: BufferId, items: Vec<InlayHin
     editor.hint_inlay_ids = editor.display_map.splice_inlays(prev, inserts);
 }
 
-/// Remove all inlay hints from the focused editor's display map.
+/// Remove every inlay hint from every editor's display map, across all
+/// workspaces.
+///
+/// A hint is spliced into whichever editor was focused when its response
+/// applied, so with splits or after switching buffers, hints outlive the moment
+/// they were requested and sit in editors that are no longer focused. Once the
+/// toggle is off the trigger returns early and never runs again, so a
+/// focused-only clear would strand those hints forever. The sweep must reach
+/// every editor.
 pub(crate) fn clear_inlay_hints(stoat: &mut Stoat) {
-    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
-        return;
-    };
-    let prev = std::mem::take(&mut editor.hint_inlay_ids);
-    if !prev.is_empty() {
-        editor.display_map.splice_inlays(prev, Vec::new());
+    for ws in stoat.workspaces.values_mut() {
+        for editor in ws.editors.values_mut() {
+            let prev = std::mem::take(&mut editor.hint_inlay_ids);
+            if !prev.is_empty() {
+                editor.display_map.splice_inlays(prev, Vec::new());
+            }
+        }
     }
 }
 
@@ -8319,6 +8328,24 @@ mod tests {
             .len()
     }
 
+    fn focused_editor_id(h: &TestHarness) -> crate::editor_state::EditorId {
+        let ws = h.stoat.active_workspace();
+        match ws.panes.pane(ws.panes.focus()).view {
+            crate::pane::View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        }
+    }
+
+    fn editor_hint_ids_len(h: &TestHarness, id: crate::editor_state::EditorId) -> usize {
+        h.stoat
+            .active_workspace()
+            .editors
+            .get(id)
+            .expect("editor")
+            .hint_inlay_ids
+            .len()
+    }
+
     #[test]
     fn snapshot_inlay_hints_render_when_enabled() {
         let mut h = TestHarness::with_size(40, 8);
@@ -8350,6 +8377,36 @@ mod tests {
 
         h.type_keys("space l h");
         assert_eq!(hint_ids_len(&mut h), 0);
+    }
+
+    #[test]
+    fn inlay_hints_toggle_off_clears_unfocused_editors() {
+        let mut h = TestHarness::with_size(40, 8);
+        enable_inlay_hints(&h);
+        let root = seed(&mut h, &[("a.rs", "let x = 1\n"), ("b.rs", "let y = 2\n")]);
+        let a = root.join("a.rs");
+        open_buffer(&mut h, a.clone());
+        h.fake_lsp()
+            .set_range_inlay_hints(a.to_str().unwrap(), vec![type_hint(0, 5, ": u32")]);
+        h.type_keys("space l h");
+        h.advance_clock(Duration::from_millis(150));
+        let a_editor = focused_editor_id(&h);
+        assert_eq!(editor_hint_ids_len(&h, a_editor), 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        open_buffer(&mut h, root.join("b.rs"));
+        assert_ne!(
+            focused_editor_id(&h),
+            a_editor,
+            "opening b.rs in the split moves focus off a.rs's editor"
+        );
+
+        h.type_keys("space l h");
+        assert_eq!(
+            editor_hint_ids_len(&h, a_editor),
+            0,
+            "toggle-off clears hints from the unfocused a.rs editor"
+        );
     }
 
     #[test]
