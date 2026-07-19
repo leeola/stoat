@@ -129,9 +129,10 @@ pub(crate) struct FrameCtx<'a> {
     /// spinner glyph. Empty for an unfocused pane or a buffer with no named
     /// server.
     pub(crate) lsp_servers: &'a [(String, bool)],
-    /// Whether a `textDocument/hover` request is still in flight, so the status
-    /// bar shows a "lsp: hover..." segment until the response lands.
-    pub(crate) hover_pending: bool,
+    /// Label of the explicit LSP request still in flight, so the status bar
+    /// shows a "lsp: {label}..." segment until the response lands. `None` when no
+    /// such request is pending. See [`crate::app::Stoat::lsp_pending_label`].
+    pub(crate) lsp_pending: Option<&'static str>,
     /// Freshest `window/showMessage` text. `MessageType::ERROR` paints as a
     /// wrapped popout card above the status bar. Other levels paint in the bar's
     /// right side.
@@ -332,6 +333,7 @@ pub(crate) fn frame(
     });
 
     let home = stoat.env_host().var("HOME").map(PathBuf::from);
+    let lsp_pending = stoat.lsp_pending_label();
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -394,7 +396,7 @@ pub(crate) fn frame(
         lsp_progress_entries: &lsp_progress_entries,
         spinner_phase: app::spinner_phase(stoat.spinner_clock),
         lsp_servers: &lsp_servers,
-        hover_pending: stoat.pending_hover_request.is_some(),
+        lsp_pending,
         lsp_message: stoat
             .lsp_message
             .as_ref()

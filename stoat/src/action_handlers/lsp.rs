@@ -5913,6 +5913,34 @@ mod tests {
     }
 
     #[test]
+    fn in_flight_code_action_shows_a_status_segment() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+
+        // Hold the response open so the request stays in flight through render.
+        h.fake_lsp()
+            .set_request_delay("textDocument/codeAction", Duration::from_secs(60));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+        assert!(
+            h.stoat.pending_code_action_request.is_some(),
+            "the delayed code-action request stays in flight",
+        );
+
+        let buf = h.stoat.render();
+        let shown = (0..buf.area.height).any(|y| {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            row.contains("lsp: code actions...")
+        });
+        assert!(
+            shown,
+            "the status bar shows the in-flight code-action segment"
+        );
+    }
+
+    #[test]
     fn code_action_no_result_reports_none_available() {
         let mut h = TestHarness::with_size(80, 24);
         enable_code_action(&h);

@@ -1781,6 +1781,42 @@ impl Stoat {
         self.lsp_registry.hosts_with_feature(&name, feature)
     }
 
+    /// The label for the highest-priority explicit LSP request in flight, or
+    /// `None` when none is pending, driving the status bar's ` lsp: ...  `
+    /// segment so a slow server does not make the keypress look dead.
+    ///
+    /// Background-debounced requests (inlay hints, signature help, document
+    /// highlight, diagnostics, semantic tokens, folding) are deliberately
+    /// excluded because they fire on every edit and scroll and would flash the
+    /// segment constantly.
+    pub(crate) fn lsp_pending_label(&self) -> Option<&'static str> {
+        if let Some((label, _)) = &self.pending_lsp_jump {
+            return Some(label);
+        }
+        if self.pending_hover_request.is_some() {
+            return Some("hover");
+        }
+        if self.pending_code_action_request.is_some() {
+            return Some("code actions");
+        }
+        if self.pending_code_action_resolve.is_some() {
+            return Some("code action");
+        }
+        if self.pending_prepare_rename.is_some() || self.pending_rename.is_some() {
+            return Some("rename");
+        }
+        if self.pending_symbol_picker_request.is_some() {
+            return Some("symbols");
+        }
+        if self.pending_workspace_symbol_request.is_some() {
+            return Some("workspace symbols");
+        }
+        if self.pending_format_request.is_some() || self.pending_format_on_save.is_some() {
+            return Some("format");
+        }
+        None
+    }
+
     /// Reap the language server on quit. Awaits [`LspHost::shutdown`]
     /// bounded by a 500ms timeout so a server that ignores the request
     /// cannot block the editor's exit. [`NoopLsp`] and the test fake
@@ -6427,6 +6463,7 @@ impl Stoat {
     fn emit_window_content(&mut self, out: &mut Vec<u8>) {
         let mode = self.focused_mode().to_string();
         let home = self.env_host().var("HOME").map(PathBuf::from);
+        let lsp_pending = self.lsp_pending_label();
         let ws = &mut self.workspaces[self.active_workspace];
         let windowed = ws.panes.windowed_panes();
         if windowed.is_empty() {
@@ -6458,7 +6495,7 @@ impl Stoat {
             lsp_progress_entries: &[],
             spinner_phase: 0,
             lsp_servers: &[],
-            hover_pending: self.pending_hover_request.is_some(),
+            lsp_pending,
             lsp_message: self
                 .lsp_message
                 .as_ref()
