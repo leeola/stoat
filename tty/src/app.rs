@@ -588,6 +588,122 @@ struct ActivePool {
     content_changed: bool,
 }
 
+/// The outcome of stepping one pool's glide for a frame.
+enum PoolStep {
+    /// The target held steady long enough and the ease has arrived, so the pool
+    /// hands its region back to the base grid and stops ticking.
+    Settled,
+    /// Still gliding, but this frame's window is unbuffered with no held
+    /// composite, so the base grid shows through. The loop keeps ticking.
+    Degraded,
+    /// Still gliding with a composite ready at [`ActivePool::frac`].
+    Gliding(ActivePool),
+}
+
+/// Advance `anim`'s ease one frame toward `pool`'s scroll target and compose the
+/// pool's rows at the eased offset into `anim.document_grid`.
+///
+/// Both render paths share this step-and-compose. The primary composites the
+/// result over the live grid, an aux window over its target-projected base. The
+/// caller passes any pending `reposition` (it consumes it from the terminal) and
+/// handles the cursor and z-ordered blit around this.
+///
+/// A [`PoolStep::Settled`] result means the region hands off to the base, so the
+/// caller drops the pool from its composite set. The recompose is skipped while
+/// only the sub-cell fraction moves, so a settled or shift-only pool costs no
+/// projection.
+fn advance_pool_glide(
+    anim: &mut PoolAnim,
+    pool: &PoolView,
+    terminal: &Terminal,
+    reposition: Option<u64>,
+    dt: Duration,
+) -> PoolStep {
+    let page_rows = (pool.region.height as f32).max(1.0);
+
+    // A frame that moved the target scrolled the document, so reset the stable
+    // timer. A frame that left it steady advances toward the handoff.
+    let target_pages = pool.scroll_target.pages();
+    let jump_rows = (target_pages - anim.last_scroll_target) * page_rows;
+    anim.last_scroll_target = target_pages;
+    if jump_rows == 0.0 {
+        anim.target_stable_for = anim.target_stable_for.saturating_add(dt);
+    } else {
+        anim.target_stable_for = Duration::ZERO;
+    }
+
+    // A reposition jump re-anchors the offset to a local neighbour of the
+    // destination, so the ease lands softly within the freshly-buffered window
+    // instead of dragging across the unbuffered gap.
+    if let Some(target) = reposition {
+        anim.scroll = (target as f32 - REPOSITION_LAND_PAGES).max(0.0);
+    }
+
+    let (scroll, easing) = step_document_scroll(anim.scroll, target_pages, page_rows, dt);
+    let scroll_settled = anim.target_stable_for >= HANDOFF_STABLE_TIME;
+    anim.scroll = scroll;
+    if !easing && scroll_settled {
+        // The base owns the region once it hands off. Drop any held composite so
+        // a later re-glide cannot resurrect content the base has since replaced.
+        anim.held_frac = None;
+        return PoolStep::Settled;
+    }
+
+    // The composed rows depend only on the integer top document row, the pooled
+    // page bytes, and the region size. While all three hold, the glide advanced
+    // only the sub-cell fraction, so the recompose here and the copy downstream
+    // are skipped and last frame's grids and buffered verdict are reused.
+    let doc_rows = scroll * page_rows;
+    let top = doc_rows.floor() as i64;
+    let frac = doc_rows - top as f32;
+    let version = terminal.pool_content_version(pool.id);
+    let region_dims = (pool.region.width, pool.region.height);
+    let content_changed = anim.last_top != Some(top)
+        || anim.last_version != version
+        || anim.last_region_dims != Some(region_dims);
+
+    // A resize reshapes document_grid, so a held composite from the old
+    // dimensions no longer fits the region.
+    if anim.last_region_dims != Some(region_dims) {
+        anim.held_frac = None;
+    }
+
+    let buffered = if content_changed {
+        let composed = terminal
+            .project_pool(pool.id, &mut anim.document_grid, scroll)
+            .is_some();
+        anim.last_top = Some(top);
+        anim.last_version = version;
+        anim.last_region_dims = Some(region_dims);
+        anim.last_buffered = composed;
+        composed
+    } else {
+        anim.last_buffered
+    };
+
+    if buffered {
+        anim.held_frac = Some(frac);
+        PoolStep::Gliding(ActivePool {
+            id: pool.id,
+            region: pool.region,
+            frac,
+            content_changed,
+        })
+    } else if let Some(held) = anim.held_frac {
+        // The window is not buffered this frame. Re-push the last good composite
+        // at its held offset so the region holds it instead of snapping back to
+        // the base grid.
+        PoolStep::Gliding(ActivePool {
+            id: pool.id,
+            region: pool.region,
+            frac: held,
+            content_changed: false,
+        })
+    } else {
+        PoolStep::Degraded
+    }
+}
+
 impl ApplicationHandler<PtyEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
@@ -1143,49 +1259,13 @@ impl ApplicationHandler<PtyEvent> for App {
                     let mut pool_easing = false;
                     let mut cursor_anchor: Option<AnchoredCursor> = None;
                     for pool in &pools {
-                        let page_rows = (pool.region.height as f32).max(1.0);
                         let anim = state
                             .pool_anims
                             .entry(pool.id)
                             .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
-
-                        // A scrolling jump moves the cursor's document line while
-                        // its screen cell barely shifts, so the cursor would not
-                        // appear to travel. Launch its animation back along the
-                        // jump by the scrolled distance, clamped into the region,
-                        // so it sweeps to the destination as the pool glides under
-                        // it. Small motions stay below the threshold and do not
-                        // launch.
-                        let target_pages = pool.scroll_target.pages();
-                        let jump_rows = (target_pages - anim.last_scroll_target) * page_rows;
-                        anim.last_scroll_target = target_pages;
-                        if jump_rows == 0.0 {
-                            anim.target_stable_for = anim.target_stable_for.saturating_add(dt);
-                        } else {
-                            anim.target_stable_for = Duration::ZERO;
-                        }
-
-                        // A reposition jump re-anchors the offset to a local
-                        // neighbour of the destination, so the ease lands softly
-                        // within the freshly-buffered window instead of dragging
-                        // across the unbuffered gap.
-                        if let Some(target) = terminal.take_reposition(pool.id) {
-                            anim.scroll = (target as f32 - REPOSITION_LAND_PAGES).max(0.0);
-                        }
-
-                        let (scroll, easing) = step_document_scroll(
-                            anim.scroll,
-                            pool.scroll_target.pages(),
-                            page_rows,
-                            dt,
-                        );
-                        let scroll_settled = anim.target_stable_for >= HANDOFF_STABLE_TIME;
-                        anim.scroll = scroll;
-                        if !easing && scroll_settled {
-                            // The live grid owns the region once it hands off.
-                            // Drop any held composite so a later re-glide cannot
-                            // resurrect content the live grid has since replaced.
-                            anim.held_frac = None;
+                        let reposition = terminal.take_reposition(pool.id);
+                        let step = advance_pool_glide(anim, pool, &terminal, reposition, dt);
+                        if matches!(step, PoolStep::Settled) {
                             continue;
                         }
                         pool_easing = true;
@@ -1197,7 +1277,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         if let Some((row, col)) = pool.cursor_anchor {
                             let (pos, in_region) = anchored_cursor_pos(
                                 pool.region.top as f32,
-                                page_rows,
+                                (pool.region.height as f32).max(1.0),
                                 row as f32,
                                 col as f32,
                                 anim.scroll,
@@ -1209,61 +1289,8 @@ impl ApplicationHandler<PtyEvent> for App {
                             });
                         }
 
-                        // The composed rows depend only on the integer top
-                        // document row, the pooled page bytes, and the region
-                        // size. While all three hold, the glide has advanced only
-                        // the sub-cell fraction, so the recompose here and the
-                        // copy downstream are skipped and last frame's grids and
-                        // buffered verdict are reused. `top` and `frac` mirror the
-                        // arithmetic `project_pool` runs before it composes.
-                        let doc_rows = scroll * page_rows;
-                        let top = doc_rows.floor() as i64;
-                        let frac = doc_rows - top as f32;
-                        let version = terminal.pool_content_version(pool.id);
-                        let region_dims = (pool.region.width, pool.region.height);
-                        let content_changed = anim.last_top != Some(top)
-                            || anim.last_version != version
-                            || anim.last_region_dims != Some(region_dims);
-
-                        // A resize reshapes document_grid, so a held composite
-                        // from the old dimensions no longer fits the region.
-                        if anim.last_region_dims != Some(region_dims) {
-                            anim.held_frac = None;
-                        }
-
-                        let buffered = if content_changed {
-                            let composed = terminal
-                                .project_pool(pool.id, &mut anim.document_grid, scroll)
-                                .is_some();
-                            anim.last_top = Some(top);
-                            anim.last_version = version;
-                            anim.last_region_dims = Some(region_dims);
-                            anim.last_buffered = composed;
-                            composed
-                        } else {
-                            anim.last_buffered
-                        };
-
-                        if buffered {
-                            anim.held_frac = Some(frac);
-                            active.push(ActivePool {
-                                id: pool.id,
-                                region: pool.region,
-                                frac,
-                                content_changed,
-                            });
-                        } else if let Some(held) = anim.held_frac {
-                            // The window is not buffered this frame. Re-push the
-                            // last good composite at its held offset with
-                            // content_changed false, so the renderer reuses the
-                            // already-uploaded pool_grid instead of the region
-                            // snapping back to the pre-glide live grid.
-                            active.push(ActivePool {
-                                id: pool.id,
-                                region: pool.region,
-                                frac: held,
-                                content_changed: false,
-                            });
+                        if let PoolStep::Gliding(tile) = step {
+                            active.push(tile);
                         }
                     }
 
