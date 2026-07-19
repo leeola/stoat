@@ -6290,6 +6290,116 @@ impl Stoat {
         }
     }
 
+    /// Ship each detached pane's status bar as a one-row window pool.
+    ///
+    /// The status bar reads only a subset of [`crate::render::FrameCtx`], so the
+    /// editor-render fields are left at defaults it never consults. Each bar is
+    /// painted into a scratch buffer and content-versioned by its cells, so an
+    /// unchanged bar ships nothing.
+    fn emit_window_status(&mut self, out: &mut Vec<u8>) {
+        let mode = self.focused_mode().to_string();
+        let ws = &mut self.workspaces[self.active_workspace];
+        let windowed = ws.panes.windowed_panes();
+        if windowed.is_empty() {
+            return;
+        }
+
+        let workspace_name = if !ws.name.is_empty() {
+            ws.name.clone()
+        } else {
+            ws.git_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("(unnamed)")
+                .to_string()
+        };
+        let screen = crate::keymap_state::view_predicate(ws);
+        let focus_target = ws.focus;
+        let focus_id = ws.panes.focus();
+
+        let frame = crate::render::FrameCtx {
+            workspace_name: &workspace_name,
+            workspace_root: &ws.git_root,
+            mode: &mode,
+            screen,
+            theme: &self.theme,
+            pending_count: self.pending_count,
+            lsp_progress: None,
+            spinner_phase: 0,
+            hover_pending: self.pending_hover_request.is_some(),
+            lsp_message: self
+                .lsp_message
+                .as_ref()
+                .map(|(typ, message)| (*typ, message.as_str())),
+            status_message: self.pending_message.as_deref(),
+            goto_word_labels: None,
+            mode_badges: &self.settings.mode_badges,
+            diagnostics: &self.diagnostics,
+            search_query: None,
+            stoatty: self.stoatty,
+            line_numbers: LineNumbers::Relative,
+            wrap_mode: WrapMode::EditorWidth,
+            wrap_column: 80,
+            inactive_dim: 0.0,
+            minimap_enabled: false,
+            minimap_chrome: None,
+            minimap_band: None,
+            hover_cell: None,
+            home: None,
+            #[cfg(feature = "perf")]
+            perf: None,
+        };
+
+        for (pane_id, window) in windowed {
+            let (status, view, index, is_focused) = {
+                let pane = ws.panes.pane(pane_id);
+                let (_, status) = crate::render::layout::split_pane_status(pane.area);
+                let is_focused =
+                    matches!(focus_target, FocusTarget::SplitPane) && pane_id == focus_id;
+                (status, pane.view.clone(), pane.index, is_focused)
+            };
+            if status.width == 0 || status.height == 0 {
+                continue;
+            }
+
+            let row = Rect::new(0, 0, status.width, 1);
+            let mut buf = Buffer::empty(row);
+            crate::render::pane::paint_pane_status_cells(
+                &view,
+                is_focused,
+                row,
+                frame,
+                &mut ws.editors,
+                &ws.buffers,
+                &mut buf,
+            );
+
+            let bytes = crate::smooth_scroll::serialize_buffer(&buf);
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                hasher.finish()
+            };
+            let region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + index,
+                top: status.y,
+                left: status.x,
+                width: status.width,
+                height: 1,
+                window,
+            };
+            crate::smooth_scroll::emit_into(
+                out,
+                &mut self.smooth_scroll,
+                region,
+                0.0,
+                content_version,
+                false,
+                |_| bytes.clone(),
+            );
+        }
+    }
+
     /// Assign a `content_id` to each visible split-editor buffer a minimap strip
     /// may render, so the declare widget can read the id while the frame paints.
     ///
@@ -6604,6 +6714,12 @@ impl Stoat {
 
         let mut out = Vec::new();
         let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
+        // Each detached pane also keeps a one-row status pool alive.
+        for (pool, _, region) in &panes {
+            if region.window != 0 {
+                active.push(crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + pool);
+            }
+        }
         if finder_list.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::FINDER);
         }
@@ -7215,6 +7331,8 @@ impl Stoat {
                 },
             );
         }
+
+        self.emit_window_status(&mut out);
 
         if !out.is_empty() {
             let _ = apc_tx.send(out);
@@ -12982,6 +13100,47 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Command::PoolCursor(_))),
             "an unchanged frame ships no pool cursor"
+        );
+    }
+
+    #[test]
+    fn detached_pane_ships_a_window_status_row_that_goes_quiet_when_idle() {
+        use stoatty_protocol::command::Command;
+
+        let status_base = crate::smooth_scroll::non_pane_pool::WINDOW_STATUS;
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.window_ipc_connected = true;
+
+        let root = std::path::PathBuf::from("/detach-status");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"hello\nworld\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        h.type_action("SplitRight()");
+        h.settle();
+        h.type_action("DetachPane()");
+        while rx.try_recv().is_ok() {}
+
+        h.stoat.emit_smooth_scroll();
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, Command::PoolRegion(r) if r.pool >= status_base && r.window != 0)
+            ),
+            "the detached pane declares a window-bound status pool, got {cmds:?}"
+        );
+
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            !drain_apc(&mut rx)
+                .iter()
+                .any(|c| matches!(c, Command::PoolRegion(r) if r.pool >= status_base)),
+            "an unchanged status bar re-declares nothing"
         );
     }
 

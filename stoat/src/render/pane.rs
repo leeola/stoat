@@ -430,6 +430,40 @@ fn render_pane_status(
     render_status_segments(area, base_style, frame, &left, &right, buf, scene);
 }
 
+/// Paint a pane's status bar into `buf` as plain cells, for a detached pane's
+/// aux window where no rich APC scene is available.
+///
+/// Shares the segment assembly ([`status_segments`]) with [`render_pane_status`]
+/// but always takes the cell fallback rather than the rich components.
+pub(crate) fn paint_pane_status_cells(
+    view: &View,
+    is_focused: bool,
+    area: Rect,
+    frame: FrameCtx<'_>,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    buf: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let base_style = if is_focused {
+        frame.theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+    } else {
+        frame.theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
+    };
+
+    let y = area.y;
+    let end_x = area.x + area.width;
+    for x in area.x..end_x {
+        buf[(x, y)].set_char(' ').set_style(base_style);
+    }
+
+    let (left, right) = status_segments(view, is_focused, area, frame, editors, buffers);
+    paint_status_fallback(buf, area, &left, &right);
+}
+
 /// Render the built status segments as rich APC components inside stoatty, or
 /// into cells otherwise.
 ///

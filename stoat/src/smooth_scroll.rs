@@ -98,6 +98,10 @@ pub(crate) mod non_pane_pool {
     pub(crate) const SYMBOL: u32 = BASE + 6;
     pub(crate) const WORKSPACE_SYMBOL: u32 = BASE + 7;
     pub(crate) const HOVER: u32 = BASE + 8;
+    /// First id of the per-window status-bar partition. A detached pane's status
+    /// row pools at `WINDOW_STATUS + pane.index`, so the partition is offset far
+    /// enough above the fixed non-pane ids that pane indices never collide.
+    pub(crate) const WINDOW_STATUS: u32 = BASE + 0x100;
 }
 
 /// Per-app smooth-scroll emit state: what has been declared to the terminal for
@@ -1701,7 +1705,7 @@ mod tests {
     fn non_pane_pool_ids_are_distinct_and_above_the_base() {
         use super::non_pane_pool::{
             BASE, COMMITS, COMPLETION, FINDER, HELP_DETAIL, HELP_LIST, HOVER, PALETTE, SYMBOL,
-            WORKSPACE_SYMBOL,
+            WINDOW_STATUS, WORKSPACE_SYMBOL,
         };
         use std::collections::BTreeSet;
 
@@ -1715,6 +1719,7 @@ mod tests {
             SYMBOL,
             WORKSPACE_SYMBOL,
             HOVER,
+            WINDOW_STATUS,
         ];
         assert!(
             ids.iter().all(|&id| id >= BASE),
