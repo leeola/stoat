@@ -21,6 +21,81 @@ pub enum WindowIpcEvent {
     Resized { window: u32, cols: u16, rows: u16 },
     /// The window was closed via its OS close control.
     Closed { window: u32 },
+    /// A pointer event at cell `col`, `row` (window-relative) with keyboard
+    /// modifiers `mods` as a bitmask. Aux windows report pointer input here
+    /// rather than as PTY mouse escapes, whose coordinates are primary-grid.
+    Mouse {
+        window: u32,
+        kind: MouseKind,
+        col: u16,
+        row: u16,
+        mods: u8,
+    },
+}
+
+/// A pointer gesture carried by [`WindowIpcEvent::Mouse`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MouseKind {
+    Press(MouseButton),
+    Release(MouseButton),
+    Drag(MouseButton),
+    WheelUp,
+    WheelDown,
+}
+
+/// A pointer button named by a [`MouseKind`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+impl MouseKind {
+    /// The verb and argument words this kind encodes to, e.g. `("press",
+    /// "left")` or `("wheel", "up")`.
+    fn words(self) -> (&'static str, &'static str) {
+        match self {
+            MouseKind::Press(button) => ("press", button.word()),
+            MouseKind::Release(button) => ("release", button.word()),
+            MouseKind::Drag(button) => ("drag", button.word()),
+            MouseKind::WheelUp => ("wheel", "up"),
+            MouseKind::WheelDown => ("wheel", "down"),
+        }
+    }
+
+    fn from_words(verb: &str, arg: &str) -> Option<MouseKind> {
+        Some(match verb {
+            "press" => MouseKind::Press(MouseButton::from_word(arg)?),
+            "release" => MouseKind::Release(MouseButton::from_word(arg)?),
+            "drag" => MouseKind::Drag(MouseButton::from_word(arg)?),
+            "wheel" => match arg {
+                "up" => MouseKind::WheelUp,
+                "down" => MouseKind::WheelDown,
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+}
+
+impl MouseButton {
+    fn word(self) -> &'static str {
+        match self {
+            MouseButton::Left => "left",
+            MouseButton::Middle => "middle",
+            MouseButton::Right => "right",
+        }
+    }
+
+    fn from_word(word: &str) -> Option<MouseButton> {
+        match word {
+            "left" => Some(MouseButton::Left),
+            "middle" => Some(MouseButton::Middle),
+            "right" => Some(MouseButton::Right),
+            _ => None,
+        }
+    }
 }
 
 impl WindowIpcEvent {
@@ -32,6 +107,16 @@ impl WindowIpcEvent {
                 format!("resized {window} {cols} {rows}")
             },
             WindowIpcEvent::Closed { window } => format!("closed {window}"),
+            WindowIpcEvent::Mouse {
+                window,
+                kind,
+                col,
+                row,
+                mods,
+            } => {
+                let (verb, arg) = kind.words();
+                format!("mouse {window} {col} {row} {mods} {verb} {arg}")
+            },
         }
     }
 }
@@ -55,6 +140,20 @@ pub fn parse_line(line: &str) -> Option<WindowIpcEvent> {
         "closed" => WindowIpcEvent::Closed {
             window: parts.next()?.parse().ok()?,
         },
+        "mouse" => {
+            let window = parts.next()?.parse().ok()?;
+            let col = parts.next()?.parse().ok()?;
+            let row = parts.next()?.parse().ok()?;
+            let mods = parts.next()?.parse().ok()?;
+            let kind = MouseKind::from_words(parts.next()?, parts.next()?)?;
+            WindowIpcEvent::Mouse {
+                window,
+                kind,
+                col,
+                row,
+                mods,
+            }
+        },
         _ => return None,
     };
 
@@ -67,7 +166,7 @@ pub fn parse_line(line: &str) -> Option<WindowIpcEvent> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_line, WindowIpcEvent};
+    use super::{parse_line, MouseButton, MouseKind, WindowIpcEvent};
 
     #[test]
     fn encode_line_renders_each_event() {
@@ -107,7 +206,7 @@ mod tests {
 
     #[test]
     fn unknown_keyword_yields_none() {
-        assert_eq!(parse_line("mouse 2 10 20 press"), None);
+        assert_eq!(parse_line("hover 2 10 20"), None);
         assert_eq!(parse_line(""), None);
     }
 
@@ -117,5 +216,76 @@ mod tests {
         assert_eq!(parse_line("focused x"), None, "non-numeric window");
         assert_eq!(parse_line("resized 2 80"), None, "missing rows");
         assert_eq!(parse_line("closed 2 3"), None, "trailing token");
+    }
+
+    #[test]
+    fn mouse_events_round_trip() {
+        for event in [
+            WindowIpcEvent::Mouse {
+                window: 2,
+                kind: MouseKind::Press(MouseButton::Left),
+                col: 10,
+                row: 20,
+                mods: 0,
+            },
+            WindowIpcEvent::Mouse {
+                window: 5,
+                kind: MouseKind::Drag(MouseButton::Right),
+                col: 3,
+                row: 4,
+                mods: 4,
+            },
+            WindowIpcEvent::Mouse {
+                window: 1,
+                kind: MouseKind::WheelDown,
+                col: 0,
+                row: 0,
+                mods: 1,
+            },
+        ] {
+            assert_eq!(parse_line(&event.encode_line()), Some(event));
+        }
+    }
+
+    #[test]
+    fn mouse_line_encodes_verb_and_button() {
+        assert_eq!(
+            WindowIpcEvent::Mouse {
+                window: 2,
+                kind: MouseKind::Release(MouseButton::Middle),
+                col: 7,
+                row: 8,
+                mods: 0,
+            }
+            .encode_line(),
+            "mouse 2 7 8 0 release middle"
+        );
+        assert_eq!(
+            WindowIpcEvent::Mouse {
+                window: 2,
+                kind: MouseKind::WheelUp,
+                col: 7,
+                row: 8,
+                mods: 0,
+            }
+            .encode_line(),
+            "mouse 2 7 8 0 wheel up"
+        );
+    }
+
+    #[test]
+    fn malformed_mouse_lines_yield_none() {
+        assert_eq!(parse_line("mouse 2 7 8 0 press"), None, "missing button");
+        assert_eq!(
+            parse_line("mouse 2 7 8 0 press up"),
+            None,
+            "wheel arg on press"
+        );
+        assert_eq!(parse_line("mouse 2 7 8 0 spin left"), None, "unknown verb");
+        assert_eq!(
+            parse_line("mouse 2 7 8 0 press left extra"),
+            None,
+            "trailing token"
+        );
     }
 }

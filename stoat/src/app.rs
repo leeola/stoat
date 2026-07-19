@@ -50,7 +50,7 @@ use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock, Wrap
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::{Anchor, Bias, IndentStyle, Selection};
-use stoatty_protocol::window_ipc::WindowIpcEvent;
+use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent};
 use stoatty_widgets::ApcScene;
 use tokio::{
     io::AsyncBufReadExt,
@@ -1486,6 +1486,20 @@ impl Stoat {
             WindowIpc::Event(event) => event,
         };
 
+        // A pointer event runs the full pane-apply path, which borrows self more
+        // broadly than the pane-only lifecycle arms below can while holding the
+        // pane-tree borrow.
+        if let WindowIpcEvent::Mouse {
+            window,
+            kind,
+            col,
+            row,
+            ..
+        } = event
+        {
+            return self.handle_aux_mouse(window, kind, col, row);
+        }
+
         let panes = &mut self.active_workspace_mut().panes;
         match event {
             WindowIpcEvent::Focused { window: 0 } => {
@@ -1511,8 +1525,41 @@ impl Stoat {
                     panes.attach(id);
                 }
             },
+            WindowIpcEvent::Mouse { .. } => unreachable!("mouse events return above"),
         }
         UpdateEffect::Redraw
+    }
+
+    /// Route a pointer event from aux window `window` to the pane bound to it.
+    ///
+    /// Resolves the window's pane and focuses it, so the shared apply targets it
+    /// without the primary grid hit-test ever running -- an aux click cannot
+    /// land on a primary pane whose rect overlaps. `col`/`row` are
+    /// window-relative, which equal pane-relative coordinates since a detached
+    /// pane's area sits at (0, 0).
+    fn handle_aux_mouse(
+        &mut self,
+        window: u32,
+        kind: MouseKind,
+        col: u16,
+        row: u16,
+    ) -> UpdateEffect {
+        let Some(pane_id) = pane_for_window(&self.active_workspace().panes, window) else {
+            return UpdateEffect::None;
+        };
+
+        // A wheel scrolls the window's pane without focusing it, as the primary
+        // wheel scrolls the pane under the cursor rather than the focused one.
+        if matches!(kind, MouseKind::WheelUp | MouseKind::WheelDown) {
+            let (view, area) = {
+                let pane = self.active_workspace().panes.pane(pane_id);
+                (pane.view.clone(), pane.area)
+            };
+            return self.scroll_view_at(view, area, matches!(kind, MouseKind::WheelDown));
+        }
+
+        self.active_workspace_mut().panes.set_focus(pane_id);
+        self.apply_focused_pane_mouse(mouse_event_kind(kind), col, row)
     }
 
     /// Inject the version string the `ShowVersion` action reports. The binary
@@ -3388,18 +3435,34 @@ impl Stoat {
         let Some((col, row)) = self.translate_mouse_to_focused(mouse.column, mouse.row) else {
             return UpdateEffect::None;
         };
-        if self.handle_run_pane_mouse(mouse.kind, col, row) {
+        self.apply_focused_pane_mouse(mouse.kind, col, row)
+    }
+
+    /// Route a pane-relative pointer event to whichever focused pane kind owns
+    /// it, returning [`UpdateEffect::Redraw`] when one consumes it.
+    ///
+    /// The shared tail of both the primary mouse path and an aux window's
+    /// pointer events. The caller resolves and focuses the target pane first --
+    /// the primary via its grid hit-test, an aux window via its pane binding --
+    /// so `col`/`row` are relative to the focused pane's content area.
+    fn apply_focused_pane_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        col: u16,
+        row: u16,
+    ) -> UpdateEffect {
+        if self.handle_run_pane_mouse(kind, col, row) {
             return UpdateEffect::Redraw;
         }
-        if self.handle_editor_pane_mouse(mouse.kind, col, row) {
+        if self.handle_editor_pane_mouse(kind, col, row) {
             return UpdateEffect::Redraw;
         }
-        if self.handle_terminal_pane_mouse(mouse.kind, col, row) {
+        if self.handle_terminal_pane_mouse(kind, col, row) {
             return UpdateEffect::Redraw;
         }
         tracing::trace!(
             target: "stoat::app",
-            kind = ?mouse.kind,
+            kind = ?kind,
             col,
             row,
             "mouse event routed to focused element"
@@ -3674,7 +3737,7 @@ impl Stoat {
         let Some(target) = self.target_at(mouse.column, mouse.row) else {
             return UpdateEffect::None;
         };
-        let ws = self.active_workspace_mut();
+        let ws = self.active_workspace();
 
         // Snapshot the view and pane area under the cursor so the scroll below
         // can take a fresh mutable borrow of the run or editor state.
@@ -3689,17 +3752,24 @@ impl Stoat {
             },
         };
 
+        self.scroll_view_at(view, area, matches!(mouse.kind, MouseEventKind::ScrollDown))
+    }
+
+    /// Advance the wheel-scroll target of `view` (occupying `area`), scrolling
+    /// down when `down`.
+    ///
+    /// The pane-resolved half of the wheel path, shared by the primary hit-test
+    /// and an aux window's wheel events. An editor only moves its glide target,
+    /// so it reports no redraw -- the frame tick eases and renders, and a
+    /// trackpad flick of ~100 events must not repaint per event.
+    fn scroll_view_at(&mut self, view: View, area: Rect, down: bool) -> UpdateEffect {
+        let ws = self.active_workspace_mut();
         match view {
             View::Editor(id) => {
                 let Some(editor) = ws.editors.get_mut(id) else {
                     return UpdateEffect::None;
                 };
-                let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
                 action_handlers::movement::wheel_scroll(editor, down);
-                // No repaint here. The wheel only advances the glide target, and
-                // the frame tick drives the ease and its renders. A trackpad
-                // sends ~100 events per flick, so repainting per event would
-                // saturate the loop with re-renders of an unscrolled view.
                 UpdateEffect::None
             },
             View::Run(id) => {
@@ -3708,10 +3778,10 @@ impl Stoat {
                 };
                 let page = (area.height as usize).saturating_sub(1);
                 let max = run_state.output_line_total().saturating_sub(page);
-                run_state.scroll_offset = match mouse.kind {
-                    MouseEventKind::ScrollUp => (run_state.scroll_offset + 3).min(max),
-                    MouseEventKind::ScrollDown => run_state.scroll_offset.saturating_sub(3),
-                    _ => return UpdateEffect::None,
+                run_state.scroll_offset = if down {
+                    run_state.scroll_offset.saturating_sub(3)
+                } else {
+                    (run_state.scroll_offset + 3).min(max)
                 };
                 UpdateEffect::Redraw
             },
@@ -8044,6 +8114,27 @@ fn pane_for_window(panes: &PaneTree, window: u32) -> Option<PaneId> {
         .into_iter()
         .find(|(_, w)| *w == window)
         .map(|(id, _)| id)
+}
+
+/// Map an aux window's pointer gesture onto the crossterm event kind the pane
+/// mouse handlers dispatch on. A wheel becomes a scroll. A button gesture keeps
+/// its button.
+fn mouse_event_kind(kind: MouseKind) -> MouseEventKind {
+    match kind {
+        MouseKind::Press(button) => MouseEventKind::Down(mouse_button(button)),
+        MouseKind::Release(button) => MouseEventKind::Up(mouse_button(button)),
+        MouseKind::Drag(button) => MouseEventKind::Drag(mouse_button(button)),
+        MouseKind::WheelUp => MouseEventKind::ScrollUp,
+        MouseKind::WheelDown => MouseEventKind::ScrollDown,
+    }
+}
+
+fn mouse_button(button: IpcMouseButton) -> MouseButton {
+    match button {
+        IpcMouseButton::Left => MouseButton::Left,
+        IpcMouseButton::Middle => MouseButton::Middle,
+        IpcMouseButton::Right => MouseButton::Right,
+    }
 }
 
 /// Read stoatty's window-event socket, forwarding each event over `tx`.
@@ -13369,6 +13460,98 @@ mod tests {
         assert!(
             bytes.windows(3).any(|w| w == b"[2]"),
             "a detached pane's status badge continues the split count to 2"
+        );
+    }
+
+    fn stoat_with_detached_editor(lines: usize) -> (crate::test_harness::TestHarness, PaneId, u32) {
+        let mut h = Stoat::test();
+        h.stoat.window_ipc_connected = true;
+        let root = PathBuf::from("/aux-mouse");
+        let path = root.join("a.txt");
+        let body = (0..lines)
+            .map(|i| format!("line {i}\n"))
+            .collect::<String>();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+        h.type_action("SplitRight()");
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        h.type_action("DetachPane()");
+        h.settle();
+        let (detached, window) = h.stoat.active_workspace().panes.windowed_panes()[0];
+        (h, detached, window)
+    }
+
+    #[test]
+    fn aux_click_lands_in_the_bound_pane_not_a_primary() {
+        let (mut h, detached, window) = stoat_with_detached_editor(40);
+
+        // Focus a primary split pane, so the click can only reach the detached
+        // pane by resolving the window binding, never the grid hit-test.
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusPane { index: 1 });
+        assert_ne!(
+            h.stoat.active_workspace().panes.focus(),
+            detached,
+            "a primary pane holds focus before the aux click"
+        );
+
+        h.stoat
+            .handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Mouse {
+                window,
+                kind: MouseKind::Press(IpcMouseButton::Left),
+                col: 3,
+                row: 2,
+                mods: 0,
+            }));
+
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            detached,
+            "the aux click resolves the bound pane, not a primary pane whose rect overlaps"
+        );
+        assert!(
+            h.stoat.editor_drag.is_some(),
+            "the click placed a block cursor in the detached editor and armed drag"
+        );
+    }
+
+    #[test]
+    fn aux_wheel_scrolls_the_bound_editor() {
+        let (mut h, detached, window) = stoat_with_detached_editor(200);
+        let View::Editor(editor_id) = h.stoat.active_workspace().panes.pane(detached).view else {
+            panic!("detached pane is an editor");
+        };
+        let before = h
+            .stoat
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .unwrap()
+            .scroll_row;
+
+        h.stoat
+            .handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Mouse {
+                window,
+                kind: MouseKind::WheelDown,
+                col: 3,
+                row: 2,
+                mods: 0,
+            }));
+
+        let after = h
+            .stoat
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .unwrap()
+            .scroll_row;
+        assert!(
+            after > before,
+            "the aux wheel advances the detached editor's scroll target"
         );
     }
 
