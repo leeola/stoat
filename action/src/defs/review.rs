@@ -63,6 +63,44 @@ define_action!(
 );
 
 define_action!(
+    StageLineDef,
+    StageLine,
+    "StageLine",
+    ActionKind::StageLine,
+    "stage the line under the cursor",
+    "Apply only the cursor line's change to the git index, staging the \
+     minus/plus pair of a modified line. Works in any editor view on a \
+     git-tracked file, and is a no-op with a status message when the \
+     cursor is on no change.",
+    ActionPriority::Common
+);
+
+define_action!(
+    UnstageLineDef,
+    UnstageLine,
+    "UnstageLine",
+    ActionKind::UnstageLine,
+    "unstage the line under the cursor",
+    "Revert only the cursor line's staged change in the git index back to \
+     HEAD, unstaging the minus/plus pair of a modified line. Works in any \
+     editor view on a git-tracked file, and is a no-op with a status \
+     message when the cursor is on no staged change.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ToggleStageLineDef,
+    ToggleStageLine,
+    "ToggleStageLine",
+    ActionKind::ToggleStageLine,
+    "toggle staging of the line under the cursor",
+    "Stage the cursor line's change when it is unstaged, or unstage it when \
+     it is already staged. Works in any editor view on a git-tracked file, \
+     and is a no-op with a status message when the cursor is on no change.",
+    ActionPriority::Common
+);
+
+define_action!(
     JumpToMoveSourceDef,
     JumpToMoveSource,
     "JumpToMoveSource",

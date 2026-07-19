@@ -667,6 +667,8 @@ on key {
         M -> JumpToMoveTarget();
         s -> StageHunk();
         u -> UnstageHunk();
+        S -> StageLine();
+        U -> UnstageLine();
         Space -> ToggleStageHunk();
     }
     mode == insert {

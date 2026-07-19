@@ -6,8 +6,8 @@ use crate::{
     editor_state::{EditorId, EditorState, ScrollGlide},
     host::{GitHost, WatchToken},
     pane::View,
-    review::{MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
-    review_apply::chunk_to_unified_diff,
+    review::{line_count, MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow},
+    review_apply::{chunk_to_unified_diff, line_restricted_rows, rows_to_unified_diff},
     review_session::{
         ChunkIdentity, ChunkStatus, ReviewProgress, ReviewSession, ReviewSource, ReviewViewState,
     },
@@ -1124,6 +1124,195 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
     }
 
     UpdateEffect::Redraw
+}
+
+/// Stage, unstage, or toggle the git-index state of only the cursor line's
+/// change, in the focused editor on any git-tracked file.
+///
+/// Unlike [`stage_hunk`], the emitted patch is restricted to the cursor's line
+/// via [`line_restricted_rows`], and staging diffs the git index (not HEAD)
+/// against the live buffer so sequential single-line stages inside one hunk
+/// compose. A missing repo, an untracked file, or a cursor on no change sets a
+/// status message and changes nothing.
+pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
+    let Some((_editor_id, buffer_id)) = stoat.focused_editor_ids() else {
+        return UpdateEffect::None;
+    };
+
+    let (cursor_row, buffer_text) = {
+        let Some(editor) = super::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let head = buffer_snapshot.resolve_anchor(&sel.head());
+        let cursor_row = buffer_snapshot.rope().offset_to_point(head).row;
+        (cursor_row, buffer_snapshot.rope().to_string())
+    };
+
+    let Some(path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let git_root = stoat.active_workspace().git_root.clone();
+
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        stoat.set_status("not in a git repository");
+        return UpdateEffect::Redraw;
+    };
+    let Some(head_text) = repo.head_content(&path) else {
+        stoat.set_status("no line change under the cursor");
+        return UpdateEffect::Redraw;
+    };
+    let index_text = repo
+        .index_content(&path)
+        .unwrap_or_else(|| head_text.clone());
+
+    let rel = path
+        .strip_prefix(&git_root)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .into_owned();
+
+    let stage = || stage_line_patch(&path, &rel, &index_text, &buffer_text, cursor_row);
+    let unstage = || {
+        unstage_line_patch(
+            &path,
+            &rel,
+            &index_text,
+            &head_text,
+            &buffer_text,
+            cursor_row,
+        )
+    };
+    let patch_and_message = match mode {
+        HunkStage::Stage => stage().map(|patch| (patch, "staged line")),
+        HunkStage::Unstage => unstage().map(|patch| (patch, "unstaged line")),
+        HunkStage::Toggle => stage()
+            .map(|patch| (patch, "staged line"))
+            .or_else(|| unstage().map(|patch| (patch, "unstaged line"))),
+    };
+
+    let Some((patch, message)) = patch_and_message else {
+        stoat.set_status("no line change under the cursor");
+        return UpdateEffect::Redraw;
+    };
+
+    match repo.apply_to_index(&patch) {
+        Ok(()) => {
+            stoat.active_workspace_mut().invalidate_diff(buffer_id);
+            stoat.set_status(message);
+        },
+        Err(err) => stoat.set_status(format!("could not update staging: {err}")),
+    }
+
+    UpdateEffect::Redraw
+}
+
+/// Build the patch that stages only the cursor line by diffing the git index
+/// against the live buffer and keeping the cursor row's change.
+///
+/// `None` when the cursor sits on no index-vs-buffer change.
+fn stage_line_patch(
+    path: &Path,
+    rel: &str,
+    index_text: &str,
+    buffer_text: &str,
+    cursor_row: u32,
+) -> Option<String> {
+    let session = ephemeral_diff_session(path, rel, index_text, buffer_text);
+    let chunk_id = session
+        .order
+        .iter()
+        .copied()
+        .find(|id| session.chunks[id].buffer_line_range.contains(&cursor_row))?;
+    let rows = line_restricted_rows(&session.chunks[&chunk_id].hunk.rows, cursor_row + 1, true)?;
+    Some(rows_to_unified_diff(
+        Path::new(rel),
+        index_text,
+        buffer_text,
+        &rows,
+    ))
+}
+
+/// Build the patch that unstages only the cursor line by reverting its index
+/// row to HEAD.
+///
+/// The cursor row is a buffer coordinate, so it is first mapped back to the
+/// index by removing the line delta of every index-vs-buffer hunk above it.
+/// Diffing the index against HEAD then expresses the staged change as an
+/// index-side row, and the forward patch reverts that one row to HEAD. `None`
+/// when the mapped row carries no staged change.
+fn unstage_line_patch(
+    path: &Path,
+    rel: &str,
+    index_text: &str,
+    head_text: &str,
+    buffer_text: &str,
+    cursor_row: u32,
+) -> Option<String> {
+    let index_row = map_buffer_row_to_index(path, rel, index_text, buffer_text, cursor_row);
+    let session = ephemeral_diff_session(path, rel, index_text, head_text);
+    let chunk_id = session
+        .order
+        .iter()
+        .copied()
+        .find(|id| session.chunks[id].base_line_range.contains(&index_row))?;
+    let rows = line_restricted_rows(&session.chunks[&chunk_id].hunk.rows, index_row + 1, false)?;
+    Some(rows_to_unified_diff(
+        Path::new(rel),
+        index_text,
+        head_text,
+        &rows,
+    ))
+}
+
+/// Map a 0-based buffer row to its 0-based row in the git index.
+///
+/// Each index-vs-buffer hunk fully above the cursor shifts buffer rows past the
+/// index by its added-minus-removed line count, so subtracting that shift
+/// recovers the index row. The `index_text` slicing keys off each hunk's base
+/// byte range to count its index lines.
+fn map_buffer_row_to_index(
+    path: &Path,
+    rel: &str,
+    index_text: &str,
+    buffer_text: &str,
+    cursor_row: u32,
+) -> u32 {
+    let session = ephemeral_diff_session(path, rel, index_text, buffer_text);
+    let mut shift: i64 = 0;
+    for id in &session.order {
+        let chunk = &session.chunks[id];
+        if chunk.buffer_line_range.end <= cursor_row {
+            let buffer_len = (chunk.buffer_line_range.end - chunk.buffer_line_range.start) as i64;
+            let index_len =
+                line_count(index_text.get(chunk.base_byte_range.clone()).unwrap_or("")) as i64;
+            shift += buffer_len - index_len;
+        }
+    }
+    (cursor_row as i64 - shift).max(0) as u32
+}
+
+/// Diff `base` against `buffer` into a single-file [`ReviewSession`] whose
+/// chunks and rows drive line-restricted patch emission.
+fn ephemeral_diff_session(path: &Path, rel: &str, base: &str, buffer: &str) -> ReviewSession {
+    let mut session = ReviewSession::new(ReviewSource::InMemory {
+        files: Arc::new(Vec::new()),
+    });
+    session.add_files(vec![ReviewFileInput {
+        path: path.to_path_buf(),
+        rel_path: rel.to_string(),
+        language: None,
+        base_text: Arc::new(base.to_string()),
+        buffer_text: Arc::new(buffer.to_string()),
+    }]);
+    session
 }
 
 /// Toggle the focused pane between the side-by-side diff and a plain editor
@@ -2489,6 +2678,164 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("no hunk under the cursor")
+        );
+    }
+
+    #[test]
+    fn stage_line_stages_only_the_cursor_line() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\n", "a\nB\nC\nd\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "one patch: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("-b\n") && patch.contains("+B\n"),
+            "stages the cursor line: {patch}"
+        );
+        assert!(
+            !patch.contains("+C\n"),
+            "leaves the other line unstaged: {patch}"
+        );
+        assert!(
+            patch.contains(" c\n"),
+            "the other line stays as context: {patch}"
+        );
+    }
+
+    #[test]
+    fn unstage_line_reverts_the_staged_line_to_head() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_index_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nB\nc\n", "a\nB\nc\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "one patch: {patches:?}");
+        let patch = &patches[0];
+        assert!(patch.contains("-B\n"), "reverts the staged line: {patch}");
+        assert!(patch.contains("+b\n"), "restores the HEAD line: {patch}");
+    }
+
+    #[test]
+    fn toggle_stage_line_stages_an_unstaged_line() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nB\nc\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(
+            patches.len(),
+            1,
+            "toggle stages the unstaged line: {patches:?}"
+        );
+        assert!(patches[0].contains("-b\n") && patches[0].contains("+B\n"));
+    }
+
+    #[test]
+    fn toggle_stage_line_unstages_a_staged_line() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_index_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nB\nc\n", "a\nB\nc\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 1);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(
+            patches.len(),
+            1,
+            "toggle unstages the staged line: {patches:?}"
+        );
+        assert!(patches[0].contains("-B\n") && patches[0].contains("+b\n"));
+    }
+
+    #[test]
+    fn stage_line_composes_against_the_updated_index() {
+        // HEAD a/b/c/d; the index already stages line 1 (b -> B), and the
+        // buffer additionally changes line 2 (c -> C). Staging line 2 diffs the
+        // index (not HEAD), so the patch touches only line 2.
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_index_scenario(
+            &workdir,
+            &[("a.rs", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nC\nd\n")],
+        );
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "one patch: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("-c\n") && patch.contains("+C\n"),
+            "stages line 2 against the index: {patch}"
+        );
+        assert!(
+            !patch.contains("+B\n") && !patch.contains("-b\n"),
+            "line 1 is already staged in the index and stays context, not re-staged: {patch}"
+        );
+    }
+
+    #[test]
+    fn unstage_line_maps_the_cursor_past_an_unstaged_insertion() {
+        // HEAD a/b; the index stages line 1 (b -> B); the buffer inserts NEW
+        // above unstaged, so the staged line sits at buffer row 2 but index row
+        // 1. Unstaging must map back and revert only the index line.
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stage_index_scenario(&workdir, &[("a.rs", "a\nb\n", "a\nB\n", "NEW\na\nB\n")]);
+        h.open_file(&workdir.join("a.rs"));
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+
+        let patches = h.fake_git().applied_patches(&workdir);
+        assert_eq!(patches.len(), 1, "one patch: {patches:?}");
+        let patch = &patches[0];
+        assert!(patch.contains("-B\n"), "reverts the staged line: {patch}");
+        assert!(patch.contains("+b\n"), "restores the HEAD line: {patch}");
+        assert!(
+            !patch.contains("NEW"),
+            "the unstaged insertion is untouched: {patch}"
+        );
+    }
+
+    #[test]
+    fn stage_line_off_a_change_is_a_message_only_noop() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_git_file_at_cursor(&mut h, 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+
+        assert!(
+            h.fake_git().applied_patches(&workdir).is_empty(),
+            "cursor off a change applies nothing"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no line change under the cursor")
         );
     }
 }

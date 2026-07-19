@@ -42,6 +42,50 @@ pub(crate) fn chunk_to_unified_diff(
     }
 }
 
+/// Restrict a chunk's rows to the single change at 1-based `side_line`, for
+/// staging or unstaging one line.
+///
+/// Keeps the [`ReviewRow::Changed`] row whose selected side -- right when
+/// `right_side`, else left -- sits at `side_line`, and rewrites every other
+/// `Changed` row so the emitted patch touches nothing else. Both callers apply
+/// the forward patch against the base (left) side, so a non-selected row with a
+/// base line becomes a [`ReviewRow::Context`] carrying that base content, and a
+/// right-only row (no base line) is dropped. Existing `Context` rows pass
+/// through, so the surrounding hunk context still anchors the patch.
+///
+/// Returns [`None`] when no `Changed` row matched `side_line`, letting the
+/// caller report that the cursor sits on no change.
+pub(crate) fn line_restricted_rows(
+    rows: &[ReviewRow],
+    side_line: u32,
+    right_side: bool,
+) -> Option<Vec<ReviewRow>> {
+    let mut matched = false;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        match row {
+            ReviewRow::Context { .. } => out.push(row.clone()),
+            ReviewRow::Changed { left, right } => {
+                let selected = if right_side {
+                    right.as_ref()
+                } else {
+                    left.as_ref()
+                };
+                if selected.is_some_and(|side| side.line_num == side_line) {
+                    matched = true;
+                    out.push(row.clone());
+                } else if let Some(left) = left {
+                    out.push(ReviewRow::Context {
+                        left: left.clone(),
+                        right: left.clone(),
+                    });
+                }
+            },
+        }
+    }
+    matched.then_some(out)
+}
+
 /// Swaps a row's two sides so a forward hunk emits as its reverse.
 ///
 /// Context rows carry identical text on both sides, so the swap only
@@ -59,7 +103,7 @@ fn swap_row(row: &ReviewRow) -> ReviewRow {
     }
 }
 
-fn rows_to_unified_diff(
+pub(crate) fn rows_to_unified_diff(
     rel: &Path,
     base_text: &str,
     buffer_text: &str,
@@ -273,6 +317,40 @@ mod tests {
         assert!(patch.contains("+NEW\n"));
         assert!(patch.contains(" a\n"));
         assert!(patch.contains(" c\n"));
+    }
+
+    #[test]
+    fn line_restricted_rows_keeps_only_the_selected_change() {
+        let base = "a\nOLD1\nOLD2\nb\n";
+        let buffer = "a\nNEW1\nNEW2\nb\n";
+        let session = session_with_file("a.txt", base, buffer);
+        let chunk = &session.chunks[&session.order[0]];
+        // Buffer line 2 (1-based) is the OLD1/NEW1 row of a two-change hunk.
+        let rows = line_restricted_rows(&chunk.hunk.rows, 2, true).expect("row 2 matched");
+        let patch = rows_to_unified_diff(Path::new("a.txt"), base, buffer, &rows);
+        assert!(
+            patch.contains("-OLD1\n"),
+            "removes the selected base line: {patch}"
+        );
+        assert!(
+            patch.contains("+NEW1\n"),
+            "adds the selected buffer line: {patch}"
+        );
+        assert!(
+            !patch.contains("NEW2"),
+            "the other change is neutralized: {patch}"
+        );
+        assert!(
+            patch.contains(" OLD2\n"),
+            "the other row is base-side context: {patch}"
+        );
+    }
+
+    #[test]
+    fn line_restricted_rows_returns_none_when_no_row_matches() {
+        let session = session_with_file("a.txt", "a\nOLD\nb\n", "a\nNEW\nb\n");
+        let chunk = &session.chunks[&session.order[0]];
+        assert!(line_restricted_rows(&chunk.hunk.rows, 99, true).is_none());
     }
 
     #[test]
