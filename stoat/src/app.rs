@@ -4996,7 +4996,13 @@ impl Stoat {
         let FocusTarget::SplitPane = ws.focus else {
             return None;
         };
-        let pane_editor = match ws.panes.pane(ws.panes.focus()).view {
+        let focused_pane = ws.panes.pane(ws.panes.focus());
+        // A detached pane draws its cursor in its own aux window via a pool
+        // cursor, so the primary frame parks no terminal cursor over its cells.
+        if matches!(focused_pane.placement, Placement::Window(_)) {
+            return None;
+        }
+        let pane_editor = match focused_pane.view {
             View::Editor(id) => id,
             _ => return None,
         };
@@ -6780,8 +6786,10 @@ impl Stoat {
             // While the focused pane glides, ship the cursor's content anchor so
             // the terminal draws it riding the eased offset. A None cell (cursor
             // off-view at the last paint) skips the emit, so the terminal falls
-            // back to its plain ease.
-            if focused_editor == Some(*editor_id)
+            // back to its plain ease. A detached pane's cursor rides its own
+            // window pool via emit_detached_cursor instead, so it is excluded.
+            if region.window == 0
+                && focused_editor == Some(*editor_id)
                 && editor.scroll_glide != ScrollGlide::None
                 && let Some((col, _)) = editor.cursor_screen_cell
             {
@@ -12873,6 +12881,38 @@ mod tests {
             cmds.iter()
                 .any(|c| matches!(c, Command::PoolRegion(r) if r.window != 0)),
             "the detached editor declares a window-bound pool, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn detached_focus_parks_no_primary_cursor() {
+        let mut h = Stoat::test();
+        h.stoat.window_ipc_connected = true;
+
+        let path = std::path::PathBuf::from("/w/a.txt");
+        h.fake_fs().insert_file(&path, b"hello\n");
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 24);
+        h.type_action("SplitRight()");
+        h.settle();
+
+        // Stand in for the live paint's recorded cursor cell so the split-pane
+        // baseline is Some. The windowed check must return None regardless of it.
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("focused editor");
+        h.stoat
+            .active_workspace_mut()
+            .editors
+            .get_mut(editor_id)
+            .unwrap()
+            .cursor_screen_cell = Some((7, 3));
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((7, 3)));
+
+        h.type_action("DetachPane()");
+        assert_eq!(
+            h.stoat.primary_cursor_screen_pos(),
+            None,
+            "a detached focus draws its cursor in its window, not the primary"
         );
     }
 
