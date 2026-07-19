@@ -505,6 +505,11 @@ struct State {
     /// True while a stoatty-native grid selection is being dragged, so
     /// `CursorMoved` extends it and the left release copies and clears it.
     native_drag: bool,
+    /// The OS clipboard handle, opened lazily on the first copy and kept alive
+    /// so X11 selection ownership persists between copies. `None` until the
+    /// first copy, and reset to `None` after a failed copy so the next one
+    /// reopens it.
+    clipboard: Option<arboard::Clipboard>,
     /// When the previous `RedrawRequested` ran, so each frame's easing advances
     /// by the wall time actually elapsed rather than a fixed per-frame step.
     /// `None` until the first frame.
@@ -874,6 +879,7 @@ impl ApplicationHandler<PtyEvent> for App {
             pressed_button: None,
             pointer_side_right: false,
             native_drag: false,
+            clipboard: None,
             last_redraw: None,
             #[cfg(feature = "perf")]
             show_perf_hud: false,
@@ -1699,7 +1705,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     // Re-copy the live selection, keeping it highlighted. An empty
                     // selection falls through so a bare Ctrl-C still SIGINTs.
                     if let Some(text) = selection_copy_text(&state.terminal) {
-                        copy_to_clipboard(&text);
+                        copy_to_clipboard(state, &text);
                         return;
                     }
                 }
@@ -1848,7 +1854,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         // It is cleared on supersession by a new drag, typing, or
                         // a paste.
                         if let Some(text) = selection_copy_text(&state.terminal) {
-                            copy_to_clipboard(&text);
+                            copy_to_clipboard(state, &text);
                         }
                     }
                     state.window.request_redraw();
@@ -2227,7 +2233,7 @@ fn handle_term_events(
         match event {
             TermEvent::Title(title) => state.window.set_title(&title),
             TermEvent::ResetTitle => state.window.set_title(DEFAULT_TITLE),
-            TermEvent::ClipboardStore(text) => copy_to_clipboard(&text),
+            TermEvent::ClipboardStore(text) => copy_to_clipboard(state, &text),
             TermEvent::Bell => ring_bell(state, Instant::now()),
             TermEvent::Notification { title, body } => {
                 deliver_notification(title.as_deref(), &body)
@@ -2715,13 +2721,34 @@ fn deliver_notification(title: Option<&str>, body: &str) {
 #[cfg(not(unix))]
 fn deliver_notification(_title: Option<&str>, _body: &str) {}
 
-/// Copy `text` to the OS clipboard, reporting a failure rather than crashing.
+/// Copy `text` to the OS clipboard through the handle cached on [`State`].
 ///
-/// Opens a fresh clipboard handle per copy, the per-call pattern the editor's
-/// clipboard host uses, so no handle is held across the app's event loop.
-fn copy_to_clipboard(text: &str) {
-    if let Err(err) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.to_owned())) {
+/// The handle is held across copies rather than reopened each time because X11
+/// selection ownership lasts only while an `arboard::Clipboard` and its
+/// background server thread stay alive. A handle opened and dropped per copy
+/// releases ownership at once, losing the copied text before any paste unless a
+/// clipboard manager races to grab it, and arboard's debug build prints a drop
+/// warning to the launching terminal.
+///
+/// A failed open or copy is reported rather than fatal. A failed copy also
+/// clears the cache so the next call reopens the handle.
+fn copy_to_clipboard(state: &mut State, text: &str) {
+    if state.clipboard.is_none() {
+        match arboard::Clipboard::new() {
+            Ok(clipboard) => state.clipboard = Some(clipboard),
+            Err(err) => {
+                eprintln!("stoatty: failed to open clipboard: {err}");
+                return;
+            },
+        }
+    }
+
+    let Some(clipboard) = state.clipboard.as_mut() else {
+        return;
+    };
+    if let Err(err) = clipboard.set_text(text.to_owned()) {
         eprintln!("stoatty: failed to copy selection to clipboard: {err}");
+        state.clipboard = None;
     }
 }
 
