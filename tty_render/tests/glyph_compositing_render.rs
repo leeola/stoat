@@ -15,7 +15,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{BorderStyle, Grid, Panel, Rgb},
+    grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb},
     term::Damage,
 };
 use wgpu::{
@@ -88,7 +88,7 @@ fn grid_glyph_blends_over_the_framebuffer_not_an_assumed_bg() {
         border: Rgb::new(200, 100, 50),
         corner_radius: 6,
         fill: Some(fill),
-        shadow: false,
+        shadow: PanelShadow::None_,
         inset_x: 0,
         seq: 0,
     };

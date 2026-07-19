@@ -9,8 +9,8 @@
 use crate::{
     grid::{
         self, Bar, Border, BorderStyle, Borders, Cell, DocumentOffset, Flags, Grid, Icon, IconKind,
-        Minimap, MinimapView, Overlay, PagePool, Panel, Rgb, Scale, ScrollRegion, TextRun,
-        UnderlineStyle,
+        Minimap, MinimapView, Overlay, PagePool, Panel, PanelShadow, Rgb, Scale, ScrollRegion,
+        TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -2518,6 +2518,14 @@ fn grid_border_style(style: command::BorderStyle) -> BorderStyle {
     }
 }
 
+fn grid_panel_shadow(shadow: command::PanelShadow) -> PanelShadow {
+    match shadow {
+        command::PanelShadow::None_ => PanelShadow::None_,
+        command::PanelShadow::Drop => PanelShadow::Drop,
+        command::PanelShadow::Tucked => PanelShadow::Tucked,
+    }
+}
+
 /// Claim each stored scale command's block on `grid`.
 ///
 /// Runs each projection because the cell projection resets every cell to
@@ -2770,7 +2778,7 @@ fn panel_grid(command: &PanelCommand, seq: u32) -> Panel {
         border: Rgb::new(command.border[0], command.border[1], command.border[2]),
         corner_radius: command.corner_radius,
         fill: command.fill.map(|[r, g, b]| Rgb::new(r, g, b)),
-        shadow: command.shadow,
+        shadow: grid_panel_shadow(command.shadow),
         inset_x: command.inset_x,
         seq,
     }
@@ -2838,7 +2846,8 @@ mod tests {
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Minimap,
-            MinimapView, Overlay, Panel, Rgb, Scale, ScrollRegion, TextRun, UnderlineStyle,
+            MinimapView, Overlay, Panel, PanelShadow, Rgb, Scale, ScrollRegion, TextRun,
+            UnderlineStyle,
         },
         theme::Theme,
     };
@@ -2851,8 +2860,9 @@ mod tests {
         BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand,
         IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
         MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
-        PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand,
-        ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand, WindowOpenCommand,
+        PanelShadow as ProtoPanelShadow, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
+        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+        TextRunCommand, WindowOpenCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -3737,7 +3747,7 @@ mod tests {
             border: [40, 50, 60],
             corner_radius: 6,
             fill: Some([10, 20, 30]),
-            shadow: true,
+            shadow: ProtoPanelShadow::Drop,
             inset_x: 0,
         });
 
@@ -3757,7 +3767,7 @@ mod tests {
                 border: Rgb::new(40, 50, 60),
                 corner_radius: 6,
                 fill: Some(Rgb::new(10, 20, 30)),
-                shadow: true,
+                shadow: PanelShadow::Drop,
                 inset_x: 0,
                 seq: 1,
             }]
@@ -3775,7 +3785,7 @@ mod tests {
             border: [1, 2, 3],
             corner_radius: 0,
             fill: None,
-            shadow: false,
+            shadow: ProtoPanelShadow::None_,
             inset_x: 0,
         });
 
@@ -3799,7 +3809,7 @@ mod tests {
             border: [1, 2, 3],
             corner_radius: 0,
             fill: None,
-            shadow: false,
+            shadow: ProtoPanelShadow::None_,
             inset_x: 0,
         });
         stream.extend_from_slice(&encode_icon(&IconCommand {
@@ -3860,7 +3870,7 @@ mod tests {
             border: [1, 2, 3],
             corner_radius: 0,
             fill: None,
-            shadow: false,
+            shadow: ProtoPanelShadow::None_,
             inset_x: 0,
         });
 

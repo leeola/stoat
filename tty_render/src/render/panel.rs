@@ -9,7 +9,7 @@
 
 use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
-use stoatty_term::grid::{BorderStyle, Grid, Panel, Rgb};
+use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
@@ -31,10 +31,14 @@ const SHADOW_MARGIN: f32 = 16.0;
 /// panel reads as floating above the grid rather than pasted onto it.
 const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
 
+/// Blur radius in physical pixels for a tucked shadow. Tighter than
+/// [`SHADOW_MARGIN`] so the undisplaced halo reads as a seam rather than a float.
+const SHADOW_MARGIN_TUCKED: f32 = 6.0;
+
 /// The per-panel instance data. Carries the anchor cell, the size in cells, the
-/// fill and stroke colors, the drop-shadow displacement and blur radius, the
-/// corner radius, a flag selecting whether the fill is painted, and the border
-/// style code.
+/// fill and stroke colors, the shadow displacement and blur radius, the corner
+/// radius, a flag selecting whether the fill is painted, the border style code,
+/// and a flag clipping the shadow above the box bottom for a tucked shadow.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct PanelInstance {
@@ -48,6 +52,7 @@ struct PanelInstance {
     fill_flag: f32,
     style: u32,
     inset_x: f32,
+    shadow_clip_bottom: f32,
 }
 
 /// The uniform shared by every instance. Carries the surface resolution, the
@@ -136,6 +141,7 @@ impl PanelPass {
                         7 => Float32,
                         8 => Uint32,
                         9 => Float32,
+                        10 => Float32,
                     ],
                 }],
             },
@@ -275,10 +281,10 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
     panels
         .iter()
         .map(|panel| {
-            let (shadow_offset, shadow_margin) = if panel.shadow {
-                (SHADOW_OFFSET, SHADOW_MARGIN)
-            } else {
-                ([0.0, 0.0], 0.0)
+            let (shadow_offset, shadow_margin, shadow_clip_bottom) = match panel.shadow {
+                PanelShadow::Drop => (SHADOW_OFFSET, SHADOW_MARGIN, 0.0),
+                PanelShadow::Tucked => ([0.0, 0.0], SHADOW_MARGIN_TUCKED, 1.0),
+                PanelShadow::None_ => ([0.0, 0.0], 0.0, 0.0),
             };
             PanelInstance {
                 cell: [panel.left as f32, panel.top as f32],
@@ -291,6 +297,7 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
                 fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
                 style: style_code(panel.style),
                 inset_x: panel.inset_x as f32,
+                shadow_clip_bottom,
             }
         })
         .collect()
@@ -316,7 +323,7 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::{build_panel_instances, style_code};
-    use stoatty_term::grid::{BorderStyle, Panel, Rgb};
+    use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
     use wgpu::naga::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
@@ -341,7 +348,7 @@ mod tests {
             border: Rgb::new(0, 255, 0),
             corner_radius: 6,
             fill: Some(Rgb::new(255, 0, 0)),
-            shadow: true,
+            shadow: PanelShadow::Drop,
             inset_x: 0,
             seq: 0,
         }];
@@ -355,6 +362,7 @@ mod tests {
         assert_eq!(instances[0].border, [0.0, 1.0, 0.0]);
         assert_eq!(instances[0].shadow_offset, super::SHADOW_OFFSET);
         assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN);
+        assert_eq!(instances[0].shadow_clip_bottom, 0.0);
         assert_eq!(instances[0].corner_radius, 6.0);
         assert_eq!(instances[0].fill_flag, 1.0);
         assert_eq!(instances[0].style, style_code(BorderStyle::Heavy));
@@ -371,7 +379,7 @@ mod tests {
             border: Rgb::new(10, 20, 30),
             corner_radius: 0,
             fill: None,
-            shadow: false,
+            shadow: PanelShadow::None_,
             inset_x: 0,
             seq: 0,
         }];
@@ -381,5 +389,32 @@ mod tests {
         assert_eq!(instances[0].fill_flag, 0.0);
         assert_eq!(instances[0].shadow_offset, [0.0, 0.0]);
         assert_eq!(instances[0].shadow_margin, 0.0);
+        assert_eq!(instances[0].shadow_clip_bottom, 0.0);
+    }
+
+    #[test]
+    fn tucked_panel_undisplaces_and_clips_the_shadow() {
+        let panels = [Panel {
+            top: 2,
+            left: 2,
+            width: 6,
+            height: 3,
+            style: BorderStyle::Light,
+            border: Rgb::new(1, 2, 3),
+            corner_radius: 0,
+            fill: Some(Rgb::new(4, 5, 6)),
+            shadow: PanelShadow::Tucked,
+            inset_x: 4,
+            seq: 0,
+        }];
+
+        let instances = build_panel_instances(&panels);
+
+        assert_eq!(instances[0].shadow_offset, [0.0, 0.0], "no displacement");
+        assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN_TUCKED);
+        assert_eq!(
+            instances[0].shadow_clip_bottom, 1.0,
+            "clipped below the box"
+        );
     }
 }

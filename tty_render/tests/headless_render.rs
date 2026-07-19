@@ -12,7 +12,8 @@ use stoatty_render::gpu::{
 };
 use stoatty_term::{
     grid::{
-        Bar, Border, BorderStyle, Grid, Icon, IconKind, Overlay, Panel, Rgb, ScrollRegion, TextRun,
+        Bar, Border, BorderStyle, Grid, Icon, IconKind, Overlay, Panel, PanelShadow, Rgb,
+        ScrollRegion, TextRun,
     },
     term::Damage,
 };
@@ -114,7 +115,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         border: Rgb::new(180, 180, 220),
         corner_radius: 6,
         fill: Some(Rgb::new(30, 30, 50)),
-        shadow: true,
+        shadow: PanelShadow::Drop,
         inset_x: 0,
         seq: 0,
     }]);

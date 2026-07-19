@@ -14,7 +14,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, Rgb, TextRun},
+    grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Rgb, TextRun},
     term::Damage,
 };
 use wgpu::{
@@ -96,7 +96,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         border,
         corner_radius: 0,
         fill: None,
-        shadow: false,
+        shadow: PanelShadow::None_,
         inset_x: 0,
         seq: 100,
     }]);
@@ -249,7 +249,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
         border,
         corner_radius: 0,
         fill: None,
-        shadow: false,
+        shadow: PanelShadow::None_,
         inset_x: 0,
         seq: 100,
     }];

@@ -12,7 +12,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{BorderStyle, Grid, Panel, Rgb},
+    grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb},
     term::Damage,
 };
 use wgpu::{
@@ -140,7 +140,7 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         border: Rgb::new(200, 100, 50),
         corner_radius: 6,
         fill: None,
-        shadow: true,
+        shadow: PanelShadow::Drop,
         inset_x: 0,
         seq: 0,
     }) else {
@@ -182,7 +182,7 @@ fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
         corner_radius: 6,
         // Fill the box so the inset frame's interior is visibly not the clear.
         fill: Some(Rgb::new(20, 22, 30)),
-        shadow: false,
+        shadow: PanelShadow::None_,
         inset_x: inset,
         seq: 0,
     }) else {

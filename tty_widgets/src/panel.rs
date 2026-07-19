@@ -6,12 +6,12 @@ use ratatui::{
     symbols::border,
     widgets::StatefulWidget,
 };
-use stoatty_protocol::command::{self, BorderStyle, PanelCommand};
+use stoatty_protocol::command::{self, BorderStyle, PanelCommand, PanelShadow};
 
 /// Frame the render area with off-grid modal chrome.
 ///
 /// Emits a `panel` APC frame so a stoatty terminal draws a hairline frame with
-/// rounded corners, an optional fill, and a drop shadow over the area. It also
+/// rounded corners, an optional fill, and a shadow over the area. It also
 /// writes the matching box-drawing perimeter into `buf`, so the same frame
 /// degrades to a classic cell border in any other terminal. The frame occupies
 /// the area's perimeter cells, so callers size the area to include it.
@@ -23,7 +23,7 @@ pub struct Panel {
     pub border: [u8; 3],
     pub corner_radius: u8,
     pub fill: Option<[u8; 3]>,
-    pub shadow: bool,
+    pub shadow: PanelShadow,
     /// Device pixels shaved off each horizontal edge in the APC frame, so the box
     /// draws narrower than its cell rect. `0` is cell-exact. The fallback border
     /// ignores it (cell borders are whole cells).
@@ -74,7 +74,7 @@ mod tests {
     use super::Panel;
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-    use stoatty_protocol::command::{encode_panel, BorderStyle, PanelCommand};
+    use stoatty_protocol::command::{encode_panel, BorderStyle, PanelCommand, PanelShadow};
 
     fn symbol(buf: &Buffer, x: u16, y: u16) -> &str {
         buf.cell((x, y)).expect("cell in bounds").symbol()
@@ -91,7 +91,7 @@ mod tests {
             border: [78, 86, 102],
             corner_radius: 6,
             fill: Some([40, 44, 52]),
-            shadow: true,
+            shadow: PanelShadow::Drop,
             inset_x: 4,
         }
         .render(area, &mut buf, &mut scene);
@@ -105,7 +105,7 @@ mod tests {
             border: [78, 86, 102],
             corner_radius: 6,
             fill: Some([40, 44, 52]),
-            shadow: true,
+            shadow: PanelShadow::Drop,
             inset_x: 4,
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
@@ -122,7 +122,7 @@ mod tests {
             border: [255, 255, 255],
             corner_radius: 0,
             fill: None,
-            shadow: false,
+            shadow: PanelShadow::None_,
             inset_x: 0,
         }
         .render(area, &mut buf, &mut scene);
@@ -146,7 +146,7 @@ mod tests {
             border: [1, 2, 3],
             corner_radius: 6,
             fill: None,
-            shadow: false,
+            shadow: PanelShadow::None_,
             inset_x: 0,
         }
         .render(area, &mut buf, &mut scene);

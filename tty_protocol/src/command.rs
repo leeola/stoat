@@ -171,14 +171,28 @@ pub enum BorderStyle {
     Rounded,
 }
 
+/// How a panel's shadow is drawn.
+///
+/// [`PanelShadow::None_`] draws no shadow. [`PanelShadow::Drop`] is a displaced,
+/// blurred shadow that reads as the panel floating above the grid.
+/// [`PanelShadow::Tucked`] is undisplaced with a tight halo clipped above the
+/// panel's bottom edge, so the panel reads as emerging from beneath whatever sits
+/// below it rather than floating in front.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanelShadow {
+    None_,
+    Drop,
+    Tucked,
+}
+
 /// Draw off-grid modal chrome framing a cell rectangle.
 ///
 /// A `width` by `height` cell region at (`top`, `left`) in absolute grid
 /// coordinates gets a hairline frame in `border` at `style` weight, with
-/// `corner_radius` device-pixel rounded corners (0 = square) and an optional
-/// drop `shadow`. Unlike a per-cell [`BorderCommand`], the frame is a floating
-/// component drawn under the grid text, so the framed cells keep rendering their
-/// own content.
+/// `corner_radius` device-pixel rounded corners (0 = square) and a `shadow`
+/// drawn in the selected [`PanelShadow`] style. Unlike a per-cell
+/// [`BorderCommand`], the frame is a floating component drawn under the grid
+/// text, so the framed cells keep rendering their own content.
 ///
 /// `fill` is [`Some`] to paint the interior that color, or [`None`] to leave the
 /// cells' own SGR backgrounds showing through.
@@ -192,7 +206,7 @@ pub struct PanelCommand {
     pub border: [u8; 3],
     pub corner_radius: u8,
     pub fill: Option<[u8; 3]>,
-    pub shadow: bool,
+    pub shadow: PanelShadow,
     /// Device pixels shaved off each horizontal edge, so the box draws narrower
     /// than its cell rect. `0` is cell-exact. The border, fill, corner rounding,
     /// and shadow all follow the inset rect, leaving the strip outside it showing
@@ -616,7 +630,7 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
         w.write_all(&[command.corner_radius])?;
         w.write_all(&[command.fill.is_some() as u8])?;
         w.write_all(&command.fill.unwrap_or([0, 0, 0]))?;
-        w.write_all(&[command.shadow as u8])?;
+        w.write_all(&[shadow_code(command.shadow)])?;
         w.write_all(&[command.inset_x])?;
         Ok(())
     });
@@ -1371,7 +1385,7 @@ fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         border: [arg[9], arg[10], arg[11]],
         corner_radius: arg[12],
         fill: (arg[13] != 0).then_some([arg[14], arg[15], arg[16]]),
-        shadow: arg[17] != 0,
+        shadow: decode_shadow(arg[17]),
         inset_x: arg[18],
     })
 }
@@ -1701,6 +1715,24 @@ fn style_code(style: BorderStyle) -> u8 {
     }
 }
 
+fn shadow_code(shadow: PanelShadow) -> u8 {
+    match shadow {
+        PanelShadow::None_ => 0,
+        PanelShadow::Drop => 1,
+        PanelShadow::Tucked => 2,
+    }
+}
+
+/// An unknown code falls back to [`PanelShadow::Drop`], the visible default, so a
+/// newer emitter's added style still shows a shadow on an older reader.
+fn decode_shadow(code: u8) -> PanelShadow {
+    match code {
+        0 => PanelShadow::None_,
+        2 => PanelShadow::Tucked,
+        _ => PanelShadow::Drop,
+    }
+}
+
 fn decode_icon_kind(code: u8) -> Option<IconKind> {
     match code {
         0 => Some(IconKind::Error),
@@ -1730,9 +1762,9 @@ mod tests {
         encode_window_open, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
         HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand, MinimapCommand,
         MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
-        PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand,
-        ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand, WindowCloseCommand,
-        WindowFocusCommand, WindowOpenCommand,
+        PanelShadow, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
+        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
+        WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
     };
 
     #[test]
@@ -1812,7 +1844,7 @@ mod tests {
             border: [200, 40, 90],
             corner_radius: 6,
             fill: Some([20, 22, 30]),
-            shadow: true,
+            shadow: PanelShadow::Drop,
             inset_x: 4,
         };
 
@@ -1833,8 +1865,29 @@ mod tests {
             border: [1, 2, 3],
             corner_radius: 0,
             fill: None,
-            shadow: false,
+            shadow: PanelShadow::None_,
             inset_x: 0,
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    #[test]
+    fn panel_tucked_shadow_round_trips() {
+        let command = PanelCommand {
+            top: 1,
+            left: 2,
+            width: 8,
+            height: 4,
+            style: BorderStyle::Light,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: Some([4, 5, 6]),
+            shadow: PanelShadow::Tucked,
+            inset_x: 4,
         };
 
         assert_eq!(
@@ -1881,7 +1934,7 @@ mod tests {
                 border: [200, 40, 90],
                 corner_radius: 6,
                 fill: Some([20, 22, 30]),
-                shadow: true,
+                shadow: PanelShadow::Drop,
                 inset_x: 0,
             })
         );

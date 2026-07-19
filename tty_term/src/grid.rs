@@ -683,6 +683,19 @@ pub enum BorderStyle {
     Rounded,
 }
 
+/// How a [`Panel`]'s shadow is drawn, as renderer primitives.
+///
+/// [`PanelShadow::None_`] draws no shadow. [`PanelShadow::Drop`] displaces and
+/// blurs the shadow so the panel reads as floating above the grid.
+/// [`PanelShadow::Tucked`] leaves it undisplaced and clipped above the panel's
+/// bottom edge, so the panel reads as emerging from beneath what sits below it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanelShadow {
+    None_,
+    Drop,
+    Tucked,
+}
+
 /// A cell's role in a scaled glyph block.
 ///
 /// A glyph drawn at `n` times the cell size owns an `n` by `n` block of cells.
@@ -738,8 +751,9 @@ pub struct Overlay {
 ///
 /// Like an [`Overlay`], the panel is grid-level rather than a cell attribute: a
 /// hairline frame in [`Self::border`] at [`Self::style`] weight with
-/// [`Self::corner_radius`] device-pixel rounded corners and an optional drop
-/// [`Self::shadow`], composited around the `width` by `height` cell rectangle at
+/// [`Self::corner_radius`] device-pixel rounded corners and a [`Self::shadow`] in
+/// the selected [`PanelShadow`] style, composited around the `width` by `height`
+/// cell rectangle at
 /// (`top`, `left`). The framed cells keep rendering their own content, so unlike
 /// an opaque overlay the panel is chrome layered with the grid rather than over
 /// it.
@@ -756,7 +770,7 @@ pub struct Panel {
     pub border: Rgb,
     pub corner_radius: u8,
     pub fill: Option<Rgb>,
-    pub shadow: bool,
+    pub shadow: PanelShadow,
     /// Device pixels shaved off each horizontal edge, so the box draws narrower
     /// than its cell rect. Carried from the panel command and applied by the
     /// renderer to the frame, fill, corners, and shadow.

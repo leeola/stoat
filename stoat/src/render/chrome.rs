@@ -6,7 +6,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, StatefulWidget, Widget},
 };
-use stoatty_protocol::command::{self, BorderStyle, PanelCommand};
+use stoatty_protocol::command::{self, BorderStyle, PanelCommand, PanelShadow};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
 /// Draw a modal frame around `area` and return the inner content rect.
@@ -60,7 +60,7 @@ pub(crate) fn modal_frame(
                     border,
                     corner_radius: 6,
                     fill: None,
-                    shadow: true,
+                    shadow: PanelShadow::Drop,
                     inset_x: 0,
                 },
             );
@@ -136,7 +136,7 @@ pub(crate) fn popout_frame(
                     border,
                     corner_radius: 0,
                     fill: Some(bg),
-                    shadow: true,
+                    shadow: PanelShadow::Tucked,
                     inset_x: POPOUT_INSET_PX,
                 },
             );
@@ -277,7 +277,7 @@ mod tests {
     };
     use stoatty_protocol::command::{
         encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, PanelCommand,
-        TextRunCommand,
+        PanelShadow, TextRunCommand,
     };
     use stoatty_widgets::ApcScene;
 
@@ -332,7 +332,7 @@ mod tests {
             border: [1, 2, 3],
             corner_radius: 6,
             fill: None,
-            shadow: true,
+            shadow: PanelShadow::Drop,
             inset_x: 0,
         });
         // The title run carries no background box and anchors one cell into the
@@ -382,7 +382,7 @@ mod tests {
                 border: [1, 2, 3],
                 corner_radius: 0,
                 fill: Some([4, 5, 6]),
-                shadow: true,
+                shadow: PanelShadow::Tucked,
                 inset_x: POPOUT_INSET_PX,
             }),
         );

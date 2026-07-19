@@ -19,7 +19,7 @@ use std::{
     io::{self, Write},
     thread,
 };
-use stoatty_protocol::command::BorderStyle;
+use stoatty_protocol::command::{BorderStyle, PanelShadow};
 use stoatty_widgets::{panel::Panel, text_run::TextRun, ApcScene};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
@@ -78,7 +78,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
             border: FRAME_FG,
             corner_radius: 6,
             fill: None,
-            shadow: true,
+            shadow: PanelShadow::Drop,
             inset_x: 0,
         },
         dialog,

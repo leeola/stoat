@@ -22,7 +22,7 @@ var<uniform> globals: Globals;
 @group(0) @binding(1)
 var<storage, read> instances: array<f32>;
 
-const INSTANCE_STRIDE: u32 = 17u;
+const INSTANCE_STRIDE: u32 = 18u;
 
 // Border style codes, matching the protocol's border style ordering.
 const STYLE_LIGHT: u32 = 0u;
@@ -54,6 +54,9 @@ struct VsOut {
     // This panel's draw index, so the fragment shader can occlude against every
     // later (higher-index, on-top) panel.
     @location(9) @interpolate(flat) instance: u32,
+    // 1.0 to clip the shadow above the box's bottom edge (a tucked shadow), 0.0
+    // to let it fall past the bottom (a drop shadow).
+    @location(10) @interpolate(flat) shadow_clip_bottom: f32,
 }
 
 @vertex
@@ -70,6 +73,7 @@ fn vs_main(
     @location(7) fill_flag: f32,
     @location(8) style: u32,
     @location(9) inset_x: f32,
+    @location(10) shadow_clip_bottom: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -112,6 +116,7 @@ fn vs_main(
     out.fill_flag = fill_flag;
     out.style = style;
     out.instance = instance_index;
+    out.shadow_clip_bottom = shadow_clip_bottom;
     return out;
 }
 
@@ -177,13 +182,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let shadow_min = in.box_min + offset;
     let shadow_max = in.box_max + offset;
     let d = max(vec2<f32>(0.0, 0.0), max(shadow_min - p, p - shadow_max));
+    // A tucked shadow paints nothing below the box's bottom edge, so the seam
+    // with whatever sits below the panel stays clean and the panel reads as
+    // emerging from beneath it rather than floating over it.
+    let clip = select(1.0, step(p.y, in.box_max.y), in.shadow_clip_bottom > 0.5);
     // Gate the shadow to the box exterior so an unfilled panel's interior is not
     // washed by its own shadow. `interior` is 1 inside the box and 0 outside.
     let shadow_base = select(
         0.0,
         SHADOW_ALPHA * (1.0 - smoothstep(0.0, margin, length(d))),
         margin > 0.0
-    ) * (1.0 - interior);
+    ) * (1.0 - interior) * clip;
 
     // Composite bottom-up: the shadow, then the optional fill, then the stroke.
     var color = SHADOW_COLOR;
