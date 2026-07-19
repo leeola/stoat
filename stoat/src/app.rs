@@ -6514,7 +6514,11 @@ impl Stoat {
         let panes = if overlay {
             Vec::new()
         } else {
-            self.editor_pool_panes()
+            // Detached editor panes ship through the same fill pipeline, their
+            // regions bound to their aux windows. An overlay blanks them too.
+            let mut panes = self.editor_pool_panes();
+            panes.extend(self.windowed_editor_pool_panes());
+            panes
         };
 
         // The file finder is a modal over normal mode (not a full-screen overlay
@@ -6754,7 +6758,10 @@ impl Stoat {
 
             // Per-pane mode feeds each pane's own strip, keyed by its pool. Single
             // mode feeds one shared strip (u32::MAX) for the focused pane only.
-            let view_strip = if single_minimap {
+            // Aux windows draw no minimap, so a windowed region feeds no strip.
+            let view_strip = if region.window != 0 {
+                None
+            } else if single_minimap {
                 (focused_editor == Some(*editor_id))
                     .then_some(crate::render::SINGLE_MINIMAP_STRIP_ID)
             } else {
@@ -7299,6 +7306,47 @@ impl Stoat {
                         width,
                         height: content.height,
                         window: 0,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// The detached editor panes and their window-bound pool regions.
+    ///
+    /// The counterpart to [`Self::editor_pool_panes`] over the workspace's
+    /// windowed panes. Each region's coordinates are relative to the pane's own
+    /// aux window (`window` is nonzero), and no minimap-strip columns are
+    /// reserved since aux windows draw no minimap.
+    fn windowed_editor_pool_panes(
+        &self,
+    ) -> Vec<(u32, EditorId, stoatty_protocol::command::PoolRegionCommand)> {
+        let ws = self.active_workspace();
+        ws.panes
+            .windowed_panes()
+            .into_iter()
+            .filter_map(|(pane_id, window)| {
+                let pane = ws.panes.pane(pane_id);
+                let View::Editor(editor_id) = pane.view else {
+                    return None;
+                };
+                ws.editors.get(editor_id)?;
+
+                let (content, _) = crate::render::layout::split_pane_status(pane.area);
+                if content.width == 0 || content.height == 0 {
+                    return None;
+                }
+
+                Some((
+                    pane.index,
+                    editor_id,
+                    stoatty_protocol::command::PoolRegionCommand {
+                        pool: pane.index,
+                        top: content.y,
+                        left: content.x,
+                        width: content.width,
+                        height: content.height,
+                        window,
                     },
                 ))
             })
@@ -12793,6 +12841,38 @@ mod tests {
             filled,
             vec![0, 1, 2, 3, 4],
             "the initial window's pages fill asynchronously, got {filled:?}"
+        );
+    }
+
+    #[test]
+    fn detached_editor_ships_a_window_bound_pool() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.window_ipc_connected = true;
+
+        let root = std::path::PathBuf::from("/detach-emit");
+        let path = root.join("a.txt");
+        let body = (0..150).map(|i| format!("line {i}\n")).collect::<String>();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        h.type_action("SplitRight()");
+        h.settle();
+        h.type_action("DetachPane()");
+        while rx.try_recv().is_ok() {}
+
+        h.stoat.emit_smooth_scroll();
+        let cmds = drain_apc(&mut rx);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::PoolRegion(r) if r.window != 0)),
+            "the detached editor declares a window-bound pool, got {cmds:?}"
         );
     }
 
