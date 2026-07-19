@@ -13,13 +13,13 @@ use ratatui::{
 };
 use std::path::Path;
 
-/// Lay out the centered document-symbol finder modal within `area`, or `None`
-/// when `area` is too small to host it.
+/// Lay out the centered symbol finder modal within `area`, or `None` when
+/// `area` is too small to host it.
 ///
-/// Returns the modal box, its inner rect (prompt, separator, then body), and
-/// the list rect spanning the whole body below the separator. There is no
-/// preview pane at this scope.
-fn symbol_finder_layout(area: Rect) -> Option<(Rect, Rect, Rect)> {
+/// Returns the modal box, its inner rect (prompt, separator, then body), the
+/// result-list rect, and an optional preview pane rect. The preview appears only
+/// when the body is wide enough, so a narrow modal stays list-only.
+fn symbol_finder_layout(area: Rect) -> Option<(Rect, Rect, Rect, Option<Rect>)> {
     if area.width < 40 || area.height < 12 {
         return None;
     }
@@ -38,8 +38,15 @@ fn symbol_finder_layout(area: Rect) -> Option<(Rect, Rect, Rect)> {
     if body_height == 0 {
         return None;
     }
-    let list = Rect::new(inner.x, body_top, inner.width, body_height);
-    Some((modal, inner, list))
+    let (list, preview) = crate::render::picker::split_list_preview(
+        inner.x,
+        body_top,
+        inner.width,
+        body_height,
+        80,
+        24,
+    );
+    Some((modal, inner, list, preview))
 }
 
 pub(crate) fn render_symbol_finder(
@@ -50,7 +57,7 @@ pub(crate) fn render_symbol_finder(
     buf: &mut Buffer,
     mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
-    let Some((modal, inner, list)) = symbol_finder_layout(area) else {
+    let Some((modal, inner, list, preview)) = symbol_finder_layout(area) else {
         return;
     };
 
@@ -90,8 +97,21 @@ pub(crate) fn render_symbol_finder(
         inner.y + 1,
         inner.width,
         separator_style,
-        scene,
+        scene.as_deref_mut(),
     );
+
+    if let Some(preview_rect) = preview {
+        crate::render::chrome::vline(
+            buf,
+            list.x + list.width,
+            list.y,
+            list.height,
+            separator_style,
+            scene,
+        );
+        finder.preview_rows = Some(preview_rect.height as usize);
+        crate::render::picker::render_picker_preview(&finder.preview, preview_rect, theme, ws, buf);
+    }
 
     let git_root = ws.git_root.clone();
     finder.viewport_rows = Some(list.height as usize);

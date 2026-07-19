@@ -3,6 +3,7 @@ use crate::{
     fuzzy,
     host::OffsetEncoding,
     input_view::{InputView, SubmitTarget},
+    picker::Preview,
     workspace::Workspace,
 };
 use lsp_types::{Position, SymbolKind};
@@ -63,6 +64,12 @@ pub(crate) struct SymbolFinder {
     pub(crate) match_indices: Vec<Vec<u32>>,
     pub(crate) selected: usize,
     pub(crate) viewport_rows: Option<usize>,
+    /// Read-only pane showing the selected symbol's source. Kept in sync by
+    /// [`crate::action_handlers::lsp::sync_symbol_finder`].
+    pub(crate) preview: Preview,
+    /// Rows the preview pane rendered last, driving the scroll centering.
+    /// `None` until the first render lays the pane out.
+    pub(crate) preview_rows: Option<usize>,
     /// Buffer the finder opened over. The workspace scope routes re-issued
     /// requests through it when its named servers no longer resolve.
     pub(crate) buffer_id: BufferId,
@@ -84,6 +91,7 @@ impl SymbolFinder {
         scope: SymbolFinderScope,
         servers: Vec<String>,
     ) -> Self {
+        let preview = Preview::new(ws, executor.clone());
         let input = InputView::create(ws, executor, SubmitTarget::SymbolFinder, "", "insert", 1);
         Self {
             input,
@@ -93,6 +101,8 @@ impl SymbolFinder {
             match_indices: Vec::new(),
             selected: 0,
             viewport_rows: None,
+            preview,
+            preview_rows: None,
             buffer_id,
             servers,
             last_query: String::new(),
@@ -145,6 +155,7 @@ impl SymbolFinder {
 
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
+        self.preview.dispose(ws);
     }
 
     fn clamp_selected(&mut self) {
@@ -192,6 +203,7 @@ mod tests {
         buffer::BufferId,
         editor_state::EditorId,
         input_view::{InputView, SubmitTarget},
+        picker::Preview,
     };
 
     fn entry(title: &str) -> SymbolFinderEntry {
@@ -218,6 +230,8 @@ mod tests {
             match_indices: Vec::new(),
             selected: 0,
             viewport_rows: None,
+            preview: Preview::test_dummy(),
+            preview_rows: None,
             buffer_id: BufferId::new(0),
             servers: Vec::new(),
             last_query: String::new(),

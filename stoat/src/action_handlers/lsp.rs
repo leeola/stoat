@@ -22,6 +22,7 @@ use crate::{
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
     location_picker::{LocationEntry, LocationPicker},
     lsp::{servers::ServerSource, LspSymbolKind},
+    picker::PreviewSource,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
     theme::scope,
     workspace::WorkspaceUid,
@@ -3760,6 +3761,81 @@ pub(crate) fn sync_symbol_finder(stoat: &mut Stoat) {
 
     if let Some(finder) = stoat.symbol_finder.as_mut() {
         finder.refilter(&query);
+    }
+
+    sync_symbol_finder_preview(stoat);
+}
+
+/// Sync the finder's preview pane to the selected entry.
+///
+/// Loads the entry's source (the focused buffer for document scope, the target
+/// file or its live buffer for workspace scope), scrolls it so the symbol line
+/// sits a third down the pane, and lands the preview cursor at the symbol offset
+/// so the target line is markable. Clears the pane when nothing is selected.
+fn sync_symbol_finder_preview(stoat: &mut Stoat) {
+    let Some((buffer_id, rows, entry)) = stoat.symbol_finder.as_ref().map(|finder| {
+        (
+            finder.buffer_id,
+            finder.preview_rows.unwrap_or(24),
+            finder.selected_entry().map(|e| (e.line, e.target.clone())),
+        )
+    }) else {
+        return;
+    };
+
+    let idx = stoat.active_workspace;
+    let fs_host = &*stoat.fs_host;
+    let language_registry = &stoat.language_registry;
+    let ws = &mut stoat.workspaces[idx];
+    let Some(finder) = stoat.symbol_finder.as_mut() else {
+        return;
+    };
+
+    let Some((line, target)) = entry else {
+        finder.preview.clear(ws);
+        return;
+    };
+
+    let source = match &target {
+        SymbolTarget::Offset(_) => PreviewSource::Buffer(buffer_id),
+        SymbolTarget::Workspace { path, .. } => match ws.buffers.id_for_path(path) {
+            Some(id) => PreviewSource::Buffer(id),
+            None => PreviewSource::File(path.clone()),
+        },
+    };
+    finder.preview.sync(ws, fs_host, language_registry, source);
+
+    let scroll_row = line.saturating_sub((rows / 3) as u32);
+    let editor_id = finder.preview.editor;
+    if let Some(editor) = ws.editors.get_mut(editor_id) {
+        editor.scroll_row = scroll_row;
+        editor.scroll_offset = scroll_row as f32;
+
+        let offset = {
+            let snapshot = editor.display_map.snapshot();
+            let buf_snap = snapshot.buffer_snapshot();
+            match &target {
+                SymbolTarget::Offset(off) => *off,
+                SymbolTarget::Workspace {
+                    position, encoding, ..
+                } => {
+                    crate::lsp::util::lsp_pos_to_byte_offset(buf_snap.rope(), *position, *encoding)
+                },
+            }
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+        let clamped = offset.min(rope.len());
+        editor.selections.transform(buffer_snapshot, |sel| {
+            crate::action_handlers::movement::land_block_cursor(
+                sel.id,
+                clamped,
+                stoat_text::SelectionGoal::None,
+                rope,
+                buffer_snapshot,
+            )
+        });
     }
 }
 
@@ -7889,6 +7965,128 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
         h.assert_snapshot("snapshot_symbol_picker");
+    }
+
+    #[test]
+    fn symbol_finder_previews_document_scrolled_to_line() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let src = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nfn target() {}\n";
+        let root = seed(&mut h, &[("main.rs", src)]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![flat_symbol(
+                "target",
+                path.to_str().unwrap(),
+                10,
+                3,
+            )]),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+
+        let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+        let preview_editor = finder.preview.editor;
+        let preview_buffer = finder.preview.buffer;
+        let ws = h.stoat.active_workspace();
+        let content = ws
+            .buffers
+            .get(preview_buffer)
+            .expect("preview buffer")
+            .read()
+            .expect("preview buffer")
+            .rope()
+            .to_string();
+        assert_eq!(content, src, "the preview mirrors the focused buffer");
+        assert_eq!(
+            ws.editors
+                .get(preview_editor)
+                .expect("preview editor")
+                .scroll_row,
+            2,
+            "line 10 sits a third down a 24-row pane (10 - 8)",
+        );
+    }
+
+    #[test]
+    fn symbol_finder_previews_workspace_file_from_disk() {
+        use lsp_types::SymbolKind;
+        let mut h = TestHarness::with_size(80, 24);
+        enable_workspace_symbols(&h);
+        let root = seed(
+            &mut h,
+            &[("main.rs", "fn foo() {}\n"), ("lib.rs", "fn bar() {}\n")],
+        );
+        let lib = root.join("lib.rs");
+        open_buffer(&mut h, root.join("main.rs"));
+        h.fake_lsp().add_workspace_symbol(
+            "bar",
+            "bar",
+            SymbolKind::FUNCTION,
+            lib.to_str().unwrap(),
+            0,
+            3,
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        h.type_keys("b a r");
+        h.settle();
+
+        let preview_buffer = h
+            .stoat
+            .symbol_finder
+            .as_ref()
+            .expect("finder")
+            .preview
+            .buffer;
+        let content = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(preview_buffer)
+            .expect("preview buffer")
+            .read()
+            .expect("preview buffer")
+            .rope()
+            .to_string();
+        assert_eq!(
+            content, "fn bar() {}\n",
+            "the workspace preview shows the unopened target file from disk",
+        );
+    }
+
+    #[test]
+    fn symbol_finder_close_disposes_preview() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![flat_symbol("foo", path.to_str().unwrap(), 0, 3)]),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+
+        let (editor_id, buffer_id) = {
+            let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+            (finder.preview.editor, finder.preview.buffer)
+        };
+        assert!(h.stoat.active_workspace().editors.get(editor_id).is_some());
+
+        h.type_keys("escape");
+        assert!(h.stoat.symbol_finder.is_none());
+        assert!(
+            h.stoat.active_workspace().editors.get(editor_id).is_none(),
+            "the preview editor is disposed on close",
+        );
+        assert!(
+            h.stoat.active_workspace().buffers.get(buffer_id).is_none(),
+            "the preview scratch buffer is disposed on close",
+        );
     }
 
     /// Install two identically-capable fakes routed primary-then-secondary for

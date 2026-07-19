@@ -477,6 +477,17 @@ impl Preview {
         ws.editors.remove(self.editor);
         ws.buffers.remove(self.buffer);
     }
+
+    /// A preview holding no real workspace slots, for unit tests that construct
+    /// a picker but never render or sync the pane.
+    #[cfg(test)]
+    pub(crate) fn test_dummy() -> Self {
+        Self {
+            editor: EditorId::default(),
+            buffer: BufferId::new(0),
+            rendered_for: None,
+        }
+    }
 }
 
 /// Read `path` through `fs_host`, truncating at [`PREVIEW_BYTE_LIMIT`] on a
