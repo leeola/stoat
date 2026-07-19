@@ -2122,12 +2122,24 @@ impl Stoat {
     /// wheel rates overlaps into continuous motion instead of pulsing. A gap
     /// wider than three viewports (a big count-jump or a jump landing mid-glide)
     /// snaps instead so the offset never drags across the pool's buffered window.
+    ///
+    /// A wheel glide keeps the cursor anchored to its origin line while it moves
+    /// fast. Once the glide slows below a velocity threshold the cursor re-homes
+    /// into the scrolloff band mid-flight, repeating as a slow crawl drifts the
+    /// viewport, so it comes into frame before the glide settles.
     fn tick_scroll_anim(&mut self, dt: f32) -> bool {
         const PAGE_EASE: f32 = 0.35;
         // Slow enough that >=10Hz wheel report trains overlap into continuous
         // motion instead of pulse-stall-pulse, fast enough that a lone notch's
         // three-row glide completes in about 200ms.
         const WHEEL_EASE: f32 = 0.13;
+        // Below this glide velocity in rows per second the cursor re-homes into
+        // the scrolloff band mid-flight rather than waiting for the settle, so
+        // it comes into frame while content still visibly moves. With WHEEL_EASE
+        // the per-tick velocity is roughly the remaining gap in rows times a
+        // fixed factor, so 15 rows/s lands the cursor once under about one row of
+        // glide remains. Raise it to bring the cursor in earlier.
+        const WHEEL_REHOME_MAX_VELOCITY: f32 = 15.0;
 
         // Read before the workspace borrow so the settle clamp below can use it.
         let scrolloff = self.settings.scrolloff.unwrap_or(3);
@@ -2144,6 +2156,7 @@ impl Stoat {
                 .viewport_rows
                 .unwrap_or(action_handlers::movement::DEFAULT_VIEWPORT_ROWS)
                 .max(1);
+            let mut closed = 0.0;
             if (target - editor.scroll_offset).abs() > viewport as f32 * 3.0 {
                 editor.scroll_offset = target;
                 editor.scroll_glide = ScrollGlide::None;
@@ -2154,6 +2167,7 @@ impl Stoat {
                     dt,
                     ease,
                 );
+                closed = (offset - editor.scroll_offset).abs();
                 editor.scroll_offset = offset;
                 if settled {
                     editor.scroll_glide = ScrollGlide::None;
@@ -2162,6 +2176,16 @@ impl Stoat {
             // A wheel glide defers its cursor follow to the settle, so when it
             // just cleared, clamp the anchored cursor into the landing band.
             if was == ScrollGlide::Wheel && editor.scroll_glide == ScrollGlide::None {
+                action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
+            }
+            // While the glide is still in flight but has slowed below the re-home
+            // velocity, land the cursor in the band now rather than at the settle.
+            // clamp_cursor_to_view no-ops inside the band, so this re-homes about
+            // once per notch as the viewport drifts on.
+            if was == ScrollGlide::Wheel
+                && editor.scroll_glide == ScrollGlide::Wheel
+                && closed / dt.max(1e-6) <= WHEEL_REHOME_MAX_VELOCITY
+            {
                 action_handlers::movement::clamp_cursor_to_view(editor, scrolloff);
             }
             animating |= editor.scroll_glide != ScrollGlide::None;
@@ -8559,6 +8583,89 @@ mod tests {
         assert!(
             head_row(&mut h) > cursor_before,
             "the mid-glide key clamped the cursor down into the landing viewport"
+        );
+    }
+
+    #[test]
+    fn wheel_glide_rehomes_the_cursor_when_velocity_drops() {
+        use crate::test_harness::TestHarness;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let head_row = |h: &mut TestHarness| -> u32 {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            let snapshot = editor.display_map.snapshot();
+            let buffer_snapshot = snapshot.buffer_snapshot();
+            let head = editor.selections.newest_anchor().head();
+            let offset = buffer_snapshot.resolve_anchor(&head);
+            buffer_snapshot.rope().offset_to_point(offset).row
+        };
+
+        let origin = head_row(&mut h);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            for _ in 0..4 {
+                action_handlers::movement::wheel_scroll(editor, true);
+            }
+        }
+
+        // The first tick is fast, so the cursor stays anchored to its origin line.
+        h.stoat.tick_scroll_anim(0.016);
+        assert!(h.stoat.is_animating(), "the wheel glide is still in flight");
+        assert_eq!(
+            head_row(&mut h),
+            origin,
+            "at high velocity the cursor stays anchored to its origin line"
+        );
+
+        // As the glide slows below the re-home velocity the cursor lands in the
+        // scrolloff band while the glide is still in flight.
+        let mut ticks = 0;
+        while head_row(&mut h) == origin {
+            assert!(ticks < 100, "the cursor re-homes before the glide ends");
+            h.stoat.tick_scroll_anim(0.016);
+            ticks += 1;
+        }
+        assert!(
+            h.stoat.is_animating(),
+            "the re-home beat the settle, so the glide is still gliding"
+        );
+        let landed = head_row(&mut h);
+        let band_top = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .scroll_row;
+        assert!(
+            landed >= band_top + 3 && landed < band_top + 10,
+            "the re-home lands the cursor in the scrolloff band \
+             (scroll_row {band_top}, cursor_row {landed})"
+        );
+
+        // A further notch drifts the viewport on, so the cursor re-homes a second
+        // time mid-glide rather than freezing until the settle.
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            action_handlers::movement::wheel_scroll(editor, true);
+        }
+        let mut ticks = 0;
+        while head_row(&mut h) == landed {
+            assert!(
+                ticks < 100,
+                "the cursor re-homes a second time on the slow crawl"
+            );
+            h.stoat.tick_scroll_anim(0.016);
+            ticks += 1;
+        }
+        assert!(
+            h.stoat.is_animating(),
+            "the second re-home also lands mid-glide"
+        );
+        assert!(
+            head_row(&mut h) > landed,
+            "the second re-home advanced the cursor further down the band"
         );
     }
 

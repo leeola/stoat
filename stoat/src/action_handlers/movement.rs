@@ -4018,9 +4018,9 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
 /// Each report moves `scroll_row` a fixed three rows -- matching the scrollback
 /// and run-pane wheel steps -- toward the document bound, and the tick eases
 /// `scroll_offset` up to it, so steady wheel input yields steady speed. The
-/// selection stays anchored to its buffer line for the whole glide, sliding out
-/// of view with the content. The cursor is clamped into the scrolloff band only
-/// when the glide settles.
+/// selection stays anchored to its buffer line while the glide moves fast,
+/// sliding out of view with the content. Once the glide slows below its re-home
+/// velocity the cursor lands in the scrolloff band, ahead of the settle.
 ///
 /// Reseeds `scroll_offset` from `scroll_row` only when no glide is in flight and
 /// another path moved the integer row out from under the fraction. Mid-glide the
