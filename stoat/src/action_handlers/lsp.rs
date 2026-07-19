@@ -739,17 +739,17 @@ pub(crate) fn goto_implementation(stoat: &mut Stoat) -> UpdateEffect {
 /// server. No-op when the focused pane is not an editor, its buffer has
 /// no path, or a review cursor does not map to a file line.
 pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::GotoReference)
-    {
-        return crate::code_index::nav::goto_references(stoat);
-    }
-
-    let encoding = stoat.lsp_host().offset_encoding();
     let Some(site) = lsp_request_site(stoat) else {
         return UpdateEffect::None;
     };
+    let Some((_, host)) = stoat
+        .feature_hosts(site.buffer_id, LanguageServerFeature::GotoReference)
+        .into_iter()
+        .next()
+    else {
+        return crate::code_index::nav::goto_references(stoat);
+    };
+    let encoding = host.offset_encoding();
     let Some(source_uri) = path_to_uri(&site.path) else {
         return UpdateEffect::None;
     };
@@ -767,12 +767,11 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
         },
     };
 
-    let lsp = stoat.lsp_host();
     let fs = stoat.fs_host.clone();
     let source_path = site.path;
     let source_rope = site.rope;
     let task = stoat.spawn_woken(async move {
-        let locations = match lsp.references(params).await {
+        let locations = match host.references(params).await {
             Ok(Some(locations)) => locations,
             Ok(None) => return Vec::new(),
             Err(err) => {
@@ -830,6 +829,7 @@ fn review_lsp_source(stoat: &mut Stoat) -> Option<(PathBuf, Rope, usize)> {
 /// The focused editor's cursor resolved to an LSP request site: the
 /// source file, its rope, and the cursor's byte offset into it.
 struct LspRequestSite {
+    buffer_id: BufferId,
     path: PathBuf,
     rope: Rope,
     offset: usize,
@@ -861,7 +861,12 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
 
     if is_review {
         let (path, rope, offset) = review_lsp_source(stoat)?;
-        Some(LspRequestSite { path, rope, offset })
+        Some(LspRequestSite {
+            buffer_id,
+            path,
+            rope,
+            offset,
+        })
     } else {
         let path = stoat
             .active_workspace()
@@ -869,6 +874,7 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
             .path_for(buffer_id)
             .map(Path::to_path_buf)?;
         Some(LspRequestSite {
+            buffer_id,
             path,
             rope: focused_rope,
             offset: focused_offset,
@@ -894,14 +900,17 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
 /// Replacing the prior pending task drops it and cancels its spawned
 /// future, so only one in-flight jump is tracked at a time.
 fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
-    if !stoat.lsp_host().supports_feature(kind.feature()) {
-        return report_lsp_unavailable(stoat, &format!("goto {}", kind.status_label()));
-    }
-
-    let encoding = stoat.lsp_host().offset_encoding();
     let Some(site) = lsp_request_site(stoat) else {
         return UpdateEffect::None;
     };
+    let Some((_, host)) = stoat
+        .feature_hosts(site.buffer_id, kind.feature())
+        .into_iter()
+        .next()
+    else {
+        return report_lsp_unavailable(stoat, &format!("goto {}", kind.status_label()));
+    };
+    let encoding = host.offset_encoding();
     let Some(source_uri) = path_to_uri(&site.path) else {
         return UpdateEffect::None;
     };
@@ -916,16 +925,15 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_host();
     let fs = stoat.fs_host.clone();
     let source_path = site.path;
     let source_rope = site.rope;
     let task = stoat.spawn_woken(async move {
         let result = match kind {
-            LspJumpKind::Definition => lsp.goto_definition(params).await,
-            LspJumpKind::Declaration => lsp.goto_declaration(params).await,
-            LspJumpKind::TypeDefinition => lsp.goto_type_definition(params).await,
-            LspJumpKind::Implementation => lsp.goto_implementation(params).await,
+            LspJumpKind::Definition => host.goto_definition(params).await,
+            LspJumpKind::Declaration => host.goto_declaration(params).await,
+            LspJumpKind::TypeDefinition => host.goto_type_definition(params).await,
+            LspJumpKind::Implementation => host.goto_implementation(params).await,
         };
         let response = match result {
             Ok(Some(resp)) => resp,
@@ -1256,10 +1264,10 @@ pub(crate) fn answer_agent_query(
                 .iter()
                 .find(|(_, ws)| ws.uid == uid)
                 .and_then(|(_, ws)| ws.buffers.id_for_path(&path));
-            if !buffer_id.is_some_and(|id| stoat.lsp_opened.contains(&id)) {
+            let Some(buffer_id) = buffer_id.filter(|id| stoat.lsp_opened.contains(id)) else {
                 let _ = reply.send(json!({ "error": "not open" }));
                 return;
-            }
+            };
             let Some(uri) = path_to_uri(&path) else {
                 let _ = reply.send(json!({ "error": "invalid path" }));
                 return;
@@ -1275,7 +1283,7 @@ pub(crate) fn answer_agent_query(
                 },
                 work_done_progress_params: Default::default(),
             };
-            let lsp = stoat.lsp_host();
+            let lsp = stoat.lsp_for_feature(buffer_id, LanguageServerFeature::Hover);
             stoat
                 .executor
                 .spawn(async move {
@@ -3602,6 +3610,10 @@ pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
 pub(crate) struct WorkspaceSymbolInputState {
     pub(crate) input: crate::input_view::InputView,
     pub(crate) anchor_offset: usize,
+    /// The server routed at open, resolved again at submit so a focus change
+    /// mid-query does not re-route. `buffer_id` is the fallback route.
+    pub(crate) server: Option<String>,
+    pub(crate) buffer_id: BufferId,
 }
 
 /// One entry in [`WorkspaceSymbolPicker`]. `title` is the symbol
@@ -3624,6 +3636,9 @@ pub(crate) struct WorkspaceSymbolPicker {
     pub(crate) entries: Vec<WorkspaceSymbolEntry>,
     pub(crate) anchor_offset: usize,
     pub(crate) selected_idx: usize,
+    /// The routed server's offset encoding, captured at request time so pick
+    /// converts a result position with the server that produced it.
+    pub(crate) encoding: OffsetEncoding,
 }
 
 /// Open the workspace-symbol query input modal. When the server does not
@@ -3633,12 +3648,16 @@ pub(crate) struct WorkspaceSymbolPicker {
 /// modal's [`crate::input_view::InputView`]. The modal seed is empty;
 /// submit fires the request, cancel disposes the input.
 pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host()
-        .supports_feature(LanguageServerFeature::WorkspaceSymbols)
-    {
+    let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
+        return UpdateEffect::None;
+    };
+    let Some((server, _)) = stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::WorkspaceSymbols)
+        .into_iter()
+        .next()
+    else {
         return report_lsp_unavailable(stoat, "workspace symbols");
-    }
+    };
 
     let anchor_offset = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
@@ -3665,6 +3684,8 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     stoat.workspace_symbol_input = Some(WorkspaceSymbolInputState {
         input,
         anchor_offset,
+        server: Some(server),
+        buffer_id,
     });
     UpdateEffect::Redraw
 }
@@ -3687,7 +3708,14 @@ pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_host();
+    let lsp = state
+        .server
+        .as_deref()
+        .and_then(|name| stoat.lsp_registry.client(name))
+        .unwrap_or_else(|| {
+            stoat.lsp_for_feature(state.buffer_id, LanguageServerFeature::WorkspaceSymbols)
+        });
+    let encoding = lsp.offset_encoding();
     let task = stoat.spawn_woken(async move {
         match lsp.workspace_symbol(params).await {
             Ok(resp) => resp,
@@ -3702,6 +3730,7 @@ pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
         entries: Vec::new(),
         anchor_offset,
         selected_idx: 0,
+        encoding,
     });
     true
 }
@@ -3803,7 +3832,7 @@ pub(crate) fn pick_workspace_symbol(stoat: &mut Stoat, index: usize) -> bool {
     let focused = stoat.active_workspace().panes.focus();
     crate::action_handlers::file::open_file_in_pane(stoat, focused, &entry.path);
 
-    let encoding = stoat.lsp_host().offset_encoding();
+    let encoding = picker.encoding;
     let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
         return true;
     };
@@ -4487,6 +4516,104 @@ mod tests {
             popup.lines,
             vec![vec![("utf8 routed".to_string(), Style::default())]]
         );
+    }
+
+    #[test]
+    fn goto_definition_routes_to_a_secondary_when_the_primary_lacks_it() {
+        use crate::lsp::registry::ServerSelector;
+        use lsp_types::{OneOf, ServerCapabilities};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let primary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        primary.set_capabilities(ServerCapabilities::default());
+        let secondary = std::sync::Arc::new(crate::host::FakeLsp::new());
+        secondary.set_capabilities(ServerCapabilities {
+            definition_provider: Some(OneOf::Left(true)),
+            ..ServerCapabilities::default()
+        });
+        h.stoat
+            .lsp_registry
+            .insert("primary".into(), primary.clone());
+        h.stoat
+            .lsp_registry
+            .insert("secondary".into(), secondary.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("primary".into()),
+                ServerSelector::all("secondary".into()),
+            ],
+        );
+
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        secondary.set_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+
+        assert_eq!(
+            cursor_offset(&mut h),
+            8,
+            "the capable secondary served goto-definition"
+        );
+    }
+
+    #[test]
+    fn workspace_symbol_submit_uses_the_host_stashed_at_open() {
+        use crate::lsp::registry::ServerSelector;
+        use lsp_types::{OneOf, ServerCapabilities, SymbolKind};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let capable = std::sync::Arc::new(crate::host::FakeLsp::new());
+        capable.set_capabilities(ServerCapabilities {
+            workspace_symbol_provider: Some(OneOf::Left(true)),
+            ..ServerCapabilities::default()
+        });
+        let other = std::sync::Arc::new(crate::host::FakeLsp::new());
+        other.set_capabilities(ServerCapabilities::default());
+        h.stoat
+            .lsp_registry
+            .insert("capable".into(), capable.clone());
+        h.stoat.lsp_registry.insert("other".into(), other.clone());
+        h.stoat.lsp_registry.set_selectors(
+            "rust".into(),
+            vec![
+                ServerSelector::all("capable".into()),
+                ServerSelector::all("other".into()),
+            ],
+        );
+
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let main = root.join("main.rs");
+        open_buffer(&mut h, main.clone());
+        capable.add_workspace_symbol(
+            "",
+            "foo",
+            SymbolKind::FUNCTION,
+            main.to_str().unwrap(),
+            0,
+            3,
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+
+        // The capable server drops workspace symbols mid-query, so a
+        // re-resolution at submit would find no capable server. Submit must
+        // still target the server stashed at open, resolved by name.
+        capable.set_capabilities(ServerCapabilities::default());
+        crate::action_handlers::lsp::workspace_symbol_submit(&mut h.stoat);
+        h.settle();
+
+        let picker = h
+            .stoat
+            .pending_workspace_symbol_picker
+            .as_ref()
+            .expect("picker filled from the stashed server");
+        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, vec!["foo"]);
     }
 
     #[test]

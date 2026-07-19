@@ -128,13 +128,13 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
         return SaveFlow::RefusedDiskChanged;
     }
 
-    if format_on_save_enabled(stoat) {
+    if let Some(host) = format_on_save_host(stoat, buffer_id) {
         // A save already formatting drops later ones so a burst does not queue
         // duplicate writes. The in-flight one still lands the latest text.
         if stoat.pending_format_on_save.is_some() {
             return SaveFlow::AlreadyPending;
         }
-        arm_format_on_save(stoat, buffer_id, path);
+        arm_format_on_save(stoat, host, buffer_id, path);
         return SaveFlow::Armed;
     }
 
@@ -162,18 +162,32 @@ pub(crate) struct FormatOnSaveOutcome {
 /// blocks a save.
 const FORMAT_ON_SAVE_BUDGET: Duration = Duration::from_millis(500);
 
-fn format_on_save_enabled(stoat: &Stoat) -> bool {
-    stoat.settings.format_on_save == Some(true)
-        && stoat
-            .lsp_host()
-            .supports_feature(LanguageServerFeature::Format)
+/// The routed server that formats `buffer_id` on save, or `None` when the
+/// setting is off or no capable server serves the buffer.
+fn format_on_save_host(
+    stoat: &Stoat,
+    buffer_id: BufferId,
+) -> Option<Arc<dyn crate::host::LspHost>> {
+    if stoat.settings.format_on_save != Some(true) {
+        return None;
+    }
+    stoat
+        .feature_hosts(buffer_id, LanguageServerFeature::Format)
+        .into_iter()
+        .next()
+        .map(|(_, host)| host)
 }
 
 /// Race a `textDocument/formatting` request against [`FORMAT_ON_SAVE_BUDGET`]
 /// and park the outcome in [`Stoat::pending_format_on_save`] for
 /// [`pump_format_on_save`]. Writes immediately without formatting when the path
 /// has no `file:` URI.
-fn arm_format_on_save(stoat: &mut Stoat, buffer_id: BufferId, path: PathBuf) {
+fn arm_format_on_save(
+    stoat: &mut Stoat,
+    host: Arc<dyn crate::host::LspHost>,
+    buffer_id: BufferId,
+    path: PathBuf,
+) {
     let Some(uri) = super::lsp::path_to_uri(&path) else {
         write_buffer_to_disk(stoat, buffer_id, &path);
         return;
@@ -189,10 +203,9 @@ fn arm_format_on_save(stoat: &mut Stoat, buffer_id: BufferId, path: PathBuf) {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
-    let lsp = stoat.lsp_for(buffer_id);
     let executor = stoat.executor.clone();
     let task = stoat.executor.spawn(async move {
-        let format = std::pin::pin!(lsp.formatting(params));
+        let format = std::pin::pin!(host.formatting(params));
         let timer = std::pin::pin!(executor.timer(FORMAT_ON_SAVE_BUDGET));
         let edits = match futures::future::select(format, timer).await {
             futures::future::Either::Left((Ok(Some(edits)), _)) if !edits.is_empty() => Some(edits),
