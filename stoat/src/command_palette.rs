@@ -490,6 +490,23 @@ impl CommandPalette {
     /// list is refiltered against the full text.
     pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) {
         let text = self.input.text(ws);
+
+        // The filter output is a pure function of the input text and scope
+        // (availability is fixed for the palette's lifetime), so an unchanged
+        // key means an identical result. Skip the whole registry walk rather
+        // than recompute it every idle frame the palette is open.
+        let key = {
+            let mut hasher = DefaultHasher::new();
+            text.hash(&mut hasher);
+            self.scope.hash(&mut hasher);
+            hasher.finish()
+        };
+        if key == self.last_filter_key {
+            return;
+        }
+        self.last_filter_key = key;
+        self.generation = crate::picker::next_generation();
+
         self.command = parse_command(&text).map(|(entry, _)| entry);
         if self.command.is_some() {
             self.filtered.clear();
@@ -504,17 +521,6 @@ impl CommandPalette {
                 &mut self.match_indices,
                 &mut self.selected,
             );
-        }
-
-        let key = {
-            let mut hasher = DefaultHasher::new();
-            text.hash(&mut hasher);
-            self.scope.hash(&mut hasher);
-            hasher.finish()
-        };
-        if key != self.last_filter_key {
-            self.last_filter_key = key;
-            self.generation = crate::picker::next_generation();
         }
     }
 
@@ -926,6 +932,34 @@ mod tests {
         );
         assert_eq!(filtered.len(), 3);
         assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn palette_refilter_skips_when_key_unchanged() {
+        let mut h = Stoat::test();
+        h.type_text(":quit");
+        h.snapshot();
+
+        // Clear the derived list, then re-sync with identical input. A skipped
+        // refilter leaves it cleared. A re-run would repopulate it.
+        let generation = {
+            let palette = h.stoat.command_palette.as_mut().expect("palette open");
+            assert!(!palette.filtered.is_empty(), "query should match entries");
+            palette.filtered.clear();
+            palette.generation
+        };
+
+        h.snapshot();
+
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert!(
+            palette.filtered.is_empty(),
+            "unchanged input must skip the refilter and leave filtered untouched"
+        );
+        assert_eq!(
+            palette.generation, generation,
+            "unchanged input must not bump the generation"
+        );
     }
 
     #[test]
