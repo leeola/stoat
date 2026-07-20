@@ -131,18 +131,23 @@ impl PickList {
         let anchor_len = anchor.map_or(0, |a| a.chars().count()) as u32;
 
         let display_roots = self.display_roots.as_deref();
+        // Resolve the home directory once for the whole list rather than per
+        // path, since `row_display`'s git-root-relative branch would otherwise
+        // hit the env for every candidate.
+        let home = paths::home_dir();
+        let home = home.as_deref();
         let items = self
             .base
             .iter()
             .enumerate()
-            .map(|(idx, path)| (idx, row_display(path, git_root, display_roots)))
+            .map(|(idx, path)| (idx, row_display(path, git_root, display_roots, home)))
             .filter(|(_, display)| anchor.is_none_or(|a| display.starts_with(a)));
         let Some(mut matches) = fuzzy::match_and_rank(pattern, items) else {
             let mut rows: Vec<(usize, String)> = self
                 .base
                 .iter()
                 .enumerate()
-                .map(|(idx, path)| (idx, row_display(path, git_root, display_roots)))
+                .map(|(idx, path)| (idx, row_display(path, git_root, display_roots, home)))
                 .filter(|(_, display)| anchor.is_none_or(|a| display.starts_with(a)))
                 .collect();
             rows.sort_by(|a, b| a.1.cmp(&b.1));
@@ -217,10 +222,11 @@ pub(crate) fn row_display(
     path: &Path,
     git_root: &Path,
     display_roots: Option<&[PathBuf]>,
+    home: Option<&Path>,
 ) -> String {
     match display_roots {
         Some(roots) => workspace_rooted_display(path, roots),
-        None => paths::display_relative(path, git_root),
+        None => paths::display_relative_with_home(path, git_root, home),
     }
 }
 
@@ -860,7 +866,7 @@ mod tests {
     #[test]
     fn row_display_defaults_to_git_relative() {
         assert_eq!(
-            row_display(&p("/r/src/main.rs"), &p("/r"), None),
+            row_display(&p("/r/src/main.rs"), &p("/r"), None, None),
             "src/main.rs"
         );
     }
@@ -870,11 +876,11 @@ mod tests {
         let roots = vec![p("/a/proj"), p("/b/other")];
         let ignored = p("/ignored");
         assert_eq!(
-            row_display(&p("/a/proj/src/main.rs"), &ignored, Some(&roots)),
+            row_display(&p("/a/proj/src/main.rs"), &ignored, Some(&roots), None),
             "proj/src/main.rs"
         );
         assert_eq!(
-            row_display(&p("/b/other/lib.rs"), &ignored, Some(&roots)),
+            row_display(&p("/b/other/lib.rs"), &ignored, Some(&roots), None),
             "other/lib.rs"
         );
     }
@@ -883,7 +889,7 @@ mod tests {
     fn workspace_rooted_display_picks_the_longest_prefix_root() {
         let roots = vec![p("/a"), p("/a/nested")];
         assert_eq!(
-            row_display(&p("/a/nested/file.rs"), &p("/ignored"), Some(&roots)),
+            row_display(&p("/a/nested/file.rs"), &p("/ignored"), Some(&roots), None),
             "nested/file.rs",
             "a nested workspace root wins over its ancestor",
         );
@@ -893,7 +899,7 @@ mod tests {
     fn workspace_rooted_display_falls_back_when_no_root_contains_the_path() {
         let roots = vec![p("/a/proj")];
         assert_eq!(
-            row_display(&p("/elsewhere/x.rs"), &p("/ignored"), Some(&roots)),
+            row_display(&p("/elsewhere/x.rs"), &p("/ignored"), Some(&roots), None),
             "/elsewhere/x.rs"
         );
     }

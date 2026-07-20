@@ -41,6 +41,8 @@ pub(crate) fn paint_path_rows(
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
     let prefix_len = prefix.chars().count() as u32;
+    let home = crate::paths::home_dir();
+    let home = home.as_deref();
 
     for (row_idx, (&idx, indices)) in picklist
         .filtered
@@ -65,7 +67,8 @@ pub(crate) fn paint_path_rows(
             row_display(
                 &picklist.base[idx],
                 git_root,
-                picklist.display_roots.as_deref()
+                picklist.display_roots.as_deref(),
+                home
             )
         );
         let width = end_x.saturating_sub(label_x) as usize;

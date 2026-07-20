@@ -81,7 +81,11 @@ pub fn user_config_path() -> Option<PathBuf> {
         .map(|x| x.config_dir().join("stoat/config.stcfg"))
 }
 
-fn display_relative_with_home(path: &Path, context: &Path, home: Option<&Path>) -> String {
+pub(crate) fn display_relative_with_home(
+    path: &Path,
+    context: &Path,
+    home: Option<&Path>,
+) -> String {
     if !path.is_absolute() {
         return path.to_string_lossy().into_owned();
     }
@@ -104,7 +108,7 @@ fn display_relative_with_home(path: &Path, context: &Path, home: Option<&Path>) 
     path.to_string_lossy().into_owned()
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     Xdg::new().ok().map(|x| x.home_dir().to_path_buf())
 }
 

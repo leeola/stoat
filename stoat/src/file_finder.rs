@@ -948,6 +948,7 @@ mod tests {
                     &list.base[i],
                     &finder.core.git_root,
                     list.display_roots.as_deref(),
+                    None,
                 )
             })
             .collect();
