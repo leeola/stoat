@@ -8,6 +8,7 @@
 use std::{
     collections::HashMap,
     ops::{BitOr, BitOrAssign},
+    sync::Arc,
 };
 use stoatty_protocol::command::{BarCommand, LineSummary, MinimapCommand, TextRunCommand};
 
@@ -468,13 +469,13 @@ impl PagePool {
     ) {
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
-        page.text_runs = text_runs;
-        page.bars = bars;
+        page.text_runs = text_runs.into_iter().map(text_run_from_command).collect();
+        page.bars = bars.into_iter().map(bar_from_command).collect();
     }
 
     /// The page-targeted text runs and bars buffered for document page `index`,
     /// or `None` when that page is not currently in the pool's window.
-    pub fn page_decorations(&self, index: u64) -> Option<(&[TextRunCommand], &[BarCommand])> {
+    pub fn page_decorations(&self, index: u64) -> Option<(&[TextRun], &[Bar])> {
         let page = &self.pages[self.slot(index)];
         (page.index == Some(index)).then_some((&page.text_runs, &page.bars))
     }
@@ -584,12 +585,13 @@ struct Page {
     index: Option<u64>,
     grid: Grid,
     /// Page-targeted text runs captured from the fill that painted this slot,
-    /// page-local. Empty for a plain page. The terminal's pool projection stamps
-    /// them into the composite grid, translated to the window's rows.
-    text_runs: Vec<TextRunCommand>,
+    /// page-local and pre-converted to the grid form at capture time. Empty for a
+    /// plain page. The terminal's pool projection stamps them into the composite
+    /// grid, translated to the window's rows.
+    text_runs: Vec<TextRun>,
     /// Page-targeted bars captured from the fill that painted this slot,
     /// page-local. See [`Self::text_runs`].
-    bars: Vec<BarCommand>,
+    bars: Vec<Bar>,
 }
 
 /// A single grid cell: one character and how to render it.
@@ -861,7 +863,7 @@ pub struct TextRun {
     /// Opaque background box painted behind the glyphs, or `None` to blend the
     /// glyphs directly over the surface behind the run with no backing box.
     pub bg: Option<Rgb>,
-    pub text: String,
+    pub text: Arc<str>,
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
@@ -885,6 +887,37 @@ pub struct Bar {
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
+}
+
+/// Convert a page-local [`TextRunCommand`] to its grid [`TextRun`] at capture
+/// time, so the pool projection re-stamps it without re-decoding per frame.
+///
+/// The declared row passes through unresolved because a pool page carries no
+/// line layout, so its logical-to-physical row resolution is the identity. The
+/// run is the base layer of a pool composite, so it takes `seq` 0.
+fn text_run_from_command(command: TextRunCommand) -> TextRun {
+    TextRun {
+        col: command.col,
+        row: command.row,
+        scale: command.scale,
+        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+        bg: command.bg.map(|bg| Rgb::new(bg[0], bg[1], bg[2])),
+        text: command.text.into(),
+        seq: 0,
+    }
+}
+
+/// Convert a page-local [`BarCommand`] to its grid [`Bar`]. See
+/// [`text_run_from_command`] for the identity-row and `seq` 0 rationale.
+fn bar_from_command(command: BarCommand) -> Bar {
+    Bar {
+        x: command.x,
+        y: command.y,
+        width: command.width,
+        height: command.height,
+        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+        seq: 0,
+    }
 }
 
 /// A declared minimap strip joined with its viewport thumb.
@@ -1160,7 +1193,7 @@ mod tests {
             scale: 192,
             color: Rgb::new(150, 160, 170),
             bg: Some(Rgb::new(24, 26, 32)),
-            text: "42".to_owned(),
+            text: "42".into(),
             seq: 0,
         };
         grid.set_text_runs(vec![run.clone()]);

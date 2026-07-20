@@ -114,7 +114,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         scale: 256,
         color: Rgb::new(0, 0, 0),
         bg: Some(run_bg),
-        text: " ".repeat(cols),
+        text: " ".repeat(cols).into(),
         seq: 2,
     }]);
     grid.set_icons(vec![

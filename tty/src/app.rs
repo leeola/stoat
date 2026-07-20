@@ -3206,7 +3206,7 @@ mod tests {
             scale: 160,
             color: Rgb::new(1, 2, 3),
             bg: Some(Rgb::new(4, 5, 6)),
-            text: "42".to_string(),
+            text: "42".into(),
             seq: 0,
         }]);
         document.set_bars(vec![Bar {
@@ -3229,7 +3229,7 @@ mod tests {
                 scale: 160,
                 color: Rgb::new(1, 2, 3),
                 bg: Some(Rgb::new(4, 5, 6)),
-                text: "42".to_string(),
+                text: "42".into(),
                 seq: 0,
             }],
             "the text run shifts by the region origin (left*16, top*16)"

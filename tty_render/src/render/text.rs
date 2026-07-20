@@ -3501,7 +3501,7 @@ mod tests {
             scale: 256,
             color: Rgb::new(1, 2, 3),
             bg: Some(Rgb::new(4, 5, 6)),
-            text: "42".to_owned(),
+            text: "42".into(),
             seq: 42,
         }]);
 
@@ -3526,7 +3526,7 @@ mod tests {
             scale: 256,
             color: Rgb::new(1, 2, 3),
             bg: None,
-            text: "42".to_owned(),
+            text: "42".into(),
             seq: 42,
         }]);
 
@@ -3548,7 +3548,7 @@ mod tests {
             scale: 256,
             color: Rgb::new(1, 2, 3),
             bg: Some(Rgb::new(4, 5, 6)),
-            text: "42".to_owned(),
+            text: "42".into(),
             seq: 7,
         }]);
 
@@ -3577,7 +3577,10 @@ mod tests {
             scale: 256,
             color: Rgb::new(255, 255, 255),
             bg: None,
-            text: (0x21u32..=0x7e).filter_map(char::from_u32).collect(),
+            text: (0x21u32..=0x7e)
+                .filter_map(char::from_u32)
+                .collect::<String>()
+                .into(),
             seq: 0,
         }
     }
@@ -3667,7 +3670,7 @@ mod tests {
             scale: 256,
             color: Rgb::new(255, 255, 255),
             bg: None,
-            text: "42".to_owned(),
+            text: "42".into(),
             seq: 0,
         }]);
 

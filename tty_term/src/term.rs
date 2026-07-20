@@ -2633,10 +2633,15 @@ fn apply_line_layout(grid: &mut Grid, command: Option<&LineLayoutCommand>) {
 ///
 /// Each page the window straddles contributes its slot decorations shifted by
 /// the whole-row gap between the page's document start and the window top `top`,
-/// in the commands' sixteenth-cell units. A decoration lying fully above or
-/// below the composed rows is dropped. The sub-cell scroll fraction stays with
-/// the renderer, so these shift by the same pixel offset as the cells
-/// [`PagePool::compose`] copied.
+/// in sixteenth-cell units. A decoration lying fully above or below the composed
+/// rows is dropped. The sub-cell scroll fraction stays with the renderer, so
+/// these shift by the same pixel offset as the cells [`PagePool::compose`]
+/// copied.
+///
+/// The page decorations are already in grid form (see
+/// [`PagePool::set_decorations`]), so re-stamping is Copy-field arithmetic plus
+/// an `Arc` bump per run, with no per-frame decode. They carry `seq` 0 as the
+/// base layer of the composite, so any declared panel above occludes them.
 fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: usize) {
     let out_rows = out.rows() as i64;
     let out_rows_16 = out_rows * 16;
@@ -2657,7 +2662,7 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
                 continue;
             }
             if let Ok(row) = i16::try_from(row) {
-                text_runs.push(TextRunCommand { row, ..run.clone() });
+                text_runs.push(TextRun { row, ..run.clone() });
             }
         }
 
@@ -2667,15 +2672,13 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
                 continue;
             }
             if let Ok(y) = i16::try_from(y) {
-                bars.push(BarCommand { y, ..*bar });
+                bars.push(Bar { y, ..*bar });
             }
         }
     }
 
-    // Pool-composited page content is the base layer, so it carries seq 0 and
-    // any declared panel above it occludes it.
-    apply_text_runs(out, &text_runs, &vec![0; text_runs.len()]);
-    apply_bars(out, &bars, &vec![0; bars.len()]);
+    out.set_text_runs(text_runs);
+    out.set_bars(bars);
 }
 
 /// Replace the grid's text-run list with each stored text-run command's run.
@@ -2694,7 +2697,7 @@ fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand], seqs: &[u32]) {
             scale: command.scale,
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
             bg: command.bg.map(|b| Rgb::new(b[0], b[1], b[2])),
-            text: command.text.clone(),
+            text: Arc::from(command.text.as_str()),
             seq,
         })
         .collect();
@@ -4184,7 +4187,7 @@ mod tests {
                 scale: 192,
                 color: Rgb::new(150, 160, 170),
                 bg: Some(Rgb::new(24, 26, 32)),
-                text: "42".to_owned(),
+                text: "42".into(),
                 seq: 1,
             }]
         );
@@ -4440,10 +4443,7 @@ mod tests {
 
     /// The text of each run on the projected grid, in order.
     fn run_labels(grid: &Grid) -> Vec<&str> {
-        grid.text_runs()
-            .iter()
-            .map(|run| run.text.as_str())
-            .collect()
+        grid.text_runs().iter().map(|run| &*run.text).collect()
     }
 
     /// Commit a one-run scene "A", then open a synchronized update and stage a
@@ -4743,23 +4743,25 @@ mod tests {
             .expect("page buffered");
         assert_eq!(
             runs,
-            [TextRunCommand {
+            [TextRun {
                 col: 0,
                 row: 16,
                 scale: 160,
-                color: [150, 160, 170],
-                bg: Some([24, 26, 32]),
-                text: "42".to_owned(),
+                color: Rgb::new(150, 160, 170),
+                bg: Some(Rgb::new(24, 26, 32)),
+                text: "42".into(),
+                seq: 0,
             }]
         );
         assert_eq!(
             bars,
-            [BarCommand {
+            [Bar {
                 x: 0,
                 y: 16,
                 width: 3,
                 height: 16,
-                color: [220, 50, 47],
+                color: Rgb::new(220, 50, 47),
+                seq: 0,
             }]
         );
 
@@ -4810,7 +4812,7 @@ mod tests {
                 scale: 160,
                 color: Rgb::new(4, 5, 6),
                 bg: Some(Rgb::new(0, 0, 0)),
-                text: "bb".to_owned(),
+                text: "bb".into(),
                 seq: 0,
             }]
         );
