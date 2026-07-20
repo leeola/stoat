@@ -771,6 +771,7 @@ on key {
         Escape -> SetMode(normal);
         b -> OpenBufferPicker();
         d -> [CloseBuffer(), SetMode(normal)];
+        f -> [AutoReload(follow), SetMode(normal)];
     }
     mode == space_git {
         Escape -> SetMode(normal);

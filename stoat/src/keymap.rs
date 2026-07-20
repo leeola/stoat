@@ -1157,6 +1157,23 @@ mod tests {
     }
 
     #[test]
+    fn space_buffer_binds_f_to_auto_reload_follow() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let space_buffer = TestState::new().set("mode", StateValue::String("space_buffer".into()));
+        let f = keymap
+            .lookup(
+                &space_buffer,
+                &key_event(KeyCode::Char('f'), KeyModifiers::NONE),
+            )
+            .expect("f is bound in space_buffer");
+        assert_eq!(f[0].name, "AutoReload");
+        assert_eq!(f[0].args[0].value, Value::Ident("follow".into()));
+        assert_eq!(f[1].name, "SetMode");
+    }
+
+    #[test]
     fn default_config_pins_every_setting_default() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         // The embedded config must actively set every fixed-default scalar, so
