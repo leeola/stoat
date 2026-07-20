@@ -1,6 +1,6 @@
 use crate::{
     render::text::write_str,
-    workspace_picker::{PathDisplay, WorkspacePicker},
+    workspace_picker::{PathDisplay, WorkspacePicker, WorkspaceStatus},
 };
 use ratatui::{
     buffer::Buffer,
@@ -109,17 +109,23 @@ pub(crate) fn render_workspace_picker(
         let is_selected = i == selected;
         let base_style = if is_selected {
             selected_style
-        } else if entry.is_current {
-            current_style
         } else {
-            row_style
+            match entry.status {
+                WorkspaceStatus::Active => current_style,
+                WorkspaceStatus::Background => row_style,
+                WorkspaceStatus::Inactive => header_style,
+            }
         };
 
         for col in inner.x..inner.x + inner.width {
             buf[(col, row)].set_char(' ').set_style(base_style);
         }
 
-        let marker = if entry.is_current { "*" } else { " " };
+        let marker = match entry.status {
+            WorkspaceStatus::Active => "*",
+            WorkspaceStatus::Background => " ",
+            WorkspaceStatus::Inactive => "\u{00b7}",
+        };
         write_str(buf, marker_x, row, marker, base_style);
         let name: String = entry.basename.chars().take(NAME_W as usize).collect();
         write_str(buf, name_x, row, &name, base_style);
@@ -133,25 +139,29 @@ pub(crate) fn render_workspace_picker(
             let path_trimmed: String = path.chars().take(path_w as usize).collect();
             write_str(buf, path_x, row, &path_trimmed, base_style);
         }
+        // An inactive row has no live runs or editors, so those counts blank
+        // rather than reading a misleading zero.
+        let inactive = entry.status == WorkspaceStatus::Inactive;
+        let count = |n: usize, blank: bool| if blank { String::new() } else { n.to_string() };
         write_str(
             buf,
             buf_col_x,
             row,
-            &right_pad(&entry.buffer_count.to_string(), BUF_W),
+            &right_pad(&count(entry.buffer_count, false), BUF_W),
             base_style,
         );
         write_str(
             buf,
             run_col_x,
             row,
-            &right_pad(&entry.run_count.to_string(), RUN_W),
+            &right_pad(&count(entry.run_count, inactive), RUN_W),
             base_style,
         );
         write_str(
             buf,
             edit_col_x,
             row,
-            &right_pad(&entry.editor_count.to_string(), EDIT_W),
+            &right_pad(&count(entry.editor_count, inactive), EDIT_W),
             base_style,
         );
     }

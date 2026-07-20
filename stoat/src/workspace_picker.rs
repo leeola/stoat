@@ -1,9 +1,27 @@
 use crate::{
     paths,
-    workspace::{Workspace, WorkspaceId, WorkspaceUid},
+    workspace::{registry::RegistryEntry, Workspace, WorkspaceId, WorkspaceUid},
 };
 use slotmap::SlotMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+/// Where a listed workspace stands relative to the running instance.
+///
+/// Ordered so a sort lists [`Active`](Self::Active) first, then
+/// [`Background`](Self::Background), then [`Inactive`](Self::Inactive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WorkspaceStatus {
+    /// The focused workspace.
+    Active,
+    /// Open in the instance but not focused.
+    Background,
+    /// Persisted on disk, not open in any instance.
+    Inactive,
+}
 
 /// Modal list of open workspaces, rendered as a centered overlay when
 /// the `SwitchWorkspace` action fires.
@@ -20,14 +38,20 @@ pub struct WorkspacePicker {
 /// picker owns its own display data and doesn't borrow from [`Stoat`] for
 /// its lifetime.
 pub struct PickerEntry {
-    pub id: WorkspaceId,
+    /// The open workspace's id, or `None` for an inactive on-disk row.
+    pub id: Option<WorkspaceId>,
     pub basename: String,
     pub git_root: PathBuf,
     pub uid: WorkspaceUid,
-    pub is_current: bool,
+    pub status: WorkspaceStatus,
     pub buffer_count: usize,
     pub run_count: usize,
     pub editor_count: usize,
+    /// The state file an inactive row restores from. `None` for open rows.
+    pub state_path: Option<PathBuf>,
+    /// State file mtime, ordering inactive rows newest first. Epoch for open
+    /// rows, which sort by name instead.
+    pub mtime: SystemTime,
 }
 
 /// Rendering strategy for the picker's per-row path column. Selected once
@@ -47,38 +71,71 @@ pub enum PathDisplay {
 }
 
 impl WorkspacePicker {
-    pub fn new(workspaces: &SlotMap<WorkspaceId, Workspace>, active: WorkspaceId) -> Self {
+    /// Build the picker from the open workspaces and the on-disk registry.
+    ///
+    /// Open workspaces list as [`WorkspaceStatus::Active`] (the focused one) or
+    /// [`WorkspaceStatus::Background`]. Registry entries whose uid is not open
+    /// list as [`WorkspaceStatus::Inactive`], so an open workspace wins over its
+    /// own on-disk sidecar. Rows order Active first, then Background by name,
+    /// then Inactive newest state file first.
+    pub(crate) fn new(
+        workspaces: &SlotMap<WorkspaceId, Workspace>,
+        active: WorkspaceId,
+        inactive: Vec<RegistryEntry>,
+    ) -> Self {
         let mut entries: Vec<PickerEntry> = workspaces
             .iter()
             .map(|(id, ws)| PickerEntry {
-                id,
-                basename: if !ws.name.is_empty() {
-                    ws.name.clone()
-                } else {
-                    ws.git_root
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("(unnamed)")
-                        .to_string()
-                },
+                id: Some(id),
+                basename: display_name(&ws.name, &ws.git_root),
                 git_root: ws.git_root.clone(),
                 uid: ws.uid,
-                is_current: id == active,
+                status: if id == active {
+                    WorkspaceStatus::Active
+                } else {
+                    WorkspaceStatus::Background
+                },
                 buffer_count: ws.buffers.len(),
                 run_count: ws.runs.len(),
                 editor_count: ws.editors.len(),
+                state_path: None,
+                mtime: UNIX_EPOCH,
             })
             .collect();
-        // Current workspace first, then alphabetical by basename so the list
-        // reads predictably in the modal.
+
+        let open_uids: HashSet<WorkspaceUid> = entries.iter().map(|e| e.uid).collect();
+        for reg in inactive {
+            if open_uids.contains(&reg.meta.uid) {
+                continue;
+            }
+            entries.push(PickerEntry {
+                id: None,
+                basename: display_name(&reg.meta.name, &reg.meta.git_root),
+                git_root: reg.meta.git_root,
+                uid: reg.meta.uid,
+                status: WorkspaceStatus::Inactive,
+                buffer_count: reg.meta.buffer_count,
+                run_count: 0,
+                editor_count: 0,
+                state_path: Some(reg.state_path),
+                mtime: reg.mtime,
+            });
+        }
+
         entries.sort_by(|a, b| {
-            b.is_current
-                .cmp(&a.is_current)
-                .then_with(|| a.basename.cmp(&b.basename))
+            a.status
+                .cmp(&b.status)
+                .then_with(|| match a.status {
+                    WorkspaceStatus::Inactive => b.mtime.cmp(&a.mtime),
+                    _ => a.basename.cmp(&b.basename),
+                })
                 .then_with(|| a.uid.0.cmp(&b.uid.0))
         });
 
-        let selected = entries.iter().position(|e| e.is_current).unwrap_or(0);
+        let selected = entries
+            .iter()
+            .position(|e| e.status == WorkspaceStatus::Active)
+            .unwrap_or(0);
         Self { entries, selected }
     }
 
@@ -90,9 +147,16 @@ impl WorkspacePicker {
         self.selected
     }
 
-    /// The workspace under the selection, or `None` when the picker is empty.
+    /// The open workspace under the selection, or `None` when the picker is
+    /// empty or the selected row is an inactive on-disk workspace.
     pub fn selected_id(&self) -> Option<WorkspaceId> {
-        self.entries.get(self.selected).map(|entry| entry.id)
+        self.entries.get(self.selected).and_then(|entry| entry.id)
+    }
+
+    /// The full row under the selection, so the caller can distinguish an
+    /// inactive row (with a state path to restore) from an open one.
+    pub fn selected_entry(&self) -> Option<&PickerEntry> {
+        self.entries.get(self.selected)
     }
 
     pub fn select_next(&mut self) {
@@ -140,6 +204,19 @@ impl WorkspacePicker {
     }
 }
 
+/// A workspace's display name, its explicit name or its git root's basename
+/// when unnamed.
+fn display_name(name: &str, git_root: &Path) -> String {
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    git_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("(unnamed)")
+        .to_string()
+}
+
 fn move_selection(len: usize, selected: &mut usize, delta: i32) {
     if len == 0 {
         *selected = 0;
@@ -174,21 +251,70 @@ mod tests {
     fn new_lists_all_workspaces_current_first() {
         let exec = executor();
         let (workspaces, active) = slotmap_with_two(&exec);
-        let picker = WorkspacePicker::new(&workspaces, active);
+        let picker = WorkspacePicker::new(&workspaces, active, Vec::new());
 
         let entries = picker.entries();
         assert_eq!(entries.len(), 2);
-        assert!(entries[0].is_current);
-        assert_eq!(entries[0].id, active);
-        assert!(!entries[1].is_current);
+        assert_eq!(entries[0].status, WorkspaceStatus::Active);
+        assert_eq!(entries[0].id, Some(active));
+        assert_eq!(entries[1].status, WorkspaceStatus::Background);
         assert_eq!(picker.selected(), 0);
+    }
+
+    #[test]
+    fn new_merges_registry_dedupes_open_and_orders_inactive_newest_first() {
+        use crate::workspace::registry::{RegistryEntry, WorkspaceMeta};
+        use std::time::Duration;
+
+        let exec = executor();
+        let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
+        let a = workspaces.insert(Workspace::new(PathBuf::from("/tmp/alpha"), &exec));
+        workspaces[a].id = a;
+        let open_uid = workspaces[a].uid;
+
+        let entry = |uid: u64, name: &str, root: &str, secs: u64| RegistryEntry {
+            meta: WorkspaceMeta {
+                uid: WorkspaceUid(uid),
+                name: name.into(),
+                git_root: PathBuf::from(root),
+                buffer_count: 3,
+            },
+            state_path: PathBuf::from(root).join("s.ron"),
+            mtime: UNIX_EPOCH + Duration::from_secs(secs),
+        };
+
+        let inactive = vec![
+            entry(open_uid.0, "shadow", "/tmp/alpha", 100),
+            entry(9, "old-proj", "/tmp/old", 50),
+            entry(8, "new-proj", "/tmp/new", 90),
+        ];
+
+        let picker = WorkspacePicker::new(&workspaces, a, inactive);
+        let entries = picker.entries();
+
+        assert_eq!(
+            entries.len(),
+            3,
+            "the open workspace's shadow sidecar dedupes"
+        );
+        assert_eq!(entries[0].status, WorkspaceStatus::Active);
+        assert_eq!(entries[0].id, Some(a));
+
+        assert_eq!(entries[1].status, WorkspaceStatus::Inactive);
+        assert_eq!(
+            entries[1].basename, "new-proj",
+            "inactive rows are newest first"
+        );
+        assert_eq!(entries[1].id, None);
+        assert_eq!(entries[1].buffer_count, 3);
+        assert_eq!(entries[2].basename, "old-proj");
     }
 
     #[test]
     fn select_next_prev_clamp_at_ends() {
         let exec = executor();
         let (workspaces, active) = slotmap_with_two(&exec);
-        let mut picker = WorkspacePicker::new(&workspaces, active);
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new());
 
         picker.select_next();
         assert_eq!(picker.selected(), 1);
@@ -204,11 +330,11 @@ mod tests {
     fn selected_id_tracks_selection() {
         let exec = executor();
         let (workspaces, active) = slotmap_with_two(&exec);
-        let mut picker = WorkspacePicker::new(&workspaces, active);
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new());
 
         assert_eq!(picker.selected_id(), Some(active));
         picker.select_next();
-        assert_eq!(picker.selected_id(), Some(picker.entries()[1].id));
+        assert_eq!(picker.selected_id(), picker.entries()[1].id);
     }
 
     #[test]
@@ -218,9 +344,9 @@ mod tests {
         let a = workspaces.insert(Workspace::new(PathBuf::from("/tmp/alpha"), &exec));
         workspaces[a].id = a;
 
-        let picker = WorkspacePicker::new(&workspaces, a);
+        let picker = WorkspacePicker::new(&workspaces, a, Vec::new());
         assert_eq!(picker.entries().len(), 1);
-        assert!(picker.entries()[0].is_current);
+        assert_eq!(picker.entries()[0].status, WorkspaceStatus::Active);
     }
 
     fn picker_with_roots(roots: &[&str]) -> WorkspacePicker {
@@ -233,7 +359,7 @@ mod tests {
             first.get_or_insert(id);
         }
         let active = first.expect("at least one workspace");
-        WorkspacePicker::new(&workspaces, active)
+        WorkspacePicker::new(&workspaces, active, Vec::new())
     }
 
     #[test]

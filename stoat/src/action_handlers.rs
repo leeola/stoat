@@ -801,9 +801,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::NewWorkspace => workspace::new_workspace(stoat),
         ActionKind::CopyWorkspace => workspace::copy_workspace(stoat),
         ActionKind::SwitchWorkspace => {
+            let inactive =
+                crate::workspace::registry::list_all(&*stoat.fs_host).unwrap_or_default();
             stoat.workspace_picker = Some(WorkspacePicker::new(
                 &stoat.workspaces,
                 stoat.active_workspace,
+                inactive,
             ));
             UpdateEffect::Redraw
         },

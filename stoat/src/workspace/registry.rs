@@ -32,9 +32,7 @@ pub(crate) struct WorkspaceMeta {
 /// A persisted workspace discovered by [`list_all`], pairing its metadata with
 /// the state file it describes and that file's modification time.
 ///
-/// The listing is consumed by the workspace picker and cross-workspace search;
-/// until those land the API is exercised only by tests.
-#[allow(dead_code)]
+/// The listing is consumed by the workspace picker and cross-workspace search.
 #[derive(Clone, Debug)]
 pub(crate) struct RegistryEntry {
     pub meta: WorkspaceMeta,
@@ -68,7 +66,6 @@ pub(crate) fn write_meta(
 /// Reads each `<uid>.meta` sidecar under the workspace state directory. A legacy
 /// `<uid>.ron` with no sidecar is backfilled by parsing its state (metadata
 /// only, no op-log replay) and writing the sidecar.
-#[allow(dead_code)]
 pub(crate) fn list_all(fs: &dyn FsHost) -> io::Result<Vec<RegistryEntry>> {
     list_all_in(&stoat_log::workspace_state_dir()?, fs)
 }
