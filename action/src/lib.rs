@@ -77,11 +77,11 @@ pub use defs::{
         PromptInsertNewline, SubmitPromptInput,
     },
     rebase::{
-        AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
-        ConflictSkipEntry, ConflictTakeOurs, ConflictTakeTheirs, EnterRebase, ExecuteRebase,
-        RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort,
-        RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick,
-        SetRebaseOpReword, SetRebaseOpSquash,
+        AbortRebase, EnterRebase, ExecuteRebase, RebaseConflictAbort, RebaseConflictApply,
+        RebaseConflictNextFile, RebaseConflictPrevFile, RebaseConflictSkipEntry,
+        RebaseConflictTakeOurs, RebaseConflictTakeTheirs, RebaseContinue, RebaseMoveDown,
+        RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort, RewordConfirm, SetRebaseOpDrop,
+        SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpReword, SetRebaseOpSquash,
     },
     review::{
         AgentEdit, CloseReview, Diff, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,

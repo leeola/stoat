@@ -174,10 +174,10 @@ define_action!(
 );
 
 define_action!(
-    ConflictTakeOursDef,
-    ConflictTakeOurs,
-    "ConflictTakeOurs",
-    ActionKind::ConflictTakeOurs,
+    RebaseConflictTakeOursDef,
+    RebaseConflictTakeOurs,
+    "RebaseConflictTakeOurs",
+    ActionKind::RebaseConflictTakeOurs,
     "resolve conflicted file by taking ours",
     "Mark the currently selected conflicted file to resolve with the \
      'ours' side (the rebase-so-far's version) when the plan resumes.",
@@ -185,10 +185,10 @@ define_action!(
 );
 
 define_action!(
-    ConflictTakeTheirsDef,
-    ConflictTakeTheirs,
-    "ConflictTakeTheirs",
-    ActionKind::ConflictTakeTheirs,
+    RebaseConflictTakeTheirsDef,
+    RebaseConflictTakeTheirs,
+    "RebaseConflictTakeTheirs",
+    ActionKind::RebaseConflictTakeTheirs,
     "resolve conflicted file by taking theirs",
     "Mark the currently selected conflicted file to resolve with the \
      'theirs' side (the commit being applied).",
@@ -196,10 +196,10 @@ define_action!(
 );
 
 define_action!(
-    ConflictSkipEntryDef,
-    ConflictSkipEntry,
-    "ConflictSkipEntry",
-    ActionKind::ConflictSkipEntry,
+    RebaseConflictSkipEntryDef,
+    RebaseConflictSkipEntry,
+    "RebaseConflictSkipEntry",
+    ActionKind::RebaseConflictSkipEntry,
     "skip the entire conflicted entry",
     "Abandon the cherry-pick for this entry and continue with the \
      next one, as if it were marked Drop.",
@@ -207,30 +207,30 @@ define_action!(
 );
 
 define_action!(
-    ConflictNextFileDef,
-    ConflictNextFile,
-    "ConflictNextFile",
-    ActionKind::ConflictNextFile,
+    RebaseConflictNextFileDef,
+    RebaseConflictNextFile,
+    "RebaseConflictNextFile",
+    ActionKind::RebaseConflictNextFile,
     "select the next conflicted file",
     "Move the conflict-mode cursor to the next file in the list.",
     ActionPriority::Rare
 );
 
 define_action!(
-    ConflictPrevFileDef,
-    ConflictPrevFile,
-    "ConflictPrevFile",
-    ActionKind::ConflictPrevFile,
+    RebaseConflictPrevFileDef,
+    RebaseConflictPrevFile,
+    "RebaseConflictPrevFile",
+    ActionKind::RebaseConflictPrevFile,
     "select the previous conflicted file",
     "Move the conflict-mode cursor to the previous file in the list.",
     ActionPriority::Rare
 );
 
 define_action!(
-    ConflictApplyDef,
-    ConflictApply,
-    "ConflictApply",
-    ActionKind::ConflictApply,
+    RebaseConflictApplyDef,
+    RebaseConflictApply,
+    "RebaseConflictApply",
+    ActionKind::RebaseConflictApply,
     "apply the current conflict resolutions and resume the rebase",
     "Build the merged tree from each file's TakeOurs/TakeTheirs choice, \
      create a commit, and continue the rebase. Files without an \
@@ -239,10 +239,10 @@ define_action!(
 );
 
 define_action!(
-    ConflictAbortDef,
-    ConflictAbort,
-    "ConflictAbort",
-    ActionKind::ConflictAbort,
+    RebaseConflictAbortDef,
+    RebaseConflictAbort,
+    "RebaseConflictAbort",
+    ActionKind::RebaseConflictAbort,
     "abort the rebase from the conflict resolver",
     "Drop the in-flight rebase execution state and return to commits \
      mode without making further changes.",

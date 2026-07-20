@@ -16,7 +16,7 @@ use std::{
 pub(crate) struct WorkspaceSnapshot {
     pub rebase: Option<RebaseState>,
     pub rebase_active: Option<ActiveRebaseSnap>,
-    /// UI mode string at capture time (`"rebase"`, `"conflict"`,
+    /// UI mode string at capture time (`"rebase"`, `"rebase_conflict"`,
     /// `"commits"`, etc.). Restored verbatim on load so the TUI comes
     /// up in the same view.
     pub mode: String,

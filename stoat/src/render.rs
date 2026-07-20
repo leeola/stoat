@@ -344,7 +344,10 @@ pub(crate) fn frame(
 
     let screen = crate::keymap_state::view_predicate(ws);
 
-    let overlay_pane = if matches!(screen, Some("commits" | "rebase" | "reword" | "conflict")) {
+    let overlay_pane = if matches!(
+        screen,
+        Some("commits" | "rebase" | "reword" | "rebase_conflict")
+    ) {
         Some(ws.panes.focus())
     } else {
         None
@@ -555,7 +558,7 @@ pub(crate) fn frame(
                     frame.stoatty.then_some(&mut *scene),
                 );
             }
-        } else if screen == Some("conflict")
+        } else if screen == Some("rebase_conflict")
             && let Some(active) = ws.rebase_active.as_ref()
         {
             conflict::render_conflict(

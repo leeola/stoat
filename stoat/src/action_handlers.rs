@@ -725,17 +725,17 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RewordConfirm => reword::reword_confirm(stoat),
         ActionKind::RewordAbort => reword::reword_abort(stoat),
         ActionKind::RebaseContinue => rebase::rebase_continue(stoat),
-        ActionKind::ConflictTakeOurs => {
+        ActionKind::RebaseConflictTakeOurs => {
             conflict::conflict_set(stoat, conflict::ConflictChoice::Ours)
         },
-        ActionKind::ConflictTakeTheirs => {
+        ActionKind::RebaseConflictTakeTheirs => {
             conflict::conflict_set(stoat, conflict::ConflictChoice::Theirs)
         },
-        ActionKind::ConflictSkipEntry => conflict::conflict_skip_entry(stoat),
-        ActionKind::ConflictNextFile => conflict::conflict_step(stoat, true),
-        ActionKind::ConflictPrevFile => conflict::conflict_step(stoat, false),
-        ActionKind::ConflictApply => conflict::conflict_apply(stoat),
-        ActionKind::ConflictAbort => conflict::conflict_abort(stoat),
+        ActionKind::RebaseConflictSkipEntry => conflict::conflict_skip_entry(stoat),
+        ActionKind::RebaseConflictNextFile => conflict::conflict_step(stoat, true),
+        ActionKind::RebaseConflictPrevFile => conflict::conflict_step(stoat, false),
+        ActionKind::RebaseConflictApply => conflict::conflict_apply(stoat),
+        ActionKind::RebaseConflictAbort => conflict::conflict_abort(stoat),
         ActionKind::Dump => {
             let dump = action
                 .as_any()

@@ -999,7 +999,7 @@ pub(crate) fn screen_segment(
         "commits" => ("commits", Color::Yellow, scope::UI_STATUSLINE_COMMITS),
         "rebase" => ("rebase", Color::Red, scope::UI_STATUSLINE_REBASE),
         "reword" => ("reword", Color::Red, scope::UI_STATUSLINE_REWORD),
-        "conflict" => ("conflict", Color::LightRed, scope::UI_STATUSLINE_CONFLICT),
+        "rebase_conflict" => ("conflict", Color::LightRed, scope::UI_STATUSLINE_CONFLICT),
         _ => return None,
     };
     let color = theme

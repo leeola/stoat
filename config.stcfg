@@ -617,15 +617,15 @@ on key {
         Escape -> SetMode(normal);
         Ctrl-s -> RewordConfirm();
     }
-    view == conflict && mode == normal {
-        Escape -> ConflictAbort();
-        a -> ConflictAbort();
-        j -> ConflictNextFile();
-        k -> ConflictPrevFile();
-        o -> ConflictTakeOurs();
-        t -> ConflictTakeTheirs();
-        s -> ConflictSkipEntry();
-        Enter -> ConflictApply();
+    view == rebase_conflict && mode == normal {
+        Escape -> RebaseConflictAbort();
+        a -> RebaseConflictAbort();
+        j -> RebaseConflictNextFile();
+        k -> RebaseConflictPrevFile();
+        o -> RebaseConflictTakeOurs();
+        t -> RebaseConflictTakeTheirs();
+        s -> RebaseConflictSkipEntry();
+        Enter -> RebaseConflictApply();
         : -> OpenCommandPalette();
     }
     view == review && mode == normal {

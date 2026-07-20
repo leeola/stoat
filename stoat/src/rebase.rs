@@ -162,7 +162,7 @@ pub(crate) enum ConflictResolution {
     TakeTheirs,
     /// Skip this entry entirely (treat as Drop for rebase purposes).
     /// Reserved for a future "skip this file" variant in the resolution
-    /// UI; currently the whole-entry skip path uses `ConflictSkipEntry`
+    /// UI; currently the whole-entry skip path uses `RebaseConflictSkipEntry`
     /// and bypasses this enum.
     SkipEntry,
 }
@@ -304,7 +304,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("Enter");
         // The stepper paused on conflict and entered conflict mode.
-        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
         let ws = h.stoat.active_workspace();
         assert!(
             ws.rebase_active.is_some(),
@@ -554,7 +554,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
 
         // Take theirs on the selected file, then apply.
         h.type_keys("t");
@@ -562,7 +562,7 @@ mod tests {
 
         // Stepper resumed past the conflict; rebase_active dropped.
         assert!(h.stoat.active_workspace().rebase_active.is_none());
-        assert_ne!(h.stoat.current_view(), Some("conflict"));
+        assert_ne!(h.stoat.current_view(), Some("rebase_conflict"));
 
         let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
@@ -581,7 +581,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
 
         h.type_keys("s"); // skip the conflicted entry
         assert!(h.stoat.active_workspace().rebase_active.is_none());
@@ -602,10 +602,10 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
         h.type_keys("a");
         assert!(h.stoat.active_workspace().rebase_active.is_none());
-        assert_ne!(h.stoat.current_view(), Some("conflict"));
+        assert_ne!(h.stoat.current_view(), Some("rebase_conflict"));
     }
 
     #[test]
@@ -632,7 +632,7 @@ mod tests {
         h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
-        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        assert_eq!(h.stoat.current_view(), Some("rebase_conflict"));
         h.assert_snapshot("rebase_conflict_mode");
     }
 

@@ -90,11 +90,12 @@ use crate::{
             PaletteSelectPrev, PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
-            AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
-            ConflictSkipEntry, ConflictTakeOurs, ConflictTakeTheirs, EnterRebase, ExecuteRebase,
-            RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort,
-            RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick,
-            SetRebaseOpReword, SetRebaseOpSquash,
+            AbortRebase, EnterRebase, ExecuteRebase, RebaseConflictAbort, RebaseConflictApply,
+            RebaseConflictNextFile, RebaseConflictPrevFile, RebaseConflictSkipEntry,
+            RebaseConflictTakeOurs, RebaseConflictTakeTheirs, RebaseContinue, RebaseMoveDown,
+            RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort, RewordConfirm, SetRebaseOpDrop,
+            SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpReword,
+            SetRebaseOpSquash,
         },
         review::{
             CloseReview, Diff, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
@@ -747,15 +748,27 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RewordConfirm::DEF, |_| Ok(Box::new(RewordConfirm)));
     add(RewordAbort::DEF, |_| Ok(Box::new(RewordAbort)));
     add(RebaseContinue::DEF, |_| Ok(Box::new(RebaseContinue)));
-    add(ConflictTakeOurs::DEF, |_| Ok(Box::new(ConflictTakeOurs)));
-    add(ConflictTakeTheirs::DEF, |_| {
-        Ok(Box::new(ConflictTakeTheirs))
+    add(RebaseConflictTakeOurs::DEF, |_| {
+        Ok(Box::new(RebaseConflictTakeOurs))
     });
-    add(ConflictSkipEntry::DEF, |_| Ok(Box::new(ConflictSkipEntry)));
-    add(ConflictNextFile::DEF, |_| Ok(Box::new(ConflictNextFile)));
-    add(ConflictPrevFile::DEF, |_| Ok(Box::new(ConflictPrevFile)));
-    add(ConflictApply::DEF, |_| Ok(Box::new(ConflictApply)));
-    add(ConflictAbort::DEF, |_| Ok(Box::new(ConflictAbort)));
+    add(RebaseConflictTakeTheirs::DEF, |_| {
+        Ok(Box::new(RebaseConflictTakeTheirs))
+    });
+    add(RebaseConflictSkipEntry::DEF, |_| {
+        Ok(Box::new(RebaseConflictSkipEntry))
+    });
+    add(RebaseConflictNextFile::DEF, |_| {
+        Ok(Box::new(RebaseConflictNextFile))
+    });
+    add(RebaseConflictPrevFile::DEF, |_| {
+        Ok(Box::new(RebaseConflictPrevFile))
+    });
+    add(RebaseConflictApply::DEF, |_| {
+        Ok(Box::new(RebaseConflictApply))
+    });
+    add(RebaseConflictAbort::DEF, |_| {
+        Ok(Box::new(RebaseConflictAbort))
+    });
     add(Run::DEF, |params| {
         let raw = params
             .first()
@@ -1042,13 +1055,13 @@ mod tests {
         "RewordConfirm",
         "RewordAbort",
         "RebaseContinue",
-        "ConflictTakeOurs",
-        "ConflictTakeTheirs",
-        "ConflictSkipEntry",
-        "ConflictNextFile",
-        "ConflictPrevFile",
-        "ConflictApply",
-        "ConflictAbort",
+        "RebaseConflictTakeOurs",
+        "RebaseConflictTakeTheirs",
+        "RebaseConflictSkipEntry",
+        "RebaseConflictNextFile",
+        "RebaseConflictPrevFile",
+        "RebaseConflictApply",
+        "RebaseConflictAbort",
         "OpenRun",
         "SpawnClaude",
         "terminal",

@@ -292,8 +292,13 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         RebaseContinue => ctx.in_rebase_exec,
         RewordConfirm | RewordAbort => ctx.in_rebase_reword,
 
-        ConflictTakeOurs | ConflictTakeTheirs | ConflictSkipEntry | ConflictNextFile
-        | ConflictPrevFile | ConflictApply | ConflictAbort => ctx.in_conflict,
+        RebaseConflictTakeOurs
+        | RebaseConflictTakeTheirs
+        | RebaseConflictSkipEntry
+        | RebaseConflictNextFile
+        | RebaseConflictPrevFile
+        | RebaseConflictApply
+        | RebaseConflictAbort => ctx.in_conflict,
 
         ReviewNextChunk
         | ReviewPrevChunk
@@ -932,8 +937,8 @@ mod tests {
             "RewordConfirm",
             "RewordAbort",
             "RebaseContinue",
-            "ConflictTakeOurs",
-            "ConflictApply",
+            "RebaseConflictTakeOurs",
+            "RebaseConflictApply",
             "ReviewStageChunk",
             "ReviewApplyStaged",
             "CommitsNext",
@@ -967,7 +972,7 @@ mod tests {
             assert!(listed.contains(&name), "{name} missing when in_rebase_plan");
         }
         assert!(!listed.contains(&"RewordConfirm"));
-        assert!(!listed.contains(&"ConflictApply"));
+        assert!(!listed.contains(&"RebaseConflictApply"));
     }
 
     #[test]
@@ -993,10 +998,10 @@ mod tests {
         };
         let listed = names_for_scope("", PaletteScope::Active, &ctx);
         for name in [
-            "ConflictTakeOurs",
-            "ConflictTakeTheirs",
-            "ConflictApply",
-            "ConflictAbort",
+            "RebaseConflictTakeOurs",
+            "RebaseConflictTakeTheirs",
+            "RebaseConflictApply",
+            "RebaseConflictAbort",
         ] {
             assert!(listed.contains(&name), "{name} missing in conflict");
         }
@@ -1047,7 +1052,7 @@ mod tests {
         for name in [
             "AbortRebase",
             "RewordConfirm",
-            "ConflictApply",
+            "RebaseConflictApply",
             "ReviewStageChunk",
             "CommitsNext",
             "RunSubmit",

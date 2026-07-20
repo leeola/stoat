@@ -6883,7 +6883,7 @@ impl Stoat {
         // the real editor pool, so it is not an overlay.
         let overlay = matches!(
             crate::keymap_state::view_predicate(self.active_workspace()),
-            Some("commits" | "rebase" | "reword" | "conflict")
+            Some("commits" | "rebase" | "reword" | "rebase_conflict")
         );
         let panes = if overlay {
             Vec::new()

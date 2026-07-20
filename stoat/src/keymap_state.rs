@@ -302,7 +302,7 @@ fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
 ///
 /// App screens are not editor modes. They are derived from the session state
 /// that already tracks them, resolved in the precedence order diff > reword >
-/// conflict > rebase > commits > file so that a screen stacked over another (a
+/// rebase_conflict > rebase > commits > file so that a screen stacked over another (a
 /// diff opened from the commit list, a reword paused mid-rebase) reports the
 /// topmost one. `file` is any focused editor with no screen over it. The value
 /// is absent when nothing is focused.
@@ -321,7 +321,7 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     }
     match ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref()) {
         Some(RebasePause::Reword { .. }) => return Some("reword"),
-        Some(RebasePause::Conflict { .. }) => return Some("conflict"),
+        Some(RebasePause::Conflict { .. }) => return Some("rebase_conflict"),
         // An Edit pause reviews the picked commit. It normally installs a review
         // session (caught by the `review` check above), but the no-session
         // fallback still needs the review screen so RebaseContinue stays bound.
