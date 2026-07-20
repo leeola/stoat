@@ -1526,7 +1526,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_completes_browse_path_and_descends() {
+    fn tab_completes_browse_path() {
         let mut h = Stoat::test();
         seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
         let home = PathBuf::from("/fake-home");
@@ -1552,19 +1552,37 @@ mod tests {
 
         assert_eq!(
             palette_arg_tail(&h).as_deref(),
-            Some("~/proj/"),
-            "Tab completes the highlighted directory with a trailing slash"
+            Some("~/proj"),
+            "Tab completes the highlighted directory with no trailing slash"
         );
         assert_eq!(
             arg_picker(&h).browse.as_ref().map(|b| b.root.clone()),
+            Some(home.clone()),
+            "the completion keeps the browse rooted at ~, not descended into proj",
+        );
+        assert_eq!(browse_dir_rows(&h), ["proj"]);
+        assert!(
+            arg_picker(&h)
+                .selected_path()
+                .is_some_and(|p| p.ends_with("proj")),
+            "the completed name is the highlighted row",
+        );
+
+        // A further `/` now descends the browse into the completed dir.
+        h.type_text("/");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        assert_eq!(
+            arg_picker(&h).browse.as_ref().map(|b| b.root.clone()),
             Some(home.join("proj")),
-            "the completed tail descends the browse into ~/proj",
+            "typing `/` after the completion descends the browse into ~/proj",
         );
         assert_eq!(browse_dir_rows(&h), ["sub"]);
     }
 
     #[test]
-    fn tab_completes_workspace_dir_and_descends() {
+    fn tab_completes_workspace_dir() {
         let mut h = Stoat::test();
         let root = seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
         h.fake_fs().insert_dir(root.join("wsdir/kid"));
@@ -1585,15 +1603,49 @@ mod tests {
 
         assert_eq!(
             palette_arg_tail(&h).as_deref(),
-            Some("wsdir/"),
-            "Tab completes the workspace directory with a trailing slash"
+            Some("wsdir"),
+            "Tab completes the workspace directory with no trailing slash"
         );
+        assert!(
+            arg_picker(&h).browse.is_none(),
+            "the completed bare tail stays a workspace list, no browse re-root",
+        );
+        assert!(
+            arg_picker(&h)
+                .selected_path()
+                .is_some_and(|p| p == root.join("wsdir")),
+            "the completed workspace dir is the highlighted row",
+        );
+    }
+
+    #[test]
+    fn tab_then_enter_opens_the_completed_dir() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs()
+            .insert_files([(home.join("proj/sub/f.rs"), "x".as_bytes())]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_text(":cd ~/pr");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        // The completion refilters synchronously, so Enter opens the completed
+        // dir rather than its first child even though the intervening capture
+        // frame re-syncs the browse.
+        h.type_keys("tab enter");
+
         assert_eq!(
-            arg_picker(&h).browse.as_ref().map(|b| b.root.clone()),
-            Some(root.join("wsdir")),
-            "the completed tail descends the browse into git_root/wsdir",
+            h.stoat.active_workspace().git_root,
+            home.join("proj"),
+            "tab-then-enter opens ~/proj, not ~/proj/sub",
         );
-        assert_eq!(browse_dir_rows(&h), ["kid"]);
+        assert!(
+            h.stoat.command_palette.is_none(),
+            "palette closes on submit"
+        );
     }
 
     #[test]

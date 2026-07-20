@@ -372,13 +372,20 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Complete the highlighted directory into the `:cd` input with a trailing `/`,
-/// so the next frame's browse re-root descends into it.
+/// Complete the highlighted directory into the `:cd` input, replacing the typed
+/// tail with exactly what the selected row shows and no trailing `/`.
 ///
 /// No-op unless a palette is open on a [`ValueSource::Directories`] argument
 /// with a picker and a selected row. In browse mode the completed tail keeps the
 /// typed directory prefix and appends the highlighted child. From the workspace
 /// list it is the selected directory relative to the workspace root.
+///
+/// The completion leaves the browse rooted where it was with the completed name
+/// as the highlighted row, so a following Enter opens that directory. Descending
+/// into it is a further `/` the user types, which re-roots the browse. The
+/// picker is refiltered synchronously against the completed tail and its
+/// selection reset to the top row, so an Enter arriving before the next render
+/// still opens the completed directory rather than its first child.
 pub(super) fn palette_complete_path(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
 
@@ -399,16 +406,13 @@ pub(super) fn palette_complete_path(stoat: &mut Stoat) -> UpdateEffect {
                 let Some(name) = picker.browse_selected_path().and_then(|p| p.file_name()) else {
                     return UpdateEffect::None;
                 };
-                format!("{}{}/", browse.typed_dir, name.to_string_lossy())
+                format!("{}{}", browse.typed_dir, name.to_string_lossy())
             },
             None => {
                 let Some(selected) = picker.selected_path() else {
                     return UpdateEffect::None;
                 };
-                format!(
-                    "{}/",
-                    crate::paths::display_relative(selected, &ws.git_root)
-                )
+                crate::paths::display_relative(selected, &ws.git_root)
             },
         };
 
@@ -419,9 +423,21 @@ pub(super) fn palette_complete_path(stoat: &mut Stoat) -> UpdateEffect {
         format!("{head} {tail}")
     };
 
-    let ws = &mut stoat.workspaces[active_idx];
-    if let Some(palette) = stoat.command_palette.as_ref() {
-        palette.input.replace_text(ws, &new_text);
+    {
+        let ws = &mut stoat.workspaces[active_idx];
+        if let Some(palette) = stoat.command_palette.as_ref() {
+            palette.input.replace_text(ws, &new_text);
+        }
+    }
+
+    // Refilter against the completed tail now so the browse re-sync and selection
+    // are settled before the next Enter reads them, not one render frame later.
+    sync_palette_picker(stoat);
+
+    if let Some(palette) = stoat.command_palette.as_mut()
+        && let Some(picker) = palette.arg_picker.as_mut()
+    {
+        picker.active_core().picklist.selected = 0;
     }
     UpdateEffect::Redraw
 }
