@@ -716,7 +716,13 @@ pub(crate) fn paint_highlighted_row(
     moved_span_tint: Option<[u8; 3]>,
     endpoints: &Arc<[HighlightEndpoint]>,
 ) {
+    debug_assert!(
+        change_spans.is_sorted_by_key(|(range, _)| range.start),
+        "change_spans must be start-sorted for the monotonic cursor"
+    );
+
     let mut col = 0usize;
+    let mut span_cursor = 0;
     for chunk in
         snapshot.highlighted_chunks_with_endpoints(display_row..display_row + 1, endpoints.clone())
     {
@@ -737,9 +743,17 @@ pub(crate) fn paint_highlighted_row(
             if x >= buf.area.x + buf.area.width {
                 return;
             }
-            let cell_style = match change_spans.iter().find(|(range, _)| range.contains(&col)) {
-                Some((_, kind)) => apply_span_tint(style, kind, side_span_tint, moved_span_tint),
-                None => style,
+            while change_spans
+                .get(span_cursor)
+                .is_some_and(|(r, _)| r.end <= col)
+            {
+                span_cursor += 1;
+            }
+            let cell_style = match change_spans.get(span_cursor) {
+                Some((range, kind)) if range.start <= col => {
+                    apply_span_tint(style, kind, side_span_tint, moved_span_tint)
+                },
+                _ => style,
             };
             buf[(x, y)].set_char(ch).set_style(cell_style);
             col += 1;
@@ -790,6 +804,9 @@ fn buffer_row_change_spans(
             ranges.push((start_col..end_col, span.kind.clone()));
         }
     }
+    // Spans arrive per hunk and are not otherwise ordered. Start-sorting them
+    // makes the painter's monotonic span cursor correct.
+    ranges.sort_by_key(|(range, _)| range.start);
     ranges
 }
 
