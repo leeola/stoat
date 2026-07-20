@@ -440,9 +440,11 @@ pub(crate) fn render_page_from_snapshot(
     let mut buf = Buffer::empty(area);
 
     // A diff-view page paints the two columns itself, including both line-number
-    // gutters, so it bypasses the single-column page gutter. The ASCII path emits
-    // no rich APC, so the fill is just the serialized grid.
+    // gutters, so it bypasses the single-column page gutter. Inside stoatty its
+    // rich sub-cell components ride as APC frames appended after the serialized
+    // cells, faded to match the dimmed grid.
     if diff_view {
+        let mut scene = gutter.rich.is_some().then(ApcScene::new);
         paint_diff_rows(
             snapshot,
             top_row,
@@ -450,10 +452,15 @@ pub(crate) fn render_page_from_snapshot(
             fallback_style,
             gutter.theme(),
             &mut buf,
-            None,
+            scene.as_mut(),
+            dim,
         );
         dim_page(&mut buf, area, gutter.theme(), dim);
-        return serialize_buffer(&buf);
+        let mut bytes = serialize_buffer(&buf);
+        if let Some(mut scene) = scene {
+            bytes.extend_from_slice(scene.buffer());
+        }
+        return bytes;
     }
 
     let end_row = top_row
@@ -1086,7 +1093,16 @@ mod tests {
         let area = Rect::new(0, 0, 40, 8);
 
         let mut expected = Buffer::empty(area);
-        paint_diff_rows(&snapshot, 0, area, fallback, &theme, &mut expected, None);
+        paint_diff_rows(
+            &snapshot,
+            0,
+            area,
+            fallback,
+            &theme,
+            &mut expected,
+            None,
+            0.0,
+        );
         let expected = serialize_buffer(&expected);
 
         let got = render_page_from_snapshot(&snapshot, 0, fallback, 40, 8, &gutter, true, 0.0);

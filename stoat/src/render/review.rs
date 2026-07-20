@@ -109,6 +109,7 @@ pub(crate) fn render_diff_view(
         theme,
         buf,
         scene,
+        0.0,
     );
     render_review_cursor(
         editor,
@@ -206,6 +207,7 @@ impl DiffColumns {
 /// Shared by the live [`render_diff_view`] and the off-loop smooth-scroll page
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
 /// letting a pooled page render it on a blocking worker.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_diff_rows(
     snapshot: &DisplaySnapshot,
     scroll_row: u32,
@@ -214,6 +216,7 @@ pub(crate) fn paint_diff_rows(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
+    dim: f32,
 ) {
     let total_rows = snapshot.line_count();
     let visible = inner.height as u32;
@@ -225,9 +228,10 @@ pub(crate) fn paint_diff_rows(
     // Rich mode replaces the ASCII gutter (status glyphs, line numbers, and the
     // separators) with sub-cell APC components. It engages only when a scene is
     // threaded and every gutter color resolves to RGB, so the two paths never
-    // mix within one frame.
+    // mix within one frame. `dim` fades the bars toward the background for a
+    // pooled unfocused page, matching the cell dimming.
     let mut rich = scene.and_then(|scene| {
-        resolve_diff_rich_colors(theme, fallback_style)
+        resolve_diff_rich_colors(theme, fallback_style, dim)
             .map(|colors| DiffRichGutter { scene, colors })
     });
 
@@ -1291,13 +1295,22 @@ struct DiffRichGutter<'a> {
 ///
 /// The per-row change bar color is read from the row's change scope, so the
 /// resolver validates every change scope is RGB up front and this stores only
-/// the dim, background, and staged/unstaged colors used directly.
+/// the dim, background, and staged/unstaged colors used directly. `dim_amount`
+/// fades every bar toward the background on a pooled unfocused page.
 #[derive(Clone, Copy)]
 struct DiffRichColors {
     dim: [u8; 3],
     bg: [u8; 3],
     staged: [u8; 3],
     unstaged: [u8; 3],
+    dim_amount: f32,
+}
+
+impl DiffRichColors {
+    /// Fade `color` toward the background by the pooled-page dim amount.
+    fn faded(&self, color: [u8; 3]) -> [u8; 3] {
+        dim_rgb(color, self.bg, self.dim_amount)
+    }
 }
 
 /// Extract every diff gutter color as RGB, or `None` when any is missing or not
@@ -1306,6 +1319,7 @@ struct DiffRichColors {
 fn resolve_diff_rich_colors(
     theme: &crate::theme::Theme,
     fallback_style: Style,
+    dim_amount: f32,
 ) -> Option<DiffRichColors> {
     use crate::theme::scope as s;
     let bg = fallback_style
@@ -1320,11 +1334,15 @@ fn resolve_diff_rich_colors(
     ] {
         style_rgb(theme.get(scope).fg)?;
     }
+    // Pre-fade the directly-stored colors so the line numbers and separators
+    // need no per-use dimming. The per-row change color fades at its call site.
+    let bg = style_rgb(bg)?;
     Some(DiffRichColors {
-        dim: style_rgb(theme.get(s::DIFF_CONTEXT).fg)?,
-        bg: style_rgb(bg)?,
-        staged: style_rgb(theme.get(s::DIFF_STAGED).fg)?,
-        unstaged: style_rgb(theme.get(s::DIFF_UNSTAGED).fg)?,
+        dim: dim_rgb(style_rgb(theme.get(s::DIFF_CONTEXT).fg)?, bg, dim_amount),
+        bg,
+        staged: dim_rgb(style_rgb(theme.get(s::DIFF_STAGED).fg)?, bg, dim_amount),
+        unstaged: dim_rgb(style_rgb(theme.get(s::DIFF_UNSTAGED).fg)?, bg, dim_amount),
+        dim_amount,
     })
 }
 
@@ -1375,7 +1393,9 @@ fn draw_diff_status(
 ) {
     match rich {
         Some(rg) => {
-            let change = style_rgb(theme.get(change_scope).fg).unwrap_or(rg.colors.dim);
+            let change = rg
+                .colors
+                .faded(style_rgb(theme.get(change_scope).fg).unwrap_or(rg.colors.dim));
             let staged_color = if staged {
                 rg.colors.staged
             } else {
@@ -1834,6 +1854,26 @@ mod tests {
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
         assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
+    }
+
+    #[test]
+    fn diff_rich_colors_fade_toward_the_background_with_the_dim_amount() {
+        let theme = rgb_diff_theme();
+        let full = resolve_diff_rich_colors(&theme, Style::default(), 0.0).expect("colors resolve");
+        let faded =
+            resolve_diff_rich_colors(&theme, Style::default(), 0.6).expect("colors resolve");
+
+        assert_eq!(
+            full.dim,
+            [128, 128, 128],
+            "no dim leaves the color unchanged"
+        );
+        assert_eq!(
+            faded.dim,
+            dim_rgb([128, 128, 128], full.bg, 0.6),
+            "a pooled page fades the stored colors toward the background"
+        );
+        assert_eq!(faded.bg, full.bg, "the background itself is not faded");
     }
 
     #[test]
