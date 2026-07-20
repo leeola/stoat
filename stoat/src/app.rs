@@ -4437,6 +4437,19 @@ impl Stoat {
             .remove_by_source(crate::badge::BadgeSource::Version);
         self.lsp_message = None;
 
+        // The keymap state and binding lookup are derived once here and reused
+        // at every site below (Ctrl-C bound check, macro-toggle scan, insert
+        // fall-through, dispatch). `from_stoat` is expensive (two buffer read
+        // locks, a snapshot clone, mode/lang allocations) and none of the
+        // fall-through mutations between those sites feed a keymap predicate, so
+        // one derivation is behavior-preserving. Normalization runs first so the
+        // Ctrl-C block matches on the same key the lookup used.
+        let key = normalize_shift_event(key);
+        let looked_up: Option<Vec<ResolvedAction>> = {
+            let state = StoatKeymapState::from_stoat(self);
+            self.keymap.lookup(&state, &key).map(|a| a.to_vec())
+        };
+
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(run_id) = self.modal_run {
                 let ws = self.active_workspace_mut();
@@ -4496,16 +4509,10 @@ impl Stoat {
             }
             // Ctrl-C with a keymap binding (`pane == run` -> RunInterrupt) routes
             // through the keymap below. An unbound Ctrl-C quits.
-            let bound = {
-                let state = StoatKeymapState::from_stoat(self);
-                self.keymap.lookup(&state, &key).is_some()
-            };
-            if !bound {
+            if looked_up.is_none() {
                 return UpdateEffect::Quit;
             }
         }
-
-        let key = normalize_shift_event(key);
 
         if self.pending_macro_replay {
             self.pending_macro_replay = false;
@@ -4515,13 +4522,9 @@ impl Stoat {
             return UpdateEffect::Redraw;
         }
 
-        let is_record_macro_toggle = {
-            let state = StoatKeymapState::from_stoat(self);
-            self.keymap
-                .lookup(&state, &key)
-                .map(|actions| actions.iter().any(|a| a.name == "RecordMacro"))
-                .unwrap_or(false)
-        };
+        let is_record_macro_toggle = looked_up
+            .as_ref()
+            .is_some_and(|actions| actions.iter().any(|a| a.name == "RecordMacro"));
         if !is_record_macro_toggle {
             action_handlers::macro_recording::capture(self, &key);
         }
@@ -4559,10 +4562,7 @@ impl Stoat {
             // None for it, so it falls through to the keymap and leaves insert.
             let insert_first =
                 printable || self.pending_completion.is_some() || self.pending_insert_register;
-            let keymap_binds = !insert_first && {
-                let state = StoatKeymapState::from_stoat(self);
-                self.keymap.lookup(&state, &key).is_some()
-            };
+            let keymap_binds = !insert_first && looked_up.is_some();
             if !keymap_binds && let Some(effect) = self.handle_insert_key(key) {
                 // If help is open, keep its filtered list in sync after every
                 // text mutation in the prompt input.
@@ -4873,11 +4873,7 @@ impl Stoat {
             return UpdateEffect::Redraw;
         }
 
-        let actions = {
-            let state = StoatKeymapState::from_stoat(self);
-            self.keymap.lookup(&state, &key).map(|a| a.to_vec())
-        };
-        let Some(actions) = actions else {
+        let Some(actions) = looked_up else {
             if count_active_mode
                 && let KeyCode::Char(ch) = key.code
                 && ch.is_ascii_digit()
