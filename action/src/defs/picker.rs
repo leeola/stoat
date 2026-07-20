@@ -175,3 +175,14 @@ define_action!(
     ActionPriority::Common,
     palette_visible = false
 );
+
+define_action!(
+    CodeSearchModeToggleDef,
+    CodeSearchModeToggle,
+    "CodeSearchModeToggle",
+    ActionKind::CodeSearchModeToggle,
+    "toggle code search mode",
+    "Switch the code-search modal between regex and quick AST-pattern search. AST mode matches ast-grep patterns against files of the focused buffer's language.",
+    ActionPriority::Common,
+    palette_visible = false
+);

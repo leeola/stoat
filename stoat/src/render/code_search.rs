@@ -1,5 +1,5 @@
 use crate::{
-    code_search::CodeSearchFinder,
+    code_search::{CodeSearchFinder, SearchMode},
     paths,
     render::text::{write_str, write_str_clipped},
     theme::{scope, Theme},
@@ -25,12 +25,13 @@ pub(crate) fn render_code_search(
     };
 
     let git_root = ws.git_root.clone();
+    let title = code_search_title(finder);
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     Clear.render(layout.modal, buf);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,
-        Some(" code search "),
+        Some(&title),
         modal_style,
         theme,
         scene.as_deref_mut(),
@@ -90,11 +91,17 @@ fn paint_match_rows(
     if rows == 0 {
         return;
     }
+
+    let dim_style = theme.get(scope::UI_TEXT_MUTED);
+    if finder.invalid_pattern {
+        write_str(buf, area.x + 1, area.y, "invalid pattern", dim_style);
+        return;
+    }
+
     let start_row = finder.selected.saturating_sub(rows.saturating_sub(1));
 
     let row_style = theme.get(scope::UI_TEXT);
     let selected_style = theme.get(scope::UI_SELECTION);
-    let dim_style = theme.get(scope::UI_TEXT_MUTED);
 
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
@@ -124,5 +131,16 @@ fn paint_match_rows(
         if snippet_x < end_x {
             write_str_clipped(buf, snippet_x, row, &m.snippet, style, end_x);
         }
+    }
+}
+
+/// Modal title carrying the active search mode, and for AST the target language.
+fn code_search_title(finder: &CodeSearchFinder) -> String {
+    match finder.mode {
+        SearchMode::Regex => " code search: regex ".to_string(),
+        SearchMode::Ast => {
+            let lang = finder.target_lang.as_ref().map(|l| l.name).unwrap_or("?");
+            format!(" code search: ast ({lang}) ")
+        },
     }
 }

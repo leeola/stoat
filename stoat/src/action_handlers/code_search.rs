@@ -1,10 +1,15 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    code_search::{scan_file, CodeSearchFinder, SearchMatch, MATCH_CAP},
+    code_search::{
+        ast::{ast_scan_file, AstLang},
+        scan_file, CodeSearchFinder, SearchMatch, SearchMode, MATCH_CAP,
+    },
+    pane::View,
     picker::PreviewSource,
 };
+use ast_grep_core::Pattern;
 use regex::Regex;
-use std::{ops::ControlFlow, path::PathBuf};
+use std::{ops::ControlFlow, path::PathBuf, sync::Arc};
 use stoat_action::OpenFile;
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
@@ -24,10 +29,46 @@ pub(crate) fn open_code_search(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.code_search.is_some() {
         return UpdateEffect::None;
     }
+    let target_lang = focused_buffer_language(stoat);
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let finder = CodeSearchFinder::new(ws, executor);
+    let finder = CodeSearchFinder::new(ws, executor, target_lang);
     stoat.code_search = Some(finder);
+    UpdateEffect::Redraw
+}
+
+/// The language of the focused editor's buffer, or `None` when focus is not on a
+/// path-bound editor. Resolves the AST-mode target language at finder open.
+fn focused_buffer_language(stoat: &Stoat) -> Option<Arc<stoat_language::Language>> {
+    let ws = stoat.active_workspace();
+    let View::Editor(editor_id) = &ws.panes.pane(ws.panes.focus()).view else {
+        return None;
+    };
+    let editor = ws.editors.get(*editor_id)?;
+    ws.buffers.language_for(editor.buffer_id)
+}
+
+/// Flip between regex and AST search, clearing the current results and re-arming
+/// the scan.
+///
+/// Toggling to AST with no resolvable target language is a no-op, since AST mode
+/// needs a language to parse patterns against.
+pub(crate) fn code_search_mode_toggle(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(finder) = stoat.code_search.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let next = match finder.mode {
+        SearchMode::Regex if finder.target_lang.is_some() => SearchMode::Ast,
+        SearchMode::Regex => return UpdateEffect::Redraw,
+        SearchMode::Ast => SearchMode::Regex,
+    };
+    finder.mode = next;
+    finder.matches.clear();
+    finder.selected = 0;
+    finder.invalid_pattern = false;
+    // Force the next sync to treat the query as changed so it re-arms under the
+    // new mode.
+    finder.last_query = None;
     UpdateEffect::Redraw
 }
 
@@ -139,38 +180,78 @@ fn sync_code_search_preview(stoat: &mut Stoat) {
     }
 }
 
-/// Spawn the streaming workspace scan for `pattern`, rooted at `git_root`.
+/// Spawn the streaming workspace scan for `query` under the finder's current
+/// mode, rooted at `git_root`.
 ///
-/// Returns the pending scan, or the compiled-regex error so an invalid pattern
-/// never starts a walk. Each non-empty batch pings the redraw notifier so the
-/// open modal repaints as matches stream in.
+/// Returns `None` when no finder is open or the pattern does not compile, so an
+/// invalid pattern never starts a walk. Regex mode scans every file; AST mode
+/// scans only files of the finder's target language. Each non-empty batch pings
+/// the redraw notifier so the open modal repaints as matches stream in.
 pub(crate) fn spawn_code_search(
     stoat: &Stoat,
     git_root: PathBuf,
-    pattern: &str,
-) -> Result<PendingCodeSearch, regex::Error> {
-    let regex = Regex::new(pattern)?;
+    query: &str,
+) -> Option<PendingCodeSearch> {
+    let finder = stoat.code_search.as_ref()?;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let fs_host = stoat.fs_host.clone();
     let redraw_notify = stoat.redraw_notify.clone();
-    let task = stoat.executor.spawn_blocking(move || {
-        fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
-            let mut matches = Vec::new();
-            for path in batch {
-                scan_file(&*fs_host, &regex, &path, &mut matches);
-            }
-            if !matches.is_empty() {
-                if tx.send(matches).is_err() {
-                    return ControlFlow::Break(());
-                }
-                redraw_notify.notify_one();
-            } else if tx.is_closed() {
-                return ControlFlow::Break(());
-            }
-            ControlFlow::Continue(())
-        });
-    });
-    Ok(PendingCodeSearch { rx, _task: task })
+
+    let task = match finder.mode {
+        SearchMode::Regex => {
+            let regex = Regex::new(query).ok()?;
+            stoat.executor.spawn_blocking(move || {
+                fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
+                    let mut matches = Vec::new();
+                    for path in batch {
+                        scan_file(&*fs_host, &regex, &path, &mut matches);
+                    }
+                    if !matches.is_empty() {
+                        if tx.send(matches).is_err() {
+                            return ControlFlow::Break(());
+                        }
+                        redraw_notify.notify_one();
+                    } else if tx.is_closed() {
+                        return ControlFlow::Break(());
+                    }
+                    ControlFlow::Continue(())
+                });
+            })
+        },
+        SearchMode::Ast => {
+            let lang = finder.target_lang.as_ref()?.clone();
+            let ast_lang = AstLang::new(lang.clone());
+            let pattern = Pattern::try_new(query, ast_lang.clone()).ok()?;
+            let language_registry = stoat.language_registry.clone();
+            let target_name = lang.name;
+            stoat.executor.spawn_blocking(move || {
+                fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
+                    let mut matches = Vec::new();
+                    for path in batch {
+                        if language_registry.for_path(&path).map(|l| l.name) != Some(target_name) {
+                            continue;
+                        }
+                        let mut buf = Vec::new();
+                        if fs_host.read(&path, &mut buf).is_ok()
+                            && let Ok(text) = std::str::from_utf8(&buf)
+                        {
+                            ast_scan_file(text, &ast_lang, &pattern, &path, &mut matches);
+                        }
+                    }
+                    if !matches.is_empty() {
+                        if tx.send(matches).is_err() {
+                            return ControlFlow::Break(());
+                        }
+                        redraw_notify.notify_one();
+                    } else if tx.is_closed() {
+                        return ControlFlow::Break(());
+                    }
+                    ControlFlow::Continue(())
+                });
+            })
+        },
+    };
+    Some(PendingCodeSearch { rx, _task: task })
 }
 
 /// Drain streamed code-search batches into the open finder, capped at

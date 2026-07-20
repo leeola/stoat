@@ -82,8 +82,8 @@ use crate::{
             SplitRight, ToggleDockLeft, ToggleDockRight, TogglePaneWiden,
         },
         picker::{
-            CodeSearchClose, CodeSearchNext, CodeSearchPrev, CodeSearchSelect,
-            DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
+            CodeSearchClose, CodeSearchModeToggle, CodeSearchNext, CodeSearchPrev,
+            CodeSearchSelect, DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
             DiagnosticsPickerSelect, JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev,
             JumplistPickerSelect, LocationPickerClose, LocationPickerNext, LocationPickerPrev,
             LocationPickerSelect,
@@ -423,6 +423,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CodeSearchPrev::DEF, |_| Ok(Box::new(CodeSearchPrev)));
     add(CodeSearchSelect::DEF, |_| Ok(Box::new(CodeSearchSelect)));
     add(CodeSearchClose::DEF, |_| Ok(Box::new(CodeSearchClose)));
+    add(CodeSearchModeToggle::DEF, |_| {
+        Ok(Box::new(CodeSearchModeToggle))
+    });
     add(JumplistPickerNext::DEF, |_| {
         Ok(Box::new(JumplistPickerNext))
     });
@@ -1108,6 +1111,7 @@ mod tests {
         "CodeSearchPrev",
         "CodeSearchSelect",
         "CodeSearchClose",
+        "CodeSearchModeToggle",
         "CloseWorkspace",
         "ShowCwd",
         "ReloadEnv",
@@ -1397,13 +1401,14 @@ mod tests {
         // + 2 DetachPane, ReattachPane.
         // + 1 TogglePaneWiden.
         // + 5 OpenCodeSearch + CodeSearch Next/Prev/Select/Close.
+        // + 1 CodeSearchModeToggle.
         // + 2 Conflict, CloseConflict.
         // + 4 ConflictPickOurs/Theirs/Both, ConflictResetChunk.
         // + 2 ConflictNextChunk, ConflictPrevChunk.
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 373);
+        assert_eq!(all().count(), 374);
     }
 
     #[test]

@@ -121,6 +121,7 @@ pub enum ActionKind {
     CodeSearchPrev,
     CodeSearchSelect,
     CodeSearchClose,
+    CodeSearchModeToggle,
     SplitSelection,
     SelectRegex,
     KeepSelections,

@@ -477,6 +477,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             code_search::close_code_search(stoat);
             UpdateEffect::Redraw
         },
+        ActionKind::CodeSearchModeToggle => code_search::code_search_mode_toggle(stoat),
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
         },

@@ -76,6 +76,11 @@ pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
 /// character.
 pub(crate) const CODE_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// Longer debounce for AST search, whose scan parses every same-language file
+/// per query and so costs more than a regex sweep.
+pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(300);
+
 /// Frame interval for scroll-animation ticks, about 60 fps to match a typical
 /// display rather than shipping targets that can never be presented.
 /// [`Stoat::run`] arms a timer at this cadence while a scroll glide is active,
@@ -2963,15 +2968,33 @@ impl Stoat {
     /// arming, since an empty regex would otherwise match every position.
     pub(crate) fn set_code_search_query(&mut self, query: String) {
         self.pending_code_search = None;
-        if query.is_empty() || regex::Regex::new(&query).is_err() {
+        let Some(finder) = self.code_search.as_ref() else {
+            self.code_search_debounce = None;
+            return;
+        };
+        let is_ast = matches!(finder.mode, crate::code_search::SearchMode::Ast);
+        let valid = finder.pattern_valid(&query);
+
+        // AST mode surfaces a non-empty, unparseable query as a placeholder;
+        // regex validity is silent, since an invalid regex just clears the list.
+        if is_ast && let Some(finder) = self.code_search.as_mut() {
+            finder.invalid_pattern = !query.is_empty() && !valid;
+        }
+        if !valid {
             self.code_search_debounce = None;
             return;
         }
+
+        let debounce = if is_ast {
+            CODE_SEARCH_AST_DEBOUNCE
+        } else {
+            CODE_SEARCH_DEBOUNCE
+        };
         let executor = self.executor.clone();
         let tx = self.code_search_query_tx.clone();
         let redraw = self.redraw_notify.clone();
         self.code_search_debounce = Some(self.executor.spawn_with_redraw(redraw, async move {
-            executor.timer(CODE_SEARCH_DEBOUNCE).await;
+            executor.timer(debounce).await;
             let _ = tx.send(query).await;
         }));
     }
@@ -2990,7 +3013,7 @@ impl Stoat {
                 continue;
             }
             let git_root = self.active_workspace().git_root.clone();
-            if let Ok(pending) =
+            if let Some(pending) =
                 action_handlers::code_search::spawn_code_search(self, git_root, &query)
             {
                 self.pending_code_search = Some(pending);

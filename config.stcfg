@@ -697,6 +697,7 @@ on key {
         Down -> CodeSearchNext();
         Ctrl-p -> CodeSearchPrev();
         Ctrl-n -> CodeSearchNext();
+        BackTab -> CodeSearchModeToggle();
     }
     modal == palette && mode == insert {
         Up -> PaletteHistoryPrev();

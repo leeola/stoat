@@ -34,6 +34,7 @@ unused_lifetimes = "warn"
 unused_qualifications = "warn"
 
 [workspace.dependencies]
+ast-grep-core = "0.44"
 snafu = "0.9"
 tracing = "0.1"
 clap = { version = "4.5", features = ["derive", "env"] }

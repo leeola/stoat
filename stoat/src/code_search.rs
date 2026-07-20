@@ -4,13 +4,31 @@ use crate::{
     picker::Preview,
     workspace::Workspace,
 };
+use ast_grep_core::Pattern;
 use regex::Regex;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use stoat_language::Language;
 use stoat_scheduler::Executor;
+
+pub(crate) mod ast;
 
 /// Match sites the live scan streams before it stops, so a pattern matching most
 /// of the workspace never overruns the list or the preview.
 pub(crate) const MATCH_CAP: usize = 500;
+
+/// How the code-search query is interpreted.
+///
+/// [`SearchMode::Regex`] is the default. [`SearchMode::Ast`] parses the query as
+/// an ast-grep pattern and matches it against files of the finder's target
+/// language, reached by Shift-Tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchMode {
+    Regex,
+    Ast,
+}
 
 /// One match site surfaced by the workspace scan.
 ///
@@ -39,10 +57,22 @@ pub struct CodeSearchFinder {
     /// scan only when the typed text differs from this, so a stable query never
     /// re-scans the workspace.
     pub(crate) last_query: Option<String>,
+    pub(crate) mode: SearchMode,
+    /// The language AST mode matches against, resolved from the focused buffer at
+    /// open. `None` when that buffer has no language, which leaves AST mode
+    /// unavailable and its toggle a no-op.
+    pub(crate) target_lang: Option<Arc<Language>>,
+    /// Set when the current AST query fails to parse, so the render shows a
+    /// placeholder rather than a silently empty list.
+    pub(crate) invalid_pattern: bool,
 }
 
 impl CodeSearchFinder {
-    pub(crate) fn new(ws: &mut Workspace, executor: Executor) -> Self {
+    pub(crate) fn new(
+        ws: &mut Workspace,
+        executor: Executor,
+        target_lang: Option<Arc<Language>>,
+    ) -> Self {
         let input = InputView::create(
             ws,
             executor.clone(),
@@ -58,6 +88,27 @@ impl CodeSearchFinder {
             selected: 0,
             preview,
             last_query: None,
+            mode: SearchMode::Regex,
+            target_lang,
+            invalid_pattern: false,
+        }
+    }
+
+    /// Whether `query` compiles under the current mode.
+    ///
+    /// An empty query is never valid (an empty regex would match every
+    /// position). AST mode needs a resolved target language and a query that
+    /// parses as an ast-grep pattern.
+    pub(crate) fn pattern_valid(&self, query: &str) -> bool {
+        if query.is_empty() {
+            return false;
+        }
+        match self.mode {
+            SearchMode::Regex => Regex::new(query).is_ok(),
+            SearchMode::Ast => match &self.target_lang {
+                Some(lang) => Pattern::try_new(query, ast::AstLang::new(lang.clone())).is_ok(),
+                None => false,
+            },
         }
     }
 
@@ -148,14 +199,43 @@ fn line_snippet(text: &str, offset: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_snippet, offset_to_line_column, scan_file, SearchMatch};
+    use super::{line_snippet, offset_to_line_column, scan_file, SearchMatch, SearchMode};
     use crate::{
-        app::CODE_SEARCH_DEBOUNCE,
+        app::{CODE_SEARCH_AST_DEBOUNCE, CODE_SEARCH_DEBOUNCE},
         host::{FakeFs, FsHost},
         test_harness::TestHarness,
     };
     use regex::Regex;
     use std::path::{Path, PathBuf};
+
+    /// Open the code-search modal with a `.rs` file focused, then Shift-Tab into
+    /// AST mode. The focused rust buffer resolves rust as the target language.
+    fn open_ast_over(files: &[(&str, &str)], focus: &str) -> TestHarness {
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/repo");
+        for (name, contents) in files {
+            h.fake_fs()
+                .insert_file(root.join(name), contents.as_bytes());
+        }
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join(focus),
+            },
+        );
+        h.settle();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h.type_keys("backtab");
+        h
+    }
+
+    /// Type an AST `query` and fire the longer AST debounce so the scan lands.
+    fn run_ast_query(h: &mut TestHarness, query: &str) {
+        h.type_text(query);
+        h.settle();
+        h.advance_clock(CODE_SEARCH_AST_DEBOUNCE);
+    }
 
     fn open_over(files: &[(&str, &str)]) -> TestHarness {
         let mut h = crate::Stoat::test();
@@ -252,6 +332,55 @@ mod tests {
             before,
             "closing disposes the scratch buffers"
         );
+    }
+
+    #[test]
+    fn backtab_toggles_between_regex_and_ast() {
+        let mut h = open_ast_over(&[("a.rs", "fn a() {}\n")], "a.rs");
+        assert_eq!(
+            h.stoat.code_search.as_ref().unwrap().mode,
+            SearchMode::Ast,
+            "open_ast_over lands in AST mode"
+        );
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.code_search.as_ref().unwrap().mode,
+            SearchMode::Regex,
+            "a second backtab returns to regex"
+        );
+    }
+
+    #[test]
+    fn ast_mode_matches_target_language_and_skips_others() {
+        let mut h = open_ast_over(
+            &[("a.rs", "fn alpha() {}\n"), ("b.txt", "fn alpha() {}\n")],
+            "a.rs",
+        );
+        run_ast_query(&mut h, "fn $NAME() {}");
+
+        let finder = h.stoat.code_search.as_ref().unwrap();
+        assert_eq!(
+            finder.matches.len(),
+            1,
+            "only the rust file matches, the .txt is skipped"
+        );
+        assert!(finder.matches[0].path.ends_with("a.rs"));
+    }
+
+    #[test]
+    fn ast_invalid_pattern_flags_the_placeholder() {
+        let mut h = open_ast_over(&[("a.rs", "fn a() {}\n")], "a.rs");
+        // Two top-level items are not a single ast-grep pattern node.
+        h.type_text("fn a() {} fn b() {}");
+        h.settle();
+        let _ = h.snapshot();
+
+        let finder = h.stoat.code_search.as_ref().unwrap();
+        assert!(
+            finder.invalid_pattern,
+            "an unparseable pattern flags invalid"
+        );
+        assert!(finder.matches.is_empty());
     }
 
     fn fake_with(files: &[(&str, &str)]) -> (FakeFs, PathBuf) {
