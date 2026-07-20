@@ -456,8 +456,9 @@ struct State {
     scrollback_grid: Grid,
     /// The integer offset [`Self::scrollback_grid`] was last composed at, so a
     /// frame that only changes the sub-cell fraction reuses the cached rows and
-    /// shifts them, rebuilding only when the integer offset changes. `None` when
-    /// the previous frame rendered the live grid.
+    /// re-shifts them. The compose re-runs only when the integer offset changes
+    /// or live output redamaged the grid. `None` when the previous frame
+    /// rendered the live grid.
     last_scrollback_offset: Option<i32>,
     /// The scroll region's eased vertical offset, in rows. Seeded by the change
     /// in the region's declared offset and eased toward zero, so the region's
@@ -1398,85 +1399,93 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.region_scroll = region_scroll;
 
                 let cursor_easing = if active.is_empty() {
-                    // No pool is mid-glide: fall to the scrollback window when the
-                    // view is scrolled back, else the live grid.
-                    let scrollback_view = {
-                        let terminal = state.terminal.lock();
-                        terminal
-                            .project_scrollback(&mut state.scrollback_grid, state.scrollback_visual)
-                    };
+                    // With no pool mid-glide, fall to the scrollback window when
+                    // the view is scrolled back, else the live grid.
+                    let in_scrollback = state.scrollback_visual > 0.0 && state.grid.rows() > 0;
 
-                    match scrollback_view {
-                        Some(scroll_offset) => {
-                            // The view is scrolled back: render the composed history
-                            // window, gliding it by the sub-cell fraction. The
-                            // integer offset selects which rows fill the window;
-                            // rebuild on an offset change or when live output
-                            // redamaged the grid, otherwise reuse the cached rows.
-                            let offset = state.scrollback_visual.floor() as i32;
-                            let vt_changed = matches!(&damage, Damage::Full)
-                                || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|&d| d));
-                            let rebuild =
-                                state.last_scrollback_offset != Some(offset) || vt_changed;
-                            state.last_scrollback_offset = Some(offset);
-                            let sb_damage = if rebuild {
-                                Damage::Full
-                            } else {
-                                Damage::Partial(Vec::new())
-                            };
-                            state.gpu.render(
-                                &state.scrollback_grid,
-                                Frame {
-                                    cursor: None,
-                                    cursor_corners: None,
-                                    scroll: Scroll {
-                                        grid: 0.0,
-                                        document: 0.0,
-                                        scrollback: scroll_offset,
-                                        region: 0.0,
-                                        popovers: &[],
-                                    },
-                                    damage: &sb_damage,
-                                    decoration_damage: &sb_damage,
+                    if in_scrollback {
+                        // The view is scrolled back, so render the composed history
+                        // window, gliding it by the sub-cell fraction. The integer
+                        // offset selects which rows fill the window. Re-compose on an
+                        // offset change or when live output redamaged the grid.
+                        // Otherwise reuse the cached rows and only re-shift them.
+                        let offset = state.scrollback_visual.floor() as i32;
+                        let vt_changed = matches!(&damage, Damage::Full)
+                            || matches!(&damage, Damage::Partial(rows) if rows.iter().any(|&d| d));
+                        let rebuild = state.last_scrollback_offset != Some(offset) || vt_changed;
+                        state.last_scrollback_offset = Some(offset);
+
+                        if rebuild {
+                            let terminal = state.terminal.lock();
+                            terminal.project_scrollback(
+                                &mut state.scrollback_grid,
+                                state.scrollback_visual,
+                            );
+                        }
+
+                        let sb_damage = if rebuild {
+                            Damage::Full
+                        } else {
+                            Damage::Partial(Vec::new())
+                        };
+
+                        // The sub-cell shift project_scrollback returns, recomputed
+                        // locally so a fraction-only frame needs no lock or compose.
+                        let scroll_offset =
+                            (state.scrollback_visual - state.scrollback_visual.floor()) - 1.0;
+
+                        state.gpu.render(
+                            &state.scrollback_grid,
+                            Frame {
+                                cursor: None,
+                                cursor_corners: None,
+                                scroll: Scroll {
+                                    grid: 0.0,
+                                    document: 0.0,
+                                    scrollback: scroll_offset,
+                                    region: 0.0,
+                                    popovers: &[],
                                 },
-                            );
-                            false
-                        },
-                        None => {
-                            // At the live bottom: render the projected live grid
-                            // (cursor and decorations), cursor easing as usual.
-                            state.last_scrollback_offset = None;
-                            seed_settle_flight(
-                                &mut state.cursor_was_anchored,
-                                &mut state.cursor_anim,
-                                &mut state.cursor_corner_anim,
-                                state.grid.rows(),
-                            );
-                            let (cursor, cursor_corners, easing) = step_cursor(
-                                state.cursor_animation,
-                                &mut state.cursor_anim,
-                                &mut state.cursor_corner_anim,
-                                cursor_position(cursor),
-                                dt,
-                            );
-                            state.gpu.render(
-                                &state.grid,
-                                Frame {
-                                    cursor,
-                                    cursor_corners,
-                                    scroll: Scroll {
-                                        grid: state.grid_scroll,
-                                        document: 0.0,
-                                        scrollback: 0.0,
-                                        region: state.region_scroll,
-                                        popovers: &state.popover_scrolls,
-                                    },
-                                    damage: &damage,
-                                    decoration_damage: &decoration_damage,
+                                damage: &sb_damage,
+                                decoration_damage: &sb_damage,
+                            },
+                        );
+                        false
+                    } else {
+                        // At the live bottom, render the projected live grid (cursor
+                        // and decorations), cursor easing as usual. No lock or compose
+                        // here, so the cached scrollback rows are left untouched.
+                        state.last_scrollback_offset = None;
+                        seed_settle_flight(
+                            &mut state.cursor_was_anchored,
+                            &mut state.cursor_anim,
+                            &mut state.cursor_corner_anim,
+                            state.grid.rows(),
+                        );
+                        let (cursor, cursor_corners, easing) = step_cursor(
+                            state.cursor_animation,
+                            &mut state.cursor_anim,
+                            &mut state.cursor_corner_anim,
+                            cursor_position(cursor),
+                            dt,
+                        );
+                        state.gpu.render(
+                            &state.grid,
+                            Frame {
+                                cursor,
+                                cursor_corners,
+                                scroll: Scroll {
+                                    grid: state.grid_scroll,
+                                    document: 0.0,
+                                    scrollback: 0.0,
+                                    region: state.region_scroll,
+                                    popovers: &state.popover_scrolls,
                                 },
-                            );
-                            easing
-                        },
+                                damage: &damage,
+                                decoration_damage: &decoration_damage,
+                            },
+                        );
+                        easing
                     }
                 } else {
                     // One or more pools are mid-glide and buffered: render the live
