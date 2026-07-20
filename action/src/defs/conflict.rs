@@ -92,3 +92,27 @@ define_action!(
      Stops at the first chunk without wrapping.",
     ActionPriority::Rare
 );
+
+define_action!(
+    ConflictNextFileDef,
+    ConflictNextFile,
+    "ConflictNextFile",
+    ActionKind::ConflictNextFile,
+    "move to the next conflicted file",
+    "Show the next conflicted file in the resolve view. In-progress picks on \
+     the current file are kept so returning restores them. Stops at the last \
+     file without wrapping.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ConflictPrevFileDef,
+    ConflictPrevFile,
+    "ConflictPrevFile",
+    ActionKind::ConflictPrevFile,
+    "move to the previous conflicted file",
+    "Show the previous conflicted file in the resolve view. In-progress picks \
+     on the current file are kept so returning restores them. Stops at the \
+     first file without wrapping.",
+    ActionPriority::Rare
+);

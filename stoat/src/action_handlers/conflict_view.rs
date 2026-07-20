@@ -3,11 +3,12 @@ use crate::{
     app::Stoat,
     conflict_session::{ConflictSession, ConflictViewState, FileResolveState},
     editor_state::{EditorId, EditorState},
+    host::git::GitRepo,
     jumplist::JumpEntry,
     merge_view::{ChunkState, MergeDoc, RowPick},
     pane::View,
 };
-use std::{ops::Range, path::Path};
+use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 use stoat_action::ActionKind;
 use stoat_text::{Anchor, Bias, SelectionGoal};
 
@@ -45,13 +46,68 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
         .as_deref()
         .and_then(|p| files.iter().position(|c| c == p))
         .unwrap_or(0);
-    let path = files[current].clone();
 
-    let Some(stages) = repo.conflict_stages(&path) else {
+    let saved_editor = {
+        let ws = stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let View::Editor(saved) = ws.panes.pane(focused).view else {
+            return;
+        };
+        saved
+    };
+
+    let origin = super::jump::live_entry(stoat);
+
+    let file_count = files.len();
+    let Some((file, first_chunk_offset)) = prepare_file(
+        stoat,
+        &repo,
+        &files[current],
+        current,
+        file_count,
+        &git_root,
+    ) else {
         stoat.set_status("no merge conflicts");
         return;
     };
-    let language = stoat.language_registry.for_path(&path);
+
+    {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        ws.panes.pane_mut(focused).view = View::Editor(file.editor_id);
+        ws.panes.widen(focused);
+
+        ws.conflict = Some(ConflictSession {
+            workdir: git_root,
+            files,
+            current,
+            file,
+            saved_editor,
+            pending_clobber: None,
+            parked: HashMap::new(),
+        });
+    }
+
+    land_first_chunk(stoat, first_chunk_offset, origin);
+}
+
+/// Build the scratch center editor and resolve state for one conflicted file.
+///
+/// Reads the file's index stages through `repo`, seeds a scratch buffer with the
+/// initial marker text, and inserts a center editor carrying the render cache.
+/// Returns the resolve state and the byte offset of its first chunk, or `None`
+/// when the file no longer reports index conflicts. Leaves the pane and session
+/// untouched, so the caller decides how the editor is displayed.
+fn prepare_file(
+    stoat: &mut Stoat,
+    repo: &Arc<dyn GitRepo>,
+    path: &Path,
+    index: usize,
+    file_count: usize,
+    git_root: &Path,
+) -> Option<(FileResolveState, Option<usize>)> {
+    let stages = repo.conflict_stages(path)?;
+    let language = stoat.language_registry.for_path(path);
     let doc = MergeDoc::build(
         stages.ancestor.as_deref().unwrap_or(""),
         stages.ours.as_deref().unwrap_or(""),
@@ -60,88 +116,69 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
     );
     let (center_text, chunk_ranges) = doc.initial_center_text();
     let first_chunk_offset = chunk_ranges.first().map(|r| r.start);
-
-    let origin = super::jump::live_entry(stoat);
     let executor = stoat.executor.clone();
+    let rel_path = crate::paths::display_relative(path, git_root);
 
+    let ws = stoat.active_workspace_mut();
+    let (buffer_id, buffer) = ws.buffers.new_scratch_preview_unseeded();
     {
-        let ws = stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let View::Editor(saved_editor) = ws.panes.pane(focused).view else {
-            return;
-        };
-
-        let (buffer_id, buffer) = ws.buffers.new_scratch_preview_unseeded();
-        {
-            let mut guard = buffer.write().expect("buffer poisoned");
-            guard.edit(0..0, &center_text);
-            guard.mark_clean();
-        }
-        if let Some(lang) = language {
-            ws.buffers.set_language(buffer_id, lang);
-        }
-
-        let chunk_anchors: Vec<(Anchor, Anchor)> = {
-            let guard = buffer.read().expect("buffer poisoned");
-            chunk_ranges
-                .iter()
-                .map(|r| {
-                    (
-                        guard.anchor_at(r.start, Bias::Left),
-                        guard.anchor_at(r.end, Bias::Right),
-                    )
-                })
-                .collect()
-        };
-
-        let picks: Vec<Vec<RowPick>> = doc
-            .chunks
-            .iter()
-            .map(|chunk| {
-                vec![
-                    RowPick {
-                        ours: false,
-                        theirs: false
-                    };
-                    chunk.row_range.end - chunk.row_range.start
-                ]
-            })
-            .collect();
-
-        let file_count = files.len();
-        let rel_path = crate::paths::display_relative(&path, &git_root);
-        let mut editor = EditorState::new(buffer_id, buffer, executor);
-        editor.conflict_view = Some(ConflictViewState {
-            doc: doc.clone(),
-            chunk_anchors: chunk_anchors.clone(),
-            picks: picks.clone(),
-            file_index: current,
-            file_count,
-            rel_path,
-        });
-        let editor_id = ws.editors.insert(editor);
-
-        ws.panes.pane_mut(focused).view = View::Editor(editor_id);
-        ws.panes.widen(focused);
-
-        ws.conflict = Some(ConflictSession {
-            workdir: git_root,
-            files,
-            current,
-            file: FileResolveState {
-                path,
-                doc,
-                picks,
-                chunk_anchors,
-                buffer_id,
-                editor_id,
-            },
-            saved_editor,
-            pending_clobber: None,
-        });
+        let mut guard = buffer.write().expect("buffer poisoned");
+        guard.edit(0..0, &center_text);
+        guard.mark_clean();
+    }
+    if let Some(lang) = language {
+        ws.buffers.set_language(buffer_id, lang);
     }
 
-    land_first_chunk(stoat, first_chunk_offset, origin);
+    let chunk_anchors: Vec<(Anchor, Anchor)> = {
+        let guard = buffer.read().expect("buffer poisoned");
+        chunk_ranges
+            .iter()
+            .map(|r| {
+                (
+                    guard.anchor_at(r.start, Bias::Left),
+                    guard.anchor_at(r.end, Bias::Right),
+                )
+            })
+            .collect()
+    };
+
+    let picks: Vec<Vec<RowPick>> = doc
+        .chunks
+        .iter()
+        .map(|chunk| {
+            vec![
+                RowPick {
+                    ours: false,
+                    theirs: false
+                };
+                chunk.row_range.len()
+            ]
+        })
+        .collect();
+
+    let mut editor = EditorState::new(buffer_id, buffer, executor);
+    editor.conflict_view = Some(ConflictViewState {
+        doc: doc.clone(),
+        chunk_anchors: chunk_anchors.clone(),
+        picks: picks.clone(),
+        file_index: index,
+        file_count,
+        rel_path,
+    });
+    let editor_id = ws.editors.insert(editor);
+
+    Some((
+        FileResolveState {
+            path: path.to_path_buf(),
+            doc,
+            picks,
+            chunk_anchors,
+            buffer_id,
+            editor_id,
+        },
+        first_chunk_offset,
+    ))
 }
 
 /// Close the conflict view, restoring the original editor into the focused pane
@@ -174,6 +211,11 @@ pub(super) fn close_conflict(stoat: &mut Stoat) {
     if !editor_referenced {
         ws.editors.remove(scratch_editor);
         ws.buffers.remove(scratch_buffer);
+    }
+
+    for parked in session.parked.into_values() {
+        ws.editors.remove(parked.editor_id);
+        ws.buffers.remove(parked.buffer_id);
     }
 }
 
@@ -250,6 +292,73 @@ pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool) {
 
     land_cursor(stoat, editor_id, offset);
     scroll_cursor_into_view(stoat, editor_id);
+}
+
+/// Step to the next (`forward`) or previous conflicted file, parking the
+/// outgoing file's resolve state so returning to it restores the picks and
+/// scratch buffer. Stops at the last or first file rather than wrapping.
+pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool) {
+    let (current, target, file_count, git_root, target_path) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        let count = session.files.len();
+        let target = match (forward, session.current) {
+            (true, c) if c + 1 < count => c + 1,
+            (false, c) if c > 0 => c - 1,
+            _ => return,
+        };
+        (
+            session.current,
+            target,
+            count,
+            session.workdir.clone(),
+            session.files[target].clone(),
+        )
+    };
+
+    let parked = stoat
+        .active_workspace_mut()
+        .conflict
+        .as_mut()
+        .and_then(|session| session.parked.remove(&target));
+    let target_state = match parked {
+        Some(state) => state,
+        None => {
+            let Some(repo) = stoat.git_host.discover(&git_root) else {
+                return;
+            };
+            let Some((state, _)) =
+                prepare_file(stoat, &repo, &target_path, target, file_count, &git_root)
+            else {
+                return;
+            };
+            state
+        },
+    };
+
+    let (outgoing_editor, target_editor) = {
+        let Some(session) = stoat.active_workspace_mut().conflict.as_mut() else {
+            return;
+        };
+        let target_editor = target_state.editor_id;
+        let outgoing = std::mem::replace(&mut session.file, target_state);
+        let outgoing_editor = outgoing.editor_id;
+        session.parked.insert(current, outgoing);
+        session.current = target;
+        session.pending_clobber = None;
+        (outgoing_editor, target_editor)
+    };
+
+    {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        if matches!(ws.panes.pane(focused).view, View::Editor(e) if e == outgoing_editor) {
+            ws.panes.pane_mut(focused).view = View::Editor(target_editor);
+        }
+    }
+
+    land_first_chunk_current(stoat);
 }
 
 /// Apply a whole-side pick of the given kind to the chunk under the cursor.
@@ -392,6 +501,31 @@ fn scroll_cursor_into_view(stoat: &mut Stoat, editor_id: EditorId) {
     if let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) {
         super::movement::ensure_cursor_in_view(editor, scrolloff);
     }
+}
+
+/// Land the cursor on the current file's first conflict chunk after a file
+/// switch, resolving its start anchor against the now-focused center editor.
+fn land_first_chunk_current(stoat: &mut Stoat) {
+    let (editor_id, first_anchor) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        let Some((start, _)) = session.file.chunk_anchors.first() else {
+            return;
+        };
+        (session.file.editor_id, *start)
+    };
+
+    let offset = {
+        let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) else {
+            return;
+        };
+        let snapshot = editor.display_map.snapshot();
+        snapshot.buffer_snapshot().resolve_anchor(&first_anchor)
+    };
+
+    land_cursor(stoat, editor_id, offset);
+    scroll_cursor_into_view(stoat, editor_id);
 }
 
 /// Land the cursor on the newly-opened view's first conflict chunk and push the

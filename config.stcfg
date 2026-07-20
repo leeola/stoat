@@ -671,6 +671,8 @@ on key {
         x -> ConflictResetChunk();
         n -> ConflictNextChunk();
         p -> ConflictPrevChunk();
+        N -> ConflictNextFile();
+        P -> ConflictPrevFile();
     }
     mode == insert {
         Escape -> SetMode(normal);

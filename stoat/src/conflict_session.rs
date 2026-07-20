@@ -2,7 +2,7 @@ use crate::{
     editor_state::EditorId,
     merge_view::{MergeDoc, RowPick},
 };
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 use stoat_action::ActionKind;
 use stoat_text::{Anchor, BufferId};
 
@@ -33,6 +33,14 @@ pub(crate) struct ConflictSession {
     /// immediate repeat of the identical pick clears it and overwrites. Any
     /// different pick re-arms for the new target.
     pub(crate) pending_clobber: Option<(usize, ActionKind)>,
+    /// In-progress resolve state of files visited and stepped away from, keyed
+    /// by their index in [`Self::files`].
+    ///
+    /// Stepping to another file parks the outgoing [`Self::file`] here rather
+    /// than rebuilding it, so returning restores its picks and scratch buffer.
+    /// Each parked entry keeps its center editor and buffer alive until the view
+    /// closes.
+    pub(crate) parked: HashMap<usize, FileResolveState>,
 }
 
 /// The in-progress resolution of one conflicted file.
@@ -78,8 +86,9 @@ pub(crate) struct ConflictViewState {
 mod tests {
     use crate::{app::Stoat, merge_view::MergeDoc, test_harness::TestHarness};
     use stoat_action::{
-        Action, CloseConflict, Conflict, ConflictNextChunk, ConflictPickBoth, ConflictPickOurs,
-        ConflictPickTheirs, ConflictPrevChunk, ConflictResetChunk,
+        Action, CloseConflict, Conflict, ConflictNextChunk, ConflictNextFile, ConflictPickBoth,
+        ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk, ConflictPrevFile,
+        ConflictResetChunk,
     };
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
@@ -136,6 +145,25 @@ mod tests {
             Some("a\nB\nc\nD\ne\n"),
             Some("a\nX\nc\nY\ne\n"),
         );
+    }
+
+    /// Seed a repository with two conflicted files, each a single chunk, so
+    /// file navigation has more than one target.
+    fn seed_two_files(h: &mut TestHarness) {
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git()
+            .add_repo(git_root)
+            .conflicted_file("a.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"))
+            .conflicted_file("b.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"));
+    }
+
+    fn current_file(h: &TestHarness) -> usize {
+        h.stoat
+            .active_workspace()
+            .conflict
+            .as_ref()
+            .expect("session open")
+            .current
     }
 
     fn cursor_row(h: &mut TestHarness) -> u32 {
@@ -333,6 +361,38 @@ mod tests {
 
         pick(&mut h, &ConflictPrevChunk);
         assert_eq!(cursor_row(&mut h), 1, "p at the first chunk does not wrap");
+    }
+
+    #[test]
+    fn stepping_between_files_parks_and_restores_picks() {
+        let mut h = Stoat::test();
+        seed_two_files(&mut h);
+        dispatch_conflict(&mut h);
+        assert_eq!(current_file(&h), 0, "opens on the first file");
+
+        pick(&mut h, &ConflictPickOurs);
+        assert_eq!(center_text(&h), "ours\n");
+
+        pick(&mut h, &ConflictNextFile);
+        assert_eq!(current_file(&h), 1, "N advances to the second file");
+        assert_eq!(center_text(&h), MARKER, "the second file opens unresolved");
+
+        pick(&mut h, &ConflictPickTheirs);
+        assert_eq!(center_text(&h), "theirs\n");
+
+        pick(&mut h, &ConflictNextFile);
+        assert_eq!(current_file(&h), 1, "N at the last file does not wrap");
+
+        pick(&mut h, &ConflictPrevFile);
+        assert_eq!(current_file(&h), 0, "P returns to the first file");
+        assert_eq!(
+            center_text(&h),
+            "ours\n",
+            "the first file's pick was parked"
+        );
+
+        pick(&mut h, &ConflictPrevFile);
+        assert_eq!(current_file(&h), 0, "P at the first file does not wrap");
     }
 
     #[test]

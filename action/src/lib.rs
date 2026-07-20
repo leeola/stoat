@@ -12,8 +12,9 @@ pub use defs::{
         CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
     },
     conflict::{
-        CloseConflict, Conflict, ConflictNextChunk, ConflictPickBoth, ConflictPickOurs,
-        ConflictPickTheirs, ConflictPrevChunk, ConflictResetChunk,
+        CloseConflict, Conflict, ConflictNextChunk, ConflictNextFile, ConflictPickBoth,
+        ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk, ConflictPrevFile,
+        ConflictResetChunk,
     },
     dump::Dump,
     editor::{
