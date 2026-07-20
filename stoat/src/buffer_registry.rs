@@ -41,6 +41,22 @@ pub(crate) struct DirtyBuffer {
     pub path: Option<PathBuf>,
 }
 
+/// How aggressively a buffer re-reads its file when the on-disk copy changes.
+///
+/// [`BufferRegistry::auto_reload_paths`] reports any non-[`Off`](Self::Off)
+/// buffer to the auto-reload pump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoReloadMode {
+    /// The buffer is not auto-reloaded.
+    Off,
+    /// Reload on change, carrying a cursor that sits on the last line to the new
+    /// end so a tailed log keeps showing its newest content.
+    Tail,
+    /// Reload on change and jump every editor's cursor to the first point where
+    /// the new content diverges from the old, so in-place edits are followed.
+    Follow,
+}
+
 #[allow(dead_code)]
 struct BufferEntry {
     buffer: SharedBuffer,
@@ -84,10 +100,11 @@ struct BufferEntry {
     /// to clobber it. `None` for scratch buffers and for files whose
     /// metadata could not be read.
     disk_mtime: Option<SystemTime>,
-    /// When set, [`BufferRegistry::auto_reload_paths`] reports this buffer so the
-    /// auto-reload pump re-reads its file as the on-disk mtime advances. Set for
-    /// the session log buffer and any buffer that opts in.
-    auto_reload: bool,
+    /// The buffer's auto-reload mode. Any non-[`AutoReloadMode::Off`] value is
+    /// reported by [`BufferRegistry::auto_reload_paths`] so the auto-reload pump
+    /// re-reads the file as the on-disk mtime advances. Set for the session log
+    /// buffer and any buffer that opts in via `:auto-reload`.
+    auto_reload: AutoReloadMode,
     /// Monotonic tick of when this buffer was last shown in a pane, from
     /// [`BufferRegistry::mark_shown`]. It orders eviction of hidden buffers'
     /// highlight state, dropping the lowest values first.
@@ -203,7 +220,7 @@ impl BufferRegistry {
                 diff: None,
                 preview,
                 disk_mtime: None,
-                auto_reload: false,
+                auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
             },
         );
@@ -236,7 +253,7 @@ impl BufferRegistry {
                 diff: None,
                 preview: false,
                 disk_mtime: None,
-                auto_reload: false,
+                auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
             },
         );
@@ -301,21 +318,29 @@ impl BufferRegistry {
     ///
     /// Called when a buffer opts into file-following, such as the session log
     /// buffer and the `:auto-reload` command.
-    #[allow(dead_code)]
-    pub(crate) fn set_auto_reload(&mut self, id: BufferId, on: bool) {
+    pub(crate) fn set_auto_reload(&mut self, id: BufferId, mode: AutoReloadMode) {
         if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.auto_reload = on;
+            entry.auto_reload = mode;
         }
     }
 
-    /// The `(id, path)` of every auto-reload-flagged buffer that is path-bound,
-    /// for the auto-reload pump to poll. Scratch buffers are skipped since they
-    /// have no file to re-read.
-    pub(crate) fn auto_reload_paths(&self) -> Vec<(BufferId, PathBuf)> {
+    /// The auto-reload mode of `id`, or [`AutoReloadMode::Off`] for an unknown
+    /// buffer. Backs the `:auto-reload follow` toggle, which turns follow off
+    /// when it is already on.
+    pub(crate) fn auto_reload_mode(&self, id: BufferId) -> AutoReloadMode {
+        self.buffers
+            .get(&id)
+            .map_or(AutoReloadMode::Off, |e| e.auto_reload)
+    }
+
+    /// The `(id, path, mode)` of every non-[`AutoReloadMode::Off`], path-bound
+    /// buffer, for the auto-reload pump to poll. Scratch buffers are skipped
+    /// since they have no file to re-read.
+    pub(crate) fn auto_reload_paths(&self) -> Vec<(BufferId, PathBuf, AutoReloadMode)> {
         self.buffers
             .iter()
-            .filter(|(_, e)| e.auto_reload)
-            .filter_map(|(&id, e)| e.path.as_ref().map(|p| (id, p.clone())))
+            .filter(|(_, e)| e.auto_reload != AutoReloadMode::Off)
+            .filter_map(|(&id, e)| e.path.as_ref().map(|p| (id, p.clone(), e.auto_reload)))
             .collect()
     }
 
@@ -720,7 +745,7 @@ impl BufferRegistry {
                     diff: None,
                     preview: false,
                     disk_mtime: None,
-                    auto_reload: false,
+                    auto_reload: AutoReloadMode::Off,
                     last_shown: 0,
                 },
             );

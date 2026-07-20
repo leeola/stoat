@@ -3,6 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
+    buffer_registry::AutoReloadMode,
     editor_state::{EditorId, EditorState},
     host::LanguageServerFeature,
     pane::{PaneId, View},
@@ -395,7 +396,7 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     let mut changed = false;
 
-    for (id, path) in paths {
+    for (id, path, mode) in paths {
         let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
             continue;
         };
@@ -433,14 +434,20 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
             continue;
         }
 
-        let followers: Vec<EditorId> = stoat
-            .active_workspace_mut()
-            .editors
-            .iter_mut()
-            .filter_map(|(eid, editor)| {
-                (editor.buffer_id == id && editor_cursor_row(editor) == old_last_row).then_some(eid)
-            })
-            .collect();
+        let tail_followers: Vec<EditorId> = if mode == AutoReloadMode::Tail {
+            stoat
+                .active_workspace_mut()
+                .editors
+                .iter_mut()
+                .filter_map(|(eid, editor)| {
+                    (editor.buffer_id == id && editor_cursor_row(editor) == old_last_row)
+                        .then_some(eid)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let follow_offset = (mode == AutoReloadMode::Follow).then(|| first_divergence(&old, &new));
 
         {
             let mut guard = buffer.write().expect("buffer poisoned");
@@ -459,9 +466,21 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
         changed = true;
 
         let ws = stoat.active_workspace_mut();
-        for eid in followers {
+        for eid in tail_followers {
             if let Some(editor) = ws.editors.get_mut(eid) {
                 collapse_to_buffer_end(editor, scrolloff);
+            }
+        }
+        if let Some(offset) = follow_offset {
+            let follow_editors: Vec<EditorId> = ws
+                .editors
+                .iter()
+                .filter_map(|(eid, editor)| (editor.buffer_id == id).then_some(eid))
+                .collect();
+            for eid in follow_editors {
+                if let Some(editor) = ws.editors.get_mut(eid) {
+                    collapse_to_offset(editor, offset, scrolloff);
+                }
             }
         }
     }
@@ -504,7 +523,7 @@ pub(crate) fn open_log_buffer(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
     stoat
         .active_workspace_mut()
         .buffers
-        .set_auto_reload(id, true);
+        .set_auto_reload(id, AutoReloadMode::Tail);
     ensure_auto_reload_poll(stoat);
 
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
@@ -514,18 +533,24 @@ pub(crate) fn open_log_buffer(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Turn auto-reload on or off for the focused buffer, backing `:auto-reload`.
+/// Set the focused buffer's auto-reload mode, backing `:auto-reload`.
 ///
-/// `state` is matched case-insensitively as "on" or "off". Any other value
-/// reports the expected form and changes nothing. Enabling a scratch buffer
-/// with no backing file reports that and changes nothing. Enabling arms the
-/// poll. Disabling relies on the pump auto-disarming once no buffer is flagged.
+/// The `state` argument is matched case-insensitively. "on" tails the file,
+/// "off" disables reload, and "follow" jumps the cursor to each reload's first
+/// changed region. Any other value reports the expected form and changes
+/// nothing. Requesting "follow" while already following toggles it back off, so
+/// one binding both starts and stops it. Enabling a scratch buffer with no
+/// backing file reports that and changes nothing.
+///
+/// Enabling arms the poll. Disabling relies on the pump auto-disarming once no
+/// buffer is set.
 pub(super) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEffect {
-    let on = match state.trim().to_ascii_lowercase().as_str() {
-        "on" => true,
-        "off" => false,
+    let requested = match state.trim().to_ascii_lowercase().as_str() {
+        "on" => AutoReloadMode::Tail,
+        "off" => AutoReloadMode::Off,
+        "follow" => AutoReloadMode::Follow,
         _ => {
-            stoat.set_status("auto-reload: expected on or off");
+            stoat.set_status("auto-reload: expected on, off, or follow");
             return UpdateEffect::Redraw;
         },
     };
@@ -534,19 +559,30 @@ pub(super) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEf
         return UpdateEffect::None;
     };
 
-    if on && stoat.active_workspace().buffers.path_for(id).is_none() {
+    let already_following =
+        stoat.active_workspace().buffers.auto_reload_mode(id) == AutoReloadMode::Follow;
+    let mode = if requested == AutoReloadMode::Follow && already_following {
+        AutoReloadMode::Off
+    } else {
+        requested
+    };
+
+    if mode != AutoReloadMode::Off && stoat.active_workspace().buffers.path_for(id).is_none() {
         stoat.set_status("buffer has no file to reload");
         return UpdateEffect::Redraw;
     }
 
-    stoat.active_workspace_mut().buffers.set_auto_reload(id, on);
-    if on {
+    stoat
+        .active_workspace_mut()
+        .buffers
+        .set_auto_reload(id, mode);
+    if mode != AutoReloadMode::Off {
         ensure_auto_reload_poll(stoat);
     }
-    stoat.set_status(if on {
-        "auto-reload on"
-    } else {
-        "auto-reload off"
+    stoat.set_status(match mode {
+        AutoReloadMode::Off => "auto-reload off",
+        AutoReloadMode::Tail => "auto-reload on",
+        AutoReloadMode::Follow => "auto-reload follow",
     });
     UpdateEffect::Redraw
 }
@@ -564,6 +600,41 @@ fn collapse_to_buffer_end(editor: &mut EditorState, scrolloff: u32) {
         sel
     });
     super::movement::ensure_cursor_in_view(editor, scrolloff);
+}
+
+/// Collapse `editor`'s selection onto `offset` and scroll it into view, so a
+/// following buffer jumps to the first region a reload changed.
+fn collapse_to_offset(editor: &mut EditorState, offset: usize, scrolloff: u32) {
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    let anchor = buf_snap.anchor_at(offset, Bias::Left);
+    editor.selections.transform(buf_snap, |s| {
+        let mut sel = s.clone();
+        sel.collapse_to(anchor, SelectionGoal::None);
+        sel
+    });
+    super::movement::ensure_cursor_in_view(editor, scrolloff);
+}
+
+/// Byte offset of the first point where `new` diverges from `old`, as a char
+/// boundary of `new`.
+///
+/// When `new` extends `old`, that is `old.len()` -- the start of the appended
+/// content. Otherwise it is the first differing byte, backed off to the
+/// preceding char boundary so the offset never splits a multi-byte character.
+fn first_divergence(old: &str, new: &str) -> usize {
+    if new.starts_with(old) {
+        return old.len();
+    }
+    let mut offset = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !new.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 /// The buffer-line row of `editor`'s primary cursor, resolved through its
@@ -924,6 +995,7 @@ mod tests {
         action_handlers::dispatch,
         app::UpdateEffect,
         buffer::BufferId,
+        buffer_registry::AutoReloadMode,
         host::{FakeFsOp, FsHost},
         test_harness::TestHarness,
         Stoat,
@@ -1076,7 +1148,7 @@ mod tests {
         h.stoat
             .active_workspace_mut()
             .buffers
-            .set_auto_reload(id, true);
+            .set_auto_reload(id, AutoReloadMode::Tail);
         super::ensure_auto_reload_poll(&mut h.stoat);
         (path, id)
     }
@@ -1227,6 +1299,51 @@ mod tests {
     }
 
     #[test]
+    fn pump_auto_reload_follow_jumps_to_the_first_changed_line() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-follow-mid");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"a\nb\nc\nd\n");
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .set_auto_reload(id, AutoReloadMode::Follow);
+        assert_eq!(focused_cursor_row(&mut h), 0, "cursor starts at the top");
+
+        h.fake_fs().insert_file(&path, b"a\nb\nCHANGED\nd\n");
+        super::pump_auto_reload(&mut h.stoat);
+
+        assert_eq!(buffer_text(&h, id), "a\nb\nCHANGED\nd\n");
+        assert_eq!(
+            focused_cursor_row(&mut h),
+            2,
+            "follow jumps the cursor to the first changed line"
+        );
+        assert!(!focused_dirty(&h.stoat), "a followed reload stays clean");
+    }
+
+    #[test]
+    fn pump_auto_reload_follow_jumps_to_the_appended_content() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-follow-append");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"a\nb\n");
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .set_auto_reload(id, AutoReloadMode::Follow);
+        assert_eq!(focused_cursor_row(&mut h), 0, "cursor starts at the top");
+
+        h.fake_fs().insert_file(&path, b"a\nb\nc\nd\n");
+        super::pump_auto_reload(&mut h.stoat);
+
+        assert_eq!(buffer_text(&h, id), "a\nb\nc\nd\n");
+        assert_eq!(
+            focused_cursor_row(&mut h),
+            2,
+            "follow jumps the cursor to the start of the appended content"
+        );
+    }
+
+    #[test]
     fn pump_auto_reload_ignores_unflagged_buffers() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/auto-reload-unflagged");
@@ -1286,7 +1403,7 @@ mod tests {
             .buffers
             .auto_reload_paths()
             .iter()
-            .any(|(fid, _)| *fid == id);
+            .any(|(fid, _, _)| *fid == id);
         assert!(flagged, "the log buffer is flagged auto-reload");
         assert!(h.stoat.auto_reload_poll.is_some(), "the poll is armed");
         assert_eq!(
@@ -1345,7 +1462,7 @@ mod tests {
             .buffers
             .auto_reload_paths()
             .iter()
-            .any(|(fid, _)| *fid == id)
+            .any(|(fid, _, _)| *fid == id)
     }
 
     #[test]
@@ -1394,7 +1511,7 @@ mod tests {
         );
         assert_eq!(
             h.stoat.pending_message.as_deref(),
-            Some("auto-reload: expected on or off")
+            Some("auto-reload: expected on, off, or follow")
         );
         assert!(!is_flagged(&h, id), "no flag changed");
         assert!(h.stoat.auto_reload_poll.is_none(), "no poll armed");
@@ -1409,6 +1526,47 @@ mod tests {
             UpdateEffect::Redraw
         );
 
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("buffer has no file to reload")
+        );
+        assert!(
+            h.stoat.auto_reload_poll.is_none(),
+            "no poll armed for a scratch buffer"
+        );
+    }
+
+    #[test]
+    fn set_buffer_auto_reload_follow_twice_toggles_off() {
+        let mut h = Stoat::test();
+        let id = open_plain(&mut h, &PathBuf::from("/ar-follow"), "a.txt", b"x\n");
+
+        assert_eq!(
+            super::set_buffer_auto_reload(&mut h.stoat, "follow"),
+            UpdateEffect::Redraw
+        );
+        assert!(is_flagged(&h, id), "follow flags the buffer");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("auto-reload follow")
+        );
+
+        assert_eq!(
+            super::set_buffer_auto_reload(&mut h.stoat, "follow"),
+            UpdateEffect::Redraw
+        );
+        assert!(!is_flagged(&h, id), "a second follow unflags the buffer");
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("auto-reload off"));
+    }
+
+    #[test]
+    fn set_buffer_auto_reload_follow_rejects_a_scratch_buffer() {
+        let mut h = Stoat::test();
+
+        assert_eq!(
+            super::set_buffer_auto_reload(&mut h.stoat, "follow"),
+            UpdateEffect::Redraw
+        );
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("buffer has no file to reload")

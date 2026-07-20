@@ -276,7 +276,7 @@ const AUTO_RELOAD_PARAMS: &[ParamDef] = &[ParamDef {
     kind: ParamKind::String,
     value_source: ValueSource::None,
     required: true,
-    description: "on or off",
+    description: "on, off, or follow",
 }];
 
 #[derive(Debug)]
@@ -300,7 +300,7 @@ impl ActionDef for AutoReloadDef {
     }
 
     fn long_desc(&self) -> &'static str {
-        "Turn auto-reload on or off for the focused buffer. When on, the buffer re-reads its file as new content is appended, following the tail. Run :auto-reload off to stop it. Only file-backed buffers can follow."
+        "Set auto-reload for the focused buffer. \"on\" re-reads the file as new content is appended and follows the tail. \"follow\" re-reads and jumps the cursor to the first region each change touches, for watching in-place edits live. \"off\" stops it, as does running :auto-reload follow a second time. Follow is per-buffer and opt-in, so opening :diff never enables it. Only file-backed buffers can reload."
     }
 
     fn priority(&self) -> ActionPriority {
