@@ -4292,6 +4292,27 @@ impl Stoat {
         let ws = self.active_workspace_mut();
         let editor = ws.editors.get_mut(editor_id)?;
         let scroll_row = editor.scroll_row;
+        // The conflict view is three columns. A click in the center text maps to
+        // its cell; a click in either side column (or a gutter) drops to col 0 so
+        // the cursor lands on the aligned center row's start.
+        if editor.conflict_view.is_some() {
+            let cols = crate::render::conflict_view::ConflictColumns::compute(area);
+            let center_gutter = cols.center_text_x.saturating_sub(area.x);
+            let center_end = cols.sep2_x.saturating_sub(area.x);
+            let click_col = if (center_gutter..center_end).contains(&col) {
+                col
+            } else {
+                0
+            };
+            let snapshot = editor.display_map.snapshot();
+            return crate::render::editor::display_cell_to_offset(
+                &snapshot,
+                scroll_row,
+                center_gutter,
+                click_col,
+                row,
+            );
+        }
         // The diff view puts the editable text in the right column, so a click
         // maps against the right column's start rather than the left gutter.
         // Cells left of it (the base column and gutters) clamp to the line start.
@@ -15588,6 +15609,51 @@ mod tests {
             h.stoat.editor_screen_to_offset(editor_id, area, 8, 0),
             Some(0),
             "a click left of the right column clamps to the buffer line start"
+        );
+    }
+
+    #[test]
+    fn conflict_view_click_maps_center_exact_and_sides_to_row_start() {
+        use stoat_action::Conflict;
+
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("a\nb\nc\n"),
+            Some("a\nB\nc\n"),
+            Some("a\nX\nc\n"),
+        );
+        action_handlers::dispatch(&mut h.stoat, &Conflict);
+
+        let editor_id = {
+            let ws = h.stoat.active_workspace();
+            match ws.panes.pane(ws.panes.focus()).view {
+                View::Editor(id) => id,
+                _ => panic!("focused pane is not the conflict editor"),
+            }
+        };
+
+        // At width 150 the center text starts at col 56 and the theirs column at
+        // col 100. Row 1 is the "<<<<<<< ours" marker line.
+        let area = Rect::new(0, 0, 150, 20);
+        let row_start = h.stoat.editor_screen_to_offset(editor_id, area, 56, 1);
+        assert!(row_start.is_some(), "the center row resolves");
+
+        assert_eq!(
+            h.stoat.editor_screen_to_offset(editor_id, area, 59, 1),
+            row_start.map(|offset| offset + 3),
+            "a center-column click maps to the exact clicked cell"
+        );
+        assert_eq!(
+            h.stoat.editor_screen_to_offset(editor_id, area, 3, 1),
+            row_start,
+            "an ours-column click lands on the aligned center row start"
+        );
+        assert_eq!(
+            h.stoat.editor_screen_to_offset(editor_id, area, 110, 1),
+            row_start,
+            "a theirs-column click lands on the aligned center row start"
         );
     }
 

@@ -24,23 +24,27 @@ const BAND_TINT: f32 = 0.85;
 /// The center always keeps a one-cell state gutter, a five-cell number gutter,
 /// and its text. The side columns keep a five-cell number gutter only at or
 /// above [`CONFLICT_SIDE_NUM_MIN`]. Below it they drop it.
-struct ConflictColumns {
+pub(crate) struct ConflictColumns {
     ours_num_x: u16,
     ours_text_x: u16,
     center_gutter_x: u16,
     center_num_x: u16,
-    center_text_x: u16,
+    /// Absolute x of the center column's editable text, where a click maps to a
+    /// center-buffer offset.
+    pub(crate) center_text_x: u16,
     theirs_num_x: u16,
     theirs_text_x: u16,
     sep1_x: u16,
-    sep2_x: u16,
+    /// Absolute x of the rule after the center column, the exclusive end of the
+    /// center text region.
+    pub(crate) sep2_x: u16,
     side_w: usize,
     center_w: usize,
     side_nums: bool,
 }
 
 impl ConflictColumns {
-    fn compute(inner: Rect) -> Self {
+    pub(crate) fn compute(inner: Rect) -> Self {
         let num_w: u16 = 5;
         let sep: u16 = 1;
         let side_nums = inner.width >= CONFLICT_SIDE_NUM_MIN;
