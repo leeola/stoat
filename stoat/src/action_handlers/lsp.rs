@@ -441,6 +441,16 @@ fn report_lsp_unavailable(stoat: &mut Stoat, what: &str) -> UpdateEffect {
 /// [`patch_to_content_changes`]). `NONE` skips silently.
 pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
     for id in stoat.lsp_opened.iter().copied().collect::<Vec<_>>() {
+        // Skip buffers unchanged since the last sync before grouping hosts and
+        // building plans. build_dispatch_plan would return empty plans anyway,
+        // and the version write-back below would rewrite the same value.
+        if let Some(buffer) = stoat.active_workspace().buffers.get(id) {
+            let version = buffer.read().expect("buffer lock").version();
+            if stoat.lsp_buffer_versions.get(&id) == Some(&version) {
+                continue;
+            }
+        }
+
         // Group the buffer's hosts by the sync kind and encoding each
         // negotiated, so a FULL host and an INCREMENTAL one -- or two hosts on
         // different encodings -- each get content changes shaped their own way.
@@ -1822,6 +1832,24 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
     request_inlay_hints(stoat, INLAY_HINT_DEBOUNCE);
 }
 
+/// The focused editor's `(buffer_id, version, scroll_row, end_row)` inlay-hint
+/// dedupe key, or `None` on a review view, absent editor, or missing viewport.
+///
+/// Mirrors [`build_inlay_hint_request`]'s editor read without cloning the rope,
+/// so the trigger can bail before host resolution.
+fn inlay_hint_key(stoat: &mut Stoat) -> Option<(BufferId, u64, u32, u32)> {
+    let editor = crate::action_handlers::focused_editor_mut(stoat)?;
+    if editor.review_view.is_some() {
+        return None;
+    }
+    let viewport = editor.viewport_rows?;
+    let scroll_row = editor.scroll_row;
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    let end_row = (scroll_row + viewport).min(snapshot.line_count());
+    Some((editor.buffer_id, buf_snap.version(), scroll_row, end_row))
+}
+
 /// Issue a viewport inlay-hint request for the focused editor, waiting
 /// `debounce` before the server call (pass [`Duration::ZERO`] to skip it).
 ///
@@ -1834,6 +1862,13 @@ fn request_inlay_hints(stoat: &mut Stoat, debounce: Duration) -> bool {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return false;
     };
+    let Some(key) = inlay_hint_key(stoat) else {
+        return true;
+    };
+    if stoat.last_inlay_hint_key == Some(key) {
+        return true;
+    }
+
     let Some((_, host)) = stoat
         .feature_hosts(buffer_id, LanguageServerFeature::InlayHints)
         .into_iter()
@@ -1846,16 +1881,12 @@ fn request_inlay_hints(stoat: &mut Stoat, debounce: Duration) -> bool {
         return true;
     };
 
-    let key = (
+    stoat.last_inlay_hint_key = Some((
         request.buffer_id,
         request.version,
         request.scroll_row,
         request.end_row,
-    );
-    if stoat.last_inlay_hint_key == Some(key) {
-        return true;
-    }
-    stoat.last_inlay_hint_key = Some(key);
+    ));
 
     let InlayHintRequest {
         buffer_id,
@@ -2064,6 +2095,25 @@ const DOCUMENT_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(200);
 /// whether the server marked it a write.
 pub(crate) type DocumentHighlightResponse = (BufferId, Vec<(std::ops::Range<usize>, bool)>);
 
+/// The focused editor's `(buffer_id, version, cursor_offset)` document-highlight
+/// dedupe key, or `None` on a review view or absent editor.
+///
+/// Mirrors [`build_document_highlight_request`]'s editor read without cloning
+/// the rope, so the trigger can bail before host resolution.
+fn document_highlight_key(stoat: &mut Stoat) -> Option<(BufferId, u64, usize)> {
+    let editor = crate::action_handlers::focused_editor_mut(stoat)?;
+    if editor.review_view.is_some() {
+        return None;
+    }
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    let sel = editor.selections.newest_anchor();
+    let tail_off = buf_snap.resolve_anchor(&sel.tail());
+    let head_off = buf_snap.resolve_anchor(&sel.head());
+    let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
+    Some((editor.buffer_id, buf_snap.version(), offset))
+}
+
 /// Highlight the occurrences of the symbol under the focused editor's cursor when
 /// the server supports it and the cursor rests in normal mode.
 ///
@@ -2084,6 +2134,13 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return;
     };
+    let Some(key) = document_highlight_key(stoat) else {
+        return;
+    };
+    if stoat.last_document_highlight_key == Some(key) {
+        return;
+    }
+
     let Some((_, host)) = stoat
         .feature_hosts(buffer_id, LanguageServerFeature::DocumentHighlight)
         .into_iter()
@@ -2098,11 +2155,7 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
         return;
     };
 
-    let key = (buffer_id, version, offset);
-    if stoat.last_document_highlight_key == Some(key) {
-        return;
-    }
-    stoat.last_document_highlight_key = Some(key);
+    stoat.last_document_highlight_key = Some((buffer_id, version, offset));
     clear_document_highlights(stoat);
 
     let executor = stoat.executor.clone();
@@ -2306,6 +2359,16 @@ pub(crate) fn pull_diagnostics_trigger(stoat: &mut Stoat) {
         .iter()
         .copied()
         .filter(|&id| {
+            // Skip buffers unchanged since the last pull before the
+            // feature_hosts allocation. build_pull_plan repeats this check.
+            stoat
+                .active_workspace()
+                .buffers
+                .get(id)
+                .map(|buffer| buffer.read().expect("buffer lock").version())
+                .is_some_and(|version| stoat.last_pull_diagnostic_key.get(&id) != Some(&version))
+        })
+        .filter(|&id| {
             stoat
                 .feature_hosts(id, LanguageServerFeature::PullDiagnostics)
                 .into_iter()
@@ -2495,6 +2558,19 @@ pub(crate) type SemanticTokensOutcome = (
     )>,
 );
 
+/// The focused editor's current buffer-snapshot version, or `None` on a review
+/// view or absent editor.
+///
+/// Lets a trigger check its `(buffer_id, version)` dedupe key without the rope
+/// clone its request builder does.
+fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
+    let editor = crate::action_handlers::focused_editor_mut(stoat)?;
+    if editor.review_view.is_some() {
+        return None;
+    }
+    Some(editor.display_map.snapshot().buffer_snapshot().version())
+}
+
 /// Request semantic tokens for the focused editor when the server advertises a
 /// full-document legend and the `(buffer, version)` key changed.
 ///
@@ -2506,6 +2582,13 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return;
     };
+    let Some(version) = focused_buffer_version(stoat) else {
+        return;
+    };
+    if stoat.last_semantic_tokens_key == Some((buffer_id, version)) {
+        return;
+    }
+
     let lsp = stoat.lsp_for(buffer_id);
     let capabilities = lsp.capabilities();
     let Some(legend) = semantic_tokens_legend(&capabilities) else {
@@ -2519,9 +2602,6 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
     };
 
     let key = (buffer_id, version);
-    if stoat.last_semantic_tokens_key == Some(key) {
-        return;
-    }
     stoat.last_semantic_tokens_key = Some(key);
 
     // When the buffer is unchanged since tokens were last computed, reinstall
@@ -2843,6 +2923,13 @@ pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return;
     };
+    let Some(version) = focused_buffer_version(stoat) else {
+        return;
+    };
+    if stoat.last_folding_range_key == Some((buffer_id, version)) {
+        return;
+    }
+
     let lsp = stoat.lsp_for(buffer_id);
     if lsp.capabilities().folding_range_provider.is_none() {
         return;
@@ -2853,9 +2940,6 @@ pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
     };
 
     let key = (buffer_id, version);
-    if stoat.last_folding_range_key == Some(key) {
-        return;
-    }
     stoat.last_folding_range_key = Some(key);
 
     let executor = stoat.executor.clone();
