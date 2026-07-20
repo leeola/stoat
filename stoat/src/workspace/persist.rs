@@ -250,6 +250,14 @@ impl Workspace {
         let tmp = path.with_extension("ron.tmp");
         fs.write(&tmp, body.as_bytes())?;
         fs.rename(&tmp, path)?;
+
+        let meta = super::registry::WorkspaceMeta {
+            uid: self.uid,
+            name: self.name.clone(),
+            git_root: self.git_root.clone(),
+            buffer_count: self.buffers.len(),
+        };
+        super::registry::write_meta(&meta, path, fs)?;
         Ok(())
     }
 
