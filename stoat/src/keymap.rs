@@ -1071,8 +1071,8 @@ mod tests {
 
         assert_eq!(
             name_in("normal"),
-            "ToggleKeyHints",
-            "? toggles the hints overlay in normal mode",
+            "OpenHelp",
+            "? opens help directly in normal mode",
         );
         assert_eq!(
             name_in("goto"),
@@ -1081,6 +1081,11 @@ mod tests {
         );
         assert_eq!(
             name_in("space"),
+            "ToggleKeyHints",
+            "the hints toggle relocated to the space leader",
+        );
+        assert_eq!(
+            name_in("space_buffer"),
             "OpenHelp",
             "? still opens help in other sub-modes",
         );

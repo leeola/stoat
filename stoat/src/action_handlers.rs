@@ -166,14 +166,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::ToggleKeyHints => {
-            if stoat.key_hints_visible {
-                stoat.key_hints_visible = false;
-                if stoat.help.is_none() {
-                    open_help(stoat);
-                }
-            } else {
-                stoat.key_hints_visible = true;
-            }
+            stoat.key_hints_visible = !stoat.key_hints_visible;
             UpdateEffect::Redraw
         },
         ActionKind::DismissKeyHints => {
@@ -1237,8 +1230,9 @@ fn show_version(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Open the full help modal, snapshotting the bindings active for the focused
-/// mode. Shared between the `OpenHelp` action and the second `ToggleKeyHints`
-/// in normal mode.
+/// mode. Backs the `OpenHelp` action that `?` dispatches from normal mode and
+/// most others (goto keeps reverse-search, the space leader keeps the hints
+/// toggle).
 pub(crate) fn open_help(stoat: &mut Stoat) {
     let active = stoat.active_bindings_for_current_mode();
     let mode = stoat.focused_mode().to_string();
@@ -2424,7 +2418,6 @@ mod tests {
         assert!(h.stoat.key_hints_visible, "first toggle shows the hints");
         dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
         assert!(!h.stoat.key_hints_visible, "second toggle hides the hints");
-        assert!(h.stoat.help.is_some(), "second toggle opens the full help");
     }
 
     #[test]
@@ -2467,21 +2460,31 @@ mod tests {
     }
 
     #[test]
-    fn second_toggle_key_hints_opens_the_normal_mode_help() {
+    fn question_mark_opens_help_in_normal_mode() {
         let mut h = Stoat::test();
-        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
-        dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        assert!(h.stoat.help.is_none(), "no help open by default");
 
+        h.type_text("?");
+        let all = h
+            .stoat
+            .help
+            .as_ref()
+            .expect("? opens help directly in normal mode")
+            .filtered()
+            .len();
+        assert!(all > 0, "help lists the active bindings");
+
+        h.type_text("quit");
+        let filtered = h
+            .stoat
+            .help
+            .as_ref()
+            .expect("help stays open while typing")
+            .filtered()
+            .len();
         assert!(
-            !h.stoat.key_hints_visible,
-            "the second toggle clears the hints"
-        );
-        let help = h.stoat.help.as_ref().expect("the second toggle opens help");
-        assert_eq!(help.snapshot_mode(), "normal", "help snapshots normal mode");
-        assert_eq!(
-            help.scope(),
-            crate::help::HelpScope::Active,
-            "help opens scoped to the active bindings"
+            filtered < all,
+            "typing into the help search filters the list ({all} -> {filtered})",
         );
     }
 

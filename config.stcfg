@@ -268,7 +268,7 @@ on init {
 # When several bindings match one key the most specific wins, the one with the
 # most predicate atoms, so a key can carry different actions per context.
 on key {
-    mode != normal && mode != goto {
+    mode != normal && mode != goto && mode != space {
         ? -> OpenHelp();
     }
     modal == help && mode == normal {
@@ -427,7 +427,7 @@ on key {
         m -> SetMode(match);
         R -> ReplaceWithYanked();
         / -> OpenSearchInput();
-        ? -> ToggleKeyHints();
+        ? -> OpenHelp();
         Escape -> DismissKeyHints();
         n -> SearchNext();
         N -> SearchPrev();
@@ -759,6 +759,7 @@ on key {
         k -> [JumpForward(), SetMode(normal)];
         / -> OpenCodeSearch();
         ' -> [OpenLastPicker(), SetMode(normal)];
+        ? -> [ToggleKeyHints(), SetMode(normal)];
     }
     mode == space_clipboard {
         Escape -> SetMode(normal);
