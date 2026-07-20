@@ -426,14 +426,19 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
             continue;
         };
 
-        let (old, old_last_row) = {
+        let (old_len, old_last_row, common) = {
             let guard = buffer.read().expect("buffer poisoned");
+            let text = &guard.snapshot.visible_text;
             (
-                guard.snapshot.visible_text.to_string(),
-                guard.snapshot.visible_text.max_point().row,
+                text.len(),
+                text.max_point().row,
+                common_prefix_len(text.chunks(), &new),
             )
         };
-        if new == old {
+        // The buffer is a prefix of `new` only when every one of its bytes
+        // matched, which is the appended-log fast path.
+        let appended = common == old_len;
+        if appended && new.len() == old_len {
             stoat
                 .active_workspace_mut()
                 .buffers
@@ -454,12 +459,21 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
         } else {
             Vec::new()
         };
-        let follow_offset = (mode == AutoReloadMode::Follow).then(|| first_divergence(&old, &new));
+        let follow_offset = (mode == AutoReloadMode::Follow).then(|| {
+            if appended {
+                old_len
+            } else {
+                let mut offset = common;
+                while !new.is_char_boundary(offset) {
+                    offset -= 1;
+                }
+                offset
+            }
+        });
 
         {
             let mut guard = buffer.write().expect("buffer poisoned");
-            let old_len = old.len();
-            if new.starts_with(&old) {
+            if appended {
                 guard.edit(old_len..old_len, &new[old_len..]);
             } else {
                 guard.edit(0..old_len, &new);
@@ -623,25 +637,33 @@ fn collapse_to_offset(editor: &mut EditorState, offset: usize, scrolloff: u32) {
     super::movement::ensure_cursor_in_view(editor, scrolloff);
 }
 
-/// Byte offset of the first point where `new` diverges from `old`, as a char
-/// boundary of `new`.
+/// The number of leading bytes the rope `chunks` share with `new`.
 ///
-/// When `new` extends `old`, that is `old.len()` -- the start of the appended
-/// content. Otherwise it is the first differing byte, backed off to the
-/// preceding char boundary so the offset never splits a multi-byte character.
-fn first_divergence(old: &str, new: &str) -> usize {
-    if new.starts_with(old) {
-        return old.len();
+/// Walks the chunks byte by byte, stopping at the first mismatch or once `new`
+/// is exhausted, so a followed log is diffed against the new file without ever
+/// materializing the whole buffer. The result is the append splice point when
+/// it equals the buffer length, and the first divergence otherwise.
+fn common_prefix_len<'a>(chunks: impl Iterator<Item = &'a str>, new: &str) -> usize {
+    let new = new.as_bytes();
+    let mut matched = 0;
+    for chunk in chunks {
+        if matched == new.len() {
+            break;
+        }
+        let chunk = chunk.as_bytes();
+        let tail = &new[matched..];
+        let n = chunk.len().min(tail.len());
+        let common = chunk[..n]
+            .iter()
+            .zip(tail)
+            .take_while(|(a, b)| a == b)
+            .count();
+        matched += common;
+        if common < chunk.len() {
+            break;
+        }
     }
-    let mut offset = old
-        .bytes()
-        .zip(new.bytes())
-        .take_while(|(a, b)| a == b)
-        .count();
-    while !new.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
+    matched
 }
 
 /// The buffer-line row of `editor`'s primary cursor, resolved through its
@@ -1260,6 +1282,47 @@ mod tests {
 
         assert_eq!(buffer_text(&h, id), "line1\nline2\n");
         assert!(!focused_dirty(&h.stoat), "a reloaded buffer stays clean");
+    }
+
+    #[test]
+    fn pump_auto_reload_appends_across_a_chunk_boundary() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-chunks");
+        // Larger than one rope chunk, so the streaming compare walks several
+        // chunks before reaching the append point.
+        let seed = "abcdefghij\n".repeat(200);
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", seed.as_bytes());
+
+        let appended = format!("{seed}tail line\n");
+        h.fake_fs().insert_file(&path, appended.as_bytes());
+        arm_and_pump(&mut h);
+
+        assert_eq!(buffer_text(&h, id), appended);
+        assert!(
+            !focused_dirty(&h.stoat),
+            "a chunk-boundary append stays clean"
+        );
+    }
+
+    #[test]
+    fn pump_auto_reload_replaces_on_a_mid_chunk_change() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-chunk-replace");
+        let seed = "abcdefghij\n".repeat(200);
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", seed.as_bytes());
+
+        // Flip a byte deep inside the buffer, so the compare finds a mismatch
+        // mid-chunk and full-replaces rather than appending.
+        let mut changed = seed.into_bytes();
+        changed[1500] = b'Z';
+        h.fake_fs().insert_file(&path, &changed);
+        arm_and_pump(&mut h);
+
+        assert_eq!(
+            buffer_text(&h, id).into_bytes(),
+            changed,
+            "a mid-chunk change replaces the buffer"
+        );
     }
 
     #[test]
