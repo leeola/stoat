@@ -298,17 +298,25 @@ impl BackgroundPass {
             }
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scratch));
         } else {
-            for row in 0..grid.rows() {
-                if damage.is_dirty(row) {
-                    self.scratch.clear();
-                    build_row_instances(grid, row, &mut self.scratch);
-                    let offset = (row * cols * size_of::<BgInstance>()) as u64;
-                    queue.write_buffer(
-                        &self.instances,
-                        offset,
-                        bytemuck::cast_slice(&self.scratch),
-                    );
+            let rows = grid.rows();
+            let mut row = 0;
+            while row < rows {
+                if !damage.is_dirty(row) {
+                    row += 1;
+                    continue;
                 }
+
+                // Contiguous dirty rows share one contiguous instance range, so
+                // build the whole run and upload it in a single write.
+                let start = row;
+                self.scratch.clear();
+                while row < rows && damage.is_dirty(row) {
+                    build_row_instances(grid, row, &mut self.scratch);
+                    row += 1;
+                }
+
+                let offset = (start * cols * size_of::<BgInstance>()) as u64;
+                queue.write_buffer(&self.instances, offset, bytemuck::cast_slice(&self.scratch));
             }
         }
     }
