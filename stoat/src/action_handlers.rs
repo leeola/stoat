@@ -240,6 +240,22 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             conflict_view::close_conflict(stoat);
             UpdateEffect::Redraw
         },
+        ActionKind::ConflictPickOurs => {
+            conflict_view::conflict_pick_ours(stoat);
+            UpdateEffect::Redraw
+        },
+        ActionKind::ConflictPickTheirs => {
+            conflict_view::conflict_pick_theirs(stoat);
+            UpdateEffect::Redraw
+        },
+        ActionKind::ConflictPickBoth => {
+            conflict_view::conflict_pick_both(stoat);
+            UpdateEffect::Redraw
+        },
+        ActionKind::ConflictResetChunk => {
+            conflict_view::conflict_reset_chunk(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::StageHunk => review::stage_hunk(stoat, review::HunkStage::Stage),
         ActionKind::UnstageHunk => review::stage_hunk(stoat, review::HunkStage::Unstage),
         ActionKind::ToggleStageHunk => review::stage_hunk(stoat, review::HunkStage::Toggle),

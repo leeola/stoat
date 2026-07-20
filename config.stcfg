@@ -665,6 +665,10 @@ on key {
     view == conflict && mode == normal {
         Escape -> CloseConflict();
         q -> CloseConflict();
+        o -> ConflictPickOurs();
+        t -> ConflictPickTheirs();
+        b -> ConflictPickBoth();
+        x -> ConflictResetChunk();
     }
     mode == insert {
         Escape -> SetMode(normal);

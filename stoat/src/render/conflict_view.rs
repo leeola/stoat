@@ -1,6 +1,7 @@
 use crate::{
     display_map::{BlockRowKind, DisplaySnapshot},
     editor_state::EditorState,
+    merge_view::{ChunkState, MergeDoc, RowPick},
     render::review::{
         dim_rgb, fill_line_tint, paint_highlighted_row, render_empty_num, render_review_cursor,
         render_side_num, render_side_text, style_rgb,
@@ -8,6 +9,7 @@ use crate::{
     review::ReviewSide,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use stoat_text::Anchor;
 
 /// At or above this inner width the ours and theirs columns keep a line-number
 /// gutter. Below it they drop it so their text has room to read.
@@ -100,12 +102,16 @@ pub(crate) fn render_conflict_view(
     let scroll_row = editor.scroll_row;
 
     if let Some(state) = editor.conflict_view.as_ref() {
+        let chunk_center_rows = chunk_center_rows(&snapshot, &state.chunk_anchors);
+        let chunk_states = chunk_states(&snapshot, &state.doc, &state.chunk_anchors, &state.picks);
         paint_conflict_rows(
             &snapshot,
             scroll_row,
             inner,
             &cols,
             &state.doc,
+            &chunk_center_rows,
+            &chunk_states,
             fallback_style,
             theme,
             buf,
@@ -123,13 +129,77 @@ pub(crate) fn render_conflict_view(
     );
 }
 
+/// Resolve each chunk's anchors to the row span it currently occupies in the
+/// center buffer.
+///
+/// A pick reassembles a chunk's marker block into its chosen resolution, which
+/// is usually fewer rows, so the span shrinks. Sizing the side band to this live
+/// span rather than the original marker height keeps the ours and theirs columns
+/// aligned after a pick. Feeds [`crate::merge_view::MergeDoc::align`].
+fn chunk_center_rows(snapshot: &DisplaySnapshot, chunk_anchors: &[(Anchor, Anchor)]) -> Vec<usize> {
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    chunk_anchors
+        .iter()
+        .map(|(start, end)| {
+            let start_row = rope
+                .offset_to_point(buffer_snapshot.resolve_anchor(start))
+                .row;
+            let end_row = rope
+                .offset_to_point(buffer_snapshot.resolve_anchor(end))
+                .row;
+            end_row.saturating_sub(start_row) as usize
+        })
+        .collect()
+}
+
+/// Classify each chunk against its live center-region text so the gutter glyph
+/// and unresolved wash follow picks and hand edits.
+///
+/// The state is derived, never stored, so a buffer edit or undo can never leave
+/// the glyph disagreeing with the text. Feeds [`state_glyph`].
+fn chunk_states(
+    snapshot: &DisplaySnapshot,
+    doc: &MergeDoc,
+    chunk_anchors: &[(Anchor, Anchor)],
+    picks: &[Vec<RowPick>],
+) -> Vec<ChunkState> {
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    chunk_anchors
+        .iter()
+        .enumerate()
+        .map(|(i, (start, end))| {
+            let start = buffer_snapshot.resolve_anchor(start);
+            let end = buffer_snapshot.resolve_anchor(end);
+            let region_text: String = rope.chunks_in_range(start..end).collect();
+            doc.chunks[i].classify(&doc.rows, &picks[i], &region_text)
+        })
+        .collect()
+}
+
+/// The one-cell gutter marker for a chunk's resolution state.
+fn state_glyph(state: ChunkState) -> char {
+    match state {
+        ChunkState::Unresolved => '?',
+        ChunkState::Ours => 'O',
+        ChunkState::Theirs => 'T',
+        ChunkState::Both => 'B',
+        ChunkState::Picked => '~',
+        ChunkState::AutoIndent => 'I',
+        ChunkState::Manual => 'M',
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_conflict_rows(
     snapshot: &DisplaySnapshot,
     scroll_row: u32,
     inner: Rect,
     cols: &ConflictColumns,
-    doc: &crate::merge_view::MergeDoc,
+    doc: &MergeDoc,
+    chunk_center_rows: &[usize],
+    chunk_states: &[ChunkState],
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
@@ -150,7 +220,7 @@ fn paint_conflict_rows(
         }
     };
 
-    let plan = doc.align();
+    let plan = doc.align(chunk_center_rows);
     let total = snapshot.line_count();
     let end_row = (scroll_row + inner.height as u32).min(total);
     if end_row <= scroll_row {
@@ -167,12 +237,13 @@ fn paint_conflict_rows(
         let plan_row = plan.get(display_row as usize);
 
         if let Some(chunk_idx) = plan_row.and_then(|r| r.chunk) {
-            let auto = doc.chunks[chunk_idx].auto.is_some();
-            let glyph = if auto { 'I' } else { '?' };
+            let state = chunk_states[chunk_idx];
             buf[(cols.center_gutter_x, y)]
-                .set_char(glyph)
+                .set_char(state_glyph(state))
                 .set_style(header_style);
-            if !auto && let Some(tint) = unresolved_tint {
+            if state == ChunkState::Unresolved
+                && let Some(tint) = unresolved_tint
+            {
                 fill_line_tint(buf, cols.center_text_x, y, cols.center_w, tint);
             }
         }

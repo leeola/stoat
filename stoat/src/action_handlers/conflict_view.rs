@@ -2,12 +2,13 @@ use super::focused_editor_mut;
 use crate::{
     app::Stoat,
     conflict_session::{ConflictSession, ConflictViewState, FileResolveState},
-    editor_state::EditorState,
+    editor_state::{EditorId, EditorState},
     jumplist::JumpEntry,
-    merge_view::{MergeDoc, RowPick},
+    merge_view::{ChunkState, MergeDoc, RowPick},
     pane::View,
 };
-use std::path::Path;
+use std::{ops::Range, path::Path};
+use stoat_action::ActionKind;
 use stoat_text::{Anchor, Bias, SelectionGoal};
 
 /// Open the three-way conflict resolve view on the repository's conflicted
@@ -93,21 +94,7 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
                 .collect()
         };
 
-        let file_count = files.len();
-        let rel_path = crate::paths::display_relative(&path, &git_root);
-        let mut editor = EditorState::new(buffer_id, buffer, executor);
-        editor.conflict_view = Some(ConflictViewState {
-            doc: doc.clone(),
-            file_index: current,
-            file_count,
-            rel_path,
-        });
-        let editor_id = ws.editors.insert(editor);
-
-        ws.panes.pane_mut(focused).view = View::Editor(editor_id);
-        ws.panes.widen(focused);
-
-        let picks = doc
+        let picks: Vec<Vec<RowPick>> = doc
             .chunks
             .iter()
             .map(|chunk| {
@@ -120,6 +107,22 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
                 ]
             })
             .collect();
+
+        let file_count = files.len();
+        let rel_path = crate::paths::display_relative(&path, &git_root);
+        let mut editor = EditorState::new(buffer_id, buffer, executor);
+        editor.conflict_view = Some(ConflictViewState {
+            doc: doc.clone(),
+            chunk_anchors: chunk_anchors.clone(),
+            picks: picks.clone(),
+            file_index: current,
+            file_count,
+            rel_path,
+        });
+        let editor_id = ws.editors.insert(editor);
+
+        ws.panes.pane_mut(focused).view = View::Editor(editor_id);
+        ws.panes.widen(focused);
 
         ws.conflict = Some(ConflictSession {
             workdir: git_root,
@@ -134,6 +137,7 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
                 editor_id,
             },
             saved_editor,
+            pending_clobber: None,
         });
     }
 
@@ -171,6 +175,177 @@ pub(super) fn close_conflict(stoat: &mut Stoat) {
         ws.editors.remove(scratch_editor);
         ws.buffers.remove(scratch_buffer);
     }
+}
+
+/// Resolve the conflict chunk under the cursor by taking its whole ours side.
+pub(super) fn conflict_pick_ours(stoat: &mut Stoat) {
+    pick_side(stoat, ActionKind::ConflictPickOurs);
+}
+
+/// Resolve the conflict chunk under the cursor by taking its whole theirs side.
+pub(super) fn conflict_pick_theirs(stoat: &mut Stoat) {
+    pick_side(stoat, ActionKind::ConflictPickTheirs);
+}
+
+/// Resolve the conflict chunk under the cursor by taking both sides.
+pub(super) fn conflict_pick_both(stoat: &mut Stoat) {
+    pick_side(stoat, ActionKind::ConflictPickBoth);
+}
+
+/// Reset the conflict chunk under the cursor back to its raw marker block,
+/// discarding any pick or hand edit in that region.
+pub(super) fn conflict_reset_chunk(stoat: &mut Stoat) {
+    let Some((chunk_idx, region, _)) = current_chunk(stoat) else {
+        return;
+    };
+    let (marker, picks) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        let chunk = &session.file.doc.chunks[chunk_idx];
+        let picks = vec![
+            RowPick {
+                ours: false,
+                theirs: false
+            };
+            chunk.row_range.len()
+        ];
+        (chunk.marker_text(&session.file.doc.rows), picks)
+    };
+    apply_resolution(stoat, chunk_idx, region, &marker, picks);
+}
+
+/// Apply a whole-side pick of the given kind to the chunk under the cursor.
+///
+/// A pick over a region hand-edited to text no pick produces first arms the
+/// clobber guard and warns. An immediate repeat of the identical pick confirms
+/// and overwrites.
+fn pick_side(stoat: &mut Stoat, kind: ActionKind) {
+    let Some((chunk_idx, region, region_text)) = current_chunk(stoat) else {
+        return;
+    };
+
+    let (assembly, picks, manual) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        let doc = &session.file.doc;
+        let chunk = &doc.chunks[chunk_idx];
+        let picks = match kind {
+            ActionKind::ConflictPickTheirs => chunk.all_theirs(),
+            ActionKind::ConflictPickBoth => chunk.all_both(),
+            _ => chunk.all_ours(),
+        };
+        let manual = chunk.classify(&doc.rows, &session.file.picks[chunk_idx], &region_text)
+            == ChunkState::Manual;
+        (chunk.assembly_text(&doc.rows, &picks), picks, manual)
+    };
+
+    let armed = stoat
+        .active_workspace()
+        .conflict
+        .as_ref()
+        .is_some_and(|s| s.pending_clobber == Some((chunk_idx, kind)));
+    if manual && !armed {
+        if let Some(session) = stoat.active_workspace_mut().conflict.as_mut() {
+            session.pending_clobber = Some((chunk_idx, kind));
+        }
+        stoat.set_status("chunk was hand-edited, repeat the pick to overwrite");
+        return;
+    }
+
+    apply_resolution(stoat, chunk_idx, region, &assembly, picks);
+}
+
+/// The chunk whose center region contains the cursor, with its current byte
+/// range and region text. `None` when no session is open or the cursor sits
+/// outside every chunk.
+fn current_chunk(stoat: &mut Stoat) -> Option<(usize, Range<usize>, String)> {
+    let editor_id = stoat.active_workspace().conflict.as_ref()?.file.editor_id;
+
+    let (snapshot, cursor_anchor) = {
+        let editor = stoat.active_workspace_mut().editors.get_mut(editor_id)?;
+        (
+            editor.display_map.snapshot(),
+            editor.selections.newest_anchor().start,
+        )
+    };
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let cursor = buffer_snapshot.resolve_anchor(&cursor_anchor);
+
+    let session = stoat.active_workspace().conflict.as_ref()?;
+    let chunk_idx = session.file.chunk_anchors.iter().position(|(start, end)| {
+        let start = buffer_snapshot.resolve_anchor(start);
+        let end = buffer_snapshot.resolve_anchor(end);
+        (start..end).contains(&cursor)
+    })?;
+
+    let (start, end) = &session.file.chunk_anchors[chunk_idx];
+    let region = buffer_snapshot.resolve_anchor(start)..buffer_snapshot.resolve_anchor(end);
+    let region_text = buffer_snapshot
+        .rope()
+        .chunks_in_range(region.clone())
+        .collect();
+    Some((chunk_idx, region, region_text))
+}
+
+/// Write `text` over the chunk's center region, then mirror `picks` onto the
+/// session and the render cache and disarm the clobber guard.
+///
+/// The buffer edit rides the dispatch-level undo group, so a pick and its
+/// revert are single undo steps. Chunk anchors auto-shift so later chunks stay
+/// aligned when this region grows or shrinks.
+fn apply_resolution(
+    stoat: &mut Stoat,
+    chunk_idx: usize,
+    region: Range<usize>,
+    text: &str,
+    picks: Vec<RowPick>,
+) {
+    let (buffer_id, editor_id) = {
+        let Some(session) = stoat.active_workspace_mut().conflict.as_mut() else {
+            return;
+        };
+        session.file.picks[chunk_idx] = picks.clone();
+        session.pending_clobber = None;
+        (session.file.buffer_id, session.file.editor_id)
+    };
+
+    let region_start = region.start;
+    if let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) {
+        buffer.write().expect("buffer poisoned").edit(region, text);
+    }
+
+    land_cursor(stoat, editor_id, region_start);
+
+    if let Some(view) = stoat
+        .active_workspace_mut()
+        .editors
+        .get_mut(editor_id)
+        .and_then(|editor| editor.conflict_view.as_mut())
+    {
+        view.picks[chunk_idx] = picks;
+    }
+}
+
+/// Park a block cursor at `offset` on the center editor, keeping it on the chunk
+/// just resolved so an immediate re-pick targets the same region rather than
+/// falling outside it once the pick shrinks the marker block.
+fn land_cursor(stoat: &mut Stoat, editor_id: EditorId, offset: usize) {
+    let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) else {
+        return;
+    };
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        super::movement::land_block_cursor(
+            sel.id,
+            offset,
+            SelectionGoal::None,
+            buffer_snapshot.rope(),
+            buffer_snapshot,
+        )
+    });
 }
 
 /// Land the cursor on the newly-opened view's first conflict chunk and push the

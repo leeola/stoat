@@ -3,6 +3,7 @@ use crate::{
     merge_view::{MergeDoc, RowPick},
 };
 use std::path::PathBuf;
+use stoat_action::ActionKind;
 use stoat_text::{Anchor, BufferId};
 
 /// A live three-way conflict resolution across a repository's conflicted files.
@@ -23,6 +24,15 @@ pub(crate) struct ConflictSession {
     /// The editor displaced from the focused pane when the view opened,
     /// restored there on close.
     pub(crate) saved_editor: EditorId,
+    /// Arms the two-press guard that protects a hand-edited chunk from being
+    /// silently overwritten by a whole-side pick.
+    ///
+    /// A pick over a chunk whose current text matches no pick (a
+    /// [`crate::merge_view::ChunkState::Manual`] region) sets this to that
+    /// chunk and the pick's action, then warns instead of editing. An
+    /// immediate repeat of the identical pick clears it and overwrites. Any
+    /// different pick re-arms for the new target.
+    pub(crate) pending_clobber: Option<(usize, ActionKind)>,
 }
 
 /// The in-progress resolution of one conflicted file.
@@ -51,6 +61,14 @@ pub(crate) struct FileResolveState {
 #[allow(dead_code)]
 pub(crate) struct ConflictViewState {
     pub(crate) doc: MergeDoc,
+    /// Start/end anchors of each chunk's center region, so the renderer can
+    /// resolve the current row span of a chunk (which shrinks when a pick
+    /// reassembles the region) and align the side columns to it.
+    pub(crate) chunk_anchors: Vec<(Anchor, Anchor)>,
+    /// Per-chunk row picks mirrored from the session, so the renderer can
+    /// derive each chunk's resolution state against its live region text and
+    /// paint the matching gutter glyph.
+    pub(crate) picks: Vec<Vec<RowPick>>,
     pub(crate) file_index: usize,
     pub(crate) file_count: usize,
     pub(crate) rel_path: String,
@@ -59,10 +77,26 @@ pub(crate) struct ConflictViewState {
 #[cfg(test)]
 mod tests {
     use crate::{app::Stoat, merge_view::MergeDoc, test_harness::TestHarness};
-    use stoat_action::{CloseConflict, Conflict};
+    use stoat_action::{
+        Action, CloseConflict, Conflict, ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs,
+        ConflictResetChunk,
+    };
+
+    const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
 
     fn dispatch_conflict(h: &mut TestHarness) {
         crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+    }
+
+    /// Open the seeded conflict view with the cursor already landed on the
+    /// single chunk.
+    fn open(h: &mut TestHarness) {
+        seed_conflict(h);
+        dispatch_conflict(h);
+    }
+
+    fn pick(h: &mut TestHarness, action: &dyn Action) {
+        crate::action_handlers::dispatch(&mut h.stoat, action);
     }
 
     /// Seed one conflicted file at the workspace's git root and return the
@@ -169,6 +203,82 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("no merge conflicts")
+        );
+    }
+
+    #[test]
+    fn pick_ours_replaces_the_chunk_with_the_ours_side() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        pick(&mut h, &ConflictPickOurs);
+
+        assert_eq!(center_text(&h), "ours\n");
+    }
+
+    #[test]
+    fn re_picking_switches_the_resolved_side() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        pick(&mut h, &ConflictPickOurs);
+        assert_eq!(center_text(&h), "ours\n");
+
+        pick(&mut h, &ConflictPickTheirs);
+        assert_eq!(center_text(&h), "theirs\n");
+
+        pick(&mut h, &ConflictPickBoth);
+        assert_eq!(center_text(&h), "ours\ntheirs\n");
+    }
+
+    #[test]
+    fn reset_restores_the_marker_block() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        pick(&mut h, &ConflictPickOurs);
+        pick(&mut h, &ConflictResetChunk);
+
+        assert_eq!(center_text(&h), MARKER);
+    }
+
+    #[test]
+    fn undo_reverts_a_pick() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        pick(&mut h, &ConflictPickOurs);
+        assert_eq!(center_text(&h), "ours\n");
+
+        h.type_keys("u");
+        assert_eq!(center_text(&h), MARKER);
+    }
+
+    #[test]
+    fn pick_over_a_hand_edit_warns_then_overwrites_on_repeat() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        h.type_keys("i z escape");
+        let edited = center_text(&h);
+        assert_ne!(edited, MARKER, "hand edit changed the chunk");
+
+        pick(&mut h, &ConflictPickOurs);
+        assert_eq!(
+            center_text(&h),
+            edited,
+            "first pick over a hand edit warns without overwriting"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("chunk was hand-edited, repeat the pick to overwrite")
+        );
+
+        pick(&mut h, &ConflictPickOurs);
+        assert_eq!(
+            center_text(&h),
+            "ours\n",
+            "repeat of the identical pick overwrites the hand edit"
         );
     }
 

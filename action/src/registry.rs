@@ -6,7 +6,10 @@ use crate::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
         },
-        conflict::{CloseConflict, Conflict},
+        conflict::{
+            CloseConflict, Conflict, ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs,
+            ConflictResetChunk,
+        },
         dump::Dump,
         editor::{
             AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
@@ -211,6 +214,14 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ToggleDiff::DEF, |_| Ok(Box::new(ToggleDiff)));
     add(Conflict::DEF, |_| Ok(Box::new(Conflict)));
     add(CloseConflict::DEF, |_| Ok(Box::new(CloseConflict)));
+    add(ConflictPickOurs::DEF, |_| Ok(Box::new(ConflictPickOurs)));
+    add(ConflictPickTheirs::DEF, |_| {
+        Ok(Box::new(ConflictPickTheirs))
+    });
+    add(ConflictPickBoth::DEF, |_| Ok(Box::new(ConflictPickBoth)));
+    add(ConflictResetChunk::DEF, |_| {
+        Ok(Box::new(ConflictResetChunk))
+    });
     add(StageHunk::DEF, |_| Ok(Box::new(StageHunk)));
     add(UnstageHunk::DEF, |_| Ok(Box::new(UnstageHunk)));
     add(ToggleStageHunk::DEF, |_| Ok(Box::new(ToggleStageHunk)));
@@ -1397,7 +1408,8 @@ mod tests {
         // + 1 TogglePaneWiden.
         // + 5 OpenCodeSearch + CodeSearch Next/Prev/Select/Close.
         // + 2 Conflict, CloseConflict.
-        assert_eq!(all().count(), 368);
+        // + 4 ConflictPickOurs/Theirs/Both, ConflictResetChunk.
+        assert_eq!(all().count(), 372);
     }
 
     #[test]

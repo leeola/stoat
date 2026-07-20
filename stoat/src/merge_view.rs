@@ -191,11 +191,15 @@ impl MergeDoc {
     /// beside it.
     ///
     /// A non-conflict row that contributes a center line emits that row's sides.
-    /// A conflict chunk emits one entry per center line of its region (the
-    /// marker block or the auto-resolution) with the chunk's ours and theirs
-    /// lines top-aligned, so a side line past the region's height is dropped
-    /// until padding blocks make room.
-    pub(crate) fn align(&self) -> Vec<AlignRow<'_>> {
+    /// A conflict chunk emits one entry per center line of its region with the
+    /// chunk's ours and theirs lines top-aligned, so a side line past the
+    /// region's height is dropped until padding blocks make room.
+    ///
+    /// `chunk_center_rows[i]` is chunk `i`'s current center-row span, resolved
+    /// from its anchors each frame. The chunk band is sized to it so a pick that
+    /// reassembled the region (shrinking a marker block to its resolution) still
+    /// aligns. A missing entry falls back to the marker or auto-resolution height.
+    pub(crate) fn align(&self, chunk_center_rows: &[usize]) -> Vec<AlignRow<'_>> {
         let mut plan = Vec::new();
         let mut chunk_idx = 0;
         let mut i = 0;
@@ -214,7 +218,11 @@ impl MergeDoc {
                     Some(auto) => auto.lines.len(),
                     None => ours.len() + theirs.len() + 3,
                 };
-                for b in 0..center_lines {
+                let span = chunk_center_rows
+                    .get(chunk_idx)
+                    .copied()
+                    .unwrap_or(center_lines);
+                for b in 0..span {
                     plan.push(AlignRow {
                         ours: ours.get(b).copied(),
                         theirs: theirs.get(b).copied(),
