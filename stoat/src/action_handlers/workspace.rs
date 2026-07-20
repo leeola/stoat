@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
@@ -106,21 +106,67 @@ pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Switch to the workspace under the picker's selection, saving the current
-/// one first. A selection on the already-active workspace or an empty picker
-/// just closes the picker.
+/// one first.
+///
+/// An open row switches focus directly. An inactive on-disk row is brought back
+/// into the instance via [`activate_inactive_workspace`]. A selection on the
+/// already-active workspace or an empty picker just closes the picker.
 pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.workspace_picker.take() else {
         return UpdateEffect::None;
     };
-    let Some(id) = picker.selected_id() else {
+    let Some(entry) = picker.selected_entry() else {
         return UpdateEffect::Redraw;
     };
-    if id == stoat.active_workspace {
-        return UpdateEffect::Redraw;
+
+    match (entry.id, entry.state_path.clone()) {
+        (Some(id), _) => {
+            if id == stoat.active_workspace {
+                return UpdateEffect::Redraw;
+            }
+            stoat.save_workspace(stoat.active_workspace());
+            switch_active_workspace(stoat, id);
+        },
+        (None, Some(state_path)) => {
+            let git_root = entry.git_root.clone();
+            let uid = entry.uid;
+            let name = entry.basename.clone();
+            activate_inactive_workspace(stoat, git_root, uid, name, state_path);
+        },
+        (None, None) => return UpdateEffect::Redraw,
     }
-    stoat.save_workspace(stoat.active_workspace());
-    switch_active_workspace(stoat, id);
+
     UpdateEffect::Redraw
+}
+
+/// Bring a persisted-but-closed workspace back into the running instance and
+/// switch to it, returning the id of the newly inserted workspace.
+///
+/// The fresh workspace carries the on-disk `uid` and `name` from the start, so a
+/// save triggered before the restore lands (a quit mid-restore) rewrites the
+/// same state file rather than forking a new one. The outgoing workspace is
+/// saved, focus switches, and a restore spawns to replace the fresh panes with
+/// the persisted session.
+fn activate_inactive_workspace(
+    stoat: &mut Stoat,
+    git_root: PathBuf,
+    uid: WorkspaceUid,
+    name: String,
+    state_path: PathBuf,
+) -> WorkspaceId {
+    stoat.save_workspace(stoat.active_workspace());
+
+    let mut ws = Workspace::new(git_root, &stoat.executor);
+    ws.uid = uid;
+    ws.name = name;
+    ws.layout(stoat.size());
+
+    let id = stoat.workspaces.insert(ws);
+    stoat.workspaces[id].id = id;
+
+    switch_active_workspace(stoat, id);
+    stoat.spawn_workspace_restore(id, state_path);
+    id
 }
 
 pub(super) fn handle_dump(stoat: &Stoat, name: &str) {
@@ -210,4 +256,65 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
 pub(super) fn show_cwd(stoat: &mut Stoat) {
     let root = stoat.active_workspace().git_root.display().to_string();
     stoat.set_status(format!("Current working directory is {root}"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        badge::BadgeSource,
+        workspace::registry::{RegistryEntry, WorkspaceMeta},
+        workspace_picker::WorkspacePicker,
+    };
+    use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn selecting_inactive_row_activates_it_with_the_metas_uid_and_spawns_a_restore() {
+        let mut harness = Stoat::test();
+        let stoat = &mut harness.stoat;
+
+        let uid = WorkspaceUid(424242);
+        let entry = RegistryEntry {
+            meta: WorkspaceMeta {
+                uid,
+                name: "proj".to_string(),
+                git_root: PathBuf::from("/proj"),
+                buffer_count: 1,
+            },
+            state_path: PathBuf::from("/state/hash/1.ron"),
+            mtime: UNIX_EPOCH,
+        };
+
+        let before = stoat.workspaces.len();
+        let mut picker =
+            WorkspacePicker::new(&stoat.workspaces, stoat.active_workspace, vec![entry]);
+        picker.select_next();
+        assert_eq!(
+            picker.selected_entry().map(|e| (e.id, e.uid)),
+            Some((None, uid)),
+            "selection sits on the inactive on-disk row"
+        );
+        stoat.workspace_picker = Some(picker);
+
+        workspace_picker_select(stoat);
+
+        assert_eq!(
+            stoat.workspaces.len(),
+            before + 1,
+            "reactivation inserts a new workspace"
+        );
+        let active = stoat.active_workspace();
+        assert_eq!(
+            (active.uid, active.git_root.as_path(), active.name.as_str()),
+            (uid, Path::new("/proj"), "proj"),
+            "the new active workspace carries the meta's identity"
+        );
+        assert!(
+            active
+                .badges
+                .find_by_source(BadgeSource::SessionRestore)
+                .is_some(),
+            "a session restore was spawned for the reactivated workspace"
+        );
+    }
 }
