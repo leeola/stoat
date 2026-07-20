@@ -67,7 +67,15 @@ pub(crate) fn render_review(
         buf,
         scene,
     );
-    render_review_cursor(editor, &snapshot, inner, theme, buf, stoatty);
+    render_review_cursor(
+        editor,
+        &snapshot,
+        inner,
+        review_cursor_text_x(inner),
+        theme,
+        buf,
+        stoatty,
+    );
 }
 
 /// Paint an editor as a side-by-side diff, with base (HEAD) text on the left and
@@ -99,11 +107,88 @@ pub(crate) fn render_diff_view(
         theme,
         buf,
     );
-    render_review_cursor(editor, &snapshot, inner, theme, buf, stoatty);
+    render_review_cursor(
+        editor,
+        &snapshot,
+        inner,
+        right_text_x(inner),
+        theme,
+        buf,
+        stoatty,
+    );
 }
 
-/// Paint the two-column diff body for the rows visible from `scroll_row`, base
-/// text left and buffer text right.
+/// Minimum inner width for the two-column diff layout. Below this each text
+/// half falls under about 43 columns after its gutters, too cramped to read
+/// code, so the view collapses to a single unified column.
+const DIFF_TWO_COLUMN_MIN: u16 = 100;
+
+/// Column geometry for one diff body, resolved once from the inner rect.
+///
+/// A wide rect splits into a base column on the left and a buffer column on the
+/// right, each with a two-cell status gutter, a five-cell line-number column,
+/// and the text past them. A narrow rect (under [`DIFF_TWO_COLUMN_MIN`]) aliases
+/// both sides onto one full-width column with no separator, so Block and buffer
+/// rows land in the same place and read as a unified diff.
+struct DiffColumns {
+    status_left_x: u16,
+    left_num_x: u16,
+    left_text_x: u16,
+    left_content_w: usize,
+    status_right_x: u16,
+    right_num_x: u16,
+    right_text_x: u16,
+    right_content_w: usize,
+    sep_x: Option<u16>,
+}
+
+impl DiffColumns {
+    fn compute(inner: Rect) -> Self {
+        let status_w: u16 = 2;
+        let num_w: u16 = 5;
+        let gutter_w = (status_w + num_w) as usize;
+
+        if inner.width < DIFF_TWO_COLUMN_MIN {
+            let num_x = inner.x + status_w;
+            let text_x = num_x + num_w;
+            let content_w = (inner.width as usize).saturating_sub(gutter_w);
+            return Self {
+                status_left_x: inner.x,
+                left_num_x: num_x,
+                left_text_x: text_x,
+                left_content_w: content_w,
+                status_right_x: inner.x,
+                right_num_x: num_x,
+                right_text_x: text_x,
+                right_content_w: content_w,
+                sep_x: None,
+            };
+        }
+
+        let full_w = inner.width as usize;
+        let sep: usize = 1;
+        let half_w = (full_w.saturating_sub(sep)) / 2;
+        let left_content_w = half_w.saturating_sub(gutter_w);
+        let right_start = inner.x + half_w as u16 + sep as u16;
+        let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
+        Self {
+            status_left_x: inner.x,
+            left_num_x: inner.x + status_w,
+            left_text_x: inner.x + status_w + num_w,
+            left_content_w,
+            status_right_x: right_start,
+            right_num_x: right_start + status_w,
+            right_text_x: right_start + status_w + num_w,
+            right_content_w,
+            sep_x: Some(inner.x + half_w as u16),
+        }
+    }
+}
+
+/// Paint the diff body for the rows visible from `scroll_row`.
+///
+/// A wide inner rect lays out base text left and buffer text right. A narrow one
+/// collapses to a single unified column. See [`DiffColumns`] for the geometry.
 ///
 /// Shared by the live [`render_diff_view`] and the off-loop smooth-scroll page
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
@@ -123,20 +208,17 @@ pub(crate) fn paint_diff_rows(
         return;
     }
 
-    let full_w = inner.width as usize;
-    let status_w: usize = 2;
-    let num_w: usize = 5;
-    let gutter_w = status_w + num_w;
-    let sep: usize = 1;
-    let half_w = (full_w.saturating_sub(sep)) / 2;
-    let left_content_w = half_w.saturating_sub(gutter_w);
-    let right_start = inner.x + half_w as u16 + sep as u16;
-    let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
-
-    let left_num_x = inner.x + status_w as u16;
-    let left_text_x = left_num_x + num_w as u16;
-    let right_num_x = right_start + status_w as u16;
-    let right_text_x = right_num_x + num_w as u16;
+    let DiffColumns {
+        status_left_x,
+        left_num_x,
+        left_text_x,
+        left_content_w,
+        status_right_x,
+        right_num_x,
+        right_text_x,
+        right_content_w,
+        sep_x,
+    } = DiffColumns::compute(inner);
 
     use crate::theme::scope as s;
     let dim_style = theme.get(s::DIFF_CONTEXT);
@@ -159,8 +241,7 @@ pub(crate) fn paint_diff_rows(
             break;
         }
 
-        let sep_x = inner.x + half_w as u16;
-        if sep_x < inner.x + inner.width {
+        if let Some(sep_x) = sep_x {
             buf[(sep_x, y)].set_char('│').set_style(dim_style);
         }
 
@@ -208,7 +289,7 @@ pub(crate) fn paint_diff_rows(
                         } else {
                             s::DIFF_DELETED
                         };
-                    paint_status_bars(buf, inner.x, y, change_scope, staged, theme);
+                    paint_status_bars(buf, status_left_x, y, change_scope, staged, theme);
                 }
                 base_line += 1;
             },
@@ -266,7 +347,7 @@ pub(crate) fn paint_diff_rows(
                         DiffStatus::Moved => s::DIFF_MOVED,
                         DiffStatus::Unchanged => s::DIFF_CONTEXT,
                     };
-                    paint_status_bars(buf, right_start, y, change_scope, staged, theme);
+                    paint_status_bars(buf, status_right_x, y, change_scope, staged, theme);
                 }
                 if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
                     line_buf.clear();
@@ -667,14 +748,24 @@ fn render_review_empty(watching: bool, inner: Rect, theme: &crate::theme::Theme,
     }
 }
 
-/// X column where the right pane's text begins. Mirrors the right-pane layout
-/// in [`render_review_rows`]: a status glyph then a line-number column precede
-/// the text on each side.
+/// X column where the diff body's buffer text begins, for placing the cursor
+/// and mapping clicks onto buffer offsets.
+///
+/// In the two-column layout this is the right pane's text column. In the narrow
+/// unified layout it is the single shared text column. See [`DiffColumns`].
 pub(crate) fn right_text_x(inner: Rect) -> u16 {
-    let full_w = inner.width as usize;
-    let sep: usize = 1;
-    let half_w = (full_w.saturating_sub(sep)) / 2;
-    let right_start = inner.x + half_w as u16 + sep as u16;
+    DiffColumns::compute(inner).right_text_x
+}
+
+/// X column where the review session's buffer text begins, for placing its
+/// cursor.
+///
+/// The review screen keeps a one-cell status gutter, unlike the diff view's
+/// two-cell one, so its cursor column is computed separately from
+/// [`right_text_x`] and is always two-column.
+fn review_cursor_text_x(inner: Rect) -> u16 {
+    let half_w = (inner.width.saturating_sub(1)) / 2;
+    let right_start = inner.x + half_w + 1;
     right_start + 1 + 5
 }
 
@@ -684,12 +775,12 @@ fn render_review_cursor(
     editor: &mut EditorState,
     snapshot: &DisplaySnapshot,
     inner: Rect,
+    text_x: u16,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     stoatty: bool,
 ) {
     let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
-    let text_x = right_text_x(inner);
 
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -1400,14 +1491,14 @@ mod tests {
         // HEAD a/b/c/d; buffer changes line 1 (B) and line 3 (D); the index
         // holds only the line-1 change, so line 1 is staged, line 3 is not.
         let mut editor = diff_editor_staged("a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n");
-        let area = Rect::new(0, 0, 40, 8);
+        let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
         let theme = rgb_diff_theme();
         render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, false);
 
-        // The right (buffer) status column: change bar at right_start, staged
-        // bar in the cell after it.
-        let change_col = ((40 - 1) / 2 + 1) as u16;
+        // The right buffer status column paints its change bar at right_start
+        // and its staged bar in the cell after it.
+        let change_col = ((120 - 1) / 2 + 1) as u16;
         let staged_col = change_col + 1;
         let staged_fg = theme.get(sc::DIFF_STAGED).fg.expect("staged fg");
         let unstaged_fg = theme.get(sc::DIFF_UNSTAGED).fg.expect("unstaged fg");
@@ -1437,7 +1528,7 @@ mod tests {
     #[test]
     fn diff_view_lays_out_base_left_buffer_right() {
         let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew\ntail\n");
-        let area = Rect::new(0, 0, 40, 8);
+        let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
         render_diff_view(
             &mut editor,
@@ -1448,10 +1539,10 @@ mod tests {
             false,
         );
 
-        // For width 40, left text spans cols 7..19, the separator sits at col 19,
-        // and right text spans cols 27..40. The status column takes two cells.
-        let left = |y| line_text(&buf, y, 7..19);
-        let right = |y| line_text(&buf, y, 27..40);
+        // Width 120 is wide enough for the two-column layout. Left text spans
+        // cols 7..59, the separator sits at col 59, right text spans 67..120.
+        let left = |y| line_text(&buf, y, 7..59);
+        let right = |y| line_text(&buf, y, 67..120);
 
         assert!(
             left(0).contains("keep"),
@@ -1496,10 +1587,51 @@ mod tests {
         );
 
         assert_eq!(
-            buf[(19, 0)].symbol(),
+            buf[(59, 0)].symbol(),
             "│",
             "the two columns are split by a separator"
         );
+    }
+
+    #[test]
+    fn narrow_diff_renders_a_unified_single_column() {
+        let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew\ntail\n");
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            false,
+        );
+
+        for y in 0..area.height {
+            for x in 0..area.width {
+                assert_ne!(
+                    buf[(x, y)].symbol(),
+                    "│",
+                    "a unified diff paints no column separator"
+                );
+            }
+        }
+
+        // The single text column sits past the two-cell status and five-cell
+        // line-number gutter, and both sides render into it.
+        let col = right_text_x(area);
+        assert_eq!(col, area.x + 7, "unified text starts past the one gutter");
+
+        let renders = |needle: &str| {
+            (0..area.height).any(|y| {
+                let row: String = (col..area.width)
+                    .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect();
+                row.contains(needle)
+            })
+        };
+        assert!(renders("old"), "the deleted base line renders inline");
+        assert!(renders("new"), "the added buffer line renders inline");
     }
 
     #[test]
@@ -1533,7 +1665,7 @@ mod tests {
     fn diff_view_right_column_carries_syntax_colors() {
         use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
 
-        let mut h = TestHarness::with_size(60, 10);
+        let mut h = TestHarness::with_size(120, 10);
         let path = h.write_file("a.rs", "fn main() {}\n");
         h.open_file(&path);
         h.stoat.drive_background();
@@ -1542,11 +1674,11 @@ mod tests {
             .set_diff_view(true);
         h.snapshot();
 
-        // For width 60 the right text begins at col 36. A syntax-highlighted right
+        // At width 120 the right text begins at col 67. A syntax-highlighted right
         // column paints more than one foreground color across the row's tokens.
         let buf = h.rendered_buffer();
         let mut colors = std::collections::HashSet::new();
-        for x in 36..60 {
+        for x in 67..120 {
             let cell = &buf[(x, 0)];
             if cell.symbol().trim().is_empty() {
                 continue;
@@ -1563,7 +1695,7 @@ mod tests {
     fn diff_view_left_column_carries_base_token_colors() {
         use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
 
-        let mut h = TestHarness::with_size(60, 10);
+        let mut h = TestHarness::with_size(120, 10);
         // The base carries rust keywords. The buffer differs, so the base line
         // renders as a deleted block in the left column.
         h.stage_review_scenario("/repo", &[("a.rs", "fn main() {}\n", "fn other() {}\n")]);
@@ -1575,11 +1707,12 @@ mod tests {
             .set_diff_view(true);
         h.snapshot();
 
-        // Left text spans cols 6..29 (1-col status + 5-col number, half width 29).
+        // At width 120 left text spans cols 7..59 past the two-cell status and
+        // five-cell line-number gutter.
         let buf = h.rendered_buffer();
         let mut colors = std::collections::HashSet::new();
         for y in 0..buf.area.height {
-            for x in 6..29 {
+            for x in 7..59 {
                 let cell = &buf[(x, y)];
                 if cell.symbol().trim().is_empty() {
                     continue;
@@ -1593,14 +1726,16 @@ mod tests {
         );
     }
 
-    /// A width-60 diff-view harness over one `.rs` file diffed `base` -> `buffer`,
-    /// rendered once. The default theme resolves diff colors to RGB, so the change
-    /// washes engage. Column layout: left content cols 6..29, separator col 29,
-    /// right content cols 36..60.
+    /// A width-120 diff-view harness over one `.rs` file diffed `base` ->
+    /// `buffer`, rendered once. The default theme resolves diff colors to RGB, so
+    /// the change washes engage.
+    ///
+    /// Width 120 stays above the two-column threshold. Left text spans cols 7..59,
+    /// the separator sits at col 59, right text spans cols 67..120.
     fn diff_harness(base: &str, buffer: &str) -> crate::test_harness::TestHarness {
         use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
 
-        let mut h = TestHarness::with_size(60, 10);
+        let mut h = TestHarness::with_size(120, 10);
         h.stage_review_scenario("/repo", &[("a.rs", base, buffer)]);
         h.stoat.set_diff_warm_auto(true);
         h.open_file(std::path::Path::new("/repo/a.rs"));
@@ -1661,12 +1796,12 @@ mod tests {
         let buf = h.rendered_buffer();
 
         assert_eq!(
-            chars_with_bg(buf, added_span, 30..buf.area.width),
+            chars_with_bg(buf, added_span, 67..buf.area.width),
             "other",
             "the right column washes only the changed word with the added span tint"
         );
         assert_eq!(
-            chars_with_bg(buf, removed_span, 0..30),
+            chars_with_bg(buf, removed_span, 0..59),
             "main",
             "the left column washes only the changed base word with the removed span tint"
         );
@@ -1686,10 +1821,10 @@ mod tests {
         assert!(!underlined, "a pure added line underlines nothing");
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 37..60).contains("fn b"))
+            .find(|&y| line_text(buf, y, 67..120).contains("fn b"))
             .expect("added line rendered on the right");
         assert!(
-            (37..60).all(|x| buf[(x, row)].bg == added_line),
+            (67..120).all(|x| buf[(x, row)].bg == added_line),
             "the added line's right-column cells all carry the added line wash"
         );
     }
@@ -1703,10 +1838,10 @@ mod tests {
         let buf = h.rendered_buffer();
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 7..29).contains("old"))
+            .find(|&y| line_text(buf, y, 7..59).contains("old"))
             .expect("deleted base line rendered on the left");
         assert!(
-            (7..29).all(|x| buf[(x, row)].bg == removed_line),
+            (7..59).all(|x| buf[(x, row)].bg == removed_line),
             "the deleted base line's left-column cells all carry the removed line wash"
         );
     }
@@ -1722,10 +1857,10 @@ mod tests {
         let buf = h.rendered_buffer();
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 7..29).contains("keep"))
+            .find(|&y| line_text(buf, y, 7..59).contains("keep"))
             .expect("unchanged base line mirrored on the left");
         assert!(
-            (7..29).all(|x| buf[(x, row)].bg != removed_line && buf[(x, row)].bg != removed_span),
+            (7..59).all(|x| buf[(x, row)].bg != removed_line && buf[(x, row)].bg != removed_span),
             "an unchanged mirrored base row carries no removed wash"
         );
     }
@@ -1767,10 +1902,9 @@ mod tests {
         let moved_line = tint(&theme, sc::DIFF_MOVED, LINE_TINT);
         let moved_span = tint(&theme, sc::DIFF_MOVED, SPAN_TINT);
 
-        // "bb" sits on display row 1. The diff view's status column is one cell
-        // wider than the review session's, so the right text starts one past
-        // right_text_x.
-        let rx = right_text_x(area) + 1;
+        // At this sub-threshold width the diff is unified, so the moved buffer
+        // row "bb" paints at the single text column. It sits on display row 1.
+        let rx = right_text_x(area);
         assert_eq!(
             buf[(rx, 1)].symbol(),
             "b",
@@ -1812,7 +1946,7 @@ mod tests {
             "the staged wash must differ from the unstaged one"
         );
 
-        let rx = right_text_x(area) + 1;
+        let rx = right_text_x(area);
         let row_of = |ch: char| {
             (0..area.height)
                 .find(|&y| buf[(rx, y)].symbol().starts_with(ch))
@@ -1876,7 +2010,7 @@ mod tests {
             "the staged span wash must differ from the unstaged one"
         );
 
-        let rx = right_text_x(area) + 1;
+        let rx = right_text_x(area);
         assert_eq!(
             buf[(rx, 1)].bg,
             staged_span,

@@ -15504,11 +15504,11 @@ mod tests {
         }
         h.stoat.active_workspace_mut().editors[editor_id].set_diff_view(true);
 
-        let area = Rect::new(0, 0, 40, 10);
-        // For width 40 the right text begins at col 26, so col 28 row 0 is the
-        // right column's 2nd character of the context line "keep".
+        let area = Rect::new(0, 0, 120, 10);
+        // At width 120 the two-column right text begins at col 67, so col 69 row 0
+        // is the right column's third character of the context line "keep".
         assert_eq!(
-            h.stoat.editor_screen_to_offset(editor_id, area, 28, 0),
+            h.stoat.editor_screen_to_offset(editor_id, area, 69, 0),
             Some(2),
             "a click in the right column lands on the buffer character"
         );
