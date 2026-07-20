@@ -155,11 +155,15 @@ pub(crate) struct FrameCtx<'a> {
     /// focused buffer's path and paints a compact severity badge when
     /// any diagnostics are present.
     pub(crate) diagnostics: &'a crate::diagnostics::DiagnosticSet,
-    /// Each server's negotiated offset encoding, built per frame from the LSP
-    /// registry. The editor render path converts a diagnostic's LSP position to
-    /// a byte column through its publishing server's encoding, so a utf-16
-    /// server's undercurl paints on the right column of a multibyte line.
-    pub(crate) diagnostic_encodings: &'a HashMap<String, crate::host::OffsetEncoding>,
+    /// The LSP registry, so the editor render path can resolve each server's
+    /// negotiated offset encoding on demand.
+    ///
+    /// Diagnostic positions convert to byte columns through their publishing
+    /// server's encoding, so a utf-16 server's undercurl paints on the right
+    /// column of a multibyte line. Held as the registry rather than a prebuilt
+    /// map so the encodings are resolved only when the diagnostic span cache
+    /// rebuilds, not on every frame.
+    pub(crate) lsp_registry: &'a crate::lsp::registry::LspRegistry,
     /// Most-recently submitted in-buffer search query. When `Some`,
     /// every editor pane paints visible matches with the
     /// `ui.search.match` style so users see all hits at once.
@@ -362,8 +366,6 @@ pub(crate) fn frame(
             .to_string()
     };
 
-    let diagnostic_encodings = stoat.lsp_registry.offset_encodings();
-
     let focused_language = {
         let focused = ws.panes.pane(ws.panes.focus());
         if let View::Editor(editor_id) = &focused.view {
@@ -410,7 +412,7 @@ pub(crate) fn frame(
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_badges: &stoat.settings.mode_badges,
         diagnostics: &stoat.diagnostics,
-        diagnostic_encodings: &diagnostic_encodings,
+        lsp_registry: &stoat.lsp_registry,
         search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
         stoatty: stoat.stoatty,
         line_numbers: stoat

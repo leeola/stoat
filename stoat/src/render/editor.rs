@@ -4,6 +4,7 @@ use crate::{
     display_map::{tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
     host::OffsetEncoding,
+    lsp::registry::LspRegistry,
     minimap::color_to_rgb,
     render::{
         conflict_view::render_conflict_view,
@@ -95,11 +96,7 @@ pub(crate) fn render_editor_with_overlay(
     hover_cell: Option<(u16, u16)>,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
-    diagnostic_info: Option<(
-        &Path,
-        &crate::diagnostics::DiagnosticSet,
-        &DiagnosticEncodings,
-    )>,
+    diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet, &LspRegistry)>,
     mut scene: Option<&mut ApcScene>,
     undercurls: Option<&mut Vec<UndercurlSpan>>,
     dim: f32,
@@ -373,16 +370,9 @@ pub(crate) fn render_editor_with_overlay(
         end_row,
     );
 
-    if let Some((path, set, encodings)) = diagnostic_info {
+    if let Some((path, set, registry)) = diagnostic_info {
         let rope = buffer_snapshot.rope();
-        build_diagnostic_span_cache(
-            editor,
-            set,
-            path,
-            rope,
-            encodings,
-            buffer_snapshot.version(),
-        );
+        build_diagnostic_span_cache(editor, set, path, rope, registry, buffer_snapshot.version());
         let spans: &[ResolvedDiag] = editor
             .diagnostic_span_cache
             .as_ref()
@@ -539,15 +529,8 @@ pub(crate) fn render_editor_with_overlay(
 
     editor.cursor_screen_cell = primary_cell;
 
-    if let Some((path, set, encodings)) = diagnostic_info {
-        build_diagnostic_span_cache(
-            editor,
-            set,
-            path,
-            rope,
-            encodings,
-            buffer_snapshot.version(),
-        );
+    if let Some((path, set, registry)) = diagnostic_info {
+        build_diagnostic_span_cache(editor, set, path, rope, registry, buffer_snapshot.version());
         let spans: &[ResolvedDiag] = editor
             .diagnostic_span_cache
             .as_ref()
@@ -778,7 +761,7 @@ fn build_diagnostic_span_cache(
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
     rope: &Rope,
-    encodings: &DiagnosticEncodings,
+    registry: &LspRegistry,
     buffer_version: u64,
 ) {
     let set_version = set.version();
@@ -787,10 +770,13 @@ fn build_diagnostic_span_cache(
         None => true,
     };
     if stale {
+        // Resolve the per-server encodings only on rebuild, not every frame. The
+        // cache goes stale only when the diagnostic set or buffer version moves.
+        let encodings = registry.offset_encodings();
         editor.diagnostic_span_cache = Some(DiagnosticSpanCache {
             set_version,
             buffer_version,
-            spans: resolve_diagnostic_spans(set, path, rope, encodings),
+            spans: resolve_diagnostic_spans(set, path, rope, &encodings),
         });
     }
 }

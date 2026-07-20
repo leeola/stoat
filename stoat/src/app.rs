@@ -6519,7 +6519,6 @@ impl Stoat {
         let focus_target = ws.focus;
         let focus_id = ws.panes.focus();
 
-        let diagnostic_encodings = self.lsp_registry.offset_encodings();
         let frame = crate::render::FrameCtx {
             workspace_name: &workspace_name,
             workspace_root: &ws.git_root,
@@ -6540,7 +6539,7 @@ impl Stoat {
             goto_word_labels: None,
             mode_badges: &self.settings.mode_badges,
             diagnostics: &self.diagnostics,
-            diagnostic_encodings: &diagnostic_encodings,
+            lsp_registry: &self.lsp_registry,
             search_query: None,
             stoatty: self.stoatty,
             line_numbers: LineNumbers::Relative,
