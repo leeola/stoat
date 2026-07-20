@@ -13,6 +13,7 @@ members = [
   "log",
   "text",
   "viewport",
+  "vscode_theme",
   "tty_protocol",
   "tty_widgets",
   "tty_term",

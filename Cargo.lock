@@ -4825,6 +4825,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vscode_theme"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "snafu",
+]
+
+[[package]]
 name = "vte"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
