@@ -58,7 +58,7 @@ pub use defs::{
     file_finder::{
         FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
         FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
-        OpenFileFinderHSplit, OpenFileFinderVSplit,
+        OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
     },
     help::{
         CloseHelp, DismissKeyHints, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,

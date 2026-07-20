@@ -844,6 +844,7 @@ on key {
         n -> [NewWorkspace(), SetMode(normal)];
         c -> [CopyWorkspace(), SetMode(normal)];
         s -> SwitchWorkspace();
+        f -> OpenWorkspaceFileFinder();
         x -> [CloseWorkspace(), SetMode(normal)];
     }
     mode == space_pane_nav {

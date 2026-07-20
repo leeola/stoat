@@ -242,6 +242,55 @@ impl Action for OpenBufferPicker {
 }
 
 #[derive(Debug)]
+pub struct OpenWorkspaceFileFinderDef;
+
+impl ActionDef for OpenWorkspaceFileFinderDef {
+    fn name(&self) -> &'static str {
+        "OpenWorkspaceFileFinder"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenWorkspaceFileFinder
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "open the cross-workspace file finder"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open the file finder modal scoped across every known workspace -- the \
+         open workspaces plus the on-disk registry. Rows show each file under \
+         its owning workspace, and selecting one opens it in the current \
+         workspace. Shift-Tab flips to the All scope."
+    }
+
+    fn palette_visible(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenWorkspaceFileFinder;
+
+impl OpenWorkspaceFileFinder {
+    pub const DEF: &OpenWorkspaceFileFinderDef = &OpenWorkspaceFileFinderDef;
+}
+
+impl Action for OpenWorkspaceFileFinder {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct FileFinderSelectPrevDef;
 
 impl ActionDef for FileFinderSelectPrevDef {
@@ -512,6 +561,16 @@ mod tests {
         assert_eq!(OpenBufferPicker.kind(), ActionKind::OpenBufferPicker);
         assert_eq!(OpenBufferPicker.def().name(), "OpenBufferPicker");
         assert!(OpenBufferPicker.def().palette_visible());
+
+        assert_eq!(
+            OpenWorkspaceFileFinder.kind(),
+            ActionKind::OpenWorkspaceFileFinder
+        );
+        assert_eq!(
+            OpenWorkspaceFileFinder.def().name(),
+            "OpenWorkspaceFileFinder"
+        );
+        assert!(OpenWorkspaceFileFinder.def().palette_visible());
 
         assert_eq!(
             FileFinderSelectPrev.kind(),

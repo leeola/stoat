@@ -61,7 +61,7 @@ use crate::{
         file_finder::{
             FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
             FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
-            OpenFileFinderHSplit, OpenFileFinderVSplit,
+            OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
         },
         help::{
             CloseHelp, DismissKeyHints, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
@@ -197,6 +197,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenChangedFilePicker))
     });
     add(OpenBufferPicker::DEF, |_| Ok(Box::new(OpenBufferPicker)));
+    add(OpenWorkspaceFileFinder::DEF, |_| {
+        Ok(Box::new(OpenWorkspaceFileFinder))
+    });
     add(FileFinderSelectPrev::DEF, |_| {
         Ok(Box::new(FileFinderSelectPrev))
     });
@@ -952,6 +955,7 @@ mod tests {
         "OpenFileFinderVSplit",
         "OpenChangedFilePicker",
         "OpenBufferPicker",
+        "OpenWorkspaceFileFinder",
         "FileFinderSelectPrev",
         "FileFinderSelectNext",
         "FileFinderPageUp",
@@ -1418,7 +1422,8 @@ mod tests {
         // + 2 ConflictNextChunk, ConflictPrevChunk.
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
-        assert_eq!(all().count(), 377);
+        // + 1 OpenWorkspaceFileFinder.
+        assert_eq!(all().count(), 378);
     }
 
     #[test]

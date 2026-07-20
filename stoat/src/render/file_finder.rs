@@ -89,6 +89,7 @@ pub(crate) fn render_file_finder(
             FinderScope::Modified => " file finder (modified) ".to_string(),
             FinderScope::Buffers => " file finder (buffers) ".to_string(),
             FinderScope::Named(name) => format!(" file finder ({name}) "),
+            FinderScope::AllWorkspaces => " file finder (all workspaces) ".to_string(),
         }
     };
     Clear.render(layout.modal, buf);

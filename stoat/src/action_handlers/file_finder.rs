@@ -123,13 +123,23 @@ pub(super) fn open_file_finder(
 
     let executor = stoat.executor.clone();
     let git_root = stoat.active_workspace().git_root.clone();
-    let (walk_rx, walk_task) = spawn_workspace_walk(stoat, git_root.clone());
+
+    // The cross-workspace scope walks every known root and renders rows under
+    // their owning workspace, so it swaps the single-root walk for a coordinator
+    // over the collected roots and installs those roots as the display resolver.
+    let all_workspaces_roots =
+        (initial_scope == FinderScope::AllWorkspaces).then(|| collect_workspace_roots(stoat));
+    let (walk_rx, walk_task) = match &all_workspaces_roots {
+        Some(roots) => spawn_multi_workspace_walk(stoat, roots.clone()),
+        None => spawn_workspace_walk(stoat, git_root.clone()),
+    };
+
     let modified_paths = crate::file_finder::query_modified(&*stoat.git_host, &git_root);
     let buffer_paths = stoat.active_workspace().buffers.open_paths();
     let finder_scopes = stoat.settings.finder_scopes.clone();
 
     let ws = stoat.active_workspace_mut();
-    stoat.file_finder = Some(FileFinder::new(
+    let mut finder = FileFinder::new(
         ws,
         executor,
         open_intent,
@@ -140,7 +150,11 @@ pub(super) fn open_file_finder(
         modified_paths,
         buffer_paths,
         &finder_scopes,
-    ));
+    );
+    if let Some(roots) = all_workspaces_roots {
+        finder.core.picklist.display_roots = Some(roots);
+    }
+    stoat.file_finder = Some(finder);
     UpdateEffect::Redraw
 }
 
@@ -192,6 +206,63 @@ pub(super) fn spawn_workspace_walk(
             redraw_notify.notify_one();
             ControlFlow::Continue(())
         });
+    });
+    (walk_rx, task)
+}
+
+/// The distinct roots a cross-workspace walk covers.
+///
+/// Every open workspace's `git_root` comes first, then every persisted
+/// workspace's root from the on-disk registry, deduped by path. Empty roots (an
+/// unrooted scratch workspace) are skipped so the walk never falls back to the
+/// process working directory.
+fn collect_workspace_roots(stoat: &Stoat) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut push = |root: PathBuf, roots: &mut Vec<PathBuf>| {
+        if !root.as_os_str().is_empty() && seen.insert(root.clone()) {
+            roots.push(root);
+        }
+    };
+
+    for ws in stoat.workspaces.values() {
+        push(ws.git_root.clone(), &mut roots);
+    }
+    for entry in crate::workspace::registry::list_all(&*stoat.fs_host).unwrap_or_default() {
+        push(entry.meta.git_root, &mut roots);
+    }
+    roots
+}
+
+/// Spawn a single coordinator walk over `roots`, streaming every root's files
+/// into one channel.
+///
+/// Each root is walked in turn, and each batch pings the redraw notifier so a
+/// live picker repaints as paths arrive. Emitted paths stay absolute so the
+/// display resolver can attribute each to its owning root. The task must be held
+/// to keep the walk alive.
+fn spawn_multi_workspace_walk(
+    stoat: &Stoat,
+    roots: Vec<PathBuf>,
+) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
+    let (walk_tx, walk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let fs_host = stoat.fs_host.clone();
+    let redraw_notify = stoat.redraw_notify.clone();
+    let task = stoat.executor.spawn_blocking(move || {
+        for root in &roots {
+            let mut disconnected = false;
+            fs_host.walk_workspace_files_streaming(root, &mut |batch| {
+                if walk_tx.send(batch).is_err() {
+                    disconnected = true;
+                    return ControlFlow::Break(());
+                }
+                redraw_notify.notify_one();
+                ControlFlow::Continue(())
+            });
+            if disconnected {
+                break;
+            }
+        }
     });
     (walk_rx, task)
 }
@@ -291,8 +362,41 @@ pub(super) fn file_finder_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     let Some(finder) = stoat.file_finder.as_mut() else {
         return UpdateEffect::None;
     };
+    let was_all_workspaces = *finder.scope() == FinderScope::AllWorkspaces;
     finder.toggle_scope(&*git_host);
+    let is_all_workspaces = *finder.scope() == FinderScope::AllWorkspaces;
+
+    // AllWorkspaces sources a different (multi-root) walk than the scopes that
+    // filter one walk, so crossing its boundary re-roots the core walk and
+    // toggles the display resolver.
+    if is_all_workspaces && !was_all_workspaces {
+        enter_all_workspaces(stoat);
+    } else if was_all_workspaces && !is_all_workspaces {
+        leave_all_workspaces(stoat);
+    }
     UpdateEffect::Redraw
+}
+
+/// Re-root the finder's core walk to the cross-workspace coordinator and install
+/// the collected roots as the display resolver.
+fn enter_all_workspaces(stoat: &mut Stoat) {
+    let roots = collect_workspace_roots(stoat);
+    let (walk_rx, walk_task) = spawn_multi_workspace_walk(stoat, roots.clone());
+    if let Some(finder) = stoat.file_finder.as_mut() {
+        finder.core.reset_walk(walk_rx, walk_task);
+        finder.core.picklist.display_roots = Some(roots);
+    }
+}
+
+/// Re-root the finder's core walk back to the active workspace and drop the
+/// cross-workspace display resolver.
+fn leave_all_workspaces(stoat: &mut Stoat) {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let (walk_rx, walk_task) = spawn_workspace_walk(stoat, git_root);
+    if let Some(finder) = stoat.file_finder.as_mut() {
+        finder.core.reset_walk(walk_rx, walk_task);
+        finder.core.picklist.display_roots = None;
+    }
 }
 
 fn dispatch_open_file(stoat: &mut Stoat, path: PathBuf) -> UpdateEffect {

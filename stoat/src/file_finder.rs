@@ -36,6 +36,12 @@ pub enum FinderScope {
     /// cycles through these alphabetically after Modified, and the list shows
     /// only files matching the scope's globs.
     Named(String),
+    /// Every file under every known workspace root -- the open workspaces plus
+    /// the on-disk registry -- merged into one list. Reached at the end of the
+    /// Shift-Tab cycle or via the dedicated `OpenWorkspaceFileFinder` action.
+    /// Rows carry the owning workspace's basename so same-named files stay
+    /// distinguishable, and selecting one opens it in the current workspace.
+    AllWorkspaces,
 }
 
 impl FinderScope {
@@ -49,6 +55,7 @@ impl FinderScope {
             FinderScope::All => Some("all".to_string()),
             FinderScope::Modified => Some("modified".to_string()),
             FinderScope::Named(name) => Some(name.clone()),
+            FinderScope::AllWorkspaces => Some("allworkspaces".to_string()),
             FinderScope::Buffers => None,
         }
     }
@@ -67,6 +74,7 @@ impl FinderScope {
         match name {
             "all" => Some(FinderScope::All),
             "modified" => Some(FinderScope::Modified),
+            "allworkspaces" => Some(FinderScope::AllWorkspaces),
             other if named.contains_key(other) => Some(FinderScope::Named(other.to_string())),
             _ => None,
         }
@@ -221,7 +229,8 @@ impl FileFinder {
     }
 
     /// The scope Shift-Tab lands on next: All -> Modified -> each named scope
-    /// (alphabetical) -> All, with Buffers exiting straight to All.
+    /// (alphabetical) -> AllWorkspaces -> All, with Buffers exiting straight to
+    /// All.
     fn next_scope(&self) -> FinderScope {
         match &self.scope {
             FinderScope::All => FinderScope::Modified,
@@ -229,14 +238,15 @@ impl FileFinder {
                 .named_scopes
                 .first()
                 .map(|(name, _)| FinderScope::Named(name.clone()))
-                .unwrap_or(FinderScope::All),
+                .unwrap_or(FinderScope::AllWorkspaces),
             FinderScope::Named(current) => self
                 .named_scopes
                 .iter()
                 .position(|(name, _)| name == current)
                 .and_then(|idx| self.named_scopes.get(idx + 1))
                 .map(|(name, _)| FinderScope::Named(name.clone()))
-                .unwrap_or(FinderScope::All),
+                .unwrap_or(FinderScope::AllWorkspaces),
+            FinderScope::AllWorkspaces => FinderScope::All,
             FinderScope::Buffers => FinderScope::All,
         }
     }
@@ -258,7 +268,7 @@ impl FileFinder {
         let pumped = self.core.pump_walk();
         let text = self.input.text(ws);
         match self.scope.clone() {
-            FinderScope::All => self.core.refilter(&text),
+            FinderScope::All | FinderScope::AllWorkspaces => self.core.refilter(&text),
             FinderScope::Modified => self.core.refilter_with_base(&text, &self.modified_paths),
             FinderScope::Buffers => self.core.refilter_with_base(&text, &self.buffer_paths),
             FinderScope::Named(name) => {
@@ -794,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn backtab_from_changed_file_picker_toggles_back_to_all() {
+    fn backtab_from_changed_file_picker_enters_all_workspaces() {
         let mut h = crate::Stoat::test();
         let root = seed_finder_workspace(
             &mut h,
@@ -809,9 +819,19 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenChangedFilePicker);
         h.type_keys("backtab");
+        h.settle();
+        let _ = h.snapshot();
         let finder = h.stoat.file_finder.as_ref().unwrap();
-        assert_eq!(finder.scope(), &FinderScope::All);
-        assert_eq!(finder.core.picklist.base.len(), 3);
+        assert_eq!(
+            finder.scope(),
+            &FinderScope::AllWorkspaces,
+            "with no named scopes, Modified backtabs into AllWorkspaces",
+        );
+        assert_eq!(
+            finder.core.picklist.base.len(),
+            3,
+            "AllWorkspaces lists the sole workspace's files",
+        );
     }
 
     #[test]
@@ -883,8 +903,15 @@ mod tests {
         h.type_keys("backtab");
         assert_eq!(
             h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::AllWorkspaces,
+            "backtab past the last named scope lands on AllWorkspaces"
+        );
+
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
             &FinderScope::All,
-            "backtab past the last named scope wraps to All"
+            "backtab past AllWorkspaces wraps to All"
         );
     }
 
@@ -907,6 +934,106 @@ mod tests {
         let base: Vec<PathBuf> = finder.core.picklist.base.to_vec();
         assert_eq!(base.len(), 1, "code scope should list only src/a.rs");
         assert!(base[0].ends_with("src/a.rs"));
+    }
+
+    /// Displayed rows of the finder's current filtered list, through the same
+    /// resolver the renderer uses.
+    fn finder_rows(h: &TestHarness) -> Vec<String> {
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        let list = &finder.core.picklist;
+        let mut rows: Vec<String> = list
+            .filtered
+            .iter()
+            .map(|&i| {
+                crate::picker::row_display(
+                    &list.base[i],
+                    &finder.core.git_root,
+                    list.display_roots.as_deref(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn workspace_finder_merges_roots_with_the_owning_root_prefix() {
+        let mut h = crate::Stoat::test();
+        let root_a = PathBuf::from("/ws-a");
+        let root_b = PathBuf::from("/ws-b");
+        h.fake_fs().insert_files([
+            (root_a.join("alpha.rs"), b"a".as_slice()),
+            (root_b.join("beta.rs"), b"b".as_slice()),
+        ]);
+        h.stoat.active_workspace_mut().git_root = root_a.clone();
+        let second = h.create_workspace();
+        h.stoat.workspaces[second].git_root = root_b.clone();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceFileFinder);
+        h.settle();
+        let _ = h.snapshot();
+
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::AllWorkspaces
+        );
+        assert_eq!(
+            finder_rows(&h),
+            vec!["ws-a/alpha.rs".to_string(), "ws-b/beta.rs".to_string()],
+            "both roots merge and rows carry the owning workspace basename"
+        );
+    }
+
+    #[test]
+    fn workspace_leader_binding_opens_the_cross_workspace_finder() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", "")]);
+        h.type_action("OpenWorkspaceFileFinder()");
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(finder.scope(), &FinderScope::AllWorkspaces);
+        assert_eq!(h.snapshot().mode, "insert");
+    }
+
+    #[test]
+    fn backtab_cycle_reaches_all_workspaces() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", "")]);
+
+        h.type_keys("space p");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::All
+        );
+
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.file_finder.as_ref().unwrap().scope(),
+            &FinderScope::Modified
+        );
+
+        h.type_keys("backtab");
+        let finder = h.stoat.file_finder.as_ref().unwrap();
+        assert_eq!(
+            finder.scope(),
+            &FinderScope::AllWorkspaces,
+            "with no named scopes, backtab past Modified lands on AllWorkspaces"
+        );
+        assert!(
+            finder.core.picklist.display_roots.is_some(),
+            "entering AllWorkspaces installs the cross-workspace display resolver"
+        );
+
+        h.type_keys("backtab");
+        let finder = h.stoat.file_finder.as_ref().unwrap();
+        assert_eq!(
+            finder.scope(),
+            &FinderScope::All,
+            "backtab past AllWorkspaces wraps to All"
+        );
+        assert!(
+            finder.core.picklist.display_roots.is_none(),
+            "leaving AllWorkspaces drops the display resolver"
+        );
     }
 
     #[test]

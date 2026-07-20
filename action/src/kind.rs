@@ -34,6 +34,7 @@ pub enum ActionKind {
     OpenFileFinderVSplit,
     OpenChangedFilePicker,
     OpenBufferPicker,
+    OpenWorkspaceFileFinder,
     FileFinderSelectPrev,
     FileFinderSelectNext,
     FileFinderPageUp,

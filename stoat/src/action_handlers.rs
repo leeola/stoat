@@ -214,6 +214,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             crate::file_finder::OpenIntent::Replace,
             Some(crate::file_finder::FinderScope::Buffers),
         ),
+        ActionKind::OpenWorkspaceFileFinder => file_finder::open_file_finder(
+            stoat,
+            crate::file_finder::OpenIntent::Replace,
+            Some(crate::file_finder::FinderScope::AllWorkspaces),
+        ),
         ActionKind::FileFinderSelectPrev => file_finder_move_selection(stoat, -1),
         ActionKind::FileFinderSelectNext => file_finder_move_selection(stoat, 1),
         ActionKind::FileFinderPageUp => file_finder::file_finder_page(stoat, -1),
@@ -946,6 +951,7 @@ fn is_picker_open_kind(kind: ActionKind) -> bool {
             | ActionKind::OpenFileFinderVSplit
             | ActionKind::OpenBufferPicker
             | ActionKind::OpenChangedFilePicker
+            | ActionKind::OpenWorkspaceFileFinder
             | ActionKind::OpenCommandPalette
             | ActionKind::OpenJumplistPicker
             | ActionKind::OpenGlobalSearch
