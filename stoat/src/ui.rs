@@ -11,7 +11,7 @@ use crossterm::{
     terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use futures::StreamExt;
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
 use std::{
     backtrace::Backtrace,
     io::{self, Write},
@@ -135,10 +135,6 @@ async fn run(
 
     let mut events = EventStream::new();
 
-    // Reused so a redraw copies into this buffer's allocation instead of
-    // cloning a fresh one out of the watch each frame.
-    let mut frame = Buffer::empty(Rect::new(0, 0, size.width, size.height));
-
     // UI-thread-local input-to-flush latency, logged periodically. The main
     // thread keeps its own PerfStats, so this needs no cross-thread channel.
     #[cfg(feature = "perf")]
@@ -169,39 +165,43 @@ async fn run(
                 // flushed, so ratatui's draw flush carries it ahead of the cell
                 // diff in the same write.
                 queue!(io::stdout(), BeginSynchronizedUpdate)?;
-                // Copy the latest frame into `frame` and drop the watch borrow
-                // before drawing, so the slow terminal flush never holds the
-                // lock the render thread needs to publish the next frame.
+                // Clone the latest frame's Arc out of the watch and drop the
+                // borrow before drawing, so the slow terminal flush never holds
+                // the lock the render thread needs to publish the next frame.
+                // Cloning the Arc is a refcount bump, not a grid copy.
                 #[cfg(feature = "perf")]
                 let mut input_time = None;
-                let (cursor, undercurl) = {
+                let framed = {
                     let latest = render_rx.borrow_and_update();
-                    match latest.as_ref() {
-                        Some(src) => {
-                            frame.resize(src.buffer.area);
-                            frame.content.clone_from(&src.buffer.content);
-                            #[cfg(feature = "perf")]
-                            {
-                                input_time = src.input_time;
-                            }
-                            (Some(src.cursor), src.undercurl.clone())
-                        },
-                        None => (None, Vec::new()),
-                    }
+                    latest.as_ref().map(|src| {
+                        #[cfg(feature = "perf")]
+                        {
+                            input_time = src.input_time;
+                        }
+                        (src.buffer.clone(), src.cursor, src.undercurl.clone())
+                    })
                 };
-                if let Some(cursor) = cursor {
-                    terminal.draw(|f| {
-                        let dst = f.buffer_mut();
-                        if dst.area == frame.area {
-                            dst.content.clone_from(&frame.content);
-                        } else {
-                            copy_clamped(dst, &frame);
-                        }
-                        if let Some((col, row)) = cursor {
-                            f.set_cursor_position((col, row));
-                        }
-                    })?;
-                }
+                let undercurl = match framed {
+                    Some((buffer, cursor, undercurl)) => {
+                        terminal.draw(|f| {
+                            let dst = f.buffer_mut();
+                            if dst.area == buffer.area {
+                                dst.content.clone_from(&buffer.content);
+                            } else {
+                                copy_clamped(dst, &buffer);
+                            }
+                            if let Some((col, row)) = cursor {
+                                f.set_cursor_position((col, row));
+                            }
+                        })?;
+                        // Drop the Arc before draining APC so the main thread's
+                        // recycle can reclaim this buffer's allocation via
+                        // Arc::try_unwrap instead of falling back to a fresh one.
+                        drop(buffer);
+                        undercurl
+                    },
+                    None => Vec::new(),
+                };
                 // Re-stamp diagnostic curly underlines over the grid just drawn,
                 // before the APC batches composite over the same stdout.
                 if !undercurl.is_empty() {
