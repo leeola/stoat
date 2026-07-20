@@ -315,6 +315,7 @@ pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool) {
         starts.into_iter().rev().find(|&start| start < cursor)
     };
     let Some(offset) = target else {
+        stoat.set_status("no more conflicts");
         return;
     };
 

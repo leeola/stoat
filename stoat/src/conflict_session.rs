@@ -388,6 +388,11 @@ mod tests {
 
         pick(&mut h, &ConflictNextChunk);
         assert_eq!(cursor_row(&mut h), 7, "n at the last chunk does not wrap");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no more conflicts"),
+            "hitting the end reports it"
+        );
 
         pick(&mut h, &ConflictPrevChunk);
         assert_eq!(cursor_row(&mut h), 1, "p steps back to the first chunk");
