@@ -4115,6 +4115,7 @@ dependencies = [
  "etcetera",
  "libc",
  "portable-pty",
+ "rustc-hash 2.1.2",
  "serde",
  "snafu",
  "stoat_cli",

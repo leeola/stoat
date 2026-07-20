@@ -378,6 +378,9 @@ pub struct PoolView {
     /// rides while this pool glides, so the renderer draws it at the eased
     /// content offset instead of the VT cursor cell.
     pub cursor_anchor: Option<(u64, u16)>,
+    /// Bumped whenever the pooled page bytes change, so a renderer can tell a
+    /// pure sub-cell glide from a frame whose composed content actually changed.
+    pub content_version: u64,
 }
 
 /// One smooth-scroll surface the document pool tracks.
@@ -1160,11 +1163,22 @@ impl Terminal {
     /// A window-bound pool is kept out of the primary composite and drawn into
     /// its own window from this list instead.
     pub fn window_pools(&self, window: u32) -> Vec<PoolView> {
-        self.pools
-            .values()
-            .filter(|pool| pool.region.window == window)
-            .map(Self::pool_view)
-            .collect()
+        let mut out = Vec::new();
+        self.window_pools_into(window, &mut out);
+        out
+    }
+
+    /// Snapshot every pool bound to aux `window` into `out`, clearing it first so
+    /// a reused buffer holds only the current pools. See [`Self::window_pools`]
+    /// for the ordering and contents.
+    pub fn window_pools_into(&self, window: u32, out: &mut Vec<PoolView>) {
+        out.clear();
+        out.extend(
+            self.pools
+                .values()
+                .filter(|pool| pool.region.window == window)
+                .map(Self::pool_view),
+        );
     }
 
     fn pool_view(pool: &Pool) -> PoolView {
@@ -1173,6 +1187,7 @@ impl Terminal {
             region: pool.region,
             scroll_target: pool.scroll_target,
             cursor_anchor: pool.cursor_anchor,
+            content_version: pool.content_version,
         }
     }
 

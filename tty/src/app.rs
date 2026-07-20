@@ -14,10 +14,12 @@ use crate::{
     stoat_bin,
 };
 use alacritty_terminal::sync::FairMutex;
+use rustc_hash::FxHasher;
 #[cfg(unix)]
 use std::process::Command;
 use std::{
     collections::BTreeMap,
+    hash::{Hash, Hasher},
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -352,6 +354,14 @@ struct AuxWindow {
     /// Wall-clock of the previous redraw, driving this window's own ease step.
     /// Aux windows redraw independently, so each keeps its own frame clock.
     last_redraw: Option<Instant>,
+    /// Hash of the inputs the last base compose read (each pool's content, target,
+    /// and region, plus the window size). A redraw whose inputs hash the same
+    /// skips the recompose and reuses last frame's instances. The sub-cell glide
+    /// overlay still animates. `None` forces the first frame to compose.
+    last_compose: Option<u64>,
+    /// Reused buffer for the window's pool snapshots, so a redraw allocates no
+    /// fresh Vec to gather them.
+    pool_scratch: Vec<PoolView>,
 }
 
 /// The renderer-construction inputs an aux window needs, read from [`App`]
@@ -2327,6 +2337,8 @@ fn open_aux_window(
         wheel_pixels: 0.0,
         pool_anims: BTreeMap::new(),
         last_redraw: None,
+        last_compose: None,
+        pool_scratch: Vec::new(),
     });
 
     let size = window.inner_size();
@@ -2393,20 +2405,32 @@ fn redraw_aux(
 
     let mut easing = false;
     let mut active: Vec<ActivePool> = Vec::new();
+    let mut recomposed = false;
     {
         let mut terminal = terminal.lock();
-        compose_aux_grid(
-            &terminal,
-            aux.id,
-            &mut aux.grid,
-            &mut aux.scratch,
-            rows,
-            cols,
-        );
+        let mut pools = mem::take(&mut aux.pool_scratch);
+        terminal.window_pools_into(aux.id, &mut pools);
+
+        // The base compose reads only each pool's content, scroll target, and
+        // region plus the window size, so recompose it only when their hash
+        // moves. A pure sub-cell glide leaves the base untouched and rides the
+        // overlay below.
+        let compose_hash = aux_compose_hash(&pools, rows, cols);
+        if aux.last_compose != Some(compose_hash) {
+            aux.last_compose = Some(compose_hash);
+            recomposed = true;
+            compose_aux_grid(
+                &terminal,
+                &pools,
+                &mut aux.grid,
+                &mut aux.scratch,
+                rows,
+                cols,
+            );
+        }
 
         // Step each window pool's ease and collect the ones still gliding, in
         // ascending-id z-order, dropping anim state for pools the app retired.
-        let pools = terminal.window_pools(aux.id);
         aux.pool_anims
             .retain(|id, _| pools.iter().any(|pool| pool.id == *id));
         for pool in &pools {
@@ -2424,6 +2448,8 @@ fn redraw_aux(
                 },
             }
         }
+
+        aux.pool_scratch = pools;
     }
 
     // Copy each gliding pool's composed rows over the base, then composite them
@@ -2454,7 +2480,13 @@ fn redraw_aux(
         })
         .collect::<Vec<_>>();
 
-    let damage = Damage::Full;
+    // A recomposed base rebuilds every instance. A skipped one reuses last
+    // frame's, so empty partial damage leaves them untouched.
+    let damage = if recomposed {
+        Damage::Full
+    } else {
+        Damage::Partial(Vec::new())
+    };
     let heal = gpu.render_with_pools(
         &aux.grid,
         Frame {
@@ -2476,9 +2508,30 @@ fn redraw_aux(
     easing || heal
 }
 
-/// Compose every pool bound to aux `window` into `grid`, sized to `rows` x
-/// `cols`, each pool's cells and decorations placed at its window-relative
-/// region.
+/// Hash the inputs [`compose_aux_grid`] reads, so [`redraw_aux`] can skip the
+/// recompose when nothing they cover moved.
+///
+/// Covers the window size and, per pool in z-order, its id, content version,
+/// scroll target, and region rectangle. The sub-cell glide fraction is not
+/// covered, since it rides the overlay rather than the base.
+fn aux_compose_hash(pools: &[PoolView], rows: usize, cols: usize) -> u64 {
+    let mut hasher = FxHasher::default();
+    rows.hash(&mut hasher);
+    cols.hash(&mut hasher);
+    for pool in pools {
+        pool.id.hash(&mut hasher);
+        pool.content_version.hash(&mut hasher);
+        pool.scroll_target.pages().to_bits().hash(&mut hasher);
+        pool.region.top.hash(&mut hasher);
+        pool.region.left.hash(&mut hasher);
+        pool.region.width.hash(&mut hasher);
+        pool.region.height.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Compose every pool in `pools` into `grid`, sized to `rows` x `cols`, each
+/// pool's cells and decorations placed at its window-relative region.
 ///
 /// `grid` is blanked first, so a cell no pool covers shows the window
 /// background, and `scratch` is reused to project each pool before its rows are
@@ -2488,7 +2541,7 @@ fn redraw_aux(
 /// own rows are copied and the straddle row `project_pool` composes is dropped.
 fn compose_aux_grid(
     terminal: &Terminal,
-    window: u32,
+    pools: &[PoolView],
     grid: &mut Grid,
     scratch: &mut Grid,
     rows: usize,
@@ -2502,7 +2555,7 @@ fn compose_aux_grid(
 
     let mut text_runs = Vec::new();
     let mut bars = Vec::new();
-    for pool in terminal.window_pools(window) {
+    for pool in pools {
         if terminal
             .project_pool(pool.id, scratch, pool.scroll_target.pages())
             .is_none()
