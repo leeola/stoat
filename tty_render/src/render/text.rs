@@ -325,6 +325,9 @@ pub struct TextPass {
     /// a VT cell attribute, so VT damage tracks it; scroll rides the globals
     /// uniform, so this survives a scroll-only frame.
     underline_row_instances: Vec<Vec<UnderlineInstance>>,
+    /// The row indices rebuilt this frame, reused across frames so
+    /// `rasterize_visible` allocates no per-frame temporary.
+    rebuilt_scratch: Vec<usize>,
     /// Scratch reused each frame to flatten the row instances into a contiguous
     /// upload slice, so `patch_plain_rows` allocates no per-frame temporary.
     plain_upload_scratch: Vec<TextInstance>,
@@ -637,6 +640,7 @@ impl TextPass {
             glyph_row_cache: Vec::new(),
             plain_row_instances: Vec::new(),
             underline_row_instances: Vec::new(),
+            rebuilt_scratch: Vec::new(),
             plain_upload_scratch: Vec::new(),
             underline_upload_scratch: Vec::new(),
             plain_pending_scratch: Vec::new(),
@@ -916,6 +920,8 @@ impl TextPass {
             self.grid_atlas_epoch = self.atlas.content_epoch();
         }
 
+        self.rebuilt_scratch = rebuilt;
+
         self.region_scissor = region.and_then(|region| {
             cell_rect_scissor(
                 region.top,
@@ -1102,8 +1108,9 @@ impl TextPass {
 
         let metrics = self.metrics;
         self.underline_upload_scratch.clear();
-        self.underline_upload_scratch
-            .extend((0..grid.rows()).flat_map(|row| build_underline_row(grid, row, metrics)));
+        for row in 0..grid.rows() {
+            build_underline_row_into(grid, row, metrics, &mut self.underline_upload_scratch);
+        }
         self.composite_underline_count = self.underline_upload_scratch.len() as u32;
         if !self.underline_upload_scratch.is_empty() {
             if self.underline_upload_scratch.len() > self.composite_underline_capacity {
@@ -1452,7 +1459,10 @@ impl TextPass {
         let mut first = None;
         for row in 0..rows {
             if build_all || damage.is_dirty(row) {
-                self.underline_row_instances[row] = build_underline_row(grid, row, self.metrics);
+                let mut instances = mem::take(&mut self.underline_row_instances[row]);
+                instances.clear();
+                build_underline_row_into(grid, row, self.metrics, &mut instances);
+                self.underline_row_instances[row] = instances;
                 first.get_or_insert(row);
             }
         }
@@ -1793,7 +1803,8 @@ impl TextPass {
             covers: &covers,
             cursor_cell,
         };
-        let mut rebuilt = Vec::new();
+        let mut rebuilt = mem::take(&mut self.rebuilt_scratch);
+        rebuilt.clear();
         for row in 0..rows {
             let cursor_touched =
                 cursor_moved && (left_row == Some(row) || entered_row == Some(row));
@@ -1898,7 +1909,9 @@ impl TextPass {
     /// the glyph cache intact for the next frame.
     fn rebuild_plain_row(&mut self, device: &Device, queue: &Queue, row: usize) {
         let glyphs = mem::take(&mut self.glyph_row_cache[row]);
-        self.plain_row_instances[row] = self.build_text_instances(device, queue, &glyphs);
+        let mut instances = mem::take(&mut self.plain_row_instances[row]);
+        self.build_text_instances_into(device, queue, &glyphs, &mut instances);
+        self.plain_row_instances[row] = instances;
         self.glyph_row_cache[row] = glyphs;
     }
 
@@ -2927,18 +2940,34 @@ fn cell_rect_scissor(
 }
 
 /// One underline instance per underlined cell in `row`, in column order.
+#[cfg(test)]
 fn build_underline_row(grid: &Grid, row: usize, metrics: CellMetrics) -> Vec<UnderlineInstance> {
-    (0..grid.cols())
-        .filter_map(|col| {
-            let cell = grid.get(row, col);
-            let style = underline_style_flag(cell.underline)?;
-            Some(UnderlineInstance {
-                cell_pos: [col as f32 * metrics.width, row as f32 * metrics.height],
-                color: rgb_f32(cell.underline_color),
-                style,
-            })
-        })
-        .collect()
+    let mut out = Vec::new();
+    build_underline_row_into(grid, row, metrics, &mut out);
+    out
+}
+
+/// Append one underline instance per underlined cell in `row` to `out`, in
+/// column order. `out` is not cleared, so a caller reusing one buffer across
+/// rows accumulates them and a single-row caller clears first.
+fn build_underline_row_into(
+    grid: &Grid,
+    row: usize,
+    metrics: CellMetrics,
+    out: &mut Vec<UnderlineInstance>,
+) {
+    for col in 0..grid.cols() {
+        let cell = grid.get(row, col);
+        let Some(style) = underline_style_flag(cell.underline) else {
+            continue;
+        };
+
+        out.push(UnderlineInstance {
+            cell_pos: [col as f32 * metrics.width, row as f32 * metrics.height],
+            color: rgb_f32(cell.underline_color),
+            style,
+        });
+    }
 }
 
 /// The shader style constant for `style`, or `None` for an un-underlined cell.
