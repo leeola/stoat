@@ -44,7 +44,7 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{atomic::AtomicBool, Arc},
 };
 use stoat_action::{Conflict, Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock, WrapMode};
@@ -649,6 +649,11 @@ pub struct Stoat {
     /// [`crate::action_handlers::file::pump_auto_reload`] clears this field to
     /// disarm the poll once no buffer wants following.
     pub(crate) auto_reload_poll: Option<stoat_scheduler::Task<()>>,
+    /// Set true by the auto-reload poll timer on each tick and cleared by
+    /// [`crate::action_handlers::file::pump_auto_reload`] when it consumes one,
+    /// so the pump's per-buffer fs stats run at the poll cadence rather than
+    /// every frame [`Self::drive_background`] runs.
+    pub(crate) auto_reload_tick: Arc<AtomicBool>,
     /// LSP-protocol document version per buffer. Starts at 0 from
     /// `did_open` and increments at `did_change` spawn time. Gaps
     /// (e.g. the prior task was cancelled before fire) are allowed
@@ -1348,6 +1353,7 @@ impl Stoat {
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
             auto_reload_poll: None,
+            auto_reload_tick: Arc::new(AtomicBool::new(false)),
             lsp_doc_versions: std::collections::HashMap::new(),
             lsp_last_delivered_text: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
