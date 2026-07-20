@@ -50,10 +50,6 @@ pub enum BadgeSource {
     /// One-shot version notice raised by `ShowVersion`, living in the
     /// app-level tray until the next key press dismisses it.
     Version,
-    /// Progress of the background diff-cache warm pass. A real review scan
-    /// uses [`BadgeSource::Review`] instead, so a warm and a scan never
-    /// collide on one badge.
-    DiffWarm,
     /// A large file reading on the blocking pool before it opens. Dropped once
     /// every pending open installs.
     FileOpen,

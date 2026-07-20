@@ -727,9 +727,9 @@ pub struct Stoat {
     diff_warm_file_tx: Sender<PathBuf>,
     diff_warm_file_rx: Receiver<PathBuf>,
     /// In-flight single-file diff warms. Held so their tasks are not dropped
-    /// (which would cancel them) and so the DiffWarm badge stays up until every
-    /// one finishes; [`crate::diff_warm::install_finished`] drops the completed
-    /// ones.
+    /// (which would cancel them) and so the status bar's diff segment stays up
+    /// until every one finishes. [`crate::diff_warm::install_finished`] drops the
+    /// completed ones.
     pub(crate) diff_warm_files: Vec<crate::diff_warm::PendingFileWarm>,
     /// Large files reading on the blocking pool, awaiting install by
     /// [`crate::action_handlers::file::install_pending_opens`] in
@@ -1961,7 +1961,7 @@ impl Stoat {
             let animating = self.is_animating();
             let building = self.minimap_build_pending;
             let dirty = self.pty_dirty;
-            let spinning = self.lsp_progress.current().is_some();
+            let spinning = self.lsp_progress.current().is_some() || self.diff_warm_busy();
             if !animating && !spinning {
                 last_tick = None;
             }
@@ -2161,7 +2161,7 @@ impl Stoat {
             UpdateEffect::None
         };
 
-        let effect = if self.lsp_progress.current().is_some() {
+        let effect = if self.lsp_progress.current().is_some() || self.diff_warm_busy() {
             let before = spinner_phase(self.spinner_clock);
             self.spinner_clock += dt;
             if spinner_phase(self.spinner_clock) == before {
@@ -3140,6 +3140,13 @@ impl Stoat {
             }
         }
         progressed
+    }
+
+    /// Whether any background diff warm is in flight, driving the status bar's
+    /// transient diff spinner segment and keeping the frame clock ticking so it
+    /// animates.
+    pub(crate) fn diff_warm_busy(&self) -> bool {
+        self.pending_diff_warm.is_some() || !self.diff_warm_files.is_empty()
     }
 
     /// Drain the diff-warm debounce channel, spawning a single-file warm for
@@ -6549,6 +6556,7 @@ impl Stoat {
             lsp_progress_entries: &[],
             spinner_phase: 0,
             lsp_servers: &[],
+            diff_warm_busy: false,
             lsp_pending,
             lsp_message: self
                 .lsp_message

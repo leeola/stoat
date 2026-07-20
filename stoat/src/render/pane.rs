@@ -684,6 +684,15 @@ fn status_segments(
                 area.height,
             ));
         }
+        if frame.diff_warm_busy {
+            let text = format!(" {} diff ", SPINNER_FRAMES[frame.spinner_phase as usize]);
+            let width = text.chars().count() as u16;
+            let start = right_anchor.saturating_sub(width);
+            if start >= cursor {
+                right.push((text, base_style));
+                right_anchor = start;
+            }
+        }
         if let Some(count) = frame.pending_count {
             let text = format!(" {count} ");
             let width = text.chars().count() as u16;
@@ -1130,6 +1139,34 @@ mod tests {
         assert!(
             bar.contains("RA"),
             "busy badge keeps the short name:\n{bar}"
+        );
+    }
+
+    #[test]
+    fn diff_warm_shows_spinner_segment_while_busy() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "b\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        crate::diff_warm::ensure_diff_warm(&mut h.stoat);
+
+        let buf = h.stoat.render();
+        let bar = bar_row(&buf);
+        assert!(
+            bar.contains("diff"),
+            "a pending warm shows the diff segment:\n{bar}"
+        );
+        assert!(
+            bar.contains('⠋'),
+            "the diff segment shows the spinner glyph:\n{bar}"
+        );
+
+        h.settle();
+        crate::diff_warm::install_finished(&mut h.stoat);
+        let buf = h.stoat.render();
+        let bar = bar_row(&buf);
+        assert!(
+            !bar.contains("diff"),
+            "the segment clears once the warm finishes:\n{bar}"
         );
     }
 

@@ -7,15 +7,15 @@
 //! once per workspace on a blocking thread, writing move-aware hunks into the
 //! cache, so the first `Diff` streams entirely from cache.
 //!
-//! A [`crate::badge::BadgeSource::DiffWarm`] badge shows while the pass runs.
-//! Opening review mid-warm cancels it (see
+//! The focused pane's status bar shows a diff spinner segment while the pass
+//! runs, gated by [`crate::app::Stoat::diff_warm_busy`]. Opening review
+//! mid-warm cancels it (see
 //! [`crate::action_handlers::review::open_review`]) so the two never diff the
 //! same tree twice.
 
 use crate::{
     action_handlers::review,
     app::Stoat,
-    badge::{Anchor, Badge, BadgeSource, BadgeState},
     diff,
     diff_cache::DiffCache,
     host::{FsHost, GitHost},
@@ -35,8 +35,8 @@ use stoat_scheduler::Task;
 /// An in-flight background warm pass.
 ///
 /// The task writes straight into the shared cache and flips `done` when it
-/// finishes; [`install_finished`] drains the badge on the next background pump.
-/// There is no result to install, unlike [`crate::project_env`].
+/// finishes. [`install_finished`] clears it on the next background pump. There
+/// is no result to install, unlike [`crate::project_env`].
 pub(crate) struct PendingDiffWarm {
     _task: Task<()>,
     cancel: Arc<AtomicBool>,
@@ -54,7 +54,7 @@ impl PendingDiffWarm {
 ///
 /// Held in [`Stoat::diff_warm_files`] so the task is not dropped (which would
 /// cancel it) before it writes to the cache. It flips `done` when finished, and
-/// [`install_finished`] drops the completed ones and drives the shared badge.
+/// [`install_finished`] drops the completed ones.
 pub(crate) struct PendingFileWarm {
     _task: Task<()>,
     done: Arc<AtomicBool>,
@@ -105,16 +105,6 @@ pub(crate) fn ensure_diff_warm(stoat: &mut Stoat) {
         cancel,
         done,
     });
-
-    let ws = stoat.active_workspace_mut();
-    ws.badges.remove_by_source(BadgeSource::DiffWarm);
-    ws.badges.insert(Badge {
-        source: BadgeSource::DiffWarm,
-        anchor: Anchor::BottomRight,
-        state: BadgeState::Active,
-        label: "computing diff".to_string(),
-        detail: None,
-    });
 }
 
 /// Spawn a single-file diff warm for `path`, recomputing its HEAD-vs-worktree
@@ -122,8 +112,8 @@ pub(crate) fn ensure_diff_warm(stoat: &mut Stoat) {
 ///
 /// The move-unaware entry gives an instant open, and the whole-changeset
 /// Complete pass on the next review open upgrades it (see the `move_aware` flag
-/// on [`crate::diff_cache::DiffCache`]). Posts the DiffWarm badge, which
-/// [`install_finished`] drops once every warm finishes. Called from
+/// on [`crate::diff_cache::DiffCache`]). The status bar shows a diff spinner
+/// segment until [`install_finished`] clears every warm. Called from
 /// [`Stoat::drain_pending_diff_warm_files`] after the per-path debounce fires.
 pub(crate) fn spawn_file_warm(stoat: &mut Stoat, path: PathBuf) {
     let git_root = stoat.active_workspace().git_root.clone();
@@ -145,24 +135,14 @@ pub(crate) fn spawn_file_warm(stoat: &mut Stoat, path: PathBuf) {
     stoat
         .diff_warm_files
         .push(PendingFileWarm { _task: task, done });
-
-    let ws = stoat.active_workspace_mut();
-    ws.badges.remove_by_source(BadgeSource::DiffWarm);
-    ws.badges.insert(Badge {
-        source: BadgeSource::DiffWarm,
-        anchor: Anchor::BottomRight,
-        state: BadgeState::Active,
-        label: "computing diff".to_string(),
-        detail: None,
-    });
 }
 
-/// Clear finished warms and drop the DiffWarm badge once none remain.
+/// Clear finished warms, so [`Stoat::diff_warm_busy`] falls once none remain.
 ///
 /// Called from [`Stoat::drive_background`]. Clears the full warm when its task
-/// finishes and drops every completed single-file warm, then removes the shared
-/// badge only when neither a full warm nor any file warm is still in flight.
-/// No completion badge is shown on success.
+/// finishes and drops every completed single-file warm. The status bar's diff
+/// segment then hides on the next frame once neither a full warm nor any file
+/// warm is still in flight.
 pub(crate) fn install_finished(stoat: &mut Stoat) {
     if stoat
         .pending_diff_warm
@@ -174,13 +154,6 @@ pub(crate) fn install_finished(stoat: &mut Stoat) {
     stoat
         .diff_warm_files
         .retain(|w| !w.done.load(Ordering::Relaxed));
-
-    if stoat.pending_diff_warm.is_none() && stoat.diff_warm_files.is_empty() {
-        stoat
-            .active_workspace_mut()
-            .badges
-            .remove_by_source(BadgeSource::DiffWarm);
-    }
 }
 
 /// Scan the worktree, skip files already cached, and write the misses'
@@ -289,11 +262,7 @@ fn warm_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        action_handlers::review::diff_cache_key,
-        badge::{BadgeSource, BadgeState},
-        test_harness::TestHarness,
-    };
+    use crate::{action_handlers::review::diff_cache_key, test_harness::TestHarness};
 
     /// A harness with one changed file and diff-warming enabled.
     fn warm_harness() -> TestHarness {
@@ -320,30 +289,16 @@ mod tests {
     }
 
     #[test]
-    fn warm_badge_shows_then_clears() {
+    fn warm_marks_busy_then_clears() {
         let mut h = warm_harness();
         ensure_diff_warm(&mut h.stoat);
-
-        let badge = h
-            .stoat
-            .active_workspace()
-            .badges
-            .find_by_source(BadgeSource::DiffWarm)
-            .expect("badge posted at spawn");
-        assert_eq!(
-            h.stoat.active_workspace().badges.get(badge).unwrap().state,
-            BadgeState::Active
-        );
+        assert!(h.stoat.diff_warm_busy(), "busy while the warm is pending");
 
         h.settle();
         install_finished(&mut h.stoat);
         assert!(
-            h.stoat
-                .active_workspace()
-                .badges
-                .find_by_source(BadgeSource::DiffWarm)
-                .is_none(),
-            "badge cleared once the warm finishes"
+            !h.stoat.diff_warm_busy(),
+            "no longer busy once the warm finishes"
         );
     }
 
@@ -353,12 +308,7 @@ mod tests {
         h.stoat.settings.review_precompute = Some(false);
         ensure_diff_warm(&mut h.stoat);
         assert!(h.stoat.pending_diff_warm.is_none());
-        assert!(h
-            .stoat
-            .active_workspace()
-            .badges
-            .find_by_source(BadgeSource::DiffWarm)
-            .is_none());
+        assert!(!h.stoat.diff_warm_busy());
     }
 
     /// Drive one debounced fs-watch event for `path` through to the single-file
