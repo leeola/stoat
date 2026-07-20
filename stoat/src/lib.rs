@@ -21,6 +21,7 @@ pub mod dump;
 mod editor_state;
 pub mod file_finder;
 // Materializes real sample repositories on disk for the CLI by design.
+pub(crate) mod code_search;
 #[cfg(feature = "fixture")]
 #[allow(clippy::disallowed_methods)]
 pub mod fixture;

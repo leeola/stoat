@@ -687,6 +687,12 @@ on key {
         Ctrl-f -> SymbolFinderPageDown();
         Ctrl-b -> SymbolFinderPageUp();
     }
+    modal == code_search && mode == insert {
+        Up -> CodeSearchPrev();
+        Down -> CodeSearchNext();
+        Ctrl-p -> CodeSearchPrev();
+        Ctrl-n -> CodeSearchNext();
+    }
     modal == palette && mode == insert {
         Up -> PaletteHistoryPrev();
         Down -> PaletteHistoryNext();
@@ -743,7 +749,7 @@ on key {
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];
-        / -> OpenGlobalSearch();
+        / -> OpenCodeSearch();
         ' -> [OpenLastPicker(), SetMode(normal)];
     }
     mode == space_clipboard {

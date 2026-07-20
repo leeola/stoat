@@ -581,6 +581,16 @@ define_action!(
 );
 
 define_action!(
+    OpenCodeSearchDef,
+    OpenCodeSearch,
+    "OpenCodeSearch",
+    ActionKind::OpenCodeSearch,
+    "open workspace code search",
+    "Open a live code-search modal over the workspace. As a regex is typed, matches stream into a list of path:line:column with a snippet, and a preview pane shows the selected match's file scrolled to its line. Enter opens the match's file at the offset. Esc closes.",
+    ActionPriority::Common
+);
+
+define_action!(
     SplitSelectionDef,
     SplitSelection,
     "SplitSelection",

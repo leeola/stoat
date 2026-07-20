@@ -47,6 +47,7 @@ pub(crate) enum SubmitTarget {
     RenameSymbol,
     Search,
     GlobalSearch,
+    CodeSearch,
     SplitSelection,
     KeepRemoveSelections,
     Shell,

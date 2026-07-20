@@ -32,10 +32,10 @@ use crate::{
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
-            OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput,
-            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
-            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
-            RepeatLastMotion, ReplaceChar, ReplaceWithYanked, ReplayMacro,
+            OpenCodeSearch, OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker,
+            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
+            PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection,
+            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplaceWithYanked, ReplayMacro,
             RotateSelectionContentsBackward, RotateSelectionContentsForward,
             RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
             ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectAllChildren,
@@ -77,6 +77,7 @@ use crate::{
             SplitRight, ToggleDockLeft, ToggleDockRight, TogglePaneWiden,
         },
         picker::{
+            CodeSearchClose, CodeSearchNext, CodeSearchPrev, CodeSearchSelect,
             DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
             DiagnosticsPickerSelect, GlobalSearchPickerClose, GlobalSearchPickerNext,
             GlobalSearchPickerPrev, GlobalSearchPickerSelect, JumplistPickerClose,
@@ -395,6 +396,11 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenWorkspaceDiagnosticsPicker))
     });
     add(OpenGlobalSearch::DEF, |_| Ok(Box::new(OpenGlobalSearch)));
+    add(OpenCodeSearch::DEF, |_| Ok(Box::new(OpenCodeSearch)));
+    add(CodeSearchNext::DEF, |_| Ok(Box::new(CodeSearchNext)));
+    add(CodeSearchPrev::DEF, |_| Ok(Box::new(CodeSearchPrev)));
+    add(CodeSearchSelect::DEF, |_| Ok(Box::new(CodeSearchSelect)));
+    add(CodeSearchClose::DEF, |_| Ok(Box::new(CodeSearchClose)));
     add(JumplistPickerNext::DEF, |_| {
         Ok(Box::new(JumplistPickerNext))
     });
@@ -1076,6 +1082,11 @@ mod tests {
         "GlobalSearchPickerPrev",
         "GlobalSearchPickerSelect",
         "GlobalSearchPickerClose",
+        "OpenCodeSearch",
+        "CodeSearchNext",
+        "CodeSearchPrev",
+        "CodeSearchSelect",
+        "CodeSearchClose",
         "CloseWorkspace",
         "ShowCwd",
         "ReloadEnv",
@@ -1366,7 +1377,8 @@ mod tests {
         // + 1 SetTheme.
         // + 2 DetachPane, ReattachPane.
         // + 1 TogglePaneWiden.
-        assert_eq!(all().count(), 361);
+        // + 5 OpenCodeSearch + CodeSearch Next/Prev/Select/Close.
+        assert_eq!(all().count(), 366);
     }
 
     #[test]

@@ -175,3 +175,47 @@ define_action!(
     ActionPriority::Common,
     palette_visible = false
 );
+
+define_action!(
+    CodeSearchNextDef,
+    CodeSearchNext,
+    "CodeSearchNext",
+    ActionKind::CodeSearchNext,
+    "next code-search result",
+    "Move the code-search modal's selection to the next match.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CodeSearchPrevDef,
+    CodeSearchPrev,
+    "CodeSearchPrev",
+    ActionKind::CodeSearchPrev,
+    "previous code-search result",
+    "Move the code-search modal's selection to the previous match.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CodeSearchSelectDef,
+    CodeSearchSelect,
+    "CodeSearchSelect",
+    ActionKind::CodeSearchSelect,
+    "open selected code-search match",
+    "Open the file under the code-search selection and jump to the match.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CodeSearchCloseDef,
+    CodeSearchClose,
+    "CodeSearchClose",
+    ActionKind::CodeSearchClose,
+    "close code search",
+    "Dismiss the code-search modal without jumping.",
+    ActionPriority::Common,
+    palette_visible = false
+);

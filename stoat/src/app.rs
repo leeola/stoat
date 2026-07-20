@@ -71,6 +71,11 @@ pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(50);
 
+/// Quiet window after the last code-search keystroke before the blocking
+/// workspace scan spawns, so a burst of typing re-scans once rather than per
+/// character.
+pub(crate) const CODE_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// Frame interval for scroll-animation ticks, about 60 fps to match a typical
 /// display rather than shipping targets that can never be presented.
 /// [`Stoat::run`] arms a timer at this cadence while a scroll glide is active,
@@ -259,6 +264,7 @@ pub struct Stoat {
     /// global-search submit. `Some` until the user picks a match
     /// (jumps to it) or cancels.
     pub(crate) global_search: Option<crate::global_search::GlobalSearchPicker>,
+    pub(crate) code_search: Option<crate::code_search::CodeSearchFinder>,
     /// Active input modal for typing the regex passed to
     /// [`stoat_action::SplitSelection`]. `Some` while the user
     /// composes the pattern; cleared on submit or cancel.
@@ -372,6 +378,14 @@ pub struct Stoat {
     /// [`Self::global_search`]. `None` when no search is running. Dropping it
     /// cancels the walk.
     pub(crate) pending_global_search: Option<action_handlers::PendingGlobalSearch>,
+    /// In-flight code-search scan streaming match batches from the blocking pool.
+    pub(crate) pending_code_search: Option<action_handlers::code_search::PendingCodeSearch>,
+    /// Timer that forwards the latest code-search query on
+    /// [`Self::code_search_query_tx`] after [`CODE_SEARCH_DEBOUNCE`]. A new
+    /// keystroke drops it, cancelling the pending scan trigger.
+    code_search_debounce: Option<stoat_scheduler::Task<()>>,
+    code_search_query_tx: Sender<String>,
+    code_search_query_rx: Receiver<String>,
     /// An in-flight background diff-cache warm pass, drained by
     /// [`crate::diff_warm::install_finished`] in [`Self::drive_background`].
     pub(crate) pending_diff_warm: Option<crate::diff_warm::PendingDiffWarm>,
@@ -1209,6 +1223,7 @@ impl Stoat {
         let (window_ipc_tx, window_ipc_rx) = tokio::sync::mpsc::unbounded_channel();
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
         let (review_git_refresh_tx, review_git_refresh_rx) = tokio::sync::mpsc::channel(256);
+        let (code_search_query_tx, code_search_query_rx) = tokio::sync::mpsc::channel(256);
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
@@ -1233,6 +1248,7 @@ impl Stoat {
             last_picker_action: None,
             global_search_input: None,
             global_search: None,
+            code_search: None,
             split_selection_input: None,
             filter_selections_input: None,
             macro_recording: None,
@@ -1267,6 +1283,10 @@ impl Stoat {
             perf: crate::perf::PerfStats::default(),
             pending_review_scan: None,
             pending_global_search: None,
+            pending_code_search: None,
+            code_search_debounce: None,
+            code_search_query_tx,
+            code_search_query_rx,
             pending_diff_warm: None,
             modal_run: None,
             syntax_highlight: true,
@@ -2734,6 +2754,7 @@ impl Stoat {
         self.drain_fs_watch_events();
         self.drain_pending_external_edits();
         self.drain_pending_git_refresh();
+        self.drain_pending_code_search();
         self.drain_pending_diff_warm_files();
         self.drain_pending_index_edits();
         let effect = match event {
@@ -2939,6 +2960,51 @@ impl Stoat {
             let _ = tx.send(path_for_send).await;
         });
         self.review_pending_external_edits.insert(path, task);
+    }
+
+    /// Point the code-search scan at `query`, debounced.
+    ///
+    /// Drops any in-flight scan and arms a timer that forwards `query` on
+    /// [`Self::code_search_query_tx`] after [`CODE_SEARCH_DEBOUNCE`], so a burst
+    /// of typing spawns one scan. An empty or invalid pattern cancels without
+    /// arming, since an empty regex would otherwise match every position.
+    pub(crate) fn set_code_search_query(&mut self, query: String) {
+        self.pending_code_search = None;
+        if query.is_empty() || regex::Regex::new(&query).is_err() {
+            self.code_search_debounce = None;
+            return;
+        }
+        let executor = self.executor.clone();
+        let tx = self.code_search_query_tx.clone();
+        let redraw = self.redraw_notify.clone();
+        self.code_search_debounce = Some(self.executor.spawn_with_redraw(redraw, async move {
+            executor.timer(CODE_SEARCH_DEBOUNCE).await;
+            let _ = tx.send(query).await;
+        }));
+    }
+
+    /// Drain the debounced code-search query and spawn its scan.
+    ///
+    /// The debounce timer forwards the settled query here. Spawning the blocking
+    /// walk on the main loop lets its batches stream into the open finder.
+    pub(crate) fn drain_pending_code_search(&mut self) -> bool {
+        let mut progressed = false;
+        for _ in 0..256 {
+            let Ok(query) = self.code_search_query_rx.try_recv() else {
+                break;
+            };
+            if self.code_search.is_none() {
+                continue;
+            }
+            let git_root = self.active_workspace().git_root.clone();
+            if let Ok(pending) =
+                action_handlers::code_search::spawn_code_search(self, git_root, &query)
+            {
+                self.pending_code_search = Some(pending);
+                progressed = true;
+            }
+        }
+        progressed
     }
 
     /// Schedule a debounced whole-session [`ReviewRefresh`] after a git-state
@@ -4936,7 +5002,7 @@ impl Stoat {
     ///
     /// Sampled before and after a key so the post-key view-follow can tell when
     /// the key moved the cursor and the view must follow it.
-    fn focused_cursor_pos(&mut self) -> Option<(BufferId, usize)> {
+    pub(crate) fn focused_cursor_pos(&mut self) -> Option<(BufferId, usize)> {
         let editor = action_handlers::focused_editor_mut(self)?;
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
@@ -5006,6 +5072,10 @@ impl Stoat {
         }
 
         if let Some(finder) = &self.symbol_finder {
+            return Some((finder.input.editor_id, finder.input.buffer_id));
+        }
+
+        if let Some(finder) = &self.code_search {
             return Some((finder.input.editor_id, finder.input.buffer_id));
         }
 
@@ -7727,6 +7797,8 @@ impl Stoat {
         action_handlers::pump_commits(self);
         action_handlers::pump_review_scan(self);
         action_handlers::pump_global_search(self);
+        action_handlers::code_search::pump_code_search(self);
+        action_handlers::code_search::sync_code_search(self);
         action_handlers::pump_lsp_jumps(self);
         action_handlers::lsp::pump_lsp_hover(self);
         action_handlers::lsp::pump_lsp_signature_help(self);

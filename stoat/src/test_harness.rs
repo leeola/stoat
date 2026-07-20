@@ -627,6 +627,10 @@ impl TestHarness {
             let lsp_format = crate::action_handlers::lsp::pump_lsp_format(&mut self.stoat);
             let symbol_doc = crate::action_handlers::lsp::pump_symbol_finder_doc(&mut self.stoat);
             crate::action_handlers::lsp::sync_symbol_finder(&mut self.stoat);
+            crate::action_handlers::code_search::sync_code_search(&mut self.stoat);
+            let code_search_drain = self.stoat.drain_pending_code_search();
+            let code_search =
+                crate::action_handlers::code_search::pump_code_search(&mut self.stoat);
             let format_on_save = crate::action_handlers::file::pump_format_on_save(&mut self.stoat);
             let completion = crate::completion::request::pump(&mut self.stoat);
             let completion_resolve =
@@ -660,6 +664,8 @@ impl TestHarness {
                 && !completion_accept
                 && !external_edits
                 && !git_refresh
+                && !code_search_drain
+                && !code_search
             {
                 break;
             }

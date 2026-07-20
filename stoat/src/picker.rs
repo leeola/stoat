@@ -472,6 +472,17 @@ impl Preview {
         }
     }
 
+    /// Scroll the preview so 0-based `line` sits a few rows below the top, for a
+    /// picker whose selection points at a line rather than a whole file.
+    pub(crate) fn scroll_to_line(&self, ws: &mut Workspace, line: u32) {
+        if let Some(editor) = ws.editors.get_mut(self.editor) {
+            let scroll_row = line.saturating_sub(5);
+            editor.scroll_row = scroll_row;
+            editor.scroll_offset = scroll_row as f32;
+            editor.scroll_glide = ScrollGlide::None;
+        }
+    }
+
     /// Remove the owned editor and scratch buffer from the workspace.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         ws.editors.remove(self.editor);

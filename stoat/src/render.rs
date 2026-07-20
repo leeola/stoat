@@ -1,6 +1,7 @@
 pub(crate) mod badges;
 pub(crate) mod chrome;
 pub(crate) mod code_action;
+pub(crate) mod code_search;
 pub(crate) mod command_palette;
 pub(crate) mod commits;
 pub(crate) mod completion;
@@ -274,6 +275,7 @@ fn modal_overlay_open(stoat: &Stoat) -> bool {
         || stoat.diagnostics_picker.is_some()
         || stoat.location_picker.is_some()
         || stoat.global_search.is_some()
+        || stoat.code_search.is_some()
 }
 
 /// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
@@ -699,6 +701,33 @@ pub(crate) fn frame(
             .collect();
         hints::render_hints(
             "symbols",
+            &bindings,
+            None,
+            &stoat.theme,
+            full,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
+    } else if let Some(finder) = &mut stoat.code_search {
+        code_search::render_code_search(
+            finder,
+            ws,
+            &stoat.theme,
+            full,
+            buf,
+            stoat.stoatty.then_some(&mut *scene),
+        );
+        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("code_search");
+        let raw = stoat.keymap.scoped_bindings(&state, "modal", "code_search");
+        let bindings: Vec<_> = raw
+            .iter()
+            .map(|(key, actions)| {
+                let desc = actions.first().map(action_display_desc).unwrap_or_default();
+                (key.as_str(), desc)
+            })
+            .collect();
+        hints::render_hints(
+            "code_search",
             &bindings,
             None,
             &stoat.theme,

@@ -11,6 +11,9 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if super::global_search_submit(stoat) {
         return UpdateEffect::Redraw;
     }
+    if super::code_search::code_search_select(stoat) {
+        return UpdateEffect::Redraw;
+    }
     if super::split_selection::submit(stoat) {
         return UpdateEffect::Redraw;
     }
@@ -60,6 +63,9 @@ pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
     if super::global_search_cancel(stoat) {
+        return UpdateEffect::Redraw;
+    }
+    if super::code_search::close_code_search(stoat) {
         return UpdateEffect::Redraw;
     }
     if super::split_selection::cancel(stoat) {

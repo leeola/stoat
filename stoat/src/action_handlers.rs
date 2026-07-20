@@ -1,4 +1,5 @@
 mod agent;
+pub(crate) mod code_search;
 mod commits;
 pub(crate) mod completion;
 mod conflict;
@@ -420,6 +421,17 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GlobalSearchPickerPrev => picker::global_search_picker_prev(stoat),
         ActionKind::GlobalSearchPickerSelect => picker::global_search_picker_select(stoat),
         ActionKind::GlobalSearchPickerClose => picker::global_search_picker_close(stoat),
+        ActionKind::OpenCodeSearch => code_search::open_code_search(stoat),
+        ActionKind::CodeSearchNext => code_search::code_search_next(stoat),
+        ActionKind::CodeSearchPrev => code_search::code_search_prev(stoat),
+        ActionKind::CodeSearchSelect => {
+            code_search::code_search_select(stoat);
+            UpdateEffect::Redraw
+        },
+        ActionKind::CodeSearchClose => {
+            code_search::close_code_search(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
         },
