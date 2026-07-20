@@ -571,16 +571,6 @@ define_action!(
 );
 
 define_action!(
-    OpenGlobalSearchDef,
-    OpenGlobalSearch,
-    "OpenGlobalSearch",
-    ActionKind::OpenGlobalSearch,
-    "open workspace regex search",
-    "Open an input modal for a regex pattern. On submit, scan every workspace file for matches and present them as a picker listing path:line:column with a snippet of the matched line. Enter opens the selected match's file at the match offset; Esc cancels.",
-    ActionPriority::Common
-);
-
-define_action!(
     OpenCodeSearchDef,
     OpenCodeSearch,
     "OpenCodeSearch",

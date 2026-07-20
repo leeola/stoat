@@ -1,7 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    code_search::{CodeSearchFinder, MATCH_CAP},
-    global_search::{scan_file, SearchMatch},
+    code_search::{scan_file, CodeSearchFinder, SearchMatch, MATCH_CAP},
     picker::PreviewSource,
 };
 use regex::Regex;

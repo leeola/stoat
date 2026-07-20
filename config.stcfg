@@ -328,14 +328,6 @@ on key {
         Enter -> LocationPickerSelect();
         Escape -> LocationPickerClose();
     }
-    modal == search {
-        Up -> GlobalSearchPickerPrev();
-        Down -> GlobalSearchPickerNext();
-        Ctrl-p -> GlobalSearchPickerPrev();
-        Ctrl-n -> GlobalSearchPickerNext();
-        Enter -> GlobalSearchPickerSelect();
-        Escape -> GlobalSearchPickerClose();
-    }
     mode == normal {
         Enter -> RunSubmit();
         q -> ReplayMacro();

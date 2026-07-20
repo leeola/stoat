@@ -356,9 +356,7 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
 /// Covers both the pickers/overlays and the transient text inputs (search,
 /// shell, rename, ...). The latter are plain insert-mode editors, so the
 /// `modal` value is the only thing distinguishing them from an ordinary buffer
-/// when resolving keybindings. `search` is the global-search *results* picker;
-/// the incremental `/` input is `isearch`, its query counterpart
-/// `global_search`.
+/// when resolving keybindings. The incremental `/` input is `isearch`.
 pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
     if stoat.modal_run.is_some() {
         Some("run")
@@ -372,8 +370,6 @@ pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
         Some("diagnostics")
     } else if stoat.location_picker.is_some() {
         Some("location")
-    } else if stoat.global_search.is_some() {
-        Some("search")
     } else if stoat.file_finder.is_some() {
         Some("finder")
     } else if stoat.symbol_finder.is_some() {
@@ -388,8 +384,6 @@ pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
         Some("rename")
     } else if stoat.search_input.is_some() {
         Some("isearch")
-    } else if stoat.global_search_input.is_some() {
-        Some("global_search")
     } else if stoat.split_selection_input.is_some() {
         Some("split_selection")
     } else if stoat.filter_selections_input.is_some() {

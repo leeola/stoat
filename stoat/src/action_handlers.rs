@@ -50,20 +50,17 @@ pub(crate) use file_finder::{
 pub(crate) use lsp::pump_lsp_jumps;
 pub(crate) use palette::{palette_move_selection, sync_palette_picker};
 pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
-use regex::Regex;
 #[cfg(test)]
 pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
-use std::{ops::ControlFlow, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, Dump, FocusPane, OpenBuffer, OpenFile, OpenReviewAgentEdits,
     OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
     SetTheme,
 };
-use stoat_scheduler::Task;
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     conflict_view::disarm_clobber_unless_pick(stoat, action.kind());
@@ -457,7 +454,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenJumplistPicker => open_jumplist_picker(stoat),
         ActionKind::OpenDiagnosticsPicker => open_diagnostics_picker(stoat),
         ActionKind::OpenWorkspaceDiagnosticsPicker => open_workspace_diagnostics_picker(stoat),
-        ActionKind::OpenGlobalSearch => open_global_search(stoat),
         ActionKind::JumplistPickerNext => picker::jumplist_picker_next(stoat),
         ActionKind::JumplistPickerPrev => picker::jumplist_picker_prev(stoat),
         ActionKind::JumplistPickerSelect => picker::jumplist_picker_select(stoat),
@@ -470,10 +466,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::LocationPickerPrev => picker::location_picker_prev(stoat),
         ActionKind::LocationPickerSelect => picker::location_picker_select(stoat),
         ActionKind::LocationPickerClose => picker::location_picker_close(stoat),
-        ActionKind::GlobalSearchPickerNext => picker::global_search_picker_next(stoat),
-        ActionKind::GlobalSearchPickerPrev => picker::global_search_picker_prev(stoat),
-        ActionKind::GlobalSearchPickerSelect => picker::global_search_picker_select(stoat),
-        ActionKind::GlobalSearchPickerClose => picker::global_search_picker_close(stoat),
         ActionKind::OpenCodeSearch => code_search::open_code_search(stoat),
         ActionKind::CodeSearchNext => code_search::code_search_next(stoat),
         ActionKind::CodeSearchPrev => code_search::code_search_prev(stoat),
@@ -954,7 +946,7 @@ fn is_picker_open_kind(kind: ActionKind) -> bool {
             | ActionKind::OpenWorkspaceFileFinder
             | ActionKind::OpenCommandPalette
             | ActionKind::OpenJumplistPicker
-            | ActionKind::OpenGlobalSearch
+            | ActionKind::OpenCodeSearch
             | ActionKind::OpenDiagnosticsPicker
             | ActionKind::OpenWorkspaceDiagnosticsPicker
     )
@@ -1083,153 +1075,6 @@ pub(crate) fn gc_editor_if_unreferenced(ws: &mut crate::workspace::Workspace, ed
         return;
     }
     ws.editors.remove(editor_id);
-}
-
-/// Drive [`ActionKind::OpenGlobalSearch`]. Opens the input modal so the
-/// user can type a regex pattern; submission triggers the workspace
-/// scan via [`global_search_submit`].
-fn open_global_search(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.global_search_input.is_some() {
-        return UpdateEffect::None;
-    }
-    let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace_mut();
-    let input = InputView::create(ws, executor, SubmitTarget::GlobalSearch, "", "insert", 1);
-    stoat.global_search_input = Some(crate::global_search::GlobalSearchInputState { input });
-    UpdateEffect::Redraw
-}
-
-/// Submit the global-search query. Reads the typed pattern, opens an empty
-/// [`crate::global_search::GlobalSearchPicker`] on `Stoat`, and streams the
-/// workspace scan into it from the blocking pool via [`pump_global_search`].
-///
-/// Empty or invalid patterns close the input without opening the picker.
-/// Returns `true` when the input modal was open.
-pub(crate) fn global_search_submit(stoat: &mut Stoat) -> bool {
-    let Some(state) = stoat.global_search_input.take() else {
-        return false;
-    };
-    let query = state.input.text(stoat.active_workspace());
-    let ws = stoat.active_workspace_mut();
-    state.input.dispose(ws);
-    if query.is_empty() {
-        return true;
-    }
-    let git_root = stoat.active_workspace().git_root.clone();
-    let (rx, task) = match spawn_global_search(stoat, git_root, &query) {
-        Ok(handles) => handles,
-        Err(_) => return true,
-    };
-    stoat.global_search = Some(crate::global_search::GlobalSearchPicker::new(
-        Vec::new(),
-        query,
-    ));
-    stoat.pending_global_search = Some(PendingGlobalSearch { rx, _task: task });
-    true
-}
-
-/// An in-flight global-search scan streaming from the blocking pool.
-///
-/// The regex scan runs on a blocking thread and streams match batches over
-/// `rx`. [`pump_global_search`] drains them into the open picker. `_task` keeps
-/// the closure scheduled, and dropping this cancels the walk, since the
-/// streaming walker stops via [`ControlFlow::Break`] once its receiver is gone.
-pub(crate) struct PendingGlobalSearch {
-    rx: UnboundedReceiver<Vec<crate::global_search::SearchMatch>>,
-    _task: Task<()>,
-}
-
-/// Spawn the streaming workspace scan for `pattern`, rooted at `git_root`.
-///
-/// Returns the receiver yielding match batches and the blocking task running the
-/// walk. The compiled-regex error surfaces synchronously, so an invalid pattern
-/// never opens a picker. Each non-empty batch pings the redraw notifier so a
-/// live picker repaints as matches stream in.
-fn spawn_global_search(
-    stoat: &Stoat,
-    git_root: std::path::PathBuf,
-    pattern: &str,
-) -> Result<
-    (
-        UnboundedReceiver<Vec<crate::global_search::SearchMatch>>,
-        Task<()>,
-    ),
-    regex::Error,
-> {
-    let regex = Regex::new(pattern)?;
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let fs_host = stoat.fs_host.clone();
-    let redraw_notify = stoat.redraw_notify.clone();
-    let task = stoat.executor.spawn_blocking(move || {
-        fs_host.walk_workspace_files_streaming(&git_root, &mut |batch| {
-            let mut matches = Vec::new();
-            for path in batch {
-                crate::global_search::scan_file(&*fs_host, &regex, &path, &mut matches);
-            }
-            if !matches.is_empty() {
-                if tx.send(matches).is_err() {
-                    return ControlFlow::Break(());
-                }
-                redraw_notify.notify_one();
-            } else if tx.is_closed() {
-                return ControlFlow::Break(());
-            }
-            ControlFlow::Continue(())
-        });
-    });
-    Ok((rx, task))
-}
-
-/// Drain streamed global-search batches into the open picker.
-///
-/// Appends each arriving batch to [`Stoat::global_search`]. A closed picker
-/// (the user dismissed it, or opened a match) drops the pending scan, cancelling
-/// the walk. When the walk finishes having found nothing, the empty picker is
-/// closed so a no-match search leaves no modal open. Returns whether a batch was
-/// drained.
-pub(crate) fn pump_global_search(stoat: &mut Stoat) -> bool {
-    let Some(mut pending) = stoat.pending_global_search.take() else {
-        return false;
-    };
-    if stoat.global_search.is_none() {
-        return false;
-    }
-    let mut drained = false;
-    loop {
-        match pending.rx.try_recv() {
-            Ok(batch) => {
-                if let Some(picker) = stoat.global_search.as_mut() {
-                    picker.push_matches(batch);
-                }
-                drained = true;
-            },
-            Err(TryRecvError::Empty) => {
-                stoat.pending_global_search = Some(pending);
-                return drained;
-            },
-            Err(TryRecvError::Disconnected) => {
-                if stoat
-                    .global_search
-                    .as_ref()
-                    .is_some_and(|picker| picker.matches().is_empty())
-                {
-                    stoat.global_search = None;
-                }
-                return true;
-            },
-        }
-    }
-}
-
-/// Cancel the global-search input modal without running the scan.
-/// Returns `true` when the input was open.
-pub(crate) fn global_search_cancel(stoat: &mut Stoat) -> bool {
-    let Some(state) = stoat.global_search_input.take() else {
-        return false;
-    };
-    let ws = stoat.active_workspace_mut();
-    state.input.dispose(ws);
-    true
 }
 
 /// Drive [`ActionKind::OpenJumplistPicker`]. Builds a snapshot of the focused
@@ -1670,96 +1515,6 @@ mod tests {
         let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(h.stoat.update(Event::Key(event)), UpdateEffect::Redraw);
         assert!(h.stoat.jumplist_picker.is_none());
-    }
-
-    #[test]
-    fn open_global_search_opens_input_modal() {
-        let mut stoat = stoat();
-        assert_eq!(
-            dispatch(&mut stoat, &stoat_action::OpenGlobalSearch),
-            UpdateEffect::Redraw
-        );
-        assert!(stoat.global_search_input.is_some());
-        assert_eq!(stoat.focused_mode(), "insert");
-    }
-
-    #[test]
-    fn global_search_submit_with_no_matches_closes_input() {
-        let mut h = Stoat::test();
-        let root = std::path::PathBuf::from("/repo");
-        h.fake_fs().insert_file(root.join("a.rs"), b"hello\n");
-        h.stoat.active_workspace_mut().git_root = root;
-        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
-        h.type_text("zzz_no_match");
-        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        h.settle();
-        assert!(h.stoat.global_search_input.is_none());
-        assert!(h.stoat.global_search.is_none());
-    }
-
-    #[test]
-    fn global_search_submit_with_matches_opens_picker() {
-        let mut h = Stoat::test();
-        let root = std::path::PathBuf::from("/repo");
-        h.fake_fs().insert_file(root.join("a.rs"), b"alpha\nbeta\n");
-        h.fake_fs().insert_file(root.join("b.rs"), b"alpha again\n");
-        h.stoat.active_workspace_mut().git_root = root;
-        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
-        h.type_text("alpha");
-        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        h.settle();
-        let picker = h.stoat.global_search.as_ref().expect("picker open");
-        assert_eq!(picker.matches().len(), 2);
-    }
-
-    #[test]
-    fn global_search_picker_esc_closes_without_jumping() {
-        let mut h = Stoat::test();
-        let root = std::path::PathBuf::from("/repo");
-        h.fake_fs().insert_file(root.join("a.rs"), b"alpha\n");
-        h.stoat.active_workspace_mut().git_root = root;
-        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
-        h.type_text("alpha");
-        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert!(h.stoat.global_search.is_some());
-        assert_eq!(
-            h.stoat.update(Event::Key(keys::key(KeyCode::Esc))),
-            UpdateEffect::Redraw
-        );
-        assert!(h.stoat.global_search.is_none());
-        h.settle();
-        assert!(
-            h.stoat.pending_global_search.is_none(),
-            "closing the picker cancels the scan"
-        );
-    }
-
-    #[test]
-    fn global_search_picker_enter_opens_and_jumps() {
-        let mut h = Stoat::test();
-        let root = std::path::PathBuf::from("/repo");
-        h.fake_fs().insert_file(root.join("a.rs"), b"alpha\nbeta\n");
-        h.stoat.active_workspace_mut().git_root = root;
-        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
-        h.type_text("beta");
-        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        h.settle();
-        assert!(h.stoat.global_search.is_some());
-
-        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        h.settle();
-        assert!(h.stoat.global_search.is_none());
-        assert_eq!(editor::head_offsets(&mut h.stoat), vec![6]);
-    }
-
-    #[test]
-    fn global_search_input_esc_cancels() {
-        let mut h = Stoat::test();
-        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
-        assert!(h.stoat.global_search_input.is_some());
-        h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
-        assert!(h.stoat.global_search_input.is_none());
-        assert!(h.stoat.global_search.is_none());
     }
 
     #[test]

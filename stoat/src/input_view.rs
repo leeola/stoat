@@ -47,7 +47,6 @@ pub(crate) enum SubmitTarget {
     WorkspacePicker,
     RenameSymbol,
     Search,
-    GlobalSearch,
     CodeSearch,
     SplitSelection,
     KeepRemoveSelections,

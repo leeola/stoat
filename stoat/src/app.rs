@@ -256,14 +256,6 @@ pub struct Stoat {
     /// Only set when an opening dispatch returned `Redraw`;
     /// no-op opens do not overwrite the prior recall target.
     pub(crate) last_picker_action: Option<&'static str>,
-    /// Active input modal for typing a global-search regex pattern.
-    /// `Some` while the user is composing the query; cleared on
-    /// submit (the picker takes over) or cancel.
-    pub(crate) global_search_input: Option<crate::global_search::GlobalSearchInputState>,
-    /// Results modal listing every workspace match for the most-recent
-    /// global-search submit. `Some` until the user picks a match
-    /// (jumps to it) or cancels.
-    pub(crate) global_search: Option<crate::global_search::GlobalSearchPicker>,
     pub(crate) code_search: Option<crate::code_search::CodeSearchFinder>,
     /// Active input modal for typing the regex passed to
     /// [`stoat_action::SplitSelection`]. `Some` while the user
@@ -372,12 +364,6 @@ pub struct Stoat {
     /// off this task and installs it on the main loop, so opening a review
     /// never stalls input on the scan.
     pub(crate) pending_review_scan: Option<action_handlers::PendingReviewScan>,
-    /// In-flight global-search scan streaming match batches from the blocking
-    /// pool, drained by
-    /// [`pump_global_search`](action_handlers::pump_global_search) into
-    /// [`Self::global_search`]. `None` when no search is running. Dropping it
-    /// cancels the walk.
-    pub(crate) pending_global_search: Option<action_handlers::PendingGlobalSearch>,
     /// In-flight code-search scan streaming match batches from the blocking pool.
     pub(crate) pending_code_search: Option<action_handlers::code_search::PendingCodeSearch>,
     /// Timer that forwards the latest code-search query on
@@ -1246,8 +1232,6 @@ impl Stoat {
             diagnostics_picker: None,
             location_picker: None,
             last_picker_action: None,
-            global_search_input: None,
-            global_search: None,
             code_search: None,
             split_selection_input: None,
             filter_selections_input: None,
@@ -1282,7 +1266,6 @@ impl Stoat {
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
             pending_review_scan: None,
-            pending_global_search: None,
             pending_code_search: None,
             code_search_debounce: None,
             code_search_query_tx,
@@ -4460,9 +4443,6 @@ impl Stoat {
             if self.location_picker.take().is_some() {
                 return UpdateEffect::Redraw;
             }
-            if self.global_search.take().is_some() {
-                return UpdateEffect::Redraw;
-            }
             if self.pending_hover.is_some() {
                 self.pending_hover = None;
                 self.pending_hover_request = None;
@@ -5130,10 +5110,6 @@ impl Stoat {
 
         if let Some(search) = &self.search_input {
             return Some((search.input.editor_id, search.input.buffer_id));
-        }
-
-        if let Some(gs) = &self.global_search_input {
-            return Some((gs.input.editor_id, gs.input.buffer_id));
         }
 
         if let Some(ss) = &self.split_selection_input {
@@ -7831,7 +7807,6 @@ impl Stoat {
         self.drive_diff_jobs();
         action_handlers::pump_commits(self);
         action_handlers::pump_review_scan(self);
-        action_handlers::pump_global_search(self);
         action_handlers::code_search::pump_code_search(self);
         action_handlers::code_search::sync_code_search(self);
         action_handlers::pump_lsp_jumps(self);

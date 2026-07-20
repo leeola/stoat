@@ -37,10 +37,10 @@ use crate::{
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
-            OpenCodeSearch, OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker,
-            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
-            PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection,
-            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplaceWithYanked, ReplayMacro,
+            OpenCodeSearch, OpenJumplistPicker, OpenLastPicker, OpenReverseSearchInput,
+            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
+            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
+            RepeatLastMotion, ReplaceChar, ReplaceWithYanked, ReplayMacro,
             RotateSelectionContentsBackward, RotateSelectionContentsForward,
             RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
             ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectAllChildren,
@@ -84,10 +84,9 @@ use crate::{
         picker::{
             CodeSearchClose, CodeSearchNext, CodeSearchPrev, CodeSearchSelect,
             DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
-            DiagnosticsPickerSelect, GlobalSearchPickerClose, GlobalSearchPickerNext,
-            GlobalSearchPickerPrev, GlobalSearchPickerSelect, JumplistPickerClose,
-            JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect, LocationPickerClose,
-            LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
+            DiagnosticsPickerSelect, JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev,
+            JumplistPickerSelect, LocationPickerClose, LocationPickerNext, LocationPickerPrev,
+            LocationPickerSelect,
         },
         prompt::{
             CancelPromptInput, PaletteCompletePath, PaletteHistoryNext, PaletteHistoryPrev,
@@ -419,7 +418,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenWorkspaceDiagnosticsPicker::DEF, |_| {
         Ok(Box::new(OpenWorkspaceDiagnosticsPicker))
     });
-    add(OpenGlobalSearch::DEF, |_| Ok(Box::new(OpenGlobalSearch)));
     add(OpenCodeSearch::DEF, |_| Ok(Box::new(OpenCodeSearch)));
     add(CodeSearchNext::DEF, |_| Ok(Box::new(CodeSearchNext)));
     add(CodeSearchPrev::DEF, |_| Ok(Box::new(CodeSearchPrev)));
@@ -460,18 +458,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(LocationPickerClose::DEF, |_| {
         Ok(Box::new(LocationPickerClose))
-    });
-    add(GlobalSearchPickerNext::DEF, |_| {
-        Ok(Box::new(GlobalSearchPickerNext))
-    });
-    add(GlobalSearchPickerPrev::DEF, |_| {
-        Ok(Box::new(GlobalSearchPickerPrev))
-    });
-    add(GlobalSearchPickerSelect::DEF, |_| {
-        Ok(Box::new(GlobalSearchPickerSelect))
-    });
-    add(GlobalSearchPickerClose::DEF, |_| {
-        Ok(Box::new(GlobalSearchPickerClose))
     });
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
     add(SelectRegex::DEF, |_| Ok(Box::new(SelectRegex)));
@@ -1117,10 +1103,6 @@ mod tests {
         "LocationPickerPrev",
         "LocationPickerSelect",
         "LocationPickerClose",
-        "GlobalSearchPickerNext",
-        "GlobalSearchPickerPrev",
-        "GlobalSearchPickerSelect",
-        "GlobalSearchPickerClose",
         "OpenCodeSearch",
         "CodeSearchNext",
         "CodeSearchPrev",
@@ -1315,7 +1297,6 @@ mod tests {
         // + 1 OpenLastPicker.
         // + 1 OpenDiagnosticsPicker.
         // + 1 OpenWorkspaceDiagnosticsPicker.
-        // + 1 OpenGlobalSearch.
         // + 1 SplitSelection.
         // + 2 KeepSelections / RemoveSelections.
         // + 2 RecordMacro / ReplayMacro.
@@ -1395,7 +1376,6 @@ mod tests {
         // + 4 JumplistPicker Next/Prev/Select/Close.
         // + 4 DiagnosticsPicker Next/Prev/Select/Close.
         // + 4 LocationPicker Next/Prev/Select/Close.
-        // + 4 GlobalSearchPicker Next/Prev/Select/Close.
         // + 1 SetCwd.
         // + 1 ShowCwd.
         // + 1 ReloadEnv.
@@ -1423,7 +1403,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 378);
+        assert_eq!(all().count(), 373);
     }
 
     #[test]

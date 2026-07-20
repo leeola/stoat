@@ -11,7 +11,6 @@ pub(crate) mod diagnostics_picker;
 pub(crate) mod dock;
 pub(crate) mod editor;
 pub(crate) mod file_finder;
-pub(crate) mod global_search;
 pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
@@ -275,7 +274,6 @@ fn modal_overlay_open(stoat: &Stoat) -> bool {
         || stoat.jumplist_picker.is_some()
         || stoat.diagnostics_picker.is_some()
         || stoat.location_picker.is_some()
-        || stoat.global_search.is_some()
         || stoat.code_search.is_some()
 }
 
@@ -857,26 +855,6 @@ pub(crate) fn frame(
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "locations",
-            &bindings,
-            None,
-            &stoat.theme,
-            full,
-            buf,
-            stoat.stoatty.then_some(&mut *scene),
-        );
-    } else if let Some(picker) = &stoat.global_search {
-        let git_root = ws.git_root.clone();
-        global_search::render_global_search(
-            picker,
-            &git_root,
-            &stoat.theme,
-            full,
-            buf,
-            stoat.stoatty.then_some(&mut *scene),
-        );
-        let bindings = picker.hint_bindings();
-        hints::render_hints(
-            "global-search",
             &bindings,
             None,
             &stoat.theme,

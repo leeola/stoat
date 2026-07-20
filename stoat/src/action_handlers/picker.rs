@@ -1,5 +1,4 @@
 use crate::app::{Stoat, UpdateEffect};
-use stoat_action::OpenFile;
 
 pub(super) fn jumplist_picker_next(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(picker) = stoat.jumplist_picker.as_mut() {
@@ -121,42 +120,5 @@ pub(super) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
     super::lsp::apply_jump(stoat, &entry.path, entry.offset);
-    UpdateEffect::Redraw
-}
-
-pub(super) fn global_search_picker_next(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(picker) = stoat.global_search.as_mut() {
-        picker.select_next();
-    }
-    UpdateEffect::Redraw
-}
-
-pub(super) fn global_search_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(picker) = stoat.global_search.as_mut() {
-        picker.select_prev();
-    }
-    UpdateEffect::Redraw
-}
-
-pub(super) fn global_search_picker_close(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.global_search = None;
-    UpdateEffect::Redraw
-}
-
-/// Open the file under the global-search picker's selection and jump to
-/// the match. An empty picker just closes.
-pub(super) fn global_search_picker_select(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(picker) = stoat.global_search.take() else {
-        return UpdateEffect::None;
-    };
-    let Some(m) = picker.matches().get(picker.selected()) else {
-        return UpdateEffect::Redraw;
-    };
-    let path = m.path.clone();
-    let offset = m.offset;
-
-    super::jump::push_jump(stoat);
-    super::dispatch(stoat, &OpenFile { path });
-    stoat.jump_focused_to_match_offset(offset);
     UpdateEffect::Redraw
 }
