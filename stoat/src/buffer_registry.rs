@@ -172,6 +172,16 @@ impl BufferRegistry {
         self.new_scratch_inner(false, false)
     }
 
+    /// Allocate a preview-flagged scratch buffer with a genuinely empty rope.
+    ///
+    /// Combines [`Self::new_scratch_preview`] and [`Self::new_scratch_unseeded`]:
+    /// the parse pipeline syntax-highlights it, and it starts empty so a caller
+    /// inserting whole content is not prefixed by a seeded newline. The conflict
+    /// resolve view seeds its swapped-in center buffer through this.
+    pub(crate) fn new_scratch_preview_unseeded(&mut self) -> (BufferId, SharedBuffer) {
+        self.new_scratch_inner(true, false)
+    }
+
     fn new_scratch_inner(&mut self, preview: bool, seed: bool) -> (BufferId, SharedBuffer) {
         let id = self.allocate_id();
         let buffer = if seed {

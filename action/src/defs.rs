@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod app;
 pub mod commits;
+pub mod conflict;
 pub mod dump;
 pub mod editor;
 pub mod file;

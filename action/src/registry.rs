@@ -6,6 +6,7 @@ use crate::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
         },
+        conflict::{CloseConflict, Conflict},
         dump::Dump,
         editor::{
             AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
@@ -208,6 +209,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
     add(Diff::DEF, |_| Ok(Box::new(Diff)));
     add(ToggleDiff::DEF, |_| Ok(Box::new(ToggleDiff)));
+    add(Conflict::DEF, |_| Ok(Box::new(Conflict)));
+    add(CloseConflict::DEF, |_| Ok(Box::new(CloseConflict)));
     add(StageHunk::DEF, |_| Ok(Box::new(StageHunk)));
     add(UnstageHunk::DEF, |_| Ok(Box::new(UnstageHunk)));
     add(ToggleStageHunk::DEF, |_| Ok(Box::new(ToggleStageHunk)));
@@ -940,6 +943,8 @@ mod tests {
         "OpenHelp",
         "Diff",
         "ToggleDiff",
+        "Conflict",
+        "CloseConflict",
         "JumpToMoveSource",
         "JumpToMoveTarget",
         "JumpToNextMoveSource",
@@ -1391,7 +1396,8 @@ mod tests {
         // + 2 DetachPane, ReattachPane.
         // + 1 TogglePaneWiden.
         // + 5 OpenCodeSearch + CodeSearch Next/Prev/Select/Close.
-        assert_eq!(all().count(), 366);
+        // + 2 Conflict, CloseConflict.
+        assert_eq!(all().count(), 368);
     }
 
     #[test]

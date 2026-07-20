@@ -3,6 +3,7 @@ pub(crate) mod code_search;
 mod commits;
 pub(crate) mod completion;
 mod conflict;
+mod conflict_view;
 pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;
@@ -231,6 +232,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::ToggleDiff => review::toggle_diff(stoat),
+        ActionKind::Conflict => {
+            conflict_view::open_conflict(stoat);
+            UpdateEffect::Redraw
+        },
+        ActionKind::CloseConflict => {
+            conflict_view::close_conflict(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::StageHunk => review::stage_hunk(stoat, review::HunkStage::Stage),
         ActionKind::UnstageHunk => review::stage_hunk(stoat, review::HunkStage::Unstage),
         ActionKind::ToggleStageHunk => review::stage_hunk(stoat, review::HunkStage::Toggle),

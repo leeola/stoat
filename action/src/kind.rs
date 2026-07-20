@@ -43,6 +43,8 @@ pub enum ActionKind {
     OpenHelp,
     Diff,
     ToggleDiff,
+    Conflict,
+    CloseConflict,
     StageHunk,
     UnstageHunk,
     ToggleStageHunk,

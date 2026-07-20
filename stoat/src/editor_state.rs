@@ -106,6 +106,11 @@ pub(crate) struct EditorState {
     /// [`Self::set_diff_view`], which also flips the display map's
     /// deleted-block splicing.
     pub(crate) diff_view: bool,
+    /// When set, this editor is the swapped-in center of the three-way conflict
+    /// resolve view. The backing conflict session holds the merge state. The
+    /// editor stays a normal editable buffer on the merged text, so
+    /// `view_predicate` reports "conflict" for keymap scoping.
+    pub(crate) conflict_view: bool,
     pub(crate) selections: SelectionsCollection,
     /// Per-editor cursor for cycling through ambiguous move sources.
     /// `(hunk_line, source_index)` identifies which source the user is
@@ -198,6 +203,7 @@ impl EditorState {
             wrap_override: None,
             review_view: None,
             diff_view: false,
+            conflict_view: false,
             selections,
             move_source_cursor: None,
             expansion_history: Vec::new(),
@@ -234,6 +240,7 @@ impl EditorState {
             wrap_override: None,
             review_view: None,
             diff_view: false,
+            conflict_view: false,
             selections,
             move_source_cursor: None,
             expansion_history: Vec::new(),

@@ -662,6 +662,10 @@ on key {
     view == review && rebase_exec {
         C -> RebaseContinue();
     }
+    view == conflict && mode == normal {
+        Escape -> CloseConflict();
+        q -> CloseConflict();
+    }
     mode == insert {
         Escape -> SetMode(normal);
         Tab -> SmartTab();

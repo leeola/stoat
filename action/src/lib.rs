@@ -11,6 +11,7 @@ pub use defs::{
         CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
         CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
     },
+    conflict::{CloseConflict, Conflict},
     dump::Dump,
     editor::{
         AcceptCompletion, AddSelectionBelow, AlignSelections, AlignViewBottom, AlignViewCenter,

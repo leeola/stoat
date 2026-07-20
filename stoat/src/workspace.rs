@@ -12,6 +12,7 @@ use crate::{
         nav::TrailState,
     },
     commit_list::CommitListState,
+    conflict_session::ConflictSession,
     diff,
     diff_cache::ContentHash,
     diff_map::{line_starts, BaseHighlights, DiffMap},
@@ -174,6 +175,9 @@ pub struct Workspace {
     /// a review spans files and can be viewed by multiple panes in future
     /// multi-pane review flows. Dropped on `CloseReview`.
     pub(crate) review: Option<ReviewSession>,
+    /// Active three-way conflict resolve session (if any). Owned at the
+    /// workspace level beside [`Self::review`]. Dropped on `CloseConflict`.
+    pub(crate) conflict: Option<ConflictSession>,
     /// Active commit-listing state (if any). Parallel to [`Self::review`]:
     /// populated while the user is in `"commits"` mode and dropped on
     /// `CloseCommits`.
@@ -271,6 +275,7 @@ impl Workspace {
             changed_ranges_recomputes: 0,
             trail: None,
             review: None,
+            conflict: None,
             commits: None,
             rebase: None,
             rebase_active: None,
