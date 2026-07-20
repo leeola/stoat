@@ -886,6 +886,7 @@ pub(crate) fn frame(
     } else if mode != "space_pane_display"
         && (!PRIMARY_MODES.contains(&mode.as_str())
             || screen == Some("review")
+            || screen == Some("conflict")
             || stoat.key_hints_visible)
     {
         // The space_pane_display chord paints its own digit badges below, and
@@ -908,6 +909,8 @@ pub(crate) fn frame(
         // review` bindings. A chord sub-mode owns its whole mode, so take them all.
         let raw = if screen == Some("review") {
             stoat.keymap.scoped_bindings(&state, "view", "review")
+        } else if screen == Some("conflict") {
+            stoat.keymap.scoped_bindings(&state, "view", "conflict")
         } else {
             stoat.keymap.active_bindings(&state)
         };
@@ -938,13 +941,34 @@ pub(crate) fn frame(
                 };
                 hints::HintsFooter { text, style }
             })
+        } else if screen == Some("conflict") {
+            let conflict_state = match ws.panes.pane(ws.panes.focus()).view {
+                View::Editor(id) => ws.editors.get(id).and_then(|e| e.conflict_view.as_ref()),
+                _ => None,
+            };
+            conflict_state.map(|state| {
+                let total = state.doc.chunks.len();
+                let resolved = state.doc.chunks.iter().filter(|c| c.auto.is_some()).count();
+                let text = format!(
+                    "file {}/{} {} · {} conflicts · {} resolved",
+                    state.file_index + 1,
+                    state.file_count,
+                    state.rel_path,
+                    total,
+                    resolved,
+                );
+                hints::HintsFooter {
+                    text,
+                    style: stoat.theme.get(crate::theme::scope::UI_TEXT),
+                }
+            })
         } else {
             None
         };
-        let hint_label = if screen == Some("review") {
-            "review"
-        } else {
-            mode.as_str()
+        let hint_label = match screen {
+            Some("review") => "review",
+            Some("conflict") => "conflict",
+            _ => mode.as_str(),
         };
         hints::render_hints(
             hint_label,
