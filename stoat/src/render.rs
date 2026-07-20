@@ -56,7 +56,7 @@ use slotmap::SlotMap;
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
-    path::{Path, PathBuf},
+    path::Path,
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoatty_widgets::{minimap::Minimap, popover::Popover, ApcScene};
@@ -341,7 +341,6 @@ pub(crate) fn frame(
         }
     });
 
-    let home = stoat.env_host().var("HOME").map(PathBuf::from);
     let lsp_pending = stoat.lsp_pending_label();
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
@@ -433,7 +432,7 @@ pub(crate) fn frame(
         minimap_chrome,
         minimap_band: single_minimap_rect,
         hover_cell: stoat.hover_cell,
-        home: home.as_deref(),
+        home: stoat.home.as_deref(),
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),
     };

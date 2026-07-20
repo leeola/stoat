@@ -745,6 +745,11 @@ pub struct Stoat {
     /// Environment-variable lookups go through this trait so tests can
     /// install [`crate::host::FakeEnv`] without leaking real env state.
     pub(crate) env_host: Arc<dyn EnvHost>,
+    /// The user home directory, resolved from [`Self::env_host`] once at
+    /// construction and refreshed by [`Self::set_env_host`]. Lets the per-frame
+    /// paint paths abbreviate `~` without an env lookup and allocation each
+    /// frame.
+    pub(crate) home: Option<PathBuf>,
     /// Language-server requests route through this trait. Defaults to
     /// Language servers keyed by name. Reached through [`Self::lsp_host`] and
     /// [`Self::lsp_for`], never directly, and empty until a real `LocalLsp` is
@@ -1224,6 +1229,9 @@ impl Stoat {
         let (diff_warm_file_tx, diff_warm_file_rx) = tokio::sync::mpsc::channel(256);
         let (index_external_edit_tx, index_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
+        let env_host: Arc<dyn EnvHost> = Arc::new(LocalEnv);
+        let home = env_host.var("HOME").map(PathBuf::from);
+
         let mut stoat = Self {
             size: Rect::default(),
             fallback_mode: "normal".into(),
@@ -1366,7 +1374,8 @@ impl Stoat {
             index_external_edit_tx,
             index_external_edit_rx,
             git_host: Arc::new(LocalGit::new()),
-            env_host: Arc::new(LocalEnv),
+            env_host,
+            home,
             lsp_registry: crate::lsp::registry::LspRegistry::new(),
             lsp_auto_spawn: false,
             lsp_spawn_failed: None,
@@ -1667,6 +1676,7 @@ impl Stoat {
     /// the test harness installs [`crate::host::FakeEnv`] so env-var
     /// reads do not pull in real process state.
     pub fn set_env_host(&mut self, host: Arc<dyn EnvHost>) {
+        self.home = host.var("HOME").map(PathBuf::from);
         self.env_host = host;
     }
 
@@ -6506,7 +6516,6 @@ impl Stoat {
     /// paint.
     fn emit_window_content(&mut self, out: &mut Vec<u8>) {
         let mode = self.focused_mode().to_string();
-        let home = self.env_host().var("HOME").map(PathBuf::from);
         let lsp_pending = self.lsp_pending_label();
         let ws = &mut self.workspaces[self.active_workspace];
         let windowed = ws.panes.windowed_panes();
@@ -6558,7 +6567,7 @@ impl Stoat {
             minimap_chrome: None,
             minimap_band: None,
             hover_cell: None,
-            home: home.as_deref(),
+            home: self.home.as_deref(),
             #[cfg(feature = "perf")]
             perf: None,
         };
@@ -15355,6 +15364,9 @@ mod tests {
             let mut h = crate::test_harness::TestHarness::with_size(40, 12);
             if let Some(home) = home {
                 h.fake_env().set("HOME", home);
+                // The cached home is resolved when the env host is set, so
+                // re-inject it now that HOME is populated.
+                h.stoat.set_env_host(h.fake_env().clone());
             }
             let run_id = h.open_run();
             h.stoat
