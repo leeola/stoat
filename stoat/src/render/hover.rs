@@ -250,15 +250,10 @@ fn highlight_grid_selection(
 /// Map a screen pointer over the hover body to a `(content line, char column)`
 /// position, clamped to the popup interior and the target line's length.
 ///
-/// Replays [`render_hover`]'s scroll clamp to resolve the line. Under stoatty it
-/// inverts the 0.85x popover scale (256ths of a cell over [`TEXT_SCALE_POPUP`])
-/// to resolve the column. The grid path maps a cell to a column 1:1.
-pub(crate) fn hover_hit_test(
-    popup: &HoverPopup,
-    stoatty: bool,
-    col: u16,
-    row: u16,
-) -> (usize, usize) {
+/// Replays [`render_hover`]'s scroll clamp to resolve the line, and inverts the
+/// 0.85x popover scale (256ths of a cell over [`TEXT_SCALE_POPUP`]) to resolve
+/// the column.
+pub(crate) fn hover_hit_test(popup: &HoverPopup, col: u16, row: u16) -> (usize, usize) {
     let inner = popup.inner;
     let clamped_col = col.clamp(inner.x, inner.x + inner.width.saturating_sub(1));
     let clamped_row = row.clamp(inner.y, inner.y + inner.height.saturating_sub(1));
@@ -273,11 +268,7 @@ pub(crate) fn hover_hit_test(
     let line = (scroll + (clamped_row - inner.y) as usize).min(popup.lines.len().saturating_sub(1));
 
     let cell = (clamped_col - inner.x) as usize;
-    let char_col = if stoatty {
-        (cell * 256 + 128) / TEXT_SCALE_POPUP as usize
-    } else {
-        cell
-    };
+    let char_col = (cell * 256 + 128) / TEXT_SCALE_POPUP as usize;
     let max_col = popup.lines.get(line).map(|l| line_width(l)).unwrap_or(0);
     (line, char_col.min(max_col))
 }

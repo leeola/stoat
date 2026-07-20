@@ -1018,11 +1018,6 @@ pub struct Stoat {
     /// [`Self::set_version_info`]. Defaults to "unknown" so tests are
     /// deterministic without a build stamp.
     pub(crate) version_info: &'static str,
-    /// Whether stoat is running inside the stoatty terminal, detected from
-    /// the `STOATTY` env var at startup. Gates the smooth-scroll APC emit:
-    /// when `false`, [`Self::emit_smooth_scroll`] is a no-op and the byte
-    /// stream is identical to a run in any other terminal.
-    pub(crate) stoatty: bool,
     /// Next aux-window id handed out when a pane detaches. Ids are per-process
     /// and monotonic, shared across workspaces, so a window id never aliases a
     /// pane detached from a different workspace.
@@ -1427,7 +1422,6 @@ impl Stoat {
             last_completion_signature: None,
             active_snippet: None,
             version_info: "unknown",
-            stoatty: true,
             next_aux_window: 1,
             apc_tx: None,
             apc_scene: ApcScene::new(),
@@ -1484,7 +1478,6 @@ impl Stoat {
     /// for the UI thread to write after each frame. The bin layer calls this once
     /// at startup, before [`Self::run`].
     pub fn set_apc_tx(&mut self, apc_tx: UnboundedSender<Vec<u8>>) {
-        self.stoatty = true;
         self.apc_tx = Some(apc_tx);
     }
 
@@ -3757,7 +3750,6 @@ impl Stoat {
             x: mouse.column,
             y: mouse.row,
         });
-        let stoatty = self.stoatty;
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -3769,7 +3761,6 @@ impl Stoat {
                 }
                 let pos = crate::render::hover::hover_hit_test(
                     self.pending_hover.as_ref()?,
-                    stoatty,
                     mouse.column,
                     mouse.row,
                 );
@@ -3788,7 +3779,6 @@ impl Stoat {
                 }
                 let pos = crate::render::hover::hover_hit_test(
                     self.pending_hover.as_ref()?,
-                    stoatty,
                     mouse.column,
                     mouse.row,
                 );
@@ -6427,9 +6417,6 @@ impl Stoat {
     /// widget-free frames push no batch at all. Runs at the frame seam after the
     /// live frame is published, beside [`Self::emit_smooth_scroll`].
     fn emit_apc_scene(&mut self) {
-        if !self.stoatty {
-            return;
-        }
         let Some(apc_tx) = self.apc_tx.clone() else {
             return;
         };
@@ -6450,9 +6437,6 @@ impl Stoat {
     /// before [`Self::emit_smooth_scroll`], so a window exists before its pool
     /// content ships. An unchanged set sends nothing.
     fn emit_windows(&mut self) {
-        if !self.stoatty {
-            return;
-        }
         let Some(apc_tx) = self.apc_tx.clone() else {
             return;
         };
@@ -6562,7 +6546,6 @@ impl Stoat {
             diagnostics: &self.diagnostics,
             lsp_registry: &self.lsp_registry,
             search_query: None,
-            stoatty: self.stoatty,
             line_numbers: LineNumbers::Relative,
             wrap_mode: WrapMode::EditorWidth,
             wrap_column: 80,
@@ -6713,7 +6696,7 @@ impl Stoat {
     /// The summaries themselves sync afterward at the frame seam in
     /// [`Self::emit_minimap`]. A no-op outside stoatty or with the minimap off.
     pub(crate) fn ensure_minimap_content_ids(&mut self) {
-        if !self.stoatty || !self.minimap_enabled() {
+        if !self.minimap_enabled() {
             return;
         }
         let ws_id = self.active_workspace;
@@ -6750,11 +6733,8 @@ impl Stoat {
     /// stores. A no-op outside stoatty.
     fn emit_minimap(&mut self) {
         // Recomputed below from each synced strip. Cleared first so the early
-        // exits (non-stoatty, no channel, minimap off) leave no build pending.
+        // exits (no channel, minimap off) leave no build pending.
         self.minimap_build_pending = false;
-        if !self.stoatty {
-            return;
-        }
         let Some(apc_tx) = self.apc_tx.clone() else {
             return;
         };
@@ -6925,9 +6905,6 @@ impl Stoat {
     /// layout (and thus each editor rectangle) reflects the frame just drawn and
     /// the APC bytes are written to stdout right after the grid frame.
     fn emit_smooth_scroll(&mut self) {
-        if !self.stoatty {
-            return;
-        }
         let Some(apc_tx) = self.apc_tx.clone() else {
             return;
         };
@@ -7103,7 +7080,6 @@ impl Stoat {
             .ui_inactive_dim
             .unwrap_or(0.25)
             .clamp(0.0, 1.0) as f32;
-        let stoatty = self.stoatty;
         // Relative numbering follows the same pane the live render calls focused:
         // the focused split editor outside insert mode. Resolved before the ws
         // borrow so the per-pane loop can gate on it.
@@ -7116,7 +7092,7 @@ impl Stoat {
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
-        let base_rich = crate::render::editor::resolve_rich_gutter(theme, fallback_style, stoatty);
+        let base_rich = crate::render::editor::resolve_rich_gutter(theme, fallback_style, true);
         for (_, editor_id, region) in &panes {
             let region = *region;
             let Some(editor) = ws.editors.get_mut(*editor_id) else {
@@ -12450,7 +12426,7 @@ mod tests {
             generation: 0,
         };
         for cell in 0..40u16 {
-            let (line, col) = crate::render::hover::hover_hit_test(&popup, true, cell, 0);
+            let (line, col) = crate::render::hover::hover_hit_test(&popup, cell, 0);
             assert_eq!(line, 0);
             assert_eq!(col, (cell as usize * 256 + 128) / 218);
         }

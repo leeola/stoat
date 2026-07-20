@@ -3565,7 +3565,6 @@ mod tests {
         h.settle();
 
         add_cursor_at(&mut h.stoat, 6);
-        h.stoat.stoatty = true;
 
         h.assert_snapshot("stoatty_primary_cursor_delegated");
     }
@@ -3580,7 +3579,6 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        h.stoat.stoatty = true;
         h.snapshot();
         // Column 4 is the line-number gutter width the cursor sits past.
         assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((4, 0)));
@@ -3590,10 +3588,6 @@ mod tests {
         }
         h.snapshot();
         assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((10, 0)));
-
-        h.stoat.stoatty = false;
-        h.snapshot();
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), None);
     }
 
     #[test]
@@ -3606,7 +3600,6 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        h.stoat.stoatty = true;
         h.snapshot();
         // Column 4 is the line-number gutter width the cursor sits past.
         assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((4, 0)));

@@ -1212,13 +1212,11 @@ fn show_version(stoat: &mut Stoat) -> UpdateEffect {
     use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
 
     let mut label = format!("stoat {}", stoat.version_info);
-    if stoat.stoatty {
-        let stoatty = stoat
-            .env_host()
-            .var("STOATTY_VERSION")
-            .unwrap_or_else(|| "unknown".to_string());
-        label.push_str(&format!(" | stoatty {stoatty}"));
-    }
+    let stoatty = stoat
+        .env_host()
+        .var("STOATTY_VERSION")
+        .unwrap_or_else(|| "unknown".to_string());
+    label.push_str(&format!(" | stoatty {stoatty}"));
 
     stoat.badges.remove_by_source(BadgeSource::Version);
     stoat.badges.insert(Badge {

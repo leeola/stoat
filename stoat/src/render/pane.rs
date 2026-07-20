@@ -96,7 +96,7 @@ pub(crate) fn render_pane(
                     theme,
                     buf,
                     is_focused,
-                    frame.stoatty,
+                    true,
                     frame.minimap_enabled,
                     frame.line_numbers,
                     frame.mode == "insert",
@@ -218,14 +218,7 @@ pub(crate) fn render_pane(
                 .get(crate::theme::scope::UI_BORDER_INACTIVE)
                 .fg
                 .unwrap_or(Color::Reset);
-            let content = paint_popout_card(
-                buf,
-                area,
-                bg,
-                border,
-                theme,
-                frame.stoatty.then_some(&mut *scene),
-            );
+            let content = paint_popout_card(buf, area, bg, border, theme, Some(&mut *scene));
 
             let cap = scaled_char_capacity(content.width as usize, TEXT_SCALE_COMPACT);
             let style = theme
@@ -242,7 +235,7 @@ pub(crate) fn render_pane(
                     style,
                     style_rgb(Some(bg)),
                     TEXT_SCALE_COMPACT,
-                    frame.stoatty.then_some(&mut *scene),
+                    Some(&mut *scene),
                 );
             }
             rows.len() as u16
@@ -262,11 +255,7 @@ pub(crate) fn render_pane(
             .width
             .saturating_sub(inset * 2)
             .saturating_sub(2) as usize;
-        let width = if frame.stoatty {
-            scaled_char_capacity(cell_width, TEXT_SCALE_COMPACT)
-        } else {
-            cell_width
-        };
+        let width = scaled_char_capacity(cell_width, TEXT_SCALE_COMPACT);
         let lines = wrap_popout_lines(msg, width, 4);
         if !lines.is_empty()
             && let Some(area) =
@@ -277,14 +266,7 @@ pub(crate) fn render_pane(
                 .get(crate::theme::scope::UI_BORDER_INACTIVE)
                 .fg
                 .unwrap_or(Color::Reset);
-            let content = paint_popout_card(
-                buf,
-                area,
-                bg,
-                border,
-                theme,
-                frame.stoatty.then_some(&mut *scene),
-            );
+            let content = paint_popout_card(buf, area, bg, border, theme, Some(&mut *scene));
 
             let style = theme
                 .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
@@ -299,7 +281,7 @@ pub(crate) fn render_pane(
                     style,
                     style_rgb(Some(bg)),
                     TEXT_SCALE_COMPACT,
-                    frame.stoatty.then_some(&mut *scene),
+                    Some(&mut *scene),
                 );
             }
         }
@@ -538,7 +520,7 @@ fn render_status_segments(
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
 ) {
-    let rich = scene.filter(|_| frame.stoatty).and_then(|scene| {
+    let rich = scene.and_then(|scene| {
         let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg)?;
         let left_rich = resolve_rich_segments(left, base_style)?;
         let right_rich = resolve_rich_segments(right, base_style)?;
