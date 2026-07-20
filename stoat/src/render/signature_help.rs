@@ -28,30 +28,31 @@ pub(crate) fn render_signature_help(
     if stoat.pending_completion.is_some() {
         return;
     }
-    let popup = match &stoat.pending_signature_help {
-        Some(p) => p.clone(),
+    let anchor_offset = match &stoat.pending_signature_help {
+        Some(p) => p.anchor_offset,
         None => return,
     };
 
-    let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane = ws.focus else {
-        return;
-    };
-    let pane_id = ws.panes.focus();
-    let pane = ws.panes.pane(pane_id);
-    let View::Editor(editor_id) = pane.view else {
-        return;
-    };
-    let pane_area = pane.area;
-    let (content_area, _) = split_pane_status(pane_area);
-    let editor = match ws.editors.get_mut(editor_id) {
-        Some(e) => e,
-        None => return,
-    };
-
-    let cursor_screen = match cursor_screen_position(editor, content_area, popup.anchor_offset) {
-        Some(p) => p,
-        None => return,
+    let (content_area, cursor_screen) = {
+        let ws = stoat.active_workspace_mut();
+        let FocusTarget::SplitPane = ws.focus else {
+            return;
+        };
+        let pane_id = ws.panes.focus();
+        let pane = ws.panes.pane(pane_id);
+        let View::Editor(editor_id) = pane.view else {
+            return;
+        };
+        let (content_area, _) = split_pane_status(pane.area);
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let cursor_screen = match cursor_screen_position(editor, content_area, anchor_offset) {
+            Some(p) => p,
+            None => return,
+        };
+        (content_area, cursor_screen)
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
@@ -61,6 +62,10 @@ pub(crate) fn render_signature_help(
         return;
     }
 
+    let popup = match stoat.pending_signature_help.as_ref() {
+        Some(p) => p,
+        None => return,
+    };
     let label = truncate_to_width(&popup.label, interior_width as usize);
     let doc = popup
         .doc
