@@ -8,7 +8,8 @@ use crate::{
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
         popout::{
-            paint_popout_card, popout_area, popout_inset, scaled_char_capacity, wrap_popout_lines,
+            paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
+            wrap_popout_lines,
         },
         review::{dim_rgb, style_rgb},
         run_pane::render_run_pane,
@@ -212,10 +213,7 @@ pub(crate) fn render_pane(
         if !rows.is_empty()
             && let Some(area) = popout_area(status_area, content_area, rows.len() as u16, 0)
         {
-            let bg = theme
-                .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
-                .bg
-                .unwrap_or(Color::Reset);
+            let bg = popout_card_bg(theme);
             let border = theme
                 .get(crate::theme::scope::UI_BORDER_INACTIVE)
                 .fg
@@ -274,10 +272,7 @@ pub(crate) fn render_pane(
             && let Some(area) =
                 popout_area(status_area, content_area, lines.len() as u16, status_rows)
         {
-            let bg = theme
-                .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
-                .bg
-                .unwrap_or(Color::Reset);
+            let bg = popout_card_bg(theme);
             let border = theme
                 .get(crate::theme::scope::UI_BORDER_INACTIVE)
                 .fg

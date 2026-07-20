@@ -1,6 +1,6 @@
 use crate::{
-    render::{chrome, TEXT_SCALE_FULL},
-    theme::Theme,
+    render::{chrome, review, TEXT_SCALE_FULL},
+    theme::{scope, Theme},
 };
 use ratatui::{
     buffer::Buffer,
@@ -47,6 +47,27 @@ pub(crate) fn popout_area(
 /// keeps the card off the bar's exact edge columns.
 pub(crate) fn popout_inset() -> u16 {
     1
+}
+
+/// The popout card's fill: the focused status-bar background nudged 35% toward
+/// the editor background, so the card reads as a surface distinct from the bar
+/// rather than blending into it.
+///
+/// Falls back to the bar background unchanged when either color is non-RGB (an
+/// indexed-color theme), so those themes keep today's bar-flush look.
+pub(crate) fn popout_card_bg(theme: &Theme) -> Color {
+    let bar = theme.get(scope::UI_STATUSBAR_FOCUSED).bg;
+    let editor = theme
+        .try_get(scope::UI_BACKGROUND)
+        .and_then(|style| style.bg);
+
+    match (review::style_rgb(bar), review::style_rgb(editor)) {
+        (Some(bar_rgb), Some(editor_rgb)) => {
+            let [r, g, b] = review::dim_rgb(bar_rgb, editor_rgb, 0.35);
+            Color::Rgb(r, g, b)
+        },
+        _ => bar.unwrap_or(Color::Reset),
+    }
 }
 
 /// Paint a popout card into `area` and return the rect its text draws into.
@@ -130,9 +151,10 @@ pub(crate) fn scaled_char_capacity(cells: usize, scale: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        paint_popout_card, popout_area, popout_inset, scaled_char_capacity, wrap_popout_lines,
+        paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
+        wrap_popout_lines,
     };
-    use crate::theme::Theme;
+    use crate::{render::review, theme::Theme};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use stoatty_widgets::ApcScene;
 
@@ -207,6 +229,44 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), " ", "edge glyph cleared");
         assert_eq!(buf[(2, 0)].bg, bg, "interior filled with card bg");
         assert_eq!(buf[(3, 1)].bg, bg, "interior filled with card bg");
+    }
+
+    fn theme_from(src: &str) -> Theme {
+        let (config, errors) = stoat_config::parse(src);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        Theme::from_config(&config.expect("parsed config"), "t").expect("theme load failed")
+    }
+
+    #[test]
+    fn popout_card_bg_blends_the_bar_toward_the_editor() {
+        let theme = theme_from(
+            r##"theme t { ui.statusbar.focused.bg = "#283446"; ui.background.bg = "#181818"; }"##,
+        );
+        let [r, g, b] = review::dim_rgb([0x28, 0x34, 0x46], [0x18, 0x18, 0x18], 0.35);
+
+        assert_ne!(
+            popout_card_bg(&theme),
+            Color::Rgb(0x28, 0x34, 0x46),
+            "card fill differs from the bar"
+        );
+        assert_eq!(
+            popout_card_bg(&theme),
+            Color::Rgb(r, g, b),
+            "card is the 0.35 blend"
+        );
+    }
+
+    #[test]
+    fn popout_card_bg_keeps_a_non_rgb_bar() {
+        let theme = theme_from(
+            r##"theme t { ui.statusbar.focused.bg = red; ui.background.bg = "#181818"; }"##,
+        );
+
+        assert_eq!(
+            popout_card_bg(&theme),
+            Color::Red,
+            "a non-RGB bar keeps the bar background"
+        );
     }
 
     #[test]
