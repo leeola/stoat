@@ -7,8 +7,8 @@ use crate::{
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
         },
         conflict::{
-            CloseConflict, Conflict, ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs,
-            ConflictResetChunk,
+            CloseConflict, Conflict, ConflictNextChunk, ConflictPickBoth, ConflictPickOurs,
+            ConflictPickTheirs, ConflictPrevChunk, ConflictResetChunk,
         },
         dump::Dump,
         editor::{
@@ -222,6 +222,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ConflictResetChunk::DEF, |_| {
         Ok(Box::new(ConflictResetChunk))
     });
+    add(ConflictNextChunk::DEF, |_| Ok(Box::new(ConflictNextChunk)));
+    add(ConflictPrevChunk::DEF, |_| Ok(Box::new(ConflictPrevChunk)));
     add(StageHunk::DEF, |_| Ok(Box::new(StageHunk)));
     add(UnstageHunk::DEF, |_| Ok(Box::new(UnstageHunk)));
     add(ToggleStageHunk::DEF, |_| Ok(Box::new(ToggleStageHunk)));
@@ -1409,7 +1411,8 @@ mod tests {
         // + 5 OpenCodeSearch + CodeSearch Next/Prev/Select/Close.
         // + 2 Conflict, CloseConflict.
         // + 4 ConflictPickOurs/Theirs/Both, ConflictResetChunk.
-        assert_eq!(all().count(), 372);
+        // + 2 ConflictNextChunk, ConflictPrevChunk.
+        assert_eq!(all().count(), 374);
     }
 
     #[test]

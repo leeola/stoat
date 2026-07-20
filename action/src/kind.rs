@@ -49,6 +49,8 @@ pub enum ActionKind {
     ConflictPickTheirs,
     ConflictPickBoth,
     ConflictResetChunk,
+    ConflictNextChunk,
+    ConflictPrevChunk,
     StageHunk,
     UnstageHunk,
     ToggleStageHunk,

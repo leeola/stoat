@@ -215,6 +215,43 @@ pub(super) fn conflict_reset_chunk(stoat: &mut Stoat) {
     apply_resolution(stoat, chunk_idx, region, &marker, picks);
 }
 
+/// Land the cursor on the next (`forward`) or previous conflict chunk, stopping
+/// at the last or first chunk rather than wrapping.
+pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool) {
+    let (editor_id, anchors) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        (session.file.editor_id, session.file.chunk_anchors.clone())
+    };
+
+    let (cursor, starts) = {
+        let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) else {
+            return;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let cursor = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().start);
+        let starts: Vec<usize> = anchors
+            .iter()
+            .map(|(start, _)| buffer_snapshot.resolve_anchor(start))
+            .collect();
+        (cursor, starts)
+    };
+
+    let target = if forward {
+        starts.into_iter().find(|&start| start > cursor)
+    } else {
+        starts.into_iter().rev().find(|&start| start < cursor)
+    };
+    let Some(offset) = target else {
+        return;
+    };
+
+    land_cursor(stoat, editor_id, offset);
+    scroll_cursor_into_view(stoat, editor_id);
+}
+
 /// Apply a whole-side pick of the given kind to the chunk under the cursor.
 ///
 /// A pick over a region hand-edited to text no pick produces first arms the
@@ -346,6 +383,15 @@ fn land_cursor(stoat: &mut Stoat, editor_id: EditorId, offset: usize) {
             buffer_snapshot,
         )
     });
+}
+
+/// Scroll the center editor so its cursor sits within the configured scrolloff
+/// margin after a navigation step lands off-screen.
+fn scroll_cursor_into_view(stoat: &mut Stoat, editor_id: EditorId) {
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    if let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) {
+        super::movement::ensure_cursor_in_view(editor, scrolloff);
+    }
 }
 
 /// Land the cursor on the newly-opened view's first conflict chunk and push the

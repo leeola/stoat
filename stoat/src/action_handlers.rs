@@ -256,6 +256,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             conflict_view::conflict_reset_chunk(stoat);
             UpdateEffect::Redraw
         },
+        ActionKind::ConflictNextChunk => {
+            conflict_view::conflict_step_chunk(stoat, true);
+            UpdateEffect::Redraw
+        },
+        ActionKind::ConflictPrevChunk => {
+            conflict_view::conflict_step_chunk(stoat, false);
+            UpdateEffect::Redraw
+        },
         ActionKind::StageHunk => review::stage_hunk(stoat, review::HunkStage::Stage),
         ActionKind::UnstageHunk => review::stage_hunk(stoat, review::HunkStage::Unstage),
         ActionKind::ToggleStageHunk => review::stage_hunk(stoat, review::HunkStage::Toggle),

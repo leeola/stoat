@@ -669,6 +669,8 @@ on key {
         t -> ConflictPickTheirs();
         b -> ConflictPickBoth();
         x -> ConflictResetChunk();
+        n -> ConflictNextChunk();
+        p -> ConflictPrevChunk();
     }
     mode == insert {
         Escape -> SetMode(normal);

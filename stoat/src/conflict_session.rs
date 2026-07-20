@@ -78,8 +78,8 @@ pub(crate) struct ConflictViewState {
 mod tests {
     use crate::{app::Stoat, merge_view::MergeDoc, test_harness::TestHarness};
     use stoat_action::{
-        Action, CloseConflict, Conflict, ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs,
-        ConflictResetChunk,
+        Action, CloseConflict, Conflict, ConflictNextChunk, ConflictPickBoth, ConflictPickOurs,
+        ConflictPickTheirs, ConflictPrevChunk, ConflictResetChunk,
     };
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
@@ -124,6 +124,39 @@ mod tests {
             .expect("buffer poisoned")
             .rope()
             .to_string()
+    }
+
+    /// Seed one file carrying two conflict chunks separated by a clean line, so
+    /// navigation has more than one target.
+    fn seed_two_chunks(h: &mut TestHarness) {
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("a\nb\nc\nd\ne\n"),
+            Some("a\nB\nc\nD\ne\n"),
+            Some("a\nX\nc\nY\ne\n"),
+        );
+    }
+
+    fn cursor_row(h: &mut TestHarness) -> u32 {
+        let editor_id = h
+            .stoat
+            .active_workspace()
+            .conflict
+            .as_ref()
+            .expect("session open")
+            .file
+            .editor_id;
+        let editor = h
+            .stoat
+            .active_workspace_mut()
+            .editors
+            .get_mut(editor_id)
+            .expect("center editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().start);
+        buffer_snapshot.rope().offset_to_point(offset).row
     }
 
     #[test]
@@ -280,6 +313,26 @@ mod tests {
             "ours\n",
             "repeat of the identical pick overwrites the hand edit"
         );
+    }
+
+    #[test]
+    fn n_and_p_step_between_chunks_without_wrapping() {
+        let mut h = Stoat::test();
+        seed_two_chunks(&mut h);
+        dispatch_conflict(&mut h);
+        assert_eq!(cursor_row(&mut h), 1, "opens on the first chunk");
+
+        pick(&mut h, &ConflictNextChunk);
+        assert_eq!(cursor_row(&mut h), 7, "n steps to the second chunk");
+
+        pick(&mut h, &ConflictNextChunk);
+        assert_eq!(cursor_row(&mut h), 7, "n at the last chunk does not wrap");
+
+        pick(&mut h, &ConflictPrevChunk);
+        assert_eq!(cursor_row(&mut h), 1, "p steps back to the first chunk");
+
+        pick(&mut h, &ConflictPrevChunk);
+        assert_eq!(cursor_row(&mut h), 1, "p at the first chunk does not wrap");
     }
 
     #[test]

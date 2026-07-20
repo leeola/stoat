@@ -70,3 +70,25 @@ define_action!(
      discarding any pick or hand edit in that region.",
     ActionPriority::Rare
 );
+
+define_action!(
+    ConflictNextChunkDef,
+    ConflictNextChunk,
+    "ConflictNextChunk",
+    ActionKind::ConflictNextChunk,
+    "move to the next conflict chunk",
+    "Land the cursor on the start of the next conflict chunk below it. Stops \
+     at the last chunk without wrapping.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ConflictPrevChunkDef,
+    ConflictPrevChunk,
+    "ConflictPrevChunk",
+    ActionKind::ConflictPrevChunk,
+    "move to the previous conflict chunk",
+    "Land the cursor on the start of the previous conflict chunk above it. \
+     Stops at the first chunk without wrapping.",
+    ActionPriority::Rare
+);
