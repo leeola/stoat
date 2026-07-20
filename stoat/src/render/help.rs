@@ -357,7 +357,11 @@ fn format_action(action: &ResolvedAction) -> String {
 /// it holds in `context`, followed by the predicate source and each field it
 /// tests with its current value (`unset` when the field is absent).
 fn predicate_line(predicate: &Predicate, context: &SnapshotState) -> String {
-    let mark = if evaluate(predicate, context) { "[x]" } else { "[ ]" };
+    let mark = if evaluate(predicate, context) {
+        "[x]"
+    } else {
+        "[ ]"
+    };
 
     let mut fields = Vec::new();
     collect_predicate_fields(predicate, &mut fields);
@@ -413,11 +417,7 @@ fn format_example(entry: &crate::help::HelpEntry) -> String {
         return format!("{name}()");
     }
     if !entry.bound_args.is_empty() {
-        let args: Vec<String> = entry
-            .bound_args
-            .iter()
-            .filter_map(format_arg)
-            .collect();
+        let args: Vec<String> = entry.bound_args.iter().filter_map(format_arg).collect();
         return format!("{name}({})", args.join(", "));
     }
     let placeholders: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();

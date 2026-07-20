@@ -324,9 +324,13 @@ impl Keymap {
     pub fn bindings(
         &self,
     ) -> impl Iterator<Item = (&CompiledKey, &[Predicate], &[ResolvedAction])> {
-        self.bindings
-            .iter()
-            .map(|binding| (&binding.key, binding.predicates.as_slice(), &*binding.actions))
+        self.bindings.iter().map(|binding| {
+            (
+                &binding.key,
+                binding.predicates.as_slice(),
+                &*binding.actions,
+            )
+        })
     }
 
     /// Compile `config` and collect warnings for `SetMode` targets no binding

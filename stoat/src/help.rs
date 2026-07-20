@@ -150,7 +150,9 @@ pub fn build_help_bindings(
 ) -> HashMap<String, Vec<HelpBinding>> {
     let mut by_action: HashMap<String, Vec<HelpBinding>> = HashMap::new();
     for (key, predicates, actions) in keymap.bindings() {
-        let active = predicates.iter().all(|predicate| evaluate(predicate, context));
+        let active = predicates
+            .iter()
+            .all(|predicate| evaluate(predicate, context));
         let label = key.display_label();
         for action in actions {
             by_action
