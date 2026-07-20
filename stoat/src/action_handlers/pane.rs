@@ -176,7 +176,12 @@ pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
         if let Some(buffer_id) = ws.editors.get(source_editor_id).map(|e| e.buffer_id)
             && let Some(buffer) = ws.buffers.get(buffer_id)
         {
-            let editor = ws.seeded_editor(buffer_id, buffer, executor);
+            let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
+            if let Some(src) = ws.editors.get(source_editor_id) {
+                editor.selections = src.selections.clone();
+                editor.scroll_row = src.scroll_row;
+                editor.scroll_offset = src.scroll_offset;
+            }
             let new_editor_id = ws.editors.insert(editor);
             ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
         }

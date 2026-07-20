@@ -1369,6 +1369,53 @@ mod tests {
     }
 
     #[test]
+    fn split_inherits_source_cursor_and_scroll() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, &"x\n".repeat(100));
+
+        // Drive real keypresses so the update path's view-follow scrolls the
+        // source pane, matching a user who navigated before splitting.
+        for _ in 0..50 {
+            stoat.update(Event::Key(keys::key(KeyCode::Char('j'))));
+        }
+
+        let source_pane = stoat.active_workspace().panes.focus();
+        let source_editor = editor::editor_id_in_pane(&stoat, source_pane);
+        let cursor = editor::primary_head_offset(&mut stoat);
+        let scroll = editor::editor_scroll_row(&stoat, source_editor);
+        assert!(scroll > 0, "moving past one screen scrolls the source pane");
+
+        dispatch(&mut stoat, &SplitRight);
+
+        let new_pane = stoat.active_workspace().panes.focus();
+        assert_ne!(new_pane, source_pane, "the split focuses a new pane");
+        let new_editor = editor::editor_id_in_pane(&stoat, new_pane);
+        assert_ne!(new_editor, source_editor, "the new pane has its own editor");
+        assert_eq!(
+            editor::primary_head_offset(&mut stoat),
+            cursor,
+            "the new pane inherits the source cursor",
+        );
+        assert_eq!(
+            editor::editor_scroll_row(&stoat, new_editor),
+            scroll,
+            "the new pane inherits the source viewport",
+        );
+
+        stoat.active_workspace_mut().panes.set_focus(source_pane);
+        assert_eq!(
+            editor::primary_head_offset(&mut stoat),
+            cursor,
+            "the source cursor is unchanged",
+        );
+        assert_eq!(
+            editor::editor_scroll_row(&stoat, source_editor),
+            scroll,
+            "the source viewport is unchanged",
+        );
+    }
+
+    #[test]
     fn dispatch_quit_all_exits_with_splits() {
         let mut stoat = stoat();
         dispatch(&mut stoat, &SplitRight);
