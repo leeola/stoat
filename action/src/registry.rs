@@ -7,9 +7,9 @@ use crate::{
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
         },
         conflict::{
-            CloseConflict, Conflict, ConflictNextChunk, ConflictNextFile, ConflictPickBoth,
-            ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk, ConflictPrevFile,
-            ConflictResetChunk,
+            CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
+            ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk,
+            ConflictPrevFile, ConflictResetChunk,
         },
         dump::Dump,
         editor::{
@@ -227,6 +227,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ConflictPrevChunk::DEF, |_| Ok(Box::new(ConflictPrevChunk)));
     add(ConflictNextFile::DEF, |_| Ok(Box::new(ConflictNextFile)));
     add(ConflictPrevFile::DEF, |_| Ok(Box::new(ConflictPrevFile)));
+    add(ConflictApply::DEF, |_| Ok(Box::new(ConflictApply)));
     add(StageHunk::DEF, |_| Ok(Box::new(StageHunk)));
     add(UnstageHunk::DEF, |_| Ok(Box::new(UnstageHunk)));
     add(ToggleStageHunk::DEF, |_| Ok(Box::new(ToggleStageHunk)));
@@ -1416,7 +1417,8 @@ mod tests {
         // + 4 ConflictPickOurs/Theirs/Both, ConflictResetChunk.
         // + 2 ConflictNextChunk, ConflictPrevChunk.
         // + 2 ConflictNextFile, ConflictPrevFile.
-        assert_eq!(all().count(), 376);
+        // + 1 ConflictApply.
+        assert_eq!(all().count(), 377);
     }
 
     #[test]

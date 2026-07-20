@@ -272,6 +272,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             conflict_view::conflict_step_file(stoat, false);
             UpdateEffect::Redraw
         },
+        ActionKind::ConflictApply => {
+            conflict_view::conflict_apply(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::StageHunk => review::stage_hunk(stoat, review::HunkStage::Stage),
         ActionKind::UnstageHunk => review::stage_hunk(stoat, review::HunkStage::Unstage),
         ActionKind::ToggleStageHunk => review::stage_hunk(stoat, review::HunkStage::Toggle),

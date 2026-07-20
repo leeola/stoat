@@ -8,7 +8,12 @@ use crate::{
     merge_view::{ChunkState, MergeDoc, RowPick},
     pane::View,
 };
-use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    path::Path,
+    sync::Arc,
+};
 use stoat_action::ActionKind;
 use stoat_text::{Anchor, Bias, SelectionGoal};
 
@@ -85,6 +90,7 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
             saved_editor,
             pending_clobber: None,
             parked: HashMap::new(),
+            applied: HashSet::new(),
         });
     }
 
@@ -294,24 +300,38 @@ pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool) {
     scroll_cursor_into_view(stoat, editor_id);
 }
 
-/// Step to the next (`forward`) or previous conflicted file, parking the
-/// outgoing file's resolve state so returning to it restores the picks and
-/// scratch buffer. Stops at the last or first file rather than wrapping.
+/// Step to the next (`forward`) or previous conflicted file. Stops at the last
+/// or first file rather than wrapping.
 pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool) {
-    let (current, target, file_count, git_root, target_path) = {
+    let target = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;
         };
-        let count = session.files.len();
-        let target = match (forward, session.current) {
-            (true, c) if c + 1 < count => c + 1,
+        match (forward, session.current) {
+            (true, c) if c + 1 < session.files.len() => c + 1,
             (false, c) if c > 0 => c - 1,
             _ => return,
+        }
+    };
+    switch_to_file(stoat, target);
+}
+
+/// Show the file at `target`, parking the outgoing file's resolve state or
+/// restoring a parked one, then landing the cursor on its first chunk.
+///
+/// A no-op when `target` is already current or out of range. Parking keeps the
+/// outgoing file's picks and scratch buffer alive for a later return.
+fn switch_to_file(stoat: &mut Stoat, target: usize) {
+    let (current, file_count, git_root, target_path) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
         };
+        if target == session.current || target >= session.files.len() {
+            return;
+        }
         (
             session.current,
-            target,
-            count,
+            session.files.len(),
             session.workdir.clone(),
             session.files[target].clone(),
         )
@@ -359,6 +379,115 @@ pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool) {
     }
 
     land_first_chunk_current(stoat);
+}
+
+/// Write the resolved center text to the working file, mark it resolved in the
+/// index, then advance to the next unapplied file or close when every file is
+/// applied.
+///
+/// A file with any chunk still on its raw markers is refused with a status, so a
+/// half-resolved file is never written or marked resolved.
+pub(super) fn conflict_apply(stoat: &mut Stoat) {
+    let unresolved = unresolved_chunk_count(stoat);
+    if unresolved > 0 {
+        stoat.set_status(format!("{unresolved} unresolved conflict(s) remain"));
+        return;
+    }
+
+    let (current, path, buffer_id, git_root) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        (
+            session.current,
+            session.file.path.clone(),
+            session.file.buffer_id,
+            session.workdir.clone(),
+        )
+    };
+
+    let text = {
+        let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) else {
+            return;
+        };
+        let guard = buffer.read().expect("buffer poisoned");
+        guard.rope().to_string()
+    };
+
+    if let Err(err) = stoat.fs_host.write_atomic(&path, text.as_bytes()) {
+        stoat.set_status(format!("write failed: {err}"));
+        return;
+    }
+
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        return;
+    };
+    if let Err(err) = repo.mark_resolved(&path) {
+        stoat.set_status(format!("mark resolved failed: {err}"));
+        return;
+    }
+
+    let next = {
+        let Some(session) = stoat.active_workspace_mut().conflict.as_mut() else {
+            return;
+        };
+        session.applied.insert(current);
+        let count = session.files.len();
+        (1..count)
+            .map(|step| (current + step) % count)
+            .find(|index| !session.applied.contains(index))
+    };
+
+    match next {
+        Some(target) => {
+            stoat.set_status("conflict resolved");
+            switch_to_file(stoat, target);
+        },
+        None => {
+            stoat.set_status("all conflicts resolved");
+            close_conflict(stoat);
+        },
+    }
+}
+
+/// Count the current file's chunks still showing their raw conflict markers,
+/// classified against the live center text so hand edits and picks are excluded.
+fn unresolved_chunk_count(stoat: &mut Stoat) -> usize {
+    let (editor_id, anchors) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return 0;
+        };
+        (session.file.editor_id, session.file.chunk_anchors.clone())
+    };
+
+    let region_texts: Vec<String> = {
+        let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) else {
+            return 0;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        anchors
+            .iter()
+            .map(|(start, end)| {
+                let start = buffer_snapshot.resolve_anchor(start);
+                let end = buffer_snapshot.resolve_anchor(end);
+                buffer_snapshot.rope().chunks_in_range(start..end).collect()
+            })
+            .collect()
+    };
+
+    let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+        return 0;
+    };
+    let doc = &session.file.doc;
+    region_texts
+        .iter()
+        .enumerate()
+        .filter(|(index, text)| {
+            doc.chunks[*index].classify(&doc.rows, &session.file.picks[*index], text)
+                == ChunkState::Unresolved
+        })
+        .count()
 }
 
 /// Apply a whole-side pick of the given kind to the chunk under the cursor.

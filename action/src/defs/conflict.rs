@@ -116,3 +116,16 @@ define_action!(
      first file without wrapping.",
     ActionPriority::Rare
 );
+
+define_action!(
+    ConflictApplyDef,
+    ConflictApply,
+    "ConflictApply",
+    ActionKind::ConflictApply,
+    "write the resolved file and mark it resolved",
+    "Write the current file's resolved result to the working tree and mark it \
+     resolved in the index, then advance to the next unresolved file or close \
+     the view when all are done. Refused while any chunk still shows its raw \
+     conflict markers.",
+    ActionPriority::Rare
+);

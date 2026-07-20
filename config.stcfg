@@ -673,6 +673,7 @@ on key {
         p -> ConflictPrevChunk();
         N -> ConflictNextFile();
         P -> ConflictPrevFile();
+        Enter -> ConflictApply();
     }
     mode == insert {
         Escape -> SetMode(normal);

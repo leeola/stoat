@@ -2,7 +2,10 @@ use crate::{
     editor_state::EditorId,
     merge_view::{MergeDoc, RowPick},
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 use stoat_action::ActionKind;
 use stoat_text::{Anchor, BufferId};
 
@@ -41,6 +44,12 @@ pub(crate) struct ConflictSession {
     /// Each parked entry keeps its center editor and buffer alive until the view
     /// closes.
     pub(crate) parked: HashMap<usize, FileResolveState>,
+    /// Indices in [`Self::files`] whose resolution has been written and marked
+    /// resolved in the index.
+    ///
+    /// Apply records the current file here, then advances to the next index not
+    /// in this set, closing the view once every file is applied.
+    pub(crate) applied: HashSet<usize>,
 }
 
 /// The in-progress resolution of one conflicted file.
@@ -86,9 +95,9 @@ pub(crate) struct ConflictViewState {
 mod tests {
     use crate::{app::Stoat, merge_view::MergeDoc, test_harness::TestHarness};
     use stoat_action::{
-        Action, CloseConflict, Conflict, ConflictNextChunk, ConflictNextFile, ConflictPickBoth,
-        ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk, ConflictPrevFile,
-        ConflictResetChunk,
+        Action, CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
+        ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk,
+        ConflictPrevFile, ConflictResetChunk,
     };
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
@@ -393,6 +402,78 @@ mod tests {
 
         pick(&mut h, &ConflictPrevFile);
         assert_eq!(current_file(&h), 0, "P at the first file does not wrap");
+    }
+
+    #[test]
+    fn apply_writes_the_resolved_file_and_marks_it_resolved() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        seed_conflict(&mut h);
+        dispatch_conflict(&mut h);
+        let path = git_root.join("f.txt");
+
+        pick(&mut h, &ConflictPickOurs);
+        pick(&mut h, &ConflictApply);
+
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("file"),
+            "view closes once the only file is applied"
+        );
+        let mut written = Vec::new();
+        h.stoat
+            .fs_host
+            .read(&path, &mut written)
+            .expect("resolved file written");
+        assert_eq!(String::from_utf8(written).unwrap(), "ours\n");
+        assert_eq!(h.fake_git().resolved_paths(&git_root), vec![path]);
+    }
+
+    #[test]
+    fn apply_refuses_while_a_chunk_is_unresolved() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        seed_conflict(&mut h);
+        dispatch_conflict(&mut h);
+        let path = git_root.join("f.txt");
+
+        pick(&mut h, &ConflictApply);
+
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("conflict"),
+            "view stays open on an unresolved file"
+        );
+        assert!(!h.stoat.fs_host.exists(&path), "nothing is written");
+        assert!(h.fake_git().resolved_paths(&git_root).is_empty());
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("1 unresolved conflict(s) remain")
+        );
+    }
+
+    #[test]
+    fn apply_advances_to_the_next_unresolved_file() {
+        let mut h = Stoat::test();
+        seed_two_files(&mut h);
+        dispatch_conflict(&mut h);
+
+        pick(&mut h, &ConflictPickOurs);
+        pick(&mut h, &ConflictApply);
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("conflict"),
+            "view stays open with a file left"
+        );
+        assert_eq!(current_file(&h), 1, "apply advances to the next file");
+
+        pick(&mut h, &ConflictPickTheirs);
+        pick(&mut h, &ConflictApply);
+        assert_eq!(
+            h.stoat.current_view(),
+            Some("file"),
+            "view closes when every file is applied"
+        );
     }
 
     #[test]
