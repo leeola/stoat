@@ -36,10 +36,12 @@ use crate::{
     command_palette::CommandPalette,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
-    help::Help,
+    help::{build_help_bindings, Help, SnapshotState},
     host::FsHost,
     input_view::{InputView, SubmitTarget},
     jumplist::JumpList,
+    keymap::{KeymapState, StateValue},
+    keymap_state::{StoatKeymapState, BUILTIN_FIELDS},
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace_picker::WorkspacePicker,
 };
@@ -53,7 +55,7 @@ pub(crate) use pane::{close_pane_by_id, restore_pane_after_term_exit};
 #[cfg(test)]
 pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
-use std::{path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, Dump, FocusPane, OpenBuffer, OpenFile, OpenReviewAgentEdits,
     OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
@@ -1236,9 +1238,27 @@ fn show_version(stoat: &mut Stoat) -> UpdateEffect {
 pub(crate) fn open_help(stoat: &mut Stoat) {
     let active = stoat.active_bindings_for_current_mode();
     let mode = stoat.focused_mode().to_string();
+    let context = help_context(stoat);
+    let bindings = build_help_bindings(&stoat.keymap, &context);
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    stoat.help = Some(Help::new(&mode, active, ws, executor));
+    stoat.help = Some(Help::new(&mode, active, bindings, context, ws, executor));
+}
+
+/// Snapshot the predicate fields a help binding's conditions may test.
+///
+/// User variables seed the map so a `SetVar` field is available. The builtin
+/// fields then overwrite any that collide, since [`StoatKeymapState`] is the
+/// authority on `mode`/`view`/`token` and the rest.
+fn help_context(stoat: &Stoat) -> SnapshotState {
+    let mut fields: HashMap<String, StateValue> = stoat.user_vars.clone();
+    let state = StoatKeymapState::from_stoat(stoat);
+    for &field in BUILTIN_FIELDS {
+        if let Some(value) = state.get(field) {
+            fields.insert(field.to_string(), value.clone());
+        }
+    }
+    SnapshotState(fields)
 }
 
 /// Close the help modal, disposing its scratch editor and restoring the

@@ -317,6 +317,18 @@ impl Keymap {
         Self { bindings }
     }
 
+    /// Every compiled binding as `(key, predicates, actions)`, in source order.
+    ///
+    /// Help walks this to index which keys reach each action and under what
+    /// conditions, rather than resolving one key against a single state.
+    pub fn bindings(
+        &self,
+    ) -> impl Iterator<Item = (&CompiledKey, &[Predicate], &[ResolvedAction])> {
+        self.bindings
+            .iter()
+            .map(|binding| (&binding.key, binding.predicates.as_slice(), &*binding.actions))
+    }
+
     /// Compile `config` and collect warnings for `SetMode` targets no binding
     /// block selects on.
     ///
@@ -474,6 +486,30 @@ fn collect_mode_targets(predicate: &Predicate, out: &mut HashSet<String>) {
         // spurious unknown-mode warning for a mode the config does reference.
         Predicate::Not(p) => collect_mode_targets(&p.node, out),
         _ => {},
+    }
+}
+
+/// Collect every state field name `predicate` references, walking through
+/// `And`/`Or`/`Not`.
+///
+/// Consumed by the help detail pane to annotate a binding's conditions with the
+/// current value of each field they test.
+#[allow(dead_code)]
+pub(crate) fn collect_predicate_fields(predicate: &Predicate, out: &mut Vec<String>) {
+    match predicate {
+        Predicate::Eq(field, _)
+        | Predicate::NotEq(field, _)
+        | Predicate::Gt(field, _)
+        | Predicate::Lt(field, _)
+        | Predicate::Gte(field, _)
+        | Predicate::Lte(field, _)
+        | Predicate::Matches(field, _)
+        | Predicate::Bool(field) => out.push(field.node.clone()),
+        Predicate::Not(p) => collect_predicate_fields(&p.node, out),
+        Predicate::And(l, r) | Predicate::Or(l, r) => {
+            collect_predicate_fields(&l.node, out);
+            collect_predicate_fields(&r.node, out);
+        },
     }
 }
 

@@ -1,14 +1,14 @@
 use crate::{
     input_view::{InputView, SubmitTarget},
-    keymap::{ResolvedAction, ResolvedArg},
+    keymap::{evaluate, Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     workspace::Workspace,
 };
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
 };
 use stoat_action::{registry, ActionDef, ActionKind, ParamDef, ParamValue};
-use stoat_config::Value;
+use stoat_config::{Predicate, Value};
 use stoat_scheduler::Executor;
 
 /// Synthetic [`ActionDef`] used to surface `SetMode` keybindings in help.
@@ -61,6 +61,13 @@ pub struct Help {
     scope: HelpScope,
     snapshot_mode: String,
     active: Vec<(String, Vec<ResolvedAction>)>,
+    /// Every keybinding that reaches each action, keyed by action name, indexed
+    /// at open time. The detail pane lists a selected action's bindings from
+    /// here.
+    bindings: HashMap<String, Vec<HelpBinding>>,
+    /// The context state captured at open, for evaluating a binding's
+    /// conditions against where the user was.
+    context: SnapshotState,
     entries: Vec<HelpEntry>,
     filtered: Vec<usize>,
     selected: usize,
@@ -112,10 +119,60 @@ pub enum HelpOutcome {
     Dispatch(&'static registry::RegistryEntry, Vec<ParamValue>),
 }
 
+/// A read-only [`KeymapState`] over the field values captured when help opened,
+/// so a binding's conditions can be evaluated against the context the user was
+/// in rather than the live state.
+pub struct SnapshotState(pub(crate) HashMap<String, StateValue>);
+
+impl KeymapState for SnapshotState {
+    fn get(&self, field: &str) -> Option<&StateValue> {
+        self.0.get(field)
+    }
+}
+
+/// One keybinding that reaches an action, captured for the help detail pane.
+///
+/// `actions` is the binding's full sequence, so `AutoReload(follow)` stays
+/// distinguishable from `AutoReload(on)`. `active` records whether every
+/// predicate held in the context help captured at open.
+pub struct HelpBinding {
+    pub label: String,
+    pub actions: Vec<ResolvedAction>,
+    pub predicates: Vec<Predicate>,
+    pub active: bool,
+}
+
+/// Index every keybinding by each action name in its sequence, so help can list
+/// the keys reaching an action and whether their conditions hold in `context`.
+pub fn build_help_bindings(
+    keymap: &Keymap,
+    context: &SnapshotState,
+) -> HashMap<String, Vec<HelpBinding>> {
+    let mut by_action: HashMap<String, Vec<HelpBinding>> = HashMap::new();
+    for (key, predicates, actions) in keymap.bindings() {
+        let active = predicates.iter().all(|predicate| evaluate(predicate, context));
+        let label = key.display_label();
+        for action in actions {
+            by_action
+                .entry(action.name.clone())
+                .or_default()
+                .push(HelpBinding {
+                    label: label.clone(),
+                    actions: actions.to_vec(),
+                    predicates: predicates.to_vec(),
+                    active,
+                });
+        }
+    }
+    by_action
+}
+
 impl Help {
     pub fn new(
         snapshot_mode: &str,
         active: Vec<(String, Vec<ResolvedAction>)>,
+        bindings: HashMap<String, Vec<HelpBinding>>,
+        context: SnapshotState,
         ws: &mut Workspace,
         executor: Executor,
     ) -> Self {
@@ -125,6 +182,8 @@ impl Help {
             scope: HelpScope::Active,
             snapshot_mode: snapshot_mode.to_owned(),
             active,
+            bindings,
+            context,
             entries: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
@@ -152,6 +211,18 @@ impl Help {
 
     pub fn snapshot_mode(&self) -> &str {
         &self.snapshot_mode
+    }
+
+    /// Every keybinding that reaches `action_name`, or an empty slice. Ordered
+    /// as the keymap compiled them.
+    pub fn bindings_for(&self, action_name: &str) -> &[HelpBinding] {
+        self.bindings.get(action_name).map_or(&[], Vec::as_slice)
+    }
+
+    /// The context state captured when help opened, for evaluating a binding's
+    /// conditions against where the user was.
+    pub fn context(&self) -> &SnapshotState {
+        &self.context
     }
 
     pub fn entries(&self) -> &[HelpEntry] {
@@ -471,7 +542,46 @@ mod tests {
         let executor = h.stoat.executor.clone();
         let active_idx = h.stoat.active_workspace;
         let ws = &mut h.stoat.workspaces[active_idx];
-        h.stoat.help = Some(Help::new("normal", active, ws, executor));
+        h.stoat.help = Some(Help::new(
+            "normal",
+            active,
+            HashMap::new(),
+            SnapshotState(HashMap::new()),
+            ws,
+            executor,
+        ));
+    }
+
+    #[test]
+    fn build_help_bindings_marks_active_by_context() {
+        let (config, errors) =
+            stoat_config::parse("on key { view == diff { F -> AutoReload(follow); } }");
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let keymap = Keymap::compile(&config.expect("config"));
+
+        let context_for = |view: &str| {
+            SnapshotState(HashMap::from([(
+                "view".to_string(),
+                StateValue::String(view.into()),
+            )]))
+        };
+
+        let bindings = build_help_bindings(&keymap, &context_for("file"));
+        let auto = &bindings["AutoReload"];
+        assert_eq!(auto.len(), 1);
+        assert_eq!(auto[0].label, "F");
+        assert_eq!(auto[0].actions[0].name, "AutoReload");
+        assert!(
+            !auto[0].predicates.is_empty(),
+            "the view == diff condition is kept"
+        );
+        assert!(!auto[0].active, "inactive when the view is file");
+
+        let bindings = build_help_bindings(&keymap, &context_for("diff"));
+        assert!(
+            bindings["AutoReload"][0].active,
+            "active when the view is diff"
+        );
     }
 
     /// Dispatch a key through the test harness's top-level key handler so
