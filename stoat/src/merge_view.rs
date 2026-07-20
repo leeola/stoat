@@ -121,7 +121,10 @@ impl MergeDoc {
             match (row.conflict, start) {
                 (true, None) => start = Some(i),
                 (false, Some(s)) => {
-                    chunks.push(ConflictChunk { row_range: s..i });
+                    chunks.push(ConflictChunk {
+                        row_range: s..i,
+                        auto: None,
+                    });
                     start = None;
                 },
                 _ => {},
@@ -130,7 +133,13 @@ impl MergeDoc {
         if let Some(s) = start {
             chunks.push(ConflictChunk {
                 row_range: s..rows.len(),
+                auto: None,
             });
+        }
+
+        for chunk in &mut chunks {
+            let range = chunk.row_range.clone();
+            chunk.auto = indent_auto_resolution(&rows, &range);
         }
 
         Self { rows, chunks }
@@ -152,9 +161,18 @@ impl MergeDoc {
             if chunk_idx < self.chunks.len() && self.chunks[chunk_idx].row_range.start == i {
                 let chunk = &self.chunks[chunk_idx];
                 let start = text.len();
-                text.push_str(&chunk.marker_text(&self.rows));
+                let end_row = match &chunk.auto {
+                    Some(auto) => {
+                        text.push_str(&render_lines(&auto.lines));
+                        auto.covered.end
+                    },
+                    None => {
+                        text.push_str(&chunk.marker_text(&self.rows));
+                        chunk.row_range.end
+                    },
+                };
                 ranges.push(start..text.len());
-                i = chunk.row_range.end;
+                i = end_row;
                 chunk_idx += 1;
                 continue;
             }
@@ -175,6 +193,21 @@ impl MergeDoc {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConflictChunk {
     pub(crate) row_range: Range<usize>,
+    /// Set when the chunk is an indentation-only conflict that resolves
+    /// automatically (one side re-indented, the other edited content).
+    pub(crate) auto: Option<AutoResolution>,
+}
+
+/// An automatic resolution of an indentation-only conflict chunk.
+///
+/// The resolved center lines, plus the rows they replace. `covered` starts at
+/// the chunk's first row and may extend past it to absorb trailing content-side
+/// insertions re-indented by the same delta.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AutoResolution {
+    pub(crate) lines: Vec<String>,
+    pub(crate) covered: Range<usize>,
 }
 
 #[allow(dead_code)]
@@ -281,9 +314,10 @@ impl ConflictChunk {
     }
 
     /// Derive this chunk's [`ChunkState`] by matching `region_text` (trailing
-    /// newlines ignored) against the candidate renderings in order: the marker
-    /// block, the ours/theirs/both whole-side assemblies, then the assembly for
-    /// `picks`. Anything else is [`ChunkState::Manual`].
+    /// newlines ignored) against the candidate renderings. An indent
+    /// auto-resolution matches first, then the marker block, the
+    /// ours/theirs/both whole-side assemblies, and the assembly for `picks`.
+    /// Anything else is [`ChunkState::Manual`].
     pub(crate) fn classify(
         &self,
         rows: &[MergeRow],
@@ -293,7 +327,11 @@ impl ConflictChunk {
         let target = region_text.trim_end_matches('\n');
         let matches = |candidate: &str| candidate.trim_end_matches('\n') == target;
 
-        if matches(&self.marker_text(rows)) {
+        if let Some(auto) = &self.auto
+            && matches(&render_lines(&auto.lines))
+        {
+            ChunkState::AutoIndent
+        } else if matches(&self.marker_text(rows)) {
             ChunkState::Unresolved
         } else if matches(&self.assembly_text(rows, &self.all_ours())) {
             ChunkState::Ours
@@ -336,6 +374,8 @@ pub(crate) enum ChunkState {
     Both,
     /// A per-row mix that is not a whole-side pick.
     Picked,
+    /// An indentation-only conflict auto-resolved at the re-indented level.
+    AutoIndent,
     /// Hand-edited to text no pick produces.
     Manual,
 }
@@ -356,6 +396,153 @@ fn auto_merge_line(row: &MergeRow) -> Option<&str> {
         },
         (None, None, None) => None,
     }
+}
+
+/// Render resolved center lines as newline-terminated text.
+#[allow(dead_code)]
+fn render_lines(lines: &[String]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The side of a conflict a chunk designates as the one that only re-indented.
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum IndentSide {
+    Ours,
+    Theirs,
+}
+
+/// Split a row into (indent side, content side) for the designated indent side.
+#[allow(dead_code)]
+fn split_sides(row: &MergeRow, side: IndentSide) -> (Option<&ReviewSide>, Option<&ReviewSide>) {
+    match side {
+        IndentSide::Ours => (row.ours.as_ref(), row.theirs.as_ref()),
+        IndentSide::Theirs => (row.theirs.as_ref(), row.ours.as_ref()),
+    }
+}
+
+/// The maximal leading run of spaces and tabs in `line`.
+#[allow(dead_code)]
+fn leading_ws(line: &str) -> &str {
+    let end = line.find(|c| c != ' ' && c != '\t').unwrap_or(line.len());
+    &line[..end]
+}
+
+/// `line` with its leading whitespace removed.
+#[allow(dead_code)]
+fn content_after_ws(line: &str) -> &str {
+    &line[leading_ws(line).len()..]
+}
+
+/// Whether the two prefixes together use both spaces and tabs, which makes a
+/// literal indent swap ambiguous without tabstop math.
+#[allow(dead_code)]
+fn mixes_tab_and_space(a: &str, b: &str) -> bool {
+    let has_space = a.contains(' ') || b.contains(' ');
+    let has_tab = a.contains('\t') || b.contains('\t');
+    has_space && has_tab
+}
+
+/// The side that only re-indented base on every both-present conflict row of
+/// `chunk`. `None` when neither side qualifies or no row has both sides
+/// present.
+#[allow(dead_code)]
+fn pick_indent_side(rows: &[MergeRow], chunk: &Range<usize>) -> Option<IndentSide> {
+    let both_present = rows[chunk.clone()]
+        .iter()
+        .any(|row| row.ours.is_some() && row.theirs.is_some());
+    if !both_present {
+        return None;
+    }
+
+    let qualifies = |side: IndentSide| {
+        rows[chunk.clone()].iter().all(|row| {
+            let Some(base) = row.base.as_ref() else {
+                return true;
+            };
+            match split_sides(row, side) {
+                (Some(indent), Some(_)) => {
+                    content_after_ws(&indent.text) == content_after_ws(&base.text)
+                },
+                _ => true,
+            }
+        })
+    };
+
+    if qualifies(IndentSide::Ours) {
+        Some(IndentSide::Ours)
+    } else if qualifies(IndentSide::Theirs) {
+        Some(IndentSide::Theirs)
+    } else {
+        None
+    }
+}
+
+/// Attempt to auto-resolve `chunk` as an indentation-only conflict.
+///
+/// One side must have only re-indented base while the other edited content. The
+/// content edits are re-emitted at the new indent. Returns `None` (leaving a
+/// normal conflict) when no side qualifies, a content line does not sit at
+/// base's indent, a space/tab conversion is involved, or an absorbed insertion
+/// would need a non-uniform transform.
+#[allow(dead_code)]
+fn indent_auto_resolution(rows: &[MergeRow], chunk: &Range<usize>) -> Option<AutoResolution> {
+    let side = pick_indent_side(rows, chunk)?;
+
+    let mut lines = Vec::new();
+    let mut uniform: Option<(String, String)> = None;
+    let mut uniform_ok = true;
+
+    for row in &rows[chunk.clone()] {
+        let base = row.base.as_ref()?;
+        match split_sides(row, side) {
+            (Some(indent), Some(content)) => {
+                let base_prefix = leading_ws(&base.text);
+                let side_prefix = leading_ws(&indent.text);
+                if mixes_tab_and_space(base_prefix, side_prefix) {
+                    return None;
+                }
+                let rest = content.text.strip_prefix(base_prefix)?;
+                lines.push(format!("{side_prefix}{rest}"));
+
+                let transform = (base_prefix.to_string(), side_prefix.to_string());
+                if uniform.is_none() {
+                    uniform = Some(transform);
+                } else if uniform.as_ref() != Some(&transform) {
+                    uniform_ok = false;
+                }
+            },
+            (_, None) => {},
+            (None, Some(_)) => return None,
+        }
+    }
+
+    let mut covered_end = chunk.end;
+    while let Some(row) = rows.get(covered_end) {
+        if row.base.is_some() {
+            break;
+        }
+        let (None, Some(insertion)) = split_sides(row, side) else {
+            break;
+        };
+        let (base_prefix, side_prefix) = match (&uniform, uniform_ok) {
+            (Some(transform), true) => transform,
+            _ => return None,
+        };
+        let delta = side_prefix.strip_prefix(base_prefix.as_str())?;
+        lines.push(format!("{delta}{}", insertion.text));
+        covered_end += 1;
+    }
+
+    Some(AutoResolution {
+        lines,
+        covered: chunk.start..covered_end,
+    })
 }
 
 #[cfg(test)]
@@ -540,5 +727,51 @@ mod tests {
             chunk.marker_text(&merged.rows),
             "<<<<<<< ours\n=======\nB\n>>>>>>> theirs\n"
         );
+    }
+
+    #[test]
+    fn indent_resolves_when_one_side_only_reindents() {
+        let merged = doc("a\nb\nc\n", "    a\n    b\n    c\n", "a\nB\nc\n");
+        let (center, _) = merged.initial_center_text();
+        assert_eq!(center, "    a\n    B\n    c\n");
+
+        let chunk = &merged.chunks[0];
+        assert!(chunk.auto.is_some());
+        assert_eq!(
+            chunk.classify(&merged.rows, &[], "    B\n"),
+            ChunkState::AutoIndent
+        );
+    }
+
+    #[test]
+    fn indent_reindents_absorbed_content_side_insertion() {
+        let merged = doc("a\nb\nc\n", "    a\n    b\n    c\n", "a\nB\nINS\nc\n");
+        let (center, _) = merged.initial_center_text();
+        assert_eq!(center, "    a\n    B\n    INS\n    c\n");
+
+        let auto = merged.chunks[0].auto.as_ref().expect("auto-resolved");
+        assert_eq!(auto.lines, ["    B", "    INS"]);
+        assert_eq!(auto.covered, 1..3);
+    }
+
+    #[test]
+    fn indent_stays_conflict_when_both_change_content() {
+        let merged = doc("a\nb\nc\n", "a\nOURS\nc\n", "a\nTHEIRS\nc\n");
+        assert!(merged.chunks[0].auto.is_none());
+    }
+
+    #[test]
+    fn indent_stays_conflict_on_tab_space_conversion() {
+        let merged = doc("    x\n", "\tx\n", "    Y\n");
+        assert_eq!(conflicts(&merged.rows), [true]);
+        assert!(merged.chunks[0].auto.is_none());
+    }
+
+    #[test]
+    fn indent_resolves_symmetric_theirs_reindents() {
+        let merged = doc("a\nb\nc\n", "a\nB\nc\n", "    a\n    b\n    c\n");
+        let (center, _) = merged.initial_center_text();
+        assert_eq!(center, "    a\n    B\n    c\n");
+        assert!(merged.chunks[0].auto.is_some());
     }
 }
