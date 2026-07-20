@@ -699,6 +699,32 @@ impl InlaySnapshot {
         self.inlay_count > 0
     }
 
+    /// Whether any inlay sits on a buffer row within `rows`.
+    ///
+    /// Lets a per-row paint fast path stay fast on rows with no inlay even when
+    /// the buffer carries inlays elsewhere. Seeks the inlay transforms to
+    /// `rows.start` rather than scanning them all.
+    pub fn has_inlays_in_row_range(&self, rows: Range<u32>) -> bool {
+        if !self.has_inlays() {
+            return false;
+        }
+        let mut cursor = self.transforms.cursor::<Point>(());
+        cursor.seek(&Point::new(rows.start, 0), Bias::Left);
+        while let Some(transform) = cursor.item() {
+            let pos: Point = *cursor.start();
+            if pos.row >= rows.end {
+                break;
+            }
+            if let Transform::Inlay(inlay) = transform
+                && rows.contains(&inlay.position.row)
+            {
+                return true;
+            }
+            cursor.next();
+        }
+        false
+    }
+
     pub fn inlay_point_to_offset(&self, point: InlayPoint) -> InlayOffset {
         if !self.has_inlays() {
             return InlayOffset(self.buffer.rope().point_to_offset(point.0));

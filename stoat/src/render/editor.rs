@@ -1900,8 +1900,12 @@ fn paint_offset_range(
     buf: &mut Buffer,
     runs: Option<&mut Vec<(u16, u16, u16)>>,
 ) {
-    let map_simple =
-        snapshot.fold_snapshot().fold_count() == 0 && !snapshot.inlay_snapshot().has_inlays();
+    // Folds shift columns across the whole buffer, so they force the general
+    // path everywhere. Inlays only shift the row they sit on, so the fast path
+    // is checked per segment against that row rather than the whole buffer.
+    let no_folds = snapshot.fold_snapshot().fold_count() == 0;
+    let inlay_snapshot = snapshot.inlay_snapshot();
+    let any_inlays = inlay_snapshot.has_inlays();
     let tab_size = snapshot.tab_snapshot().tab_size();
     let max_expansion_column = snapshot.tab_snapshot().max_expansion_column();
     let line_count = snapshot.line_count();
@@ -1926,11 +1930,15 @@ fn paint_offset_range(
     let mut chars = rope.chars_at(offset);
 
     'segments: while offset < range.end {
-        let display = snapshot.buffer_to_display(rope.offset_to_point(offset));
+        let point = rope.offset_to_point(offset);
+        let display = snapshot.buffer_to_display(point);
         let single_display_row = !snapshot.is_wrap_continuation(display.row)
             && (display.row + 1 >= line_count || !snapshot.is_wrap_continuation(display.row + 1));
 
-        if map_simple && single_display_row {
+        let simple_row = no_folds
+            && single_display_row
+            && !(any_inlays && inlay_snapshot.has_inlays_in_row_range(point.row..point.row + 1));
+        if simple_row {
             let row = display.row;
             let mut col = display.column;
             loop {
@@ -2222,6 +2230,82 @@ mod tests {
             buf[(hint_x, 0)].bg,
             inlay_bg,
             "the hint carries the inlay background wash"
+        );
+    }
+
+    #[test]
+    fn selection_off_an_inlay_row_paints_the_same_as_without_inlays() {
+        fn line1_row(with_inlay: bool) -> Vec<ratatui::buffer::Cell> {
+            let mut h = Stoat::test();
+            open_search_buffer(&mut h, "let x = 1\nlet y = 2");
+            let theme = h.stoat.theme.clone();
+            let fallback = theme.get(crate::theme::scope::UI_TEXT);
+
+            if with_inlay {
+                let editor =
+                    action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+                let inserts = {
+                    let snapshot = editor.display_map.snapshot();
+                    let buf_snap = snapshot.buffer_snapshot();
+                    vec![(
+                        buf_snap.anchor_at(5, Bias::Left),
+                        ": i32".to_string(),
+                        crate::display_map::InlayKind::Hint,
+                    )]
+                };
+                editor.display_map.splice_inlays(Vec::new(), inserts);
+            }
+
+            // Select line 1, which carries no inlay, so the row-scoped check
+            // routes it through the fast paint path whether or not line 0 has an
+            // inlay.
+            dispatch(&mut h.stoat, &MoveDown);
+            dispatch(&mut h.stoat, &ExtendToLineEnd);
+
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            let area = Rect::new(0, 0, 40, 4);
+            let mut buf = Buffer::empty(area);
+            super::render_editor_with_overlay(
+                editor,
+                area,
+                fallback,
+                &theme,
+                &mut buf,
+                true,
+                false,
+                false,
+                LineNumbers::Off,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0.0,
+                WrapMode::None,
+                80,
+            );
+            (0..area.width).map(|x| buf[(x, 1)].clone()).collect()
+        }
+
+        let sel_bg = {
+            let h = Stoat::test();
+            h.stoat
+                .theme
+                .get(crate::theme::scope::UI_SELECTION_EDITOR)
+                .bg
+        };
+        let with_inlay = line1_row(true);
+        let without = line1_row(false);
+
+        assert!(
+            sel_bg.is_some() && with_inlay.iter().any(|c| Some(c.bg) == sel_bg),
+            "the selection wash lands on line 1",
+        );
+        assert_eq!(
+            with_inlay, without,
+            "an inlay on line 0 must not change line 1's fast-path selection paint",
         );
     }
 
