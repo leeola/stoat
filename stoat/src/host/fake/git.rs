@@ -4,7 +4,8 @@ use crate::host::{
     fake::FakeFs,
     git::{
         BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-        CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
+        CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
+        RewriteResult,
     },
 };
 use std::{
@@ -121,6 +122,18 @@ impl FakeGit {
             .repos
             .get(workdir)
             .map(|repo| repo.state.lock().unwrap().applied_patches.clone())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot the absolute paths marked resolved via
+    /// [`GitRepo::mark_resolved`] against `workdir`, in call order. Empty when
+    /// none were marked or the repo is unknown.
+    pub fn resolved_paths(&self, workdir: &Path) -> Vec<PathBuf> {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| repo.state.lock().unwrap().resolved_paths.clone())
             .unwrap_or_default()
     }
 
@@ -305,6 +318,33 @@ impl<'a> FakeRepoBuilder<'a> {
     /// tree. Simulates the tree having been fully committed.
     pub fn clear_changes(&mut self) -> &mut Self {
         self.mutate_repo(|state| state.changed.clear());
+        self
+    }
+
+    /// Seed `rel_path` as unmerged in the index with the given base, ours, and
+    /// theirs blobs (each `None` for an absent stage). Read back via
+    /// [`GitRepo::conflicted_paths`] and [`GitRepo::conflict_stages`].
+    ///
+    /// Does not write a working copy to any attached [`FakeFs`]. A conflict's
+    /// marker-bearing working file is the caller's to seed when a test needs
+    /// one.
+    pub fn conflicted_file(
+        &mut self,
+        rel_path: impl AsRef<Path>,
+        ancestor: Option<&str>,
+        ours: Option<&str>,
+        theirs: Option<&str>,
+    ) -> &mut Self {
+        let abs = self.workdir.join(rel_path.as_ref());
+        self.mutate_repo(|state| {
+            state.conflicts.retain(|f| f.path != abs);
+            state.conflicts.push(ConflictedFile {
+                path: abs.clone(),
+                ancestor: ancestor.map(String::from),
+                ours: ours.map(String::from),
+                theirs: theirs.map(String::from),
+            });
+        });
         self
     }
 
@@ -510,6 +550,12 @@ struct FakeRepoState {
     applied_rebases: Vec<RecordedRebase>,
     /// Record of every amend_head invocation, in call order.
     amend_history: Vec<RecordedAmend>,
+    /// Files seeded as unmerged, read by [`GitRepo::conflicted_paths`] and
+    /// [`GitRepo::conflict_stages`]. Each carries an absolute path.
+    conflicts: Vec<ConflictedFile>,
+    /// Absolute paths passed to [`GitRepo::mark_resolved`], in call order, so
+    /// tests can assert the git-add happened.
+    resolved_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -595,6 +641,33 @@ impl GitRepo for FakeGitRepo {
             .get(rel)
             .or_else(|| state.head_contents.get(rel))
             .cloned()
+    }
+
+    fn conflicted_paths(&self) -> Vec<PathBuf> {
+        let state = self.state.lock().unwrap();
+        state.conflicts.iter().map(|f| f.path.clone()).collect()
+    }
+
+    fn conflict_stages(&self, path: &Path) -> Option<ConflictedFile> {
+        let target = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workdir.join(path)
+        };
+        let state = self.state.lock().unwrap();
+        state.conflicts.iter().find(|f| f.path == target).cloned()
+    }
+
+    fn mark_resolved(&self, path: &Path) -> Result<(), GitApplyError> {
+        let target = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workdir.join(path)
+        };
+        let mut state = self.state.lock().unwrap();
+        state.conflicts.retain(|f| f.path != target);
+        state.resolved_paths.push(target);
+        Ok(())
     }
 
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
@@ -847,6 +920,32 @@ mod tests {
     fn empty_host_discovers_nothing() {
         let host = FakeGit::new();
         assert!(host.discover(Path::new("/anywhere")).is_none());
+    }
+
+    #[test]
+    fn conflicted_file_round_trips_through_stages_and_resolution() {
+        let host = FakeGit::new();
+        let wd = workdir();
+        host.add_repo(&wd)
+            .conflicted_file("f.txt", Some("base"), Some("ours"), Some("theirs"));
+
+        let repo = host.discover(&wd).expect("repo discovered");
+        let f = wd.join("f.txt");
+        assert_eq!(repo.conflicted_paths(), vec![f.clone()]);
+
+        let stages = repo.conflict_stages(&f).expect("f.txt conflicted");
+        assert_eq!(
+            (
+                stages.ancestor.as_deref(),
+                stages.ours.as_deref(),
+                stages.theirs.as_deref(),
+            ),
+            (Some("base"), Some("ours"), Some("theirs")),
+        );
+
+        repo.mark_resolved(&f).expect("mark resolved");
+        assert!(repo.conflicted_paths().is_empty());
+        assert_eq!(host.resolved_paths(&wd), vec![f]);
     }
 
     #[test]

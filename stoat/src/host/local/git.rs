@@ -3,7 +3,8 @@ mod tree;
 
 use crate::host::git::{
     BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-    CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
+    CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
+    RewriteResult,
 };
 use git2::{
     ApplyLocation, Diff, DiffOptions, Repository, RepositoryState, Sort, Status, StatusOptions,
@@ -171,6 +172,35 @@ impl GitRepo for LocalGitRepo {
         let entry = repo.index().ok()?.get_path(rel, 0)?;
         let blob = repo.find_blob(entry.id).ok()?;
         std::str::from_utf8(blob.content()).ok().map(String::from)
+    }
+
+    fn conflicted_paths(&self) -> Vec<PathBuf> {
+        let repo = self.repo.lock().expect("git repo lock");
+        read_index_conflicts(&repo)
+            .map(|files| files.into_iter().map(|f| f.path).collect())
+            .unwrap_or_default()
+    }
+
+    fn conflict_stages(&self, path: &Path) -> Option<ConflictedFile> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let target = abs_in_workdir(&repo, path);
+        read_index_conflicts(&repo)
+            .ok()?
+            .into_iter()
+            .find(|f| f.path == target)
+    }
+
+    fn mark_resolved(&self, path: &Path) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let workdir = repo.workdir().map(Path::to_path_buf);
+        let rel = workdir
+            .as_deref()
+            .and_then(|wd| path.strip_prefix(wd).ok())
+            .unwrap_or(path);
+        let mut index = repo.index().map_err(err_msg)?;
+        index.add_path(rel).map_err(err_msg)?;
+        index.write().map_err(err_msg)?;
+        Ok(())
     }
 
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
@@ -503,4 +533,59 @@ fn err_msg(e: git2::Error) -> GitApplyError {
         reason: e.message().to_string(),
     }
     .build()
+}
+
+/// Returns `path` unchanged when it is already absolute, otherwise joins
+/// it onto the repo workdir so it lines up with the absolute paths that
+/// [`read_index_conflicts`] produces.
+fn abs_in_workdir(repo: &Repository, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    repo.workdir()
+        .map(|wd| wd.join(path))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Every unmerged entry in the repository's on-disk index as a
+/// [`ConflictedFile`] with an absolute path. Each stage blob is `None` when
+/// that side is absent or not valid UTF-8, mirroring the cherry-pick path.
+fn read_index_conflicts(repo: &Repository) -> Result<Vec<ConflictedFile>, GitApplyError> {
+    let workdir = repo.workdir().map(Path::to_path_buf);
+    let index = repo.index().map_err(err_msg)?;
+    let mut out = Vec::new();
+    for conflict in index.conflicts().map_err(err_msg)? {
+        let conflict = conflict.map_err(err_msg)?;
+        let rel_bytes = conflict
+            .ancestor
+            .as_ref()
+            .map(|e| e.path.clone())
+            .or_else(|| conflict.our.as_ref().map(|e| e.path.clone()))
+            .or_else(|| conflict.their.as_ref().map(|e| e.path.clone()))
+            .unwrap_or_default();
+        let rel = PathBuf::from(std::str::from_utf8(&rel_bytes).unwrap_or(""));
+        let path = match &workdir {
+            Some(wd) => wd.join(&rel),
+            None => rel,
+        };
+        let ancestor = conflict
+            .ancestor
+            .as_ref()
+            .and_then(|e| tree::read_blob(repo, e.id));
+        let ours = conflict
+            .our
+            .as_ref()
+            .and_then(|e| tree::read_blob(repo, e.id));
+        let theirs = conflict
+            .their
+            .as_ref()
+            .and_then(|e| tree::read_blob(repo, e.id));
+        out.push(ConflictedFile {
+            path,
+            ancestor,
+            ours,
+            theirs,
+        });
+    }
+    Ok(out)
 }

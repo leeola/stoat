@@ -151,6 +151,31 @@ pub trait GitRepo: Send + Sync {
     /// unstaged falls back to [`Self::head_content`] itself.
     fn index_content(&self, path: &Path) -> Option<String>;
 
+    /// Absolute paths of every file left unmerged in the on-disk index, i.e.
+    /// those carrying a stage 1/2/3 (base/ours/theirs) entry.
+    ///
+    /// Empty unless a merge, rebase, or cherry-pick is paused on real index
+    /// conflicts. Paths are absolute (workdir-joined) to line up with
+    /// [`Self::changed_files`] and the buffer paths callers already hold.
+    fn conflicted_paths(&self) -> Vec<PathBuf>;
+
+    /// The base, ours, and theirs blobs recorded for `path` in the on-disk
+    /// index, as a [`ConflictedFile`].
+    ///
+    /// A stage is `None` when that side has no entry. An add/add conflict
+    /// carries no base, and a modify/delete conflict is missing one side.
+    /// `path` may be absolute or repo-relative. Returns `None` when `path`
+    /// has no unmerged entry.
+    fn conflict_stages(&self, path: &Path) -> Option<ConflictedFile>;
+
+    /// Stage `path`'s working-tree content at stage 0, collapsing its
+    /// stage 1/2/3 entries. This is the equivalent of `git add` on a
+    /// resolved file.
+    ///
+    /// `path` may be absolute or repo-relative. Fails when the working-tree
+    /// file cannot be staged, e.g. it is missing on disk.
+    fn mark_resolved(&self, path: &Path) -> Result<(), GitApplyError>;
+
     /// Apply a unified-diff patch to the index. Most callers will want
     /// to drive this through the review-apply flow rather than directly.
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError>;

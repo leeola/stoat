@@ -2,7 +2,7 @@
 // materialize working trees in a tempdir with std::fs directly.
 #![allow(clippy::disallowed_methods)]
 
-use git2::Repository;
+use git2::{FileMode, Oid, Repository, Signature};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -56,7 +56,7 @@ impl TestRepo {
         let mut index = self.repo.index().expect("index");
         let tree_id = index.write_tree().expect("write tree");
         let tree = self.repo.find_tree(tree_id).expect("find tree");
-        let sig = git2::Signature::now("test", "t@t").expect("sig");
+        let sig = Signature::now("test", "t@t").expect("sig");
         let parents: Vec<_> = self
             .repo
             .head()
@@ -82,6 +82,38 @@ impl TestRepo {
             .peel_to_commit()
             .expect("commit")
             .id()
+            .to_string()
+    }
+
+    /// Commit a flat tree of `files` onto `parent_sha`, pointing `refname`
+    /// (e.g. `refs/heads/theirs`) at the new commit. Leaves HEAD and the
+    /// working tree untouched, so a divergent branch can be built to merge.
+    fn commit_flat_tree_on(
+        &self,
+        refname: &str,
+        parent_sha: &str,
+        files: &[(&str, &str)],
+        message: &str,
+    ) -> String {
+        let mut builder = self.repo.treebuilder(None).expect("treebuilder");
+        for (name, content) in files {
+            let oid = self.repo.blob(content.as_bytes()).expect("blob");
+            builder
+                .insert(name, oid, FileMode::Blob.into())
+                .expect("insert");
+        }
+        let tree = self
+            .repo
+            .find_tree(builder.write().expect("write tree"))
+            .expect("find tree");
+        let parent = self
+            .repo
+            .find_commit(Oid::from_str(parent_sha).expect("oid"))
+            .expect("parent");
+        let sig = Signature::now("test", "t@t").expect("sig");
+        self.repo
+            .commit(Some(refname), &sig, &sig, message, &tree, &[&parent])
+            .expect("commit")
             .to_string()
     }
 }
@@ -531,4 +563,71 @@ fn apply_to_index_rejects_double_apply() {
         .expect_err("context no longer matches on second apply");
     let GitApplyError::Backend { reason, .. } = err;
     assert!(!reason.is_empty());
+}
+
+#[test]
+fn conflicted_paths_and_stages_read_on_disk_index_conflicts() {
+    let tr = TestRepo::new();
+    tr.commit_file("f.txt", "base\n");
+    let base = tr.head_sha();
+
+    let theirs = tr.commit_flat_tree_on(
+        "refs/heads/theirs",
+        &base,
+        &[("f.txt", "theirs\n")],
+        "theirs",
+    );
+    tr.commit_file("f.txt", "ours\n");
+
+    let annotated = tr
+        .repo
+        .find_annotated_commit(Oid::from_str(&theirs).unwrap())
+        .unwrap();
+    tr.repo.merge(&[&annotated], None, None).unwrap();
+    // Flush the merged index to disk for the fresh discover handle below.
+    tr.repo.index().unwrap().write().unwrap();
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let f = tr.join("f.txt");
+    assert_eq!(repo.conflicted_paths(), vec![f.clone()]);
+
+    let stages = repo.conflict_stages(&f).expect("f.txt conflicted");
+    assert_eq!(stages.ancestor.as_deref(), Some("base\n"));
+    assert_eq!(stages.ours.as_deref(), Some("ours\n"));
+    assert_eq!(stages.theirs.as_deref(), Some("theirs\n"));
+
+    tr.write("f.txt", "merged\n");
+    repo.mark_resolved(&f).expect("mark resolved");
+    assert!(repo.conflicted_paths().is_empty());
+    assert_eq!(staged_blob(tr.path(), "f.txt").as_deref(), Some("merged\n"));
+}
+
+#[test]
+fn conflict_stages_add_add_conflict_has_no_ancestor() {
+    let tr = TestRepo::new();
+    tr.commit_file("f.txt", "base\n");
+    let base = tr.head_sha();
+
+    let theirs = tr.commit_flat_tree_on(
+        "refs/heads/theirs",
+        &base,
+        &[("f.txt", "base\n"), ("g.txt", "theirs\n")],
+        "add g on theirs",
+    );
+    tr.commit_file("g.txt", "ours\n");
+
+    let annotated = tr
+        .repo
+        .find_annotated_commit(Oid::from_str(&theirs).unwrap())
+        .unwrap();
+    tr.repo.merge(&[&annotated], None, None).unwrap();
+    tr.repo.index().unwrap().write().unwrap();
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    let stages = repo
+        .conflict_stages(&tr.join("g.txt"))
+        .expect("g.txt conflicted");
+    assert_eq!(stages.ancestor, None);
+    assert_eq!(stages.ours.as_deref(), Some("ours\n"));
+    assert_eq!(stages.theirs.as_deref(), Some("theirs\n"));
 }
