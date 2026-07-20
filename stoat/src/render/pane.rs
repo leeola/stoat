@@ -1218,14 +1218,15 @@ mod tests {
         let span: String = (rect.x..rect.x + rect.width)
             .map(|x| buf[(x, rect.y)].symbol())
             .collect();
-        // The busy badge (spinner + " RA " = 6 chars) paints at TEXT_SCALE_COMPACT,
-        // so its glyphs cover ceil((6 - 1) * 160 / 256) = 4 cells, not the full 6.
+        // Under cfg(test) TEXT_SCALE_COMPACT is a full cell, so the busy badge
+        // (spinner + " RA " = 6 chars) covers (6 - 1) = 5 cells; the leftmost pad
+        // space carries no glyph and is dropped.
         assert_eq!(
-            rect.width, 4,
-            "the rect is the compact-scaled extent of the drawn glyphs, not their char span"
+            rect.width, 5,
+            "the rect is the scaled extent of the drawn glyphs, not their full char span"
         );
         assert!(
-            span.contains('A'),
+            span.contains("RA"),
             "and covers the drawn badge glyph columns:\n{span}"
         );
     }

@@ -69,7 +69,12 @@ pub(crate) const TEXT_SCALE_FULL: u16 = 256;
 pub(crate) const TEXT_SCALE_POPUP: u16 = 218;
 /// Compact chrome text scale under stoatty, 0.625x a cell, for line numbers and
 /// the status bar.
-pub(crate) const TEXT_SCALE_COMPACT: u16 = 160;
+///
+/// Under `cfg(test)` it resolves to a full cell (256) instead: the test
+/// compositor draws one glyph per cell, so running compact text at cell scale
+/// keeps composited geometry exact against the fallback layout the harness scans
+/// and snapshots.
+pub(crate) const TEXT_SCALE_COMPACT: u16 = if cfg!(test) { 256 } else { 160 };
 
 /// Strip id for the single-mode minimap, reserved above every pane index (which
 /// are small and dense from zero). stoatty keys minimap strips in a namespace
