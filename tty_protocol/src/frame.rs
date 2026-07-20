@@ -104,6 +104,51 @@ pub fn decode(bytes: &[u8]) -> Option<Frame> {
     Some(Frame { sub, args })
 }
 
+/// Reusable argument buffers for [`decode_into`], retained across frames.
+///
+/// Holds one decoded-argument `Vec` per position. A steady stream of frames
+/// grows these once and then decodes into the retained capacity, so the busy
+/// path allocates nothing per frame after warm-up.
+#[derive(Default)]
+pub struct FrameScratch {
+    args: Vec<Vec<u8>>,
+}
+
+/// Parse a stoatty frame into `scratch`, borrowing the sub-command and decoded
+/// arguments out of it, or `None` if `bytes` is not a well-formed frame.
+///
+/// Like [`decode`] but allocation-free once `scratch` is warm: the sub-command
+/// is borrowed from `bytes` rather than owned, and each argument decodes into a
+/// retained buffer instead of a fresh `Vec`. The returned slice borrows
+/// `scratch`, so it is valid only until the next call reusing the same scratch.
+pub fn decode_into<'a>(
+    bytes: &'a [u8],
+    scratch: &'a mut FrameScratch,
+) -> Option<(&'a str, &'a [Vec<u8>])> {
+    let body = strip_wrapper(bytes);
+    let body = body.strip_prefix(PREFIX)?;
+    let body = body.strip_prefix(b";")?;
+
+    let mut fields = body.split(|&byte| byte == b';');
+
+    let sub = fields.next().filter(|sub| !sub.is_empty())?;
+    let sub = std::str::from_utf8(sub).ok()?;
+
+    let mut count = 0;
+    for (i, field) in fields.enumerate() {
+        if i == scratch.args.len() {
+            scratch.args.push(Vec::new());
+        } else {
+            scratch.args[i].clear();
+        }
+
+        STANDARD.decode_vec(field, &mut scratch.args[i]).ok()?;
+        count = i + 1;
+    }
+
+    Some((sub, &scratch.args[..count]))
+}
+
 /// Strip an optional leading `ESC _` and a trailing `ESC \` or `BEL`.
 ///
 /// A base64 argument and a UTF-8 sub-command never contain `ESC` or `BEL`, so

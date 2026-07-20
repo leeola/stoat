@@ -34,11 +34,14 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use stoatty_protocol::command::{
-    self, BarCommand, BorderCommand, Command, HelloCommand, IconCommand, IdentReply,
-    LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand, PanelCommand,
-    PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
-    WindowOpenCommand,
+use stoatty_protocol::{
+    command::{
+        self, BarCommand, BorderCommand, Command, HelloCommand, IconCommand, IdentReply,
+        LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand, PanelCommand,
+        PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
+        WindowOpenCommand,
+    },
+    frame::FrameScratch,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -90,6 +93,10 @@ pub struct Terminal {
     /// Reused buffer for one advance's decoded APC frames, so the busy decode
     /// path does not allocate a fresh Vec per chunk.
     frames_scratch: Vec<(Option<Command>, usize)>,
+    /// Reused per-argument decode buffers threaded through
+    /// [`command::decode_with`], so the busy decode path allocates nothing per
+    /// APC frame argument once warm.
+    frame_scratch: FrameScratch,
     /// Recognizes XTVERSION queries the vte parser leaves unanswered, so
     /// [`Self::advance`] can reply with [`XTVERSION_REPLY`].
     xtversion: XtVersionScanner,
@@ -493,6 +500,7 @@ impl Terminal {
             palette,
             apc: ApcScanner::default(),
             frames_scratch: Vec::new(),
+            frame_scratch: FrameScratch::default(),
             xtversion: XtVersionScanner::default(),
             osc_notify: OscNotifyScanner::default(),
             borders: Vec::new(),
@@ -592,8 +600,9 @@ impl Terminal {
 
         let mut frames = mem::take(&mut self.frames_scratch);
         frames.clear();
+        let scratch = &mut self.frame_scratch;
         self.apc.scan_with(scan, &mut |payload, end| {
-            frames.push((command::decode(payload), end));
+            frames.push((command::decode_with(payload, scratch), end));
         });
 
         for _ in 0..self.xtversion.scan(scan) {

@@ -6,7 +6,7 @@
 //! sub-command this build does not recognize, so an unsupported feature
 //! degrades to nothing rather than erroring.
 
-use crate::frame::{self, Frame};
+use crate::frame::{self, Frame, FrameScratch};
 
 /// A decoded stoatty command.
 ///
@@ -585,8 +585,18 @@ pub struct MinimapDropCommand {
 /// sub-command is unknown to this build. Ignoring rather than erroring is what
 /// lets the same byte stream degrade to nothing in another terminal.
 pub fn decode(bytes: &[u8]) -> Option<Command> {
-    let frame = frame::decode(bytes)?;
-    dispatch(&frame)
+    let mut scratch = FrameScratch::default();
+    decode_with(bytes, &mut scratch)
+}
+
+/// Decode a stoatty command, reusing `scratch`'s argument buffers.
+///
+/// Behaves like [`decode`] but takes a caller-owned [`FrameScratch`] so a hot
+/// decode loop reuses the per-argument buffers across frames instead of
+/// allocating fresh ones each call.
+pub fn decode_with(bytes: &[u8], scratch: &mut FrameScratch) -> Option<Command> {
+    let (sub, args) = frame::decode_into(bytes, scratch)?;
+    dispatch(sub, args)
 }
 
 /// Encode a [`BorderCommand`] as a full `Gstoatty;border` frame for an emitter.
@@ -1320,39 +1330,39 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
     }
 }
 
-/// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
+/// Map a sub-command name and its decoded arguments to a [`Command`].
 ///
 /// An unknown sub-command, or a known one whose payload does not parse, yields
 /// `None` so the frame is ignored.
-fn dispatch(frame: &Frame) -> Option<Command> {
-    match frame.sub.as_str() {
-        "border" => decode_border(&frame.args).map(Command::Border),
-        "panel" => decode_panel(&frame.args).map(Command::Panel),
-        "scale" => decode_scale(&frame.args).map(Command::Scale),
-        "popover" => decode_popover(&frame.args).map(Command::Popover),
+fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
+    match sub {
+        "border" => decode_border(args).map(Command::Border),
+        "panel" => decode_panel(args).map(Command::Panel),
+        "scale" => decode_scale(args).map(Command::Scale),
+        "popover" => decode_popover(args).map(Command::Popover),
         "popover_end" => Some(Command::PopoverEnd),
-        "scroll_region" => decode_scroll_region(&frame.args).map(Command::ScrollRegion),
-        "pool_region" => decode_pool_region(&frame.args).map(Command::PoolRegion),
-        "icon" => decode_icon(&frame.args).map(Command::Icon),
-        "text_run" => decode_text_run(&frame.args).map(Command::TextRun),
+        "scroll_region" => decode_scroll_region(args).map(Command::ScrollRegion),
+        "pool_region" => decode_pool_region(args).map(Command::PoolRegion),
+        "icon" => decode_icon(args).map(Command::Icon),
+        "text_run" => decode_text_run(args).map(Command::TextRun),
         "text_run_end" => Some(Command::TextRunEnd),
-        "bar" => decode_bar(&frame.args).map(Command::Bar),
-        "line_layout" => decode_line_layout(&frame.args).map(Command::LineLayout),
-        "fill" => decode_fill(&frame.args).map(Command::Fill),
+        "bar" => decode_bar(args).map(Command::Bar),
+        "line_layout" => decode_line_layout(args).map(Command::LineLayout),
+        "fill" => decode_fill(args).map(Command::Fill),
         "fill_end" => Some(Command::FillEnd),
-        "scroll" => decode_scroll(&frame.args).map(Command::Scroll),
-        "pool_cursor" => decode_pool_cursor(&frame.args).map(Command::PoolCursor),
-        "reposition" => decode_reposition(&frame.args).map(Command::Reposition),
-        "pool_drop" => decode_pool_drop(&frame.args).map(Command::PoolDrop),
-        "minimap" => decode_minimap(&frame.args).map(Command::Minimap),
-        "minimap_lines" => decode_minimap_lines(&frame.args).map(Command::MinimapLines),
-        "minimap_view" => decode_minimap_view(&frame.args).map(Command::MinimapView),
-        "minimap_drop" => decode_minimap_drop(&frame.args).map(Command::MinimapDrop),
-        "window_open" => decode_window_open(&frame.args).map(Command::WindowOpen),
-        "window_close" => decode_window_close(&frame.args).map(Command::WindowClose),
-        "window_focus" => decode_window_focus(&frame.args).map(Command::WindowFocus),
+        "scroll" => decode_scroll(args).map(Command::Scroll),
+        "pool_cursor" => decode_pool_cursor(args).map(Command::PoolCursor),
+        "reposition" => decode_reposition(args).map(Command::Reposition),
+        "pool_drop" => decode_pool_drop(args).map(Command::PoolDrop),
+        "minimap" => decode_minimap(args).map(Command::Minimap),
+        "minimap_lines" => decode_minimap_lines(args).map(Command::MinimapLines),
+        "minimap_view" => decode_minimap_view(args).map(Command::MinimapView),
+        "minimap_drop" => decode_minimap_drop(args).map(Command::MinimapDrop),
+        "window_open" => decode_window_open(args).map(Command::WindowOpen),
+        "window_close" => decode_window_close(args).map(Command::WindowClose),
+        "window_focus" => decode_window_focus(args).map(Command::WindowFocus),
         "reset" => Some(Command::Reset),
-        "hello" => decode_hello(&frame.args).map(Command::Hello),
+        "hello" => decode_hello(args).map(Command::Hello),
         _ => None,
     }
 }
