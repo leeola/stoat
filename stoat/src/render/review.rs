@@ -88,16 +88,18 @@ pub(crate) fn render_review(
 /// mirrors unchanged lines dimmed. Added and modified new lines leave it blank.
 /// Line numbers are base-file lines on the left and buffer lines on the right.
 ///
-/// Reuses [`render_review_rows`]'s two-column geometry and the ASCII gutter
-/// path. The rich sub-cell gutter is not engaged here.
+/// Reuses [`render_review_rows`]'s two-column geometry. When a `scene` is
+/// threaded (a stoatty terminal) the gutter paints with the rich sub-cell
+/// components, otherwise it falls back to the ASCII gutter.
 pub(crate) fn render_diff_view(
     editor: &mut EditorState,
     inner: Rect,
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
-    stoatty: bool,
+    scene: Option<&mut ApcScene>,
 ) {
+    let stoatty = scene.is_some();
     let snapshot = editor.display_map.snapshot();
     paint_diff_rows(
         &snapshot,
@@ -106,6 +108,7 @@ pub(crate) fn render_diff_view(
         fallback_style,
         theme,
         buf,
+        scene,
     );
     render_review_cursor(
         editor,
@@ -210,6 +213,7 @@ pub(crate) fn paint_diff_rows(
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
 ) {
     let total_rows = snapshot.line_count();
     let visible = inner.height as u32;
@@ -217,6 +221,15 @@ pub(crate) fn paint_diff_rows(
     if end_row <= scroll_row {
         return;
     }
+
+    // Rich mode replaces the ASCII gutter (status glyphs, line numbers, and the
+    // separators) with sub-cell APC components. It engages only when a scene is
+    // threaded and every gutter color resolves to RGB, so the two paths never
+    // mix within one frame.
+    let mut rich = scene.and_then(|scene| {
+        resolve_diff_rich_colors(theme, fallback_style)
+            .map(|colors| DiffRichGutter { scene, colors })
+    });
 
     let DiffColumns {
         left_num_x,
@@ -253,12 +266,14 @@ pub(crate) fn paint_diff_rows(
             break;
         }
 
-        if let Some(sep_x) = sep_x {
-            buf[(sep_x, y)].set_char('│').set_style(dim_style);
-        }
-        for gutter_sep in [left_sep_x, right_sep_x] {
-            if gutter_sep < inner.x + inner.width {
-                buf[(gutter_sep, y)].set_char('│').set_style(dim_style);
+        if rich.is_none() {
+            if let Some(sep_x) = sep_x {
+                buf[(sep_x, y)].set_char('│').set_style(dim_style);
+            }
+            for gutter_sep in [left_sep_x, right_sep_x] {
+                if gutter_sep < inner.x + inner.width {
+                    buf[(gutter_sep, y)].set_char('│').set_style(dim_style);
+                }
             }
         }
 
@@ -266,7 +281,15 @@ pub(crate) fn paint_diff_rows(
             BlockRowKind::Block { .. } => {
                 line_buf.clear();
                 snapshot.write_display_line(&mut line_buf, display_row);
-                render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
+                draw_diff_num(
+                    &mut rich,
+                    buf,
+                    inner,
+                    left_num_x,
+                    y,
+                    base_line + 1,
+                    dim_style,
+                );
                 let token_spans = snapshot
                     .diff_map()
                     .and_then(|dm| dm.base_highlights_for_line(base_line))
@@ -306,12 +329,29 @@ pub(crate) fn paint_diff_rows(
                         } else {
                             s::DIFF_DELETED
                         };
-                    paint_status_bars(buf, status_left_x, y, change_scope, staged, theme);
+                    draw_diff_status(
+                        &mut rich,
+                        buf,
+                        inner,
+                        status_left_x,
+                        y,
+                        change_scope,
+                        staged,
+                        theme,
+                    );
                 }
                 base_line += 1;
             },
             BlockRowKind::BufferRow { buffer_row } => {
-                render_side_num(buf, right_num_x, y, buffer_row + 1, dim_style);
+                draw_diff_num(
+                    &mut rich,
+                    buf,
+                    inner,
+                    right_num_x,
+                    y,
+                    buffer_row + 1,
+                    dim_style,
+                );
                 let changes = buffer_row_change_spans(snapshot, buffer_row);
                 let staged = snapshot
                     .diff_map()
@@ -364,12 +404,29 @@ pub(crate) fn paint_diff_rows(
                         DiffStatus::Moved => s::DIFF_MOVED,
                         DiffStatus::Unchanged => s::DIFF_CONTEXT,
                     };
-                    paint_status_bars(buf, status_right_x, y, change_scope, staged, theme);
+                    draw_diff_status(
+                        &mut rich,
+                        buf,
+                        inner,
+                        status_right_x,
+                        y,
+                        change_scope,
+                        staged,
+                        theme,
+                    );
                 }
                 if snapshot.line_diff_status(buffer_row) == DiffStatus::Unchanged {
                     line_buf.clear();
                     snapshot.write_display_line(&mut line_buf, display_row);
-                    render_side_num(buf, left_num_x, y, base_line + 1, dim_style);
+                    draw_diff_num(
+                        &mut rich,
+                        buf,
+                        inner,
+                        left_num_x,
+                        y,
+                        base_line + 1,
+                        dim_style,
+                    );
                     let token_spans = snapshot
                         .diff_map()
                         .and_then(|dm| dm.base_highlights_for_line(base_line))
@@ -389,6 +446,27 @@ pub(crate) fn paint_diff_rows(
                     base_line += 1;
                 }
             },
+        }
+    }
+
+    // One hairline separator per gutter spanning the visible rows, replacing the
+    // per-row glyph. Centered in its cell via the +8 sixteenths offset.
+    if let Some(rg) = rich.as_mut() {
+        let height = (end_row - scroll_row) as u16 * 16;
+        for sep in [Some(left_sep_x), Some(right_sep_x), sep_x]
+            .into_iter()
+            .flatten()
+        {
+            if sep < inner.x + inner.width {
+                Bar {
+                    x: (sep - inner.x) * 16 + 8,
+                    y: 0,
+                    width: 1,
+                    height,
+                    color: rg.colors.dim,
+                }
+                .render(inner, buf, &mut *rg.scene);
+            }
         }
     }
 }
@@ -1202,6 +1280,130 @@ pub(crate) fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
     }
 }
 
+/// The RGB gutter colors the diff view's rich sub-cell components composite
+/// with, plus the reused scene they append into.
+struct DiffRichGutter<'a> {
+    scene: &'a mut ApcScene,
+    colors: DiffRichColors,
+}
+
+/// Line-number, separator, and status-bar colors for the diff rich gutter.
+///
+/// The per-row change bar color is read from the row's change scope, so the
+/// resolver validates every change scope is RGB up front and this stores only
+/// the dim, background, and staged/unstaged colors used directly.
+#[derive(Clone, Copy)]
+struct DiffRichColors {
+    dim: [u8; 3],
+    bg: [u8; 3],
+    staged: [u8; 3],
+    unstaged: [u8; 3],
+}
+
+/// Extract every diff gutter color as RGB, or `None` when any is missing or not
+/// an RGB color, which disables rich mode for the frame so the ASCII and rich
+/// paths never mix.
+fn resolve_diff_rich_colors(
+    theme: &crate::theme::Theme,
+    fallback_style: Style,
+) -> Option<DiffRichColors> {
+    use crate::theme::scope as s;
+    let bg = fallback_style
+        .bg
+        .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg));
+    for scope in [
+        s::DIFF_ADDED,
+        s::DIFF_MODIFIED,
+        s::DIFF_MOVED,
+        s::DIFF_DELETED,
+        s::DIFF_CONTEXT,
+    ] {
+        style_rgb(theme.get(scope).fg)?;
+    }
+    Some(DiffRichColors {
+        dim: style_rgb(theme.get(s::DIFF_CONTEXT).fg)?,
+        bg: style_rgb(bg)?,
+        staged: style_rgb(theme.get(s::DIFF_STAGED).fg)?,
+        unstaged: style_rgb(theme.get(s::DIFF_UNSTAGED).fg)?,
+    })
+}
+
+/// Emit a right-aligned diff line number as a sub-cell run (rich) or paint the
+/// ASCII number.
+fn draw_diff_num(
+    rich: &mut Option<DiffRichGutter<'_>>,
+    buf: &mut Buffer,
+    inner: Rect,
+    num_x: u16,
+    y: u16,
+    num: u32,
+    dim_style: Style,
+) {
+    match rich {
+        Some(rg) => {
+            let text = num.to_string();
+            let digits = text.len() as u16;
+            let right_edge = (num_x - inner.x + 4) * 16;
+            TextRun {
+                col: right_edge.saturating_sub(digits * TEXT_SCALE_COMPACT / 16),
+                row: (y - inner.y) * 16,
+                scale: TEXT_SCALE_COMPACT,
+                color: rg.colors.dim,
+                bg: Some(rg.colors.bg),
+                text: &text,
+            }
+            .render(inner, buf, &mut *rg.scene);
+        },
+        None => render_side_num(buf, num_x, y, num, dim_style),
+    }
+}
+
+/// Emit the change and staged bars (rich) or paint the ASCII status glyphs.
+///
+/// The bars follow the editor's rich gutter spacing, a five-sixteenth change bar
+/// at the status cell, then a five-sixteenth staged bar seven sixteenths later.
+#[allow(clippy::too_many_arguments)]
+fn draw_diff_status(
+    rich: &mut Option<DiffRichGutter<'_>>,
+    buf: &mut Buffer,
+    inner: Rect,
+    status_x: u16,
+    y: u16,
+    change_scope: &str,
+    staged: bool,
+    theme: &crate::theme::Theme,
+) {
+    match rich {
+        Some(rg) => {
+            let change = style_rgb(theme.get(change_scope).fg).unwrap_or(rg.colors.dim);
+            let staged_color = if staged {
+                rg.colors.staged
+            } else {
+                rg.colors.unstaged
+            };
+            let x0 = (status_x - inner.x) * 16;
+            let y0 = (y - inner.y) * 16;
+            Bar {
+                x: x0,
+                y: y0,
+                width: 5,
+                height: 16,
+                color: change,
+            }
+            .render(inner, buf, &mut *rg.scene);
+            Bar {
+                x: x0 + 7,
+                y: y0,
+                width: 5,
+                height: 16,
+                color: staged_color,
+            }
+            .render(inner, buf, &mut *rg.scene);
+        },
+        None => paint_status_bars(buf, status_x, y, change_scope, staged, theme),
+    }
+}
+
 /// Blend `fg` toward `bg` by `amount`, where `0.0` returns `fg` unchanged and
 /// `1.0` returns `bg`.
 ///
@@ -1469,6 +1671,7 @@ mod tests {
         let src = r##"theme rgbtest {
             diff.context.fg  = "#808080";
             diff.added.fg    = "#00ff00";
+            diff.modified.fg = "#ffff00";
             diff.deleted.fg  = "#ff0000";
             diff.moved.fg    = "#0000ff";
             diff.staged.fg   = "#00ffff";
@@ -1511,7 +1714,7 @@ mod tests {
         let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
         let theme = rgb_diff_theme();
-        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, false);
+        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, None);
 
         // The right buffer status column follows its five-cell number gutter, so
         // it paints its change bar at right_start + 5 and its staged bar after.
@@ -1543,6 +1746,97 @@ mod tests {
     }
 
     #[test]
+    fn diff_view_rich_gutter_emits_bars_and_suppresses_ascii() {
+        use stoatty_protocol::command::{encode_bar, BarCommand};
+
+        fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+            haystack.windows(needle.len()).any(|w| w == needle)
+        }
+
+        let mut editor = diff_editor_staged("a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n");
+        let area = Rect::new(0, 0, 120, 8);
+        let theme = rgb_diff_theme();
+
+        let mut rich_buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &theme,
+            &mut rich_buf,
+            Some(&mut scene),
+        );
+
+        assert!(
+            !scene.buffer().is_empty(),
+            "rich mode emits sub-cell components"
+        );
+
+        let scroll = editor.scroll_row;
+        let total = editor.display_map.snapshot().line_count();
+        let rows = ((area.height as u32).min(total.saturating_sub(scroll))) as u16;
+        let dim = [128, 128, 128];
+
+        // Each side's gutter separator and the mid divider paint as hairlines.
+        for sep_x in [7u16, 59, 67] {
+            let frame = encode_bar(&BarCommand {
+                x: (sep_x * 16 + 8) as i16,
+                y: 0,
+                width: 1,
+                height: rows * 16,
+                color: dim,
+            });
+            assert!(
+                contains(scene.buffer(), &frame),
+                "separator hairline at col {sep_x}"
+            );
+        }
+
+        // A changed row emits a staged or unstaged bar in one of the two status
+        // columns. Every row is searched rather than pinning the block layout.
+        let staged = [[0, 255, 255], [255, 0, 255]];
+        let staged_bar = (0..rows).any(|row| {
+            [80u16 + 7, 65 * 16 + 7].iter().any(|&x| {
+                staged.iter().any(|&color| {
+                    contains(
+                        scene.buffer(),
+                        &encode_bar(&BarCommand {
+                            x: x as i16,
+                            y: (row * 16) as i16,
+                            width: 5,
+                            height: 16,
+                            color,
+                        }),
+                    )
+                })
+            })
+        });
+        assert!(staged_bar, "a changed row emits a staged/unstaged bar");
+
+        let has = |b: &Buffer, sym: &str| {
+            (0..area.height).any(|y| (0..area.width).any(|x| b[(x, y)].symbol() == sym))
+        };
+        assert!(
+            !has(&rich_buf, "▎"),
+            "rich mode paints no ASCII status glyphs"
+        );
+        assert!(!has(&rich_buf, "│"), "rich mode paints no ASCII separators");
+
+        let mut ascii_buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &theme,
+            &mut ascii_buf,
+            None,
+        );
+        assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
+        assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
+    }
+
+    #[test]
     fn diff_view_lays_out_base_left_buffer_right() {
         let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew\ntail\n");
         let area = Rect::new(0, 0, 120, 8);
@@ -1553,7 +1847,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
-            false,
+            None,
         );
 
         // Width 120 is wide enough for the two-column layout. Left text spans
@@ -1626,7 +1920,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
-            false,
+            None,
         );
 
         // The gutter/code separator is painted at col 7, but a unified view has
@@ -1925,7 +2219,7 @@ mod tests {
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
-        render_diff_view(&mut editor, area, fallback, &theme, &mut buf, false);
+        render_diff_view(&mut editor, area, fallback, &theme, &mut buf, None);
 
         use crate::theme::scope as sc;
         let moved_line = tint(&theme, sc::DIFF_MOVED, LINE_TINT);
@@ -1966,7 +2260,7 @@ mod tests {
         let area = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(area);
         let theme = rgb_diff_theme();
-        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, false);
+        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, None);
 
         let staged_line = tint(&theme, sc::DIFF_ADDED, STAGED_LINE_TINT);
         let unstaged_line = tint(&theme, sc::DIFF_ADDED, LINE_TINT);
@@ -2030,7 +2324,7 @@ mod tests {
         let theme = rgb_diff_theme();
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, false);
+        render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, None);
 
         let staged_span = tint(&theme, sc::DIFF_ADDED, STAGED_SPAN_TINT);
         let unstaged_span = tint(&theme, sc::DIFF_ADDED, SPAN_TINT);
@@ -2096,7 +2390,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
-            false,
+            None,
         );
 
         let row = buffer_text(&buf, 1);
@@ -2124,7 +2418,7 @@ mod tests {
             Style::default(),
             &Theme::empty(),
             &mut buf,
-            false,
+            None,
         );
 
         let row = buffer_text(&buf, 1);

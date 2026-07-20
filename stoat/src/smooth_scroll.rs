@@ -450,6 +450,7 @@ pub(crate) fn render_page_from_snapshot(
             fallback_style,
             gutter.theme(),
             &mut buf,
+            None,
         );
         dim_page(&mut buf, area, gutter.theme(), dim);
         return serialize_buffer(&buf);
@@ -1085,7 +1086,7 @@ mod tests {
         let area = Rect::new(0, 0, 40, 8);
 
         let mut expected = Buffer::empty(area);
-        paint_diff_rows(&snapshot, 0, area, fallback, &theme, &mut expected);
+        paint_diff_rows(&snapshot, 0, area, fallback, &theme, &mut expected, None);
         let expected = serialize_buffer(&expected);
 
         let got = render_page_from_snapshot(&snapshot, 0, fallback, 40, 8, &gutter, true, 0.0);

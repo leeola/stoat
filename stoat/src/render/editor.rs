@@ -119,7 +119,8 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.diff_view {
         editor.display_map.set_wrap_width(None);
-        render_diff_view(editor, inner, fallback_style, theme, buf, stoatty);
+        let scene = if stoatty { scene } else { None };
+        render_diff_view(editor, inner, fallback_style, theme, buf, scene);
         return;
     }
 
