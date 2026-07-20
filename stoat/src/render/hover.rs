@@ -38,11 +38,6 @@ const MAX_WIDTH: u16 = 120;
 /// No-op when [`Stoat::pending_hover`] is `None`, when the focused
 /// pane is not an editor, or when the cursor is off-screen.
 pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Option<&mut ApcScene>) {
-    let popup = match &stoat.pending_hover {
-        Some(p) => p.clone(),
-        None => return,
-    };
-
     let Some((popup_area, _)) = hover_popup_layout(stoat) else {
         // An unplaceable popup paints nothing, so clear its stored rects. A
         // default rect hit-tests to no point, so the mouse and wheel handlers
@@ -72,23 +67,19 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
     // on the first Ctrl-u rather than after replaying the over-scroll.
     let interior = inner.height as usize;
     let half_page = (interior / 2).max(1);
-    let scroll = popup
-        .lines
-        .len()
-        .saturating_sub(interior)
-        .min(popup.scroll_half_pages * half_page);
+    let scroll = {
+        let popup = stoat.pending_hover.as_ref().expect("layout placed a popup");
+        popup
+            .lines
+            .len()
+            .saturating_sub(interior)
+            .min(popup.scroll_half_pages * half_page)
+    };
     if let Some(open) = stoat.pending_hover.as_mut() {
         open.scroll_half_pages = scroll / half_page;
         open.area = popup_area;
         open.inner = inner;
     }
-
-    let end_x = inner.x + inner.width;
-    let body: Vec<Vec<(String, Style)>> = popup
-        .lines
-        .iter()
-        .map(|line| truncate_line(line, inner.width as usize))
-        .collect();
 
     // A span's style is a delta over the modal base, so a plain span keeps the
     // modal look. The rich arm needs an RGB modal fg and background to compose
@@ -101,18 +92,25 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
             .try_get(crate::theme::scope::UI_BACKGROUND)
             .and_then(|s| s.bg),
     );
+    let sel_rgb =
+        crate::render::review::style_rgb(stoat.theme.get(crate::theme::scope::UI_SELECTION).bg);
+
+    let end_x = inner.x + inner.width;
+    let popup = stoat.pending_hover.as_ref().expect("layout placed a popup");
+    let body: Vec<Vec<(String, Style)>> = popup
+        .lines
+        .iter()
+        .skip(scroll)
+        .take(inner.height as usize)
+        .map(|line| truncate_line(line, inner.width as usize))
+        .collect();
+
     match (scene, modal_fg, run_bg) {
         (Some(scene), Some(modal_fg), Some(run_bg)) => {
-            let sel_rgb = crate::render::review::style_rgb(
-                stoat.theme.get(crate::theme::scope::UI_SELECTION).bg,
-            );
-            for (row_idx, line) in body.iter().skip(scroll).enumerate() {
+            for (row_idx, line) in body.iter().enumerate() {
                 let row = inner.y + row_idx as u16;
-                if row >= inner.y + inner.height {
-                    break;
-                }
                 let selection = sel_rgb.and_then(|rgb| {
-                    hover_line_selection(&popup, scroll + row_idx).map(|(c0, c1)| (c0, c1, rgb))
+                    hover_line_selection(popup, scroll + row_idx).map(|(c0, c1)| (c0, c1, rgb))
                 });
 
                 // Patch the cell bg behind the 0.85x glyph boxes so the selection
@@ -132,8 +130,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
                 let mut chars_before = 0usize;
                 for (text, style) in line {
                     let color = crate::render::review::style_rgb(style.fg).unwrap_or(modal_fg);
-                    let span_chars: Vec<char> = text.chars().collect();
-                    let span_end = chars_before + span_chars.len();
+                    let span_end = chars_before + text.chars().count();
                     let (b0, b1) = match selection {
                         Some((c0, c1, _)) => (
                             c0.clamp(chars_before, span_end),
@@ -144,19 +141,18 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
 
                     // Split the span at the selection so its selected piece
                     // composites over the selection bg and the rest over the
-                    // modal bg.
-                    for (seg_start, seg_end, selected) in [
-                        (chars_before, b0, false),
-                        (b0, b1, true),
-                        (b1, span_end, false),
+                    // modal bg. The split points are char offsets into the span,
+                    // resolved to byte offsets so each segment stays a slice.
+                    let byte0 = char_to_byte(text, b0 - chars_before);
+                    let byte1 = char_to_byte(text, b1 - chars_before);
+                    for (seg_start, seg_text, selected) in [
+                        (chars_before, &text[..byte0], false),
+                        (b0, &text[byte0..byte1], true),
+                        (b1, &text[byte1..], false),
                     ] {
-                        if seg_start >= seg_end {
+                        if seg_text.is_empty() {
                             continue;
                         }
-                        let seg_text: String = span_chars
-                            [(seg_start - chars_before)..(seg_end - chars_before)]
-                            .iter()
-                            .collect();
                         let col = (seg_start as u16 * TEXT_SCALE_POPUP + 8) / 16;
                         let bg = if selected {
                             selection.map_or(run_bg, |(_, _, rgb)| rgb)
@@ -169,7 +165,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
                             scale: TEXT_SCALE_POPUP,
                             color,
                             bg: Some(bg),
-                            text: &seg_text,
+                            text: seg_text,
                         }
                         .render(Rect::new(inner.x, row, 1, 1), buf, scene);
                     }
@@ -178,11 +174,8 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
             }
         },
         _ => {
-            for (row_idx, line) in body.iter().skip(scroll).enumerate() {
+            for (row_idx, line) in body.iter().enumerate() {
                 let row = inner.y + row_idx as u16;
-                if row >= inner.y + inner.height {
-                    break;
-                }
                 let mut x = inner.x;
                 for (text, style) in line {
                     if x >= end_x {
@@ -198,7 +191,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
                     x = next_x;
                 }
             }
-            highlight_grid_selection(buf, &popup, inner, scroll, &stoat.theme);
+            highlight_grid_selection(buf, popup, inner, scroll, &stoat.theme);
         },
     }
 }
@@ -345,36 +338,43 @@ pub(crate) fn hover_selected_text(popup: &HoverPopup) -> String {
 /// the frame, and flips above otherwise, shrinking to the chosen side's free
 /// space so it never renders past the window.
 pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
-    let popup = stoat.pending_hover.as_ref()?.clone();
+    let anchor_offset = stoat.pending_hover.as_ref()?.anchor_offset;
 
     // The popup floats above panes, so placement is bounded by the whole
     // terminal frame. Only the cursor anchor stays pane-relative.
     let frame = stoat.size();
 
-    let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane = ws.focus else {
-        return None;
+    let cursor_screen = {
+        let ws = stoat.active_workspace_mut();
+        let FocusTarget::SplitPane = ws.focus else {
+            return None;
+        };
+        let pane_id = ws.panes.focus();
+        let pane = ws.panes.pane(pane_id);
+        let View::Editor(editor_id) = pane.view else {
+            return None;
+        };
+        let (content_area, _) = split_pane_status(pane.area);
+        let editor = ws.editors.get_mut(editor_id)?;
+        cursor_screen_position(editor, content_area, anchor_offset)?
     };
-    let pane_id = ws.panes.focus();
-    let pane = ws.panes.pane(pane_id);
-    let View::Editor(editor_id) = pane.view else {
-        return None;
-    };
-    let (content_area, _) = split_pane_status(pane.area);
-
-    let editor = ws.editors.get_mut(editor_id)?;
-    let cursor_screen = cursor_screen_position(editor, content_area, popup.anchor_offset)?;
 
     let interior_width = frame.width.saturating_sub(2);
     if interior_width == 0 {
         return None;
     }
-    let body: Vec<Vec<(String, Style)>> = popup
+
+    // A truncated line's width is its content width capped at the interior, and
+    // truncation is one-to-one per line, so the geometry never rebuilds a body.
+    let popup = stoat.pending_hover.as_ref()?;
+    let max_line_width = popup
         .lines
         .iter()
-        .map(|line| truncate_line(line, interior_width as usize))
-        .collect();
-    let max_line_width = body.iter().map(|line| line_width(line)).max().unwrap_or(0) as u16;
+        .map(|line| line_width(line).min(interior_width as usize))
+        .max()
+        .unwrap_or(0) as u16;
+    let body_len = popup.lines.len();
+
     let popup_width = (max_line_width + 2).clamp(3, frame.width.clamp(3, MAX_WIDTH));
 
     let rel_y = cursor_screen.1.saturating_sub(frame.y);
@@ -390,7 +390,7 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     let height_cap = max_height
         .clamp(3, MAX_HEIGHT)
         .min((frame.height / 2).max(3));
-    let popup_height = (body.len() as u16 + 2).min(height_cap);
+    let popup_height = (body_len as u16 + 2).min(height_cap);
 
     let popup_x = cursor_screen
         .0
@@ -513,6 +513,15 @@ pub(crate) fn truncate_to_width(line: &str, width: usize) -> String {
         return line.to_string();
     }
     line.chars().take(width).collect()
+}
+
+/// Byte offset of the `char_idx`-th character in `s`, or `s.len()` when
+/// `char_idx` is at or past the end.
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(byte, _)| byte)
+        .unwrap_or(s.len())
 }
 
 /// Total character width of a styled line, summed across its spans.
