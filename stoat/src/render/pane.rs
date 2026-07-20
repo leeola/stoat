@@ -15,7 +15,7 @@ use crate::{
         run_pane::render_run_pane,
         term_pane::render_term_pane,
         undercurl::UndercurlSpan,
-        FrameCtx, PaneCtx, TEXT_SCALE_COMPACT,
+        FrameCtx, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
     },
 };
 use lsp_types::DiagnosticSeverity;
@@ -672,12 +672,13 @@ fn status_segments(
             }
         }
         if right_anchor < badge_right {
-            *badge_rect = Some(Rect::new(
-                right_anchor,
-                area.y,
-                badge_right - right_anchor,
-                area.height,
-            ));
+            // The bar paints the badge glyphs at TEXT_SCALE_COMPACT, right-anchored
+            // at badge_right, so they cover fewer cells than their char count.
+            // Record the hover rect over that scaled extent (dropping the leftmost
+            // pad space, which carries no glyph) so hover matches the drawn glyphs.
+            let chars = badge_right - right_anchor;
+            let width = ((chars - 1) * TEXT_SCALE_COMPACT).div_ceil(TEXT_SCALE_FULL);
+            *badge_rect = Some(Rect::new(badge_right - width, area.y, width, area.height));
         }
         if frame.diff_warm_busy {
             let text = format!(" {} diff ", SPINNER_FRAMES[frame.spinner_phase as usize]);
@@ -1211,9 +1212,15 @@ mod tests {
         let span: String = (rect.x..rect.x + rect.width)
             .map(|x| buf[(x, rect.y)].symbol())
             .collect();
+        // The idle ` RA ` badge (4 chars) paints at TEXT_SCALE_COMPACT, so its
+        // glyphs cover ceil((4 - 1) * 160 / 256) = 2 cells rather than the full 4.
+        assert_eq!(
+            rect.width, 2,
+            "the rect is the compact-scaled extent of the drawn glyphs, not their char span"
+        );
         assert!(
-            span.contains("RA"),
-            "the recorded rect covers the painted badge columns:\n{span}"
+            span.contains('A'),
+            "and covers the drawn badge glyph columns:\n{span}"
         );
     }
 
