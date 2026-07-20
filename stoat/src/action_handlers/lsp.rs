@@ -6281,10 +6281,10 @@ mod tests {
             "the delayed hover request stays in flight",
         );
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let shown = (0..buf.area.height).any(|y| {
             let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
-            row.contains("lsp: hover...")
+            row.replace('─', " ").contains("lsp: hover...")
         });
         assert!(shown, "the status bar shows the in-flight hover segment");
     }
@@ -6306,10 +6306,10 @@ mod tests {
             "the delayed code-action request stays in flight",
         );
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let shown = (0..buf.area.height).any(|y| {
             let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
-            row.contains("lsp: code actions...")
+            row.replace('─', " ").contains("lsp: code actions...")
         });
         assert!(
             shown,

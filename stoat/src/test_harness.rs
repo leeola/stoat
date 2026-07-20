@@ -1067,11 +1067,12 @@ impl TestHarness {
     }
 
     /// Render one frame and composite its APC scene into the returned buffer, so
-    /// rich (stoatty) chrome shows up in the same cells the fallback paints.
+    /// rich chrome shows up in the same cells the fallback paints.
     ///
-    /// With the default non-stoatty harness the scene is empty, so this is a
-    /// no-op over [`Stoat::render`].
-    fn render_composited(&mut self) -> Buffer {
+    /// Tests that scan for chrome (bars, badges, overlay boxes) must render
+    /// through this rather than [`Stoat::render`], whose returned grid no longer
+    /// carries the chrome the scene draws off-grid.
+    pub(crate) fn render_composited(&mut self) -> Buffer {
         let mut buf = self.stoat.render();
         let cmds = apc::decode_apc_stream(self.stoat.apc_scene.bytes());
         apc::composite_scene(&mut buf, &cmds);

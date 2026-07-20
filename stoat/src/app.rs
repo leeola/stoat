@@ -1031,7 +1031,7 @@ pub struct Stoat {
     /// the app loop to the UI thread, written to stdout right after each
     /// rendered frame. Separate from the latest-wins render watch because
     /// `fill` page content must not be coalesced or dropped. `None` outside
-    /// stoatty or before [`Self::set_stoatty_apc`] is called.
+    /// stoatty or before [`Self::set_apc_tx`] is called.
     pub(crate) apc_tx: Option<UnboundedSender<Vec<u8>>>,
     /// Reused per-frame APC decoration buffer. Widgets append their component
     /// frames while painting; [`Self::emit_apc_scene`] diffs it against the last
@@ -1427,7 +1427,7 @@ impl Stoat {
             last_completion_signature: None,
             active_snippet: None,
             version_info: "unknown",
-            stoatty: false,
+            stoatty: true,
             next_aux_window: 1,
             apc_tx: None,
             apc_scene: ApcScene::new(),
@@ -1480,13 +1480,11 @@ impl Stoat {
 
     /// Enable the stoatty smooth-scroll APC path.
     ///
-    /// `stoatty` is whether the process is running inside the stoatty
-    /// terminal; when `false` the smooth-scroll emit stays a no-op. `apc_tx`
-    /// is the ordered channel the app loop pushes APC byte batches onto for
-    /// the UI thread to write after each frame. The bin layer calls this once
+    /// `apc_tx` is the ordered channel the app loop pushes APC byte batches onto
+    /// for the UI thread to write after each frame. The bin layer calls this once
     /// at startup, before [`Self::run`].
-    pub fn set_stoatty_apc(&mut self, stoatty: bool, apc_tx: UnboundedSender<Vec<u8>>) {
-        self.stoatty = stoatty;
+    pub fn set_apc_tx(&mut self, apc_tx: UnboundedSender<Vec<u8>>) {
+        self.stoatty = true;
         self.apc_tx = Some(apc_tx);
     }
 
@@ -2144,12 +2142,8 @@ impl Stoat {
         let animating = self.is_animating();
         let building = self.minimap_build_pending;
         let effect = if self.tick_scroll_anim(dt) {
-            if self.stoatty {
-                self.emit_smooth_scroll();
-                UpdateEffect::None
-            } else {
-                UpdateEffect::Redraw
-            }
+            self.emit_smooth_scroll();
+            UpdateEffect::None
         } else if animating {
             UpdateEffect::Redraw
         } else if building {
@@ -10186,44 +10180,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn non_stoatty_wheel_glide_repaints_the_eased_position() {
-        use crate::test_harness::TestHarness;
-
-        let mut h = TestHarness::with_size(40, 12);
-        let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
-        let path = h.write_file("long.rs", &body);
-        h.open_file(&path);
-
-        // Arm a wheel glide. The harness is non-stoatty, so there is no pool to
-        // composite the eased scroll.
-        {
-            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-            editor.viewport_rows = Some(10);
-            for _ in 0..4 {
-                action_handlers::movement::wheel_scroll(editor, true);
-            }
-        }
-        assert!(h.stoat.is_animating(), "the wheel flick armed a glide");
-        let scrolled = action_handlers::focused_editor_mut(&mut h.stoat)
-            .unwrap()
-            .scroll_row;
-        assert!(scrolled > 0, "the flick moved the rendered scroll position");
-
-        // A plain terminal has no pool to composite the eased scroll, so the glide
-        // tick repaints the moved view rather than returning None and freezing it
-        // until the glide settles.
-        assert_eq!(
-            h.stoat.frame_tick(0.016),
-            UpdateEffect::Redraw,
-            "a non-stoatty glide tick repaints",
-        );
-        assert!(
-            h.stoat.is_animating(),
-            "the glide is still easing, so the repaint came before settle",
-        );
-    }
-
     fn stoat_with_focused_term(
         make_view: fn(TermId) -> View,
     ) -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {
@@ -10950,7 +10906,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/minimap");
         let path = root.join("a.txt");
@@ -10995,7 +10951,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.window_ipc_connected = true;
 
         let path = std::path::PathBuf::from("/w/a.txt");
@@ -11035,7 +10991,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         // A file larger than one build chunk fills over several syncs.
         let total = 6000usize;
@@ -11090,7 +11046,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         // Wide enough that each vertical split clears the minimap min-width gate.
         h.resize(200, 24);
@@ -11154,7 +11110,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
         h.resize(200, 24);
 
@@ -11205,7 +11161,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
         h.resize(200, 24);
 
@@ -11270,7 +11226,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
         h.resize(200, 24);
 
@@ -11316,7 +11272,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/minimap-drop");
         let a = root.join("a.txt");
@@ -11352,7 +11308,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/minimap-view");
         let path = root.join("a.txt");
@@ -11408,7 +11364,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
         h.resize(200, 24);
 
@@ -11474,7 +11430,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
         h.resize(200, 24);
 
@@ -11527,7 +11483,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
         h.resize(200, 24);
 
@@ -11567,7 +11523,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
         h.resize(200, 24);
 
@@ -11626,7 +11582,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/minimap-marks");
         let path = root.join("a.txt");
@@ -11713,7 +11669,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/minimap-tab");
         let path = root.join("a.txt");
@@ -11800,7 +11756,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/minimap-toggle");
         let path = root.join("a.txt");
@@ -12029,7 +11985,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/pool");
         let path = root.join("a.txt");
@@ -12071,7 +12027,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/pool");
         let path = root.join("a.txt");
@@ -12364,7 +12320,9 @@ mod tests {
         let _ = open_scratch_file(&mut h, "buffer text\n");
         h.stoat.pending_hover = Some(hover_sel_popup(&["hello world", "second line"], 0));
 
-        // Down at inner (10,2) = (line 0, col 0); drag to (13,2) = col 3.
+        // Down at inner (10,2) resolves to (line 0, col 0). The drag to (13,2) is
+        // three cells in, which the 0.85x popover scale maps to char column 4, so
+        // the copied span is "hell".
         h.stoat
             .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 2));
         h.stoat
@@ -12372,7 +12330,7 @@ mod tests {
         h.stoat
             .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 13, 2));
 
-        assert_eq!(h.fake_clipboard().writes(), vec!["hel"]);
+        assert_eq!(h.fake_clipboard().writes(), vec!["hell"]);
         assert!(
             h.stoat.editor_drag.is_none(),
             "a hover drag never arms the editor selection",
@@ -12601,7 +12559,7 @@ mod tests {
     fn hover_drag_under_stoatty_maps_through_the_apc_scale() {
         let mut h = Stoat::test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         let _ = open_scratch_file(&mut h, "x\n");
         let long = "x".repeat(40);
         h.stoat.pending_hover = Some(hover_sel_popup(&[&long], 0));
@@ -12629,7 +12587,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         let root = std::path::PathBuf::from("/pool");
         let path = root.join("a.txt");
         h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
@@ -12687,7 +12645,7 @@ mod tests {
         // the frame stays genuinely widget-free.
         h.stoat.theme = Arc::new(rgb_review_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         // Line numbers off so the paint carries no off-grid gutter, and the
         // minimap off so no strip declare rides the scene. Both keep the frame
@@ -12709,22 +12667,6 @@ mod tests {
         assert!(
             drain_apc(&mut rx).is_empty(),
             "a widget-free paint appends nothing, so the scene flush stays silent"
-        );
-    }
-
-    #[test]
-    fn apc_scene_flush_is_silent_outside_stoatty() {
-        let mut h = Stoat::test();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(false, tx);
-
-        let mut buf = Buffer::empty(h.stoat.size());
-        h.stoat.paint_into(&mut buf);
-        h.stoat.emit_apc_scene();
-
-        assert!(
-            drain_apc(&mut rx).is_empty(),
-            "the scene flush never touches the channel outside stoatty"
         );
     }
 
@@ -12751,7 +12693,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_review_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         h.open_review_from_texts(&[("a.rs", "fn a() {}\n", "fn a_renamed() {}\n")]);
 
@@ -12776,7 +12718,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         // Line numbers off so the only off-grid components are the status bar's.
         h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
@@ -12816,7 +12758,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         // A rebase overlay routes its status row through render_overlay_status.
         h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
@@ -12863,7 +12805,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_diagnostic_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/diag-rich");
         let path = root.join("a.txt");
@@ -12907,7 +12849,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_diagnostic_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/diag-popover");
         let path = root.join("a.txt");
@@ -12957,7 +12899,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         h.type_keys("space a s");
         assert_eq!(h.stoat.active_workspace().panes.pane_count(), 2);
@@ -13077,7 +13019,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_diagnostic_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/diag-popover-dodge");
         let path = root.join("a.txt");
@@ -13177,7 +13119,7 @@ mod tests {
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.settle();
@@ -13211,7 +13153,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.settle();
@@ -13247,7 +13189,7 @@ mod tests {
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.settle();
@@ -13283,7 +13225,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.settle();
@@ -13307,7 +13249,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.type_keys("space");
 
         let size = h.stoat.size();
@@ -13341,7 +13283,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.fake_lsp().set_capabilities(ServerCapabilities {
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             ..Default::default()
@@ -13379,7 +13321,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_border_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
 
@@ -13420,7 +13362,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(rgb_modal_theme());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/complete");
         let path = root.join("a.txt");
@@ -13476,7 +13418,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/async-pool");
         let path = root.join("a.txt");
@@ -13530,7 +13472,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.window_ipc_connected = true;
 
         let root = std::path::PathBuf::from("/detach-emit");
@@ -13594,7 +13536,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.window_ipc_connected = true;
 
         let root = std::path::PathBuf::from("/detach-cursor");
@@ -13635,7 +13577,7 @@ mod tests {
         let status_base = crate::smooth_scroll::non_pane_pool::WINDOW_STATUS;
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.window_ipc_connected = true;
 
         let root = std::path::PathBuf::from("/detach-status");
@@ -13675,7 +13617,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.window_ipc_connected = true;
         h.resize(80, 24);
         h.type_action("SplitRight()");
@@ -13746,7 +13688,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.window_ipc_connected = true;
         h.resize(80, 24);
         h.type_action("SplitRight()");
@@ -13776,7 +13718,7 @@ mod tests {
     fn detached_pane_status_badge_continues_the_split_count() {
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.window_ipc_connected = true;
         h.resize(80, 24);
         h.type_action("SplitRight()");
@@ -13897,7 +13839,7 @@ mod tests {
 
         let mut h = TestHarness::with_size(80, 24);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         h.open_review_from_texts(&[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.settle();
@@ -13921,7 +13863,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/finder");
         for name in ["a.rs", "b.rs", "c.rs"] {
@@ -13967,7 +13909,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/bandfinder");
         for name in ["a.rs", "b.rs", "c.rs"] {
@@ -14011,7 +13953,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         action_handlers::dispatch(&mut h.stoat, &OpenCommandPalette);
         h.settle();
@@ -14051,7 +13993,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/argpool");
         for name in ["a.rs", "b.rs", "c.rs"] {
@@ -14099,7 +14041,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/argflip");
         for name in ["a.rs", "b.rs"] {
@@ -14144,7 +14086,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
@@ -14201,7 +14143,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         action_handlers::dispatch(&mut h.stoat, &OpenHelp);
         h.settle();
@@ -14261,7 +14203,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let size = h.stoat.size();
         h.stoat.active_workspace_mut().layout(size);
@@ -14310,7 +14252,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/pool");
         let path = root.join("a.txt");
@@ -14331,8 +14273,8 @@ mod tests {
             "first frame should declare the pool region, got {cmds:?}"
         );
         assert!(
-            matches!(cmds.last(), Some(Command::Scroll(_))),
-            "last frame should be the scroll target, got {cmds:?}"
+            cmds.iter().any(|c| matches!(c, Command::Scroll(_))),
+            "the scroll target eases into the region behind it, got {cmds:?}"
         );
     }
 
@@ -14343,7 +14285,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         // A file outside any git root keeps diff_version at 0, so only the
         // display snapshot version can carry an edit into the page content hash.
@@ -14411,7 +14353,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/pool");
         let path = root.join("a.txt");
@@ -14457,7 +14399,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/pool");
         let path = root.join("a.txt");
@@ -14522,7 +14464,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = std::path::PathBuf::from("/glide");
         let path = root.join("a.txt");
@@ -14584,25 +14526,6 @@ mod tests {
             settled_fills > 1,
             "the settle emit refills the whole window once, got {settled_fills}: {settled:?}"
         );
-    }
-
-    #[test]
-    fn emit_smooth_scroll_is_noop_outside_stoatty() {
-        let mut h = Stoat::test();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(false, tx);
-
-        let root = std::path::PathBuf::from("/pool");
-        let path = root.join("a.txt");
-        h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
-        h.stoat.active_workspace_mut().git_root = root;
-        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
-        h.settle();
-        let size = h.stoat.size();
-        h.stoat.active_workspace_mut().layout(size);
-
-        h.stoat.emit_smooth_scroll();
-        assert!(rx.try_recv().is_err(), "no APC bytes outside stoatty");
     }
 
     /// Drain every APC batch currently queued on `rx` into one decoded command
@@ -14754,7 +14677,7 @@ mod tests {
         let msg = "rust-analyzer failed to load the workspace: Cargo.toml is malformed and could not be parsed, so diagnostics are unavailable";
         h.stoat.lsp_message = Some((MessageType::ERROR, msg.to_string()));
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let rows: Vec<String> = (0..buf.area.height)
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
             .collect();
@@ -14784,7 +14707,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         let msg = "rust-analyzer failed to load the workspace: Cargo.toml is malformed and could not be parsed, so diagnostics are unavailable";
         h.stoat.lsp_message = Some((MessageType::ERROR, msg.to_string()));
 
@@ -14854,15 +14777,15 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.lsp_message = Some((MessageType::WARNING, "cargo check is slow".to_string()));
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let bar = buf.area.height - 1;
         let bar_row: String = (0..buf.area.width)
             .map(|x| buf[(x, bar)].symbol())
             .collect();
 
         assert!(
-            bar_row.contains("cargo check is slow"),
-            "a warning keeps painting in the status bar"
+            bar_row.replace('─', " ").contains("cargo check is slow"),
+            "a warning keeps painting in the status bar:\n{bar_row}"
         );
     }
 
@@ -16288,7 +16211,7 @@ mod tests {
 
         let mut h = Stoat::test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
         h.resize(200, 24);
 

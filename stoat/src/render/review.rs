@@ -2116,6 +2116,10 @@ mod tests {
         use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
 
         let mut h = TestHarness::with_size(120, 10);
+        // The wash scans below address fixed side-by-side columns, so the pane must
+        // span the full width. The single-minimap strip would reserve the right
+        // edge and shift the columns.
+        h.stoat.minimap_override = Some(false);
         h.stage_review_scenario("/repo", &[("a.rs", base, buffer)]);
         h.stoat.set_diff_warm_auto(true);
         h.open_file(std::path::Path::new("/repo/a.rs"));

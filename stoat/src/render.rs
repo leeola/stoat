@@ -1145,7 +1145,7 @@ mod lsp_filter_tests {
 
     /// Render one frame and flatten the painted cells into searchable text.
     fn box_text(h: &mut TestHarness) -> String {
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let mut out = String::new();
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {

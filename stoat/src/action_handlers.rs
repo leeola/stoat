@@ -2525,11 +2525,16 @@ mod tests {
         );
     }
 
-    /// Whether a rendered frame carries the ` {title} ` hint-box title, which the
-    /// non-stoatty frame paints into the cell buffer.
+    /// Whether a rendered frame carries the ` {title} ` hint-box title. The rich
+    /// frame draws the box off-grid, so the scene is composited back before the
+    /// scan.
     fn hint_box_visible(stoat: &mut Stoat, title: &str) -> bool {
+        use crate::test_harness::apc;
+
         let needle = format!(" {title} ");
-        let buf = stoat.render();
+        let mut buf = stoat.render();
+        let cmds = apc::decode_apc_stream(stoat.apc_scene.bytes());
+        apc::composite_scene(&mut buf, &cmds);
         let area = buf.area;
         (area.y..area.y + area.height).any(|y| {
             let row: String = (area.x..area.x + area.width)
@@ -2551,7 +2556,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.set_version_info("0.1.0 (aaa 2026-07-03)");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         h.fake_env()
             .set("STOATTY_VERSION", "0.2.0 (bbb 2026-07-03)");
 
@@ -2560,19 +2565,6 @@ mod tests {
         assert_eq!(
             version_badge_label(&h.stoat).as_deref(),
             Some("stoat 0.1.0 (aaa 2026-07-03) | stoatty 0.2.0 (bbb 2026-07-03)"),
-        );
-    }
-
-    #[test]
-    fn show_version_badge_is_stoat_only_outside_stoatty() {
-        let mut h = Stoat::test();
-        h.stoat.set_version_info("0.1.0 (aaa 2026-07-03)");
-
-        dispatch(&mut h.stoat, &stoat_action::ShowVersion);
-
-        assert_eq!(
-            version_badge_label(&h.stoat).as_deref(),
-            Some("stoat 0.1.0 (aaa 2026-07-03)"),
         );
     }
 

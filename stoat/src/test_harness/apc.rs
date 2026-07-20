@@ -207,16 +207,13 @@ fn fill_interior(buf: &mut Buffer, left: u16, top: u16, width: u16, height: u16,
 mod tests {
     use crate::{action_handlers::dispatch, Stoat};
 
-    /// Open a fixed file, optionally in a stoatty harness, run `keys`, and return
-    /// the last captured frame's text. A stoatty harness routes through the APC
-    /// compositor. A plain one paints the cell fallback.
-    fn frame_text(stoatty: bool, keys: &str) -> String {
+    /// Open a fixed file, run `keys`, and return the last captured frame's text,
+    /// composited from the APC scene the harness records.
+    fn frame_text(keys: &str) -> String {
         let mut h = Stoat::test();
-        if stoatty {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-            h.stoat.set_stoatty_apc(true, tx);
-            std::mem::forget(rx);
-        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        std::mem::forget(rx);
         let path = std::path::PathBuf::from("/apc/a.txt");
         h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
         dispatch(&mut h.stoat, &stoat_action::OpenFile { path });
@@ -241,37 +238,37 @@ mod tests {
     }
 
     #[test]
-    fn composited_which_key_box_equals_the_fallback() {
-        let fallback = box_rows(&frame_text(false, "space"));
-        let composited = box_rows(&frame_text(true, "space"));
-        assert!(!fallback.is_empty(), "the fallback paints a which-key box");
-        assert_eq!(
-            composited, fallback,
-            "the composited which-key box equals the fallback box"
+    fn composited_frame_paints_the_which_key_box() {
+        let rows = box_rows(&frame_text("space"));
+        assert!(
+            rows.len() >= 2,
+            "the composited frame paints a which-key box, got {rows:?}"
         );
     }
 
     #[test]
     fn composited_frame_shows_gutter_numbers_and_status_text() {
-        let fallback = frame_text(false, "");
-        let composited = frame_text(true, "");
+        let composited = frame_text("");
+        let gutter: String = composited
+            .lines()
+            .flat_map(|row| row.chars().take(4))
+            .filter(char::is_ascii_digit)
+            .collect();
+        assert!(
+            gutter.contains('1') && gutter.contains('2'),
+            "the gutter columns carry line numbers:\n{composited}"
+        );
         assert!(
             composited.contains("a.txt"),
             "the composited status bar shows the filename:\n{composited}"
         );
-        for num in fallback_gutter_numbers(&fallback) {
-            assert!(
-                composited.contains(&num),
-                "gutter number {num} the fallback paints is in the composite:\n{composited}"
-            );
-        }
     }
 
     #[test]
     fn apc_only_change_records_a_frame() {
         let mut h = Stoat::test();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
         std::mem::forget(rx);
         let path = std::path::PathBuf::from("/apc/a.txt");
         h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
@@ -287,17 +284,5 @@ mod tests {
             h.frames().last().unwrap().content.contains("space"),
             "the recorded frame captures the which-key box title"
         );
-    }
-
-    /// The distinct gutter line-number tokens on the fallback's editor rows,
-    /// taken from the left gutter columns so status/content digits do not leak in.
-    fn fallback_gutter_numbers(text: &str) -> Vec<String> {
-        text.lines()
-            .filter_map(|line| {
-                let gutter: String = line.chars().take(4).collect();
-                let digits: String = gutter.chars().filter(char::is_ascii_digit).collect();
-                (!digits.is_empty()).then_some(digits)
-            })
-            .collect()
     }
 }

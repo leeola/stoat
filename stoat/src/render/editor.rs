@@ -3260,7 +3260,7 @@ mod tests {
     fn a_diagnostic_span_collects_an_undercurl_under_stoatty() {
         let mut h = Stoat::test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        h.stoat.set_stoatty_apc(true, tx);
+        h.stoat.set_apc_tx(tx);
 
         let root = PathBuf::from("/undercurl-test");
         let path = root.join("a.txt");

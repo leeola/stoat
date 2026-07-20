@@ -305,17 +305,12 @@ fn run_tui(
         cwd
     };
 
-    // Stoat smooth-scrolls the focused editor via stoatty's APC when it detects
-    // it is running inside stoatty; the env var is set on the shell stoatty
-    // spawns. Absent it, the APC emit stays a no-op.
-    let stoatty = std::env::var_os("STOATTY").is_some();
-
     rt.block_on(async {
         let user_config =
             stoat::user_config_path().and_then(|path| std::fs::read_to_string(path).ok());
         let mut stoat =
             Stoat::new_with_user_config(executor.clone(), cli_settings, initial_git_root, user_config);
-        stoat.set_stoatty_apc(stoatty, apc_tx);
+        stoat.set_apc_tx(apc_tx);
         stoat.set_window_ipc(std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from));
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);

@@ -1112,7 +1112,7 @@ mod tests {
         h.install_lsp_server("rust", "rust-analyzer");
         open_rust(&mut h);
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let bar = bar_row(&buf);
         assert!(
             !bar.contains("RA"),
@@ -1128,7 +1128,7 @@ mod tests {
         open_rust(&mut h);
         mark_busy(&mut h, &fake);
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let bar = bar_row(&buf);
         assert!(
             bar.contains('⠋'),
@@ -1147,7 +1147,7 @@ mod tests {
         h.stoat.set_diff_warm_auto(true);
         crate::diff_warm::ensure_diff_warm(&mut h.stoat);
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let bar = bar_row(&buf);
         assert!(
             bar.contains("diff"),
@@ -1160,7 +1160,7 @@ mod tests {
 
         h.settle();
         crate::diff_warm::install_finished(&mut h.stoat);
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let bar = bar_row(&buf);
         assert!(
             !bar.contains("diff"),
@@ -1177,7 +1177,7 @@ mod tests {
         mark_busy(&mut h, &ra);
         mark_busy(&mut h, &ss);
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let bar = bar_row(&buf);
         assert!(
             bar.contains("RA") && bar.contains("SS"),
@@ -1194,7 +1194,7 @@ mod tests {
         h.type_action("SplitRight()");
         h.settle();
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let rendered: String = (buf.area.y..buf.area.y + buf.area.height)
             .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
             .map(|(x, y)| buf[(x, y)].symbol().to_string())
@@ -1213,7 +1213,7 @@ mod tests {
         open_rust(&mut h);
         mark_busy(&mut h, &fake);
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let rect = h.stoat.lsp_badge_rect.expect("badge rect stamped");
         let span: String = (rect.x..rect.x + rect.width)
             .map(|x| buf[(x, rect.y)].symbol())
@@ -1232,7 +1232,7 @@ mod tests {
     }
 
     fn full_render(h: &mut crate::test_harness::TestHarness) -> String {
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         (0..buf.area.height)
             .map(|y| {
                 (0..buf.area.width)
@@ -1303,7 +1303,7 @@ mod tests {
         dispatch(&mut h.stoat, &stoat_action::ToggleLspStatus);
         h.stoat.lsp_message = Some((MessageType::ERROR, "workspace load failed".to_string()));
 
-        let buf = h.stoat.render();
+        let buf = h.render_composited();
         let rows: Vec<String> = (0..buf.area.height)
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
             .collect();
@@ -1387,8 +1387,11 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // The composited bar joins segments with the status-line hairline rule, so
+        // the inter-token spaces read back as `─`. Normalize them to recover the
+        // logical segment text.
         assert!(
-            rendered.contains("1 staged / 1 unstaged"),
+            rendered.replace('─', " ").contains("1 staged / 1 unstaged"),
             "statusline reports the hunk counts:\n{rendered}"
         );
     }
