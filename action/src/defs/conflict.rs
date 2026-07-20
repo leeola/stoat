@@ -123,9 +123,9 @@ define_action!(
     "ConflictApply",
     ActionKind::ConflictApply,
     "write the resolved file and mark it resolved",
-    "Write the current file's resolved result to the working tree and mark it \
-     resolved in the index, then advance to the next unresolved file or close \
-     the view when all are done. Refused while any chunk still shows its raw \
-     conflict markers.",
+    "Write the current file's center result to the working tree. When every \
+     chunk is resolved, also mark it resolved in the index and advance to the \
+     next unresolved file or close the view when all are done. A file with raw \
+     conflict markers still writes, but is not marked resolved.",
     ActionPriority::Rare
 );

@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_refuses_while_a_chunk_is_unresolved() {
+    fn apply_writes_honest_markers_when_a_chunk_is_unresolved() {
         let mut h = Stoat::test();
         let git_root = h.stoat.active_workspace().git_root.clone();
         seed_conflict(&mut h);
@@ -444,11 +444,23 @@ mod tests {
             Some("conflict"),
             "view stays open on an unresolved file"
         );
-        assert!(!h.stoat.fs_host.exists(&path), "nothing is written");
-        assert!(h.fake_git().resolved_paths(&git_root).is_empty());
+        let mut written = Vec::new();
+        h.stoat
+            .fs_host
+            .read(&path, &mut written)
+            .expect("marker file written");
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            MARKER,
+            "the honest marker block is written"
+        );
+        assert!(
+            h.fake_git().resolved_paths(&git_root).is_empty(),
+            "an unresolved file is not marked resolved"
+        );
         assert_eq!(
             h.stoat.pending_message.as_deref(),
-            Some("1 unresolved conflict(s) remain")
+            Some("written with 1 unresolved chunk(s)")
         );
     }
 

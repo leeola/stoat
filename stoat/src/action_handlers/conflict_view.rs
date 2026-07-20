@@ -383,19 +383,14 @@ fn switch_to_file(stoat: &mut Stoat, target: usize) {
     land_first_chunk_current(stoat);
 }
 
-/// Write the resolved center text to the working file, mark it resolved in the
-/// index, then advance to the next unapplied file or close when every file is
-/// applied.
+/// Write the center text to the working file, and when every chunk is resolved
+/// mark it resolved in the index and advance to the next unapplied file or close
+/// once all are applied.
 ///
-/// A file with any chunk still on its raw markers is refused with a status, so a
-/// half-resolved file is never written or marked resolved.
+/// The center is always written, so a half-resolved file lands its honest
+/// marker blocks and quitting mid-resolve loses nothing. A file with any chunk
+/// still on its markers is written but not marked resolved, and stays open.
 pub(super) fn conflict_apply(stoat: &mut Stoat) {
-    let unresolved = unresolved_chunk_count(stoat);
-    if unresolved > 0 {
-        stoat.set_status(format!("{unresolved} unresolved conflict(s) remain"));
-        return;
-    }
-
     let (current, path, buffer_id, git_root) = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;
@@ -418,6 +413,12 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) {
 
     if let Err(err) = stoat.fs_host.write_atomic(&path, text.as_bytes()) {
         stoat.set_status(format!("write failed: {err}"));
+        return;
+    }
+
+    let unresolved = unresolved_chunk_count(stoat);
+    if unresolved > 0 {
+        stoat.set_status(format!("written with {unresolved} unresolved chunk(s)"));
         return;
     }
 
