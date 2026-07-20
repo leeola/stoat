@@ -354,6 +354,112 @@ impl ConflictChunk {
         out
     }
 
+    /// Render a partially-picked chunk as text.
+    ///
+    /// Each decided row emits its picked lines in merge-row order, ours before
+    /// theirs. When any row is still undecided, one marker block follows over
+    /// only those rows' present lines.
+    ///
+    /// A row is decided when its [`RowPick`] takes at least one side. An
+    /// undecided row (`{false, false}`) stays in the shrinking marker block.
+    ///
+    /// With every row decided this equals [`Self::assembly_text`]. With every
+    /// row undecided it equals [`Self::marker_text`], so classify still reads
+    /// an all-undecided region as [`ChunkState::Unresolved`].
+    pub(crate) fn partial_text(&self, rows: &[MergeRow], picks: &[RowPick]) -> String {
+        let mut out = String::new();
+        for line in self.resolution_plan(rows, picks) {
+            match line {
+                PlanLine::Content { row, side } => {
+                    if let Some(text) = side_line(&rows[row], side) {
+                        out.push_str(text);
+                        out.push('\n');
+                    }
+                },
+                PlanLine::Delimiter(text) => {
+                    out.push_str(text);
+                    out.push('\n');
+                },
+            }
+        }
+        out
+    }
+
+    /// Map a line of the [`Self::partial_text`] rendering back to the merge row
+    /// and side it came from, or `None` for a marker delimiter line or a
+    /// `row_in_region` past the rendering's last line.
+    ///
+    /// `row_in_region` is the zero-based line offset of the cursor within the
+    /// chunk's center region. `picks` must be the picks the region currently
+    /// renders, so the caller derives them from the classified state rather
+    /// than a possibly-stale stored vector.
+    pub(crate) fn center_row_to_merge_row(
+        &self,
+        rows: &[MergeRow],
+        picks: &[RowPick],
+        row_in_region: usize,
+    ) -> Option<(usize, Side)> {
+        match self.resolution_plan(rows, picks).get(row_in_region)? {
+            PlanLine::Content { row, side } => Some((*row, *side)),
+            PlanLine::Delimiter(_) => None,
+        }
+    }
+
+    /// The ordered lines [`Self::partial_text`] emits, as their source row and
+    /// side or a marker delimiter. Only present sides produce a line, so the
+    /// plan's length matches the rendered line count exactly, which keeps
+    /// [`Self::center_row_to_merge_row`] aligned with the text.
+    fn resolution_plan(&self, rows: &[MergeRow], picks: &[RowPick]) -> Vec<PlanLine> {
+        let range = self.row_range.clone();
+        let mut plan = Vec::new();
+
+        for (offset, pick) in picks.iter().enumerate() {
+            let row = range.start + offset;
+            if pick.ours && rows[row].ours.is_some() {
+                plan.push(PlanLine::Content {
+                    row,
+                    side: Side::Ours,
+                });
+            }
+            if pick.theirs && rows[row].theirs.is_some() {
+                plan.push(PlanLine::Content {
+                    row,
+                    side: Side::Theirs,
+                });
+            }
+        }
+
+        let undecided: Vec<usize> = picks
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.ours && !p.theirs)
+            .map(|(offset, _)| range.start + offset)
+            .collect();
+        if !undecided.is_empty() {
+            plan.push(PlanLine::Delimiter("<<<<<<< ours"));
+            for &row in &undecided {
+                if rows[row].ours.is_some() {
+                    plan.push(PlanLine::Content {
+                        row,
+                        side: Side::Ours,
+                    });
+                }
+            }
+            plan.push(PlanLine::Delimiter("======="));
+            for &row in &undecided {
+                if rows[row].theirs.is_some() {
+                    plan.push(PlanLine::Content {
+                        row,
+                        side: Side::Theirs,
+                    });
+                }
+            }
+            plan.push(PlanLine::Delimiter(">>>>>>> theirs"));
+        }
+
+        plan
+    }
+
     /// A whole-side pick taking every ours line and no theirs line.
     pub(crate) fn all_ours(&self) -> Vec<RowPick> {
         vec![
@@ -413,7 +519,7 @@ impl ConflictChunk {
             ChunkState::Theirs
         } else if matches(&self.assembly_text(rows, &self.all_both())) {
             ChunkState::Both
-        } else if matches(&self.assembly_text(rows, picks)) {
+        } else if matches(&self.partial_text(rows, picks)) {
             ChunkState::Picked
         } else {
             ChunkState::Manual
@@ -431,6 +537,21 @@ impl ConflictChunk {
 pub(crate) struct RowPick {
     pub(crate) ours: bool,
     pub(crate) theirs: bool,
+}
+
+/// One side of a conflict row, naming which candidate a rendered line came from.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Side {
+    Ours,
+    Theirs,
+}
+
+/// One line of a chunk's [`ConflictChunk::partial_text`] rendering, as the merge
+/// row and side it came from or a marker delimiter that maps to no row.
+enum PlanLine {
+    Content { row: usize, side: Side },
+    Delimiter(&'static str),
 }
 
 /// The resolution state of a conflict chunk's center region, derived from its
@@ -470,6 +591,15 @@ fn auto_merge_line(row: &MergeRow) -> Option<&str> {
         },
         (None, None, None) => None,
     }
+}
+
+/// The text of `row`'s `side`, or `None` when that side deleted its line.
+fn side_line(row: &MergeRow, side: Side) -> Option<&str> {
+    match side {
+        Side::Ours => row.ours.as_ref(),
+        Side::Theirs => row.theirs.as_ref(),
+    }
+    .map(|s| s.text.as_str())
 }
 
 /// Render resolved center lines as newline-terminated text.
@@ -750,6 +880,74 @@ mod tests {
             },
         ];
         assert_eq!(chunk.assembly_text(&merged.rows, &mixed), "O1\nT2\n");
+    }
+
+    #[test]
+    fn partial_text_shrinks_the_marker_block_as_rows_are_decided() {
+        let merged = doc("a\nb1\nb2\nc\n", "a\nO1\nO2\nc\n", "a\nT1\nT2\nc\n");
+        let chunk = &merged.chunks[0];
+        let rows = &merged.rows;
+
+        let one_decided = [
+            RowPick {
+                ours: true,
+                theirs: false,
+            },
+            RowPick {
+                ours: false,
+                theirs: false,
+            },
+        ];
+        assert_eq!(
+            chunk.partial_text(rows, &one_decided),
+            "O1\n<<<<<<< ours\nO2\n=======\nT2\n>>>>>>> theirs\n"
+        );
+        assert_eq!(
+            chunk.classify(rows, &one_decided, &chunk.partial_text(rows, &one_decided)),
+            ChunkState::Picked
+        );
+
+        let both_decided = [
+            RowPick {
+                ours: true,
+                theirs: false,
+            },
+            RowPick {
+                ours: false,
+                theirs: true,
+            },
+        ];
+        assert_eq!(
+            chunk.partial_text(rows, &both_decided),
+            chunk.assembly_text(rows, &both_decided),
+            "every row decided drops the marker block"
+        );
+    }
+
+    #[test]
+    fn center_row_to_merge_row_maps_result_and_marker_lines() {
+        let merged = doc("a\nb1\nb2\nc\n", "a\nO1\nO2\nc\n", "a\nT1\nT2\nc\n");
+        let chunk = &merged.chunks[0];
+        let rows = &merged.rows;
+        let picks = [
+            RowPick {
+                ours: true,
+                theirs: false,
+            },
+            RowPick {
+                ours: false,
+                theirs: false,
+            },
+        ];
+        let at = |row| chunk.center_row_to_merge_row(rows, &picks, row);
+
+        assert_eq!(at(0), Some((1, Side::Ours)), "decided result line");
+        assert_eq!(at(1), None, "<<<<<<< delimiter");
+        assert_eq!(at(2), Some((2, Side::Ours)), "ours marker-section line");
+        assert_eq!(at(3), None, "======= delimiter");
+        assert_eq!(at(4), Some((2, Side::Theirs)), "theirs marker-section line");
+        assert_eq!(at(5), None, ">>>>>>> delimiter");
+        assert_eq!(at(6), None, "past the rendering");
     }
 
     #[test]
