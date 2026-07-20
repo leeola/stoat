@@ -177,12 +177,15 @@ pub enum BorderStyle {
 /// blurred shadow that reads as the panel floating above the grid.
 /// [`PanelShadow::Tucked`] is undisplaced with a tight halo clipped above the
 /// panel's bottom edge, so the panel reads as emerging from beneath whatever sits
-/// below it rather than floating in front.
+/// below it rather than floating in front. [`PanelShadow::Overhang`] draws no
+/// exterior halo at all, only a small shadow band inside the panel along its
+/// bottom edge, so the panel reads as tucked under whatever overhangs it above.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelShadow {
     None_,
     Drop,
     Tucked,
+    Overhang,
 }
 
 /// Draw off-grid modal chrome framing a cell rectangle.
@@ -1730,6 +1733,7 @@ fn shadow_code(shadow: PanelShadow) -> u8 {
         PanelShadow::None_ => 0,
         PanelShadow::Drop => 1,
         PanelShadow::Tucked => 2,
+        PanelShadow::Overhang => 3,
     }
 }
 
@@ -1739,6 +1743,7 @@ fn decode_shadow(code: u8) -> PanelShadow {
     match code {
         0 => PanelShadow::None_,
         2 => PanelShadow::Tucked,
+        3 => PanelShadow::Overhang,
         _ => PanelShadow::Drop,
     }
 }
@@ -1763,18 +1768,19 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, decode_ident_reply, encode_bar, encode_border, encode_fill, encode_fill_end,
-        encode_hello, encode_icon, encode_ident_reply, encode_into, encode_line_layout,
-        encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
-        encode_panel, encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
-        encode_popover_end, encode_reposition, encode_reset, encode_scale, encode_scroll,
-        encode_scroll_region, encode_text_run_end, encode_window_close, encode_window_focus,
-        encode_window_open, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
-        HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand, MinimapCommand,
-        MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
-        PanelShadow, PoolCursorCommand, PoolDropCommand, PoolRegionCommand, PopoverCommand,
-        RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, TextRunCommand,
-        WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
+        decode, decode_ident_reply, decode_shadow, encode_bar, encode_border, encode_fill,
+        encode_fill_end, encode_hello, encode_icon, encode_ident_reply, encode_into,
+        encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
+        encode_minimap_view, encode_panel, encode_pool_cursor, encode_pool_drop,
+        encode_pool_region, encode_popover, encode_popover_end, encode_reposition, encode_reset,
+        encode_scale, encode_scroll, encode_scroll_region, encode_text_run_end,
+        encode_window_close, encode_window_focus, encode_window_open, BarCommand, BorderCommand,
+        BorderStyle, Command, FillCommand, HelloCommand, IconCommand, IconKind, IdentReply,
+        LineLayoutCommand, MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun,
+        MinimapViewCommand, PanelCommand, PanelShadow, PoolCursorCommand, PoolDropCommand,
+        PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
+        ScrollRegionCommand, TextRunCommand, WindowCloseCommand, WindowFocusCommand,
+        WindowOpenCommand,
     };
 
     #[test]
@@ -1903,6 +1909,37 @@ mod tests {
         assert_eq!(
             decode(&encode_panel(&command)),
             Some(Command::Panel(command))
+        );
+    }
+
+    #[test]
+    fn panel_overhang_shadow_round_trips() {
+        let command = PanelCommand {
+            top: 1,
+            left: 2,
+            width: 8,
+            height: 4,
+            style: BorderStyle::Light,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: Some([4, 5, 6]),
+            shadow: PanelShadow::Overhang,
+            inset_x: 4,
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    #[test]
+    fn unknown_shadow_code_falls_back_to_drop() {
+        assert_eq!(decode_shadow(3), PanelShadow::Overhang);
+        assert_eq!(
+            decode_shadow(4),
+            PanelShadow::Drop,
+            "unknown code is a drop shadow"
         );
     }
 

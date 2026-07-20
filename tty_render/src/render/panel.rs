@@ -35,10 +35,14 @@ const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
 /// [`SHADOW_MARGIN`] so the undisplaced halo reads as a seam rather than a float.
 const SHADOW_MARGIN_TUCKED: f32 = 6.0;
 
+/// Height in physical pixels of an overhang shadow's interior bottom band. Small,
+/// so it reads as a faint shadow cast onto the panel by whatever overhangs it.
+const SHADOW_MARGIN_OVERHANG: f32 = 5.0;
+
 /// The per-panel instance data. Carries the anchor cell, the size in cells, the
 /// fill and stroke colors, the shadow displacement and blur radius, the corner
 /// radius, a flag selecting whether the fill is painted, the border style code,
-/// and a flag clipping the shadow above the box bottom for a tucked shadow.
+/// and the shadow mode (0 drop, 1 tucked, 2 overhang).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct PanelInstance {
@@ -52,7 +56,7 @@ struct PanelInstance {
     fill_flag: f32,
     style: u32,
     inset_x: f32,
-    shadow_clip_bottom: f32,
+    shadow_mode: f32,
 }
 
 /// The uniform shared by every instance. Carries the surface resolution, the
@@ -281,9 +285,10 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
     panels
         .iter()
         .map(|panel| {
-            let (shadow_offset, shadow_margin, shadow_clip_bottom) = match panel.shadow {
+            let (shadow_offset, shadow_margin, shadow_mode) = match panel.shadow {
                 PanelShadow::Drop => (SHADOW_OFFSET, SHADOW_MARGIN, 0.0),
                 PanelShadow::Tucked => ([0.0, 0.0], SHADOW_MARGIN_TUCKED, 1.0),
+                PanelShadow::Overhang => ([0.0, 0.0], SHADOW_MARGIN_OVERHANG, 2.0),
                 PanelShadow::None_ => ([0.0, 0.0], 0.0, 0.0),
             };
             PanelInstance {
@@ -297,7 +302,7 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
                 fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
                 style: style_code(panel.style),
                 inset_x: panel.inset_x as f32,
-                shadow_clip_bottom,
+                shadow_mode,
             }
         })
         .collect()
@@ -362,7 +367,7 @@ mod tests {
         assert_eq!(instances[0].border, [0.0, 1.0, 0.0]);
         assert_eq!(instances[0].shadow_offset, super::SHADOW_OFFSET);
         assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN);
-        assert_eq!(instances[0].shadow_clip_bottom, 0.0);
+        assert_eq!(instances[0].shadow_mode, 0.0);
         assert_eq!(instances[0].corner_radius, 6.0);
         assert_eq!(instances[0].fill_flag, 1.0);
         assert_eq!(instances[0].style, style_code(BorderStyle::Heavy));
@@ -389,7 +394,7 @@ mod tests {
         assert_eq!(instances[0].fill_flag, 0.0);
         assert_eq!(instances[0].shadow_offset, [0.0, 0.0]);
         assert_eq!(instances[0].shadow_margin, 0.0);
-        assert_eq!(instances[0].shadow_clip_bottom, 0.0);
+        assert_eq!(instances[0].shadow_mode, 0.0);
     }
 
     #[test]
@@ -412,9 +417,6 @@ mod tests {
 
         assert_eq!(instances[0].shadow_offset, [0.0, 0.0], "no displacement");
         assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN_TUCKED);
-        assert_eq!(
-            instances[0].shadow_clip_bottom, 1.0,
-            "clipped below the box"
-        );
+        assert_eq!(instances[0].shadow_mode, 1.0, "clipped below the box");
     }
 }

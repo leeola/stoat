@@ -136,7 +136,7 @@ pub(crate) fn popout_frame(
                     border,
                     corner_radius: 0,
                     fill: Some(bg),
-                    shadow: PanelShadow::Tucked,
+                    shadow: PanelShadow::Overhang,
                     inset_x: POPOUT_INSET_PX,
                 },
             );
@@ -382,7 +382,7 @@ mod tests {
                 border: [1, 2, 3],
                 corner_radius: 0,
                 fill: Some([4, 5, 6]),
-                shadow: PanelShadow::Tucked,
+                shadow: PanelShadow::Overhang,
                 inset_x: POPOUT_INSET_PX,
             }),
         );

@@ -35,6 +35,10 @@ const STYLE_ROUNDED: u32 = 3u;
 // just past the box edge, falling to zero across the shadow margin.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const SHADOW_ALPHA: f32 = 0.22;
+// Peak opacity of an overhang shadow's interior bottom band, at the box's bottom
+// edge, falling to zero across the margin as it rises. Fainter than SHADOW_ALPHA
+// so it reads as a soft cast rather than a hard line.
+const SHADOW_ALPHA_OVERHANG: f32 = 0.14;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -54,9 +58,9 @@ struct VsOut {
     // This panel's draw index, so the fragment shader can occlude against every
     // later (higher-index, on-top) panel.
     @location(9) @interpolate(flat) instance: u32,
-    // 1.0 to clip the shadow above the box's bottom edge (a tucked shadow), 0.0
-    // to let it fall past the bottom (a drop shadow).
-    @location(10) @interpolate(flat) shadow_clip_bottom: f32,
+    // Shadow mode: 0.0 drop (exterior, offset), 1.0 tucked (exterior, clipped at
+    // the box bottom), 2.0 overhang (a small interior band along the bottom edge).
+    @location(10) @interpolate(flat) shadow_mode: f32,
 }
 
 @vertex
@@ -73,7 +77,7 @@ fn vs_main(
     @location(7) fill_flag: f32,
     @location(8) style: u32,
     @location(9) inset_x: f32,
-    @location(10) shadow_clip_bottom: f32,
+    @location(10) shadow_mode: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -116,7 +120,7 @@ fn vs_main(
     out.fill_flag = fill_flag;
     out.style = style;
     out.instance = instance_index;
-    out.shadow_clip_bottom = shadow_clip_bottom;
+    out.shadow_mode = shadow_mode;
     return out;
 }
 
@@ -182,23 +186,33 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let shadow_min = in.box_min + offset;
     let shadow_max = in.box_max + offset;
     let d = max(vec2<f32>(0.0, 0.0), max(shadow_min - p, p - shadow_max));
-    // A tucked shadow paints nothing below the box's bottom edge, so the seam
-    // with whatever sits below the panel stays clean and the panel reads as
-    // emerging from beneath it rather than floating over it.
-    let clip = select(1.0, step(p.y, in.box_max.y), in.shadow_clip_bottom > 0.5);
-    // Gate the shadow to the box exterior so an unfilled panel's interior is not
-    // washed by its own shadow. `interior` is 1 inside the box and 0 outside.
+    // A tucked shadow (mode 1) paints nothing below the box's bottom edge, so the
+    // seam with whatever sits below the panel stays clean.
+    let clip = select(1.0, step(p.y, in.box_max.y), in.shadow_mode > 0.5 && in.shadow_mode < 1.5);
+    // Exterior shadow for drop (mode 0) and tucked (mode 1), gated to the box
+    // exterior so an unfilled panel's interior is not washed by its own shadow.
+    // `interior` is 1 inside the box and 0 outside.
     let shadow_base = select(
         0.0,
         SHADOW_ALPHA * (1.0 - smoothstep(0.0, margin, length(d))),
-        margin > 0.0
+        margin > 0.0 && in.shadow_mode < 1.5
     ) * (1.0 - interior) * clip;
+    // Overhang (mode 2): a small interior band rising from the box's bottom edge,
+    // so the panel reads as tucked under whatever overhangs it above.
+    let overhang = select(
+        0.0,
+        SHADOW_ALPHA_OVERHANG * (1.0 - smoothstep(0.0, margin, in.box_max.y - p.y)) * interior,
+        in.shadow_mode > 1.5
+    );
 
-    // Composite bottom-up: the shadow, then the optional fill, then the stroke.
+    // Composite bottom-up: the exterior shadow, the optional fill, the overhang
+    // band cast onto that fill, then the stroke.
     var color = SHADOW_COLOR;
     var alpha = shadow_base;
     color = mix(color, in.fill, fill_alpha);
     alpha = max(alpha, fill_alpha);
+    color = mix(color, SHADOW_COLOR, overhang);
+    alpha = max(alpha, overhang);
     color = mix(color, in.border, stroke);
     alpha = max(alpha, stroke);
     return vec4<f32>(color, alpha);

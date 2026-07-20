@@ -691,11 +691,15 @@ pub enum BorderStyle {
 /// blurs the shadow so the panel reads as floating above the grid.
 /// [`PanelShadow::Tucked`] leaves it undisplaced and clipped above the panel's
 /// bottom edge, so the panel reads as emerging from beneath what sits below it.
+/// [`PanelShadow::Overhang`] drops the exterior halo entirely for a small shadow
+/// band inside the panel's bottom edge, so it reads as tucked under what overhangs
+/// it above.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelShadow {
     None_,
     Drop,
     Tucked,
+    Overhang,
 }
 
 /// A cell's role in a scaled glyph block.
