@@ -477,6 +477,29 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_picked_chunk_pads_the_taller_side() {
+        let mut h = TestHarness::with_size(150, 20);
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("start\nb\nc\nend\n"),
+            Some("start\nO\nend\n"),
+            Some("start\nT1\nT2\nend\n"),
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+        crate::action_handlers::dispatch(&mut h.stoat, &ConflictPickOurs);
+
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        assert_eq!(
+            center_text(&h),
+            "start\nO\nend\n",
+            "picking ours shrinks the center"
+        );
+        h.assert_snapshot("conflict_view_padded_pick");
+    }
+
+    #[test]
     fn snapshot_conflict_view_three_columns() {
         let mut h = TestHarness::with_size(150, 20);
         let git_root = h.stoat.active_workspace().git_root.clone();

@@ -232,6 +232,10 @@ pub struct DisplayMap {
     /// already resolved and a re-sync would reproduce the same offsets.
     last_crease_sync_version: u64,
     inserted_diff_block_ids: Vec<CustomBlockId>,
+    /// Ids of the spacer blocks the conflict view installs to pad a picked
+    /// chunk whose center shrank below its taller side, tracked so each refresh
+    /// replaces the previous set rather than stacking duplicates.
+    conflict_padding_block_ids: Vec<CustomBlockId>,
     last_diff_version: usize,
     /// When false, `Deleted`/`Modified` diff hunks do not splice inline
     /// deleted-line block rows into the display. A plain editor with a populated
@@ -282,6 +286,7 @@ impl DisplayMap {
             last_buffer_version: version,
             last_crease_sync_version: version,
             inserted_diff_block_ids: Vec::new(),
+            conflict_padding_block_ids: Vec::new(),
             last_diff_version: 0,
             show_deleted_blocks: false,
             last_show_deleted_blocks: false,
@@ -361,6 +366,19 @@ impl DisplayMap {
         // or inlay version, so the cached snapshot must be dropped explicitly or
         // snapshot_with_companion short-circuits to it and the new blocks stay
         // invisible until an unrelated version bump forces a rebuild.
+        self.cached_snapshot = None;
+    }
+
+    /// Replace the conflict view's padding spacer blocks with `blocks`.
+    ///
+    /// Removes the spacers installed by the previous call before inserting the
+    /// new set, so a pick that reshapes a chunk refreshes its padding without
+    /// stacking stale blocks. Pass an empty vector to clear them.
+    pub fn set_conflict_padding_blocks(&mut self, blocks: Vec<BlockProperties>) {
+        let stale: std::collections::HashSet<CustomBlockId> =
+            self.conflict_padding_block_ids.drain(..).collect();
+        self.block_map.remove(&stale);
+        self.conflict_padding_block_ids = self.block_map.insert(blocks);
         self.cached_snapshot = None;
     }
 

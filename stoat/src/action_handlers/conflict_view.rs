@@ -2,12 +2,14 @@ use super::focused_editor_mut;
 use crate::{
     app::Stoat,
     conflict_session::{ConflictSession, ConflictViewState, FileResolveState},
+    display_map::{BlockPlacement, BlockProperties, BlockStyle},
     editor_state::{EditorId, EditorState},
     host::git::GitRepo,
     jumplist::JumpEntry,
     merge_view::{ChunkState, MergeDoc, RowPick},
     pane::View,
 };
+use ratatui::text::Line;
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -600,6 +602,82 @@ fn apply_resolution(
         .and_then(|editor| editor.conflict_view.as_mut())
     {
         view.picks[chunk_idx] = picks;
+    }
+
+    refresh_padding(stoat, editor_id);
+}
+
+/// Reinstall the spacer blocks that pad any chunk whose center is now shorter
+/// than its taller side, so every ours and theirs line has a display row.
+///
+/// A pick shrinks the marker block to its resolution, which can leave the
+/// non-picked side with more lines than the center. Each such chunk gets a
+/// spacer block below its last center row, sized to the overflow, matching the
+/// extra rows [`crate::merge_view::MergeDoc::align`] emits.
+fn refresh_padding(stoat: &mut Stoat, editor_id: EditorId) {
+    let (anchors, side_heights) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        let doc = &session.file.doc;
+        let heights: Vec<(usize, usize)> = doc
+            .chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    chunk.ours_lines(&doc.rows).len(),
+                    chunk.theirs_lines(&doc.rows).len(),
+                )
+            })
+            .collect();
+        (session.file.chunk_anchors.clone(), heights)
+    };
+
+    let blocks = {
+        let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) else {
+            return;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+
+        let mut blocks = Vec::new();
+        for ((start, end), (ours_len, theirs_len)) in anchors.iter().zip(&side_heights) {
+            let start_row = rope
+                .offset_to_point(buffer_snapshot.resolve_anchor(start))
+                .row;
+            let end_row = rope
+                .offset_to_point(buffer_snapshot.resolve_anchor(end))
+                .row;
+            let span = end_row.saturating_sub(start_row) as usize;
+            let padding = span.max(*ours_len).max(*theirs_len) - span;
+            if padding == 0 {
+                continue;
+            }
+            let placement = if span == 0 {
+                BlockPlacement::Above(start_row)
+            } else {
+                BlockPlacement::Below(start_row + span as u32 - 1)
+            };
+            blocks.push(padding_block(placement, padding as u32));
+        }
+        blocks
+    };
+
+    if let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id) {
+        editor.display_map.set_conflict_padding_blocks(blocks);
+    }
+}
+
+/// A spacer block of `height` blank center rows at `placement`.
+fn padding_block(placement: BlockPlacement, height: u32) -> BlockProperties {
+    BlockProperties {
+        placement,
+        height: Some(height),
+        style: BlockStyle::Spacer,
+        render: Arc::new(move |_ctx| vec![Line::raw(String::new()); height as usize]),
+        diff_status: None,
+        priority: 0,
     }
 }
 
