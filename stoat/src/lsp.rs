@@ -12,7 +12,7 @@ pub mod util;
 /// (trait, struct, and enum all become `type`), which loses the distinction
 /// callers such as the `space l` which-key filter need. This preserves it in a
 /// coarser bucketing than the raw legend but finer than the highlight scope.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum LspSymbolKind {
     Trait,
     Type,

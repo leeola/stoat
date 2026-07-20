@@ -19,17 +19,33 @@ pub(crate) fn render_hints(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: Option<&mut stoatty_widgets::ApcScene>,
+) {
+    let rows = group_by_action(bindings);
+    render_hints_grouped(mode, &rows, footer, theme, area, buf, scene);
+}
+
+/// Paint the hints box from pre-grouped `(keys, action)` rows.
+///
+/// Split from [`render_hints`] so a caller holding an already-grouped row list
+/// (a per-frame cache keyed on the keymap state) can paint without re-walking
+/// the keymap or regrouping.
+pub(crate) fn render_hints_grouped(
+    mode: &str,
+    rows: &[(String, String)],
+    footer: Option<&HintsFooter>,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
     mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
-    if bindings.is_empty() || area.width < 10 || area.height < 4 {
+    if rows.is_empty() || area.width < 10 || area.height < 4 {
         return;
     }
 
     // Reserve the bottom row for the pane status bar. Every caller passes the
     // full window, so the box lays out flush to the right edge above the bar.
     let area = super::hints_overlay_area(area);
-
-    let rows = group_by_action(bindings);
 
     let gap = 3;
     let inter_col_gap = 3;
@@ -166,9 +182,9 @@ pub(crate) fn render_hints(
 
 /// Collapses entries that share an action description, joining their keys with
 /// `", "` in first-seen order. Ensures each action appears on exactly one row.
-fn group_by_action<'a>(bindings: &'a [(&str, String)]) -> Vec<(String, &'a str)> {
-    let mut rows: Vec<(String, &'a str)> = Vec::new();
-    let mut index: HashMap<&'a str, usize> = HashMap::new();
+fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut index: HashMap<&str, usize> = HashMap::new();
     for (key, action) in bindings {
         let action = action.as_str();
         if let Some(&i) = index.get(action) {
@@ -177,7 +193,7 @@ fn group_by_action<'a>(bindings: &'a [(&str, String)]) -> Vec<(String, &'a str)>
             row.0.push_str(key);
         } else {
             index.insert(action, rows.len());
-            rows.push((key.to_string(), action));
+            rows.push((key.to_string(), action.to_string()));
         }
     }
     rows

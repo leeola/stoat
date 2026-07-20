@@ -37,7 +37,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
 /// full [`StoatKeymapState::from_stoat`] derivation (e.g. while holding a
 /// workspace borrow) still set the fields they need without those predicates
 /// rippling through the signature.
-#[derive(Default)]
+#[derive(Default, Hash)]
 pub(crate) struct Flags {
     pub(crate) rebase_exec: bool,
 }
@@ -231,7 +231,7 @@ fn resolve_focus(ws: &Workspace) -> Option<(&EditorState, BufferId)> {
 
 /// The focused-buffer predicate values, all false or absent when no editor is
 /// focused.
-#[derive(Default)]
+#[derive(Default, Hash)]
 pub(crate) struct FocusFlags {
     lsp: bool,
     lang: Option<String>,
