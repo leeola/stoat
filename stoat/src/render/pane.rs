@@ -259,7 +259,7 @@ pub(crate) fn render_pane(
         && let Some((typ, msg)) = frame.lsp_message
         && typ == lsp_types::MessageType::ERROR
     {
-        let inset = popout_inset(status_area.width);
+        let inset = popout_inset();
         let cell_width = status_area
             .width
             .saturating_sub(inset * 2)

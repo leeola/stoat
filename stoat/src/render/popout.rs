@@ -11,12 +11,12 @@ use stoatty_widgets::ApcScene;
 
 /// Place a popout card of `height` rows above `status_area`.
 ///
-/// The card spans about 90% of `status_area`'s width, centered, so it reads as
-/// narrower than the bar it extends (see [`popout_inset`]). Its bottom edge sits
-/// `stacked_above` rows above `status_area`'s top row, so a second card clears one
-/// already placed at offset zero. Returns `None` when the card would not fit
-/// within `content_area`, matching how a pane too short for a bar segment simply
-/// drops it.
+/// The card is inset one cell on each side of `status_area`, centered, so it
+/// reads as narrower than the bar it extends (see [`popout_inset`]). Its bottom
+/// edge sits `stacked_above` rows above `status_area`'s top row, so a second
+/// card clears one already placed at offset zero. Returns `None` when the card
+/// would not fit within `content_area`, matching how a pane too short for a bar
+/// segment simply drops it.
 pub(crate) fn popout_area(
     status_area: Rect,
     content_area: Rect,
@@ -30,7 +30,7 @@ pub(crate) fn popout_area(
         return None;
     }
 
-    let inset = popout_inset(status_area.width);
+    let inset = popout_inset();
     Some(Rect::new(
         status_area.x + inset,
         top,
@@ -39,13 +39,14 @@ pub(crate) fn popout_area(
     ))
 }
 
-/// Cells shaved off each horizontal side of a popout card so it insets to about
-/// 90% of the status bar width, centered.
+/// Cells shaved off each horizontal side of a popout card, one per side, so the
+/// card sits just inside the status bar's edges rather than flush with them.
 ///
-/// At least one cell, so even a narrow bar keeps a visible margin where the
-/// editor background shows beside the card.
-pub(crate) fn popout_inset(status_width: u16) -> u16 {
-    (status_width * 5 / 100).max(1)
+/// The visible few-pixel gap where the editor background shows is carried by the
+/// `POPOUT_INSET_PX` pixel inset (see [`crate::render::chrome`]); this one cell
+/// keeps the card off the bar's exact edge columns.
+pub(crate) fn popout_inset() -> u16 {
+    1
 }
 
 /// Paint a popout card into `area` and return the rect its text draws into.
@@ -136,23 +137,21 @@ mod tests {
     use stoatty_widgets::ApcScene;
 
     #[test]
-    fn popout_area_sits_directly_above_the_bar_inset_to_ninety_percent() {
+    fn popout_area_sits_directly_above_the_bar_inset_one_cell() {
         let status = Rect::new(0, 20, 40, 1);
         let content = Rect::new(0, 0, 40, 20);
 
-        // A 40-wide bar insets 2 cells each side, leaving a centered 36-wide card
-        // one row above the bar.
+        // A 40-wide bar insets 1 cell each side, leaving a 38-wide card one row
+        // above the bar.
         assert_eq!(
             popout_area(status, content, 1, 0),
-            Some(Rect::new(2, 19, 36, 1))
+            Some(Rect::new(1, 19, 38, 1))
         );
     }
 
     #[test]
-    fn popout_inset_is_five_percent_per_side_min_one() {
-        assert_eq!(popout_inset(100), 5, "5% of 100");
-        assert_eq!(popout_inset(40), 2, "5% of 40");
-        assert_eq!(popout_inset(10), 1, "rounds below one, clamped to one");
+    fn popout_inset_is_one_cell_per_side() {
+        assert_eq!(popout_inset(), 1);
     }
 
     #[test]
@@ -160,10 +159,10 @@ mod tests {
         let status = Rect::new(4, 20, 100, 1);
         let content = Rect::new(0, 0, 120, 20);
 
-        // 5-cell inset each side keeps the card centered under the bar.
+        // 1-cell inset each side keeps the card centered under the bar.
         assert_eq!(
             popout_area(status, content, 1, 0),
-            Some(Rect::new(9, 19, 90, 1))
+            Some(Rect::new(5, 19, 98, 1))
         );
     }
 
