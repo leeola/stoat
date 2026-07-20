@@ -494,7 +494,6 @@ fn collect_mode_targets(predicate: &Predicate, out: &mut HashSet<String>) {
 ///
 /// Consumed by the help detail pane to annotate a binding's conditions with the
 /// current value of each field they test.
-#[allow(dead_code)]
 pub(crate) fn collect_predicate_fields(predicate: &Predicate, out: &mut Vec<String>) {
     match predicate {
         Predicate::Eq(field, _)

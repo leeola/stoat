@@ -1,5 +1,6 @@
 use crate::{
-    help::Help,
+    help::{format_arg, Help, SnapshotState},
+    keymap::{collect_predicate_fields, evaluate, KeymapState, ResolvedAction, StateValue},
     render::{
         pane::mode_segment,
         text::{wrap_text, write_str, write_str_clipped},
@@ -11,6 +12,7 @@ use ratatui::{
     style::Style,
     widgets::{Block, Borders, Clear, Widget},
 };
+use stoat_config::Predicate;
 
 /// The on-screen rectangles of the help modal, derived from a terminal `area`
 /// by [`help_layout`].
@@ -140,6 +142,20 @@ pub(crate) fn render_help(
     let chip = format!(" {mode_label} ");
     write_str(buf, inner.x, status_row, &chip, mode_style);
 
+    let summary = context_summary(help.context());
+    if !summary.is_empty() {
+        let summary_x = inner.x + chip.chars().count() as u16 + 1;
+        let summary_style = status_base.patch(theme.get(crate::theme::scope::UI_TEXT_MUTED));
+        write_str_clipped(
+            buf,
+            summary_x,
+            status_row,
+            &summary,
+            summary_style,
+            inner.x + inner.width,
+        );
+    }
+
     let list_rect = layout.list;
     let detail_rect = layout.detail;
 
@@ -266,11 +282,32 @@ pub(crate) fn paint_help_detail_rows(
 
     let mut lines: Vec<(String, Style)> = Vec::new();
     lines.push((entry.def.name().to_string(), heading));
-    if let Some(label) = entry.key_label.as_deref() {
-        lines.push((format!("bound: {label}"), key_style));
-    } else {
+
+    let bindings = help.bindings_for(entry.def.name());
+    if bindings.is_empty() {
         lines.push(("(unbound)".to_string(), muted));
+    } else {
+        lines.push(("Bindings:".to_string(), heading));
+        for binding in bindings {
+            let sequence = binding
+                .actions
+                .iter()
+                .map(format_action)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let head = format!("  {}  {sequence}", binding.label);
+            let head_style = if binding.active { key_style } else { muted };
+            for wrapped in wrap_text(&head, width) {
+                lines.push((wrapped, head_style));
+            }
+            for predicate in &binding.predicates {
+                for wrapped in wrap_text(&predicate_line(predicate, help.context()), width) {
+                    lines.push((wrapped, muted));
+                }
+            }
+        }
     }
+
     lines.push((entry.def.short_desc().to_string(), body_style));
     lines.push((String::new(), body_style));
 
@@ -304,6 +341,71 @@ pub(crate) fn paint_help_detail_rows(
     }
 }
 
+/// Render one action of a binding's sequence as `name(arg, ...)`, or bare `name`
+/// when it takes no arguments, so `AutoReload(follow)` reads distinctly from
+/// `AutoReload(on)`.
+fn format_action(action: &ResolvedAction) -> String {
+    let args: Vec<String> = action.args.iter().filter_map(format_arg).collect();
+    if args.is_empty() {
+        action.name.clone()
+    } else {
+        format!("{}({})", action.name, args.join(", "))
+    }
+}
+
+/// Render one predicate of a binding's condition. A `[x]`/`[ ]` box marks whether
+/// it holds in `context`, followed by the predicate source and each field it
+/// tests with its current value (`unset` when the field is absent).
+fn predicate_line(predicate: &Predicate, context: &SnapshotState) -> String {
+    let mark = if evaluate(predicate, context) { "[x]" } else { "[ ]" };
+
+    let mut fields = Vec::new();
+    collect_predicate_fields(predicate, &mut fields);
+    fields.dedup();
+    let values: Vec<String> = fields
+        .iter()
+        .map(|field| {
+            let value = context
+                .get(field)
+                .map_or_else(|| "unset".to_string(), display_state_value);
+            format!("{field}: {value}")
+        })
+        .collect();
+
+    if values.is_empty() {
+        format!("    {mark} {predicate}")
+    } else {
+        format!("    {mark} {predicate}   {}", values.join(", "))
+    }
+}
+
+/// Render a snapshot [`StateValue`] as the text shown in the help context.
+fn display_state_value(value: &StateValue) -> String {
+    match value {
+        StateValue::String(text) => text.to_string(),
+        StateValue::Number(number) => number.to_string(),
+        StateValue::Bool(flag) => flag.to_string(),
+    }
+}
+
+/// Summarize the captured help context for the status row. Each set string field
+/// renders as `field value` and each true boolean as the bare field, joined by
+/// ` · `.
+fn context_summary(context: &SnapshotState) -> String {
+    let mut parts = Vec::new();
+    for field in ["view", "pane", "modal", "token", "lang"] {
+        if let Some(StateValue::String(value)) = context.get(field) {
+            parts.push(format!("{field} {value}"));
+        }
+    }
+    for field in ["modified", "has_selection", "diags"] {
+        if matches!(context.get(field), Some(StateValue::Bool(true))) {
+            parts.push(field.to_string());
+        }
+    }
+    parts.join(" · ")
+}
+
 fn format_example(entry: &crate::help::HelpEntry) -> String {
     let name = entry.def.name();
     let params = entry.def.params();
@@ -314,10 +416,65 @@ fn format_example(entry: &crate::help::HelpEntry) -> String {
         let args: Vec<String> = entry
             .bound_args
             .iter()
-            .filter_map(crate::help::format_arg)
+            .filter_map(format_arg)
             .collect();
         return format!("{name}({})", args.join(", "));
     }
     let placeholders: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
     format!("{name}({})", placeholders.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::ResolvedArg;
+    use stoat_config::{Spanned, Value};
+
+    fn context(fields: &[(&str, &str)]) -> SnapshotState {
+        SnapshotState(
+            fields
+                .iter()
+                .map(|(field, value)| (field.to_string(), StateValue::String((*value).into())))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn predicate_line_marks_holds_and_annotates_the_field() {
+        let predicate = Predicate::Eq(
+            Spanned::new("view".to_string(), 0..0),
+            Spanned::new(Value::Ident("diff".to_string()), 0..0),
+        );
+
+        assert_eq!(
+            predicate_line(&predicate, &context(&[("view", "file")])),
+            "    [ ] view == diff   view: file"
+        );
+        assert_eq!(
+            predicate_line(&predicate, &context(&[("view", "diff")])),
+            "    [x] view == diff   view: diff"
+        );
+        assert_eq!(
+            predicate_line(&predicate, &context(&[])),
+            "    [ ] view == diff   view: unset"
+        );
+    }
+
+    #[test]
+    fn format_action_renders_args_then_bare() {
+        let auto = ResolvedAction {
+            name: "AutoReload".to_string(),
+            args: vec![ResolvedArg {
+                name: None,
+                value: Value::Ident("follow".to_string()),
+            }],
+        };
+        assert_eq!(format_action(&auto), "AutoReload(follow)");
+
+        let bare = ResolvedAction {
+            name: "ToggleKeyHints".to_string(),
+            args: Vec::new(),
+        };
+        assert_eq!(format_action(&bare), "ToggleKeyHints");
+    }
 }

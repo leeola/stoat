@@ -874,6 +874,24 @@ mod tests {
     }
 
     #[test]
+    fn help_detail_lists_the_auto_reload_binding_and_condition() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        send_key(&mut h, keys::key(KeyCode::BackTab));
+        type_str(&mut h, "AutoReload");
+
+        let content = h.snapshot().content.clone();
+        assert!(
+            content.contains("AutoReload(follow)"),
+            "detail names the follow action sequence:\n{content}"
+        );
+        assert!(
+            content.contains("mode == space_buffer"),
+            "detail shows the binding's condition:\n{content}"
+        );
+    }
+
+    #[test]
     fn active_scope_surfaces_set_mode_bindings() {
         let active = vec![active_binding_with_arg(
             "i",
