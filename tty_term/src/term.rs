@@ -87,6 +87,9 @@ pub struct Terminal {
     theme: Theme,
     palette: [Rgb; PALETTE_LEN],
     apc: ApcScanner,
+    /// Reused buffer for one advance's decoded APC frames, so the busy decode
+    /// path does not allocate a fresh Vec per chunk.
+    frames_scratch: Vec<(Option<Command>, usize)>,
     /// Recognizes XTVERSION queries the vte parser leaves unanswered, so
     /// [`Self::advance`] can reply with [`XTVERSION_REPLY`].
     xtversion: XtVersionScanner,
@@ -489,6 +492,7 @@ impl Terminal {
             theme,
             palette,
             apc: ApcScanner::default(),
+            frames_scratch: Vec::new(),
             xtversion: XtVersionScanner::default(),
             osc_notify: OscNotifyScanner::default(),
             borders: Vec::new(),
@@ -586,12 +590,11 @@ impl Terminal {
             return self.parser.sync_bytes_count() < bytes.len();
         };
 
-        let frames: Vec<(Option<Command>, usize)> = self
-            .apc
-            .scan(scan)
-            .into_iter()
-            .map(|(payload, end)| (command::decode(&payload), end))
-            .collect();
+        let mut frames = mem::take(&mut self.frames_scratch);
+        frames.clear();
+        self.apc.scan_with(scan, &mut |payload, end| {
+            frames.push((command::decode(payload), end));
+        });
 
         for _ in 0..self.xtversion.scan(scan) {
             self.responses.push(XTVERSION_REPLY.as_bytes());
@@ -614,11 +617,12 @@ impl Terminal {
                 )
             });
         if !involves_redirect {
-            for (command, _) in frames {
+            for (command, _) in frames.drain(..) {
                 if let Some(command) = command {
                     self.apply_command(command);
                 }
             }
+            self.frames_scratch = frames;
 
             self.parser.advance(&mut self.term, bytes);
 
@@ -635,7 +639,7 @@ impl Terminal {
         // skip left a plain head bound for the live screen.
         let prefix = bytes.len() - scan.len();
         let mut start = 0;
-        for (command, end) in frames {
+        for (command, end) in frames.drain(..) {
             self.feed_segment(&bytes[start..prefix + end]);
             start = prefix + end;
 
@@ -672,6 +676,7 @@ impl Terminal {
             }
         }
         self.feed_segment(&bytes[start..]);
+        self.frames_scratch = frames;
 
         // Mirror the non-redirect sync gate (above): a chunk that began and
         // ended inside an active update presented nothing, so it warrants no
@@ -1883,15 +1888,15 @@ impl ApcScanner {
         matches!(self.state, ApcState::Ground)
     }
 
-    /// Feed `bytes`, returning every APC payload that completes within them,
-    /// each paired with the byte offset one past its terminator.
+    /// Feed `bytes`, invoking `f` with every APC payload that completes within
+    /// them, each paired with the byte offset one past its terminator.
     ///
-    /// The offset lets a caller split the input at frame boundaries to route the
-    /// content between frames. A payload split across calls is retained until its
-    /// terminator arrives; its offset is then relative to the call it completes
-    /// in.
-    fn scan(&mut self, bytes: &[u8]) -> Vec<(Vec<u8>, usize)> {
-        let mut payloads = Vec::new();
+    /// The payload is a borrow into the scanner's reused buffer, valid only for
+    /// that call. The offset lets a caller split the input at frame boundaries to
+    /// route the content between frames. A payload split across calls is retained
+    /// until its terminator arrives, and its offset is then relative to the call
+    /// it completes in.
+    fn scan_with(&mut self, bytes: &[u8], f: &mut impl FnMut(&[u8], usize)) {
         let mut i = 0;
 
         while i < bytes.len() {
@@ -1919,14 +1924,16 @@ impl ApcScanner {
                 ApcState::Apc => match byte {
                     ESC => self.state = ApcState::ApcEscape,
                     BEL => {
-                        payloads.push((mem::take(&mut self.payload), i + 1));
+                        f(&self.payload, i + 1);
+                        self.payload.clear();
                         self.state = ApcState::Ground;
                     },
                     _ => self.push(byte),
                 },
                 ApcState::ApcEscape => match byte {
                     STRING_TERMINATOR => {
-                        payloads.push((mem::take(&mut self.payload), i + 1));
+                        f(&self.payload, i + 1);
+                        self.payload.clear();
                         self.state = ApcState::Ground;
                     },
                     ESC => self.state = ApcState::ApcEscape,
@@ -1938,8 +1945,6 @@ impl ApcScanner {
             }
             i += 1;
         }
-
-        payloads
     }
 
     /// Buffer one payload byte, abandoning the frame if it overruns the cap.
@@ -3614,12 +3619,18 @@ mod tests {
         assert_eq!((grid.rows(), grid.cols()), (5, 10));
     }
 
+    fn scan_collect(scanner: &mut ApcScanner, bytes: &[u8]) -> Vec<(Vec<u8>, usize)> {
+        let mut out = Vec::new();
+        scanner.scan_with(bytes, &mut |payload, end| out.push((payload.to_vec(), end)));
+        out
+    }
+
     #[test]
     fn scans_single_apc_frame() {
         let mut scanner = ApcScanner::default();
 
         assert_eq!(
-            scanner.scan(b"\x1b_Gstoatty;border\x1b\\"),
+            scan_collect(&mut scanner, b"\x1b_Gstoatty;border\x1b\\"),
             vec![(b"Gstoatty;border".to_vec(), 19)]
         );
     }
@@ -3628,9 +3639,9 @@ mod tests {
     fn scans_frame_split_across_calls() {
         let mut scanner = ApcScanner::default();
 
-        assert!(scanner.scan(b"\x1b_Gstoat").is_empty());
+        assert!(scan_collect(&mut scanner, b"\x1b_Gstoat").is_empty());
         assert_eq!(
-            scanner.scan(b"ty;x\x1b\\"),
+            scan_collect(&mut scanner, b"ty;x\x1b\\"),
             vec![(b"Gstoatty;x".to_vec(), 6)]
         );
     }
@@ -3639,7 +3650,10 @@ mod tests {
     fn scans_bel_terminated_frame() {
         let mut scanner = ApcScanner::default();
 
-        assert_eq!(scanner.scan(b"\x1b_foo\x07"), vec![(b"foo".to_vec(), 6)]);
+        assert_eq!(
+            scan_collect(&mut scanner, b"\x1b_foo\x07"),
+            vec![(b"foo".to_vec(), 6)]
+        );
     }
 
     #[test]
@@ -3647,7 +3661,7 @@ mod tests {
         let mut scanner = ApcScanner::default();
 
         assert_eq!(
-            scanner.scan(b"a\x1b_foo\x1b\\b"),
+            scan_collect(&mut scanner, b"a\x1b_foo\x1b\\b"),
             vec![(b"foo".to_vec(), 8)]
         );
     }
@@ -3657,7 +3671,7 @@ mod tests {
         let mut scanner = ApcScanner::default();
 
         assert_eq!(
-            scanner.scan(b"\x1b_a\x1b\\\x1b_b\x1b\\"),
+            scan_collect(&mut scanner, b"\x1b_a\x1b\\\x1b_b\x1b\\"),
             vec![(b"a".to_vec(), 5), (b"b".to_vec(), 10)]
         );
     }
@@ -3666,7 +3680,7 @@ mod tests {
     fn csi_and_plain_text_yield_no_frames() {
         let mut scanner = ApcScanner::default();
 
-        assert!(scanner.scan(b"hello\x1b[31mworld").is_empty());
+        assert!(scan_collect(&mut scanner, b"hello\x1b[31mworld").is_empty());
     }
 
     #[test]
@@ -3676,26 +3690,31 @@ mod tests {
         input.extend_from_slice(b"\x1b_frame\x07");
         let offset = input.len();
 
-        assert_eq!(scanner.scan(&input), vec![(b"frame".to_vec(), offset)]);
+        assert_eq!(
+            scan_collect(&mut scanner, &input),
+            vec![(b"frame".to_vec(), offset)]
+        );
     }
 
     #[test]
     fn apc_scan_payloads_are_split_invariant() {
         let input = b"pre\x1b_alpha\x1b\\mid\x1b_beta\x07post";
-        let whole: Vec<Vec<u8>> = ApcScanner::default()
-            .scan(input)
+        let whole: Vec<Vec<u8>> = scan_collect(&mut ApcScanner::default(), input)
             .into_iter()
             .map(|(payload, _)| payload)
             .collect();
 
         for split in 0..=input.len() {
             let mut scanner = ApcScanner::default();
-            let mut got: Vec<Vec<u8>> = scanner
-                .scan(&input[..split])
+            let mut got: Vec<Vec<u8>> = scan_collect(&mut scanner, &input[..split])
                 .into_iter()
                 .map(|(payload, _)| payload)
                 .collect();
-            got.extend(scanner.scan(&input[split..]).into_iter().map(|(p, _)| p));
+            got.extend(
+                scan_collect(&mut scanner, &input[split..])
+                    .into_iter()
+                    .map(|(p, _)| p),
+            );
             assert_eq!(got, whole, "split at {split} changed the payloads");
         }
     }
