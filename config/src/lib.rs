@@ -377,6 +377,25 @@ mod tests {
     }
 
     #[test]
+    fn predicate_display_round_trips_source() {
+        let source_of = |predicate: &str| {
+            let config = parse_ok(&format!("on key {{ {predicate} {{ j -> MoveDown(); }} }}"));
+            assert_predicate_block(&config.blocks[0].node.statements[0])
+                .predicate
+                .node
+                .to_string()
+        };
+
+        assert_eq!(source_of("mode == normal"), "mode == normal");
+        assert_eq!(
+            source_of("!token_known || token == function"),
+            "!token_known || token == function"
+        );
+        assert_eq!(source_of(r#"lang ~ "rust*""#), r#"lang ~ "rust*""#);
+        assert_eq!(source_of("a && (b || c)"), "a && (b || c)");
+    }
+
+    #[test]
     fn predicate_or() {
         let config =
             parse_ok(r#"on key { mode == "normal" || mode == "visual" { y -> Yank(); } }"#);
