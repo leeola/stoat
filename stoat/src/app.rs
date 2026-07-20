@@ -409,6 +409,12 @@ pub struct Stoat {
     /// [`Self::syntax_highlight`], not persisted. Contexts that already
     /// auto-show the overlay are unaffected.
     pub(crate) key_hints_visible: bool,
+    /// Grouped hint rows cached for the current keymap-state hash, letting an
+    /// unchanged frame skip the full keybinding walk and regrouping.
+    pub(crate) hints_cache: Option<crate::render::hints::HintsCache>,
+    /// Review-screen hints footer cached against the review session version, so
+    /// the per-chunk `progress()` walk reruns only when the session changes.
+    pub(crate) review_footer_cache: Option<(u64, Option<crate::render::hints::HintsFooter>)>,
     /// Whether LSP inlay hints are requested and rendered for the focused
     /// editor. Toggled by `ToggleInlayHints`, off by default. Not persisted.
     pub(crate) inlay_hints_enabled: bool,
@@ -1284,6 +1290,8 @@ impl Stoat {
             lsp_status_pinned: false,
             lsp_badge_hovered: false,
             key_hints_visible: false,
+            hints_cache: None,
+            review_footer_cache: None,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: None,
             last_inlay_hint_key: None,
@@ -10243,6 +10251,9 @@ mod tests {
                 sidebar == "on" { j -> SetVar(pressed, yes); }
             }"#,
         );
+        // The hints cache is keyed on state under a fixed keymap, so a new
+        // keymap invalidates it.
+        h.stoat.hints_cache = None;
 
         // `j` is inert until `x` sets the variable.
         h.stoat.handle_key(bare(KeyCode::Char('j')));
@@ -10260,10 +10271,39 @@ mod tests {
     fn set_var_collision_with_builtin_is_ignored() {
         let mut h = Stoat::test();
         h.stoat.keymap = compile_keymap("on key { x -> SetVar(mode, hacked); }");
+        h.stoat.hints_cache = None;
 
         h.stoat.handle_key(bare(KeyCode::Char('x')));
         assert!(!h.stoat.user_vars.contains_key("mode"));
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    #[test]
+    fn hints_cache_reuses_rows_across_unchanged_frames() {
+        let mut h = Stoat::test();
+        // The `?` toggle forces the hints box in normal mode, so the main arm
+        // populates the cache.
+        h.stoat.key_hints_visible = true;
+        let mut buf = Buffer::empty(h.stoat.size());
+
+        h.stoat.paint_into(&mut buf);
+        let key = h.stoat.hints_cache.as_ref().expect("cache populated").key;
+
+        // A rebuild would drop this sentinel row. Reuse keeps it.
+        h.stoat
+            .hints_cache
+            .as_mut()
+            .unwrap()
+            .rows
+            .push(("SENTINEL".into(), "SENTINEL".into()));
+
+        h.stoat.paint_into(&mut buf);
+        let cache = h.stoat.hints_cache.as_ref().expect("cache retained");
+        assert_eq!(cache.key, key, "unchanged state keeps the same cache key");
+        assert!(
+            cache.rows.iter().any(|(k, _)| k == "SENTINEL"),
+            "an unchanged frame reuses the cached rows instead of rewalking",
+        );
     }
 
     #[test]
@@ -10272,6 +10312,7 @@ mod tests {
         h.stoat.keymap = compile_keymap(
             "on key { modal == workspace_picker { Ctrl-x -> WorkspacePickerClose(); } }",
         );
+        h.stoat.hints_cache = None;
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchWorkspace);
         assert!(h.stoat.workspace_picker.is_some());

@@ -41,7 +41,9 @@ use crate::{
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
-    keymap_state::{action_display_desc, cursor_token, focus_flags, Flags, StoatKeymapState},
+    keymap_state::{
+        action_display_desc, cursor_token, focus_flags, Flags, FocusFlags, StoatKeymapState,
+    },
     minimap::MinimapContent,
     pane::{DockVisibility, FocusTarget, View},
     rebase::RebasePause,
@@ -52,7 +54,8 @@ use crate::{
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use slotmap::SlotMap;
 use std::{
-    collections::HashMap,
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
@@ -639,19 +642,11 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("help");
-        let raw = stoat.keymap.scoped_bindings(&state, "modal", "help");
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        hints::render_hints(
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
             "help",
-            &bindings,
-            None,
             &stoat.theme,
             full,
             buf,
@@ -666,19 +661,11 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("finder");
-        let raw = stoat.keymap.scoped_bindings(&state, "modal", "finder");
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        hints::render_hints(
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
             "finder",
-            &bindings,
-            None,
             &stoat.theme,
             full,
             buf,
@@ -694,19 +681,11 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("symbols");
-        let raw = stoat.keymap.scoped_bindings(&state, "modal", "symbols");
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        hints::render_hints(
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
             "symbols",
-            &bindings,
-            None,
             &stoat.theme,
             full,
             buf,
@@ -721,19 +700,11 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("code_search");
-        let raw = stoat.keymap.scoped_bindings(&state, "modal", "code_search");
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        hints::render_hints(
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
             "code_search",
-            &bindings,
-            None,
             &stoat.theme,
             full,
             buf,
@@ -748,19 +719,11 @@ pub(crate) fn frame(
             buf,
             stoat.stoatty.then_some(&mut *scene),
         );
-        let state = StoatKeymapState::with_flags(&mode, Flags::default()).with_modal("palette");
-        let raw = stoat.keymap.scoped_bindings(&state, "modal", "palette");
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        hints::render_hints(
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
             "palette",
-            &bindings,
-            None,
             &stoat.theme,
             full,
             buf,
@@ -877,52 +840,59 @@ pub(crate) fn frame(
         //
         // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
         // mutable borrow of the active workspace, so read the flags directly.
-        let state = StoatKeymapState::with_flags(
-            &mode,
-            Flags {
-                rebase_exec: ws.rebase_active.is_some(),
-            },
-        )
-        .with_view(screen)
-        .with_token(cursor_token(ws))
-        .with_focus_flags(focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry));
-        // The review screen rides on normal mode, so scope to its own `view ==
-        // review` bindings. A chord sub-mode owns its whole mode, so take them all.
-        let raw = if screen == Some("review") {
-            stoat.keymap.scoped_bindings(&state, "view", "review")
-        } else if screen == Some("conflict") {
-            stoat.keymap.scoped_bindings(&state, "view", "conflict")
-        } else {
-            stoat.keymap.active_bindings(&state)
+        let flags = Flags {
+            rebase_exec: ws.rebase_active.is_some(),
         };
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        let footer = if screen == Some("review") {
-            ws.review.as_ref().map(|session| {
-                let p = session.progress();
-                let complete = session.is_complete();
-                let text = if complete {
-                    format!("all {} reviewed", p.total)
-                } else {
-                    let current = p.current_index.unwrap_or(0);
-                    format!(
-                        "{}/{} · {} staged · {} unstaged · {} pending",
-                        current, p.total, p.staged, p.unstaged, p.pending
+        let token = cursor_token(ws);
+        let focus = focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry);
+        let key = hints_cache_key(&mode, screen, &flags, token, &focus, None);
+
+        if stoat.hints_cache.as_ref().map(|c| c.key) != Some(key) {
+            // The review screen rides on normal mode, so scope to its own `view
+            // == review` bindings. A chord sub-mode owns its whole mode, so take
+            // them all.
+            let state = StoatKeymapState::with_flags(&mode, flags)
+                .with_view(screen)
+                .with_token(token)
+                .with_focus_flags(focus);
+            let raw = if screen == Some("review") {
+                stoat.keymap.scoped_bindings(&state, "view", "review")
+            } else if screen == Some("conflict") {
+                stoat.keymap.scoped_bindings(&state, "view", "conflict")
+            } else {
+                stoat.keymap.active_bindings(&state)
+            };
+            let bindings: Vec<(&str, String)> = raw
+                .iter()
+                .map(|(key, actions)| {
+                    (
+                        key.as_str(),
+                        actions.first().map(action_display_desc).unwrap_or_default(),
                     )
-                };
-                let style = if complete {
-                    stoat.theme.get(crate::theme::scope::UI_BADGE_COMPLETE)
-                } else {
-                    stoat.theme.get(crate::theme::scope::UI_TEXT)
-                };
-                hints::HintsFooter { text, style }
-            })
-        } else if screen == Some("conflict") {
+                })
+                .collect();
+            stoat.hints_cache = Some(hints::HintsCache {
+                key,
+                rows: hints::group_by_action(&bindings),
+            });
+        }
+
+        // The review footer is cached against the session version so its
+        // per-chunk progress walk reruns only when the session mutates. The
+        // conflict footer is cheap enough to rebuild each frame.
+        if screen == Some("review") {
+            match ws.review.as_ref() {
+                Some(session) => {
+                    let version = session.version;
+                    if stoat.review_footer_cache.as_ref().map(|c| c.0) != Some(version) {
+                        let footer = build_review_footer(session, &stoat.theme);
+                        stoat.review_footer_cache = Some((version, Some(footer)));
+                    }
+                },
+                None => stoat.review_footer_cache = None,
+            }
+        }
+        let conflict_footer = if screen == Some("conflict") {
             let conflict_state = match ws.panes.pane(ws.panes.focus()).view {
                 View::Editor(id) => ws.editors.get(id).and_then(|e| e.conflict_view.as_ref()),
                 _ => None,
@@ -946,15 +916,29 @@ pub(crate) fn frame(
         } else {
             None
         };
+        let footer = if screen == Some("review") {
+            stoat
+                .review_footer_cache
+                .as_ref()
+                .and_then(|c| c.1.as_ref())
+        } else {
+            conflict_footer.as_ref()
+        };
+
         let hint_label = match screen {
             Some("review") => "review",
             Some("conflict") => "conflict",
             _ => mode.as_str(),
         };
-        hints::render_hints(
+        let rows = &stoat
+            .hints_cache
+            .as_ref()
+            .expect("cache populated above")
+            .rows;
+        hints::render_hints_grouped(
             hint_label,
-            &bindings,
-            footer.as_ref(),
+            rows,
+            footer,
             &stoat.theme,
             full,
             buf,
@@ -965,6 +949,93 @@ pub(crate) fn frame(
     if mode == "space_pane_display" {
         render_pane_id_badges(&stoat.theme, ws, buf, scene);
     }
+}
+
+/// Hash the keymap-state inputs that decide which bindings are active into a
+/// cache key. An unchanged key means the same hints list, so the binding walk
+/// and regrouping can be skipped.
+fn hints_cache_key(
+    mode: &str,
+    screen: Option<&str>,
+    flags: &Flags,
+    token: Option<Option<crate::lsp::LspSymbolKind>>,
+    focus: &FocusFlags,
+    modal: Option<&str>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    mode.hash(&mut hasher);
+    screen.hash(&mut hasher);
+    flags.hash(&mut hasher);
+    token.hash(&mut hasher);
+    focus.hash(&mut hasher);
+    modal.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Paint a modal's hint box, reusing `cache` when its mode and modal are
+/// unchanged so the scoped keymap walk and regrouping run only on a key miss.
+#[allow(clippy::too_many_arguments)]
+fn cached_modal_hints(
+    cache: &mut Option<hints::HintsCache>,
+    keymap: &crate::keymap::Keymap,
+    mode: &str,
+    modal: &'static str,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
+) {
+    let key = hints_cache_key(
+        mode,
+        None,
+        &Flags::default(),
+        None,
+        &FocusFlags::default(),
+        Some(modal),
+    );
+    if cache.as_ref().map(|c| c.key) != Some(key) {
+        let state = StoatKeymapState::with_flags(mode, Flags::default()).with_modal(modal);
+        let raw = keymap.scoped_bindings(&state, "modal", modal);
+        let bindings: Vec<(&str, String)> = raw
+            .iter()
+            .map(|(key, actions)| {
+                (
+                    key.as_str(),
+                    actions.first().map(action_display_desc).unwrap_or_default(),
+                )
+            })
+            .collect();
+        *cache = Some(hints::HintsCache {
+            key,
+            rows: hints::group_by_action(&bindings),
+        });
+    }
+    let rows = &cache.as_ref().expect("cache populated above").rows;
+    hints::render_hints_grouped(modal, rows, None, theme, area, buf, scene);
+}
+
+/// Build the review-screen hints footer from the session progress and theme.
+fn build_review_footer(
+    session: &crate::review_session::ReviewSession,
+    theme: &crate::theme::Theme,
+) -> hints::HintsFooter {
+    let p = session.progress();
+    let complete = session.is_complete();
+    let text = if complete {
+        format!("all {} reviewed", p.total)
+    } else {
+        let current = p.current_index.unwrap_or(0);
+        format!(
+            "{}/{} · {} staged · {} unstaged · {} pending",
+            current, p.total, p.staged, p.unstaged, p.pending
+        )
+    };
+    let style = if complete {
+        theme.get(crate::theme::scope::UI_BADGE_COMPLETE)
+    } else {
+        theme.get(crate::theme::scope::UI_TEXT)
+    };
+    hints::HintsFooter { text, style }
 }
 
 /// Paint a large digit badge centered on each split pane while the

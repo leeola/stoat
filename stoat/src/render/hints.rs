@@ -7,9 +7,20 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub(crate) struct HintsFooter {
     pub(crate) text: String,
     pub(crate) style: Style,
+}
+
+/// A frame's grouped hint rows kept for reuse across frames.
+///
+/// `key` hashes the keymap-state inputs that decide which bindings are active,
+/// so an unchanged key means the same rows and the keymap walk plus regrouping
+/// can be skipped.
+pub(crate) struct HintsCache {
+    pub(crate) key: u64,
+    pub(crate) rows: Vec<(String, String)>,
 }
 
 pub(crate) fn render_hints(
@@ -182,7 +193,7 @@ pub(crate) fn render_hints_grouped(
 
 /// Collapses entries that share an action description, joining their keys with
 /// `", "` in first-seen order. Ensures each action appears on exactly one row.
-fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, String)> {
+pub(crate) fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
     for (key, action) in bindings {
