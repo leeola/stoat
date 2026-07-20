@@ -345,6 +345,12 @@ pub struct TextPass {
     composite_upload_scratch: Vec<TextInstance>,
     composite_run_scratch: Vec<TextInstance>,
     composite_rect_scratch: Vec<RectInstance>,
+    /// Scratch reused across `rasterize_row`'s ligature runs for a run's cells,
+    /// its shaping string, and its per-byte column map, so a run that hits the
+    /// shape cache allocates no per-frame temporary.
+    run_scratch: Vec<(usize, char)>,
+    run_text_scratch: String,
+    run_cols_scratch: Vec<usize>,
     /// The grid width [`Self::glyph_row_cache`] was built at; a change invalidates
     /// every cached row since columns shift.
     glyph_cache_cols: usize,
@@ -639,6 +645,9 @@ impl TextPass {
             composite_upload_scratch: Vec::new(),
             composite_run_scratch: Vec::new(),
             composite_rect_scratch: Vec::new(),
+            run_scratch: Vec::new(),
+            run_text_scratch: String::new(),
+            run_cols_scratch: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
             baseline,
@@ -1909,6 +1918,10 @@ impl TextPass {
         shaping: &RowShaping<'_>,
         pending: &mut Vec<PendingGlyph>,
     ) {
+        let mut run = mem::take(&mut self.run_scratch);
+        let mut run_text = mem::take(&mut self.run_text_scratch);
+        let mut run_cols = mem::take(&mut self.run_cols_scratch);
+
         let mut col = 0;
         while col < grid.cols() {
             let cell = *grid.get(row, col);
@@ -1939,7 +1952,8 @@ impl TextPass {
                 continue;
             }
 
-            let mut run = vec![(col, cell.ch)];
+            run.clear();
+            run.push((col, cell.ch));
             let mut end = col + 1;
             while end < grid.cols() {
                 let next = *grid.get(row, end);
@@ -1958,16 +1972,16 @@ impl TextPass {
             }
 
             let (fg, _) = cell.draw_colors();
-            let (text, col_of_byte) = run_text_and_columns(&run);
+            run_text_and_columns_into(&run, &mut run_text, &mut run_cols);
             let shaped = shape_run_cached(
                 &mut self.run_shape_cache,
                 &mut self.font_system,
-                &text,
+                &run_text,
                 self.metrics,
                 shaping.primary,
             );
             for &(offset, key) in shaped {
-                let Some(&glyph_col) = col_of_byte.get(offset) else {
+                let Some(&glyph_col) = run_cols.get(offset) else {
                     continue;
                 };
                 if self
@@ -1993,6 +2007,10 @@ impl TextPass {
             }
             col = end;
         }
+
+        self.run_scratch = run;
+        self.run_text_scratch = run_text;
+        self.run_cols_scratch = run_cols;
     }
 
     /// Shape and rasterize one cell's glyph on its own, returning its placement.
@@ -2554,20 +2572,24 @@ fn shape_run_cached<'a>(
     &cache[text]
 }
 
-/// The run's shaping string and a per-byte map from string offset to grid column.
+/// Fill `text` and `col_of_byte` with the run's shaping string and a per-byte
+/// map from string offset to grid column, clearing both first.
 ///
 /// Each cell contributes its character. Every byte of that character maps to the
 /// cell's column, so a shaped glyph's [`start`](cosmic_text::LayoutGlyph::start)
 /// byte resolves to the column it originates at, even across multi-byte
 /// characters.
-fn run_text_and_columns(cells: &[(usize, char)]) -> (String, Vec<usize>) {
-    let mut text = String::new();
-    let mut col_of_byte = Vec::new();
+fn run_text_and_columns_into(
+    cells: &[(usize, char)],
+    text: &mut String,
+    col_of_byte: &mut Vec<usize>,
+) {
+    text.clear();
+    col_of_byte.clear();
     for &(col, ch) in cells {
         text.push(ch);
         col_of_byte.resize(text.len(), col);
     }
-    (text, col_of_byte)
 }
 
 /// The cosmic-text family to shape `ch` with: `primary` when it carries the
@@ -2936,7 +2958,7 @@ mod tests {
     use super::{
         build_font_system, build_underline_row, cell_glyph_scale, cell_rect_scissor, cursor_cell,
         fill_cell_box, glyph_family, glyph_origin, grid_build, is_cell_fill, load_bundled_fonts,
-        overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_char,
+        overlay_content_cells, resolve_primary_family, run_text_and_columns_into, shape_char,
         shape_family, shape_run, shape_run_cached, text_run_origin, FxHashMap, GlyphSource,
         GridBuild, RectInstance, TextInstance, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
@@ -3344,7 +3366,13 @@ mod tests {
 
     #[test]
     fn run_text_and_columns_maps_each_byte_to_its_cell() {
-        let (text, col_of_byte) = run_text_and_columns(&[(3, 'a'), (4, '世'), (5, 'b')]);
+        let mut text = String::new();
+        let mut col_of_byte = Vec::new();
+        run_text_and_columns_into(
+            &[(3, 'a'), (4, '世'), (5, 'b')],
+            &mut text,
+            &mut col_of_byte,
+        );
 
         assert_eq!(text, "a世b");
         assert_eq!(
