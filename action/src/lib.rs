@@ -13,8 +13,8 @@ pub use defs::{
     },
     conflict::{
         CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
-        ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk,
-        ConflictPrevFile, ConflictResetChunk,
+        ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
+        ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
     },
     dump::Dump,
     editor::{

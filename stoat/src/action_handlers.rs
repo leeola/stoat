@@ -257,6 +257,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             conflict_view::conflict_pick_both(stoat);
             UpdateEffect::Redraw
         },
+        ActionKind::ConflictPickOursLine => {
+            conflict_view::conflict_pick_ours_line(stoat);
+            UpdateEffect::Redraw
+        },
+        ActionKind::ConflictPickTheirsLine => {
+            conflict_view::conflict_pick_theirs_line(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::ConflictResetChunk => {
             conflict_view::conflict_reset_chunk(stoat);
             UpdateEffect::Redraw

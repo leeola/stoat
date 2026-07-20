@@ -8,8 +8,8 @@ use crate::{
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
-            ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk,
-            ConflictPrevFile, ConflictResetChunk,
+            ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
+            ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
         },
         dump::Dump,
         editor::{
@@ -222,6 +222,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(ConflictPickTheirs))
     });
     add(ConflictPickBoth::DEF, |_| Ok(Box::new(ConflictPickBoth)));
+    add(ConflictPickOursLine::DEF, |_| {
+        Ok(Box::new(ConflictPickOursLine))
+    });
+    add(ConflictPickTheirsLine::DEF, |_| {
+        Ok(Box::new(ConflictPickTheirsLine))
+    });
     add(ConflictResetChunk::DEF, |_| {
         Ok(Box::new(ConflictResetChunk))
     });
@@ -1403,12 +1409,12 @@ mod tests {
         // + 5 OpenCodeSearch + CodeSearch Next/Prev/Select/Close.
         // + 1 CodeSearchModeToggle.
         // + 2 Conflict, CloseConflict.
-        // + 4 ConflictPickOurs/Theirs/Both, ConflictResetChunk.
+        // + 6 ConflictPickOurs/Theirs/Both, ConflictPickOursLine/TheirsLine, ConflictResetChunk.
         // + 2 ConflictNextChunk, ConflictPrevChunk.
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 374);
+        assert_eq!(all().count(), 376);
     }
 
     #[test]

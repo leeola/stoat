@@ -96,8 +96,8 @@ mod tests {
     use crate::{app::Stoat, merge_view::MergeDoc, test_harness::TestHarness};
     use stoat_action::{
         Action, CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
-        ConflictPickBoth, ConflictPickOurs, ConflictPickTheirs, ConflictPrevChunk,
-        ConflictPrevFile, ConflictResetChunk,
+        ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
+        ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
     };
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
@@ -128,6 +128,22 @@ mod tests {
             Some("theirs\n"),
         );
         MergeDoc::build("base\n", "ours\n", "theirs\n", None)
+            .initial_center_text()
+            .0
+    }
+
+    /// Seed one file whose single chunk spans two conflict rows, so a line-level
+    /// pick decides one row while the other stays in the marker block. Returns
+    /// the marker-block center text the opened view shows.
+    fn seed_rows(h: &mut TestHarness) -> String {
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("a\nb1\nb2\nc\n"),
+            Some("a\nO1\nO2\nc\n"),
+            Some("a\nT1\nT2\nc\n"),
+        );
+        MergeDoc::build("a\nb1\nb2\nc\n", "a\nO1\nO2\nc\n", "a\nT1\nT2\nc\n", None)
             .initial_center_text()
             .0
     }
@@ -322,6 +338,79 @@ mod tests {
 
         h.type_keys("u");
         assert_eq!(center_text(&h), MARKER);
+    }
+
+    #[test]
+    fn pick_theirs_line_moves_one_row_into_the_result() {
+        let mut h = Stoat::test();
+        seed_rows(&mut h);
+        dispatch_conflict(&mut h);
+
+        // Land on the theirs marker line for the first conflict row (T1).
+        h.type_keys("j j j j");
+        pick(&mut h, &ConflictPickTheirsLine);
+
+        assert_eq!(
+            center_text(&h),
+            "a\nT1\n<<<<<<< ours\nO2\n=======\nT2\n>>>>>>> theirs\nc\n"
+        );
+    }
+
+    #[test]
+    fn toggling_a_line_pick_off_restores_the_marker_block() {
+        let mut h = Stoat::test();
+        let marker = seed_rows(&mut h);
+        dispatch_conflict(&mut h);
+
+        h.type_keys("j j j j");
+        pick(&mut h, &ConflictPickTheirsLine);
+        // The pick parks the cursor at the region start, now the T1 result line.
+        pick(&mut h, &ConflictPickTheirsLine);
+
+        assert_eq!(center_text(&h), marker);
+    }
+
+    #[test]
+    fn ours_line_on_a_theirs_marker_line_is_a_hinted_no_op() {
+        let mut h = Stoat::test();
+        let marker = seed_rows(&mut h);
+        dispatch_conflict(&mut h);
+
+        h.type_keys("j j j j");
+        pick(&mut h, &ConflictPickOursLine);
+
+        assert_eq!(center_text(&h), marker, "O does not pick a theirs line");
+    }
+
+    #[test]
+    fn ours_line_in_a_hand_edited_region_inserts_an_aligned_line() {
+        let mut h = Stoat::test();
+        seed_rows(&mut h);
+        dispatch_conflict(&mut h);
+
+        // Land on O1 and hand-edit it so the region classifies as Manual.
+        h.type_keys("j");
+        h.type_keys("i x escape");
+        let before = center_text(&h);
+
+        pick(&mut h, &ConflictPickOursLine);
+        let after = center_text(&h);
+
+        assert_eq!(
+            after.lines().count(),
+            before.lines().count() + 1,
+            "one line inserted"
+        );
+        assert!(
+            after.contains("<<<<<<< ours") && after.contains("xO1"),
+            "the markers and the hand edit survive, so the region stays manual"
+        );
+        let ours = |s: &str| s.matches("O1").count() + s.matches("O2").count();
+        assert_eq!(
+            ours(&after),
+            ours(&before) + 1,
+            "an aligned ours line was inserted"
+        );
     }
 
     #[test]

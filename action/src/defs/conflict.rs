@@ -61,6 +61,30 @@ define_action!(
 );
 
 define_action!(
+    ConflictPickOursLineDef,
+    ConflictPickOursLine,
+    "ConflictPickOursLine",
+    ActionKind::ConflictPickOursLine,
+    "toggle the ours line at the cursor into the resolution",
+    "Toggle the ours line aligned with the cursor row in or out of the conflict \
+     chunk's resolution, leaving the other rows as they are. In a hand-edited \
+     chunk, insert the aligned ours line above the cursor instead.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ConflictPickTheirsLineDef,
+    ConflictPickTheirsLine,
+    "ConflictPickTheirsLine",
+    ActionKind::ConflictPickTheirsLine,
+    "toggle the theirs line at the cursor into the resolution",
+    "Toggle the theirs line aligned with the cursor row in or out of the \
+     conflict chunk's resolution, leaving the other rows as they are. In a \
+     hand-edited chunk, insert the aligned theirs line above the cursor instead.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ConflictResetChunkDef,
     ConflictResetChunk,
     "ConflictResetChunk",

@@ -660,6 +660,8 @@ on key {
         o -> ConflictPickOurs();
         t -> ConflictPickTheirs();
         b -> ConflictPickBoth();
+        O -> ConflictPickOursLine();
+        T -> ConflictPickTheirsLine();
         x -> ConflictResetChunk();
         n -> ConflictNextChunk();
         p -> ConflictPrevChunk();

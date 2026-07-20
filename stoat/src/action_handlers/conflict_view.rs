@@ -6,7 +6,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::git::GitRepo,
     jumplist::JumpEntry,
-    merge_view::{ChunkState, MergeDoc, RowPick},
+    merge_view::{ChunkState, ConflictChunk, MergeDoc, MergeRow, RowPick, Side},
     pane::View,
 };
 use ratatui::text::Line;
@@ -240,6 +240,18 @@ pub(super) fn conflict_pick_theirs(stoat: &mut Stoat) {
 /// Resolve the conflict chunk under the cursor by taking both sides.
 pub(super) fn conflict_pick_both(stoat: &mut Stoat) {
     pick_side(stoat, ActionKind::ConflictPickBoth);
+}
+
+/// Toggle the ours line aligned with the cursor into or out of the current
+/// chunk's resolution.
+pub(super) fn conflict_pick_ours_line(stoat: &mut Stoat) {
+    pick_line(stoat, Side::Ours);
+}
+
+/// Toggle the theirs line aligned with the cursor into or out of the current
+/// chunk's resolution.
+pub(super) fn conflict_pick_theirs_line(stoat: &mut Stoat) {
+    pick_line(stoat, Side::Theirs);
 }
 
 /// Reset the conflict chunk under the cursor back to its raw marker block,
@@ -556,10 +568,200 @@ fn pick_side(stoat: &mut Stoat, kind: ActionKind) {
     apply_resolution(stoat, chunk_idx, region, &assembly, picks);
 }
 
+/// Toggle the `key_side` line aligned with the cursor into or out of the current
+/// chunk's resolution.
+///
+/// In a pick-derived region the cursor's line maps to a merge row and side.
+/// Pressing the same side toggles that row's line in or out. Pressing the other
+/// side over an already-decided row adds it, and over a still-undecided marker
+/// line only hints. In a hand-edited (Manual or AutoIndent) region the mapping
+/// is gone, so the aligned side line is inserted above the cursor and the region
+/// stays hand-edited.
+fn pick_line(stoat: &mut Stoat, key_side: Side) {
+    let Some((chunk_idx, region, region_text, row_in_region)) = current_chunk_and_row(stoat) else {
+        return;
+    };
+
+    enum Outcome {
+        Apply(String, Vec<RowPick>),
+        Insert(usize, String),
+        Hint(&'static str),
+    }
+
+    let outcome = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        let doc = &session.file.doc;
+        let chunk = &doc.chunks[chunk_idx];
+        let rows = &doc.rows;
+        let stored = &session.file.picks[chunk_idx];
+        let state = chunk.classify(rows, stored, &region_text);
+
+        if matches!(state, ChunkState::Manual | ChunkState::AutoIndent) {
+            match insert_target(chunk, rows, &region_text, row_in_region, key_side) {
+                Some(line) => Outcome::Insert(
+                    region.start + line_start_offset(&region_text, row_in_region),
+                    line,
+                ),
+                None => Outcome::Hint(no_line_hint(key_side)),
+            }
+        } else {
+            let effective = effective_picks(chunk, stored, state);
+            match chunk.center_row_to_merge_row(rows, &effective, row_in_region) {
+                None => Outcome::Hint("not a pickable line"),
+                Some((row, mapped_side)) => {
+                    let local = row - chunk.row_range.start;
+                    let mut picks = effective.clone();
+                    let decided = picks[local].ours || picks[local].theirs;
+                    if key_side == mapped_side {
+                        toggle_side(&mut picks[local], key_side);
+                        Outcome::Apply(chunk.partial_text(rows, &picks), picks)
+                    } else if decided {
+                        set_side(&mut picks[local], key_side);
+                        Outcome::Apply(chunk.partial_text(rows, &picks), picks)
+                    } else {
+                        Outcome::Hint(no_line_hint(key_side))
+                    }
+                },
+            }
+        }
+    };
+
+    match outcome {
+        Outcome::Apply(text, picks) => apply_resolution(stoat, chunk_idx, region, &text, picks),
+        Outcome::Insert(at, line) => insert_line_above(stoat, chunk_idx, at, &line),
+        Outcome::Hint(msg) => stoat.set_status(msg),
+    }
+}
+
+/// The picks a chunk's region currently renders, derived from its classified
+/// state rather than the stored vector so a stale store cannot mismap the
+/// cursor. A whole-side or unresolved region has canonical picks. Only a
+/// [`ChunkState::Picked`] region depends on the stored mix, which by definition
+/// matches the region text.
+fn effective_picks(chunk: &ConflictChunk, stored: &[RowPick], state: ChunkState) -> Vec<RowPick> {
+    match state {
+        ChunkState::Ours => chunk.all_ours(),
+        ChunkState::Theirs => chunk.all_theirs(),
+        ChunkState::Both => chunk.all_both(),
+        ChunkState::Picked => stored.to_vec(),
+        _ => vec![
+            RowPick {
+                ours: false,
+                theirs: false
+            };
+            chunk.row_range.len()
+        ],
+    }
+}
+
+/// The aligned `side` line to insert into a hand-edited chunk.
+///
+/// The target merge row is the nearest region line at or above the cursor that
+/// still matches one of the chunk's merge-row side texts, falling back to the
+/// row at the cursor's own index. `None` when that row deleted the wanted side.
+fn insert_target(
+    chunk: &ConflictChunk,
+    rows: &[MergeRow],
+    region_text: &str,
+    row_in_region: usize,
+    side: Side,
+) -> Option<String> {
+    let range = chunk.row_range.clone();
+    let region_lines: Vec<&str> = region_text.lines().collect();
+    let last_line = region_lines.len().saturating_sub(1);
+
+    let target = (0..=row_in_region.min(last_line))
+        .rev()
+        .find_map(|i| {
+            let line = region_lines[i];
+            rows[range.clone()]
+                .iter()
+                .position(|row| row_has_line(row, line))
+                .map(|offset| range.start + offset)
+        })
+        .unwrap_or_else(|| range.start + row_in_region.min(range.len().saturating_sub(1)));
+
+    side_text(&rows[target], side)
+}
+
+/// Insert `line` as a new row above the cursor's line in a hand-edited chunk,
+/// leaving the region hand-edited and only its padding refreshed.
+fn insert_line_above(stoat: &mut Stoat, _chunk_idx: usize, at: usize, line: &str) {
+    let (buffer_id, editor_id) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        (session.file.buffer_id, session.file.editor_id)
+    };
+
+    if let Some(buffer) = stoat.active_workspace().buffers.get(buffer_id) {
+        buffer
+            .write()
+            .expect("buffer poisoned")
+            .edit(at..at, &format!("{line}\n"));
+    }
+
+    refresh_padding(stoat, editor_id);
+}
+
+/// Whether either side of `row` still carries the exact text `line`.
+fn row_has_line(row: &MergeRow, line: &str) -> bool {
+    row.ours.as_ref().is_some_and(|s| s.text == line)
+        || row.theirs.as_ref().is_some_and(|s| s.text == line)
+}
+
+/// The text of `row`'s `side`, or `None` when that side deleted its line.
+fn side_text(row: &MergeRow, side: Side) -> Option<String> {
+    match side {
+        Side::Ours => row.ours.as_ref(),
+        Side::Theirs => row.theirs.as_ref(),
+    }
+    .map(|s| s.text.clone())
+}
+
+/// Flip `side`'s flag on `pick`.
+fn toggle_side(pick: &mut RowPick, side: Side) {
+    match side {
+        Side::Ours => pick.ours = !pick.ours,
+        Side::Theirs => pick.theirs = !pick.theirs,
+    }
+}
+
+/// Set `side`'s flag on `pick`.
+fn set_side(pick: &mut RowPick, side: Side) {
+    match side {
+        Side::Ours => pick.ours = true,
+        Side::Theirs => pick.theirs = true,
+    }
+}
+
+/// The status hint shown when the cursor is not on a line the key can pick.
+fn no_line_hint(side: Side) -> &'static str {
+    match side {
+        Side::Ours => "O picks an ours line",
+        Side::Theirs => "T picks a theirs line",
+    }
+}
+
+/// The byte offset of the start of line `row` within `text`, or the text length
+/// when `row` is past the last line.
+fn line_start_offset(text: &str, row: usize) -> usize {
+    text.split_inclusive('\n').take(row).map(str::len).sum()
+}
+
 /// The chunk whose center region contains the cursor, with its current byte
 /// range and region text. `None` when no session is open or the cursor sits
 /// outside every chunk.
 fn current_chunk(stoat: &mut Stoat) -> Option<(usize, Range<usize>, String)> {
+    let (idx, region, text, _row) = current_chunk_and_row(stoat)?;
+    Some((idx, region, text))
+}
+
+/// [`current_chunk`] plus the cursor's zero-based line offset within the region,
+/// which line-level picks map to a merge row through the chunk's rendering.
+fn current_chunk_and_row(stoat: &mut Stoat) -> Option<(usize, Range<usize>, String, usize)> {
     let editor_id = stoat.active_workspace().conflict.as_ref()?.file.editor_id;
 
     let (snapshot, cursor_anchor) = {
@@ -581,11 +783,13 @@ fn current_chunk(stoat: &mut Stoat) -> Option<(usize, Range<usize>, String)> {
 
     let (start, end) = &session.file.chunk_anchors[chunk_idx];
     let region = buffer_snapshot.resolve_anchor(start)..buffer_snapshot.resolve_anchor(end);
-    let region_text = buffer_snapshot
-        .rope()
-        .chunks_in_range(region.clone())
-        .collect();
-    Some((chunk_idx, region, region_text))
+
+    let rope = buffer_snapshot.rope();
+    let region_text = rope.chunks_in_range(region.clone()).collect();
+    let row_in_region =
+        (rope.offset_to_point(cursor).row - rope.offset_to_point(region.start).row) as usize;
+
+    Some((chunk_idx, region, region_text, row_in_region))
 }
 
 /// Write `text` over the chunk's center region, then mirror `picks` onto the
