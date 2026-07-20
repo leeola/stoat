@@ -125,18 +125,22 @@ const DIFF_TWO_COLUMN_MIN: u16 = 100;
 
 /// Column geometry for one diff body, resolved once from the inner rect.
 ///
-/// A wide rect splits into a base column on the left and a buffer column on the
-/// right, each with a two-cell status gutter, a five-cell line-number column,
-/// and the text past them. A narrow rect (under [`DIFF_TWO_COLUMN_MIN`]) aliases
-/// both sides onto one full-width column with no separator, so Block and buffer
-/// rows land in the same place and read as a unified diff.
+/// Each side lays out like the editor gutter, with a five-cell line-number
+/// column, a two-cell change/staged status column, a one-cell gutter/code
+/// separator, then the text. A wide rect splits into a base column on the left
+/// and a buffer column on the right. A narrow rect (under
+/// [`DIFF_TWO_COLUMN_MIN`]) aliases both sides onto one full-width column with
+/// no mid-divider, so Block and buffer rows land in the same place and read as
+/// a unified diff.
 struct DiffColumns {
-    status_left_x: u16,
     left_num_x: u16,
+    status_left_x: u16,
+    left_sep_x: u16,
     left_text_x: u16,
     left_content_w: usize,
-    status_right_x: u16,
     right_num_x: u16,
+    status_right_x: u16,
+    right_sep_x: u16,
     right_text_x: u16,
     right_content_w: usize,
     sep_x: Option<u16>,
@@ -144,21 +148,25 @@ struct DiffColumns {
 
 impl DiffColumns {
     fn compute(inner: Rect) -> Self {
-        let status_w: u16 = 2;
         let num_w: u16 = 5;
-        let gutter_w = (status_w + num_w) as usize;
+        let status_w: u16 = 2;
+        let sep_w: u16 = 1;
+        let gutter_w = (num_w + status_w + sep_w) as usize;
 
         if inner.width < DIFF_TWO_COLUMN_MIN {
-            let num_x = inner.x + status_w;
-            let text_x = num_x + num_w;
+            let status_x = inner.x + num_w;
+            let sep_x = status_x + status_w;
+            let text_x = sep_x + sep_w;
             let content_w = (inner.width as usize).saturating_sub(gutter_w);
             return Self {
-                status_left_x: inner.x,
-                left_num_x: num_x,
+                left_num_x: inner.x,
+                status_left_x: status_x,
+                left_sep_x: sep_x,
                 left_text_x: text_x,
                 left_content_w: content_w,
-                status_right_x: inner.x,
-                right_num_x: num_x,
+                right_num_x: inner.x,
+                status_right_x: status_x,
+                right_sep_x: sep_x,
                 right_text_x: text_x,
                 right_content_w: content_w,
                 sep_x: None,
@@ -172,13 +180,15 @@ impl DiffColumns {
         let right_start = inner.x + half_w as u16 + sep as u16;
         let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
         Self {
-            status_left_x: inner.x,
-            left_num_x: inner.x + status_w,
-            left_text_x: inner.x + status_w + num_w,
+            left_num_x: inner.x,
+            status_left_x: inner.x + num_w,
+            left_sep_x: inner.x + num_w + status_w,
+            left_text_x: inner.x + num_w + status_w + sep_w,
             left_content_w,
-            status_right_x: right_start,
-            right_num_x: right_start + status_w,
-            right_text_x: right_start + status_w + num_w,
+            right_num_x: right_start,
+            status_right_x: right_start + num_w,
+            right_sep_x: right_start + num_w + status_w,
+            right_text_x: right_start + num_w + status_w + sep_w,
             right_content_w,
             sep_x: Some(inner.x + half_w as u16),
         }
@@ -209,12 +219,14 @@ pub(crate) fn paint_diff_rows(
     }
 
     let DiffColumns {
-        status_left_x,
         left_num_x,
+        status_left_x,
+        left_sep_x,
         left_text_x,
         left_content_w,
-        status_right_x,
         right_num_x,
+        status_right_x,
+        right_sep_x,
         right_text_x,
         right_content_w,
         sep_x,
@@ -243,6 +255,11 @@ pub(crate) fn paint_diff_rows(
 
         if let Some(sep_x) = sep_x {
             buf[(sep_x, y)].set_char('│').set_style(dim_style);
+        }
+        for gutter_sep in [left_sep_x, right_sep_x] {
+            if gutter_sep < inner.x + inner.width {
+                buf[(gutter_sep, y)].set_char('│').set_style(dim_style);
+            }
         }
 
         match snapshot.classify_row(display_row) {
@@ -1496,9 +1513,9 @@ mod tests {
         let theme = rgb_diff_theme();
         render_diff_view(&mut editor, area, Style::default(), &theme, &mut buf, false);
 
-        // The right buffer status column paints its change bar at right_start
-        // and its staged bar in the cell after it.
-        let change_col = ((120 - 1) / 2 + 1) as u16;
+        // The right buffer status column follows its five-cell number gutter, so
+        // it paints its change bar at right_start + 5 and its staged bar after.
+        let change_col = ((120 - 1) / 2 + 1 + 5) as u16;
         let staged_col = change_col + 1;
         let staged_fg = theme.get(sc::DIFF_STAGED).fg.expect("staged fg");
         let unstaged_fg = theme.get(sc::DIFF_UNSTAGED).fg.expect("unstaged fg");
@@ -1540,9 +1557,9 @@ mod tests {
         );
 
         // Width 120 is wide enough for the two-column layout. Left text spans
-        // cols 7..59, the separator sits at col 59, right text spans 67..120.
-        let left = |y| line_text(&buf, y, 7..59);
-        let right = |y| line_text(&buf, y, 67..120);
+        // cols 8..59, the mid-divider sits at col 59, right text spans 68..120.
+        let left = |y| line_text(&buf, y, 8..59);
+        let right = |y| line_text(&buf, y, 68..120);
 
         assert!(
             left(0).contains("keep"),
@@ -1591,6 +1608,11 @@ mod tests {
             "│",
             "the two columns are split by a separator"
         );
+        assert_eq!(
+            (buf[(7, 0)].symbol(), buf[(67, 0)].symbol()),
+            ("│", "│"),
+            "each side carries a gutter/code separator after its status column"
+        );
     }
 
     #[test]
@@ -1607,20 +1629,27 @@ mod tests {
             false,
         );
 
+        // The gutter/code separator is painted at col 7, but a unified view has
+        // no two-column mid-divider, so no rule appears in the text region.
+        let sep_col = area.x + 7;
+        assert!(
+            (0..area.height).any(|y| buf[(sep_col, y)].symbol() == "│"),
+            "the gutter/code separator is painted in the unified view"
+        );
         for y in 0..area.height {
-            for x in 0..area.width {
+            for x in (area.x + 8)..area.width {
                 assert_ne!(
                     buf[(x, y)].symbol(),
                     "│",
-                    "a unified diff paints no column separator"
+                    "a unified diff paints no mid-divider past the gutter"
                 );
             }
         }
 
-        // The single text column sits past the two-cell status and five-cell
-        // line-number gutter, and both sides render into it.
+        // The single text column sits past the number, status, and separator
+        // gutter, and both sides render into it.
         let col = right_text_x(area);
-        assert_eq!(col, area.x + 7, "unified text starts past the one gutter");
+        assert_eq!(col, area.x + 8, "unified text starts past the one gutter");
 
         let renders = |needle: &str| {
             (0..area.height).any(|y| {
@@ -1821,10 +1850,10 @@ mod tests {
         assert!(!underlined, "a pure added line underlines nothing");
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 67..120).contains("fn b"))
+            .find(|&y| line_text(buf, y, 68..120).contains("fn b"))
             .expect("added line rendered on the right");
         assert!(
-            (67..120).all(|x| buf[(x, row)].bg == added_line),
+            (68..120).all(|x| buf[(x, row)].bg == added_line),
             "the added line's right-column cells all carry the added line wash"
         );
     }
@@ -1838,10 +1867,10 @@ mod tests {
         let buf = h.rendered_buffer();
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 7..59).contains("old"))
+            .find(|&y| line_text(buf, y, 8..59).contains("old"))
             .expect("deleted base line rendered on the left");
         assert!(
-            (7..59).all(|x| buf[(x, row)].bg == removed_line),
+            (8..59).all(|x| buf[(x, row)].bg == removed_line),
             "the deleted base line's left-column cells all carry the removed line wash"
         );
     }
