@@ -493,7 +493,15 @@ pub(crate) fn cursor_screen_position(
         return None;
     }
     let y = content_area.y + (display.row - editor.scroll_row) as u16;
-    let x = content_area.x + display.column as u16;
+    // The diff view paints the buffer text in its right column, so a cursor-
+    // anchored popup lines up against right_text_x rather than the pane's left
+    // edge. The clamp below still skips a popup that would fall past the pane.
+    let base_x = if editor.diff_view {
+        crate::render::review::right_text_x(content_area)
+    } else {
+        content_area.x
+    };
+    let x = base_x + display.column as u16;
     if x >= content_area.x + content_area.width || y >= content_area.y + content_area.height {
         return None;
     }

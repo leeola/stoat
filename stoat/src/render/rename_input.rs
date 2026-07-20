@@ -108,25 +108,5 @@ fn cursor_screen_position(
     if editor.review_view.is_some() {
         return None;
     }
-    let snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    if anchor_offset > rope.len() {
-        return None;
-    }
-    let point = rope.offset_to_point(anchor_offset);
-    let display = snapshot.buffer_to_display(point);
-    if display.row < editor.scroll_row {
-        return None;
-    }
-    let visible_rows = content_area.height as u32;
-    if display.row >= editor.scroll_row + visible_rows {
-        return None;
-    }
-    let y = content_area.y + (display.row - editor.scroll_row) as u16;
-    let x = content_area.x + display.column as u16;
-    if x >= content_area.x + content_area.width || y >= content_area.y + content_area.height {
-        return None;
-    }
-    Some((x, y))
+    crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
 }

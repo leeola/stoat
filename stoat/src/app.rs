@@ -15668,6 +15668,76 @@ mod tests {
     }
 
     #[test]
+    fn diff_view_anchors_lsp_popups_to_the_right_text_column() {
+        let mut h = Stoat::test();
+        open_scratch_file(&mut h, "keep\nnew\ntail\n");
+
+        let (editor_id, buffer_id) = {
+            let ws = h.stoat.active_workspace();
+            let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+                View::Editor(id) => id,
+                _ => panic!("focused pane is not an editor"),
+            };
+            (editor_id, ws.editors[editor_id].buffer_id)
+        };
+        {
+            let base = "keep\nold\ntail\n";
+            let text = "keep\nnew\ntail\n";
+            let dm = crate::diff_map::DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(base, text),
+                base,
+                text,
+            );
+            h.stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer")
+                .write()
+                .expect("poisoned")
+                .diff_map = Some(dm);
+        }
+
+        // Column 2 of the first context line, in a pane wide enough for the
+        // two-column diff layout.
+        let content_area = Rect::new(0, 0, 120, 10);
+        let anchor_offset = 2;
+
+        let off = {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            editor.set_diff_view(false);
+            crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
+        };
+        assert_eq!(
+            off,
+            Some((content_area.x + 2, content_area.y)),
+            "with diff off the popup anchors at the pane's left text column"
+        );
+
+        let on = {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            editor.set_diff_view(true);
+            crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
+        };
+        let right_text_x = crate::render::review::right_text_x(content_area);
+        assert_eq!(
+            on,
+            Some((right_text_x + 2, content_area.y)),
+            "with diff on the popup anchors at the right diff text column"
+        );
+    }
+
+    #[test]
     fn opening_diff_view_jumps_cursor_to_the_first_hunk() {
         let mut h = Stoat::test();
         open_scratch_file(&mut h, "keep\nnew\ntail\n");
