@@ -66,6 +66,8 @@ pub struct Args {
 enum Command {
     /// Open the first changed file with a diff against HEAD
     Review,
+    /// Resolve merge conflicts in a three-way view
+    Conflict,
     /// Manage workspace dumps (captured tarballs of the repo + stoat state).
     Dump {
         #[command(subcommand)]
@@ -130,6 +132,7 @@ pub fn run(args: Args) -> Result<(), Whatever> {
             Ok(())
         },
         Some(Command::Review) => run_tui(text_proto_log, common, working_dir, TuiStart::Review),
+        Some(Command::Conflict) => run_tui(text_proto_log, common, working_dir, TuiStart::Conflict),
         None => run_tui(text_proto_log, common, working_dir, TuiStart::Files),
     }
 }
@@ -162,6 +165,7 @@ fn run_fixture(
 
 enum TuiStart {
     Review,
+    Conflict,
     Files,
 }
 
@@ -345,6 +349,7 @@ fn run_tui(
 
         match start {
             TuiStart::Review => stoat.open_working_tree_diff(),
+            TuiStart::Conflict => stoat.open_conflict_view(),
             TuiStart::Files => {
                 for (i, path) in files.iter().enumerate() {
                     if i > 0 {
@@ -477,6 +482,12 @@ mod tests {
         };
         assert_eq!(args.sub, None);
         assert_eq!(args.name.as_deref(), Some("rust-lsp"));
+    }
+
+    #[test]
+    fn conflict_subcommand_parses() {
+        let args = Args::try_parse_from(["stoat", "conflict"]).expect("parse conflict");
+        assert!(matches!(args.command, Some(Command::Conflict)));
     }
 
     #[test]

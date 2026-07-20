@@ -46,7 +46,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_action::{Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
+use stoat_action::{Conflict, Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
 use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock, WrapMode};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
@@ -1906,6 +1906,16 @@ impl Stoat {
     /// the "no more changes" status and stays on the scratch.
     pub fn open_working_tree_diff(&mut self) {
         action_handlers::dispatch(self, &Diff);
+    }
+
+    /// Open the three-way conflict resolve view for the `stoat conflict` entry
+    /// point.
+    ///
+    /// `Conflict` opens the repository's conflicted files in the ours / result /
+    /// theirs view. With no index conflicts it sets the "no merge conflicts"
+    /// status and stays on the startup files view.
+    pub fn open_conflict_view(&mut self) {
+        action_handlers::dispatch(self, &Conflict);
     }
 
     /// Handle that makes [`Self::run`] quit at its next loop turn when
