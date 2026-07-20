@@ -1,7 +1,7 @@
 use super::focused_editor_mut;
 use crate::{
     app::Stoat,
-    conflict_session::{ConflictSession, FileResolveState},
+    conflict_session::{ConflictSession, ConflictViewState, FileResolveState},
     editor_state::EditorState,
     jumplist::JumpEntry,
     merge_view::{MergeDoc, RowPick},
@@ -93,8 +93,15 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
                 .collect()
         };
 
+        let file_count = files.len();
+        let rel_path = crate::paths::display_relative(&path, &git_root);
         let mut editor = EditorState::new(buffer_id, buffer, executor);
-        editor.conflict_view = true;
+        editor.conflict_view = Some(ConflictViewState {
+            doc: doc.clone(),
+            file_index: current,
+            file_count,
+            rel_path,
+        });
         let editor_id = ws.editors.insert(editor);
 
         ws.panes.pane_mut(focused).view = View::Editor(editor_id);

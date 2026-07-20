@@ -315,7 +315,10 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     // The conflict resolve view is a swapped-in scratch editor with
     // `conflict_view` set, checked after the review session for the same reason.
     if let Some(View::Editor(id)) = focused_view(ws)
-        && ws.editors.get(*id).is_some_and(|e| e.conflict_view)
+        && ws
+            .editors
+            .get(*id)
+            .is_some_and(|e| e.conflict_view.is_some())
     {
         return Some("conflict");
     }

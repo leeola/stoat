@@ -185,6 +185,70 @@ impl MergeDoc {
 
         (text, ranges)
     }
+
+    /// One entry per line of [`Self::initial_center_text`], pairing that center
+    /// line with the ours and theirs side content the three-column view aligns
+    /// beside it.
+    ///
+    /// A non-conflict row that contributes a center line emits that row's sides.
+    /// A conflict chunk emits one entry per center line of its region (the
+    /// marker block or the auto-resolution) with the chunk's ours and theirs
+    /// lines top-aligned, so a side line past the region's height is dropped
+    /// until padding blocks make room.
+    pub(crate) fn align(&self) -> Vec<AlignRow<'_>> {
+        let mut plan = Vec::new();
+        let mut chunk_idx = 0;
+        let mut i = 0;
+        while i < self.rows.len() {
+            if chunk_idx < self.chunks.len() && self.chunks[chunk_idx].row_range.start == i {
+                let chunk = &self.chunks[chunk_idx];
+                let ours: Vec<&ReviewSide> = self.rows[chunk.row_range.clone()]
+                    .iter()
+                    .filter_map(|r| r.ours.as_ref())
+                    .collect();
+                let theirs: Vec<&ReviewSide> = self.rows[chunk.row_range.clone()]
+                    .iter()
+                    .filter_map(|r| r.theirs.as_ref())
+                    .collect();
+                let center_lines = match &chunk.auto {
+                    Some(auto) => auto.lines.len(),
+                    None => ours.len() + theirs.len() + 3,
+                };
+                for b in 0..center_lines {
+                    plan.push(AlignRow {
+                        ours: ours.get(b).copied(),
+                        theirs: theirs.get(b).copied(),
+                        chunk: Some(chunk_idx),
+                    });
+                }
+                i = chunk
+                    .auto
+                    .as_ref()
+                    .map_or(chunk.row_range.end, |a| a.covered.end);
+                chunk_idx += 1;
+                continue;
+            }
+            let row = &self.rows[i];
+            if auto_merge_line(row).is_some() {
+                plan.push(AlignRow {
+                    ours: row.ours.as_ref(),
+                    theirs: row.theirs.as_ref(),
+                    chunk: None,
+                });
+            }
+            i += 1;
+        }
+        plan
+    }
+}
+
+/// One center line of a [`MergeDoc`] paired with the ours and theirs side
+/// content the three-column conflict view aligns beside it.
+pub(crate) struct AlignRow<'a> {
+    pub(crate) ours: Option<&'a ReviewSide>,
+    pub(crate) theirs: Option<&'a ReviewSide>,
+    /// Index into [`MergeDoc::chunks`] when this line sits in a conflict band.
+    pub(crate) chunk: Option<usize>,
 }
 
 /// A maximal run of adjacent conflict rows within a [`MergeDoc`]. A non-conflict

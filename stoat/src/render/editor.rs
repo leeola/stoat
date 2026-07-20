@@ -6,6 +6,7 @@ use crate::{
     host::OffsetEncoding,
     minimap::color_to_rgb,
     render::{
+        conflict_view::render_conflict_view,
         review::{dim_rgb, render_diff_view, render_review, style_rgb},
         undercurl::UndercurlSpan,
     },
@@ -119,6 +120,12 @@ pub(crate) fn render_editor_with_overlay(
     if editor.diff_view {
         editor.display_map.set_wrap_width(None);
         render_diff_view(editor, inner, fallback_style, theme, buf, stoatty);
+        return;
+    }
+
+    if editor.conflict_view.is_some() {
+        editor.display_map.set_wrap_width(None);
+        render_conflict_view(editor, inner, fallback_style, theme, buf, stoatty);
         return;
     }
 

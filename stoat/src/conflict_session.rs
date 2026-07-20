@@ -42,6 +42,20 @@ pub(crate) struct FileResolveState {
     pub(crate) editor_id: EditorId,
 }
 
+/// Per-editor render cache for the three-column conflict view.
+///
+/// Cloned from the session onto the swapped-in editor at open, so the renderer
+/// (which only receives the focused editor) can build its column display list
+/// from `doc` each frame. `file_index`/`file_count`/`rel_path` feed the hints
+/// footer. Refreshed alongside the session when a pick reassembles a region.
+#[allow(dead_code)]
+pub(crate) struct ConflictViewState {
+    pub(crate) doc: MergeDoc,
+    pub(crate) file_index: usize,
+    pub(crate) file_count: usize,
+    pub(crate) rel_path: String,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{app::Stoat, merge_view::MergeDoc, test_harness::TestHarness};
@@ -156,5 +170,39 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("no merge conflicts")
         );
+    }
+
+    #[test]
+    fn snapshot_conflict_view_three_columns() {
+        let mut h = TestHarness::with_size(150, 20);
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "src/f.txt",
+            Some("a\nb\nc\nd\ne\n"),
+            Some("a\nB\nc\nD\ne\n"),
+            Some("a\nX\nc\nY\ne\n"),
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        h.assert_snapshot("conflict_view_three_columns");
+    }
+
+    #[test]
+    fn snapshot_conflict_view_narrow_drops_side_gutters() {
+        let mut h = TestHarness::with_size(90, 16);
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("a\nb\nc\n"),
+            Some("a\nB\nc\n"),
+            Some("a\nX\nc\n"),
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
+
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        h.assert_snapshot("conflict_view_narrow");
     }
 }

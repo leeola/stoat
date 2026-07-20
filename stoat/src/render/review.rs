@@ -443,7 +443,7 @@ fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTints> {
 /// symbol untouched so text painted afterward keeps the wash. Ratatui's
 /// `set_style` patches only the fields a style sets, and token styles set no
 /// background.
-fn fill_line_tint(buf: &mut Buffer, start_x: u16, y: u16, cols: usize, tint: [u8; 3]) {
+pub(crate) fn fill_line_tint(buf: &mut Buffer, start_x: u16, y: u16, cols: usize, tint: [u8; 3]) {
     let color = Color::Rgb(tint[0], tint[1], tint[2]);
     for i in 0..cols {
         let x = start_x + i as u16;
@@ -603,7 +603,7 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// [`Modifier::UNDERLINED`]. Columns, not byte offsets, are used because the
 /// chunks expand tabs, so the counter tracks display cells.
 #[allow(clippy::too_many_arguments)]
-fn paint_highlighted_row(
+pub(crate) fn paint_highlighted_row(
     snapshot: &DisplaySnapshot,
     display_row: u32,
     start_x: u16,
@@ -771,7 +771,7 @@ fn review_cursor_text_x(inner: Rect) -> u16 {
 
 /// Paint the primary selection's cursor over the right pane's text, or set the
 /// stoatty hardware cursor there. Skips a row scrolled out of view.
-fn render_review_cursor(
+pub(crate) fn render_review_cursor(
     editor: &mut EditorState,
     snapshot: &DisplaySnapshot,
     inner: Rect,

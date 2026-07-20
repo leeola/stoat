@@ -6,6 +6,7 @@ pub(crate) mod command_palette;
 pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
+pub(crate) mod conflict_view;
 pub(crate) mod diagnostics_picker;
 pub(crate) mod dock;
 pub(crate) mod editor;
