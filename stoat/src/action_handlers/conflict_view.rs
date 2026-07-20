@@ -265,6 +265,26 @@ pub(super) fn conflict_reset_chunk(stoat: &mut Stoat) {
     apply_resolution(stoat, chunk_idx, region, &marker, picks);
 }
 
+/// Clear the clobber guard unless `kind` is a whole-side pick, the only actions
+/// that arm and confirm it.
+///
+/// Dispatch calls this for every action, so any action or cursor motion between
+/// the warning press and the confirming press disarms the guard, and re-picking
+/// over the still-manual region warns afresh rather than silently overwriting.
+pub(super) fn disarm_clobber_unless_pick(stoat: &mut Stoat, kind: ActionKind) {
+    if matches!(
+        kind,
+        ActionKind::ConflictPickOurs
+            | ActionKind::ConflictPickTheirs
+            | ActionKind::ConflictPickBoth
+    ) {
+        return;
+    }
+    if let Some(session) = stoat.active_workspace_mut().conflict.as_mut() {
+        session.pending_clobber = None;
+    }
+}
+
 /// Land the cursor on the next (`forward`) or previous conflict chunk, stopping
 /// at the last or first chunk rather than wrapping.
 pub(super) fn conflict_step_chunk(stoat: &mut Stoat, forward: bool) {

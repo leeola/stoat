@@ -65,6 +65,8 @@ pub(crate) use terminal::respawn_terminal_panes;
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
+    conflict_view::disarm_clobber_unless_pick(stoat, action.kind());
+
     let group_buffer = if manages_own_undo_group(action.kind()) {
         None
     } else {

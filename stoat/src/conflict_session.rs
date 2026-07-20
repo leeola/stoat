@@ -353,6 +353,30 @@ mod tests {
     }
 
     #[test]
+    fn an_intervening_action_disarms_the_clobber_guard() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        h.type_keys("i z escape");
+        let edited = center_text(&h);
+
+        pick(&mut h, &ConflictPickOurs);
+        assert_eq!(
+            center_text(&h),
+            edited,
+            "first press over a hand edit warns"
+        );
+
+        pick(&mut h, &ConflictNextChunk);
+        pick(&mut h, &ConflictPickOurs);
+        assert_eq!(
+            center_text(&h),
+            edited,
+            "an intervening action disarms the guard, so the repeat only warns"
+        );
+    }
+
+    #[test]
     fn n_and_p_step_between_chunks_without_wrapping() {
         let mut h = Stoat::test();
         seed_two_chunks(&mut h);
