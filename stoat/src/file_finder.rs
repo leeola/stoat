@@ -282,12 +282,11 @@ impl FileFinder {
                     let filtered = self.filter_by_named_scope(&name);
                     self.named_cache = Some((name.clone(), filtered));
                 }
-                let base = self
-                    .named_cache
-                    .as_ref()
-                    .map(|(_, base)| base.clone())
-                    .unwrap_or_default();
-                self.core.refilter_with_base(&text, &base);
+                // `named_cache` and `core` are disjoint fields, so the matcher
+                // reads the cached base in place rather than cloning it.
+                if let Some((_, base)) = &self.named_cache {
+                    self.core.refilter_with_base(&text, base);
+                }
             },
         }
     }

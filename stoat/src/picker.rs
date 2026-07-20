@@ -9,7 +9,10 @@ use crate::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
@@ -36,8 +39,9 @@ pub(crate) fn next_generation() -> u64 {
 /// query string. The owner sets `base`, calls [`PickList::refilter`] with the
 /// query, and reads `filtered`/`match_indices`/`selected` to render.
 pub(crate) struct PickList {
-    /// Candidate paths the query filters over.
-    pub(crate) base: Vec<PathBuf>,
+    /// Candidate paths the query filters over. Shared as an [`Arc`] so the owner
+    /// can hand it a snapshot of its walked paths without a second copy.
+    pub(crate) base: Arc<[PathBuf]>,
     /// Indices into `base`, after filtering, in display order.
     pub(crate) filtered: Vec<usize>,
     /// Per-row matched character offsets into the row's display string,
@@ -64,7 +68,7 @@ pub(crate) struct PickList {
 impl Default for PickList {
     fn default() -> Self {
         Self {
-            base: Vec::new(),
+            base: Vec::new().into(),
             filtered: Vec::new(),
             match_indices: Vec::new(),
             selected: 0,
@@ -275,6 +279,11 @@ pub(crate) struct PathPicker {
     /// short-circuits. Cleared by [`PathPicker::invalidate`] when the base set
     /// changes under a stable query.
     pub(crate) last_filter_text: String,
+    /// Whether [`Self::picklist`] reflects the current base and query. Set by a
+    /// refilter, cleared by [`PathPicker::invalidate`]. Gating on this rather
+    /// than a non-empty result keeps a zero-match query cached instead of
+    /// refiltering the whole list every render tick.
+    filter_valid: bool,
     pub(crate) preview: Preview,
 }
 
@@ -299,6 +308,7 @@ impl PathPicker {
             _walk_task: walk_task,
             picklist: PickList::default(),
             last_filter_text: String::new(),
+            filter_valid: false,
             preview,
         }
     }
@@ -347,6 +357,7 @@ impl PathPicker {
     /// this so the stale filtered rows do not survive.
     pub(crate) fn invalidate(&mut self) {
         self.last_filter_text.clear();
+        self.filter_valid = false;
         self.picklist.filtered.clear();
         self.picklist.match_indices.clear();
     }
@@ -372,25 +383,33 @@ impl PathPicker {
     }
 
     /// Refilter over this picker's own walk-fed [`Self::all_paths`], skipping
-    /// the work when the query is unchanged and rows are present.
+    /// the work when the query is unchanged and the filter is still valid.
     pub(crate) fn refilter(&mut self, query: &str) {
-        if query == self.last_filter_text && !self.picklist.filtered.is_empty() {
+        if query == self.last_filter_text && self.filter_valid {
             return;
         }
-        let base = self.all_paths.clone();
-        self.refilter_with_base(query, &base);
+        let base: Arc<[PathBuf]> = Arc::from(self.all_paths.as_slice());
+        self.set_base_and_refilter(query, base);
     }
 
     /// Refilter over a caller-owned `base` set. The query cache still applies,
     /// so a caller that changes `base` under a stable query must
     /// [`Self::invalidate`] first (the finder does this on a scope flip).
     pub(crate) fn refilter_with_base(&mut self, query: &str, base: &[PathBuf]) {
-        if query == self.last_filter_text && !self.picklist.filtered.is_empty() {
+        if query == self.last_filter_text && self.filter_valid {
             return;
         }
-        self.picklist.base = base.to_vec();
+        self.set_base_and_refilter(query, Arc::from(base));
+    }
+
+    /// Point the pick list at `base`, run the matcher, and mark the filter valid
+    /// so an unchanged-query re-render short-circuits until the next
+    /// [`Self::invalidate`].
+    fn set_base_and_refilter(&mut self, query: &str, base: Arc<[PathBuf]>) {
+        self.picklist.base = base;
         self.picklist.refilter(query, &self.git_root);
         self.last_filter_text = query.to_string();
+        self.filter_valid = true;
     }
 
     /// Sync the preview pane to the current selection per `policy`, clearing it
@@ -657,7 +676,7 @@ mod tests {
     /// Display strings of the filtered rows after running `query` over `base`.
     fn names(query: &str, base: Vec<PathBuf>, git_root: &Path) -> Vec<String> {
         let mut list = PickList {
-            base,
+            base: base.into(),
             ..PickList::default()
         };
         list.refilter(query, git_root);
@@ -678,7 +697,7 @@ mod tests {
     fn refilter_and_construction_bump_the_filter_generation() {
         let git_root = p("/r");
         let mut list = PickList {
-            base: vec![p("/r/a.rs"), p("/r/b.rs")],
+            base: vec![p("/r/a.rs"), p("/r/b.rs")].into(),
             ..PickList::default()
         };
         let before = list.filter_generation;
@@ -755,7 +774,7 @@ mod tests {
     fn root_anchor_highlights_the_prefix() {
         let git_root = p("/r");
         let mut list = PickList {
-            base: vec![p("/r/docs/readme.md")],
+            base: vec![p("/r/docs/readme.md")].into(),
             ..PickList::default()
         };
         list.refilter("./docs", &git_root);
@@ -829,7 +848,7 @@ mod tests {
     fn refilter_clamps_selected_when_results_shrink() {
         let git_root = p("/r");
         let mut list = PickList {
-            base: vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")],
+            base: vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")].into(),
             selected: 2,
             ..PickList::default()
         };
