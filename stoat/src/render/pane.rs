@@ -656,18 +656,14 @@ fn status_segments(
     if is_focused {
         let badge_right = right_anchor;
         for (short, busy) in frame.lsp_servers {
-            let (text, style) = if *busy {
-                (
-                    format!(" {} {short} ", SPINNER_FRAMES[frame.spinner_phase as usize]),
-                    base_style,
-                )
-            } else {
-                (format!(" {short} "), base_style.add_modifier(Modifier::DIM))
-            };
+            if !*busy {
+                continue;
+            }
+            let text = format!(" {} {short} ", SPINNER_FRAMES[frame.spinner_phase as usize]);
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                right.push((text, style));
+                right.push((text, base_style));
                 right_anchor = start;
             }
         }
@@ -1092,29 +1088,12 @@ mod tests {
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
     }
 
-    #[test]
-    fn lsp_badge_shows_dim_short_name_when_idle() {
-        let mut h = Stoat::test();
-        h.install_lsp_server("rust", "rust-analyzer");
-        open_rust(&mut h);
-
-        let buf = h.stoat.render();
-        let bar = bar_row(&buf);
-        assert!(
-            bar.contains("RA"),
-            "idle badge shows the short name:\n{bar}"
-        );
-        assert!(!bar.contains('⠋'), "no spinner glyph when idle:\n{bar}");
-    }
-
-    #[test]
-    fn lsp_badge_shows_spinner_when_busy() {
+    /// Push a work-done progress begin so `fake`'s server reads as busy, painting
+    /// its bar badge.
+    fn mark_busy(h: &mut crate::test_harness::TestHarness, fake: &crate::host::FakeLsp) {
         use crate::host::LspNotification;
         use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
 
-        let mut h = Stoat::test();
-        let fake = h.install_lsp_server("rust", "rust-analyzer");
-        open_rust(&mut h);
         fake.push_notification(LspNotification::Progress {
             token: NumberOrString::Number(1),
             value: WorkDoneProgress::Begin(WorkDoneProgressBegin {
@@ -1125,6 +1104,29 @@ mod tests {
             }),
         });
         h.drain_lsp();
+    }
+
+    #[test]
+    fn lsp_badge_hidden_when_idle() {
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+
+        let buf = h.stoat.render();
+        let bar = bar_row(&buf);
+        assert!(
+            !bar.contains("RA"),
+            "an idle server paints no badge:\n{bar}"
+        );
+        assert!(h.stoat.lsp_badge_rect.is_none(), "and stamps no hover rect");
+    }
+
+    #[test]
+    fn lsp_badge_shows_spinner_when_busy() {
+        let mut h = Stoat::test();
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        mark_busy(&mut h, &fake);
 
         let buf = h.stoat.render();
         let bar = bar_row(&buf);
@@ -1169,9 +1171,11 @@ mod tests {
     #[test]
     fn lsp_badge_one_per_server() {
         let mut h = Stoat::test();
-        h.install_lsp_server("rust", "rust-analyzer");
-        h.install_lsp_server("rust", "second-server");
+        let ra = h.install_lsp_server("rust", "rust-analyzer");
+        let ss = h.install_lsp_server("rust", "second-server");
         open_rust(&mut h);
+        mark_busy(&mut h, &ra);
+        mark_busy(&mut h, &ss);
 
         let buf = h.stoat.render();
         let bar = bar_row(&buf);
@@ -1184,8 +1188,9 @@ mod tests {
     #[test]
     fn lsp_badge_hidden_on_unfocused_pane() {
         let mut h = Stoat::test();
-        h.install_lsp_server("rust", "rust-analyzer");
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
         open_rust(&mut h);
+        mark_busy(&mut h, &fake);
         h.type_action("SplitRight()");
         h.settle();
 
@@ -1204,18 +1209,19 @@ mod tests {
     #[test]
     fn lsp_badge_rect_records_painted_columns() {
         let mut h = Stoat::test();
-        h.install_lsp_server("rust", "rust-analyzer");
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
         open_rust(&mut h);
+        mark_busy(&mut h, &fake);
 
         let buf = h.stoat.render();
         let rect = h.stoat.lsp_badge_rect.expect("badge rect stamped");
         let span: String = (rect.x..rect.x + rect.width)
             .map(|x| buf[(x, rect.y)].symbol())
             .collect();
-        // The idle ` RA ` badge (4 chars) paints at TEXT_SCALE_COMPACT, so its
-        // glyphs cover ceil((4 - 1) * 160 / 256) = 2 cells rather than the full 4.
+        // The busy badge (spinner + " RA " = 6 chars) paints at TEXT_SCALE_COMPACT,
+        // so its glyphs cover ceil((6 - 1) * 160 / 256) = 4 cells, not the full 6.
         assert_eq!(
-            rect.width, 2,
+            rect.width, 4,
             "the rect is the compact-scaled extent of the drawn glyphs, not their char span"
         );
         assert!(
