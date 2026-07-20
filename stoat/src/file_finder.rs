@@ -417,34 +417,12 @@ pub(crate) fn query_modified(git_host: &dyn GitHost, git_root: &Path) -> Vec<Pat
     paths
 }
 
-/// Produce the user-facing display form of an absolute path relative to
-/// `git_root`. Falls back to [`paths::display_relative`] so anything outside
-/// the root still renders something readable.
-fn display_for(path: &Path, git_root: &Path) -> String {
-    paths::display_relative(path, git_root)
-}
-
-/// Display string for a filtered row: the repo-relative path. Used by the
-/// renderer and by tests.
-pub(crate) fn display_row(path: &Path, git_root: &Path) -> String {
-    display_for(path, git_root)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
-    }
-
-    #[test]
-    fn display_row_strips_git_root_prefix() {
-        let git_root = p("/work/stoat");
-        assert_eq!(
-            display_row(&p("/work/stoat/src/main.rs"), &git_root),
-            "src/main.rs"
-        );
     }
 
     /// Path used as the workspace root in walker unit tests. Every entry

@@ -6,8 +6,7 @@
 //! a `PathPicker`, so both render through these functions and cannot drift.
 
 use crate::{
-    file_finder::display_row,
-    picker::{PickList, Preview},
+    picker::{row_display, PickList, Preview},
     render::{editor::render_editor, text::write_str_clipped},
     theme::{scope, Theme},
     workspace::Workspace,
@@ -61,7 +60,14 @@ pub(crate) fn paint_path_rows(
         for col in area.x..end_x {
             buf[(col, row)].set_char(' ').set_style(style);
         }
-        let label = format!("{prefix}{}", display_row(&picklist.base[idx], git_root));
+        let label = format!(
+            "{prefix}{}",
+            row_display(
+                &picklist.base[idx],
+                git_root,
+                picklist.display_roots.as_deref()
+            )
+        );
         let width = end_x.saturating_sub(label_x) as usize;
         let label_len = label.chars().count();
 
