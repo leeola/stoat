@@ -398,4 +398,28 @@ mod tests {
             (100, 100, 100)
         );
     }
+
+    #[test]
+    fn builtin_theme_files_parse() {
+        let one_dark = parse(include_str!("../../themes/one-dark.json")).expect("one-dark parses");
+        assert_eq!(one_dark.name.as_deref(), Some("one-dark"));
+        assert_eq!(
+            one_dark.colors.get("editor.background").map(String::as_str),
+            Some("#282c34")
+        );
+        assert!(one_dark.token_colors.contains(&TokenRule {
+            scopes: vec!["keyword".to_string()],
+            foreground: Some("#61afef".to_string()),
+            background: None,
+            font_style: Some("bold".to_string()),
+        }));
+
+        let gruvbox =
+            parse(include_str!("../../themes/gruvbox-dark.json")).expect("gruvbox-dark parses");
+        assert_eq!(gruvbox.name.as_deref(), Some("gruvbox-dark"));
+        assert_eq!(
+            gruvbox.colors.get("terminal.ansiRed").map(String::as_str),
+            Some("#cc241d")
+        );
+    }
 }
