@@ -943,6 +943,20 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
         editor.set_diff_view(on);
         on
     };
+
+    // Give the diff its own full width. Opening widens the focused pane when the
+    // layout allows a clean cover. An unwidenable layout stays put and rides the
+    // unified fallback. Closing restores only when this pane is the widened one.
+    {
+        let panes = &mut stoat.active_workspace_mut().panes;
+        let focus = panes.focus();
+        if turned_on {
+            panes.widen(focus);
+        } else if panes.widened() == Some(focus) {
+            panes.unwiden();
+        }
+    }
+
     if !turned_on {
         return;
     }

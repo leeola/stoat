@@ -15574,6 +15574,153 @@ mod tests {
         );
     }
 
+    /// Opens a scratch buffer with a small HEAD-vs-buffer diff installed, so
+    /// `toggle_diff_view` finds a ready map and skips the on-demand compute.
+    fn open_scratch_with_diff(h: &mut crate::test_harness::TestHarness) {
+        open_scratch_file(h, "keep\nnew\ntail\n");
+        let buffer_id = {
+            let ws = h.stoat.active_workspace();
+            match ws.panes.pane(ws.panes.focus()).view {
+                View::Editor(id) => ws.editors[id].buffer_id,
+                _ => panic!("focused pane is not an editor"),
+            }
+        };
+        let base = "keep\nold\ntail\n";
+        let text = "keep\nnew\ntail\n";
+        let dm = crate::diff_map::DiffMap::from_structural_changes(
+            stoat_language::structural_diff::diff(base, text),
+            base,
+            text,
+        );
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .diff_map = Some(dm);
+    }
+
+    #[test]
+    fn opening_diff_view_widens_the_focused_pane() {
+        let mut h = Stoat::test();
+        open_scratch_with_diff(&mut h);
+        h.type_keys("space a s");
+
+        let (focused, other, focused_area, other_area) = {
+            let panes = &h.stoat.active_workspace().panes;
+            let focused = panes.focus();
+            let other = panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|&id| id != focused)
+                .expect("a second pane");
+            (
+                focused,
+                other,
+                panes.pane(focused).area,
+                panes.pane(other).area,
+            )
+        };
+
+        h.stoat.toggle_diff_view();
+        {
+            let panes = &h.stoat.active_workspace().panes;
+            assert_eq!(
+                panes.widened(),
+                Some(focused),
+                "opening the diff widens the focused pane"
+            );
+            assert!(
+                panes.pane(focused).area.width > focused_area.width,
+                "the widened pane grows past its split width"
+            );
+        }
+
+        h.stoat.toggle_diff_view();
+        {
+            let panes = &h.stoat.active_workspace().panes;
+            assert_eq!(panes.widened(), None, "closing the diff unwidens");
+            assert_eq!(
+                panes.pane(focused).area,
+                focused_area,
+                "the focused pane is restored"
+            );
+            assert_eq!(
+                panes.pane(other).area,
+                other_area,
+                "the other pane is restored"
+            );
+        }
+    }
+
+    #[test]
+    fn opening_diff_view_leaves_an_unwidenable_layout_put() {
+        let mut h = Stoat::test();
+        open_scratch_with_diff(&mut h);
+        h.type_keys("space a s");
+        h.type_keys("space a v");
+        h.type_keys("space a k");
+
+        let focused = h.stoat.active_workspace().panes.focus();
+        h.stoat.toggle_diff_view();
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            ws.panes.widened(),
+            None,
+            "a layout with no clean cover is left unwidened"
+        );
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        assert!(
+            ws.editors[editor_id].diff_view,
+            "the diff still opens even when the pane cannot widen"
+        );
+    }
+
+    #[test]
+    fn focusing_away_from_an_open_diff_unwidens_and_keeps_the_diff() {
+        let mut h = Stoat::test();
+        open_scratch_with_diff(&mut h);
+        h.type_keys("space a s");
+
+        let (focused, other, editor_id) = {
+            let ws = h.stoat.active_workspace();
+            let focused = ws.panes.focus();
+            let other = ws
+                .panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|&id| id != focused)
+                .expect("a second pane");
+            let editor_id = match ws.panes.pane(focused).view {
+                View::Editor(id) => id,
+                _ => panic!("focused pane is not an editor"),
+            };
+            (focused, other, editor_id)
+        };
+
+        h.stoat.toggle_diff_view();
+        assert_eq!(h.stoat.active_workspace().panes.widened(), Some(focused));
+
+        h.stoat.active_workspace_mut().panes.set_focus(other);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            ws.panes.widened(),
+            None,
+            "focusing another pane restores the layout"
+        );
+        assert!(
+            ws.editors[editor_id].diff_view,
+            "the diff view stays open on the original editor"
+        );
+    }
+
     #[test]
     fn opening_diff_view_scrolls_a_far_first_hunk_into_the_viewport() {
         let mut h = Stoat::test();
