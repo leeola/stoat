@@ -4445,9 +4445,9 @@ impl Stoat {
         // one derivation is behavior-preserving. Normalization runs first so the
         // Ctrl-C block matches on the same key the lookup used.
         let key = normalize_shift_event(key);
-        let looked_up: Option<Vec<ResolvedAction>> = {
+        let looked_up = {
             let state = StoatKeymapState::from_stoat(self);
-            self.keymap.lookup(&state, &key).map(|a| a.to_vec())
+            self.keymap.lookup(&state, &key)
         };
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -4892,7 +4892,7 @@ impl Stoat {
         let mut dispatched_code_action = false;
         let mut dispatched_rename_symbol = false;
         let mut dispatched_symbol_picker = false;
-        for ra in &actions {
+        for ra in actions.iter() {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
                     self.transition_mode(mode_name);

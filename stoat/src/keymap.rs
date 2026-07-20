@@ -1,6 +1,9 @@
 use compact_str::CompactString;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use stoat_config::{
     ActionExpr, Binding, Config, EventType, Key, KeyPart, Predicate, Statement, Value,
 };
@@ -291,7 +294,7 @@ pub struct ResolvedArg {
 struct CompiledBinding {
     key: CompiledKey,
     predicates: Vec<Predicate>,
-    actions: Vec<ResolvedAction>,
+    actions: Arc<[ResolvedAction]>,
 }
 
 pub struct Keymap {
@@ -328,7 +331,7 @@ impl Keymap {
         let mut set_mode_targets: HashSet<String> = HashSet::new();
         let mut selected_modes: HashSet<String> = HashSet::new();
         for binding in &keymap.bindings {
-            for action in &binding.actions {
+            for action in binding.actions.iter() {
                 if action.name == "SetMode"
                     && let Some(target) = action.args.first().and_then(|a| value_str(&a.value))
                 {
@@ -351,8 +354,12 @@ impl Keymap {
         (keymap, warnings)
     }
 
-    pub fn lookup(&self, state: &dyn KeymapState, event: &KeyEvent) -> Option<&[ResolvedAction]> {
-        let mut best: Option<(usize, &[ResolvedAction])> = None;
+    pub fn lookup(
+        &self,
+        state: &dyn KeymapState,
+        event: &KeyEvent,
+    ) -> Option<Arc<[ResolvedAction]>> {
+        let mut best: Option<(usize, &Arc<[ResolvedAction]>)> = None;
         for binding in &self.bindings {
             if !binding.key.matches(event) {
                 continue;
@@ -364,10 +371,10 @@ impl Keymap {
             // Strict `>` keeps the earliest binding on a tie, so equally specific
             // matches still resolve in source order.
             if best.is_none_or(|(best_score, _)| score > best_score) {
-                best = Some((score, binding.actions.as_slice()));
+                best = Some((score, &binding.actions));
             }
         }
-        best.map(|(_, actions)| actions)
+        best.map(|(_, actions)| actions.clone())
     }
 
     pub fn active_keys(&self, state: &dyn KeymapState) -> Vec<(&CompiledKey, &[ResolvedAction])> {
@@ -375,7 +382,7 @@ impl Keymap {
         for binding in &self.bindings {
             let matches = binding.predicates.iter().all(|p| evaluate(p, state));
             if matches {
-                results.push((&binding.key, binding.actions.as_slice()));
+                results.push((&binding.key, binding.actions.as_ref()));
             }
         }
         results
@@ -388,7 +395,7 @@ impl Keymap {
         for binding in &self.bindings {
             let matches = binding.predicates.iter().all(|p| evaluate(p, state));
             if matches {
-                results.push((binding.key.display_label(), binding.actions.as_slice()));
+                results.push((binding.key.display_label(), binding.actions.as_ref()));
             }
         }
         results
@@ -420,7 +427,7 @@ impl Keymap {
                 .iter()
                 .any(|p| predicate_eq_matches(p, scope_field, scope_value));
             if in_scope {
-                results.push((binding.key.display_label(), binding.actions.as_slice()));
+                results.push((binding.key.display_label(), binding.actions.as_ref()));
             }
         }
         results
@@ -523,7 +530,7 @@ fn compile_binding(binding: &Binding, predicates: &[Predicate], out: &mut Vec<Co
     out.push(CompiledBinding {
         key,
         predicates: predicates.to_vec(),
-        actions,
+        actions: actions.into(),
     });
 }
 
