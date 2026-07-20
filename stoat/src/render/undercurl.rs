@@ -1,4 +1,5 @@
 use ratatui::{buffer::Buffer, style::Color};
+use std::fmt::{self, Display, Formatter, Write};
 
 /// A run of cells to re-stamp with a severity-colored curly underline.
 ///
@@ -66,11 +67,8 @@ pub(crate) fn build(buf: &Buffer, spans: &[UndercurlSpan]) -> Vec<u8> {
             }
             let segment_end = i;
 
-            body.push_str(&format!(
-                "\x1b[{};{}H",
-                span.y + 1,
-                span.x + segment_start + 1
-            ));
+            write!(body, "\x1b[{};{}H", span.y + 1, span.x + segment_start + 1)
+                .expect("writing to a String is infallible");
 
             let mut run_start = segment_start;
             while run_start < segment_end {
@@ -82,11 +80,13 @@ pub(crate) fn build(buf: &Buffer, spans: &[UndercurlSpan]) -> Vec<u8> {
                     run_end += 1;
                 }
 
-                body.push_str(&format!(
+                write!(
+                    body,
                     "\x1b[0;{};{};4:3;58:2::{ur}:{ug}:{ub}m",
-                    sgr_fg(fg),
-                    sgr_bg(bg),
-                ));
+                    SgrFg(fg),
+                    SgrBg(bg),
+                )
+                .expect("writing to a String is infallible");
                 for x in (span.x + run_start)..(span.x + run_end) {
                     body.push_str(buf[(x, span.y)].symbol());
                 }
@@ -119,17 +119,25 @@ fn cell_colors(buf: &Buffer, x: u16, y: u16) -> (Color, Color) {
     (cell.fg, cell.bg)
 }
 
-fn sgr_fg(color: Color) -> String {
-    match color {
-        Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
-        _ => "39".to_string(),
+struct SgrFg(Color);
+
+impl Display for SgrFg {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Color::Rgb(r, g, b) => write!(f, "38;2;{r};{g};{b}"),
+            _ => f.write_str("39"),
+        }
     }
 }
 
-fn sgr_bg(color: Color) -> String {
-    match color {
-        Color::Rgb(r, g, b) => format!("48;2;{r};{g};{b}"),
-        _ => "49".to_string(),
+struct SgrBg(Color);
+
+impl Display for SgrBg {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Color::Rgb(r, g, b) => write!(f, "48;2;{r};{g};{b}"),
+            _ => f.write_str("49"),
+        }
     }
 }
 
