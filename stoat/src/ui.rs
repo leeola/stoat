@@ -52,7 +52,7 @@ pub struct RenderFrame {
     /// thread draws it is never measured. The recorded distribution therefore
     /// covers frames actually flushed, which is the user-visible latency.
     #[cfg(feature = "perf")]
-    pub input_time: Option<std::time::Instant>,
+    pub input_time: Option<Instant>,
 }
 
 /// Install a process-global panic hook that restores the terminal before the
