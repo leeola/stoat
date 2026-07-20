@@ -28,7 +28,7 @@ pub(crate) mod surround;
 mod terminal;
 pub(crate) mod textobject;
 pub(crate) mod textobject_nav;
-mod workspace;
+pub(crate) mod workspace;
 pub(crate) mod yank;
 
 use crate::{
@@ -38,6 +38,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     help::Help,
     host::FsHost,
+    input_view::{InputView, SubmitTarget},
     jumplist::JumpList,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace_picker::WorkspacePicker,
@@ -803,10 +804,23 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SwitchWorkspace => {
             let inactive =
                 crate::workspace::registry::list_all(&*stoat.fs_host).unwrap_or_default();
+            stoat.set_focused_mode("normal".into());
+            let input = {
+                let executor = stoat.executor.clone();
+                InputView::create(
+                    stoat.active_workspace_mut(),
+                    executor,
+                    SubmitTarget::WorkspacePicker,
+                    "",
+                    "insert",
+                    1,
+                )
+            };
             stoat.workspace_picker = Some(WorkspacePicker::new(
                 &stoat.workspaces,
                 stoat.active_workspace,
                 inactive,
+                input,
             ));
             UpdateEffect::Redraw
         },
@@ -1074,14 +1088,7 @@ fn open_global_search(stoat: &mut Stoat) -> UpdateEffect {
     }
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let input = crate::input_view::InputView::create(
-        ws,
-        executor,
-        crate::input_view::SubmitTarget::GlobalSearch,
-        "",
-        "insert",
-        1,
-    );
+    let input = InputView::create(ws, executor, SubmitTarget::GlobalSearch, "", "insert", 1);
     stoat.global_search_input = Some(crate::global_search::GlobalSearchInputState { input });
     UpdateEffect::Redraw
 }
@@ -2967,6 +2974,31 @@ mod tests {
         }
         h.type_action("SwitchWorkspace()");
         h.assert_snapshot("workspace_picker_listing");
+    }
+
+    #[test]
+    fn typing_in_the_picker_filters_the_list() {
+        let mut h = Stoat::test();
+        h.type_action("NewWorkspace()");
+        let ids: Vec<_> = h.stoat.workspaces.keys().collect();
+        h.stoat.workspaces[ids[0]].name = "alpha".into();
+        h.stoat.workspaces[ids[1]].name = "beta".into();
+
+        h.type_action("SwitchWorkspace()");
+        assert_eq!(
+            h.stoat.workspace_picker.as_ref().unwrap().filtered().len(),
+            2,
+            "both workspaces list before filtering"
+        );
+
+        h.type_text("alph");
+
+        let picker = h.stoat.workspace_picker.as_ref().unwrap();
+        assert_eq!(picker.filtered().len(), 1, "typing narrows to the match");
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("alpha")
+        );
     }
 
     #[test]

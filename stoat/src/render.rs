@@ -769,6 +769,7 @@ pub(crate) fn frame(
     } else if let Some(picker) = &stoat.workspace_picker {
         workspace_picker::render_workspace_picker(
             picker,
+            ws,
             &stoat.theme,
             full,
             buf,

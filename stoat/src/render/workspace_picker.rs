@@ -1,5 +1,6 @@
 use crate::{
     render::text::write_str,
+    workspace::Workspace,
     workspace_picker::{PathDisplay, WorkspacePicker, WorkspaceStatus},
 };
 use ratatui::{
@@ -7,14 +8,15 @@ use ratatui::{
     layout::Rect,
     widgets::{Clear, Widget},
 };
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 pub(crate) fn render_workspace_picker(
     picker: &WorkspacePicker,
+    ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    mut scene: Option<&mut stoatty_widgets::ApcScene>,
 ) {
     if area.width < 60 || area.height < 8 {
         return;
@@ -31,7 +33,8 @@ pub(crate) fn render_workspace_picker(
     if box_width < 60 {
         return;
     }
-    let box_height = 3 + entry_rows;
+    // The filter input and its separator add two rows above the list.
+    let box_height = 5 + entry_rows;
     if box_height > area.height {
         return;
     }
@@ -48,6 +51,30 @@ pub(crate) fn render_workspace_picker(
         Some(" workspaces "),
         modal_style,
         theme,
+        scene.as_deref_mut(),
+    );
+
+    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
+    let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
+
+    write_str(buf, inner.x, inner.y, ">", prompt_style);
+    let input_area = Rect::new(inner.x + 2, inner.y, inner.width.saturating_sub(2), 1);
+    picker.input.render(
+        &mut ws.editors,
+        input_area,
+        true,
+        "prompt",
+        theme,
+        &BTreeMap::new(),
+        buf,
+    );
+
+    crate::render::chrome::hline(
+        buf,
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        separator_style,
         scene,
     );
 
@@ -73,8 +100,9 @@ pub(crate) fn render_workspace_picker(
     let current_style = theme.get(crate::theme::scope::UI_PROMPT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
     let header_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
 
-    let header_row = inner.y;
+    let header_row = inner.y + 2;
     write_str(buf, name_x, header_row, "name", header_style);
     if show_path {
         write_str(buf, path_x, header_row, "path", header_style);
@@ -101,10 +129,18 @@ pub(crate) fn render_workspace_picker(
         header_style,
     );
 
-    let entries_top = inner.y + 1;
+    let entries_top = inner.y + 3;
     let selected = picker.selected();
+    let match_indices = picker.match_indices();
 
-    for (i, entry) in entries.iter().take(max_entries as usize).enumerate() {
+    for (i, &idx) in picker
+        .filtered()
+        .iter()
+        .take(max_entries as usize)
+        .enumerate()
+    {
+        let entry = &entries[idx];
+        let indices = &match_indices[i];
         let row = entries_top + i as u16;
         let is_selected = i == selected;
         let base_style = if is_selected {
@@ -127,8 +163,15 @@ pub(crate) fn render_workspace_picker(
             WorkspaceStatus::Inactive => "\u{00b7}",
         };
         write_str(buf, marker_x, row, marker, base_style);
+
         let name: String = entry.basename.chars().take(NAME_W as usize).collect();
         write_str(buf, name_x, row, &name, base_style);
+        for (j, _) in name.chars().enumerate() {
+            if indices.binary_search(&(j as u32)).is_ok() {
+                buf[(name_x + j as u16, row)].set_style(match_style);
+            }
+        }
+
         if show_path {
             let context: &Path = match &path_display {
                 PathDisplay::Omit => unreachable!("show_path guards against Omit"),

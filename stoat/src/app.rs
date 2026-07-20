@@ -5110,6 +5110,10 @@ impl Stoat {
             return Some((finder.input.editor_id, finder.input.buffer_id));
         }
 
+        if let Some(picker) = &self.workspace_picker {
+            return Some((picker.input.editor_id, picker.input.buffer_id));
+        }
+
         if let Some(palette) = &self.command_palette
             && let Some(input) = palette.focused_input()
         {
@@ -7846,6 +7850,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_workspace_symbol(self);
         action_handlers::lsp::pump_symbol_finder_doc(self);
         action_handlers::lsp::sync_symbol_finder(self);
+        action_handlers::workspace::sync_workspace_picker(self);
         action_handlers::lsp::pump_lsp_format(self);
         action_handlers::file::pump_format_on_save(self);
         crate::completion::request::pump(self);
@@ -10267,16 +10272,18 @@ mod tests {
     #[test]
     fn workspace_picker_binding_is_rebindable() {
         let mut h = Stoat::test();
-        h.stoat.keymap =
-            compile_keymap("on key { modal == workspace_picker { q -> WorkspacePickerClose(); } }");
+        h.stoat.keymap = compile_keymap(
+            "on key { modal == workspace_picker { Ctrl-x -> WorkspacePickerClose(); } }",
+        );
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchWorkspace);
         assert!(h.stoat.workspace_picker.is_some());
 
-        // `q` is not a default picker binding, so closing on it proves the
-        // `modal == workspace_picker` block drives the picker, not hardcoded
-        // dispatch.
-        h.stoat.handle_key(bare(KeyCode::Char('q')));
+        // The picker's filter input is in insert mode, so a printable key would
+        // type rather than route. `Ctrl-x` is non-printable and not a default
+        // picker binding, so closing on it proves the `modal == workspace_picker`
+        // block drives the picker, not hardcoded dispatch.
+        h.stoat.handle_key(ctrl('x'));
         assert!(h.stoat.workspace_picker.is_none());
     }
 

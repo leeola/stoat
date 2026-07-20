@@ -1,4 +1,6 @@
 use crate::{
+    fuzzy,
+    input_view::InputView,
     paths,
     workspace::{registry::RegistryEntry, Workspace, WorkspaceId, WorkspaceUid},
 };
@@ -23,14 +25,25 @@ pub enum WorkspaceStatus {
     Inactive,
 }
 
-/// Modal list of open workspaces, rendered as a centered overlay when
-/// the `SwitchWorkspace` action fires.
+/// Finder-style modal listing open and inactive workspaces, rendered as a
+/// centered overlay when the `SwitchWorkspace` action fires.
 ///
-/// Navigation and selection route through the `modal == workspace_picker`
-/// keymap block. [`Self::select_next`] and [`Self::select_prev`] move the
-/// highlight, and [`Self::selected_id`] reports the row to switch to.
+/// A fuzzy filter input sits atop the list. Typed characters route into
+/// [`Self::input`] via the insert-mode keymap, and [`Self::refilter`] re-ranks
+/// the list against the query each idle tick. Navigation and selection route
+/// through the `modal == workspace_picker` keymap block. [`Self::select_next`]
+/// and [`Self::select_prev`] move the highlight, and [`Self::selected_id`]
+/// reports the row to switch to.
 pub struct WorkspacePicker {
+    pub(crate) input: InputView,
     entries: Vec<PickerEntry>,
+    /// Indices into `entries` in display order after fuzzy filtering. An empty
+    /// query lists every entry in the status-grouped order.
+    filtered: Vec<usize>,
+    /// Matched character offsets in each filtered row's haystack, parallel to
+    /// [`Self::filtered`], driving name-column highlights.
+    match_indices: Vec<Vec<u32>>,
+    /// Cursor into [`Self::filtered`].
     selected: usize,
 }
 
@@ -78,10 +91,15 @@ impl WorkspacePicker {
     /// list as [`WorkspaceStatus::Inactive`], so an open workspace wins over its
     /// own on-disk sidecar. Rows order Active first, then Background by name,
     /// then Inactive newest state file first.
+    ///
+    /// The `input` is built by the caller because listing borrows every
+    /// workspace immutably, while creating the input needs the active workspace
+    /// mutably.
     pub(crate) fn new(
         workspaces: &SlotMap<WorkspaceId, Workspace>,
         active: WorkspaceId,
         inactive: Vec<RegistryEntry>,
+        input: InputView,
     ) -> Self {
         let mut entries: Vec<PickerEntry> = workspaces
             .iter()
@@ -136,35 +154,96 @@ impl WorkspacePicker {
             .iter()
             .position(|e| e.status == WorkspaceStatus::Active)
             .unwrap_or(0);
-        Self { entries, selected }
+
+        let mut picker = Self {
+            input,
+            entries,
+            filtered: Vec::new(),
+            match_indices: Vec::new(),
+            selected,
+        };
+        picker.refilter("");
+        picker
     }
 
     pub fn entries(&self) -> &[PickerEntry] {
         &self.entries
     }
 
+    pub fn filtered(&self) -> &[usize] {
+        &self.filtered
+    }
+
+    pub fn match_indices(&self) -> &[Vec<u32>] {
+        &self.match_indices
+    }
+
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// Re-rank the entries for `query`, matches first by score descending then
+    /// by status-grouped order. An empty or unusable query lists every entry in
+    /// the status-grouped order with no highlights.
+    ///
+    /// The haystack per row is `"{basename} {git_root}"`, so a query narrows on
+    /// either the workspace name or any part of its root path. Match highlights
+    /// land only on name-column indices when painted.
+    pub(crate) fn refilter(&mut self, query: &str) {
+        let items = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| (idx, format!("{} {}", e.basename, e.git_root.display())));
+
+        match fuzzy::match_and_rank(query, items) {
+            Some(mut matches) => {
+                matches.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.item.cmp(&b.item)));
+                self.filtered = matches.iter().map(|m| m.item).collect();
+                self.match_indices = matches.into_iter().map(|m| m.matched_indices).collect();
+            },
+            None => {
+                self.filtered = (0..self.entries.len()).collect();
+                self.match_indices = vec![Vec::new(); self.entries.len()];
+            },
+        }
+
+        self.clamp_selected();
+    }
+
+    /// Free the filter input's editor and scratch buffer. Called when the picker
+    /// closes so the transient input leaves no unsaved buffer behind.
+    pub(crate) fn dispose(&self, ws: &mut Workspace) {
+        self.input.dispose(ws);
     }
 
     /// The open workspace under the selection, or `None` when the picker is
     /// empty or the selected row is an inactive on-disk workspace.
     pub fn selected_id(&self) -> Option<WorkspaceId> {
-        self.entries.get(self.selected).and_then(|entry| entry.id)
+        self.selected_entry().and_then(|entry| entry.id)
     }
 
     /// The full row under the selection, so the caller can distinguish an
     /// inactive row (with a state path to restore) from an open one.
     pub fn selected_entry(&self) -> Option<&PickerEntry> {
-        self.entries.get(self.selected)
+        let idx = *self.filtered.get(self.selected)?;
+        self.entries.get(idx)
     }
 
     pub fn select_next(&mut self) {
-        move_selection(self.entries.len(), &mut self.selected, 1);
+        move_selection(self.filtered.len(), &mut self.selected, 1);
     }
 
     pub fn select_prev(&mut self) {
-        move_selection(self.entries.len(), &mut self.selected, -1);
+        move_selection(self.filtered.len(), &mut self.selected, -1);
+    }
+
+    fn clamp_selected(&mut self) {
+        if self.filtered.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len() - 1;
+        }
     }
 
     /// How the per-row path column should render for this picker's entries.
@@ -230,12 +309,23 @@ fn move_selection(len: usize, selected: &mut usize, delta: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::Workspace;
+    use crate::{
+        buffer::BufferId, editor_state::EditorId, input_view::SubmitTarget, workspace::Workspace,
+    };
     use std::sync::Arc;
     use stoat_scheduler::{Executor, TestScheduler};
 
     fn executor() -> Executor {
         Arc::new(TestScheduler::new()).executor()
+    }
+
+    fn dummy_input() -> InputView {
+        InputView {
+            editor_id: EditorId::default(),
+            buffer_id: BufferId::new(0),
+            target: SubmitTarget::WorkspacePicker,
+            max_height: 1,
+        }
     }
 
     fn slotmap_with_two(exec: &Executor) -> (SlotMap<WorkspaceId, Workspace>, WorkspaceId) {
@@ -251,7 +341,7 @@ mod tests {
     fn new_lists_all_workspaces_current_first() {
         let exec = executor();
         let (workspaces, active) = slotmap_with_two(&exec);
-        let picker = WorkspacePicker::new(&workspaces, active, Vec::new());
+        let picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
 
         let entries = picker.entries();
         assert_eq!(entries.len(), 2);
@@ -289,7 +379,7 @@ mod tests {
             entry(8, "new-proj", "/tmp/new", 90),
         ];
 
-        let picker = WorkspacePicker::new(&workspaces, a, inactive);
+        let picker = WorkspacePicker::new(&workspaces, a, inactive, dummy_input());
         let entries = picker.entries();
 
         assert_eq!(
@@ -314,7 +404,7 @@ mod tests {
     fn select_next_prev_clamp_at_ends() {
         let exec = executor();
         let (workspaces, active) = slotmap_with_two(&exec);
-        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new());
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
 
         picker.select_next();
         assert_eq!(picker.selected(), 1);
@@ -330,7 +420,7 @@ mod tests {
     fn selected_id_tracks_selection() {
         let exec = executor();
         let (workspaces, active) = slotmap_with_two(&exec);
-        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new());
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
 
         assert_eq!(picker.selected_id(), Some(active));
         picker.select_next();
@@ -344,7 +434,7 @@ mod tests {
         let a = workspaces.insert(Workspace::new(PathBuf::from("/tmp/alpha"), &exec));
         workspaces[a].id = a;
 
-        let picker = WorkspacePicker::new(&workspaces, a, Vec::new());
+        let picker = WorkspacePicker::new(&workspaces, a, Vec::new(), dummy_input());
         assert_eq!(picker.entries().len(), 1);
         assert_eq!(picker.entries()[0].status, WorkspaceStatus::Active);
     }
@@ -359,7 +449,7 @@ mod tests {
             first.get_or_insert(id);
         }
         let active = first.expect("at least one workspace");
-        WorkspacePicker::new(&workspaces, active, Vec::new())
+        WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input())
     }
 
     #[test]
@@ -381,5 +471,38 @@ mod tests {
     fn path_display_tilde_when_divergent() {
         let picker = picker_with_roots(&["/tmp/alpha", "/var/beta"]);
         assert_eq!(picker.path_display(), PathDisplay::TildeAbsolute);
+    }
+
+    #[test]
+    fn refilter_narrows_reranks_and_clamps_selection() {
+        let exec = executor();
+        let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
+        let mut active = None;
+        for root in ["/tmp/alpha", "/tmp/beta", "/tmp/gamma"] {
+            let id = workspaces.insert(Workspace::new(PathBuf::from(root), &exec));
+            workspaces[id].id = id;
+            workspaces[id].name = String::new();
+            active.get_or_insert(id);
+        }
+        let active = active.expect("at least one workspace");
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
+        picker.select_next();
+        picker.select_next();
+        assert_eq!(picker.selected(), 2);
+
+        picker.refilter("alpha");
+        assert_eq!(picker.filtered().len(), 1, "only alpha matches");
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            picker.selected(),
+            0,
+            "the stale selection clamps into the shorter list"
+        );
+
+        picker.refilter("");
+        assert_eq!(picker.filtered().len(), 3, "empty query restores every row");
     }
 }

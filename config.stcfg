@@ -288,7 +288,7 @@ on key {
         PageDown -> HelpScrollDetailDown();
         BackTab -> HelpScopeToggle();
     }
-    modal == workspace_picker {
+    modal == workspace_picker && mode == insert {
         Up -> WorkspacePickerPrev();
         Down -> WorkspacePickerNext();
         Ctrl-p -> WorkspacePickerPrev();
@@ -843,7 +843,7 @@ on key {
         Escape -> SetMode(normal);
         n -> [NewWorkspace(), SetMode(normal)];
         c -> [CopyWorkspace(), SetMode(normal)];
-        s -> [SwitchWorkspace(), SetMode(normal)];
+        s -> SwitchWorkspace();
         x -> [CloseWorkspace(), SetMode(normal)];
     }
     mode == space_pane_nav {

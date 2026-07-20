@@ -101,8 +101,26 @@ pub(super) fn workspace_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.workspace_picker = None;
+    if let Some(picker) = stoat.workspace_picker.take() {
+        picker.dispose(stoat.active_workspace_mut());
+    }
     UpdateEffect::Redraw
+}
+
+/// Refilter the open workspace picker against its input text on the idle path,
+/// so typing narrows the list without a dedicated key handler.
+pub(crate) fn sync_workspace_picker(stoat: &mut Stoat) {
+    let Some(query) = stoat
+        .workspace_picker
+        .as_ref()
+        .map(|picker| picker.input.text(stoat.active_workspace()))
+    else {
+        return;
+    };
+
+    if let Some(picker) = stoat.workspace_picker.as_mut() {
+        picker.refilter(&query);
+    }
 }
 
 /// Switch to the workspace under the picker's selection, saving the current
@@ -115,6 +133,8 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.workspace_picker.take() else {
         return UpdateEffect::None;
     };
+    picker.dispose(stoat.active_workspace_mut());
+
     let Some(entry) = picker.selected_entry() else {
         return UpdateEffect::Redraw;
     };
@@ -263,10 +283,23 @@ mod tests {
     use super::*;
     use crate::{
         badge::BadgeSource,
+        input_view::{InputView, SubmitTarget},
         workspace::registry::{RegistryEntry, WorkspaceMeta},
         workspace_picker::WorkspacePicker,
     };
     use std::time::UNIX_EPOCH;
+
+    fn picker_input(stoat: &mut Stoat) -> InputView {
+        let executor = stoat.executor.clone();
+        InputView::create(
+            stoat.active_workspace_mut(),
+            executor,
+            SubmitTarget::WorkspacePicker,
+            "",
+            "insert",
+            1,
+        )
+    }
 
     #[test]
     fn selecting_inactive_row_activates_it_with_the_metas_uid_and_spawns_a_restore() {
@@ -286,8 +319,13 @@ mod tests {
         };
 
         let before = stoat.workspaces.len();
-        let mut picker =
-            WorkspacePicker::new(&stoat.workspaces, stoat.active_workspace, vec![entry]);
+        let input = picker_input(stoat);
+        let mut picker = WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            vec![entry],
+            input,
+        );
         picker.select_next();
         assert_eq!(
             picker.selected_entry().map(|e| (e.id, e.uid)),
