@@ -78,7 +78,8 @@ use crate::{
         palette::OpenCommandPalette,
         pane::{
             CloseOtherPanes, ClosePane, DetachPane, FocusDown, FocusLeft, FocusNext, FocusPane,
-            FocusPrev, FocusRight, FocusUp, ReattachPane, SplitDown, SplitNewDown, SplitNewRight,
+            FocusPrev, FocusRight, FocusUp, MovePaneDown, MovePaneLeft, MovePaneNext, MovePanePrev,
+            MovePaneRight, MovePaneUp, ReattachPane, SplitDown, SplitNewDown, SplitNewRight,
             SplitRight, ToggleDockLeft, ToggleDockRight, TogglePaneWiden,
         },
         picker::{
@@ -189,6 +190,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(FocusDown::DEF, |_| Ok(Box::new(FocusDown)));
     add(FocusNext::DEF, |_| Ok(Box::new(FocusNext)));
     add(FocusPrev::DEF, |_| Ok(Box::new(FocusPrev)));
+    add(MovePaneLeft::DEF, |_| Ok(Box::new(MovePaneLeft)));
+    add(MovePaneDown::DEF, |_| Ok(Box::new(MovePaneDown)));
+    add(MovePaneUp::DEF, |_| Ok(Box::new(MovePaneUp)));
+    add(MovePaneRight::DEF, |_| Ok(Box::new(MovePaneRight)));
+    add(MovePaneNext::DEF, |_| Ok(Box::new(MovePaneNext)));
+    add(MovePanePrev::DEF, |_| Ok(Box::new(MovePanePrev)));
     add(FocusPane::DEF, |params| {
         let raw = params
             .first()
@@ -1675,6 +1682,7 @@ mod tests {
         // + 2 PaletteHistoryPrev/Next.
         // + 1 SetTheme.
         // + 2 DetachPane, ReattachPane.
+        // + 6 MovePane{Left,Down,Up,Right,Next,Prev}.
         // + 1 TogglePaneWiden.
         // + 5 OpenCodeSearch + CodeSearch Next/Prev/Select/Close.
         // + 1 CodeSearchModeToggle.
@@ -1684,7 +1692,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 391);
+        assert_eq!(all().count(), 397);
     }
 
     #[test]

@@ -301,6 +301,46 @@ pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {
     }
 }
 
+/// Swap the focused pane's content with the split leaf in `direction`,
+/// following it there.
+///
+/// Only a focused split pane can move. A dock focus reports instead. A widened
+/// layout is collapsed first so the neighbour search reads the real geometry
+/// rather than the collapsed neighbours a widen hides.
+pub(super) fn move_pane_direction(stoat: &mut Stoat, direction: Direction) {
+    if !matches!(stoat.active_workspace().focus, FocusTarget::SplitPane) {
+        stoat.set_status("no pane to move");
+        return;
+    }
+
+    let ws = stoat.active_workspace_mut();
+    ws.panes.unwiden();
+    if !ws.panes.swap_view_direction(direction) {
+        stoat.set_status("no pane in that direction");
+    }
+}
+
+/// Swap the focused pane's content with the next (`forward`) or previous split
+/// leaf in traversal order, wrapping around and following it there. Reports
+/// when the workspace holds a single pane or the focus is a dock.
+pub(super) fn move_pane_rotate(stoat: &mut Stoat, forward: bool) {
+    if !matches!(stoat.active_workspace().focus, FocusTarget::SplitPane) {
+        stoat.set_status("no pane to move");
+        return;
+    }
+
+    let ws = stoat.active_workspace_mut();
+    ws.panes.unwiden();
+    let moved = if forward {
+        ws.panes.swap_view_next()
+    } else {
+        ws.panes.swap_view_prev()
+    };
+    if !moved {
+        stoat.set_status("no other pane");
+    }
+}
+
 /// Focus the pane at 1-based `index` in [`crate::pane::PaneTree::split_panes`]
 /// layout order, the same order pane-ID badges number panes.
 ///

@@ -120,6 +120,30 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.active_workspace_mut().panes.focus_prev();
             UpdateEffect::Redraw
         },
+        ActionKind::MovePaneLeft => {
+            pane::move_pane_direction(stoat, Direction::Left);
+            UpdateEffect::Redraw
+        },
+        ActionKind::MovePaneDown => {
+            pane::move_pane_direction(stoat, Direction::Down);
+            UpdateEffect::Redraw
+        },
+        ActionKind::MovePaneUp => {
+            pane::move_pane_direction(stoat, Direction::Up);
+            UpdateEffect::Redraw
+        },
+        ActionKind::MovePaneRight => {
+            pane::move_pane_direction(stoat, Direction::Right);
+            UpdateEffect::Redraw
+        },
+        ActionKind::MovePaneNext => {
+            pane::move_pane_rotate(stoat, true);
+            UpdateEffect::Redraw
+        },
+        ActionKind::MovePanePrev => {
+            pane::move_pane_rotate(stoat, false);
+            UpdateEffect::Redraw
+        },
         ActionKind::FocusPane => {
             let focus = action
                 .as_any()
@@ -1317,6 +1341,7 @@ mod tests {
     use super::*;
     use crate::{
         editor_state::ScrollGlide,
+        pane::{DockPanel, DockVisibility},
         test_harness::{editor, keys},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1326,9 +1351,9 @@ mod tests {
         ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
         FlipSelections, FocusPane, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd,
-        MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
-        Quit, QuitAll, RenameWorkspace, SaveSelection, SelectAll, SetTheme, SplitNewRight,
-        SplitRight,
+        MoveNextWordStart, MovePaneLeft, MovePaneNext, MovePaneRight, MovePrevWordEnd,
+        MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Quit, QuitAll, RenameWorkspace,
+        SaveSelection, SelectAll, SetTheme, SplitNewRight, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -1414,6 +1439,146 @@ mod tests {
         assert_eq!(stoat.active_workspace().panes.pane_count(), 2);
         assert_eq!(dispatch(&mut stoat, &Quit), UpdateEffect::Redraw);
         assert_eq!(stoat.active_workspace().panes.pane_count(), 1);
+    }
+
+    #[test]
+    fn move_pane_right_swaps_content_and_follows_focus() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+        let right = stoat.active_workspace().panes.focus();
+        let left = {
+            let ids = stoat.active_workspace().panes.split_pane_ids();
+            *ids.iter().find(|&&id| id != right).expect("a left pane")
+        };
+        stoat.active_workspace_mut().panes.set_focus(left);
+        let moved = editor::editor_id_in_pane(&stoat, left);
+
+        dispatch(&mut stoat, &MovePaneRight);
+
+        assert_eq!(
+            stoat.active_workspace().panes.focus(),
+            right,
+            "focus follows the content into the right slot"
+        );
+        assert_eq!(
+            editor::editor_id_in_pane(&stoat, right),
+            moved,
+            "the content moved with focus"
+        );
+        assert_eq!(
+            stoat.active_workspace().panes.pane_count(),
+            2,
+            "no pane was created or destroyed"
+        );
+    }
+
+    #[test]
+    fn move_pane_against_the_edge_reports_and_changes_nothing() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+        let right = stoat.active_workspace().panes.focus();
+        let editor = editor::editor_id_in_pane(&stoat, right);
+
+        dispatch(&mut stoat, &MovePaneRight);
+
+        assert_eq!(
+            stoat.active_workspace().panes.focus(),
+            right,
+            "focus unchanged"
+        );
+        assert_eq!(
+            editor::editor_id_in_pane(&stoat, right),
+            editor,
+            "content unchanged"
+        );
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("no pane in that direction")
+        );
+    }
+
+    #[test]
+    fn move_pane_next_wraps_from_the_last() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+        dispatch(&mut stoat, &SplitRight);
+
+        let ids = stoat.active_workspace().panes.split_pane_ids();
+        let (first, last) = (ids[0], *ids.last().expect("panes"));
+        stoat.active_workspace_mut().panes.set_focus(last);
+        let moved = editor::editor_id_in_pane(&stoat, last);
+
+        dispatch(&mut stoat, &MovePaneNext);
+
+        assert_eq!(
+            stoat.active_workspace().panes.focus(),
+            first,
+            "next from the last wraps to the first"
+        );
+        assert_eq!(
+            editor::editor_id_in_pane(&stoat, first),
+            moved,
+            "the content followed to the first slot"
+        );
+    }
+
+    #[test]
+    fn move_with_a_dock_focused_reports() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+
+        let ws = stoat.active_workspace_mut();
+        let dock = ws.docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Left,
+            visibility: DockVisibility::Open { width: 20 },
+            default_width: 20,
+            area: Default::default(),
+        });
+        ws.focus = FocusTarget::Dock(dock);
+
+        dispatch(&mut stoat, &MovePaneRight);
+
+        assert_eq!(stoat.pending_message.as_deref(), Some("no pane to move"));
+        assert!(
+            matches!(stoat.active_workspace().focus, FocusTarget::Dock(_)),
+            "focus stays on the dock"
+        );
+    }
+
+    #[test]
+    fn move_from_a_widened_pane_unwidens_and_still_moves() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+        let right = stoat.active_workspace().panes.focus();
+        let left = {
+            let ids = stoat.active_workspace().panes.split_pane_ids();
+            *ids.iter().find(|&&id| id != right).expect("a left pane")
+        };
+
+        assert!(
+            stoat.active_workspace_mut().panes.widen(right),
+            "the focused pane widens"
+        );
+        let moved = editor::editor_id_in_pane(&stoat, right);
+
+        dispatch(&mut stoat, &MovePaneLeft);
+
+        assert_eq!(
+            stoat.active_workspace().panes.widened(),
+            None,
+            "the move collapsed the widen first"
+        );
+        assert_eq!(
+            stoat.active_workspace().panes.focus(),
+            left,
+            "focus followed into the left slot"
+        );
+        assert_eq!(
+            editor::editor_id_in_pane(&stoat, left),
+            moved,
+            "the content moved despite the widen"
+        );
     }
 
     #[test]

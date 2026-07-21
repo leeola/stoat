@@ -76,6 +76,7 @@ pub use defs::{
     palette::OpenCommandPalette,
     pane::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPane, FocusPrev, FocusRight, FocusUp,
+        MovePaneDown, MovePaneLeft, MovePaneNext, MovePanePrev, MovePaneRight, MovePaneUp,
         SplitDown, SplitNewDown, SplitNewRight, SplitRight, ToggleDockLeft, ToggleDockRight,
     },
     prompt::{

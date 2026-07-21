@@ -560,8 +560,6 @@ impl PaneTree {
     /// places while each slot keeps its geometry and pane number, so the moved
     /// pane lands in the neighbour's position rather than re-parenting the split
     /// tree. Focus follows the content so repeated moves push the same pane.
-    // Consumed by the MovePane{Left,Down,Up,Right} action handlers.
-    #[allow(dead_code)]
     pub(crate) fn swap_view_direction(&mut self, direction: Direction) -> bool {
         let anchor = self.focus_anchor();
         let anchor_node = self.node_for_pane(anchor);
@@ -579,8 +577,6 @@ impl PaneTree {
     /// Swap the focused pane's content with the next split leaf in traversal
     /// order, wrapping past the last, and follow it there. Returns false when
     /// there is no other split pane.
-    // Consumed by the MovePaneNext action handler.
-    #[allow(dead_code)]
     pub(crate) fn swap_view_next(&mut self) -> bool {
         let anchor = self.focus_anchor();
         let target = self.next_split_pane(anchor);
@@ -590,8 +586,6 @@ impl PaneTree {
     /// Swap the focused pane's content with the previous split leaf in
     /// traversal order, wrapping past the first, and follow it there. Returns
     /// false when there is no other split pane.
-    // Consumed by the MovePanePrev action handler.
-    #[allow(dead_code)]
     pub(crate) fn swap_view_prev(&mut self) -> bool {
         let anchor = self.focus_anchor();
         let target = self.prev_split_pane(anchor);

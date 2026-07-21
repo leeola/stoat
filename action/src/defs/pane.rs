@@ -89,6 +89,66 @@ define_action!(
     "Move focus to the previous pane in traversal order, wrapping around."
 );
 define_action!(
+    MovePaneLeftDef,
+    MovePaneLeft,
+    "MovePaneLeft",
+    ActionKind::MovePaneLeft,
+    "move the pane left",
+    "Swap the focused pane's content with the pane to its left, following it \
+     there. Pane numbers and layout stay put; only the content moves. Reports \
+     when there is no pane in that direction."
+);
+define_action!(
+    MovePaneDownDef,
+    MovePaneDown,
+    "MovePaneDown",
+    ActionKind::MovePaneDown,
+    "move the pane down",
+    "Swap the focused pane's content with the pane below it, following it \
+     there. Pane numbers and layout stay put; only the content moves. Reports \
+     when there is no pane in that direction."
+);
+define_action!(
+    MovePaneUpDef,
+    MovePaneUp,
+    "MovePaneUp",
+    ActionKind::MovePaneUp,
+    "move the pane up",
+    "Swap the focused pane's content with the pane above it, following it \
+     there. Pane numbers and layout stay put; only the content moves. Reports \
+     when there is no pane in that direction."
+);
+define_action!(
+    MovePaneRightDef,
+    MovePaneRight,
+    "MovePaneRight",
+    ActionKind::MovePaneRight,
+    "move the pane right",
+    "Swap the focused pane's content with the pane to its right, following it \
+     there. Pane numbers and layout stay put; only the content moves. Reports \
+     when there is no pane in that direction."
+);
+define_action!(
+    MovePaneNextDef,
+    MovePaneNext,
+    "MovePaneNext",
+    ActionKind::MovePaneNext,
+    "swap the pane with the next one",
+    "Swap the focused pane's content with the next pane in traversal order, \
+     wrapping around, and follow it there. Pane numbers and layout stay put; \
+     only the content moves. Reports when there is no other pane."
+);
+define_action!(
+    MovePanePrevDef,
+    MovePanePrev,
+    "MovePanePrev",
+    ActionKind::MovePanePrev,
+    "swap the pane with the previous one",
+    "Swap the focused pane's content with the previous pane in traversal order, \
+     wrapping around, and follow it there. Pane numbers and layout stay put; \
+     only the content moves. Reports when there is no other pane."
+);
+define_action!(
     DetachPaneDef,
     DetachPane,
     "DetachPane",
