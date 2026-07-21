@@ -101,6 +101,130 @@ const SPINNER_FRAME_SECS: f32 = 0.1;
 /// [`SPINNER_FRAME_SECS`] window.
 pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Everything a parsed config resolves into, rebuilt wholesale at startup and
+/// again whenever the config is reloaded.
+///
+/// Grouping them keeps the two paths honest with each other. A field added here
+/// is one the reload must swap, which the destructuring at both call sites
+/// forces the author to confront.
+struct ConfigArtifacts {
+    keymap: Keymap,
+    settings: Settings,
+    theme: crate::theme::Theme,
+    theme_blocks: Vec<Spanned<ThemeBlock>>,
+    syntax_styles: SyntaxStyles,
+    minimap_class_table: crate::minimap::ClassTable,
+}
+
+/// Resolve `config` into the artifacts the editor runs on.
+///
+/// `embedded` is the built-in config when `config` came from the user, so its
+/// theme blocks can sit underneath as inheritable parents. It is [`None`] when
+/// `config` *is* the embedded default, which is also how the theme precedence
+/// below tells a user-chosen theme from the shipped one.
+///
+/// `imported` are the already-converted VSCode theme blocks, slotted between the
+/// embedded and user blocks so a user config's own `theme` block still wins.
+///
+/// `env_theme` names the theme inherited from the environment. It applies only
+/// when neither `cli_settings` nor a user config picks one. A reload passes
+/// [`None`], since the environment is read once at startup.
+fn build_config_artifacts(
+    config: Option<stoat_config::Config>,
+    embedded: Option<stoat_config::Config>,
+    imported: &[Spanned<ThemeBlock>],
+    cli_settings: Settings,
+    env_theme: Option<String>,
+) -> ConfigArtifacts {
+    let settings = {
+        let cli_theme_set = cli_settings.theme.is_some();
+        let from_config = config
+            .as_ref()
+            .map(Settings::from_config)
+            .unwrap_or_default();
+        // A clean user config replaces the embedded one wholesale, so the
+        // config's own theme is an explicit choice only when it came from the
+        // user source. The embedded default sets `theme = default_dark`
+        // unconditionally, which an inherited theme is meant to beat.
+        let user_theme_set = embedded.is_some() && from_config.theme.is_some();
+
+        let mut settings = from_config.merge(cli_settings);
+        if !cli_theme_set
+            && !user_theme_set
+            && let Some(name) = env_theme
+        {
+            settings.theme = Some(name);
+        }
+
+        settings
+    };
+
+    // The whole pool is retained so SetTheme can re-resolve any theme at
+    // runtime, and so an `inherits PARENT` sees every candidate parent.
+    let theme_blocks: Vec<Spanned<ThemeBlock>> = {
+        let mut blocks = Vec::new();
+        if let Some(base) = embedded.as_ref() {
+            blocks.extend(base.themes.iter().cloned());
+        }
+        blocks.extend(imported.iter().cloned());
+        if let Some(c) = config.as_ref() {
+            blocks.extend(c.themes.iter().cloned());
+        }
+        blocks
+    };
+
+    let theme = {
+        let name = settings.theme.as_deref().unwrap_or("default_dark");
+        if theme_blocks.is_empty() {
+            crate::theme::Theme::empty()
+        } else {
+            let all: Vec<&Spanned<ThemeBlock>> = theme_blocks.iter().collect();
+            crate::theme::Theme::from_blocks(name, &all).unwrap_or_else(|e| {
+                tracing::error!("theme '{name}' load failed: {e}");
+                crate::theme::Theme::empty()
+            })
+        }
+    };
+
+    let keymap = {
+        let (keymap, warnings) = match config {
+            Some(c) => Keymap::compile_with_warnings(&c),
+            None => Keymap::compile_with_warnings(&stoat_config::Config {
+                blocks: vec![],
+                themes: vec![],
+            }),
+        };
+        for warning in warnings {
+            tracing::warn!(target: "stoat::keymap", "{warning}");
+        }
+        keymap
+    };
+
+    let syntax_styles = SyntaxStyles::from_theme(&theme);
+    let minimap_class_table = crate::minimap::ClassTable::from_theme(&theme);
+
+    ConfigArtifacts {
+        keymap,
+        settings,
+        theme,
+        theme_blocks,
+        syntax_styles,
+        minimap_class_table,
+    }
+}
+
+/// Point every registered language's highlight map at `styles`' theme keys.
+///
+/// Must run again after a theme swap, since the keys a capture name maps onto
+/// are derived from the active theme.
+fn install_highlight_maps(registry: &LanguageRegistry, styles: &SyntaxStyles) {
+    let theme_keys = styles.theme_keys();
+    for lang in registry.languages() {
+        let map = stoat_language::HighlightMap::new(lang.highlight_capture_names(), theme_keys);
+        lang.set_highlight_map(map);
+    }
+}
+
 /// Index into [`SPINNER_FRAMES`] for a spinner that has animated for `clock`
 /// seconds, wrapping once per full cycle.
 pub(crate) fn spinner_phase(clock: f32) -> u8 {
@@ -230,11 +354,19 @@ pub struct Stoat {
     pub executor: Executor,
     pub(crate) keymap: Keymap,
     pub settings: Settings,
+    /// The CLI and environment overrides that layered over the config at
+    /// startup, retained so a mid-session config reload can re-apply them. A
+    /// flag passed on the command line outranks the file both times.
+    pub(crate) cli_settings: Settings,
     pub theme: Arc<crate::theme::Theme>,
     /// The combined embedded-plus-user `theme` blocks the active theme was built
     /// from, retained so [`ActionKind::SetTheme`] can re-resolve a different
     /// theme at runtime without reparsing the config.
     pub(crate) theme_blocks: Vec<Spanned<ThemeBlock>>,
+    /// The VSCode themes converted at startup, both built-in and from the user's
+    /// theme directory. Retained so a config reload rebuilds the same pool
+    /// without re-reading or re-parsing the theme files.
+    pub(crate) imported_theme_blocks: Vec<Spanned<ThemeBlock>>,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
@@ -1172,58 +1304,22 @@ impl Stoat {
             None => (Self::parse_default_keymap(), None, None),
         };
 
-        // A clean user config replaces the embedded one wholesale, so the
-        // config's own `theme` is an explicit user choice only when it came from
-        // the user source. The embedded default sets `theme = default_dark`
-        // unconditionally, which STOAT_THEME is meant to beat.
-        let settings = {
-            let cli_theme_set = cli_settings.theme.is_some();
-            let from_config = config
-                .as_ref()
-                .map(Settings::from_config)
-                .unwrap_or_default();
-            let user_theme_set = theme_base.is_some() && from_config.theme.is_some();
-
-            let mut settings = from_config.merge(cli_settings);
-            if !cli_theme_set
-                && !user_theme_set
-                && let Some(name) = env_theme
-            {
-                settings.theme = Some(name);
-            }
-
-            settings
-        };
-
-        let highlight_retention = settings
-            .highlight_retention
-            .unwrap_or(DEFAULT_HIGHLIGHT_RETENTION);
-        tracing::info!(
-            target: "stoat::app",
-            highlight_retention,
-            configured = settings.highlight_retention.is_some(),
-            "highlight retention: caching syntax trees and token sets for hidden buffers"
-        );
-
-        // The embedded theme blocks sit under the user's so a clean user config
-        // can override or inherit a built-in theme without restating it.
-        // theme_base is None when config already is the embedded default. The
-        // whole pool is retained on Stoat so SetTheme can re-resolve any theme
-        // at runtime, and so an `inherits PARENT` sees every candidate parent.
-        let theme_blocks: Vec<Spanned<ThemeBlock>> = {
-            let mut blocks = Vec::new();
-            if let Some(base) = theme_base.as_ref() {
-                blocks.extend(base.themes.iter().cloned());
-            }
+        // Converting the VSCode themes once and retaining the blocks lets a
+        // mid-session reload rebuild the identical pool without re-reading the
+        // theme directory, and keeps the parse errors on the startup path where
+        // the transient status lives.
+        let imported_theme_blocks = {
             let builtins = [
                 ("one-dark", THEME_ONE_DARK),
                 ("gruvbox-dark", THEME_GRUVBOX_DARK),
             ];
-            let imports = builtins
+            let sources = builtins
                 .into_iter()
                 .map(|(stem, source)| (stem.to_string(), source.to_string()))
                 .chain(user_themes);
-            for (stem, source) in imports {
+
+            let mut blocks = Vec::new();
+            for (stem, source) in sources {
                 match vscode_theme::parse(&source) {
                     Ok(theme) => blocks.push(crate::theme_vscode::theme_block(&stem, &theme)),
                     Err(error) => {
@@ -1236,47 +1332,36 @@ impl Stoat {
                     },
                 }
             }
-            if let Some(c) = config.as_ref() {
-                blocks.extend(c.themes.iter().cloned());
-            }
             blocks
         };
 
-        let theme = {
-            let name = settings.theme.as_deref().unwrap_or("default_dark");
-            if theme_blocks.is_empty() {
-                crate::theme::Theme::empty()
-            } else {
-                let all: Vec<&Spanned<ThemeBlock>> = theme_blocks.iter().collect();
-                crate::theme::Theme::from_blocks(name, &all).unwrap_or_else(|e| {
-                    tracing::error!("theme '{name}' load failed: {e}");
-                    crate::theme::Theme::empty()
-                })
-            }
-        };
+        let ConfigArtifacts {
+            keymap,
+            settings,
+            theme,
+            theme_blocks,
+            syntax_styles,
+            minimap_class_table,
+        } = build_config_artifacts(
+            config,
+            theme_base,
+            &imported_theme_blocks,
+            cli_settings.clone(),
+            env_theme,
+        );
 
-        let keymap = {
-            let (keymap, warnings) = match config {
-                Some(c) => Keymap::compile_with_warnings(&c),
-                None => Keymap::compile_with_warnings(&stoat_config::Config {
-                    blocks: vec![],
-                    themes: vec![],
-                }),
-            };
-            for warning in warnings {
-                tracing::warn!(target: "stoat::keymap", "{warning}");
-            }
-            keymap
-        };
+        let highlight_retention = settings
+            .highlight_retention
+            .unwrap_or(DEFAULT_HIGHLIGHT_RETENTION);
+        tracing::info!(
+            target: "stoat::app",
+            highlight_retention,
+            configured = settings.highlight_retention.is_some(),
+            "highlight retention: caching syntax trees and token sets for hidden buffers"
+        );
 
-        let syntax_styles = SyntaxStyles::from_theme(&theme);
-        let minimap_class_table = crate::minimap::ClassTable::from_theme(&theme);
         let language_registry = Arc::new(LanguageRegistry::standard());
-        let theme_keys = syntax_styles.theme_keys();
-        for lang in language_registry.languages() {
-            let map = stoat_language::HighlightMap::new(lang.highlight_capture_names(), theme_keys);
-            lang.set_highlight_map(map);
-        }
+        install_highlight_maps(&language_registry, &syntax_styles);
 
         let mut workspaces = SlotMap::with_key();
         let workspace = Workspace::new(initial_git_root.clone(), &executor);
@@ -1304,8 +1389,10 @@ impl Stoat {
             executor,
             keymap,
             settings,
+            cli_settings,
             theme: Arc::new(theme),
             theme_blocks,
+            imported_theme_blocks,
             command_palette: None,
             help: None,
             file_finder: None,
@@ -1517,6 +1604,57 @@ impl Stoat {
             );
         }
         config
+    }
+
+    /// Re-resolve the user config from `source` and swap the running keymap,
+    /// settings, theme, and theme-derived tables.
+    ///
+    /// A source that fails to parse leaves everything as it was and reports the
+    /// failure. Falling back to the built-in defaults is right at startup, where
+    /// there is nothing to lose, but mid-session it would tear down a working
+    /// setup over a half-typed edit.
+    ///
+    /// CLI overrides are re-applied on top, so a flag passed at launch keeps
+    /// outranking the file. Runtime state (open buffers, the current mode, user
+    /// variables) is untouched. Settings read per use follow the new values
+    /// immediately, while those consumed once at launch (mouse capture, the
+    /// terminal shell, direnv) wait for the next start.
+    pub(crate) fn reload_user_config(&mut self, source: &str) {
+        let (config, errors) = stoat_config::parse(source);
+        if !errors.is_empty() {
+            tracing::error!(
+                "config reload parse failed; keeping the current config: {}",
+                stoat_config::format_errors(source, &errors)
+            );
+            self.set_status("config parse failed; keeping the current config");
+            return;
+        }
+
+        let ConfigArtifacts {
+            keymap,
+            settings,
+            theme,
+            theme_blocks,
+            syntax_styles,
+            minimap_class_table,
+        } = build_config_artifacts(
+            config,
+            Self::parse_default_keymap(),
+            &self.imported_theme_blocks,
+            self.cli_settings.clone(),
+            None,
+        );
+
+        self.keymap = keymap;
+        self.settings = settings;
+        self.theme = Arc::new(theme);
+        self.theme_blocks = theme_blocks;
+        self.syntax_styles = syntax_styles;
+        self.minimap_class_table = minimap_class_table;
+
+        install_highlight_maps(&self.language_registry, &self.syntax_styles);
+        self.minimap_content.clear();
+        self.set_status("config reloaded");
     }
 
     /// Look up a previously-cached diff by content hashes plus

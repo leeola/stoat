@@ -306,6 +306,12 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
             .set_disk_mtime(buffer_id, mtime);
     }
     stoat.persist_saved_shard(buffer_id, path, &text);
+    maybe_apply_config_save(
+        stoat,
+        path,
+        &text,
+        crate::paths::user_config_path().as_deref(),
+    );
     let Some(path_str) = path.to_str() else {
         return true;
     };
@@ -328,6 +334,26 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
             .detach();
     }
     true
+}
+
+/// Re-apply the config just written to `path`, when it is stoat's own.
+///
+/// `text` is the bytes that were written, parsed directly rather than read back
+/// from disk. Called from the single write path both a direct save and a
+/// format-on-save deferred write funnel through, so either triggers the reload.
+///
+/// `config_path` is where stoat's config lives, passed in rather than resolved
+/// here so the decision stays independent of the environment.
+///
+/// Does nothing when `config.auto_reload` is off, or when `path` is any other
+/// file.
+fn maybe_apply_config_save(stoat: &mut Stoat, path: &Path, text: &str, config_path: Option<&Path>) {
+    if !stoat.settings.config_auto_reload.unwrap_or(true) {
+        return;
+    }
+    if config_path == Some(path) {
+        stoat.reload_user_config(text);
+    }
 }
 
 /// True when the file at `path` has an on-disk mtime newer than the baseline
@@ -1813,6 +1839,104 @@ mod tests {
             h.stoat.settings.config_auto_reload, before,
             "a bad argument leaves the setting untouched"
         );
+    }
+
+    /// A config naming a theme, setting format_on_save, and binding a key that
+    /// the default keymap leaves free in normal mode.
+    const RELOADED_CONFIG: &str = "theme swapped { ui.text.fg = \"#abcdef\"; }\n\
+         on init { theme = swapped; format_on_save = true; }\n\
+         on key { mode == normal { F2 -> SaveBuffer(); } }\n";
+
+    fn binds_f2(stoat: &Stoat) -> bool {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let state = crate::keymap_state::StoatKeymapState::from_stoat(stoat);
+        stoat
+            .keymap
+            .lookup(&state, &KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            .is_some()
+    }
+
+    #[test]
+    fn config_save_swaps_the_keymap_settings_and_theme() {
+        let mut h = Stoat::test();
+        let config = PathBuf::from("/cfg/config.stcfg");
+        assert!(!binds_f2(&h.stoat), "F2 is free in the default keymap");
+
+        super::maybe_apply_config_save(
+            &mut h.stoat,
+            &config,
+            RELOADED_CONFIG,
+            Some(config.as_path()),
+        );
+
+        assert_eq!(h.stoat.settings.format_on_save, Some(true), "settings swap");
+        assert_eq!(h.stoat.theme.name, "swapped", "theme swaps");
+        assert!(binds_f2(&h.stoat), "the new binding resolves");
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("config reloaded"));
+    }
+
+    #[test]
+    fn config_save_with_a_syntax_error_keeps_the_running_config() {
+        let mut h = Stoat::test();
+        let config = PathBuf::from("/cfg/config.stcfg");
+        let theme_before = h.stoat.theme.name.clone();
+
+        super::maybe_apply_config_save(
+            &mut h.stoat,
+            &config,
+            "on init { format_on_save = ",
+            Some(config.as_path()),
+        );
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("config parse failed; keeping the current config")
+        );
+        assert_eq!(h.stoat.theme.name, theme_before, "the theme is untouched");
+        assert!(!binds_f2(&h.stoat), "no keymap was swapped in");
+    }
+
+    #[test]
+    fn config_save_does_not_reload_when_auto_reload_is_off() {
+        let mut h = Stoat::test();
+        let config = PathBuf::from("/cfg/config.stcfg");
+        h.stoat.settings.config_auto_reload = Some(false);
+        let before = h.stoat.settings.format_on_save;
+
+        super::maybe_apply_config_save(
+            &mut h.stoat,
+            &config,
+            RELOADED_CONFIG,
+            Some(config.as_path()),
+        );
+
+        assert_eq!(
+            h.stoat.settings.format_on_save, before,
+            "settings untouched"
+        );
+        assert!(!binds_f2(&h.stoat), "keymap untouched");
+        assert_eq!(h.stoat.pending_message, None);
+    }
+
+    #[test]
+    fn saving_a_file_other_than_the_config_does_not_reload() {
+        let mut h = Stoat::test();
+        let config = PathBuf::from("/cfg/config.stcfg");
+        let before = h.stoat.settings.format_on_save;
+
+        super::maybe_apply_config_save(
+            &mut h.stoat,
+            &PathBuf::from("/src/main.rs"),
+            RELOADED_CONFIG,
+            Some(config.as_path()),
+        );
+
+        assert_eq!(
+            h.stoat.settings.format_on_save, before,
+            "settings untouched"
+        );
+        assert!(!binds_f2(&h.stoat), "keymap untouched");
+        assert_eq!(h.stoat.pending_message, None);
     }
 
     #[test]
