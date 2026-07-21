@@ -56,7 +56,17 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    let pixel = (origin + corner * size) * globals.cell_size;
+    // Snap both edges to whole pixels so a bar shares exact integer boundaries
+    // with the cell grid beneath it, which bg.wgsl snaps the same way. Cell size
+    // is fractional at most font sizes, so an unsnapped bar drifts up to a pixel
+    // off its row. Each edge is floored a pixel apart so a sub-pixel bar (the
+    // hairline separator is 1/16 of a cell) never rounds away to nothing.
+    let min_px = round(origin * globals.cell_size);
+    let max_px = max(
+        round((origin + size) * globals.cell_size),
+        min_px + vec2<f32>(1.0, 1.0)
+    );
+    let pixel = min_px + corner * (max_px - min_px);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
