@@ -24,7 +24,7 @@ use crate::{
     input_history::InputHistory,
     pane::{DockId, DockPanel, FocusTarget, PaneId, PaneTree, View},
     rebase::RebaseState,
-    workspace::{Workspace, WorkspaceUid},
+    workspace::{Tab, Workspace, WorkspaceUid},
 };
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
@@ -82,6 +82,14 @@ pub(crate) struct WorkspaceStateV1 {
     /// survives a restart. Empty on legacy files that predate the field.
     #[serde(default)]
     pub palette_history: Vec<String>,
+    /// One entry per tab in display order, mirroring the in-memory shape: the
+    /// entry at [`Self::active_tab`] is `None` because that tree is saved in
+    /// [`Self::panes`]. Empty on legacy files, which restore as a single tab.
+    #[serde(default)]
+    pub tabs: Vec<Option<PaneTree>>,
+    /// Index into [`Self::tabs`] of the tab whose tree is in [`Self::panes`].
+    #[serde(default)]
+    pub active_tab: usize,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -235,6 +243,12 @@ impl Workspace {
             name: self.name.clone(),
             last_finder_scope: self.last_finder_scope.clone(),
             palette_history: self.palette_history.entries().to_vec(),
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| tab.parked.as_ref().map(clone_pane_tree))
+                .collect(),
+            active_tab: self.active_tab,
         }
     }
 
@@ -326,15 +340,15 @@ impl Workspace {
         }
 
         let mut panes = state.panes;
-        // Aux windows do not survive a restart, so reattach every detached pane
-        // as a split before the remap and sweep passes. Those passes walk the
-        // split tree, so a pane left windowed would be skipped and orphaned in
-        // the slotmap.
-        for (id, _window) in panes.windowed_panes() {
-            panes.attach(id);
+        rehydrate_tree(&mut panes, &editor_id_map);
+
+        // A parked tree carries the same stale editor ids and detached panes as
+        // the active one, so it needs the identical treatment. Skipping it would
+        // leave the tab pointing at editors that no longer exist.
+        let mut parked: Vec<Option<PaneTree>> = state.tabs;
+        for tree in parked.iter_mut().flatten() {
+            rehydrate_tree(tree, &editor_id_map);
         }
-        remap_editor_views_in_panes(&mut panes, &editor_id_map);
-        sweep_stale_views_in_panes(&mut panes);
 
         let mut docks = state.docks;
         remap_editor_views_in_docks(&mut docks, &editor_id_map);
@@ -362,7 +376,41 @@ impl Workspace {
         };
         self.last_finder_scope = state.last_finder_scope;
         self.palette_history = InputHistory::from_entries(state.palette_history);
+
+        // Exactly the active slot may be empty, since that tree is in `panes`.
+        let coherent = parked.len() > 1
+            && state.active_tab < parked.len()
+            && parked
+                .iter()
+                .enumerate()
+                .all(|(i, slot)| (i == state.active_tab) == slot.is_none());
+        if coherent {
+            self.tabs = parked.into_iter().map(|parked| Tab { parked }).collect();
+            self.active_tab = state.active_tab;
+        } else {
+            // The file's tab shape disagrees with itself, and its intent is not
+            // recoverable. One tab holding the restored active tree is always a
+            // coherent workspace, and is what a legacy file means anyway.
+            self.tabs = vec![Tab { parked: None }];
+            self.active_tab = 0;
+        }
+        // Which tab to toggle back to is session state, not layout.
+        self.last_tab = None;
     }
+}
+
+/// Bring a restored pane tree back into a usable state against the freshly
+/// built editor slotmap.
+///
+/// Aux windows do not survive a restart, so every detached pane reattaches as a
+/// split first. The remap and sweep passes walk the split tree, so a pane left
+/// windowed would be skipped and orphaned in the slotmap.
+fn rehydrate_tree(tree: &mut PaneTree, editor_id_map: &HashMap<EditorId, EditorId>) {
+    for (id, _window) in tree.windowed_panes() {
+        tree.attach(id);
+    }
+    remap_editor_views_in_panes(tree, editor_id_map);
+    sweep_stale_views_in_panes(tree);
 }
 
 /// Read and parse a persisted workspace state, replaying every buffer's op log
@@ -464,10 +512,150 @@ mod tests {
         Arc::new(TestScheduler::new()).executor()
     }
 
+    /// [`WorkspaceStateV1`] as it stood before tabs, for writing a file that
+    /// genuinely lacks the fields rather than one edited to look like it does.
+    #[derive(Serialize)]
+    struct LegacyState {
+        uid: WorkspaceUid,
+        git_root: PathBuf,
+        panes: PaneTree,
+        docks: SlotMap<DockId, DockPanel>,
+        focus: FocusTargetSnap,
+        editors: Vec<(EditorId, EditorStateSnapshot)>,
+        buffers: BufferRegistrySnapshot,
+        rebase: Option<RebaseState>,
+        rebase_active: Option<ActiveRebaseSnap>,
+        name: String,
+        last_finder_scope: Option<String>,
+        palette_history: Vec<String>,
+    }
+
+    impl From<WorkspaceStateV1> for LegacyState {
+        fn from(s: WorkspaceStateV1) -> Self {
+            Self {
+                uid: s.uid,
+                git_root: s.git_root,
+                panes: s.panes,
+                docks: s.docks,
+                focus: s.focus,
+                editors: s.editors,
+                buffers: s.buffers,
+                rebase: s.rebase,
+                rebase_active: s.rebase_active,
+                name: s.name,
+                last_finder_scope: s.last_finder_scope,
+                palette_history: s.palette_history,
+            }
+        }
+    }
+
     fn new_laid_out_workspace(git_root: PathBuf, exec: &Executor) -> Workspace {
         let mut ws = Workspace::new(git_root, exec);
         ws.layout(ratatui::layout::Rect::new(0, 0, 120, 40));
         ws
+    }
+
+    /// The editor a parked tab shows, or `None` when that tab's focused pane
+    /// shows something else.
+    fn parked_focus_editor(ws: &Workspace, tab: usize) -> Option<EditorId> {
+        let tree = ws.tabs[tab].parked.as_ref()?;
+        match tree.pane(tree.focus()).view {
+            View::Editor(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Asserting the tab count alone would pass against a restore that dropped
+    /// the remap, so this follows the parked tab's view through to an editor
+    /// that must actually exist in the rebuilt slotmap, holding the buffer it
+    /// had before the save.
+    #[test]
+    fn round_trip_restores_a_parked_tab_with_remapped_editors() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/tabs");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+
+        // Restoring inserts editors into a fresh slotmap, which hands back the
+        // very same keys unless the original recycled a slot. Freeing one first
+        // makes `editor_a` land in it at a bumped version, so its saved id
+        // cannot survive the restore unchanged and a tree that skipped the
+        // remap would point at nothing rather than working by luck.
+        let (id_hole, buf_hole) = ws.buffers.open(&ws_dir.join("hole.txt"), "hole\n");
+        let hole = ws
+            .editors
+            .insert(EditorState::new(id_hole, buf_hole, exec.clone()));
+        ws.editors.remove(hole);
+
+        let (id_a, buf_a) = ws.buffers.open(&ws_dir.join("a.txt"), "alpha\n");
+        let editor_a = ws
+            .editors
+            .insert(EditorState::new(id_a, buf_a, exec.clone()));
+
+        let root = ws.panes.focus();
+        ws.panes.pane_mut(root).view = View::Editor(editor_a);
+
+        // A second tab, leaving the first parked behind it.
+        ws.new_tab(&exec);
+        assert_eq!(ws.active_tab, 1);
+        assert_eq!(parked_focus_editor(&ws, 0), Some(editor_a));
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        assert_eq!(fresh.tabs.len(), 2, "both tabs survive");
+        assert_eq!(fresh.active_tab, 1);
+        assert!(
+            fresh.tabs[1].parked.is_none(),
+            "the active tab's tree is in ws.panes, not parked"
+        );
+        assert_eq!(fresh.last_tab, None, "the toggle target does not persist");
+
+        let restored = parked_focus_editor(&fresh, 0).expect("the parked tab shows an editor");
+        assert_ne!(
+            restored, editor_a,
+            "the gap did its job: a stale id would not have resolved by luck"
+        );
+        let state = fresh
+            .editors
+            .get(restored)
+            .expect("the parked tab's editor id resolves after the remap");
+        assert_eq!(
+            fresh.buffers.path_for(state.buffer_id),
+            Some(ws_dir.join("a.txt").as_path()),
+            "and still holds the buffer it was saved with"
+        );
+    }
+
+    /// A pre-tabs stoat wrote neither field, so both have to default rather
+    /// than fail the whole parse and lose the session.
+    #[test]
+    fn a_state_file_without_tab_fields_restores_one_tab() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/legacy");
+        let exec = executor();
+
+        let ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let state_path = ws_dir.join("state.ron");
+
+        // Serialized through a struct that never had the fields, which is a
+        // truer stand-in for an old file than editing a current one.
+        let body = ron::ser::to_string(&LegacyState::from(ws.to_state())).unwrap();
+        assert!(!body.contains("active_tab"), "no tab fields on the wire");
+        fake.write(&state_path, body.as_bytes()).unwrap();
+
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
+        fresh
+            .restore_state(&state_path, &fake, &exec)
+            .expect("a legacy file still parses");
+
+        assert_eq!(fresh.tabs.len(), 1);
+        assert_eq!(fresh.active_tab, 0);
+        assert!(fresh.tabs[0].parked.is_none());
     }
 
     #[test]
