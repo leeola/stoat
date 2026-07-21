@@ -702,6 +702,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenSymbolPicker => lsp::open_symbol_picker(stoat),
         ActionKind::SymbolFinderSelectPrev => lsp::symbol_finder_move_selection(stoat, -1),
         ActionKind::SymbolFinderSelectNext => lsp::symbol_finder_move_selection(stoat, 1),
+        ActionKind::SymbolFinderComplete => lsp::symbol_finder_complete(stoat),
         ActionKind::SymbolFinderPageUp => lsp::symbol_finder_page(stoat, -1),
         ActionKind::SymbolFinderPageDown => lsp::symbol_finder_page(stoat, 1),
         ActionKind::OpenWorkspaceSymbolPicker => lsp::open_workspace_symbol_picker(stoat),

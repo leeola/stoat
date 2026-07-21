@@ -72,8 +72,8 @@ use crate::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
             GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
             OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
-            OpenWorkspaceSymbolPicker, RenameSymbol, SymbolFinderPageDown, SymbolFinderPageUp,
-            SymbolFinderSelectNext, SymbolFinderSelectPrev,
+            OpenWorkspaceSymbolPicker, RenameSymbol, SymbolFinderComplete, SymbolFinderPageDown,
+            SymbolFinderPageUp, SymbolFinderSelectNext, SymbolFinderSelectPrev,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -279,6 +279,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(SymbolFinderSelectNext::DEF, |_| {
         Ok(Box::new(SymbolFinderSelectNext))
+    });
+    add(SymbolFinderComplete::DEF, |_| {
+        Ok(Box::new(SymbolFinderComplete))
     });
     add(SymbolFinderPageUp::DEF, |_| {
         Ok(Box::new(SymbolFinderPageUp))
@@ -1376,6 +1379,7 @@ mod tests {
         // + 1 RenameSymbol.
         // + 1 OpenSymbolPicker.
         // + 4 SymbolFinder SelectPrev/Next/PageUp/PageDown.
+        // + 1 SymbolFinderComplete.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
         // + 1 Format.
@@ -1447,7 +1451,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 378);
+        assert_eq!(all().count(), 379);
     }
 
     #[test]

@@ -4041,6 +4041,45 @@ fn sync_symbol_finder_preview(stoat: &mut Stoat) {
     }
 }
 
+/// Complete the highlighted symbol's title into the finder input, replacing
+/// what was typed, and leave that symbol selected.
+///
+/// No-op when the finder is closed or its list is empty. Under the workspace
+/// scope the completed query re-issues `workspace/symbol` through the per-frame
+/// [`sync_symbol_finder`] path, so this only touches local state.
+///
+/// Re-ranking against the completed title moves it to the top of the list while
+/// the selection cursor keeps its old index, so the cursor is repositioned onto
+/// the completed entry afterwards. It is tracked by its index into `entries`
+/// rather than by assuming the exact match ranks first, since symbol titles are
+/// not unique and equal scores tie-break on title alone.
+pub(crate) fn symbol_finder_complete(stoat: &mut Stoat) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+
+    let Some((entry_idx, title)) = stoat.symbol_finder.as_ref().and_then(|finder| {
+        let entry_idx = *finder.filtered.get(finder.selected)?;
+        let title = finder.entries.get(entry_idx)?.title.clone();
+        Some((entry_idx, title))
+    }) else {
+        return UpdateEffect::None;
+    };
+
+    {
+        let ws = &mut stoat.workspaces[active_idx];
+        if let Some(finder) = stoat.symbol_finder.as_ref() {
+            finder.input.replace_text(ws, &title);
+        }
+    }
+
+    if let Some(finder) = stoat.symbol_finder.as_mut() {
+        finder.refilter(&title);
+        if let Some(row) = finder.filtered.iter().position(|&i| i == entry_idx) {
+            finder.selected = row;
+        }
+    }
+    UpdateEffect::Redraw
+}
+
 /// Move the symbol finder selection by `delta`, saturating at list bounds.
 pub(crate) fn symbol_finder_move_selection(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     match stoat.symbol_finder.as_mut() {
@@ -8298,6 +8337,99 @@ mod tests {
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             ..Default::default()
         });
+    }
+
+    /// The symbols are ordered so completing reshuffles the list rather than
+    /// narrowing it to one row. An empty query lists them in document order, so
+    /// `aaa` sits second. Completing it re-ranks the exact match to the top
+    /// while `aaa_longer` still matches and stays on the list. A cursor left at
+    /// its old index would therefore land on `aaa_longer`, and clamping cannot
+    /// rescue it because the index is still in range.
+    #[test]
+    fn symbol_finder_tab_completes_and_keeps_the_entry_selected() {
+        let mut h = TestHarness::with_size(120, 30);
+        enable_document_symbols_and_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "fn aaa_longer() {}\nfn aaa() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![
+                flat_symbol("aaa_longer", path.to_str().unwrap(), 0, 3),
+                flat_symbol("aaa", path.to_str().unwrap(), 1, 3),
+            ]),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+
+        h.type_keys("down");
+        h.settle();
+        assert_eq!(
+            h.stoat
+                .symbol_finder
+                .as_ref()
+                .unwrap()
+                .selected_entry()
+                .map(|e| e.title.as_str()),
+            Some("aaa"),
+            "the second row is highlighted before completing"
+        );
+
+        h.type_keys("tab");
+        h.settle();
+
+        let finder = h.stoat.symbol_finder.as_ref().unwrap();
+        assert_eq!(
+            finder.input.text(h.stoat.active_workspace()),
+            "aaa",
+            "Tab completes the highlighted title into the input"
+        );
+        assert_eq!(
+            finder.filtered.len(),
+            2,
+            "the completed query still matches both symbols, so the list reshuffles"
+        );
+        assert_eq!(
+            finder.selected_entry().map(|e| e.title.as_str()),
+            Some("aaa"),
+            "the completed symbol stays selected after the re-rank"
+        );
+    }
+
+    #[test]
+    fn symbol_finder_tab_with_an_empty_list_is_a_noop() {
+        let mut h = TestHarness::with_size(120, 30);
+        enable_document_symbols_and_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "fn aaa() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![flat_symbol("aaa", path.to_str().unwrap(), 0, 3)]),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+
+        h.type_text("zzz");
+        h.settle();
+        assert!(
+            h.stoat.symbol_finder.as_ref().unwrap().filtered.is_empty(),
+            "the query matches nothing"
+        );
+
+        h.type_keys("tab");
+        h.settle();
+
+        assert_eq!(
+            h.stoat
+                .symbol_finder
+                .as_ref()
+                .unwrap()
+                .input
+                .text(h.stoat.active_workspace()),
+            "zzz",
+            "Tab with no selectable row leaves the query unchanged"
+        );
     }
 
     #[test]

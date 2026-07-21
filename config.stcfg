@@ -700,6 +700,7 @@ on key {
         Ctrl-n -> SymbolFinderSelectNext();
         Ctrl-f -> SymbolFinderPageDown();
         Ctrl-b -> SymbolFinderPageUp();
+        Tab -> SymbolFinderComplete();
     }
     modal == code_search && mode == insert {
         Up -> CodeSearchPrev();

@@ -189,6 +189,20 @@ define_action!(
 );
 
 define_action!(
+    SymbolFinderCompleteDef,
+    SymbolFinderComplete,
+    "SymbolFinderComplete",
+    ActionKind::SymbolFinderComplete,
+    "complete selected symbol",
+    "Complete the highlighted symbol's title into the symbol finder input, \
+     replacing what was typed. The completed symbol stays selected, so a \
+     following Enter jumps to it. Bound by default to Tab while the symbol \
+     finder is open; a no-op when the list is empty.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
     SymbolFinderPageUpDef,
     SymbolFinderPageUp,
     "SymbolFinderPageUp",

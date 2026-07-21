@@ -293,6 +293,7 @@ pub enum ActionKind {
     OpenSymbolPicker,
     SymbolFinderSelectPrev,
     SymbolFinderSelectNext,
+    SymbolFinderComplete,
     SymbolFinderPageUp,
     SymbolFinderPageDown,
     OpenWorkspaceSymbolPicker,
