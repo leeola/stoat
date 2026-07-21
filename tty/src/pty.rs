@@ -79,6 +79,7 @@ impl Pty {
         stoat_dir: Option<&Path>,
         log_id: Option<&str>,
         window_socket: Option<&str>,
+        theme: &str,
         rows: u16,
         cols: u16,
         sink: impl FnMut(PtyOutput<'_>) + Send + 'static,
@@ -101,6 +102,7 @@ impl Pty {
                 stoat_dir,
                 log_id,
                 window_socket,
+                theme,
             ))
             .map_err(io::Error::other)?;
         tracing::info!(program, pid = ?child.process_id(), "spawned child over pty");
@@ -204,13 +206,14 @@ fn shell_command(
     stoat_dir: Option<&Path>,
     log_id: Option<&str>,
     window_socket: Option<&str>,
+    theme: &str,
 ) -> CommandBuilder {
     let mut command = CommandBuilder::new(program);
     command.args(args);
     if let Some(dir) = cwd {
         command.cwd(dir);
     }
-    configure_child_env(&mut command, stoat_dir, log_id, window_socket);
+    configure_child_env(&mut command, stoat_dir, log_id, window_socket, theme);
     command
 }
 
@@ -235,6 +238,9 @@ const MULTIPLEXER_ENV_VARS: [&str; 5] = [
 /// prefixes its own log filenames with it and one session's files sort together.
 /// `STOATTY_WINDOW_SOCKET`, when set, is the unix-socket path a child editor
 /// connects to for upstream window focus, resize, and close events.
+/// `STOAT_THEME` carries stoatty's configured theme name so a child editor
+/// adopts the terminal's theme by default. An empty `theme` exports nothing,
+/// leaving the child on its own configured default.
 ///
 /// Inherited multiplexer markers ([`MULTIPLEXER_ENV_VARS`]) are removed because
 /// stoatty presents a fresh terminal that owns and forwards its own window's
@@ -248,6 +254,7 @@ fn configure_child_env(
     stoat_dir: Option<&Path>,
     log_id: Option<&str>,
     window_socket: Option<&str>,
+    theme: &str,
 ) {
     command.env("TERM", "xterm-256color");
     command.env("STOATTY", "1");
@@ -257,6 +264,9 @@ fn configure_child_env(
     }
     if let Some(socket) = window_socket {
         command.env("STOATTY_WINDOW_SOCKET", socket);
+    }
+    if !theme.is_empty() {
+        command.env("STOAT_THEME", theme);
     }
     for var in MULTIPLEXER_ENV_VARS {
         command.env_remove(var);
@@ -500,6 +510,7 @@ mod tests {
             Some(Path::new("/opt/stoat/bin")),
             Some("20260718-143022-99"),
             Some("/run/stoat/stoatty-win-42.sock"),
+            "gruvbox-dark",
         );
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
@@ -515,6 +526,10 @@ mod tests {
             command.get_env("STOATTY_WINDOW_SOCKET"),
             Some(OsStr::new("/run/stoat/stoatty-win-42.sock")),
         );
+        assert_eq!(
+            command.get_env("STOAT_THEME"),
+            Some(OsStr::new("gruvbox-dark")),
+        );
         let path = command.get_env("PATH").expect("PATH set from stoat dir");
         assert!(
             path.to_str()
@@ -523,9 +538,14 @@ mod tests {
             "stoat dir prepended to PATH: {path:?}"
         );
 
-        let without_id = shell_command("/bin/sh", &[], None, None, None, None);
+        let without_id = shell_command("/bin/sh", &[], None, None, None, None, "");
         assert_eq!(without_id.get_env("STOATTY_LOG_ID"), None);
         assert_eq!(without_id.get_env("STOATTY_WINDOW_SOCKET"), None);
+        assert_eq!(
+            without_id.get_env("STOAT_THEME"),
+            None,
+            "an unnamed theme exports nothing, leaving the child on its own default"
+        );
     }
 
     #[test]
@@ -537,7 +557,7 @@ mod tests {
         command.env("ZELLIJ_SESSION_NAME", "main");
         command.env("ZELLIJ_PANE_ID", "71");
 
-        configure_child_env(&mut command, None, None, None);
+        configure_child_env(&mut command, None, None, None, "");
 
         for var in MULTIPLEXER_ENV_VARS {
             assert_eq!(command.get_env(var), None, "{var} not stripped");
@@ -552,7 +572,15 @@ mod tests {
 
     #[test]
     fn shell_command_sets_cwd_when_given() {
-        let command = shell_command("/bin/sh", &[], Some(Path::new("/tmp")), None, None, None);
+        let command = shell_command(
+            "/bin/sh",
+            &[],
+            Some(Path::new("/tmp")),
+            None,
+            None,
+            None,
+            "",
+        );
         assert_eq!(
             command.get_cwd().map(|cwd| cwd.as_os_str()),
             Some(OsStr::new("/tmp"))

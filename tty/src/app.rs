@@ -193,6 +193,7 @@ fn run_with_config(
         program,
         args,
         theme,
+        config.theme,
         FontSettings {
             size: config.font_size,
             family: config.font_family,
@@ -270,6 +271,10 @@ struct App {
     /// same binary. `None` for a `-e`/shell child or a bare-name stoat.
     stoat_dir: Option<PathBuf>,
     theme: Theme,
+    /// The configured name `theme` was resolved from, exported to the spawned
+    /// child as `STOAT_THEME` so a child editor adopts the terminal's theme.
+    /// Empty when the config names no theme.
+    theme_name: String,
     font_size: u32,
     /// Ordered font-family cascade from the config, resolved against the font db
     /// at renderer creation to pick the shaping primary. Read once in `resumed`.
@@ -294,6 +299,7 @@ impl App {
         program: String,
         args: Vec<String>,
         theme: Theme,
+        theme_name: String,
         font: FontSettings,
         cursor_animation: CursorAnimation,
         size: Option<[u16; 2]>,
@@ -309,6 +315,7 @@ impl App {
             working_directory,
             stoat_dir,
             theme,
+            theme_name,
             font_size: font.size,
             font_family: font.family,
             ligatures: font.ligatures,
@@ -814,6 +821,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 self.stoat_dir.as_deref(),
                 stoat_log::ident::get().map(|i| i.id.as_str()),
                 window_socket.as_deref().and_then(Path::to_str),
+                &self.theme_name,
                 rows as u16,
                 cols as u16,
                 move |output| match output {
