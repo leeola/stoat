@@ -2,7 +2,12 @@ use crate::{bar::Bar, text_run::TextRun, ApcScene};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 
 /// A status bar composed of left- and right-anchored scaled text segments and a
-/// top hairline separator that reads unbroken across the segment backgrounds.
+/// top hairline separator that reads across the bare background between them.
+///
+/// Segments fill the row's full height and break the hairline where they sit.
+/// The separator is emitted first so they can. A hairline painted over a segment
+/// instead clips its top sliver, which reads as the segment starting below the
+/// bar's own top edge.
 ///
 /// Components-only, like [`TextRun`] and [`Bar`]: it emits off-grid APC frames
 /// and writes no cell fallback, so the caller paints its own degraded cells for
@@ -29,7 +34,8 @@ pub struct StatusBar<'a> {
 ///
 /// The text carries its own surrounding padding (a segment reads ` label `),
 /// and that padded width sizes the background bar. The run stays box-less so the
-/// bar carries the background and the top hairline reads unbroken above it.
+/// background comes from the bar, which spans the row's full height and so
+/// covers the hairline emitted before it.
 pub struct StatusSegment<'a> {
     pub text: &'a str,
     pub fg: [u8; 3],
@@ -42,6 +48,15 @@ impl StatusBar<'_> {
     /// The caller passes the on-screen status [`Rect`]. [`TextRun`] and [`Bar`]
     /// offset by the area, so positions here are area-relative sixteenths.
     pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
+        Bar {
+            x: 0,
+            y: 0,
+            width: area.width * 16,
+            height: 1,
+            color: self.separator,
+        }
+        .render(area, buf, scene);
+
         let mut cursor = 0u16;
         for seg in self.left {
             let advance = self.segment_advance(seg.text);
@@ -59,23 +74,15 @@ impl StatusBar<'_> {
             self.draw_segment(start, advance, seg, area, buf, scene);
             anchor = start;
         }
-
-        Bar {
-            x: 0,
-            y: 0,
-            width: area.width * 16,
-            height: 1,
-            color: self.separator,
-        }
-        .render(area, buf, scene);
     }
 
     /// Draw one segment as a full-row background bar with a box-less text run
     /// over it.
     ///
-    /// The bar carries the segment background so the top hairline, emitted after
-    /// every segment bar, overwrites its top sliver and reads unbroken. A box on
-    /// the run instead would paint from the later text pass and bury the line.
+    /// The bar carries the segment background and spans the row's full height,
+    /// so it covers the top hairline emitted before it and the segment reads
+    /// flush with the bar's top edge. A box on the run instead would paint from
+    /// the later text pass and bury the segment's own background.
     fn draw_segment(
         &self,
         x: u16,
@@ -118,9 +125,13 @@ mod tests {
     use stoatty_protocol::command::{encode_bar, encode_text_run, BarCommand, TextRunCommand};
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        position(haystack, needle).is_some()
+    }
+
+    fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
             .windows(needle.len())
-            .any(|window| window == needle)
+            .position(|window| window == needle)
     }
 
     #[test]
@@ -318,6 +329,68 @@ mod tests {
         assert!(
             contains(scene.buffer(), &separator),
             "top hairline separator bar frame"
+        );
+    }
+
+    #[test]
+    fn the_hairline_is_emitted_before_the_segments_that_cover_it() {
+        let left = [StatusSegment {
+            text: " NOR ",
+            fg: [1, 2, 3],
+            bg: [4, 5, 6],
+        }];
+        let right = [StatusSegment {
+            text: " 1:1 ",
+            fg: [7, 8, 9],
+            bg: [10, 11, 12],
+        }];
+        let status = StatusBar {
+            left: &left,
+            right: &right,
+            scale: 160,
+            separator: [60, 66, 77],
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        status.draw_components(area, &mut buf, &mut scene);
+
+        let separator = encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 1,
+            color: [60, 66, 77],
+        });
+        // advance(" NOR ") = 5 * 160 / 16 = 50; right start = 320 - 50 = 270.
+        let left_bar = encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 16,
+            color: [4, 5, 6],
+        });
+        let right_bar = encode_bar(&BarCommand {
+            x: 270,
+            y: 0,
+            width: 50,
+            height: 16,
+            color: [10, 11, 12],
+        });
+
+        let frames = scene.buffer();
+        let separator_at = position(frames, &separator).expect("hairline emitted");
+        let left_at = position(frames, &left_bar).expect("left segment bar emitted");
+        let right_at = position(frames, &right_bar).expect("right segment bar emitted");
+
+        assert!(
+            separator_at < left_at,
+            "the hairline precedes the left segment bar that covers it"
+        );
+        assert!(
+            separator_at < right_at,
+            "the hairline precedes the right segment bar that covers it"
         );
     }
 }
