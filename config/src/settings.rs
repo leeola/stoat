@@ -42,6 +42,16 @@ pub enum MinimapMode {
     Single,
 }
 
+/// When the tab bar occupies a row at the top of the window. `Auto` shows it
+/// only once a workspace holds more than one tab, so a single-tab session keeps
+/// the whole window for panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabBarMode {
+    Auto,
+    Always,
+    Never,
+}
+
 /// How editor panes soft-wrap long lines. `EditorWidth` wraps at the pane's text
 /// width. `Bounded` wraps at the smaller of the pane text width and
 /// `editor.wrap_column`. `None` disables wrapping, so long lines truncate at the
@@ -115,6 +125,10 @@ pub struct Settings {
     /// width. `None` falls back at the consumer to 80. Set `editor.wrap_column =
     /// N;` in stcfg. Consulted only by [`WrapMode::Bounded`].
     pub editor_wrap_column: Option<u32>,
+    /// When the tab bar shows, one of `auto`, `always`, or `never`. `None`
+    /// falls back to [`TabBarMode::Auto`], which reveals the bar only once a
+    /// workspace holds a second tab. The `:tabs` command flips it at runtime.
+    pub ui_tab_bar: Option<TabBarMode>,
     /// Fraction an unfocused pane's colors blend toward the theme background,
     /// so an inactive split reads as dimmed. `None` falls back to 0.25; `0`
     /// disables dimming. Set `ui.inactive_dim = 0.4;` in stcfg. The raw value
@@ -240,6 +254,7 @@ impl Settings {
             editor_minimap: other.editor_minimap.or(self.editor_minimap),
             editor_wrap: other.editor_wrap.or(self.editor_wrap),
             editor_wrap_column: other.editor_wrap_column.or(self.editor_wrap_column),
+            ui_tab_bar: other.ui_tab_bar.or(self.ui_tab_bar),
             ui_inactive_dim: other.ui_inactive_dim.or(self.ui_inactive_dim),
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
@@ -379,6 +394,20 @@ impl Settings {
                     self.editor_wrap_column = Some(n as u32);
                 }
             },
+            ["ui", "tab_bar"] => {
+                let mode = match &setting.value.node {
+                    Value::String(s) | Value::Ident(s) => match s.as_str() {
+                        "auto" => Some(TabBarMode::Auto),
+                        "always" => Some(TabBarMode::Always),
+                        "never" => Some(TabBarMode::Never),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(m) = mode {
+                    self.ui_tab_bar = Some(m);
+                }
+            },
             ["ui", "inactive_dim"] => {
                 if let Value::Number(n) = setting.value.node {
                     self.ui_inactive_dim = Some(n);
@@ -511,6 +540,7 @@ mod tests {
                 editor_minimap: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
+                ui_tab_bar: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -782,6 +812,7 @@ mod tests {
                 editor_minimap: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
+                ui_tab_bar: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -820,6 +851,7 @@ mod tests {
                 editor_minimap: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
+                ui_tab_bar: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -867,6 +899,7 @@ mod tests {
             editor_minimap: None,
             editor_wrap: None,
             editor_wrap_column: None,
+            ui_tab_bar: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
@@ -897,6 +930,7 @@ mod tests {
             editor_minimap: None,
             editor_wrap: None,
             editor_wrap_column: None,
+            ui_tab_bar: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
@@ -929,6 +963,7 @@ mod tests {
                 editor_minimap: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
+                ui_tab_bar: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -964,6 +999,7 @@ mod tests {
             editor_minimap: None,
             editor_wrap: None,
             editor_wrap_column: None,
+            ui_tab_bar: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
@@ -997,6 +1033,7 @@ mod tests {
                 editor_minimap: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
+                ui_tab_bar: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -1043,6 +1080,7 @@ mod tests {
                 editor_minimap: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
+                ui_tab_bar: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -1081,6 +1119,7 @@ mod tests {
                 editor_minimap: None,
                 editor_wrap: None,
                 editor_wrap_column: None,
+                ui_tab_bar: None,
                 ui_inactive_dim: None,
                 highlight_retention: None,
                 terminal_shell: None,
@@ -1116,6 +1155,7 @@ mod tests {
             editor_minimap: None,
             editor_wrap: None,
             editor_wrap_column: None,
+            ui_tab_bar: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,
@@ -1146,6 +1186,7 @@ mod tests {
             editor_minimap: None,
             editor_wrap: None,
             editor_wrap_column: None,
+            ui_tab_bar: None,
             ui_inactive_dim: None,
             highlight_retention: None,
             terminal_shell: None,

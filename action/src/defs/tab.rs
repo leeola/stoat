@@ -105,6 +105,19 @@ define_action!(
     aliases = &["tab-toggle"]
 );
 
+define_action!(
+    ToggleTabBarDef,
+    ToggleTabBar,
+    "ToggleTabBar",
+    ActionKind::ToggleTabBar,
+    "show or hide the tab bar",
+    "Show the tab bar when it is hidden, or hide it when it is showing, for \
+     this session only. The `ui.tab_bar` setting decides what it does by \
+     default, and a restart returns to that.",
+    ActionPriority::Common,
+    aliases = &["tabs"]
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

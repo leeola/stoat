@@ -21,6 +21,7 @@ pub enum ActionKind {
     CloseTab,
     GotoTab,
     ToggleTab,
+    ToggleTabBar,
     ClosePane,
     CloseOtherPanes,
     TogglePaneWiden,

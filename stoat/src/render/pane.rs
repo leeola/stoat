@@ -17,6 +17,7 @@ use crate::{
         undercurl::UndercurlSpan,
         FrameCtx, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
     },
+    workspace::Workspace,
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{
@@ -538,6 +539,44 @@ fn render_status_segments(
         },
         None => paint_status_fallback(buf, area, left, right),
     }
+}
+
+/// Paint the tab bar across `area`, one segment per tab.
+///
+/// Each segment reads ` <n>:<title> ` at its 1-based number, so a tab is
+/// addressable by what the bar shows. Painting through the status-bar segment
+/// path means the bar picks up the same scaled-run rendering under stoatty and
+/// the same cell fallback elsewhere.
+pub(crate) fn render_tab_bar(
+    ws: &Workspace,
+    area: Rect,
+    frame: FrameCtx<'_>,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let active = frame.theme.get(crate::theme::scope::UI_TABBAR_ACTIVE);
+    let inactive = frame.theme.get(crate::theme::scope::UI_TABBAR_INACTIVE);
+
+    for x in area.x..area.x + area.width {
+        buf[(x, area.y)].set_char(' ').set_style(inactive);
+    }
+
+    let left: Vec<StatusSeg> = (0..ws.tabs.len())
+        .map(|idx| {
+            let style = if idx == ws.active_tab {
+                active
+            } else {
+                inactive
+            };
+            (format!(" {}:{} ", idx + 1, ws.tab_title(idx)), style)
+        })
+        .collect();
+
+    render_status_segments(area, inactive, frame, &left, &[], buf, scene);
 }
 
 /// One built status-bar segment pairing painted text with its cell style.

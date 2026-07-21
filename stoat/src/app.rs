@@ -47,7 +47,7 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 use stoat_action::{Conflict, Diff, OpenFile, ReviewExternalEdit, ReviewRefresh};
-use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, ThemeBlock, WrapMode};
+use stoat_config::{LineNumbers, MinimapMode, Settings, Spanned, TabBarMode, ThemeBlock, WrapMode};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
 use stoat_text::{Anchor, Bias, IndentStyle, Selection};
@@ -534,6 +534,9 @@ pub struct Stoat {
     /// `ToggleMinimap`. `None` follows the `editor.minimap` setting; `Some`
     /// wins for the session. Not persisted.
     pub(crate) minimap_override: Option<bool>,
+    /// Session-only override of the `ui.tab_bar` setting, set by `:tabs`.
+    /// `None` leaves the configured mode in force.
+    pub(crate) tab_bar_override: Option<TabBarMode>,
     /// The window-right strip band single-minimap mode reserves, stamped every
     /// paint. `Some` only under stoatty in [`stoat_config::MinimapMode::Single`]
     /// on a wide-enough window, and `None` in per-pane and off modes.
@@ -1453,6 +1456,7 @@ impl Stoat {
             modal_run: None,
             syntax_highlight: true,
             minimap_override: None,
+            tab_bar_override: None,
             single_minimap_rect: None,
             lsp_badge_rect: None,
             lsp_status_pinned: false,
@@ -2084,12 +2088,37 @@ impl Stoat {
     /// and the strip yields to them, so their paint, pools, and mouse hit-tests
     /// derive from `size` instead.
     pub(crate) fn layout_size(&self) -> Rect {
-        match self.single_minimap_rect {
+        let size = match self.single_minimap_rect {
             Some(band) => Rect {
                 width: self.size.width.saturating_sub(band.width),
                 ..self.size
             },
             None => self.size,
+        };
+        if !self.tab_bar_visible() {
+            return size;
+        }
+        Rect {
+            y: size.y + 1,
+            height: size.height.saturating_sub(1),
+            ..size
+        }
+    }
+
+    /// Whether the tab bar occupies the window's top row this frame.
+    ///
+    /// [`TabBarMode::Auto`] reveals it only once the active workspace holds a
+    /// second tab, so a single-tab session keeps the whole window. `:tabs`
+    /// overrides the configured mode for the session.
+    pub(crate) fn tab_bar_visible(&self) -> bool {
+        let mode = self
+            .tab_bar_override
+            .or(self.settings.ui_tab_bar)
+            .unwrap_or(TabBarMode::Auto);
+        match mode {
+            TabBarMode::Always => true,
+            TabBarMode::Never => false,
+            TabBarMode::Auto => self.active_workspace().tabs.len() > 1,
         }
     }
 

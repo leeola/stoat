@@ -407,6 +407,40 @@ impl Workspace {
         }
     }
 
+    /// What tab `idx` calls itself in the tab bar, taken from its focused
+    /// pane's view.
+    ///
+    /// An editor names its file, or reads as scratch when it has none. The
+    /// other views name their kind, since a terminal or run pane has nothing
+    /// more specific to offer. An out-of-range index is empty.
+    ///
+    /// The kind names match the `pane` keymap predicate's, so what the bar
+    /// shows and what a binding condition matches on read the same.
+    pub(crate) fn tab_title(&self, idx: usize) -> String {
+        let tree = if idx == self.active_tab {
+            Some(&self.panes)
+        } else {
+            self.tabs.get(idx).and_then(|tab| tab.parked.as_ref())
+        };
+        let Some(tree) = tree else {
+            return String::new();
+        };
+
+        match &tree.pane(tree.focus()).view {
+            View::Editor(id) => self
+                .editors
+                .get(*id)
+                .and_then(|editor| self.buffers.path_for(editor.buffer_id))
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "scratch".to_string()),
+            View::Agent(_) => "agent".to_string(),
+            View::Terminal(_) => "term".to_string(),
+            View::Run(_) => "run".to_string(),
+            View::Label(_) => "pane".to_string(),
+        }
+    }
+
     /// Every pane tree in the workspace, the active one first.
     ///
     /// Use this for questions about whether anything still references an

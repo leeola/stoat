@@ -65,6 +65,9 @@ theme default_dark {
     ui.mode_label          = { fg: black, modifiers: [bold] };
     ui.message.error.fg    = danger;
 
+    ui.tabbar.active       = { fg: text, bg: muted };
+    ui.tabbar.inactive     = { fg: dim, bg: subtle };
+
     ui.statusline.normal.fg   = primary;
     ui.statusline.insert.fg   = success;
     ui.statusline.select.fg   = warning;
@@ -150,6 +153,10 @@ theme default_dark {
 
 on init {
     theme = default_dark;
+
+    # When the tab bar occupies the top row: auto shows it only once a
+    # workspace holds a second tab, always pins it, never hides it.
+    ui.tab_bar = auto;
 
     # Gutter line numbering: relative (distance from the cursor line),
     # absolute (each line's own number), or off (diagnostic marks only).

@@ -233,6 +233,7 @@ fn run_tui(
         editor_minimap: None,
         editor_wrap: None,
         editor_wrap_column: None,
+        ui_tab_bar: None,
         ui_inactive_dim: None,
         highlight_retention: None,
         terminal_shell: None,

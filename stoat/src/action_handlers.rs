@@ -138,6 +138,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::NewTab => tab::new_tab(stoat),
         ActionKind::CloseTab => tab::close_tab(stoat),
         ActionKind::ToggleTab => tab::toggle_tab(stoat),
+        ActionKind::ToggleTabBar => tab::toggle_tab_bar(stoat),
         ActionKind::ClosePane => {
             pane::close_focused_pane(stoat);
             UpdateEffect::Redraw

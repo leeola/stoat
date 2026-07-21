@@ -155,6 +155,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "80",
         },
         SettingDef {
+            path: &[Lit("ui"), Lit("tab_bar")],
+            shape: ValueShape::Enum(&["auto", "always", "never"]),
+            doc: "When the tab bar occupies the top row. `auto` shows it only \
+                  once a workspace holds a second tab.",
+            default: "auto",
+        },
+        SettingDef {
             path: &[Lit("ui"), Lit("inactive_dim")],
             shape: ValueShape::Number,
             doc: "Fraction an unfocused pane's colors blend toward the background \

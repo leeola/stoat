@@ -506,6 +506,9 @@ pub mod scope {
     pub const UI_BADGE_COMPLETE: &str = "ui.badge.complete";
     pub const UI_BADGE_ERROR: &str = "ui.badge.error";
 
+    pub const UI_TABBAR_ACTIVE: &str = "ui.tabbar.active";
+    pub const UI_TABBAR_INACTIVE: &str = "ui.tabbar.inactive";
+
     pub const UI_STATUSBAR_FOCUSED: &str = "ui.statusbar.focused";
     pub const UI_STATUSBAR_UNFOCUSED: &str = "ui.statusbar.unfocused";
     pub const UI_MODE_LABEL: &str = "ui.mode_label";

@@ -314,18 +314,22 @@ pub(crate) fn frame(
     let minimap_enabled = minimap_mode != MinimapMode::Off;
     stoat.ensure_minimap_content_ids();
 
+    let tab_bar_rows = u16::from(stoat.tab_bar_visible());
+
     // Single mode reserves a strip band at the window's right edge and shrinks
     // the pane layout by the strip width, so the panes never overlap the strip.
     // The band stops one row above the bottom so a status bar on that row runs
-    // the full window width. The band is stamped on Stoat for the mouse handler,
-    // then read back for this paint.
+    // the full window width, and starts one row down when the tab bar holds the
+    // top, since the band derives its own rect instead of going through
+    // `layout_size`. The band is stamped on Stoat for the mouse handler, then
+    // read back for this paint.
     stoat.single_minimap_rect = (minimap_mode == MinimapMode::Single
         && full.width >= editor::MINIMAP_MIN_PANE_COLS)
         .then(|| Rect {
             x: full.x + full.width - editor::MINIMAP_STRIP_COLS,
-            y: full.y,
+            y: full.y + tab_bar_rows,
             width: editor::MINIMAP_STRIP_COLS,
-            height: full.height.saturating_sub(1),
+            height: full.height.saturating_sub(1 + tab_bar_rows),
         });
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
@@ -440,6 +444,16 @@ pub(crate) fn frame(
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),
     };
+
+    if tab_bar_rows == 1 {
+        let bar = Rect {
+            x: full.x,
+            y: full.y,
+            width: full.width,
+            height: 1,
+        };
+        pane::render_tab_bar(ws, bar, frame, buf, scene);
+    }
 
     let split_focused = ws.panes.focus();
     let mut lsp_badge_rect: Option<Rect> = None;
