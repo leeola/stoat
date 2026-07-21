@@ -96,7 +96,6 @@ pub(crate) fn render_pane(
                     theme,
                     buf,
                     is_focused,
-                    true,
                     frame.minimap_enabled,
                     frame.line_numbers,
                     frame.mode == "insert",

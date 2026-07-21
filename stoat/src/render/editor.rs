@@ -66,7 +66,6 @@ pub(crate) fn render_editor(
         buf,
         is_focused,
         false,
-        false,
         LineNumbers::Off,
         false,
         None,
@@ -89,7 +88,6 @@ pub(crate) fn render_editor_with_overlay(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     is_focused: bool,
-    stoatty: bool,
     minimap_enabled: bool,
     line_numbers: LineNumbers,
     insert_mode: bool,
@@ -109,21 +107,22 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.review_view.is_some() {
         editor.display_map.set_wrap_width(None);
-        let scene = if stoatty { scene } else { None };
         render_review(editor, inner, fallback_style, theme, buf, scene);
         return;
     }
 
     if editor.diff_view {
         editor.display_map.set_wrap_width(None);
-        let scene = if stoatty { scene } else { None };
         render_diff_view(editor, inner, fallback_style, theme, buf, scene);
         return;
     }
 
     if editor.conflict_view.is_some() {
         editor.display_map.set_wrap_width(None);
-        render_conflict_view(editor, inner, fallback_style, theme, buf, stoatty);
+        // A scene means the terminal draws the cursor, matching the delegation
+        // the main editor path makes on the same condition.
+        let delegates_cursor = scene.is_some();
+        render_conflict_view(editor, inner, fallback_style, theme, buf, delegates_cursor);
         return;
     }
 
@@ -133,7 +132,7 @@ pub(crate) fn render_editor_with_overlay(
     // wrapped snapshot the gutter and text paint from is taken below.
     let snapshot = editor.display_map.snapshot();
 
-    let rich_gutter_colors = resolve_rich_gutter(theme, fallback_style, stoatty);
+    let rich_gutter_colors = resolve_rich_gutter(theme, fallback_style);
     let gutter_is_rich = scene.is_some() && rich_gutter_colors.is_some();
     let measured_gutter_w = if line_numbers != LineNumbers::Off {
         measure_gutter_width(&snapshot, gutter_is_rich)
@@ -145,7 +144,7 @@ pub(crate) fn render_editor_with_overlay(
     };
 
     let after_gutter = inner.width.saturating_sub(measured_gutter_w);
-    let minimap_cols = if stoatty && minimap_enabled && after_gutter >= MINIMAP_MIN_PANE_COLS {
+    let minimap_cols = if minimap_enabled && after_gutter >= MINIMAP_MIN_PANE_COLS {
         MINIMAP_STRIP_COLS
     } else {
         0
@@ -222,7 +221,6 @@ pub(crate) fn render_editor_with_overlay(
             severity.as_ref(),
             fallback_style,
             theme,
-            stoatty,
             current_line,
             severity_version,
             &mut editor.gutter_geometry_cache,
@@ -234,11 +232,8 @@ pub(crate) fn render_editor_with_overlay(
         0
     } else {
         // Rich mode emits a sub-cell severity bar per row instead of the glyph,
-        // engaging only inside stoatty with every severity color resolved to RGB.
-        let rich = scene
-            .as_deref_mut()
-            .filter(|_| stoatty)
-            .zip(severity.as_ref());
+        // engaging only with a scene and every severity color resolved to RGB.
+        let rich = scene.as_deref_mut().zip(severity.as_ref());
         match rich {
             Some((scene, colors)) => {
                 let area = Rect {
@@ -309,7 +304,7 @@ pub(crate) fn render_editor_with_overlay(
     // Reserve the right-edge minimap strip under stoatty, recording its screen
     // rect for pointer mapping. Only the text rect shrinks to clear the space.
     // The reserved cells stay blank so stoatty's GPU minimap pass owns them.
-    let inner = if stoatty && minimap_enabled && inner.width >= MINIMAP_MIN_PANE_COLS {
+    let inner = if minimap_enabled && inner.width >= MINIMAP_MIN_PANE_COLS {
         editor.minimap_rect = Some(Rect {
             x: inner.x + inner.width - MINIMAP_STRIP_COLS,
             y: inner.y,
@@ -390,7 +385,7 @@ pub(crate) fn render_editor_with_overlay(
             right,
             bottom,
             buf,
-            if stoatty { undercurls } else { None },
+            undercurls,
             severity.as_ref(),
             dim,
         );
@@ -472,6 +467,10 @@ pub(crate) fn render_editor_with_overlay(
     let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
     let primary_id = editor.selections.newest_anchor().id;
     let mut primary_cell: Option<(u16, u16)> = None;
+    // A scene means the terminal draws the primary cursor itself, so this pass
+    // records the cell and leaves it unpainted. Without one, as in an input view
+    // or dock, nothing downstream would draw it, so it is painted here.
+    let delegates_cursor = scene.is_some();
     let rope = buffer_snapshot.rope();
     for selection in editor.selections.all_anchors() {
         let start_offset = buffer_snapshot.resolve_anchor(&selection.start);
@@ -510,7 +509,7 @@ pub(crate) fn render_editor_with_overlay(
             let y = inner.y + (display.row - editor.scroll_row) as u16;
             let x = inner.x + display.column as u16;
             if x < right && y < bottom {
-                if stoatty && selection.id == primary_id {
+                if delegates_cursor && selection.id == primary_id {
                     primary_cell = Some((x, y));
                 } else {
                     let cell = &mut buf[(x, y)];
@@ -551,11 +550,11 @@ pub(crate) fn render_editor_with_overlay(
         });
 
         // The mouse hover wins over the cursor when both land in a span. The
-        // popover renders only inside stoatty with the severity and background
-        // colors resolved to RGB, and its presence suppresses the same
-        // diagnostic's redundant EOL message.
+        // popover needs a scene plus the severity and background colors resolved
+        // to RGB, and its presence suppresses the same diagnostic's redundant
+        // EOL message.
         let mut suppress = None;
-        if let (Some(index), true) = (hover_diag.or(cursor_diag), stoatty) {
+        if let Some(index) = hover_diag.or(cursor_diag) {
             let bg = style_rgb(fallback_style.bg.or_else(|| {
                 theme
                     .try_get(crate::theme::scope::UI_BACKGROUND)
@@ -939,20 +938,16 @@ impl RichGutterColors {
     }
 }
 
-/// Resolve the rich page-gutter colors, or `None` outside stoatty or when a
-/// gutter color is not RGB.
+/// Resolve the rich page-gutter colors, or `None` when a gutter color is not
+/// RGB.
 ///
 /// Mirrors the live gutter's rich gate so an off-run-loop page render and the
 /// live render agree on rich versus fallback for the same theme.
 pub(crate) fn resolve_rich_gutter(
     theme: &crate::theme::Theme,
     fallback_style: Style,
-    stoatty: bool,
 ) -> Option<RichGutterColors> {
     use crate::theme::scope as s;
-    if !stoatty {
-        return None;
-    }
     let colors = severity_colors(theme)?;
     let diff = DiffMarkColors::resolve(theme);
     let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
@@ -1243,9 +1238,9 @@ fn gutter_geometry_key(
 
 /// Draw the absolute-line-number gutter and return the cell columns it reserves.
 ///
-/// Inside stoatty with every gutter color resolved to RGB, draws the rich
-/// sub-cell gutter (scaled numbers, severity bars, hairline separator). Any
-/// other terminal, or a theme whose colors are not RGB, gets right-aligned cell
+/// With a scene and every gutter color resolved to RGB, draws the rich
+/// sub-cell gutter (scaled numbers, severity bars, hairline separator). Without
+/// one, or with a theme whose colors are not RGB, gets right-aligned cell
 /// numbers and a one-column severity mark styled from the theme, so the numbers
 /// still show.
 #[allow(clippy::too_many_arguments)]
@@ -1258,7 +1253,6 @@ fn draw_line_number_gutter(
     severity: Option<&SeverityColors>,
     fallback_style: Style,
     theme: &crate::theme::Theme,
-    stoatty: bool,
     current_line: Option<u32>,
     severity_version: u64,
     cache: &mut Option<GutterGeometryCache>,
@@ -1283,33 +1277,31 @@ fn draw_line_number_gutter(
     let diff_colors = {
         let base = DiffMarkColors::resolve(theme);
         match rich_bg {
-            Some(bg) if stoatty => base.dim(bg, dim),
-            _ => base,
+            Some(bg) => base.dim(bg, dim),
+            None => base,
         }
     };
-    let dimmed_severity = match (stoatty, severity, rich_bg) {
-        (true, Some(colors), Some(bg)) => Some(colors.dim(bg, dim)),
+    let dimmed_severity = match (severity, rich_bg) {
+        (Some(colors), Some(bg)) => Some(colors.dim(bg, dim)),
         _ => None,
     };
 
-    // Rich mode needs stoatty, a scene, and every gutter color as RGB. The
-    // colors resolve here, ahead of the scene, so the same values feed both the
-    // cache key and the component-line rebuild.
-    let gutter_rgb = stoatty
-        .then(|| {
-            let colors = dimmed_severity.as_ref()?;
-            let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
-            let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
-            let bg = rich_bg?;
-            Some((
-                colors,
-                dim_rgb(number_fg, bg, dim),
-                dim_rgb(separator, bg, dim),
-                bg,
-            ))
-        })
-        .flatten();
-    let rich = scene.filter(|_| stoatty).zip(gutter_rgb);
+    // Rich mode needs a scene and every gutter color as RGB. The colors resolve
+    // here, ahead of the scene, so the same values feed both the cache key and
+    // the component-line rebuild.
+    let gutter_rgb = (|| {
+        let colors = dimmed_severity.as_ref()?;
+        let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
+        let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
+        let bg = rich_bg?;
+        Some((
+            colors,
+            dim_rgb(number_fg, bg, dim),
+            dim_rgb(separator, bg, dim),
+            bg,
+        ))
+    })();
+    let rich = scene.zip(gutter_rgb);
 
     let key = gutter_geometry_key(
         scroll_row,
@@ -1535,8 +1527,8 @@ fn paint_diagnostic_spans(
             .get(severity_scope(sev))
             .add_modifier(Modifier::UNDERLINED);
 
-        // Collect the painted runs only when the stoatty undercurl overlay is
-        // live, then re-stamp each as a severity-colored curl span.
+        // Collect the painted runs only when the undercurl overlay is live,
+        // then re-stamp each as a severity-colored curl span.
         let mut runs: Vec<(u16, u16, u16)> = Vec::new();
         let collect = undercurls.is_some() && colors.is_some();
         paint_offset_range(
@@ -2101,7 +2093,6 @@ mod tests {
             &mut buf,
             true,
             false,
-            false,
             LineNumbers::Off,
             false,
             None,
@@ -2200,7 +2191,6 @@ mod tests {
             &mut buf,
             true,
             false,
-            false,
             LineNumbers::Off,
             false,
             None,
@@ -2272,7 +2262,6 @@ mod tests {
                 &theme,
                 &mut buf,
                 true,
-                false,
                 false,
                 LineNumbers::Off,
                 false,
@@ -2442,7 +2431,6 @@ mod tests {
             &mut buf,
             true,
             false,
-            false,
             LineNumbers::Off,
             false,
             None,
@@ -2576,7 +2564,6 @@ mod tests {
                 &mut buf,
                 true,
                 false,
-                false,
                 LineNumbers::Off,
                 false,
                 None,
@@ -2618,7 +2605,6 @@ mod tests {
             &theme,
             &mut buf,
             true,
-            false,
             false,
             LineNumbers::Absolute,
             false,
@@ -2714,7 +2700,6 @@ mod tests {
             &mut buf,
             is_focused,
             false,
-            false,
             line_numbers,
             insert_mode,
             None,
@@ -2739,12 +2724,11 @@ mod tests {
             .collect()
     }
 
-    /// Render the focused editor at `width` x `rows` under the given stoatty and
-    /// minimap flags, returning the recorded strip rect and, per row, the
+    /// Render the focused editor at `width` x `rows` under the given minimap
+    /// flag, returning the recorded strip rect and, per row, the
     /// symbols painted in the rightmost [`super::MINIMAP_STRIP_COLS`] columns.
     fn render_minimap(
         stoat: &mut Stoat,
-        stoatty: bool,
         minimap_enabled: bool,
         width: u16,
         rows: u16,
@@ -2761,7 +2745,6 @@ mod tests {
             &theme,
             &mut buf,
             true,
-            stoatty,
             minimap_enabled,
             LineNumbers::Off,
             false,
@@ -2798,7 +2781,7 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        let (rect, strip) = render_minimap(&mut h.stoat, true, true, 80, 3);
+        let (rect, strip) = render_minimap(&mut h.stoat, true, 80, 3);
         assert_eq!(
             rect,
             Some(Rect::new(72, 0, super::MINIMAP_STRIP_COLS, 3)),
@@ -2821,17 +2804,12 @@ mod tests {
         h.settle();
 
         assert_eq!(
-            render_minimap(&mut h.stoat, false, true, 80, 3).0,
-            None,
-            "no strip outside stoatty"
-        );
-        assert_eq!(
-            render_minimap(&mut h.stoat, true, false, 80, 3).0,
+            render_minimap(&mut h.stoat, false, 80, 3).0,
             None,
             "no strip when the minimap is disabled"
         );
         assert_eq!(
-            render_minimap(&mut h.stoat, true, true, 50, 3).0,
+            render_minimap(&mut h.stoat, true, 50, 3).0,
             None,
             "no strip below the minimum pane width"
         );
@@ -2876,7 +2854,6 @@ mod tests {
             &theme,
             &mut buf,
             true,
-            false,
             false,
             LineNumbers::Absolute,
             false,

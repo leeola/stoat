@@ -7311,7 +7311,7 @@ impl Stoat {
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
-        let base_rich = crate::render::editor::resolve_rich_gutter(theme, fallback_style, true);
+        let base_rich = crate::render::editor::resolve_rich_gutter(theme, fallback_style);
         for (_, editor_id, region) in &panes {
             let region = *region;
             let Some(editor) = ws.editors.get_mut(*editor_id) else {

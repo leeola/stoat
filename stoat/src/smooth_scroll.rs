@@ -972,7 +972,6 @@ mod tests {
                 &mut expected,
                 false,
                 false,
-                false,
                 LineNumbers::Absolute,
                 false,
                 None,
@@ -1472,7 +1471,7 @@ mod tests {
 
         let theme = h.stoat.theme.clone();
         let fallback = theme.get(scope::UI_TEXT);
-        let rich = resolve_rich_gutter(&theme, fallback, true)
+        let rich = resolve_rich_gutter(&theme, fallback)
             .expect("the shipped theme resolves the rich gutter colors");
         let gutter = PageGutter::new(
             true,
