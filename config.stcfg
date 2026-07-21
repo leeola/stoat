@@ -708,8 +708,10 @@ on key {
         BackTab -> CodeSearchModeToggle();
     }
     modal == palette && mode == insert {
-        Up -> PaletteHistoryPrev();
-        Down -> PaletteHistoryNext();
+        Up -> PaletteSelectPrev();
+        Down -> PaletteSelectNext();
+        Alt-Up -> PaletteHistoryPrev();
+        Alt-Down -> PaletteHistoryNext();
         Ctrl-p -> PaletteSelectPrev();
         Ctrl-n -> PaletteSelectNext();
         Ctrl-f -> PalettePageDown();

@@ -1208,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn palette_up_recalls_and_reexecutes_a_recorded_command() {
+    fn palette_alt_up_recalls_and_reexecutes_a_recorded_command() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/hist");
         let sub = root.join("sub");
@@ -1221,11 +1221,11 @@ mod tests {
 
         h.stoat.active_workspace_mut().git_root = root;
         h.type_text(":");
-        h.type_keys("up enter");
+        h.type_keys("alt-up enter");
         assert_eq!(
             h.stoat.active_workspace().git_root,
             sub,
-            "Up recalls the recorded cd line and Enter re-runs it"
+            "Alt-Up recalls the recorded cd line and Enter re-runs it"
         );
     }
 
@@ -1240,7 +1240,7 @@ mod tests {
             InputHistory::from_entries(vec![format!("cd {}", sub.display()), "w".to_string()]);
 
         h.type_text(":sub");
-        h.type_keys("up enter");
+        h.type_keys("alt-up enter");
         assert_eq!(
             h.stoat.active_workspace().git_root,
             sub,
@@ -1255,7 +1255,7 @@ mod tests {
             InputHistory::from_entries(vec!["cd /alpha".to_string(), "cd /beta".to_string()]);
 
         h.type_text(":");
-        h.type_keys("up");
+        h.type_keys("alt-up");
         assert_eq!(
             palette_text(&h),
             "cd /beta",
@@ -1264,11 +1264,11 @@ mod tests {
 
         h.type_text("x");
         h.stoat.drive_background();
-        h.type_keys("up");
+        h.type_keys("alt-up");
         assert_eq!(
             palette_text(&h),
             "cd /betax",
-            "the edit ends the walk, so Up captures the new needle (which matches nothing)"
+            "the edit ends the walk, so Alt-Up captures the new needle (which matches nothing)"
         );
     }
 
@@ -1292,6 +1292,28 @@ mod tests {
             "Ctrl-P moves the list selection up"
         );
         assert_eq!(palette_text(&h), "", "the Ctrl keys never recall history");
+    }
+
+    #[test]
+    fn palette_arrows_move_the_list_not_history() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["w".to_string()]);
+
+        h.type_text(":");
+        h.type_keys("down");
+        assert_eq!(
+            h.stoat.command_palette.as_ref().expect("open").selected,
+            1,
+            "Down moves the list selection down"
+        );
+        h.type_keys("up");
+        assert_eq!(
+            h.stoat.command_palette.as_ref().expect("open").selected,
+            0,
+            "Up moves the list selection up"
+        );
+        assert_eq!(palette_text(&h), "", "the arrows never recall history");
     }
 
     #[test]
