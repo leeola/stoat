@@ -2146,6 +2146,21 @@ mod tests {
     }
 
     #[test]
+    fn palette_tab_alias_dispatches_goto_tab_with_its_number() {
+        let mut h = Stoat::test();
+        h.type_text(":tab 2");
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let ws = h.stoat.active_workspace_mut();
+        match palette.handle_submit(ws) {
+            PaletteOutcome::Dispatch(entry, args, _) => {
+                assert_eq!(entry.def.name(), "GotoTab");
+                assert_eq!(args, vec![ParamValue::Number(2.0)]);
+            },
+            _ => panic!("`tab 2` should dispatch GotoTab with the index"),
+        }
+    }
+
+    #[test]
     fn palette_partial_text_dispatches_fuzzy_selection() {
         let mut h = Stoat::test();
         h.type_text(":qui");

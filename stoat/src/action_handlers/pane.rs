@@ -5,6 +5,7 @@ use crate::{
     workspace::Workspace,
 };
 use ratatui::layout::Rect;
+use stoat_scheduler::Executor;
 
 /// Closes the focused pane and disposes its backing view state. Returns
 /// `false` when the pane tree refused to close (only one split pane
@@ -102,10 +103,48 @@ pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     if !ws.panes.close(id) {
         return false;
     }
+    dispose_view(ws, &executor, view, EditorDisposal::Remove);
+    true
+}
+
+/// What to do with the editor behind a closing [`View::Editor`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditorDisposal {
+    /// Drop it outright. Correct when a pane closes, since the pane was the
+    /// thing showing it.
+    Remove,
+    /// Drop it only when no pane in any tab still shows it. Correct when a
+    /// whole tab closes, because another tab may be showing the same editor.
+    GcIfUnreferenced,
+}
+
+/// Release whatever `view` owned, which is an editor, a run's shell, or a
+/// terminal's PTY child. A label owns nothing.
+///
+/// Shared by pane close and tab close, which differ only in how they treat the
+/// editor. Killing a PTY is spawned onto `executor` rather than awaited, so the
+/// caller is not blocked on a child that ignores its signal.
+pub(crate) fn dispose_view(
+    ws: &mut Workspace,
+    executor: &Executor,
+    view: View,
+    editors: EditorDisposal,
+) {
     match view {
         View::Editor(id) => {
             let buffer_id = ws.editors.get(id).map(|editor| editor.buffer_id);
-            ws.editors.remove(id);
+            match editors {
+                EditorDisposal::Remove => {
+                    ws.editors.remove(id);
+                },
+                EditorDisposal::GcIfUnreferenced => {
+                    super::gc_editor_if_unreferenced(ws, id);
+                    // Still referenced, so its bridge waiter stays armed too.
+                    if ws.editors.contains_key(id) {
+                        return;
+                    }
+                },
+            }
             if let Some(buffer_id) = buffer_id
                 && let Some(done) = ws.editor_bridge_waiters.remove(&buffer_id)
             {
@@ -134,7 +173,6 @@ pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
         },
         View::Label(_) => {},
     }
-    true
 }
 
 /// Point a pane at its pre-terminal view, or a fresh scratch editor, after its

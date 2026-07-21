@@ -100,6 +100,7 @@ pub use defs::{
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     set_theme::SetTheme,
+    tab::{CloseTab, GotoTab, NewTab, ToggleTab},
     terminal::Terminal,
     workspace::{
         CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd, ShowCwd,

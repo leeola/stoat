@@ -337,9 +337,6 @@ impl Workspace {
     /// A no-op for an out-of-range index or the already-active tab. Pane focus
     /// rides along inside each tree, and docks are workspace-level, so nothing
     /// outside the tree needs restoring.
-    // Tests are the only caller until the NewTab, CloseTab, GotoTab, and
-    // ToggleTab actions land and dispatch into these four.
-    #[allow(dead_code)]
     pub(crate) fn switch_tab(&mut self, idx: usize) -> bool {
         if idx == self.active_tab || idx >= self.tabs.len() {
             return false;
@@ -356,7 +353,6 @@ impl Workspace {
     }
 
     /// Append a tab showing a fresh scratch buffer and switch to it.
-    #[allow(dead_code)]
     pub(crate) fn new_tab(&mut self, executor: &Executor) {
         let tree = scratch_tree(&mut self.buffers, &mut self.editors, executor);
         self.tabs.push(Tab { parked: Some(tree) });
@@ -369,7 +365,6 @@ impl Workspace {
     /// workspace always has somewhere to show panes. Closing the active tab
     /// first moves to the most recently used tab, or the nearest neighbour when
     /// there is none.
-    #[allow(dead_code)]
     pub(crate) fn close_tab(&mut self, idx: usize) -> Option<PaneTree> {
         if idx >= self.tabs.len() || self.tabs.len() == 1 {
             return None;
@@ -405,7 +400,6 @@ impl Workspace {
     }
 
     /// Switch back to the most recently used tab. Returns whether it happened.
-    #[allow(dead_code)]
     pub(crate) fn toggle_tab(&mut self) -> bool {
         match self.last_tab {
             Some(prev) => self.switch_tab(prev),

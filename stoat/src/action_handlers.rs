@@ -25,6 +25,7 @@ pub(crate) mod search;
 pub(crate) mod shell;
 pub(crate) mod split_selection;
 pub(crate) mod surround;
+mod tab;
 mod terminal;
 pub(crate) mod textobject;
 pub(crate) mod textobject_nav;
@@ -57,9 +58,9 @@ pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::{collections::HashMap, path::Path, sync::Arc};
 use stoat_action::{
-    Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, OpenBuffer, OpenConfig,
-    OpenFile, OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace,
-    ReviewExternalEdit, Run, SetCwd, SetTheme,
+    Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GotoTab, OpenBuffer,
+    OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange,
+    RenameWorkspace, ReviewExternalEdit, Run, SetCwd, SetTheme,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -127,6 +128,16 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             pane::focus_pane_by_index(stoat, focus.index);
             UpdateEffect::Redraw
         },
+        ActionKind::GotoTab => {
+            let goto = action
+                .as_any()
+                .downcast_ref::<GotoTab>()
+                .expect("GotoTab action downcast");
+            tab::goto_tab(stoat, goto.index)
+        },
+        ActionKind::NewTab => tab::new_tab(stoat),
+        ActionKind::CloseTab => tab::close_tab(stoat),
+        ActionKind::ToggleTab => tab::toggle_tab(stoat),
         ActionKind::ClosePane => {
             pane::close_focused_pane(stoat);
             UpdateEffect::Redraw

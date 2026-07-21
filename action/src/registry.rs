@@ -113,6 +113,7 @@ use crate::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
         },
         set_theme::SetTheme,
+        tab::{CloseTab, GotoTab, NewTab, ToggleTab},
         terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
@@ -208,6 +209,29 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             index: raw as usize,
         }))
     });
+    add(GotoTab::DEF, |params| {
+        let raw = params
+            .first()
+            .context(MissingSnafu { name: "index" })?
+            .as_number()
+            .context(WrongKindSnafu {
+                name: "index",
+                expected: ParamKind::Number,
+            })?;
+        if raw < 1.0 || raw.fract() != 0.0 {
+            return ParseFailureSnafu {
+                expected: ParamKind::Number,
+                input: raw.to_string(),
+            }
+            .fail();
+        }
+        Ok(Box::new(GotoTab {
+            index: raw as usize,
+        }))
+    });
+    add(NewTab::DEF, |_| Ok(Box::new(NewTab)));
+    add(CloseTab::DEF, |_| Ok(Box::new(CloseTab)));
+    add(ToggleTab::DEF, |_| Ok(Box::new(ToggleTab)));
     add(ClosePane::DEF, |_| Ok(Box::new(ClosePane)));
     add(CloseOtherPanes::DEF, |_| Ok(Box::new(CloseOtherPanes)));
     add(TogglePaneWiden::DEF, |_| Ok(Box::new(TogglePaneWiden)));
@@ -1536,6 +1560,7 @@ mod tests {
         // + 1 SymbolFinderComplete.
         // + 1 HelpComplete.
         // + 1 WorkspacePickerComplete.
+        // + 4 NewTab, CloseTab, GotoTab, ToggleTab.
         // + 2 CodeSearchPageDown, CodeSearchPageUp.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
@@ -1608,7 +1633,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 383);
+        assert_eq!(all().count(), 387);
     }
 
     #[test]
