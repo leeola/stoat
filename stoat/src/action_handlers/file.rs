@@ -608,6 +608,33 @@ pub(super) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEf
     UpdateEffect::Redraw
 }
 
+/// Set whether saving a config file re-applies it, backing
+/// `:auto-reload-config`.
+///
+/// The `state` argument is matched case-insensitively and accepts "on" or
+/// "off". Any other value reports the expected form and changes nothing.
+///
+/// This overrides the `config.auto_reload` setting for the running session
+/// only. Reloading stoat's config restores whatever value that file sets.
+pub(super) fn set_auto_reload_config(stoat: &mut Stoat, state: &str) -> UpdateEffect {
+    let enabled = match state.trim().to_ascii_lowercase().as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            stoat.set_status("auto-reload-config: expected on or off");
+            return UpdateEffect::Redraw;
+        },
+    };
+
+    stoat.settings.config_auto_reload = Some(enabled);
+    stoat.set_status(if enabled {
+        "auto-reload-config on"
+    } else {
+        "auto-reload-config off"
+    });
+    UpdateEffect::Redraw
+}
+
 /// Collapse `editor`'s selection onto the end of its buffer and scroll it into
 /// view, so a tailing buffer shows its newest content.
 fn collapse_to_buffer_end(editor: &mut EditorState, scrolloff: u32) {
@@ -1740,6 +1767,51 @@ mod tests {
         assert!(
             h.stoat.auto_reload_poll.is_none(),
             "no poll armed for a scratch buffer"
+        );
+    }
+
+    #[test]
+    fn set_auto_reload_config_flips_the_setting_both_ways() {
+        let mut h = Stoat::test();
+
+        assert_eq!(
+            super::set_auto_reload_config(&mut h.stoat, "off"),
+            UpdateEffect::Redraw
+        );
+        assert_eq!(h.stoat.settings.config_auto_reload, Some(false));
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("auto-reload-config off")
+        );
+
+        assert_eq!(
+            super::set_auto_reload_config(&mut h.stoat, "ON"),
+            UpdateEffect::Redraw
+        );
+        assert_eq!(h.stoat.settings.config_auto_reload, Some(true));
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("auto-reload-config on")
+        );
+    }
+
+    #[test]
+    fn set_auto_reload_config_rejects_a_bogus_argument() {
+        let mut h = Stoat::test();
+        let before = h.stoat.settings.config_auto_reload;
+
+        assert_eq!(
+            super::set_auto_reload_config(&mut h.stoat, "sometimes"),
+            UpdateEffect::Redraw
+        );
+
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("auto-reload-config: expected on or off")
+        );
+        assert_eq!(
+            h.stoat.settings.config_auto_reload, before,
+            "a bad argument leaves the setting untouched"
         );
     }
 

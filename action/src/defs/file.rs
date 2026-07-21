@@ -342,6 +342,66 @@ impl Action for AutoReload {
     }
 }
 
+const AUTO_RELOAD_CONFIG_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "state",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: true,
+    description: "on or off",
+}];
+
+#[derive(Debug)]
+pub struct AutoReloadConfigDef;
+
+impl ActionDef for AutoReloadConfigDef {
+    fn name(&self) -> &'static str {
+        "AutoReloadConfig"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::AutoReloadConfig
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        AUTO_RELOAD_CONFIG_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "toggle config auto-reload"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Flip the running value of the `config.auto_reload` setting, which decides whether saving a config file re-applies it right away instead of waiting for a restart. Covers saves of both stoat's own config and the terminal's. The change lasts until stoat exits, or until a later reload of stoat's config re-reads the value written in the file."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Normal
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["auto-reload-config"]
+    }
+}
+
+#[derive(Debug)]
+pub struct AutoReloadConfig {
+    pub state: String,
+}
+
+impl AutoReloadConfig {
+    pub const DEF: &AutoReloadConfigDef = &AutoReloadConfigDef;
+}
+
+impl Action for AutoReloadConfig {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[derive(Debug)]
 pub struct ForceSaveBufferDef;
 

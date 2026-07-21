@@ -140,6 +140,7 @@ pub enum ActionKind {
     WriteQuit,
     CloseBuffer,
     AutoReload,
+    AutoReloadConfig,
     AcceptCompletion,
     SmartTab,
     InsertTab,

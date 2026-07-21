@@ -55,8 +55,8 @@ use crate::{
             YankToClipboard,
         },
         file::{
-            AutoReload, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ToggleMinimap,
-            ToggleWrap,
+            AutoReload, AutoReloadConfig, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile,
+            ToggleMinimap, ToggleWrap,
         },
         file_finder::{
             FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
@@ -718,6 +718,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
                 expected: ParamKind::String,
             })?;
         Ok(Box::new(AutoReload {
+            state: raw.to_string(),
+        }))
+    });
+    add(AutoReloadConfig::DEF, |params| {
+        let raw = params
+            .first()
+            .context(MissingSnafu { name: "state" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "state",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(AutoReloadConfig {
             state: raw.to_string(),
         }))
     });
@@ -1416,6 +1429,7 @@ mod tests {
         // + 1 ReplaceWithYanked.
         // + 2 JoinSelections / JoinSelectionsSpace.
         // + 1 AutoReload.
+        // + 1 AutoReloadConfig.
         // + 1 PaletteCompletePath.
         // + 1 FocusPane.
         // + 2 PaletteHistoryPrev/Next.
@@ -1430,7 +1444,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 376);
+        assert_eq!(all().count(), 377);
     }
 
     #[test]
