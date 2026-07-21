@@ -7,7 +7,8 @@ define_action!(
     ActionKind::Quit,
     "close pane or exit",
     "Close the focused pane. Exit the application when closing the last remaining pane.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    aliases = &["q"]
 );
 
 define_action!(
@@ -17,7 +18,8 @@ define_action!(
     ActionKind::QuitAll,
     "exit stoat, closing all panes",
     "Exit the application immediately, closing every pane and viewport. See also Quit, which closes the current pane and only exits when it is the last.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    aliases = &["qa"]
 );
 
 define_action!(
@@ -49,7 +51,8 @@ define_action!(
     ActionKind::ShowVersion,
     "show the version",
     "Show stoat's version and build commit as a one-line badge, plus stoatty's version when running inside the stoatty terminal. The badge is dismissed on the next key press.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    command_name = "version"
 );
 
 define_action!(
@@ -60,7 +63,7 @@ define_action!(
     "open the session log file",
     "Open this session's log file in the focused pane and follow it as new lines are written, with the cursor on the last line. Use `:auto-reload off` to stop following. Reports in the status line when the session has no log file.",
     ActionPriority::Normal,
-    aliases = &["logs"]
+    command_name = "logs"
 );
 
 #[cfg(test)]

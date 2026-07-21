@@ -8,7 +8,8 @@ define_action!(
     "browse commit history",
     "Open the commit-list view: a left pane of commits on the current \
      branch with a right-pane preview of the selected commit's changes.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "commits"
 );
 
 define_action!(

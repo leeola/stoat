@@ -224,6 +224,10 @@ impl ActionDef for ShowCwdDef {
         "ShowCwd"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("pwd")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::ShowCwd
     }
@@ -238,10 +242,6 @@ impl ActionDef for ShowCwdDef {
 
     fn long_desc(&self) -> &'static str {
         "Report the active workspace's working directory as a status message. This is the root the file finder, diff, and review resolve against, not the process working directory."
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["pwd"]
     }
 
     fn priority(&self) -> ActionPriority {
@@ -288,10 +288,6 @@ impl ActionDef for ReloadEnvDef {
 
     fn long_desc(&self) -> &'static str {
         "Re-run direnv against the active workspace's root and replace its stored environment diff. Runs even when `direnv.load` is disabled, since invoking it is explicit intent. Child processes spawned after the reload pick up the new environment; already-running ones keep theirs."
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["reload-env"]
     }
 
     fn priority(&self) -> ActionPriority {
@@ -343,10 +339,14 @@ mod tests {
         assert_eq!(set_cwd.def().aliases(), &["cd"]);
         assert_eq!(ShowCwd.kind(), ActionKind::ShowCwd);
         assert_eq!(ShowCwd.def().name(), "ShowCwd");
-        assert_eq!(ShowCwd.def().aliases(), &["pwd"]);
+        assert_eq!(ShowCwd.def().command_name(), Some("pwd"));
         assert_eq!(ReloadEnv.kind(), ActionKind::ReloadEnv);
         assert_eq!(ReloadEnv.def().name(), "ReloadEnv");
-        assert_eq!(ReloadEnv.def().aliases(), &["reload-env"]);
+        assert_eq!(
+            ReloadEnv.def().command_name(),
+            None,
+            "reload-env is the derived name"
+        );
     }
 
     #[test]

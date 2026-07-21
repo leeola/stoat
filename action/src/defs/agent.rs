@@ -7,5 +7,6 @@ define_action!(
     ActionKind::SpawnClaude,
     "spawn claude",
     "Launch a Claude agent session in the focused pane.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "claude"
 );

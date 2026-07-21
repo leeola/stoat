@@ -17,6 +17,10 @@ impl ActionDef for OpenFileDef {
         "OpenFile"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("open")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::OpenFile
     }
@@ -38,7 +42,7 @@ impl ActionDef for OpenFileDef {
     }
 
     fn aliases(&self) -> &'static [&'static str] {
-        &["o", "open", "edit"]
+        &["o", "edit"]
     }
 }
 
@@ -77,6 +81,10 @@ impl ActionDef for OpenConfigDef {
         "OpenConfig"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("config")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::OpenConfig
     }
@@ -95,10 +103,6 @@ impl ActionDef for OpenConfigDef {
 
     fn priority(&self) -> ActionPriority {
         ActionPriority::Common
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["config"]
     }
 }
 
@@ -130,6 +134,10 @@ impl ActionDef for ToggleMinimapDef {
         "ToggleMinimap"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("minimap")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::ToggleMinimap
     }
@@ -148,10 +156,6 @@ impl ActionDef for ToggleMinimapDef {
 
     fn priority(&self) -> ActionPriority {
         ActionPriority::Common
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["minimap"]
     }
 }
 
@@ -180,6 +184,10 @@ impl ActionDef for ToggleWrapDef {
         "ToggleWrap"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("wrap")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::ToggleWrap
     }
@@ -198,10 +206,6 @@ impl ActionDef for ToggleWrapDef {
 
     fn priority(&self) -> ActionPriority {
         ActionPriority::Common
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["wrap"]
     }
 }
 
@@ -238,6 +242,10 @@ impl ActionDef for OpenBufferDef {
         "OpenBuffer"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("buffer")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::OpenBuffer
     }
@@ -259,7 +267,7 @@ impl ActionDef for OpenBufferDef {
     }
 
     fn aliases(&self) -> &'static [&'static str] {
-        &["b", "buffer"]
+        &["b"]
     }
 }
 
@@ -317,10 +325,6 @@ impl ActionDef for AutoReloadDef {
     fn priority(&self) -> ActionPriority {
         ActionPriority::Normal
     }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["auto-reload"]
-    }
 }
 
 #[derive(Debug)]
@@ -376,10 +380,6 @@ impl ActionDef for AutoReloadConfigDef {
 
     fn priority(&self) -> ActionPriority {
         ActionPriority::Normal
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["auto-reload-config"]
     }
 }
 

@@ -34,7 +34,8 @@ define_action!(
      Each row shows the diagnostic's line:column, severity glyph, and a message snippet; \
      selecting an entry collapses the cursor at that diagnostic's range start. \
      No-op when the focused pane is not an editor or the buffer has no diagnostics.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "diagnostics"
 );
 
 define_action!(
@@ -47,7 +48,8 @@ define_action!(
      Each row shows the path, line:column, severity glyph, and a message snippet; \
      selecting an entry opens the target file in the focused pane and collapses the cursor \
      at the diagnostic's range start. No-op when no diagnostics are loaded.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "workspace-diagnostics"
 );
 
 define_action!(
@@ -161,7 +163,8 @@ define_action!(
      Type to filter the symbol list, Enter jumps to the selected symbol's \
      definition, Escape closes. No-op when the server does not advertise \
      the capability.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "symbols"
 );
 
 define_action!(
@@ -237,7 +240,8 @@ define_action!(
      a numbered popup. Number keys 1-9 select a symbol; on select the \
      cursor opens the target file at the symbol's location. No-op when \
      the server does not advertise the capability.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "workspace-symbols"
 );
 
 define_action!(

@@ -120,7 +120,49 @@ macro_rules! define_action {
             aliases = $aliases
         );
     };
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, command_name = $command:expr_2021) => {
+        $crate::action::define_action!(
+            $def,
+            $action,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = true,
+            aliases = &[],
+            command_name_opt = Some($command)
+        );
+    };
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, aliases = $aliases:expr_2021, command_name = $command:expr_2021) => {
+        $crate::action::define_action!(
+            $def,
+            $action,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = true,
+            aliases = $aliases,
+            command_name_opt = Some($command)
+        );
+    };
     ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021, aliases = $aliases:expr_2021) => {
+        $crate::action::define_action!(
+            $def,
+            $action,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            palette_visible = $visible,
+            aliases = $aliases,
+            command_name_opt = None
+        );
+    };
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, palette_visible = $visible:expr_2021, aliases = $aliases:expr_2021, command_name_opt = $command:expr_2021) => {
         #[derive(Debug)]
         pub struct $def;
 
@@ -155,6 +197,10 @@ macro_rules! define_action {
 
             fn aliases(&self) -> &'static [&'static str] {
                 $aliases
+            }
+
+            fn command_name(&self) -> Option<&'static str> {
+                $command
             }
         }
 

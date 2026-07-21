@@ -183,7 +183,9 @@ define_action!(
     "TogglePaneWiden",
     ActionKind::TogglePaneWiden,
     "toggle pane widen",
-    "Horizontally expand the focused pane to full workspace width when neighboring pane edges align, and restore it when already widened or when focus leaves."
+    "Horizontally expand the focused pane to full workspace width when neighboring pane edges align, and restore it when already widened or when focus leaves.",
+    ActionPriority::Normal,
+    command_name = "widen"
 );
 
 define_action!(
@@ -193,7 +195,8 @@ define_action!(
     ActionKind::ToggleDockRight,
     "toggle right dock",
     "Cycle the right dock panel through visible, minimized, and hidden states.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    command_name = "dock-right"
 );
 
 define_action!(
@@ -203,7 +206,8 @@ define_action!(
     ActionKind::ToggleDockLeft,
     "toggle left dock",
     "Cycle the left dock panel through visible, minimized, and hidden states.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    command_name = "dock-left"
 );
 
 #[cfg(test)]

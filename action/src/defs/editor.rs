@@ -157,7 +157,8 @@ define_action!(
     ActionKind::ToggleSyntaxHighlight,
     "toggle syntax highlighting",
     "Turn tree-sitter syntax coloring off or on for the session. When off, code renders in the default foreground while search matches, diagnostics, and other text highlights stay. Applies to every open editor and to editors opened afterward; the setting is not persisted across restarts.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    command_name = "syntax-highlight"
 );
 
 define_action!(
@@ -167,7 +168,8 @@ define_action!(
     ActionKind::ToggleLspStatus,
     "toggle the LSP status popout",
     "Pin the detailed LSP status popout open or closed above the focused status bar. When open it lists each in-flight work-done operation across servers, freshest first, or one idle row per running server when nothing is in flight. Opens and closes instantly; the setting is not persisted across restarts.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    command_name = "lsp-status"
 );
 
 define_action!(
@@ -177,7 +179,8 @@ define_action!(
     ActionKind::ToggleInlayHints,
     "toggle LSP inlay hints",
     "Turn LSP inlay hints off or on for the session. When on, type and parameter hints for the visible region of the focused editor are requested from the language server and rendered inline. No-op when the server does not advertise inlay hints.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    command_name = "inlay-hints"
 );
 
 define_action!(
@@ -557,7 +560,8 @@ define_action!(
     ActionKind::OpenJumplistPicker,
     "open jumplist picker",
     "Open a modal listing every entry in the focused pane's jumplist with its file name, line:column, and a snippet of the line content. Enter jumps to the selected entry and resumes the walk from it. Esc cancels. No-op when the jumplist is empty.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "jumplist"
 );
 
 define_action!(
@@ -577,7 +581,8 @@ define_action!(
     ActionKind::OpenCodeSearch,
     "open workspace code search",
     "Open a live code-search modal over the workspace. As a regex is typed, matches stream into a list of path:line:column with a snippet, and a preview pane shows the selected match's file scrolled to its line. Enter opens the match's file at the offset. Esc closes.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "search"
 );
 
 define_action!(
@@ -698,7 +703,8 @@ define_action!(
     "save the focused buffer to disk",
     "Write the focused buffer's rope text to its backing file via FsHost, clear the buffer's dirty flag, and notify the LSP server via did_save. No-op for scratch buffers (no path).",
     ActionPriority::Common,
-    aliases = &["w", "write"]
+    aliases = &["w"],
+    command_name = "write"
 );
 
 define_action!(

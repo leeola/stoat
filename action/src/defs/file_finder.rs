@@ -9,6 +9,10 @@ impl ActionDef for OpenFileFinderDef {
         "OpenFileFinder"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("files")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::OpenFileFinder
     }
@@ -153,6 +157,10 @@ impl ActionDef for OpenChangedFilePickerDef {
         "OpenChangedFilePicker"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("changed-files")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::OpenChangedFilePicker
     }
@@ -201,6 +209,10 @@ impl ActionDef for OpenBufferPickerDef {
         "OpenBufferPicker"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("buffers")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::OpenBufferPicker
     }
@@ -247,6 +259,10 @@ pub struct OpenWorkspaceFileFinderDef;
 impl ActionDef for OpenWorkspaceFileFinderDef {
     fn name(&self) -> &'static str {
         "OpenWorkspaceFileFinder"
+    }
+
+    fn command_name(&self) -> Option<&'static str> {
+        Some("workspace-files")
     }
 
     fn kind(&self) -> ActionKind {

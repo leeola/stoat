@@ -17,6 +17,10 @@ impl ActionDef for SetThemeDef {
         "SetTheme"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("theme")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::SetTheme
     }
@@ -31,10 +35,6 @@ impl ActionDef for SetThemeDef {
 
     fn long_desc(&self) -> &'static str {
         "Re-resolve the named theme against the loaded theme blocks and apply it immediately, without restarting. Keeps the current theme and shows a message when the name is unknown."
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["theme"]
     }
 
     fn priority(&self) -> ActionPriority {
@@ -74,6 +74,6 @@ mod tests {
         assert_eq!(action.def().name(), "SetTheme");
         assert_eq!(action.def().params().len(), 1);
         assert_eq!(action.def().params()[0].name, "name");
-        assert_eq!(action.def().aliases(), ["theme"]);
+        assert_eq!(action.def().command_name(), Some("theme"));
     }
 }

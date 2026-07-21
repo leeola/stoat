@@ -828,7 +828,7 @@ mod tests {
     fn empty_filter_groups_by_priority_then_alphabetical() {
         let listed = names_for("");
         assert!(listed.contains(&"quit"));
-        assert!(listed.contains(&"open-file"));
+        assert!(listed.contains(&"open"));
         assert!(!listed.contains(&"open-command-palette"));
 
         let listed_with_prio: Vec<(u8, &&'static str)> =
@@ -888,13 +888,13 @@ mod tests {
 
     #[test]
     fn multi_token_query_matches_in_either_order() {
-        // `OpenFile` contains both `open` and `file` tokens. Pattern
+        // `changed-files` contains both `changed` and `files` tokens. Pattern
         // splits on whitespace, so the order of tokens does not change
         // the hit set.
-        let forward = names_for("open file");
-        let reverse = names_for("file open");
-        assert!(forward.contains(&"open-file"));
-        assert!(reverse.contains(&"open-file"));
+        let forward = names_for("changed files");
+        let reverse = names_for("files changed");
+        assert!(forward.contains(&"changed-files"));
+        assert!(reverse.contains(&"changed-files"));
     }
 
     #[test]
@@ -930,12 +930,12 @@ mod tests {
     fn exact_alias_match_pins_to_top() {
         assert_eq!(
             names_for("w").first().copied(),
-            Some("save-buffer"),
+            Some("write"),
             "`w` is SaveBuffer's alias and must pin to the top",
         );
         assert_eq!(
             names_for("o").first().copied(),
-            Some("open-file"),
+            Some("open"),
             "`o` is OpenFile's alias and must pin to the top",
         );
     }
@@ -1735,13 +1735,13 @@ mod tests {
         let mut h = Stoat::test();
         seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
 
-        h.type_text(":set-them");
+        h.type_text(":set-cw");
         let _ = h.snapshot();
         h.type_keys("tab");
         let _ = h.snapshot();
         assert_eq!(
             palette_text(&h),
-            "set-theme ",
+            "set-cwd ",
             "a param-taking command completes with the space that opens its arg picker"
         );
 
@@ -2176,7 +2176,7 @@ mod tests {
         let mut palette = h.stoat.command_palette.take().expect("palette open");
         let ws = h.stoat.active_workspace_mut();
         assert!(matches!(palette.handle_submit(ws), PaletteOutcome::None));
-        assert_eq!(palette.input.text(ws), "open-file ");
+        assert_eq!(palette.input.text(ws), "open ");
     }
 
     /// `:cd ` with no query lists the workspace's directories beside a cleared

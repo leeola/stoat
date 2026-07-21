@@ -7,7 +7,9 @@ define_action!(
     ActionKind::EnterRebase,
     "enter interactive rebase over the commit list",
     "Seed a rebase todo list from the currently loaded commits (oldest \
-     first, all marked Pick) and switch to rebase mode for editing."
+     first, all marked Pick) and switch to rebase mode for editing.",
+    ActionPriority::Normal,
+    command_name = "rebase"
 );
 
 define_action!(

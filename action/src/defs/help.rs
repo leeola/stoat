@@ -59,6 +59,10 @@ impl ActionDef for ToggleKeyHintsDef {
         "ToggleKeyHints"
     }
 
+    fn command_name(&self) -> Option<&'static str> {
+        Some("hints")
+    }
+
     fn kind(&self) -> ActionKind {
         ActionKind::ToggleKeyHints
     }
@@ -79,10 +83,6 @@ impl ActionDef for ToggleKeyHintsDef {
 
     fn priority(&self) -> ActionPriority {
         ActionPriority::Common
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["hints"]
     }
 }
 

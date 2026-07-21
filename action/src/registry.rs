@@ -1246,6 +1246,55 @@ mod tests {
         );
     }
 
+    /// Curating a command name lets the identical alias be deleted, so this
+    /// pins that every such token still reaches the action it used to. A
+    /// deletion that outran its replacement would make the command silently
+    /// unreachable by the word users already type.
+    #[test]
+    fn tokens_whose_aliases_were_dropped_still_resolve() {
+        let cases = [
+            ("theme", "SetTheme"),
+            ("pwd", "ShowCwd"),
+            ("reload-env", "ReloadEnv"),
+            ("minimap", "ToggleMinimap"),
+            ("wrap", "ToggleWrap"),
+            ("hints", "ToggleKeyHints"),
+            ("config", "OpenConfig"),
+            ("logs", "OpenLogs"),
+            ("auto-reload", "AutoReload"),
+            ("auto-reload-config", "AutoReloadConfig"),
+            ("open", "OpenFile"),
+            ("buffer", "OpenBuffer"),
+            ("write", "SaveBuffer"),
+        ];
+        for (token, action) in cases {
+            assert_eq!(
+                lookup_alias(token).map(|e| e.def.name()),
+                Some(action),
+                "{token} must still reach {action}"
+            );
+        }
+    }
+
+    /// The short forms kept or added alongside the curated names.
+    #[test]
+    fn short_aliases_resolve() {
+        for (token, action) in [
+            ("q", "Quit"),
+            ("qa", "QuitAll"),
+            ("w", "SaveBuffer"),
+            ("o", "OpenFile"),
+            ("b", "OpenBuffer"),
+            ("cd", "SetCwd"),
+        ] {
+            assert_eq!(
+                lookup_alias(token).map(|e| e.def.name()),
+                Some(action),
+                "{token} must reach {action}"
+            );
+        }
+    }
+
     /// Every way of addressing an action has to name exactly one of them, or
     /// typing that token in the palette silently reaches whichever entry the
     /// hash map happened to yield first.
