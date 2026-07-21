@@ -40,6 +40,7 @@ pub enum ActionKind {
     FileFinderPageUp,
     FileFinderPageDown,
     FileFinderScopeToggle,
+    FileFinderComplete,
     OpenCommandPalette,
     OpenHelp,
     Diff,

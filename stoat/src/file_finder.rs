@@ -1166,6 +1166,118 @@ mod tests {
         assert!(finder.core.picklist.base[idx].ends_with("alpha.rs"));
     }
 
+    /// The finder's current query text.
+    fn finder_query(h: &TestHarness) -> String {
+        h.stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .input
+            .text(h.stoat.active_workspace())
+    }
+
+    #[test]
+    fn tab_completes_the_highlighted_row() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/alpha.rs", ""), ("src/beta.rs", "")]);
+
+        h.type_keys("space p");
+        h.type_text("alp");
+        let _ = h.snapshot();
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            finder_query(&h),
+            "src/alpha.rs",
+            "Tab completes the highlighted row into the query"
+        );
+        assert_eq!(
+            h.stoat
+                .file_finder
+                .as_ref()
+                .expect("finder open")
+                .active_core_ref()
+                .picklist
+                .selected,
+            0,
+            "the completed row is the selection"
+        );
+    }
+
+    #[test]
+    fn tab_completes_a_browse_row_under_the_typed_prefix() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("f.rs", "")]);
+        let home = PathBuf::from("/fake-home");
+        h.fake_fs()
+            .insert_files([(home.join("alpha.rs"), "a".as_bytes())]);
+        h.fake_env().set("HOME", home.to_str().unwrap());
+
+        h.type_keys("space p");
+        h.type_text("~/al");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            finder_query(&h),
+            "~/alpha.rs",
+            "a browse completion keeps the typed prefix and appends the row name"
+        );
+    }
+
+    /// The completed query still matches more than one row here, so the
+    /// selection reset is what decides which file Enter opens. A refilter alone
+    /// only clamps the stale index into range, which would leave it pointing at
+    /// the longer sibling.
+    #[test]
+    fn tab_then_enter_opens_the_completed_file() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(
+            &mut h,
+            &[
+                ("src/alpha.rs", "ALPHA-CONTENT"),
+                ("src/alphabet.rs", "ALPHABET-CONTENT"),
+                ("src/alphabetical.rs", "ALPHABETICAL-CONTENT"),
+            ],
+        );
+
+        h.type_keys("space p");
+        h.type_text("alp");
+        let _ = h.snapshot();
+
+        h.type_keys("down");
+        let _ = h.snapshot();
+        assert_eq!(
+            finder_rows(&h),
+            vec![
+                "src/alpha.rs".to_string(),
+                "src/alphabet.rs".to_string(),
+                "src/alphabetical.rs".to_string(),
+            ],
+            "all three rows match the partial query"
+        );
+
+        // Enter must read the selection the completion already reset, so the
+        // two keys go through with no settle between them.
+        h.type_keys("tab enter");
+        h.settle();
+
+        let frame = h.snapshot();
+        assert!(
+            frame.content.contains("ALPHABET-CONTENT")
+                && !frame.content.contains("ALPHABETICAL-CONTENT"),
+            "Tab then Enter opens the completed row, not its longer sibling, got:\n{}",
+            frame.content
+        );
+        assert!(h.stoat.file_finder.is_none(), "the finder closed");
+    }
+
     #[test]
     fn split_path_query_parses_path_shaped_queries() {
         let home = Some("/home/u");

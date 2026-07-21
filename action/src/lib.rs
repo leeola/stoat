@@ -57,9 +57,9 @@ pub use defs::{
         ToggleMinimap, ToggleWrap,
     },
     file_finder::{
-        FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
-        FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
-        OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
+        FileFinderComplete, FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle,
+        FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker,
+        OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
     },
     help::{
         CloseHelp, DismissKeyHints, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,

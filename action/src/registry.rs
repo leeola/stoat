@@ -59,9 +59,9 @@ use crate::{
             ToggleMinimap, ToggleWrap,
         },
         file_finder::{
-            FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle, FileFinderSelectNext,
-            FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
-            OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
+            FileFinderComplete, FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle,
+            FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker, OpenChangedFilePicker,
+            OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
         },
         help::{
             CloseHelp, DismissKeyHints, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
@@ -211,6 +211,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(FileFinderScopeToggle::DEF, |_| {
         Ok(Box::new(FileFinderScopeToggle))
+    });
+    add(FileFinderComplete::DEF, |_| {
+        Ok(Box::new(FileFinderComplete))
     });
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
     add(Diff::DEF, |_| Ok(Box::new(Diff)));
@@ -983,6 +986,7 @@ mod tests {
         "FileFinderPageUp",
         "FileFinderPageDown",
         "FileFinderScopeToggle",
+        "FileFinderComplete",
         "OpenHelp",
         "Diff",
         "ToggleDiff",
@@ -1394,6 +1398,7 @@ mod tests {
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 4 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev.
         // + 2 FileFinderPageUp, FileFinderPageDown.
+        // + 1 FileFinderComplete.
         // + 2 PalettePageUp, PalettePageDown.
         // + 1 OpenBuffer.
         // + 1 ToggleDiff.
@@ -1442,7 +1447,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 377);
+        assert_eq!(all().count(), 378);
     }
 
     #[test]

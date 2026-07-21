@@ -338,6 +338,59 @@ pub(super) fn file_finder_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
     Some(UpdateEffect::Redraw)
 }
 
+/// Complete the highlighted row into the finder query, replacing what was typed
+/// with exactly what the row shows.
+///
+/// While browsing a directory the completed query keeps the typed prefix and
+/// appends the highlighted child, so the browse stays rooted where it was with
+/// the completed name selected and a following Enter opens that entry.
+/// Otherwise the query becomes the selected path relative to the workspace root.
+///
+/// No-op when the finder is closed or its list is empty. The picker is
+/// refiltered synchronously against the completed query and its selection reset
+/// to the top row, so an Enter arriving before the next render opens the
+/// completed row rather than whatever the stale selection pointed at.
+pub(super) fn file_finder_complete(stoat: &mut Stoat) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+
+    let completed = {
+        let Some(finder) = stoat.file_finder.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let Some(selected) = finder.selected_path() else {
+            return UpdateEffect::None;
+        };
+        match finder.browse.as_ref() {
+            Some(browse) => {
+                let Some(name) = selected.file_name() else {
+                    return UpdateEffect::None;
+                };
+                format!("{}{}", browse.typed_dir, name.to_string_lossy())
+            },
+            None => {
+                let ws = &stoat.workspaces[active_idx];
+                crate::paths::display_relative(selected, &ws.git_root)
+            },
+        }
+    };
+
+    {
+        let ws = &mut stoat.workspaces[active_idx];
+        if let Some(finder) = stoat.file_finder.as_ref() {
+            finder.input.replace_text(ws, &completed);
+        }
+    }
+
+    sync_file_finder_browse(stoat);
+
+    let ws = &stoat.workspaces[active_idx];
+    if let Some(finder) = stoat.file_finder.as_mut() {
+        finder.refilter_from_input(ws);
+        finder.active_core().picklist.selected = 0;
+    }
+    UpdateEffect::Redraw
+}
+
 pub(crate) fn file_finder_move_selection(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let Some(finder) = stoat.file_finder.as_mut() else {
         return UpdateEffect::None;

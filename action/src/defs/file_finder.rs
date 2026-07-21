@@ -433,6 +433,56 @@ impl Action for FileFinderScopeToggle {
 }
 
 #[derive(Debug)]
+pub struct FileFinderCompleteDef;
+
+impl ActionDef for FileFinderCompleteDef {
+    fn name(&self) -> &'static str {
+        "FileFinderComplete"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::FileFinderComplete
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "complete selected file"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Complete the highlighted row into the file finder query, replacing \
+         what was typed with the row's path. Browsing a directory completes \
+         the typed prefix plus the row's name, so a following Enter opens that \
+         entry. Bound by default to Tab while the finder is open; a no-op when \
+         the list is empty."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct FileFinderComplete;
+
+impl FileFinderComplete {
+    pub const DEF: &FileFinderCompleteDef = &FileFinderCompleteDef;
+}
+
+impl Action for FileFinderComplete {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct FileFinderPageUpDef;
 
 impl ActionDef for FileFinderPageUpDef {
@@ -586,6 +636,9 @@ mod tests {
             FileFinderScopeToggle.kind(),
             ActionKind::FileFinderScopeToggle
         );
+        assert_eq!(FileFinderComplete.kind(), ActionKind::FileFinderComplete);
+        assert_eq!(FileFinderComplete.def().name(), "FileFinderComplete");
+        assert!(FileFinderComplete.def().params().is_empty());
 
         for def in [
             FileFinderSelectPrev.def(),
@@ -593,6 +646,7 @@ mod tests {
             FileFinderPageUp.def(),
             FileFinderPageDown.def(),
             FileFinderScopeToggle.def(),
+            FileFinderComplete.def(),
         ] {
             assert!(!def.palette_visible());
         }

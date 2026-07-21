@@ -690,6 +690,7 @@ on key {
         Ctrl-n -> FileFinderSelectNext();
         Ctrl-f -> FileFinderPageDown();
         Ctrl-b -> FileFinderPageUp();
+        Tab -> FileFinderComplete();
         BackTab -> FileFinderScopeToggle();
     }
     modal == symbols && mode == insert {

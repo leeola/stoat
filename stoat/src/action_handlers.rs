@@ -220,6 +220,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::FileFinderPageUp => file_finder::file_finder_page(stoat, -1),
         ActionKind::FileFinderPageDown => file_finder::file_finder_page(stoat, 1),
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),
+        ActionKind::FileFinderComplete => file_finder::file_finder_complete(stoat),
         ActionKind::OpenCommandPalette => {
             let executor = stoat.executor.clone();
             let availability = crate::command_palette::Availability::from_stoat(stoat);
