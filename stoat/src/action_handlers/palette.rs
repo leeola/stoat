@@ -372,29 +372,47 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Complete the highlighted directory into the `:cd` input, replacing the typed
-/// tail with exactly what the selected row shows and no trailing `/`.
+/// Complete the highlighted candidate into the palette input, replacing the
+/// typed tail with exactly what the selected row shows.
 ///
-/// No-op unless a palette is open on a [`ValueSource::Directories`] argument
-/// with a picker and a selected row. In browse mode the completed tail keeps the
-/// typed directory prefix and appends the highlighted child. From the workspace
-/// list it is the selected directory relative to the workspace root.
+/// In command-list mode this completes the highlighted command's token. A
+/// command taking parameters completes with a trailing space so the argument
+/// picker opens. A parameterless one completes bare, which the exact-match arm
+/// of `handle_submit` dispatches on the next Enter.
 ///
-/// The completion leaves the browse rooted where it was with the completed name
-/// as the highlighted row, so a following Enter opens that directory. Descending
-/// into it is a further `/` the user types, which re-roots the browse. The
-/// picker is refiltered synchronously against the completed tail and its
-/// selection reset to the top row, so an Enter arriving before the next render
-/// still opens the completed directory rather than its first child.
-pub(super) fn palette_complete_path(stoat: &mut Stoat) -> UpdateEffect {
+/// In argument mode it completes the selected row of any picker-sourced
+/// argument. A browse-mode tail keeps the typed directory prefix and appends the
+/// highlighted child, and no completion appends a trailing `/`, so the browse
+/// stays rooted where it was with the completed name highlighted and a following
+/// Enter opens that entry. Descending is a further `/` the user types, which
+/// re-roots the browse.
+///
+/// No-op when no palette is open, or when the list it would complete from is
+/// empty. The picker is refiltered synchronously against the completed tail and
+/// its selection reset to the top row, so an Enter arriving before the next
+/// render still reads the completed entry rather than its first child.
+pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
 
     let new_text = {
         let Some(palette) = stoat.command_palette.as_ref() else {
             return UpdateEffect::None;
         };
-        if palette.arg_source() != Some(ValueSource::Directories) {
-            return UpdateEffect::None;
+        if palette.command.is_none() {
+            let Some(entry) = palette.filtered.get(palette.selected).copied() else {
+                return UpdateEffect::None;
+            };
+            let token = entry.def.name();
+            let completed = if entry.def.params().is_empty() {
+                token.to_string()
+            } else {
+                format!("{token} ")
+            };
+
+            let ws = &mut stoat.workspaces[active_idx];
+            palette.input.replace_text(ws, &completed);
+            sync_palette_picker(stoat);
+            return UpdateEffect::Redraw;
         }
         let Some(picker) = palette.arg_picker.as_ref() else {
             return UpdateEffect::None;

@@ -335,15 +335,15 @@ impl Action for PaletteHistoryNext {
 }
 
 #[derive(Debug)]
-pub struct PaletteCompletePathDef;
+pub struct PaletteCompleteDef;
 
-impl ActionDef for PaletteCompletePathDef {
+impl ActionDef for PaletteCompleteDef {
     fn name(&self) -> &'static str {
-        "PaletteCompletePath"
+        "PaletteComplete"
     }
 
     fn kind(&self) -> ActionKind {
-        ActionKind::PaletteCompletePath
+        ActionKind::PaletteComplete
     }
 
     fn params(&self) -> &'static [ParamDef] {
@@ -351,13 +351,16 @@ impl ActionDef for PaletteCompletePathDef {
     }
 
     fn short_desc(&self) -> &'static str {
-        "complete selected palette path"
+        "complete selected palette entry"
     }
 
     fn long_desc(&self) -> &'static str {
-        "Complete the highlighted directory into the palette input with a \
-         trailing slash, descending into it. Bound by default to Tab for a \
-         Directories argument such as :cd; a no-op for other arguments."
+        "Complete the highlighted candidate into the palette input. From the \
+         command list this is the selected command, completed with a trailing \
+         space when it takes arguments so the argument picker opens. From an \
+         argument list it is the selected row, for every picker-backed argument \
+         such as a file, buffer, theme, or directory. Bound by default to Tab; \
+         a no-op when the list is empty."
     }
 
     fn palette_visible(&self) -> bool {
@@ -366,13 +369,13 @@ impl ActionDef for PaletteCompletePathDef {
 }
 
 #[derive(Debug)]
-pub struct PaletteCompletePath;
+pub struct PaletteComplete;
 
-impl PaletteCompletePath {
-    pub const DEF: &PaletteCompletePathDef = &PaletteCompletePathDef;
+impl PaletteComplete {
+    pub const DEF: &PaletteCompleteDef = &PaletteCompleteDef;
 }
 
-impl Action for PaletteCompletePath {
+impl Action for PaletteComplete {
     fn def(&self) -> &'static dyn ActionDef {
         Self::DEF
     }

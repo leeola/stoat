@@ -89,7 +89,7 @@ use crate::{
             LocationPickerSelect,
         },
         prompt::{
-            CancelPromptInput, PaletteCompletePath, PaletteHistoryNext, PaletteHistoryPrev,
+            CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
             PalettePageDown, PalettePageUp, PaletteScopeToggle, PaletteSelectNext,
             PaletteSelectPrev, PromptInsertNewline, SubmitPromptInput,
         },
@@ -917,9 +917,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PaletteScopeToggle::DEF, |_| {
         Ok(Box::new(PaletteScopeToggle))
     });
-    add(PaletteCompletePath::DEF, |_| {
-        Ok(Box::new(PaletteCompletePath))
-    });
+    add(PaletteComplete::DEF, |_| Ok(Box::new(PaletteComplete)));
 
     map
 }
@@ -1165,7 +1163,7 @@ mod tests {
         "PalettePageUp",
         "PalettePageDown",
         "PaletteScopeToggle",
-        "PaletteCompletePath",
+        "PaletteComplete",
     ];
 
     #[test]
@@ -1430,7 +1428,7 @@ mod tests {
         // + 2 JoinSelections / JoinSelectionsSpace.
         // + 1 AutoReload.
         // + 1 AutoReloadConfig.
-        // + 1 PaletteCompletePath.
+        // + 1 PaletteComplete.
         // + 1 FocusPane.
         // + 2 PaletteHistoryPrev/Next.
         // + 1 SetTheme.

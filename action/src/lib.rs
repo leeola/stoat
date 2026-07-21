@@ -78,7 +78,7 @@ pub use defs::{
         SplitDown, SplitNewDown, SplitNewRight, SplitRight, ToggleDockLeft, ToggleDockRight,
     },
     prompt::{
-        CancelPromptInput, PaletteCompletePath, PaletteHistoryNext, PaletteHistoryPrev,
+        CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
         PalettePageDown, PalettePageUp, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
         PromptInsertNewline, SubmitPromptInput,
     },

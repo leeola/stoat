@@ -1711,20 +1711,69 @@ mod tests {
     }
 
     #[test]
-    fn tab_in_command_mode_leaves_input_unchanged() {
+    fn tab_completes_the_selected_command() {
         let mut h = Stoat::test();
         seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
 
-        h.type_text(":q");
+        h.type_text(":SetThem");
+        let _ = h.snapshot();
+        h.type_keys("tab");
+        let _ = h.snapshot();
+        assert_eq!(
+            palette_text(&h),
+            "SetTheme ",
+            "a param-taking command completes with the space that opens its arg picker"
+        );
+
+        h.type_keys("escape");
+        h.type_text(":QuitAl");
+        let _ = h.snapshot();
+        h.type_keys("tab");
+        let _ = h.snapshot();
+        assert_eq!(
+            palette_text(&h),
+            "QuitAll",
+            "a parameterless command completes bare, ready for Enter"
+        );
+    }
+
+    #[test]
+    fn tab_completes_file_arg() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/alpha.rs", ""), ("wsdir/beta.rs", "")]);
+
+        h.type_text(":OpenFile wsdir/al");
+        let _ = h.snapshot();
+        h.settle();
         let _ = h.snapshot();
 
         h.type_keys("tab");
         let _ = h.snapshot();
 
         assert_eq!(
-            palette_text(&h),
-            "q",
-            "Tab in command-filter mode leaves the input unchanged"
+            palette_arg_tail(&h).as_deref(),
+            Some("wsdir/alpha.rs"),
+            "Tab completes the highlighted file row into the tail"
+        );
+    }
+
+    #[test]
+    fn tab_completes_theme_arg() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
+
+        h.type_text(":SetTheme gruv");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            palette_arg_tail(&h).as_deref(),
+            Some("gruvbox-dark"),
+            "Tab completes the highlighted theme row into the tail"
         );
     }
 

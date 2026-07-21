@@ -879,7 +879,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PalettePageUp => palette::palette_page(stoat, -1),
         ActionKind::PalettePageDown => palette::palette_page(stoat, 1),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
-        ActionKind::PaletteCompletePath => palette::palette_complete_path(stoat),
+        ActionKind::PaletteComplete => palette::palette_complete(stoat),
         ActionKind::OpenLastPicker => open_last_picker(stoat),
     };
     end_action_group(stoat, group_buffer);

@@ -716,7 +716,7 @@ on key {
         Ctrl-n -> PaletteSelectNext();
         Ctrl-f -> PalettePageDown();
         Ctrl-b -> PalettePageUp();
-        Tab -> PaletteCompletePath();
+        Tab -> PaletteComplete();
         BackTab -> PaletteScopeToggle();
     }
     modal == help && mode == insert {
