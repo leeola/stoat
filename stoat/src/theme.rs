@@ -41,6 +41,21 @@ impl Theme {
         self.palette.get(name).copied()
     }
 
+    /// The style the text caret paints with.
+    ///
+    /// A caret drawn in the same colors as the text beneath it is invisible, so
+    /// a theme expressing no cursor style falls back to reverse video rather
+    /// than to no style at all. A theme that does style the scope, or any
+    /// broader one [`Self::get`] falls back through, is returned untouched.
+    pub(crate) fn cursor_style(&self) -> Style {
+        let style = self.get(scope::UI_CURSOR);
+        if style == Style::default() {
+            return Style::default().add_modifier(Modifier::REVERSED);
+        }
+
+        style
+    }
+
     /// Build the theme named `name` from all `theme` blocks in `config`.
     ///
     /// A thin wrapper over [`Self::from_blocks`] passing `config.themes` as the
@@ -646,6 +661,25 @@ mod tests {
         assert_eq!(
             load(map_src, "t").try_get("ui.cursor"),
             load(dotted_src, "t").try_get("ui.cursor")
+        );
+    }
+
+    #[test]
+    fn cursor_style_falls_back_to_reverse_video() {
+        assert_eq!(
+            Theme::empty().cursor_style(),
+            Style::default().add_modifier(Modifier::REVERSED),
+            "a theme styling no cursor scope still paints a visible caret"
+        );
+    }
+
+    #[test]
+    fn cursor_style_keeps_a_styled_cursor_verbatim() {
+        let theme = load("theme t { ui.cursor.fg = red; }", "t");
+        assert_eq!(
+            theme.cursor_style(),
+            Style::default().fg(Color::Red),
+            "a theme that styles the cursor gets no added modifier"
         );
     }
 

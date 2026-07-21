@@ -1496,11 +1496,11 @@ mod tests {
     fn review_page_fill_wraps_and_matches_the_live_render() {
         use super::{render_review_page_from_parts, serialize_buffer};
         use crate::{
-            render::review::render_review,
+            render::review::{render_review, render_review_rows},
             theme::{scope, Theme},
             Stoat,
         };
-        use ratatui::{buffer::Buffer, layout::Rect};
+        use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
         use stoatty_protocol::command::FillCommand;
 
         let mut h = Stoat::test();
@@ -1537,9 +1537,27 @@ mod tests {
             "frame closes the fill, got {cmds:?}"
         );
 
-        // The async page bytes match what the live editor path paints for the
-        // same page, so moving the render off-thread changed nothing on screen.
+        // The async page bytes match what the live path paints for the same
+        // page, so moving the render off-thread changed nothing on screen. A
+        // pooled page carries document rows only, while the live path overlays
+        // the caret on top of them, so the rows are what the two share.
         let area = Rect::new(0, 0, width, height);
+        let mut rows_only = Buffer::empty(area);
+        render_review_rows(
+            &snapshot,
+            &view,
+            0,
+            area,
+            fallback,
+            &theme,
+            &mut rows_only,
+            None,
+        );
+        assert!(
+            find(&frame, &serialize_buffer(&rows_only)).is_some(),
+            "the page's row bytes ride between the fill markers"
+        );
+
         let mut live = Buffer::empty(area);
         {
             let editor = h
@@ -1551,10 +1569,25 @@ mod tests {
             editor.scroll_row = 0;
             render_review(editor, area, fallback, &theme, &mut live, None);
         }
-        let page = serialize_buffer(&live);
+
+        let overlaid: Vec<_> = live
+            .content
+            .iter()
+            .zip(rows_only.content.iter())
+            .filter(|(painted, rows)| painted != rows)
+            .collect();
+        assert_eq!(
+            overlaid.len(),
+            1,
+            "the live render adds the caret and nothing else to the pooled rows"
+        );
         assert!(
-            find(&frame, &page).is_some(),
-            "the live render's page bytes ride between the fill markers"
+            overlaid[0]
+                .0
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "a theme styling no cursor scope still paints a visible caret"
         );
     }
 

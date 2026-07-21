@@ -464,7 +464,7 @@ pub(crate) fn render_editor_with_overlay(
     }
 
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
-    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
+    let cursor_style = theme.cursor_style();
     let primary_id = editor.selections.newest_anchor().id;
     let mut primary_cell: Option<(u16, u16)> = None;
     // A scene means the terminal draws the primary cursor itself, so this pass

@@ -896,7 +896,7 @@ pub(crate) fn render_review_cursor(
     buf: &mut Buffer,
     stoatty: bool,
 ) {
-    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
+    let cursor_style = theme.cursor_style();
 
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
