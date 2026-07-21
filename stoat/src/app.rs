@@ -127,8 +127,11 @@ struct ConfigArtifacts {
 /// embedded and user blocks so a user config's own `theme` block still wins.
 ///
 /// `env_theme` names the theme inherited from the environment. It applies only
-/// when neither `cli_settings` nor a user config picks one. A reload passes
-/// [`None`], since the environment is read once at startup.
+/// when neither `cli_settings` nor a user config picks one, and only when the
+/// theme pool can resolve it. An inherited name is a hint the user never typed,
+/// so one naming no known theme is ignored with a warning and the default look
+/// survives. A reload passes [`None`], since the environment is read once at
+/// startup.
 fn build_config_artifacts(
     config: Option<stoat_config::Config>,
     embedded: Option<stoat_config::Config>,
@@ -136,6 +139,20 @@ fn build_config_artifacts(
     cli_settings: Settings,
     env_theme: Option<String>,
 ) -> ConfigArtifacts {
+    // The whole pool is retained so SetTheme can re-resolve any theme at
+    // runtime, and so an `inherits PARENT` sees every candidate parent.
+    let theme_blocks: Vec<Spanned<ThemeBlock>> = {
+        let mut blocks = Vec::new();
+        if let Some(base) = embedded.as_ref() {
+            blocks.extend(base.themes.iter().cloned());
+        }
+        blocks.extend(imported.iter().cloned());
+        if let Some(c) = config.as_ref() {
+            blocks.extend(c.themes.iter().cloned());
+        }
+        blocks
+    };
+
     let settings = {
         let cli_theme_set = cli_settings.theme.is_some();
         let from_config = config
@@ -153,24 +170,14 @@ fn build_config_artifacts(
             && !user_theme_set
             && let Some(name) = env_theme
         {
-            settings.theme = Some(name);
+            if theme_blocks.iter().any(|b| b.node.name.node == name) {
+                settings.theme = Some(name);
+            } else {
+                tracing::warn!("STOAT_THEME '{name}' names no known theme; using the default");
+            }
         }
 
         settings
-    };
-
-    // The whole pool is retained so SetTheme can re-resolve any theme at
-    // runtime, and so an `inherits PARENT` sees every candidate parent.
-    let theme_blocks: Vec<Spanned<ThemeBlock>> = {
-        let mut blocks = Vec::new();
-        if let Some(base) = embedded.as_ref() {
-            blocks.extend(base.themes.iter().cloned());
-        }
-        blocks.extend(imported.iter().cloned());
-        if let Some(c) = config.as_ref() {
-            blocks.extend(c.themes.iter().cloned());
-        }
-        blocks
     };
 
     let theme = {
@@ -1275,8 +1282,8 @@ impl Stoat {
     /// own theme as `STOAT_THEME` so a child stoat matches the terminal). It
     /// applies only when neither `cli_settings` nor the user config names a
     /// theme, so an explicit choice always outranks the inherited one. A name
-    /// that resolves to no theme block falls through to the same empty-theme
-    /// error path an unknown configured name takes.
+    /// matching no theme block is ignored with a warning, leaving the default
+    /// theme in place, since the environment is inherited rather than chosen.
     pub fn new_with_user_config(
         executor: Executor,
         cli_settings: Settings,
@@ -15293,13 +15300,16 @@ mod tests {
     }
 
     #[test]
-    fn unknown_env_theme_falls_through_to_the_empty_theme() {
+    fn unknown_env_theme_keeps_the_embedded_default() {
         let stoat = stoat_with_env_theme(None, Settings::default(), "no-such-theme");
 
         assert_eq!(
-            stoat.theme.name,
-            String::new(),
-            "an unresolvable env theme takes the same path as an unknown configured name"
+            stoat.theme.name, "default_dark",
+            "an unresolvable env theme is ignored rather than blanking the theme"
+        );
+        assert!(
+            stoat.theme.try_get("ui.cursor").is_some(),
+            "the default theme's caret style survives an unresolvable env theme"
         );
     }
 
