@@ -74,7 +74,7 @@ pub(crate) fn render_file_finder(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let Some(layout) = file_finder_layout(area) else {
         return;
@@ -99,7 +99,7 @@ pub(crate) fn render_file_finder(
         Some(&title),
         modal_style,
         theme,
-        scene.as_deref_mut(),
+        &mut *scene,
     );
 
     let inner = layout.inner;
@@ -126,7 +126,7 @@ pub(crate) fn render_file_finder(
         separator_row,
         inner.width,
         separator_style,
-        scene.as_deref_mut(),
+        Some(&mut *scene),
     );
 
     if let Some(preview_rect) = layout.preview {

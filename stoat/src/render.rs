@@ -502,18 +502,18 @@ pub(crate) fn frame(
     // repaints and never draw over an overlay covering a diagnostic.
     undercurl::snapshot_cells(buf, undercurls);
 
-    pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf, Some(&mut *scene));
+    pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf, &mut *scene);
 
     if let Some(pane_id) = overlay_pane {
         let pane = ws.panes.pane(pane_id);
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && ws.panes.focus() == pane_id;
         if screen == Some("commits") {
             if let Some(state) = ws.commits.as_mut() {
-                commits::render_commits(pane, is_focused, state, frame, buf, Some(&mut *scene));
+                commits::render_commits(pane, is_focused, state, frame, buf, &mut *scene);
             }
         } else if screen == Some("rebase") {
             if let Some(state) = ws.rebase.as_ref() {
-                rebase::render_rebase(pane, is_focused, state, frame, buf, Some(&mut *scene));
+                rebase::render_rebase(pane, is_focused, state, frame, buf, &mut *scene);
             }
         } else if screen == Some("reword") {
             let reword_ctx = ws
@@ -543,13 +543,13 @@ pub(crate) fn frame(
                     &orig,
                     frame,
                     buf,
-                    Some(&mut *scene),
+                    &mut *scene,
                 );
             }
         } else if screen == Some("rebase_conflict")
             && let Some(active) = ws.rebase_active.as_ref()
         {
-            conflict::render_conflict(pane, is_focused, active, frame, buf, Some(&mut *scene));
+            conflict::render_conflict(pane, is_focused, active, frame, buf, &mut *scene);
         }
     }
 
@@ -559,7 +559,7 @@ pub(crate) fn frame(
         }
         let is_focused = matches!(ws.focus, FocusTarget::Dock(id) if id == dock_id);
         if matches!(dock.visibility, DockVisibility::Minimized) {
-            dock::render_dock_minimized(dock, is_focused, &stoat.theme, buf, Some(&mut *scene));
+            dock::render_dock_minimized(dock, is_focused, &stoat.theme, buf, &mut *scene);
         } else {
             dock::render_dock_open(
                 dock,
@@ -572,16 +572,16 @@ pub(crate) fn frame(
                 },
                 frame,
                 buf,
-                Some(&mut *scene),
+                &mut *scene,
             );
         }
     }
-    hover::render_hover(stoat, buf, Some(&mut *scene));
-    signature_help::render_signature_help(stoat, buf, Some(&mut *scene));
-    completion::render_completion(stoat, buf, Some(&mut *scene));
-    code_action::render_code_action(stoat, buf, Some(&mut *scene));
-    rename_input::render_rename_input(stoat, buf, Some(&mut *scene));
-    symbol_picker::render_symbol_picker(stoat, buf, Some(&mut *scene));
+    hover::render_hover(stoat, buf, &mut *scene);
+    signature_help::render_signature_help(stoat, buf, &mut *scene);
+    completion::render_completion(stoat, buf, &mut *scene);
+    code_action::render_code_action(stoat, buf, &mut *scene);
+    rename_input::render_rename_input(stoat, buf, &mut *scene);
+    symbol_picker::render_symbol_picker(stoat, buf, &mut *scene);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::sync_agent_badge(&mut ws.badges, ws.agent.as_ref());
     badges::render_badges(
@@ -594,7 +594,7 @@ pub(crate) fn frame(
     );
     if let Some(run_id) = stoat.modal_run {
         if let Some(run_state) = ws.runs.get(run_id) {
-            run_pane::render_modal_run(run_state, &stoat.theme, full, buf, Some(&mut *scene));
+            run_pane::render_modal_run(run_state, &stoat.theme, full, buf, &mut *scene);
         }
     } else if let Some(help) = &stoat.help {
         help::render_help(
@@ -605,7 +605,7 @@ pub(crate) fn frame(
             &stoat.settings.mode_badges,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
         cached_modal_hints(
             &mut stoat.hints_cache,
@@ -615,10 +615,10 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(finder) = &mut stoat.file_finder {
-        file_finder::render_file_finder(finder, ws, &stoat.theme, full, buf, Some(&mut *scene));
+        file_finder::render_file_finder(finder, ws, &stoat.theme, full, buf, &mut *scene);
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,
@@ -627,7 +627,7 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(finder) = &mut stoat.symbol_finder {
         symbol_finder::render_symbol_finder(
@@ -637,7 +637,7 @@ pub(crate) fn frame(
             &stoat.language_registry,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
         cached_modal_hints(
             &mut stoat.hints_cache,
@@ -647,10 +647,10 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(finder) = &mut stoat.code_search {
-        code_search::render_code_search(finder, ws, &stoat.theme, full, buf, Some(&mut *scene));
+        code_search::render_code_search(finder, ws, &stoat.theme, full, buf, &mut *scene);
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,
@@ -659,17 +659,10 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(palette) = &mut stoat.command_palette {
-        command_palette::render_command_palette(
-            palette,
-            ws,
-            &stoat.theme,
-            full,
-            buf,
-            Some(&mut *scene),
-        );
+        command_palette::render_command_palette(palette, ws, &stoat.theme, full, buf, &mut *scene);
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,
@@ -678,17 +671,10 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(picker) = &stoat.workspace_picker {
-        workspace_picker::render_workspace_picker(
-            picker,
-            ws,
-            &stoat.theme,
-            full,
-            buf,
-            Some(&mut *scene),
-        );
+        workspace_picker::render_workspace_picker(picker, ws, &stoat.theme, full, buf, &mut *scene);
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "picker",
@@ -697,16 +683,10 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(modal) = &stoat.quit_all_confirm {
-        quit_all_confirm::render_quit_all_confirm(
-            modal,
-            &stoat.theme,
-            full,
-            buf,
-            Some(&mut *scene),
-        );
+        quit_all_confirm::render_quit_all_confirm(modal, &stoat.theme, full, buf, &mut *scene);
         let bindings: Vec<(&'static str, String)> = vec![
             ("y", "discard & quit".to_string()),
             ("n", "cancel".to_string()),
@@ -720,10 +700,10 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(picker) = &stoat.jumplist_picker {
-        jumplist_picker::render_jumplist_picker(picker, &stoat.theme, full, buf, Some(&mut *scene));
+        jumplist_picker::render_jumplist_picker(picker, &stoat.theme, full, buf, &mut *scene);
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "jumplist",
@@ -732,7 +712,7 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(picker) = &stoat.diagnostics_picker {
         diagnostics_picker::render_diagnostics_picker(
@@ -741,7 +721,7 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
         let bindings = picker.hint_bindings();
         hints::render_hints(
@@ -751,7 +731,7 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if let Some(picker) = &stoat.location_picker {
         location_picker::render_location_picker(
@@ -760,7 +740,7 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
         let bindings = picker.hint_bindings();
         hints::render_hints(
@@ -770,7 +750,7 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     } else if mode != "space_pane_display"
         && (!PRIMARY_MODES.contains(&mode.as_str())
@@ -887,7 +867,7 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             buf,
-            Some(&mut *scene),
+            &mut *scene,
         );
     }
 
@@ -928,7 +908,7 @@ fn cached_modal_hints(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
     let key = hints_cache_key(
         mode,

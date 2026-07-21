@@ -30,7 +30,7 @@ pub(crate) fn render_hints(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let rows = group_by_action(bindings);
     render_hints_grouped(mode, &rows, footer, theme, area, buf, scene);
@@ -48,7 +48,7 @@ pub(crate) fn render_hints_grouped(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     if rows.is_empty() || area.width < 10 || area.height < 4 {
         return;
@@ -113,7 +113,7 @@ pub(crate) fn render_hints_grouped(
         Some(title.as_str()),
         modal_style,
         theme,
-        scene.as_deref_mut(),
+        &mut *scene,
     );
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
@@ -142,7 +142,7 @@ pub(crate) fn render_hints_grouped(
                 key_style,
                 run_bg,
                 TEXT_SCALE_POPUP,
-                scene.as_deref_mut(),
+                &mut *scene,
             );
 
             let action_text = format!("   {action}");
@@ -155,7 +155,7 @@ pub(crate) fn render_hints_grouped(
                 action_style,
                 run_bg,
                 TEXT_SCALE_POPUP,
-                scene.as_deref_mut(),
+                &mut *scene,
             );
         }
         col_x += (key_width + gap + action_width + inter_col_gap) as u16;
@@ -172,7 +172,7 @@ pub(crate) fn render_hints_grouped(
                 sep_row,
                 inner.width,
                 sep_style,
-                scene.as_deref_mut(),
+                Some(&mut *scene),
             );
         }
         if text_row < inner.y + inner.height {
@@ -226,6 +226,9 @@ mod tests {
     fn render(bindings: &[(&str, String)], width: u16, height: u16) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
+        // An empty theme resolves no RGB colours, so the helpers still take their
+        // cell fallback and the assertions below read real glyphs.
+        let mut scene = stoatty_widgets::ApcScene::new();
         render_hints(
             "normal",
             bindings,
@@ -233,7 +236,7 @@ mod tests {
             &Theme::empty(),
             area,
             &mut buf,
-            None,
+            &mut scene,
         );
         buf
     }

@@ -12,7 +12,7 @@ pub(crate) fn render_location_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     if area.width < 50 || area.height < 6 {
         return;

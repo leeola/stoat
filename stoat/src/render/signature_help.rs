@@ -23,7 +23,7 @@ use ratatui::{
 pub(crate) fn render_signature_help(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     if stoat.pending_completion.is_some() {
         return;

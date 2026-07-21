@@ -86,7 +86,7 @@ pub(crate) fn paint_popout_card(
     bg: Color,
     border: Color,
     theme: &Theme,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) -> Rect {
     let right = area.x + area.width.saturating_sub(1);
     for y in area.y..area.y + area.height {
@@ -221,7 +221,7 @@ mod tests {
         let theme = Theme::empty();
         let mut scene = ApcScene::new();
 
-        let content = paint_popout_card(&mut buf, area, bg, border, &theme, Some(&mut scene));
+        let content = paint_popout_card(&mut buf, area, bg, border, &theme, &mut scene);
 
         assert_eq!(content, Rect::new(1, 0, 4, 2));
         assert_eq!(buf[(0, 0)].bg, editor_bg, "left edge keeps editor bg");

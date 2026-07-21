@@ -21,7 +21,7 @@ pub(crate) const VISIBLE_WINDOW: usize = 9;
 pub(crate) fn render_symbol_picker(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let picker = match &stoat.pending_symbol_picker {
         Some(p) if !p.entries.is_empty() => p.clone(),

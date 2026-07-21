@@ -12,15 +12,14 @@ use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 /// Draw a modal frame around `area` and return the inner content rect.
 ///
 /// This is the single chrome primitive behind every stoat modal and cursor
-/// popup. The fallback -- taken when `scene` is absent or `style`'s foreground
-/// is not RGB -- draws a ratatui [`Block`] with [`Borders::ALL`], `style` on the
+/// popup. The fallback -- taken when `style`'s foreground does not resolve to
+/// RGB -- draws a ratatui [`Block`] with [`Borders::ALL`], `style` on the
 /// border, and `title` styled the same, which is exactly what the sites drew
 /// before, so their snapshots stay identical.
 ///
-/// Under stoatty (a `scene` is threaded and the border color resolves to RGB) it
-/// instead emits a hairline `panel` APC frame with rounded corners and a drop
-/// shadow, plus, for `Some(title)`, a full-size title [`TextRun`] over the top
-/// edge. The hairline runs unbroken through the title span, and the title run
+/// When the border colour resolves to RGB it instead emits a hairline `panel` APC frame with
+/// rounded corners and a drop shadow, plus, for `Some(title)`, a full-size title [`TextRun`] over
+/// the top edge. The hairline runs unbroken through the title span, and the title run
 /// carries no background box, so its glyphs blend directly over the grid cells
 /// behind them. No box-drawing glyphs are written in this arm.
 ///
@@ -38,17 +37,12 @@ pub(crate) fn modal_frame(
     title: Option<&str>,
     style: Style,
     _theme: &Theme,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) -> Rect {
     let inner = Block::default().borders(Borders::ALL).inner(area);
 
-    let rich = scene.and_then(|scene| {
-        let border = style_rgb(style.fg)?;
-        Some((scene, border))
-    });
-
-    match rich {
-        Some((scene, border)) => {
+    match style_rgb(style.fg) {
+        Some(border) => {
             command::encode_panel_into(
                 scene.buffer(),
                 &PanelCommand {
@@ -98,10 +92,9 @@ const POPOUT_INSET_PX: u8 = 4;
 /// The frame is a filled, square-cornered, drop-shadowed panel inset a few pixels
 /// from its cell rect. This draws only the frame, so the caller owns the interior.
 ///
-/// The rich arm -- taken when `scene` is threaded and both `bg` and `border`
-/// resolve to RGB -- emits a `panel` APC frame with `fill` set to `bg`, a
-/// [`POPOUT_INSET_PX`] horizontal inset, a drop shadow, and a square light
-/// hairline in `border`. Square corners match the status bar the card extends, so
+/// The rich arm -- taken when both `bg` and `border` resolve to RGB -- emits a `panel` APC frame
+/// with `fill` set to `bg`, a [`POPOUT_INSET_PX`] horizontal inset, a drop shadow, and a square
+/// light hairline in `border`. Square corners match the status bar the card extends, so
 /// the card reads as part of it. The inset and shadow are what make the card read
 /// as tucked behind the bar, and a plain terminal cannot draw them.
 ///
@@ -115,16 +108,10 @@ pub(crate) fn popout_frame(
     bg: Color,
     border: Color,
     _theme: &Theme,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
-    let rich = scene.and_then(|scene| {
-        let bg = style_rgb(Some(bg))?;
-        let border = style_rgb(Some(border))?;
-        Some((scene, bg, border))
-    });
-
-    match rich {
-        Some((scene, bg, border)) => {
+    match style_rgb(Some(bg)).zip(style_rgb(Some(border))) {
+        Some((bg, border)) => {
             command::encode_panel_into(
                 scene.buffer(),
                 &PanelCommand {
@@ -189,20 +176,20 @@ pub(crate) fn hline(
 /// Draw a vertical separator down `height` cells at column `x`, starting at row
 /// `y`.
 ///
-/// The fallback -- taken when `scene` is absent or `style`'s foreground is not
-/// RGB -- writes `│` glyphs styled with `style`, exactly as the separator sites
-/// did before. Under stoatty it emits one hairline [`Bar`] a sixteenth of a
-/// cell thick centered in the column, and writes no glyphs.
+/// The fallback -- taken when `style`'s foreground does not resolve to RGB --
+/// writes `│` glyphs styled with `style`, exactly as the separator sites did
+/// before. Otherwise it emits one hairline [`Bar`] a sixteenth of a cell thick
+/// centered in the column, and writes no glyphs.
 pub(crate) fn vline(
     buf: &mut Buffer,
     x: u16,
     y: u16,
     height: u16,
     style: Style,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
-    match scene.zip(style_rgb(style.fg)) {
-        Some((scene, color)) => {
+    match style_rgb(style.fg) {
+        Some(color) => {
             Bar {
                 x: 8,
                 y: 0,
@@ -222,11 +209,11 @@ pub(crate) fn vline(
 
 /// Draw `content` at cell `(x, y)`, clipped before column `end_x`.
 ///
-/// The fallback -- taken when `scene` is absent, `style`'s foreground is not
-/// RGB, or `bg` is `None` -- writes glyphs cell-by-cell styled with `style`,
-/// stopping before `end_x`, exactly as the text sites did before. Under stoatty
-/// it emits one [`TextRun`] at `scale` (256ths of a cell) anchored at the cell,
-/// with `bg` as its background box and no grid glyphs.
+/// The fallback -- taken when `style`'s foreground does not resolve to RGB, or
+/// `bg` is `None` -- writes glyphs cell-by-cell styled with `style`, stopping
+/// before `end_x`, exactly as the text sites did before. Otherwise it emits one [`TextRun`] at
+/// `scale` (256ths of a cell) anchored at the cell, with `bg` as its background box and no grid
+/// glyphs.
 ///
 /// `bg` is the run's own background. The renderer paints it as one opaque box
 /// behind the alpha-blended glyphs, so it need not match the surface beneath.
@@ -240,10 +227,10 @@ pub(crate) fn text(
     style: Style,
     bg: Option<[u8; 3]>,
     scale: u16,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
-    match (scene, style_rgb(style.fg), bg) {
-        (Some(scene), Some(color), Some(bg)) => {
+    match (style_rgb(style.fg), bg) {
+        (Some(color), Some(bg)) => {
             TextRun {
                 col: 0,
                 row: 0,
@@ -285,13 +272,28 @@ mod tests {
         Style::default().fg(Color::Rgb(1, 2, 3))
     }
 
+    /// A style whose foreground does not resolve to RGB, which is what drops
+    /// these helpers to their cell fallback now that a scene is always present.
+    fn plain_style() -> Style {
+        Style::default().fg(Color::Reset)
+    }
+
     #[test]
     fn fallback_draws_a_box_border_and_returns_the_inner_rect() {
         let area = Rect::new(0, 0, 8, 4);
         let mut buf = Buffer::empty(area);
         let theme = Theme::empty();
 
-        let inner = modal_frame(&mut buf, area, Some(" hi "), rgb_style(), &theme, None);
+        let mut scene = ApcScene::new();
+
+        let inner = modal_frame(
+            &mut buf,
+            area,
+            Some(" hi "),
+            plain_style(),
+            &theme,
+            &mut scene,
+        );
 
         assert_eq!(inner, Rect::new(1, 1, 6, 2));
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┌");
@@ -310,14 +312,7 @@ mod tests {
         // The rich arm engages purely on the border color (style.fg) being RGB.
         let style = rgb_style();
 
-        let inner = modal_frame(
-            &mut buf,
-            area,
-            Some(" hi "),
-            style,
-            &theme,
-            Some(&mut scene),
-        );
+        let inner = modal_frame(&mut buf, area, Some(" hi "), style, &theme, &mut scene);
 
         assert_eq!(inner, Rect::new(3, 2, 6, 2));
         // No box-drawing glyph is painted. The panel is off-grid.
@@ -362,7 +357,7 @@ mod tests {
             Color::Rgb(4, 5, 6),
             Color::Rgb(1, 2, 3),
             &theme,
-            Some(&mut scene),
+            &mut scene,
         );
 
         // No box-drawing glyph is painted. The panel is off-grid.
@@ -415,14 +410,15 @@ mod tests {
     #[test]
     fn vline_fallback_draws_bars_and_stoatty_emits_a_centered_bar() {
         let mut fallback = Buffer::empty(Rect::new(0, 0, 8, 4));
-        vline(&mut fallback, 2, 1, 3, rgb_style(), None);
+        let mut fallback_scene = ApcScene::new();
+        vline(&mut fallback, 2, 1, 3, plain_style(), &mut fallback_scene);
         assert_eq!(fallback.cell((2, 1)).unwrap().symbol(), "│");
         assert_eq!(fallback.cell((2, 3)).unwrap().symbol(), "│");
         assert_eq!(fallback.cell((2, 0)).unwrap().symbol(), " ");
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
         let mut scene = ApcScene::new();
-        vline(&mut buf, 2, 1, 3, rgb_style(), Some(&mut scene));
+        vline(&mut buf, 2, 1, 3, rgb_style(), &mut scene);
         assert_eq!(buf.cell((2, 1)).unwrap().symbol(), " ");
         assert_eq!(
             scene.buffer(),
@@ -439,16 +435,17 @@ mod tests {
     #[test]
     fn text_fallback_writes_clipped_glyphs_and_stoatty_emits_a_scaled_run() {
         let mut fallback = Buffer::empty(Rect::new(0, 0, 8, 2));
+        let mut fallback_scene = ApcScene::new();
         text(
             &mut fallback,
             1,
             0,
             5,
             "hello",
-            rgb_style(),
+            plain_style(),
             Some([9, 9, 9]),
             218,
-            None,
+            &mut fallback_scene,
         );
         assert_eq!(fallback.cell((1, 0)).unwrap().symbol(), "h");
         assert_eq!(fallback.cell((4, 0)).unwrap().symbol(), "l");
@@ -466,7 +463,7 @@ mod tests {
             rgb_style(),
             Some([9, 9, 9]),
             218,
-            Some(&mut scene),
+            &mut scene,
         );
         assert_eq!(buf.cell((1, 0)).unwrap().symbol(), " ");
         assert_eq!(

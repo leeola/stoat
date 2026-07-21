@@ -25,12 +25,12 @@ pub(crate) fn render_commits(
     state: &mut CommitListState,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, buf, scene.as_deref_mut());
+    render_overlay_status(status_area, is_focused, frame, buf, &mut *scene);
 
     let Some(left_area) = commits_list_rect(pane.area) else {
         return;
@@ -40,14 +40,7 @@ pub(crate) fn render_commits(
     let right_w = inner.width.saturating_sub(left_area.width + 1);
 
     let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    crate::render::chrome::vline(
-        buf,
-        sep_x,
-        inner.y,
-        inner.height,
-        sep_style,
-        scene.as_deref_mut(),
-    );
+    crate::render::chrome::vline(buf, sep_x, inner.y, inner.height, sep_style, &mut *scene);
 
     state.viewport_rows = left_area.height as usize;
     state.ensure_selected_visible(state.viewport_rows);
@@ -168,7 +161,7 @@ fn render_commit_detail_pane(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let dim = theme.get(crate::theme::scope::VCS_COMMIT_METADATA);
     let Some(sha) = state.selected_sha() else {
@@ -268,7 +261,7 @@ fn render_commit_preview(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -325,7 +318,7 @@ fn render_commit_preview(
                     return;
                 }
                 if sep_x < area.x + area.width {
-                    crate::render::chrome::vline(buf, sep_x, y, 1, dim, scene.as_deref_mut());
+                    crate::render::chrome::vline(buf, sep_x, y, 1, dim, &mut *scene);
                 }
                 let left_num_x = area.x + status_w as u16;
                 let right_num_x = right_start + status_w as u16;

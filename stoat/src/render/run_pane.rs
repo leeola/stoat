@@ -189,7 +189,7 @@ pub(crate) fn render_modal_run(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     if area.width < 20 || area.height < 8 {
         return;

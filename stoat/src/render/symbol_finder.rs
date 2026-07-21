@@ -58,7 +58,7 @@ pub(crate) fn render_symbol_finder(
     languages: &LanguageRegistry,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let Some((modal, inner, list, preview)) = symbol_finder_layout(area) else {
         return;
@@ -70,14 +70,7 @@ pub(crate) fn render_symbol_finder(
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     Clear.render(modal, buf);
-    crate::render::chrome::modal_frame(
-        buf,
-        modal,
-        Some(title),
-        modal_style,
-        theme,
-        scene.as_deref_mut(),
-    );
+    crate::render::chrome::modal_frame(buf, modal, Some(title), modal_style, theme, &mut *scene);
 
     let prompt_style = theme.get(scope::UI_PROMPT);
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);
@@ -100,7 +93,7 @@ pub(crate) fn render_symbol_finder(
         inner.y + 1,
         inner.width,
         separator_style,
-        scene.as_deref_mut(),
+        Some(&mut *scene),
     );
 
     if let Some(preview_rect) = preview {

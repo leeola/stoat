@@ -83,7 +83,7 @@ pub(crate) fn render_help(
     mode_badges: &std::collections::BTreeMap<String, String>,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     use crate::help::{help_input_mode, HelpInput, HelpScope};
     let input_mode = help_input_mode(stoat_mode);
@@ -104,7 +104,7 @@ pub(crate) fn render_help(
         Some(title.as_str()),
         modal_style,
         theme,
-        scene.as_deref_mut(),
+        &mut *scene,
     );
 
     let inner = layout.inner;

@@ -37,7 +37,7 @@ const MAX_WIDTH: u16 = 120;
 ///
 /// No-op when [`Stoat::pending_hover`] is `None`, when the focused
 /// pane is not an editor, or when the cursor is off-screen.
-pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Option<&mut ApcScene>) {
+pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
     let Some((popup_area, _)) = hover_popup_layout(stoat) else {
         // An unplaceable popup paints nothing, so clear its stored rects. A
         // default rect hit-tests to no point, so the mouse and wheel handlers
@@ -59,7 +59,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
         None,
         modal_style,
         &stoat.theme,
-        scene.as_deref_mut(),
+        &mut *scene,
     );
 
     // Clamp the half-page scroll to the content that overflows the interior, then
@@ -106,7 +106,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, mut scene: Optio
         .collect();
 
     match (scene, modal_fg, run_bg) {
-        (Some(scene), Some(modal_fg), Some(run_bg)) => {
+        (scene, Some(modal_fg), Some(run_bg)) => {
             for (row_idx, line) in body.iter().enumerate() {
                 let row = inner.y + row_idx as u16;
                 let selection = sel_rgb.and_then(|rgb| {

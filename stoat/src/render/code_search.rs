@@ -18,7 +18,7 @@ pub(crate) fn render_code_search(
     theme: &Theme,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let Some(layout) = crate::render::file_finder::file_finder_layout(area) else {
         return;
@@ -34,7 +34,7 @@ pub(crate) fn render_code_search(
         Some(&title),
         modal_style,
         theme,
-        scene.as_deref_mut(),
+        &mut *scene,
     );
 
     let inner = layout.inner;
@@ -59,7 +59,7 @@ pub(crate) fn render_code_search(
         inner.y + 1,
         inner.width,
         separator_style,
-        scene.as_deref_mut(),
+        Some(&mut *scene),
     );
 
     if let Some(preview_rect) = layout.preview {

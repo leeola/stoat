@@ -184,7 +184,7 @@ pub(crate) fn render_pane(
         buffers,
         badge_rect,
         buf,
-        Some(scene),
+        scene,
     );
 
     let status_rows: u16 = if is_focused && frame.lsp_status_open {
@@ -217,7 +217,7 @@ pub(crate) fn render_pane(
                 .get(crate::theme::scope::UI_BORDER_INACTIVE)
                 .fg
                 .unwrap_or(Color::Reset);
-            let content = paint_popout_card(buf, area, bg, border, theme, Some(&mut *scene));
+            let content = paint_popout_card(buf, area, bg, border, theme, &mut *scene);
 
             let cap = scaled_char_capacity(content.width as usize, TEXT_SCALE_COMPACT);
             let style = theme
@@ -234,7 +234,7 @@ pub(crate) fn render_pane(
                     style,
                     style_rgb(Some(bg)),
                     TEXT_SCALE_COMPACT,
-                    Some(&mut *scene),
+                    &mut *scene,
                 );
             }
             rows.len() as u16
@@ -265,7 +265,7 @@ pub(crate) fn render_pane(
                 .get(crate::theme::scope::UI_BORDER_INACTIVE)
                 .fg
                 .unwrap_or(Color::Reset);
-            let content = paint_popout_card(buf, area, bg, border, theme, Some(&mut *scene));
+            let content = paint_popout_card(buf, area, bg, border, theme, &mut *scene);
 
             let style = theme
                 .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
@@ -280,7 +280,7 @@ pub(crate) fn render_pane(
                     style,
                     style_rgb(Some(bg)),
                     TEXT_SCALE_COMPACT,
-                    Some(&mut *scene),
+                    &mut *scene,
                 );
             }
         }
@@ -316,7 +316,7 @@ pub(crate) fn render_overlay_status(
     is_focused: bool,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -396,7 +396,7 @@ pub(crate) fn render_pane_dividers(
     dividers: &[Divider],
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
-    mut scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
     let dim = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
     let lit = theme.get(crate::theme::scope::UI_BORDER_FOCUSED);
@@ -410,14 +410,14 @@ pub(crate) fn render_pane_dividers(
                     continue;
                 }
                 let height = d.y.saturating_add(d.len).min(buf_end_y).saturating_sub(d.y);
-                chrome::vline(buf, d.x, d.y, height, style, scene.as_deref_mut());
+                chrome::vline(buf, d.x, d.y, height, style, &mut *scene);
             },
             DividerOrientation::Horizontal => {
                 if d.y >= buf_end_y {
                     continue;
                 }
                 let width = d.x.saturating_add(d.len).min(buf_end_x).saturating_sub(d.x);
-                chrome::hline(buf, d.x, d.y, width, style, scene.as_deref_mut());
+                chrome::hline(buf, d.x, d.y, width, style, Some(&mut *scene));
             },
         }
     }
@@ -433,7 +433,7 @@ fn render_pane_status(
     buffers: &BufferRegistry,
     badge_rect: &mut Option<Rect>,
     buf: &mut Buffer,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -517,17 +517,17 @@ fn render_status_segments(
     left: &[StatusSeg],
     right: &[StatusSeg],
     buf: &mut Buffer,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
-    let rich = scene.and_then(|scene| {
+    let rich = (|| {
         let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg)?;
         let left_rich = resolve_rich_segments(left, base_style)?;
         let right_rich = resolve_rich_segments(right, base_style)?;
-        Some((scene, separator, left_rich, right_rich))
-    });
+        Some((separator, left_rich, right_rich))
+    })();
 
     match rich {
-        Some((scene, separator, left_rich, right_rich)) => {
+        Some((separator, left_rich, right_rich)) => {
             StatusBar {
                 left: &left_rich,
                 right: &right_rich,

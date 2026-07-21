@@ -19,14 +19,14 @@ pub(crate) fn render_conflict(
     active: &ActiveRebase,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     use crate::rebase::ConflictResolution;
 
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, frame, buf, scene.as_deref_mut());
+    render_overlay_status(status_area, is_focused, frame, buf, &mut *scene);
     if inner.width < 20 || inner.height < 4 {
         return;
     }

@@ -28,7 +28,7 @@ pub(crate) fn render_reword(
     original_message: &str,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let current_mode = frame.mode;
     let theme = frame.theme;

@@ -18,7 +18,7 @@ use ratatui::{
 pub(crate) fn render_rename_input(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     if stoat.rename_input.is_none() {
         return;

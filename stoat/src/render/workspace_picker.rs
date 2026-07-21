@@ -16,7 +16,7 @@ pub(crate) fn render_workspace_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     if area.width < 60 || area.height < 8 {
         return;
@@ -51,7 +51,7 @@ pub(crate) fn render_workspace_picker(
         Some(" workspaces "),
         modal_style,
         theme,
-        scene.as_deref_mut(),
+        &mut *scene,
     );
 
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
@@ -75,7 +75,7 @@ pub(crate) fn render_workspace_picker(
         inner.y + 1,
         inner.width,
         separator_style,
-        scene,
+        Some(scene),
     );
 
     const NAME_W: u16 = 12;

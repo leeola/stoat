@@ -112,7 +112,7 @@ pub(crate) fn render_command_palette(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
         render_palette_arg_picker(palette, ws, theme, area, buf, scene);
@@ -164,11 +164,11 @@ fn render_palette_arg_picker(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let entry = palette.command.expect("arg picker requires a command");
     let Some(layout) =
-        render_palette_command_prelude(palette, entry, ws, theme, area, buf, scene.as_deref_mut())
+        render_palette_command_prelude(palette, entry, ws, theme, area, buf, &mut *scene)
     else {
         return;
     };
@@ -237,7 +237,7 @@ fn render_palette_free_arg(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let Some(layout) = render_palette_command_prelude(palette, entry, ws, theme, area, buf, scene)
     else {
@@ -298,7 +298,7 @@ fn render_palette_command_prelude(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) -> Option<PaletteFilterLayout> {
     let layout = palette_filter_layout(area)?;
 
@@ -311,7 +311,7 @@ fn render_palette_command_prelude(
         Some(title.as_str()),
         modal_style,
         theme,
-        scene.as_deref_mut(),
+        &mut *scene,
     );
 
     let inner = layout.inner;
@@ -338,7 +338,7 @@ fn render_palette_command_prelude(
         separator_row,
         inner.width,
         separator_style,
-        scene,
+        Some(scene),
     );
 
     Some(layout)
@@ -355,7 +355,7 @@ fn render_palette_filter(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-    mut scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let Some(layout) = palette_filter_layout(area) else {
         return;
@@ -373,7 +373,7 @@ fn render_palette_filter(
         Some(title),
         modal_style,
         theme,
-        scene.as_deref_mut(),
+        &mut *scene,
     );
 
     let inner = layout.inner;
@@ -401,7 +401,7 @@ fn render_palette_filter(
         separator_row,
         inner.width,
         separator_style,
-        scene.as_deref_mut(),
+        Some(&mut *scene),
     );
 
     let list = layout.list;
@@ -417,7 +417,7 @@ fn render_palette_filter(
             doc_separator_row,
             inner.width,
             separator_style,
-            scene,
+            Some(scene),
         );
         let doc_lines = filtered
             .get(selected)

@@ -174,7 +174,7 @@ fn detail_footer(item: &CompletionItem) -> Option<String> {
 pub(crate) fn render_completion(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let Some((prefix, layout)) = completion_popup_layout(stoat) else {
         return;

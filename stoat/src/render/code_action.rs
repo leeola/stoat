@@ -21,7 +21,7 @@ use ratatui::{
 pub(crate) fn render_code_action(
     stoat: &mut Stoat,
     buf: &mut Buffer,
-    scene: Option<&mut stoatty_widgets::ApcScene>,
+    scene: &mut stoatty_widgets::ApcScene,
 ) {
     let anchor_offset = match &stoat.pending_code_action_picker {
         Some(p) if !p.entries.is_empty() => p.anchor_offset,
