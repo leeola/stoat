@@ -484,6 +484,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenCodeSearch => code_search::open_code_search(stoat),
         ActionKind::CodeSearchNext => code_search::code_search_next(stoat),
         ActionKind::CodeSearchPrev => code_search::code_search_prev(stoat),
+        ActionKind::CodeSearchPageDown => code_search::code_search_page(stoat, 1),
+        ActionKind::CodeSearchPageUp => code_search::code_search_page(stoat, -1),
         ActionKind::CodeSearchSelect => {
             code_search::code_search_select(stoat);
             UpdateEffect::Redraw

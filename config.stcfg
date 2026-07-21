@@ -708,6 +708,8 @@ on key {
         Down -> CodeSearchNext();
         Ctrl-p -> CodeSearchPrev();
         Ctrl-n -> CodeSearchNext();
+        Ctrl-f -> CodeSearchPageDown();
+        Ctrl-b -> CodeSearchPageUp();
         BackTab -> CodeSearchModeToggle();
     }
     modal == palette && mode == insert {

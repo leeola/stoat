@@ -122,6 +122,8 @@ pub enum ActionKind {
     LocationPickerClose,
     CodeSearchNext,
     CodeSearchPrev,
+    CodeSearchPageDown,
+    CodeSearchPageUp,
     CodeSearchSelect,
     CodeSearchClose,
     CodeSearchModeToggle,

@@ -155,6 +155,30 @@ define_action!(
 );
 
 define_action!(
+    CodeSearchPageDownDef,
+    CodeSearchPageDown,
+    "CodeSearchPageDown",
+    ActionKind::CodeSearchPageDown,
+    "page code search down",
+    "Move the code-search modal's selection down by half the visible list \
+     height. Bound by default to Ctrl-F while the modal is open.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CodeSearchPageUpDef,
+    CodeSearchPageUp,
+    "CodeSearchPageUp",
+    ActionKind::CodeSearchPageUp,
+    "page code search up",
+    "Move the code-search modal's selection up by half the visible list \
+     height. Bound by default to Ctrl-B while the modal is open.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     CodeSearchSelectDef,
     CodeSearchSelect,
     "CodeSearchSelect",

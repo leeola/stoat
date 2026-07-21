@@ -86,6 +86,16 @@ pub(crate) fn code_search_prev(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Page the code-search selection by half its rendered list height in `dir`
+/// (-1 up, 1 down). Before the first render the viewport is unset and the step
+/// falls back to a single row.
+pub(crate) fn code_search_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if let Some(finder) = stoat.code_search.as_mut() {
+        finder.page(dir);
+    }
+    UpdateEffect::Redraw
+}
+
 /// Close the code-search modal, disposing its input and preview. Returns whether
 /// a modal was open.
 pub(crate) fn close_code_search(stoat: &mut Stoat) -> bool {

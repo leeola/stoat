@@ -74,6 +74,7 @@ pub(crate) fn render_code_search(
         crate::render::picker::render_picker_preview(&finder.preview, preview_rect, theme, ws, buf);
     }
 
+    finder.viewport_rows = Some(layout.list.height as usize);
     paint_match_rows(finder, layout.list, &git_root, theme, buf);
 }
 

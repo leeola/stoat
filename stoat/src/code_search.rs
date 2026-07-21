@@ -65,6 +65,9 @@ pub struct CodeSearchFinder {
     /// Set when the current AST query fails to parse, so the render shows a
     /// placeholder rather than a silently empty list.
     pub(crate) invalid_pattern: bool,
+    /// Rows the match list rendered last, driving the page step. `None` until
+    /// the first render lays the pane out.
+    pub(crate) viewport_rows: Option<usize>,
 }
 
 impl CodeSearchFinder {
@@ -91,6 +94,7 @@ impl CodeSearchFinder {
             mode: SearchMode::Regex,
             target_lang,
             invalid_pattern: false,
+            viewport_rows: None,
         }
     }
 
@@ -130,6 +134,17 @@ impl CodeSearchFinder {
         }
         let max = (self.matches.len() - 1) as i32;
         self.selected = (self.selected as i32 + delta).clamp(0, max) as usize;
+    }
+
+    /// Page the selection by half the rendered list height in `dir` (negative
+    /// up, positive down). Falls back to a single row before the first render
+    /// sets [`Self::viewport_rows`].
+    pub(crate) fn page(&mut self, dir: i32) {
+        let step = self
+            .viewport_rows
+            .map(|v| v.div_ceil(2).max(1))
+            .unwrap_or(1) as i32;
+        self.move_selection(dir * step);
     }
 
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
@@ -254,6 +269,94 @@ mod tests {
         h.type_text(query);
         h.settle();
         h.advance_clock(CODE_SEARCH_DEBOUNCE);
+    }
+
+    /// Twelve matches over a viewport of six, so a page is three rows and both
+    /// ends clamp within two pages.
+    #[test]
+    fn paging_steps_half_the_viewport_and_clamps() {
+        let lines: String = (0..12).map(|i| format!("fn hit{i}() {{}}\n")).collect();
+        let mut h = open_over(&[("a.rs", &lines)]);
+        run_query(&mut h, "hit");
+
+        let finder = h.stoat.code_search.as_mut().expect("modal open");
+        assert_eq!(finder.matches.len(), 12);
+        finder.viewport_rows = Some(6);
+
+        finder.page(1);
+        assert_eq!(finder.selected, 3, "a page down is half the viewport");
+        finder.page(1);
+        assert_eq!(finder.selected, 6);
+        finder.page(-1);
+        assert_eq!(finder.selected, 3, "a page up steps back by the same half");
+
+        finder.page(1);
+        finder.page(1);
+        finder.page(1);
+        assert_eq!(
+            finder.selected, 11,
+            "paging past the end clamps to the last"
+        );
+        finder.page(-1);
+        finder.page(-1);
+        finder.page(-1);
+        finder.page(-1);
+        finder.page(-1);
+        assert_eq!(
+            finder.selected, 0,
+            "paging past the start clamps to the first"
+        );
+    }
+
+    /// The viewport is only unset between opening the modal and its first
+    /// render, a window the harness closes on its own, so it is cleared here to
+    /// reach the fallback path.
+    #[test]
+    fn paging_with_an_unset_viewport_steps_one_row() {
+        let lines: String = (0..4).map(|i| format!("fn hit{i}() {{}}\n")).collect();
+        let mut h = open_over(&[("a.rs", &lines)]);
+        run_query(&mut h, "hit");
+
+        let finder = h.stoat.code_search.as_mut().expect("modal open");
+        finder.viewport_rows = None;
+
+        finder.page(1);
+        assert_eq!(finder.selected, 1, "an unset viewport steps a single row");
+    }
+
+    /// The unit tests above call `page` directly and so cannot see the keymap.
+    /// This covers the wiring instead. Ctrl-f has to reach the handler rather
+    /// than doing nothing, which is the whole point of the item.
+    #[test]
+    fn ctrl_f_pages_the_code_search_selection() {
+        let lines: String = (0..12).map(|i| format!("fn hit{i}() {{}}\n")).collect();
+        let mut h = open_over(&[("a.rs", &lines)]);
+        run_query(&mut h, "hit");
+        let _ = h.snapshot();
+
+        let before = h.stoat.code_search.as_ref().expect("modal open").selected;
+        assert_eq!(before, 0);
+        let viewport = h
+            .stoat
+            .code_search
+            .as_ref()
+            .expect("modal open")
+            .viewport_rows
+            .expect("the render stamped the viewport");
+
+        h.type_keys("ctrl-f");
+        assert_eq!(
+            h.stoat.code_search.as_ref().expect("modal open").selected,
+            viewport.div_ceil(2).max(1),
+            "Ctrl-F pages down by half the rendered list height"
+        );
+
+        h.type_keys("ctrl-b");
+        assert_eq!(
+            h.stoat.code_search.as_ref().expect("modal open").selected,
+            0,
+            "Ctrl-B pages back up"
+        );
     }
 
     #[test]

@@ -82,11 +82,11 @@ use crate::{
             SplitRight, ToggleDockLeft, ToggleDockRight, TogglePaneWiden,
         },
         picker::{
-            CodeSearchClose, CodeSearchModeToggle, CodeSearchNext, CodeSearchPrev,
-            CodeSearchSelect, DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPrev,
-            DiagnosticsPickerSelect, JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev,
-            JumplistPickerSelect, LocationPickerClose, LocationPickerNext, LocationPickerPrev,
-            LocationPickerSelect,
+            CodeSearchClose, CodeSearchModeToggle, CodeSearchNext, CodeSearchPageDown,
+            CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, DiagnosticsPickerClose,
+            DiagnosticsPickerNext, DiagnosticsPickerPrev, DiagnosticsPickerSelect,
+            JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect,
+            LocationPickerClose, LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
         },
         prompt::{
             CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
@@ -433,6 +433,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenCodeSearch::DEF, |_| Ok(Box::new(OpenCodeSearch)));
     add(CodeSearchNext::DEF, |_| Ok(Box::new(CodeSearchNext)));
     add(CodeSearchPrev::DEF, |_| Ok(Box::new(CodeSearchPrev)));
+    add(CodeSearchPageDown::DEF, |_| {
+        Ok(Box::new(CodeSearchPageDown))
+    });
+    add(CodeSearchPageUp::DEF, |_| Ok(Box::new(CodeSearchPageUp)));
     add(CodeSearchSelect::DEF, |_| Ok(Box::new(CodeSearchSelect)));
     add(CodeSearchClose::DEF, |_| Ok(Box::new(CodeSearchClose)));
     add(CodeSearchModeToggle::DEF, |_| {
@@ -1154,6 +1158,8 @@ mod tests {
         "OpenCodeSearch",
         "CodeSearchNext",
         "CodeSearchPrev",
+        "CodeSearchPageDown",
+        "CodeSearchPageUp",
         "CodeSearchSelect",
         "CodeSearchClose",
         "CodeSearchModeToggle",
@@ -1388,6 +1394,7 @@ mod tests {
         // + 1 SymbolFinderComplete.
         // + 1 HelpComplete.
         // + 1 WorkspacePickerComplete.
+        // + 2 CodeSearchPageDown, CodeSearchPageUp.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
         // + 1 Format.
@@ -1459,7 +1466,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 381);
+        assert_eq!(all().count(), 383);
     }
 
     #[test]
