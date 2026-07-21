@@ -178,6 +178,11 @@ on init {
     # the save-time budget writes the buffer unchanged.
     format_on_save = false;
 
+    # Re-apply a config file as soon as it is saved from within stoat, rather
+    # than waiting for a restart. Covers both this config and stoatty's. On by
+    # default.
+    config.auto_reload = true;
+
     # Automatically follow an open working-tree review as the project changes
     # on disk: external edits, commits, and newly-changed files refresh it. On
     # by default. Set false to require a manual `r` instead.

@@ -1228,6 +1228,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(false),
                 format_on_save: Some(false),
+                config_auto_reload: Some(true),
                 review_follow: Some(true),
                 review_rebase_head: Some(true),
                 review_precompute: Some(true),

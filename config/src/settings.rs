@@ -64,6 +64,14 @@ pub struct Settings {
     /// `format_on_save = true;` in stcfg. A format that errors or exceeds the
     /// save-time budget saves the buffer unchanged.
     pub format_on_save: Option<bool>,
+    /// Whether saving a config file re-applies it immediately. `None` falls
+    /// back to enabled. Set `config.auto_reload = false;` in stcfg to require a
+    /// restart instead.
+    ///
+    /// It governs both halves of the reload. stoat re-reads its own config
+    /// in-process, and the terminal is told to re-read its own when that file
+    /// is the one saved.
+    pub config_auto_reload: Option<bool>,
     /// Whether an open review session follows the project as it changes:
     /// external edits, git-state changes, and newly-changed files refresh it
     /// automatically. `None` falls back to enabled. Set `review.follow = false;`
@@ -221,6 +229,7 @@ impl Settings {
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             format_on_save: other.format_on_save.or(self.format_on_save),
+            config_auto_reload: other.config_auto_reload.or(self.config_auto_reload),
             review_follow: other.review_follow.or(self.review_follow),
             review_rebase_head: other.review_rebase_head.or(self.review_rebase_head),
             review_precompute: other.review_precompute.or(self.review_precompute),
@@ -260,6 +269,11 @@ impl Settings {
             ["format_on_save"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.format_on_save = Some(b);
+                }
+            },
+            ["config", "auto_reload"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.config_auto_reload = Some(b);
                 }
             },
             ["review", "follow"] => {
@@ -486,6 +500,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 format_on_save: None,
+                config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
                 review_precompute: None,
@@ -535,6 +550,15 @@ mod tests {
         let config = parse_ok("on init { review.precompute = false; }");
         assert_eq!(
             Settings::from_config(&config).review_precompute,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_config_auto_reload() {
+        let config = parse_ok("on init { config.auto_reload = false; }");
+        assert_eq!(
+            Settings::from_config(&config).config_auto_reload,
             Some(false)
         );
     }
@@ -747,6 +771,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(false),
                 format_on_save: None,
+                config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
                 review_precompute: None,
@@ -784,6 +809,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 format_on_save: None,
+                config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
                 review_precompute: None,
@@ -830,6 +856,7 @@ mod tests {
         let left = Settings {
             text_proto_log: Some(false),
             format_on_save: None,
+            config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
             review_precompute: None,
@@ -859,6 +886,7 @@ mod tests {
         let right = Settings {
             text_proto_log: Some(true),
             format_on_save: None,
+            config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
             review_precompute: None,
@@ -890,6 +918,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 format_on_save: None,
+                config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
                 review_precompute: None,
@@ -924,6 +953,7 @@ mod tests {
         let left = Settings {
             text_proto_log: Some(true),
             format_on_save: None,
+            config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
             review_precompute: None,
@@ -956,6 +986,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 format_on_save: None,
+                config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
                 review_precompute: None,
@@ -1001,6 +1032,7 @@ mod tests {
             Settings {
                 text_proto_log: None,
                 format_on_save: None,
+                config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
                 review_precompute: None,
@@ -1038,6 +1070,7 @@ mod tests {
             Settings {
                 text_proto_log: None,
                 format_on_save: None,
+                config_auto_reload: None,
                 review_follow: None,
                 review_rebase_head: None,
                 review_precompute: None,
@@ -1072,6 +1105,7 @@ mod tests {
         let left = Settings {
             text_proto_log: None,
             format_on_save: None,
+            config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
             review_precompute: None,
@@ -1101,6 +1135,7 @@ mod tests {
         let right = Settings {
             text_proto_log: None,
             format_on_save: None,
+            config_auto_reload: None,
             review_follow: None,
             review_rebase_head: None,
             review_precompute: None,

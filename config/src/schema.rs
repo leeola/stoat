@@ -63,6 +63,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "false",
         },
         SettingDef {
+            path: &[Lit("config"), Lit("auto_reload")],
+            shape: ValueShape::Bool,
+            doc: "Re-apply a config file as soon as it is saved, rather than \
+                  waiting for a restart.",
+            default: "true",
+        },
+        SettingDef {
             path: &[Lit("review"), Lit("follow")],
             shape: ValueShape::Bool,
             doc: "Whether an open review session follows the project as files, git \
