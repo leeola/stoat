@@ -6631,6 +6631,22 @@ impl Stoat {
         }
     }
 
+    /// Tell the hosting terminal its config file changed on disk, so it re-reads
+    /// and re-applies it.
+    ///
+    /// A no-op unless running inside stoatty. Unlike the frame-seam emitters
+    /// this carries no state to reconcile. Each call reports one save, and the
+    /// terminal reads the file itself.
+    pub(crate) fn emit_config_reload(&self) {
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+
+        let mut out = Vec::new();
+        stoatty_protocol::command::encode_config_reload_into(&mut out);
+        let _ = apc_tx.send(out);
+    }
+
     /// Open and close the aux windows detached panes render into.
     ///
     /// Diffs the [`Self::aux_windows`] ledger against the active workspace's

@@ -311,6 +311,7 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
         path,
         &text,
         crate::paths::user_config_path().as_deref(),
+        crate::paths::stoatty_config_path().as_deref(),
     );
     let Some(path_str) = path.to_str() else {
         return true;
@@ -336,23 +337,37 @@ fn write_buffer_to_disk(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) -> 
     true
 }
 
-/// Re-apply the config just written to `path`, when it is stoat's own.
+/// Re-apply the config just written to `path`, when it is one of the two this
+/// editor knows about.
 ///
 /// `text` is the bytes that were written, parsed directly rather than read back
 /// from disk. Called from the single write path both a direct save and a
 /// format-on-save deferred write funnel through, so either triggers the reload.
 ///
-/// `config_path` is where stoat's config lives, passed in rather than resolved
-/// here so the decision stays independent of the environment.
+/// `stoat_config` and `stoatty_config` are where the two configs live, passed in
+/// rather than resolved here so the decision stays independent of the
+/// environment.
+///
+/// stoat re-applies its own config in-process. The hosting terminal's is only
+/// reported to it, since the terminal owns that file and re-reads it itself.
 ///
 /// Does nothing when `config.auto_reload` is off, or when `path` is any other
 /// file.
-fn maybe_apply_config_save(stoat: &mut Stoat, path: &Path, text: &str, config_path: Option<&Path>) {
+fn maybe_apply_config_save(
+    stoat: &mut Stoat,
+    path: &Path,
+    text: &str,
+    stoat_config: Option<&Path>,
+    stoatty_config: Option<&Path>,
+) {
     if !stoat.settings.config_auto_reload.unwrap_or(true) {
         return;
     }
-    if config_path == Some(path) {
+    if stoat_config == Some(path) {
         stoat.reload_user_config(text);
+    } else if stoatty_config == Some(path) {
+        stoat.emit_config_reload();
+        stoat.set_status("stoatty config reloaded");
     }
 }
 
@@ -1867,6 +1882,7 @@ mod tests {
             &config,
             RELOADED_CONFIG,
             Some(config.as_path()),
+            None,
         );
 
         assert_eq!(h.stoat.settings.format_on_save, Some(true), "settings swap");
@@ -1886,6 +1902,7 @@ mod tests {
             &config,
             "on init { format_on_save = ",
             Some(config.as_path()),
+            None,
         );
 
         assert_eq!(
@@ -1908,6 +1925,7 @@ mod tests {
             &config,
             RELOADED_CONFIG,
             Some(config.as_path()),
+            None,
         );
 
         assert_eq!(
@@ -1929,6 +1947,7 @@ mod tests {
             &PathBuf::from("/src/main.rs"),
             RELOADED_CONFIG,
             Some(config.as_path()),
+            None,
         );
 
         assert_eq!(
@@ -1936,6 +1955,67 @@ mod tests {
             "settings untouched"
         );
         assert!(!binds_f2(&h.stoat), "keymap untouched");
+        assert_eq!(h.stoat.pending_message, None);
+    }
+
+    /// Save `path` through the config hook with an APC channel installed, and
+    /// return every command the emit put on the wire.
+    fn config_save_commands(
+        h: &mut TestHarness,
+        path: &Path,
+        stoatty_config: &Path,
+    ) -> Vec<stoatty_protocol::command::Command> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        super::maybe_apply_config_save(&mut h.stoat, path, "", None, Some(stoatty_config));
+
+        let mut bytes = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            bytes.extend_from_slice(&batch);
+        }
+        crate::test_harness::apc::decode_apc_stream(&bytes)
+    }
+
+    #[test]
+    fn saving_the_stoatty_config_emits_a_reload() {
+        let mut h = Stoat::test();
+        let stoatty_config = PathBuf::from("/cfg/stoatty/config.toml");
+
+        let commands = config_save_commands(&mut h, &stoatty_config, &stoatty_config);
+
+        assert_eq!(
+            commands,
+            vec![stoatty_protocol::command::Command::ConfigReload],
+            "exactly one reload reaches the terminal"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("stoatty config reloaded")
+        );
+    }
+
+    #[test]
+    fn saving_the_stoatty_config_emits_nothing_when_auto_reload_is_off() {
+        let mut h = Stoat::test();
+        let stoatty_config = PathBuf::from("/cfg/stoatty/config.toml");
+        h.stoat.settings.config_auto_reload = Some(false);
+
+        let commands = config_save_commands(&mut h, &stoatty_config, &stoatty_config);
+
+        assert!(commands.is_empty(), "no reload is emitted: {commands:?}");
+        assert_eq!(h.stoat.pending_message, None);
+    }
+
+    #[test]
+    fn saving_another_file_emits_no_stoatty_reload() {
+        let mut h = Stoat::test();
+        let stoatty_config = PathBuf::from("/cfg/stoatty/config.toml");
+
+        let commands =
+            config_save_commands(&mut h, &PathBuf::from("/src/main.rs"), &stoatty_config);
+
+        assert!(commands.is_empty(), "no reload is emitted: {commands:?}");
         assert_eq!(h.stoat.pending_message, None);
     }
 
