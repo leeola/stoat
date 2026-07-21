@@ -9,8 +9,10 @@ define_action!(
     OpenRun,
     "OpenRun",
     ActionKind::OpenRun,
-    "open terminal",
-    "Open a terminal pane for running commands.",
+    "open the run-command prompt",
+    "Turn the focused pane into a run prompt backed by a shell. Commands typed \
+     at the prompt run in the workspace root and their output stays in the \
+     pane. See also Terminal, which opens a bare subshell pane instead.",
     ActionPriority::Common
 );
 

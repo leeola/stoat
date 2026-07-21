@@ -1130,6 +1130,17 @@ mod tests {
         }
     }
 
+    /// These take a workdir and a revision, which nobody can type at the
+    /// palette, so they stay hidden even in the scope that shows everything
+    /// else. The commits view dispatches them directly.
+    #[test]
+    fn commands_taking_untypable_params_stay_out_of_the_palette() {
+        let listed = action_names_for_scope("", PaletteScope::All, &Availability::default());
+        for name in ["OpenReviewCommit", "OpenReviewCommitRange"] {
+            assert!(!listed.contains(&name), "{name} must not be listed");
+        }
+    }
+
     #[test]
     fn every_registered_action_is_available_when_all_flags_set() {
         let ctx = Availability {

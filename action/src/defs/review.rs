@@ -316,6 +316,12 @@ impl ActionDef for OpenReviewCommitDef {
         "Open a review session diffing the given commit's tree against its \
          first parent. Root commits diff against the empty tree."
     }
+
+    /// Hidden from the palette because its workdir and sha parameters are not
+    /// something a user can type. The commits view dispatches it directly.
+    fn palette_visible(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -385,6 +391,12 @@ impl ActionDef for OpenReviewCommitRangeDef {
     fn long_desc(&self) -> &'static str {
         "Open a review session diffing `to`'s tree against `from`'s tree. \
          Mirrors `git diff from..to`."
+    }
+
+    /// Hidden from the palette because its workdir and revision parameters are
+    /// not something a user can type. The commits view dispatches it directly.
+    fn palette_visible(&self) -> bool {
+        false
     }
 }
 
