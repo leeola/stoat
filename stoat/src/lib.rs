@@ -64,6 +64,9 @@ pub(crate) mod symbol_finder;
 pub mod term_screen;
 pub mod term_session;
 pub mod theme;
+// Exercised only by its own tests until the app's theme loading calls it.
+#[allow(dead_code)]
+mod theme_vscode;
 pub mod ui;
 pub mod workspace;
 pub mod workspace_picker;

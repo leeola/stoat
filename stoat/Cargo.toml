@@ -25,6 +25,7 @@ stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
 stoatty_protocol = { path = "../tty_protocol" }
+vscode_theme = { path = "../vscode_theme" }
 stoatty_widgets = { path = "../tty_widgets" }
 ast-grep-core.workspace = true
 ratatui.workspace = true
