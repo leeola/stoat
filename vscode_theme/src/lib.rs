@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 /// `colors` maps workbench color keys (e.g. `editor.background`) to hex strings;
 /// `token_colors` holds the TextMate-scoped syntax rules. Every field is
 /// optional in the source, so a sparse theme still parses.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct VsCodeTheme {
     #[serde(default)]
     pub name: Option<String>,
@@ -34,7 +34,7 @@ pub struct VsCodeTheme {
 /// Flattens VSCode's nested `{ scope, settings: { foreground, ... } }` shape. A
 /// rule's `scope` may be a single string, a comma-separated string, or an array;
 /// all three forms land here as separate [`Self::scopes`] entries.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(from = "RawTokenRule")]
 pub struct TokenRule {
     pub scopes: Vec<String>,

@@ -4126,6 +4126,7 @@ dependencies = [
  "stoatty_term",
  "toml",
  "tracing",
+ "vscode_theme",
  "winit",
 ]
 

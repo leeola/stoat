@@ -14,7 +14,11 @@ font_size = 15
 # system's default monospace.
 font_family = ["JetBrains Mono", "monospace"]
 
-# Name of the [themes.<name>] entry the terminal resolves colors against.
+# Name of the theme the terminal resolves colors against. A [themes.<name>]
+# entry below is checked first. Failing that the name is looked up among the
+# VSCode color themes, which are the built-in "one-dark" and "gruvbox-dark"
+# plus any .json theme file dropped in ~/.config/stoat/themes. That directory
+# is shared with the stoat editor, so one file themes both.
 theme = "zed"
 
 # Shape contiguous same-style cell runs together so the font's ligatures (->,

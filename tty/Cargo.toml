@@ -21,6 +21,7 @@ stoatty_term = { path = "../tty_term" }
 stoatty_render = { path = "../tty_render" }
 stoat_cli = { path = "../cli" }
 stoat_log = { path = "../log" }
+vscode_theme = { path = "../vscode_theme" }
 tracing.workspace = true
 alacritty_terminal.workspace = true
 arboard.workspace = true

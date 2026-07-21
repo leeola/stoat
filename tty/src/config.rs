@@ -10,10 +10,37 @@ use serde::{de::Error as _, Deserialize, Deserializer};
 use snafu::{ResultExt, Snafu};
 use std::{collections::BTreeMap, io, path::PathBuf};
 use stoatty_term::{grid::Rgb, theme::Theme};
+use vscode_theme::{Rgba, VsCodeTheme};
 
 /// The default configuration, embedded from the repo root so a built binary
 /// carries it without the source tree.
 const DEFAULT_CONFIG: &str = include_str!("../../stoatty.toml");
+
+/// The built-in VSCode themes, embedded so `theme = "one-dark"` and
+/// `theme = "gruvbox-dark"` resolve without any file on disk.
+const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
+const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
+
+/// The `terminal.ansi*` color keys in palette-index order, the 8 normal colors
+/// followed by the 8 bright ones.
+const ANSI_KEYS: [&str; 16] = [
+    "terminal.ansiBlack",
+    "terminal.ansiRed",
+    "terminal.ansiGreen",
+    "terminal.ansiYellow",
+    "terminal.ansiBlue",
+    "terminal.ansiMagenta",
+    "terminal.ansiCyan",
+    "terminal.ansiWhite",
+    "terminal.ansiBrightBlack",
+    "terminal.ansiBrightRed",
+    "terminal.ansiBrightGreen",
+    "terminal.ansiBrightYellow",
+    "terminal.ansiBrightBlue",
+    "terminal.ansiBrightMagenta",
+    "terminal.ansiBrightCyan",
+    "terminal.ansiBrightWhite",
+];
 
 /// The settled stoatty configuration.
 ///
@@ -61,57 +88,124 @@ pub struct Config {
     /// Named color themes, keyed by the name [`theme`](Self::theme) selects.
     #[serde(default)]
     pub themes: BTreeMap<String, ThemeColors>,
+
+    /// VSCode color themes available to [`theme`](Self::theme), keyed by file
+    /// stem.
+    ///
+    /// These come from the built-in themes and the JSON files dropped in the
+    /// shared themes dir, not from the config file, so [`load`] fills the field
+    /// after deserializing rather than reading it out of the TOML. A
+    /// [`themes`](Self::themes) entry of the same name shadows one of these.
+    #[serde(skip)]
+    pub vscode_themes: BTreeMap<String, VsCodeTheme>,
 }
 
 impl Config {
     /// The selected theme resolved into a [`Theme`].
     ///
-    /// Starts from [`Theme::default`] and overlays the colors the selected
-    /// `[themes.<name>]` entry sets, so an unset color keeps the built-in
-    /// default and an unknown selector name yields the default theme.
+    /// A `[themes.<name>]` entry wins, so a hand-written TOML block always
+    /// overrides a VSCode theme of the same name. Failing that the name is
+    /// looked up among the [`vscode_themes`](Self::vscode_themes). A name
+    /// matching neither yields [`Theme::default`].
     pub fn resolve_theme(&self) -> Theme {
-        let mut theme = Theme::default();
-
-        let Some(colors) = self.themes.get(&self.theme) else {
-            return theme;
-        };
-
-        if let Some(HexColor(rgb)) = colors.foreground {
-            theme.foreground = rgb;
+        if let Some(colors) = self.themes.get(&self.theme) {
+            return theme_from_toml(colors);
         }
-        if let Some(HexColor(rgb)) = colors.background {
-            theme.background = rgb;
+        match self.vscode_themes.get(&self.theme) {
+            Some(source) => theme_from_vscode(source),
+            None => Theme::default(),
         }
-        if let Some(HexColor(rgb)) = colors.cursor {
-            theme.cursor = rgb;
-        }
-
-        let ansi = [
-            colors.black,
-            colors.red,
-            colors.green,
-            colors.yellow,
-            colors.blue,
-            colors.magenta,
-            colors.cyan,
-            colors.white,
-            colors.bright_black,
-            colors.bright_red,
-            colors.bright_green,
-            colors.bright_yellow,
-            colors.bright_blue,
-            colors.bright_magenta,
-            colors.bright_cyan,
-            colors.bright_white,
-        ];
-        for (slot, over) in theme.ansi.iter_mut().zip(ansi) {
-            if let Some(HexColor(rgb)) = over {
-                *slot = rgb;
-            }
-        }
-
-        theme
     }
+}
+
+/// Overlay a `[themes.<name>]` entry's colors onto [`Theme::default`].
+///
+/// An unset color keeps the built-in default rather than blanking the slot.
+fn theme_from_toml(colors: &ThemeColors) -> Theme {
+    let mut theme = Theme::default();
+
+    if let Some(HexColor(rgb)) = colors.foreground {
+        theme.foreground = rgb;
+    }
+    if let Some(HexColor(rgb)) = colors.background {
+        theme.background = rgb;
+    }
+    if let Some(HexColor(rgb)) = colors.cursor {
+        theme.cursor = rgb;
+    }
+
+    let ansi = [
+        colors.black,
+        colors.red,
+        colors.green,
+        colors.yellow,
+        colors.blue,
+        colors.magenta,
+        colors.cyan,
+        colors.white,
+        colors.bright_black,
+        colors.bright_red,
+        colors.bright_green,
+        colors.bright_yellow,
+        colors.bright_blue,
+        colors.bright_magenta,
+        colors.bright_cyan,
+        colors.bright_white,
+    ];
+    for (slot, over) in theme.ansi.iter_mut().zip(ansi) {
+        if let Some(HexColor(rgb)) = over {
+            *slot = rgb;
+        }
+    }
+
+    theme
+}
+
+/// Derive a terminal [`Theme`] from a VSCode color theme.
+///
+/// A VSCode theme colors an editor, not a terminal, so only its `terminal.*`
+/// keys map directly. Where those are absent the editor's own colors stand in,
+/// which is what makes a theme written with no integrated-terminal section
+/// still usable here. Any slot the theme leaves unspecified keeps its
+/// [`Theme::default`] value rather than going black.
+///
+/// Themes lean on alpha for overlays, so every color is composited down to an
+/// opaque one over the resolved background.
+fn theme_from_vscode(source: &VsCodeTheme) -> Theme {
+    let fallback = Theme::default();
+    let color = |key: &str| source.colors.get(key).and_then(|hex| Rgba::parse(hex));
+    let first = |keys: [&str; 2]| keys.into_iter().find_map(color);
+
+    let background = match first(["terminal.background", "editor.background"]) {
+        Some(rgba) => flatten(rgba, fallback.background),
+        None => fallback.background,
+    };
+    let foreground = first(["terminal.foreground", "editor.foreground"])
+        .map(|rgba| flatten(rgba, background))
+        .unwrap_or(fallback.foreground);
+    let cursor = first(["terminalCursor.foreground", "editorCursor.foreground"])
+        .map(|rgba| flatten(rgba, background))
+        .unwrap_or(foreground);
+
+    let mut ansi = fallback.ansi;
+    for (slot, key) in ansi.iter_mut().zip(ANSI_KEYS) {
+        if let Some(rgba) = color(key) {
+            *slot = flatten(rgba, background);
+        }
+    }
+
+    Theme {
+        foreground,
+        background,
+        cursor,
+        ansi,
+    }
+}
+
+/// Composite `rgba` over the opaque `bg`, yielding an opaque [`Rgb`].
+fn flatten(rgba: Rgba, bg: Rgb) -> Rgb {
+    let (r, g, b) = rgba.blend_over((bg.r, bg.g, bg.b));
+    Rgb::new(r, g, b)
 }
 
 /// Cursor motion style selectable in the config.
@@ -242,7 +336,9 @@ pub enum ConfigError {
 /// values that do not fit the schema) returns a [`ConfigError`] rather than
 /// panicking.
 pub fn load() -> Result<Config, ConfigError> {
-    settle(DEFAULT_CONFIG, read_user_config()?.as_deref())
+    let mut config = settle(DEFAULT_CONFIG, read_user_config()?.as_deref())?;
+    config.vscode_themes = parse_vscode_themes(vscode_theme_sources());
+    Ok(config)
 }
 
 /// The embedded default configuration, with no user overrides applied.
@@ -252,7 +348,9 @@ pub fn load() -> Result<Config, ConfigError> {
 /// after a bad user config still renders with the intended look. The embedded
 /// default ships with the binary and is trusted, so a malformed one panics.
 pub fn embedded_default() -> Config {
-    settle(DEFAULT_CONFIG, None).expect("embedded default config settles")
+    let mut config = settle(DEFAULT_CONFIG, None).expect("embedded default config settles");
+    config.vscode_themes = parse_vscode_themes(vscode_theme_sources());
+    config
 }
 
 /// The user config path, `<XDG_CONFIG_HOME>/stoatty/config.toml`, or `None`
@@ -261,6 +359,78 @@ fn user_config_path() -> Option<PathBuf> {
     Xdg::new()
         .ok()
         .map(|xdg| xdg.config_dir().join("stoatty/config.toml"))
+}
+
+/// The themes directory, `<XDG_CONFIG_HOME>/stoat/themes`, or `None` when the
+/// XDG base directories cannot be resolved.
+///
+/// This is deliberately stoat's directory rather than stoatty's. One drop point
+/// serves both programs, so a theme placed there is selectable in the terminal
+/// and in the editor it hosts.
+fn user_themes_dir() -> Option<PathBuf> {
+    Xdg::new()
+        .ok()
+        .map(|xdg| xdg.config_dir().join("stoat/themes"))
+}
+
+/// The `(stem, JSON)` pairs of every available VSCode theme, built-ins first.
+///
+/// User files come last so one whose stem matches a built-in shadows it.
+fn vscode_theme_sources() -> Vec<(String, String)> {
+    let mut sources = builtin_vscode_themes();
+    sources.extend(user_vscode_themes());
+    sources
+}
+
+/// The `(stem, JSON)` pairs of the themes embedded in the binary.
+fn builtin_vscode_themes() -> Vec<(String, String)> {
+    vec![
+        ("one-dark".to_string(), THEME_ONE_DARK.to_string()),
+        ("gruvbox-dark".to_string(), THEME_GRUVBOX_DARK.to_string()),
+    ]
+}
+
+/// The `(stem, JSON)` pairs of the `*.json` files in the themes directory.
+///
+/// An unresolvable or unreadable directory yields no themes rather than an
+/// error, since a user with no themes of their own is the common case.
+fn user_vscode_themes() -> Vec<(String, String)> {
+    let Some(dir) = user_themes_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()? != "json" {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?.to_string();
+            Some((stem, std::fs::read_to_string(&path).ok()?))
+        })
+        .collect()
+}
+
+/// Parse theme sources into a map keyed by stem, dropping the ones that fail.
+///
+/// A malformed theme file is logged and skipped rather than failing the load,
+/// so one bad file in the themes directory cannot stop the terminal from
+/// starting. Later sources win, so the caller orders them by precedence.
+fn parse_vscode_themes(sources: Vec<(String, String)>) -> BTreeMap<String, VsCodeTheme> {
+    sources
+        .into_iter()
+        .filter_map(|(stem, source)| match vscode_theme::parse(&source) {
+            Ok(theme) => Some((stem, theme)),
+            Err(error) => {
+                tracing::warn!(%error, theme = %stem, "skipping malformed VSCode theme");
+                None
+            },
+        })
+        .collect()
 }
 
 /// The user config file's contents, or `None` when it is absent or the config
@@ -324,9 +494,10 @@ fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
 #[cfg(test)]
 mod tests {
     use super::{
-        embedded_default, merge_tables, settle, CursorAnimation, ShellConfig, DEFAULT_CONFIG,
+        builtin_vscode_themes, embedded_default, merge_tables, parse_vscode_themes, settle, Config,
+        CursorAnimation, ShellConfig, DEFAULT_CONFIG,
     };
-    use stoatty_term::grid::Rgb;
+    use stoatty_term::{grid::Rgb, theme::Theme};
 
     #[test]
     fn embedded_default_sets_the_logical_font_size() {
@@ -460,5 +631,113 @@ mod tests {
             Some("[themes.zed]\nbackground = \"nope\"\n")
         )
         .is_err());
+    }
+
+    /// Settle `user` over the shipped default, then stock the VSCode map from
+    /// `sources`, standing in for what [`load`] reads off disk.
+    fn config_with_vscode(user: &str, sources: &[(&str, &str)]) -> Config {
+        let owned = sources
+            .iter()
+            .map(|(stem, json)| (stem.to_string(), json.to_string()))
+            .collect();
+
+        let mut config = settle(DEFAULT_CONFIG, Some(user)).unwrap();
+        config.vscode_themes = parse_vscode_themes(owned);
+        config
+    }
+
+    #[test]
+    fn vscode_theme_resolves_by_name() {
+        let json = r##"{ "colors": {
+            "terminal.background": "#101010",
+            "terminal.foreground": "#e0e0e0",
+            "terminalCursor.foreground": "#ff8800",
+            "terminal.ansiRed": "#ff0000"
+        } }"##;
+        let theme = config_with_vscode("theme = \"probe\"", &[("probe", json)]).resolve_theme();
+
+        assert_eq!(theme.background, Rgb::new(0x10, 0x10, 0x10));
+        assert_eq!(theme.foreground, Rgb::new(0xe0, 0xe0, 0xe0));
+        assert_eq!(theme.cursor, Rgb::new(0xff, 0x88, 0x00));
+        assert_eq!(theme.ansi[1], Rgb::new(0xff, 0x00, 0x00), "ansi red");
+        assert_eq!(
+            theme.ansi[2],
+            Theme::default().ansi[2],
+            "a slot the theme omits keeps the built-in default"
+        );
+    }
+
+    #[test]
+    fn toml_theme_shadows_a_same_name_vscode_theme() {
+        let json = r##"{ "colors": { "terminal.background": "#101010" } }"##;
+        let user = "theme = \"probe\"\n[themes.probe]\nbackground = \"#010203\"\n";
+        let theme = config_with_vscode(user, &[("probe", json)]).resolve_theme();
+
+        assert_eq!(theme.background, Rgb::new(0x01, 0x02, 0x03));
+    }
+
+    #[test]
+    fn vscode_theme_falls_back_to_editor_colors() {
+        let json = r##"{ "colors": {
+            "editor.background": "#202020",
+            "editor.foreground": "#c0c0c0"
+        } }"##;
+        let theme = config_with_vscode("theme = \"probe\"", &[("probe", json)]).resolve_theme();
+
+        assert_eq!(theme.background, Rgb::new(0x20, 0x20, 0x20));
+        assert_eq!(theme.foreground, Rgb::new(0xc0, 0xc0, 0xc0));
+        assert_eq!(
+            theme.cursor,
+            Rgb::new(0xc0, 0xc0, 0xc0),
+            "a theme naming no cursor color uses its foreground"
+        );
+    }
+
+    #[test]
+    fn vscode_alpha_composites_over_the_background() {
+        let json = r##"{ "colors": {
+            "terminal.background": "#000000",
+            "terminal.ansiBlue": "#ffffff80"
+        } }"##;
+        let theme = config_with_vscode("theme = \"probe\"", &[("probe", json)]).resolve_theme();
+
+        assert_eq!(
+            theme.ansi[4],
+            Rgb::new(128, 128, 128),
+            "half-transparent white over black lands midway"
+        );
+    }
+
+    #[test]
+    fn builtin_gruvbox_dark_resolves_with_no_user_files() {
+        let mut config = settle(DEFAULT_CONFIG, Some("theme = \"gruvbox-dark\"")).unwrap();
+        config.vscode_themes = parse_vscode_themes(builtin_vscode_themes());
+        let theme = config.resolve_theme();
+
+        assert_eq!(theme.background, Rgb::new(0x28, 0x28, 0x28));
+        assert_eq!(theme.foreground, Rgb::new(0xeb, 0xdb, 0xb2));
+        assert_eq!(theme.ansi[1], Rgb::new(0xcc, 0x24, 0x1d), "ansi red");
+        assert_eq!(
+            theme.ansi[15],
+            Rgb::new(0xeb, 0xdb, 0xb2),
+            "ansi bright white"
+        );
+    }
+
+    #[test]
+    fn a_malformed_theme_file_is_skipped() {
+        let themes = parse_vscode_themes(vec![
+            ("bad".to_string(), "{ not json".to_string()),
+            (
+                "good".to_string(),
+                r##"{ "colors": { "terminal.background": "#101010" } }"##.to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            themes.keys().collect::<Vec<_>>(),
+            ["good"],
+            "one bad file does not take the rest down with it"
+        );
     }
 }
