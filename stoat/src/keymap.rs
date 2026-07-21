@@ -23,6 +23,13 @@ pub trait KeymapState {
 pub struct CompiledKey {
     pub code: KeyCode,
     pub modifiers: KeyModifiers,
+    /// A `num` binding key, matching any digit press instead of one exact key.
+    ///
+    /// When set, [`Self::code`] is an unused sentinel and [`Self::matches`]
+    /// accepts any ASCII digit with equal modifiers. The pressed digit is
+    /// recovered with [`Self::captured_digit`] so a `$num` action argument can
+    /// bind it.
+    pub any_digit: bool,
 }
 
 impl CompiledKey {
@@ -54,15 +61,52 @@ impl CompiledKey {
             }
         }
 
+        if let Key::Named(n) = &kp.keys[key_idx]
+            && n == "num"
+        {
+            return Some(Self {
+                code: KeyCode::Null,
+                modifiers,
+                any_digit: true,
+            });
+        }
+
         let code = resolve_key(&kp.keys[key_idx])?;
-        Some(Self { code, modifiers })
+        Some(Self {
+            code,
+            modifiers,
+            any_digit: false,
+        })
     }
 
     pub fn matches(&self, event: &KeyEvent) -> bool {
-        event.code == self.code && event.modifiers == self.modifiers
+        if event.modifiers != self.modifiers {
+            return false;
+        }
+        if self.any_digit {
+            return matches!(event.code, KeyCode::Char(c) if c.is_ascii_digit());
+        }
+        event.code == self.code
+    }
+
+    /// The digit `event` carries when this key is the `num` placeholder.
+    ///
+    /// `None` for an exact key or a non-digit event, so a `$num` argument binds
+    /// a value only when a placeholder actually matched a digit press.
+    pub fn captured_digit(&self, event: &KeyEvent) -> Option<f64> {
+        if !self.any_digit {
+            return None;
+        }
+        match event.code {
+            KeyCode::Char(c) => c.to_digit(10).map(f64::from),
+            _ => None,
+        }
     }
 
     pub fn to_key_token(&self) -> String {
+        if self.any_digit {
+            return self.format_with_modifiers("num");
+        }
         let base = match self.code {
             KeyCode::Char(' ') => "space",
             KeyCode::Char(c) => return self.format_with_modifiers(&c.to_string()),
@@ -115,6 +159,7 @@ impl CompiledKey {
             parts.push("A".to_string());
         }
         parts.push(match self.code {
+            _ if self.any_digit => "0-9".to_string(),
             KeyCode::Char(' ') => "Spc".to_string(),
             KeyCode::Char(c) => c.to_string(),
             KeyCode::Esc => "Esc".to_string(),
@@ -375,7 +420,24 @@ impl Keymap {
         state: &dyn KeymapState,
         event: &KeyEvent,
     ) -> Option<Arc<[ResolvedAction]>> {
-        let mut best: Option<(usize, &Arc<[ResolvedAction]>)> = None;
+        self.lookup_with_capture(state, event)
+            .map(|(actions, _)| actions)
+    }
+
+    /// Resolve `event` against `state` to the winning binding's actions and the
+    /// digit it captured, if the winning key is a `num` placeholder.
+    ///
+    /// Bindings rank by predicate specificity first. On a tie an exact key beats
+    /// a placeholder, so `3 -> ...` overrides `num -> ...` for the `3` press,
+    /// and equally-ranked matches keep source order. The captured digit is
+    /// `Some` only when the winning key is the placeholder, so a `$num` argument
+    /// binds a value exactly when a placeholder matched.
+    pub fn lookup_with_capture(
+        &self,
+        state: &dyn KeymapState,
+        event: &KeyEvent,
+    ) -> Option<(Arc<[ResolvedAction]>, Option<f64>)> {
+        let mut best: Option<((usize, bool), &CompiledBinding)> = None;
         for binding in &self.bindings {
             if !binding.key.matches(event) {
                 continue;
@@ -384,13 +446,15 @@ impl Keymap {
                 continue;
             }
             let score: usize = binding.predicates.iter().map(predicate_atoms).sum();
-            // Strict `>` keeps the earliest binding on a tie, so equally specific
+            // Rank exact keys above placeholders at equal specificity. Strict `>`
+            // then keeps the earliest binding on a full tie, so equally specific
             // matches still resolve in source order.
-            if best.is_none_or(|(best_score, _)| score > best_score) {
-                best = Some((score, &binding.actions));
+            let rank = (score, !binding.key.any_digit);
+            if best.is_none_or(|(best_rank, _)| rank > best_rank) {
+                best = Some((rank, binding));
             }
         }
-        best.map(|(_, actions)| actions.clone())
+        best.map(|(_, binding)| (binding.actions.clone(), binding.key.captured_digit(event)))
     }
 
     pub fn active_keys(&self, state: &dyn KeymapState) -> Vec<(&CompiledKey, &[ResolvedAction])> {
@@ -697,6 +761,7 @@ mod tests {
         let ck = CompiledKey {
             code: KeyCode::Char('s'),
             modifiers: KeyModifiers::CONTROL,
+            any_digit: false,
         };
         assert!(ck.matches(&key_event(KeyCode::Char('s'), KeyModifiers::CONTROL)));
         assert!(!ck.matches(&key_event(KeyCode::Char('s'), KeyModifiers::NONE)));
@@ -938,6 +1003,96 @@ mod tests {
         // The later 2-atom binding outscores the earlier 1-atom one.
         let actions = keymap.lookup(&state, &event).expect("should match");
         assert_eq!(actions[0].name, "MoveRight");
+    }
+
+    /// Resolve the digit press against `keymap` and return the resulting
+    /// [`stoat_action::FocusPane`]'s index, or `None` if nothing bound or the
+    /// action dropped.
+    fn resolved_focus_index(keymap: &Keymap, state: &TestState, digit: char) -> Option<usize> {
+        let event = key_event(KeyCode::Char(digit), KeyModifiers::NONE);
+        let (actions, captured) = keymap.lookup_with_capture(state, &event)?;
+        let action =
+            crate::keymap_state::resolve_action(&actions[0].name, &actions[0].args, captured)?;
+        action
+            .as_any()
+            .downcast_ref::<stoat_action::FocusPane>()
+            .map(|fp| fp.index)
+    }
+
+    #[test]
+    fn num_placeholder_captures_the_pressed_digit() {
+        let config = parse_config(
+            r#"on key {
+                mode == "tabsel" { num -> FocusPane($num); }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let state = TestState::new().set("mode", StateValue::String("tabsel".into()));
+
+        assert_eq!(resolved_focus_index(&keymap, &state, '5'), Some(5));
+        assert_eq!(resolved_focus_index(&keymap, &state, '9'), Some(9));
+    }
+
+    #[test]
+    fn an_exact_digit_key_beats_the_num_placeholder() {
+        let config = parse_config(
+            r#"on key {
+                mode == "tabsel" {
+                    num -> FocusPane($num);
+                    3 -> FocusPane(7);
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let state = TestState::new().set("mode", StateValue::String("tabsel".into()));
+
+        assert_eq!(
+            resolved_focus_index(&keymap, &state, '3'),
+            Some(7),
+            "the exact 3 binding wins over the placeholder"
+        );
+        assert_eq!(
+            resolved_focus_index(&keymap, &state, '5'),
+            Some(5),
+            "other digits still flow through the placeholder"
+        );
+    }
+
+    #[test]
+    fn num_placeholder_renders_as_a_digit_range() {
+        let kp = KeyPart {
+            keys: vec![Key::Named("num".into())],
+        };
+        let ck = CompiledKey::from_key_part(&kp).expect("num compiles");
+
+        assert!(ck.any_digit);
+        assert_eq!(ck.display_label(), "0-9");
+        assert_eq!(ck.to_key_token(), "num");
+        assert!(ck.matches(&key_event(KeyCode::Char('7'), KeyModifiers::NONE)));
+        assert!(!ck.matches(&key_event(KeyCode::Char('a'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn num_arg_under_an_exact_key_drops() {
+        let config = parse_config(
+            r#"on key {
+                mode == "tabsel" { 5 -> FocusPane($num); }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let state = TestState::new().set("mode", StateValue::String("tabsel".into()));
+
+        let event = key_event(KeyCode::Char('5'), KeyModifiers::NONE);
+        let (actions, captured) = keymap
+            .lookup_with_capture(&state, &event)
+            .expect("the exact 5 binding matches");
+
+        assert_eq!(captured, None, "an exact key captures no digit");
+        assert!(
+            crate::keymap_state::resolve_action(&actions[0].name, &actions[0].args, captured)
+                .is_none(),
+            "$num without a placeholder match drops the action"
+        );
     }
 
     #[test]
@@ -1354,6 +1509,7 @@ mod tests {
         let ck = CompiledKey {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::NONE,
+            any_digit: false,
         };
         assert_eq!(ck.display_label(), "q");
     }
@@ -1363,6 +1519,7 @@ mod tests {
         let ck = CompiledKey {
             code: KeyCode::Char('s'),
             modifiers: KeyModifiers::CONTROL,
+            any_digit: false,
         };
         assert_eq!(ck.display_label(), "C-s");
     }
@@ -1372,7 +1529,8 @@ mod tests {
         assert_eq!(
             CompiledKey {
                 code: KeyCode::Esc,
-                modifiers: KeyModifiers::NONE
+                modifiers: KeyModifiers::NONE,
+                any_digit: false,
             }
             .display_label(),
             "Esc"
@@ -1380,7 +1538,8 @@ mod tests {
         assert_eq!(
             CompiledKey {
                 code: KeyCode::Char(' '),
-                modifiers: KeyModifiers::NONE
+                modifiers: KeyModifiers::NONE,
+                any_digit: false,
             }
             .display_label(),
             "Spc"
@@ -1392,6 +1551,7 @@ mod tests {
         let ck = CompiledKey {
             code: KeyCode::BackTab,
             modifiers: KeyModifiers::NONE,
+            any_digit: false,
         };
         assert_eq!(ck.display_label(), "S-Tab");
     }
@@ -1401,6 +1561,7 @@ mod tests {
         let ck = CompiledKey {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::NONE,
+            any_digit: false,
         };
         assert_eq!(ck.to_key_token(), "q");
     }
@@ -1410,6 +1571,7 @@ mod tests {
         let ck = CompiledKey {
             code: KeyCode::Char(' '),
             modifiers: KeyModifiers::NONE,
+            any_digit: false,
         };
         assert_eq!(ck.to_key_token(), "space");
     }
@@ -1419,6 +1581,7 @@ mod tests {
         let ck = CompiledKey {
             code: KeyCode::Char('s'),
             modifiers: KeyModifiers::CONTROL,
+            any_digit: false,
         };
         assert_eq!(ck.to_key_token(), "ctrl-s");
     }

@@ -4682,9 +4682,12 @@ impl Stoat {
         // one derivation is behavior-preserving. Normalization runs first so the
         // Ctrl-C block matches on the same key the lookup used.
         let key = normalize_shift_event(key);
-        let looked_up = {
+        let (looked_up, captured_digit) = {
             let state = StoatKeymapState::from_stoat(self);
-            self.keymap.lookup(&state, &key)
+            match self.keymap.lookup_with_capture(&state, &key) {
+                Some((actions, captured)) => (Some(actions), captured),
+                None => (None, None),
+            }
         };
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -5154,7 +5157,7 @@ impl Stoat {
             if ra.name == "OpenSymbolPicker" {
                 dispatched_symbol_picker = true;
             }
-            if let Some(action) = resolve_action(&ra.name, &ra.args) {
+            if let Some(action) = resolve_action(&ra.name, &ra.args, captured_digit) {
                 dispatched_action = true;
                 let e = action_handlers::dispatch(self, &*action);
                 match e {

@@ -1557,7 +1557,11 @@ mod tests {
             (KeyCode::F(1), KeyModifiers::NONE, "f1"),
         ];
         for (code, modifiers, expected) in cases {
-            let ck = CompiledKey { code, modifiers };
+            let ck = CompiledKey {
+                code,
+                modifiers,
+                any_digit: false,
+            };
             let token = ck.to_key_token();
             assert_eq!(token, expected);
             let parsed = parse_single_key(&token);

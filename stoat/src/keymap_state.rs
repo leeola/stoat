@@ -447,12 +447,18 @@ pub(crate) fn arg_to_state_value(arg: &ResolvedArg) -> Option<StateValue> {
     }
 }
 
-fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
+fn arg_to_param_value(
+    arg: &ResolvedArg,
+    captured: Option<f64>,
+) -> Option<stoat_action::ParamValue> {
     match &arg.value {
         stoat_config::Value::String(s) => Some(stoat_action::ParamValue::String(s.clone())),
         stoat_config::Value::Ident(s) => Some(stoat_action::ParamValue::String(s.clone())),
         stoat_config::Value::Number(n) => Some(stoat_action::ParamValue::Number(*n)),
         stoat_config::Value::Bool(b) => Some(stoat_action::ParamValue::Bool(*b)),
+        stoat_config::Value::StateRef(name) if name == "num" => {
+            captured.map(stoat_action::ParamValue::Number)
+        },
         _ => None,
     }
 }
@@ -471,11 +477,21 @@ pub(crate) fn action_display_desc(action: &ResolvedAction) -> String {
         .unwrap_or_else(|| action.name.clone())
 }
 
-pub(crate) fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action>> {
+/// Build the action `name` with `args`, or `None` if unknown or an argument
+/// cannot be converted.
+///
+/// `captured` is the digit a `num` placeholder key matched this press, the value
+/// a `$num` argument resolves to. It is `None` for every non-placeholder
+/// binding, so a `$num` argument there has no value and drops the action.
+pub(crate) fn resolve_action(
+    name: &str,
+    args: &[ResolvedArg],
+    captured: Option<f64>,
+) -> Option<Box<dyn Action>> {
     let entry = stoat_action::registry::lookup(name)?;
     let mut params = Vec::with_capacity(args.len());
     for arg in args {
-        match arg_to_param_value(arg) {
+        match arg_to_param_value(arg, captured) {
             Some(value) => params.push(value),
             None => {
                 tracing::warn!("action `{name}`: cannot convert arg {:?}", arg.value);

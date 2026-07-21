@@ -280,6 +280,12 @@ on init {
 #
 # When several bindings match one key the most specific wins, the one with the
 # most predicate atoms, so a key can carry different actions per context.
+#
+# The key `num` matches any digit 0-9, and `$num` in the action passes the
+# pressed digit along, so `num -> GotoTab($num)` binds all ten digits at once.
+# An exact digit key beats the placeholder at equal specificity, so pairing it
+# with `0 -> GotoTab(10)` routes 0 to the tenth item while 1-9 flow through
+# `$num`.
 on key {
     mode != normal && mode != goto && mode != space {
         ? -> OpenHelp();
