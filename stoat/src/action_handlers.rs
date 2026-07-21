@@ -841,6 +841,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::WorkspacePickerNext => workspace::workspace_picker_next(stoat),
         ActionKind::WorkspacePickerPrev => workspace::workspace_picker_prev(stoat),
+        ActionKind::WorkspacePickerComplete => workspace::workspace_picker_complete(stoat),
         ActionKind::WorkspacePickerSelect => workspace::workspace_picker_select(stoat),
         ActionKind::WorkspacePickerClose => workspace::workspace_picker_close(stoat),
         ActionKind::CloseWorkspace => workspace::close_workspace(stoat),

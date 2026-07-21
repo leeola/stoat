@@ -116,8 +116,8 @@ use crate::{
         terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
-            ShowCwd, SwitchWorkspace, WorkspacePickerClose, WorkspacePickerNext,
-            WorkspacePickerPrev, WorkspacePickerSelect,
+            ShowCwd, SwitchWorkspace, WorkspacePickerClose, WorkspacePickerComplete,
+            WorkspacePickerNext, WorkspacePickerPrev, WorkspacePickerSelect,
         },
     },
     param::{MissingSnafu, ParseFailureSnafu, WrongKindSnafu},
@@ -868,6 +868,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(WorkspacePickerNext::DEF, |_| {
         Ok(Box::new(WorkspacePickerNext))
     });
+    add(WorkspacePickerComplete::DEF, |_| {
+        Ok(Box::new(WorkspacePickerComplete))
+    });
     add(WorkspacePickerPrev::DEF, |_| {
         Ok(Box::new(WorkspacePickerPrev))
     });
@@ -1133,6 +1136,7 @@ mod tests {
         "SwitchWorkspace",
         "WorkspacePickerNext",
         "WorkspacePickerPrev",
+        "WorkspacePickerComplete",
         "WorkspacePickerSelect",
         "WorkspacePickerClose",
         "JumplistPickerNext",
@@ -1383,6 +1387,7 @@ mod tests {
         // + 4 SymbolFinder SelectPrev/Next/PageUp/PageDown.
         // + 1 SymbolFinderComplete.
         // + 1 HelpComplete.
+        // + 1 WorkspacePickerComplete.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
         // + 1 Format.
@@ -1454,7 +1459,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 380);
+        assert_eq!(all().count(), 381);
     }
 
     #[test]

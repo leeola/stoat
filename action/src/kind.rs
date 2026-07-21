@@ -353,6 +353,7 @@ pub enum ActionKind {
     SwitchWorkspace,
     WorkspacePickerNext,
     WorkspacePickerPrev,
+    WorkspacePickerComplete,
     WorkspacePickerSelect,
     WorkspacePickerClose,
     CloseWorkspace,

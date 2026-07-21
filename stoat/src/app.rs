@@ -10504,6 +10504,29 @@ mod tests {
         assert!(h.stoat.workspace_picker.is_none());
     }
 
+    /// The picker-level completion logic is unit-tested in `workspace_picker`.
+    /// This covers the wiring that unit test cannot see. Tab has to route
+    /// through the default keymap to the handler at all, rather than falling
+    /// through to the insert-mode `SmartTab` and indenting the filter input.
+    #[test]
+    fn tab_completes_the_highlighted_workspace_into_the_filter() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().name = "alpha".into();
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchWorkspace);
+        let _ = h.snapshot();
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        let picker = h.stoat.workspace_picker.as_ref().expect("picker open");
+        assert_eq!(
+            picker.input.text(h.stoat.active_workspace()),
+            "alpha",
+            "Tab completes the highlighted workspace name into the filter input"
+        );
+    }
+
     #[test]
     fn modal_over_a_target_keeps_the_target_mode() {
         let mut h = Stoat::test();

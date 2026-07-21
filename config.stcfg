@@ -299,6 +299,7 @@ on key {
         Down -> WorkspacePickerNext();
         Ctrl-p -> WorkspacePickerPrev();
         Ctrl-n -> WorkspacePickerNext();
+        Tab -> WorkspacePickerComplete();
         Enter -> WorkspacePickerSelect();
         Escape -> WorkspacePickerClose();
     }

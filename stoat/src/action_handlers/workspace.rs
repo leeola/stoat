@@ -93,6 +93,24 @@ pub(super) fn workspace_picker_next(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn workspace_picker_complete(stoat: &mut Stoat) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+
+    let Some(basename) = stoat
+        .workspace_picker
+        .as_mut()
+        .and_then(|picker| picker.complete_selected())
+    else {
+        return UpdateEffect::None;
+    };
+
+    let ws = &mut stoat.workspaces[active_idx];
+    if let Some(picker) = stoat.workspace_picker.as_ref() {
+        picker.input.replace_text(ws, &basename);
+    }
+    UpdateEffect::Redraw
+}
+
 pub(super) fn workspace_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(picker) = stoat.workspace_picker.as_mut() {
         picker.select_prev();

@@ -45,6 +45,20 @@ define_action!(
 );
 
 define_action!(
+    WorkspacePickerCompleteDef,
+    WorkspacePickerComplete,
+    "WorkspacePickerComplete",
+    ActionKind::WorkspacePickerComplete,
+    "complete selected workspace",
+    "Complete the highlighted workspace's name into the picker's filter input, \
+     replacing what was typed. The completed workspace stays selected, so a \
+     following Enter switches to it. Bound by default to Tab while the picker \
+     is open; a no-op when the list is empty.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     WorkspacePickerPrevDef,
     WorkspacePickerPrev,
     "WorkspacePickerPrev",

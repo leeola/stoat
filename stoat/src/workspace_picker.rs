@@ -211,6 +211,26 @@ impl WorkspacePicker {
         self.clamp_selected();
     }
 
+    /// Re-rank the list against the highlighted row's own name, keeping that row
+    /// selected, and return the name for the caller to write into the input.
+    ///
+    /// `None` for an empty list. The caller owns the input write, so this stays
+    /// free of any [`Workspace`] borrow.
+    ///
+    /// [`Self::refilter`] ranks by score and then by entry order, not by name,
+    /// so the completed row is not reliably first afterwards. It is tracked by
+    /// its index into `entries` and the cursor moved to wherever that lands.
+    pub(crate) fn complete_selected(&mut self) -> Option<String> {
+        let entry_idx = *self.filtered.get(self.selected)?;
+        let basename = self.entries.get(entry_idx)?.basename.clone();
+
+        self.refilter(&basename);
+        if let Some(row) = self.filtered.iter().position(|&i| i == entry_idx) {
+            self.selected = row;
+        }
+        Some(basename)
+    }
+
     /// Free the filter input's editor and scratch buffer. Called when the picker
     /// closes so the transient input leaves no unsaved buffer behind.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
@@ -349,6 +369,68 @@ mod tests {
         assert_eq!(entries[0].id, Some(active));
         assert_eq!(entries[1].status, WorkspaceStatus::Background);
         assert_eq!(picker.selected(), 0);
+    }
+
+    /// The three names are chosen so completing the middle row drops the first
+    /// and keeps the third. `zulu` cannot match `ab` while `abc` can, so the
+    /// list reshuffles instead of narrowing to one row, and the cursor's old
+    /// index stays in range while pointing at `abc`. Narrowing would let
+    /// `clamp_selected` land on the right entry by itself and prove nothing.
+    #[test]
+    fn complete_selected_keeps_the_completed_row_selected() {
+        let exec = executor();
+        let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
+        let mut insert = |root: &str, name: &str| {
+            let id = workspaces.insert(Workspace::new(PathBuf::from(root), &exec));
+            workspaces[id].id = id;
+            workspaces[id].name = name.into();
+            id
+        };
+        let active = insert("/tmp/zulu", "zulu");
+        insert("/tmp/ab", "ab");
+        insert("/tmp/abc", "abc");
+
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
+        assert_eq!(
+            picker
+                .entries()
+                .iter()
+                .map(|e| e.basename.as_str())
+                .collect::<Vec<_>>(),
+            ["zulu", "ab", "abc"],
+            "the active workspace leads, then the rest by name"
+        );
+
+        picker.select_next();
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("ab"),
+            "the second row is highlighted before completing"
+        );
+
+        assert_eq!(picker.complete_selected().as_deref(), Some("ab"));
+
+        assert_eq!(
+            picker.filtered().len(),
+            2,
+            "zulu drops out but abc still matches, so the list reshuffles"
+        );
+        assert_eq!(
+            picker.selected_entry().map(|e| e.basename.as_str()),
+            Some("ab"),
+            "the completed workspace stays selected"
+        );
+    }
+
+    #[test]
+    fn complete_selected_on_an_empty_list_is_none() {
+        let exec = executor();
+        let (workspaces, active) = slotmap_with_two(&exec);
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
+        picker.refilter("zzzznomatch");
+        assert!(picker.filtered().is_empty(), "the query matches nothing");
+
+        assert_eq!(picker.complete_selected(), None);
     }
 
     #[test]
