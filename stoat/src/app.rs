@@ -14956,6 +14956,33 @@ mod tests {
     }
 
     #[test]
+    fn transient_status_message_keeps_the_rich_status_bar() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.set_status("Current working directory is now /w");
+
+        let buf = h.stoat.render();
+        h.stoat.emit_apc_scene();
+
+        let mut raw = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            raw.extend(batch);
+        }
+        let scene = String::from_utf8_lossy(&raw);
+
+        assert!(
+            scene.contains("Current working directory"),
+            "the status message streams into the APC scene"
+        );
+        let in_cells = (0..buf.area.height).any(|y| {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            row.contains("Current working directory")
+        });
+        assert!(!in_cells, "no grid cell carries the status message");
+    }
+
+    #[test]
     fn show_message_is_attributed_to_its_server() {
         use crate::host::{FakeLsp, LspHost, LspNotification};
         use lsp_types::MessageType;

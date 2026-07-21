@@ -548,11 +548,16 @@ type StatusSeg = (String, Style);
 ///
 /// Falls back to red when the theme leaves that scope undefined, so the message
 /// always reads as an alert rather than blending into the bar.
+///
+/// That fallback is an RGB red rather than a named one because
+/// [`render_status_segments`] drops the whole bar to the cell fallback on any
+/// non-RGB segment color. A theme missing this scope must degrade only the
+/// message's color, never the bar's rendering mode.
 fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style {
     base_style.patch(
         theme
             .try_get(crate::theme::scope::UI_MESSAGE_ERROR)
-            .unwrap_or_else(|| Style::default().fg(Color::Red)),
+            .unwrap_or_else(|| Style::default().fg(Color::Rgb(0xe0, 0x6c, 0x75))),
     )
 }
 
