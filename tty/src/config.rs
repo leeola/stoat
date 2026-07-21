@@ -344,9 +344,10 @@ pub fn load() -> Result<Config, ConfigError> {
 /// The embedded default configuration, with no user overrides applied.
 ///
 /// The fallback when [`load`] fails. It carries the shipped defaults, a font
-/// size of 15 and the `zed` theme, rather than zeroed fields, so a window opened
-/// after a bad user config still renders with the intended look. The embedded
-/// default ships with the binary and is trusted, so a malformed one panics.
+/// size of 15 and the `one-dark` theme, rather than zeroed fields, so a window
+/// opened after a bad user config still renders with the intended look. The
+/// embedded default ships with the binary and is trusted, so a malformed one
+/// panics.
 pub fn embedded_default() -> Config {
     let mut config = settle(DEFAULT_CONFIG, None).expect("embedded default config settles");
     config.vscode_themes = parse_vscode_themes(vscode_theme_sources());
@@ -509,7 +510,7 @@ mod tests {
         let config = embedded_default();
         assert_eq!(config.font_size, 15);
         assert_eq!(config.font_family, ["JetBrains Mono", "monospace"]);
-        assert_eq!(config.theme, "zed");
+        assert_eq!(config.theme, "one-dark");
     }
 
     #[test]
@@ -597,8 +598,10 @@ mod tests {
     }
 
     #[test]
-    fn zed_theme_resolves_to_one_dark_colors() {
-        let theme = settle(DEFAULT_CONFIG, None).unwrap().resolve_theme();
+    fn default_theme_resolves_to_one_dark_colors() {
+        let mut config = settle(DEFAULT_CONFIG, None).unwrap();
+        config.vscode_themes = parse_vscode_themes(builtin_vscode_themes());
+        let theme = config.resolve_theme();
 
         assert_eq!(theme.background, Rgb::new(0x28, 0x2c, 0x34));
         assert_eq!(theme.foreground, Rgb::new(0xab, 0xb2, 0xbf));
@@ -615,7 +618,7 @@ mod tests {
     fn user_override_replaces_one_theme_field() {
         let config = settle(
             DEFAULT_CONFIG,
-            Some("[themes.zed]\nbackground = \"#000000\"\n"),
+            Some("theme = \"zed\"\n[themes.zed]\nbackground = \"#000000\"\n"),
         )
         .unwrap();
         let theme = config.resolve_theme();

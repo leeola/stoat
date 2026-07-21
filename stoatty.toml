@@ -19,7 +19,11 @@ font_family = ["JetBrains Mono", "monospace"]
 # VSCode color themes, which are the built-in "one-dark" and "gruvbox-dark"
 # plus any .json theme file dropped in ~/.config/stoat/themes. That directory
 # is shared with the stoat editor, so one file themes both.
-theme = "zed"
+#
+# The name is also exported to a child stoat as STOAT_THEME so the editor
+# follows the terminal, which works only for a name stoat resolves too: a
+# built-in, or a stem in the shared themes dir.
+theme = "one-dark"
 
 # Shape contiguous same-style cell runs together so the font's ligatures (->,
 # =>, ==, ...) form across cells. Set to false to shape each cell on its own, so
@@ -37,8 +41,9 @@ cursor_animation = "block"
 # program = "/bin/bash"
 # args = ["--login"]
 
-# Zed's One Dark terminal palette. Colors are #rrggbb hex strings; an omitted
-# field keeps the built-in default for that slot.
+# An example of the hand-written palette format, carrying the same colors as the
+# built-in one-dark default. Colors are #rrggbb hex strings, and an omitted field
+# keeps the built-in default for that slot. Select it with theme = "zed" above.
 [themes.zed]
 background = "#282c34"
 foreground = "#abb2bf"
