@@ -553,6 +553,71 @@ impl PaneTree {
         self.focus = self.prev_split_pane(self.focus);
     }
 
+    /// Swap the focused pane's content with the split leaf in `direction`,
+    /// following it there. Returns whether a neighbour was found.
+    ///
+    /// Only the content moves. `view`, `prev_view`, and the jumplist trade
+    /// places while each slot keeps its geometry and pane number, so the moved
+    /// pane lands in the neighbour's position rather than re-parenting the split
+    /// tree. Focus follows the content so repeated moves push the same pane.
+    // Consumed by the MovePane{Left,Down,Up,Right} action handlers.
+    #[allow(dead_code)]
+    pub(crate) fn swap_view_direction(&mut self, direction: Direction) -> bool {
+        let anchor = self.focus_anchor();
+        let anchor_node = self.node_for_pane(anchor);
+        if let Some(target) = self.find_split_in_direction(anchor_node, direction)
+            && let NodeContent::Leaf(target_pane) = self.nodes[target].content
+            && target_pane != anchor
+        {
+            self.swap_pane_contents(anchor, target_pane);
+            self.focus = target_pane;
+            return true;
+        }
+        false
+    }
+
+    /// Swap the focused pane's content with the next split leaf in traversal
+    /// order, wrapping past the last, and follow it there. Returns false when
+    /// there is no other split pane.
+    // Consumed by the MovePaneNext action handler.
+    #[allow(dead_code)]
+    pub(crate) fn swap_view_next(&mut self) -> bool {
+        let anchor = self.focus_anchor();
+        let target = self.next_split_pane(anchor);
+        self.swap_view_with(anchor, target)
+    }
+
+    /// Swap the focused pane's content with the previous split leaf in
+    /// traversal order, wrapping past the first, and follow it there. Returns
+    /// false when there is no other split pane.
+    // Consumed by the MovePanePrev action handler.
+    #[allow(dead_code)]
+    pub(crate) fn swap_view_prev(&mut self) -> bool {
+        let anchor = self.focus_anchor();
+        let target = self.prev_split_pane(anchor);
+        self.swap_view_with(anchor, target)
+    }
+
+    fn swap_view_with(&mut self, anchor: PaneId, target: PaneId) -> bool {
+        if target == anchor {
+            return false;
+        }
+        self.swap_pane_contents(anchor, target);
+        self.focus = target;
+        true
+    }
+
+    /// Trade the content of two panes, leaving each slot's geometry and pane
+    /// number in place. A no-op if the ids are equal or not both live.
+    fn swap_pane_contents(&mut self, a: PaneId, b: PaneId) {
+        let Some([pa, pb]) = self.panes.get_disjoint_mut([a, b]) else {
+            return;
+        };
+        std::mem::swap(&mut pa.view, &mut pb.view);
+        std::mem::swap(&mut pa.prev_view, &mut pb.prev_view);
+        std::mem::swap(&mut pa.jumplist, &mut pb.jumplist);
+    }
+
     pub fn split_panes(&self) -> Traverse<'_> {
         Traverse {
             tree: self,
@@ -1310,6 +1375,62 @@ mod tests {
 
         tree.focus_prev();
         assert_eq!(tree.focus(), c); // wraps back
+    }
+
+    #[test]
+    fn swap_view_direction_exchanges_contents_and_follows_focus() {
+        let mut tree = PaneTree::new(area());
+        let a = tree.focus();
+        let b = tree.split(Axis::Vertical);
+        tree.pane_mut(a).view = View::Label("a".into());
+        tree.pane_mut(b).view = View::Label("b".into());
+        let (a_area, a_index) = (tree.pane(a).area, tree.pane(a).index);
+        let (b_area, b_index) = (tree.pane(b).area, tree.pane(b).index);
+
+        // Focus is on the right pane. Push its content left into a's slot.
+        assert!(tree.swap_view_direction(Direction::Left));
+
+        assert!(matches!(&tree.pane(a).view, View::Label(s) if s == "b"));
+        assert!(matches!(&tree.pane(b).view, View::Label(s) if s == "a"));
+        assert_eq!(tree.focus(), a, "focus follows the moved content");
+
+        assert_eq!(tree.pane(a).area, a_area, "geometry stays with the slot");
+        assert_eq!(
+            tree.pane(a).index,
+            a_index,
+            "pane number stays with the slot"
+        );
+        assert_eq!(tree.pane(b).area, b_area);
+        assert_eq!(tree.pane(b).index, b_index);
+    }
+
+    #[test]
+    fn swap_view_next_wraps_from_the_last_pane() {
+        let mut tree = PaneTree::new(area());
+        let a = tree.focus();
+        let b = tree.split(Axis::Vertical);
+        let c = tree.split(Axis::Vertical);
+        tree.pane_mut(a).view = View::Label("a".into());
+        tree.pane_mut(b).view = View::Label("b".into());
+        tree.pane_mut(c).view = View::Label("c".into());
+
+        // Focus is on the last pane, so next wraps to the first.
+        assert!(tree.swap_view_next());
+        assert_eq!(tree.focus(), a, "wraps to the first pane");
+        assert!(matches!(&tree.pane(a).view, View::Label(s) if s == "c"));
+        assert!(matches!(&tree.pane(c).view, View::Label(s) if s == "a"));
+        assert!(
+            matches!(&tree.pane(b).view, View::Label(s) if s == "b"),
+            "untouched"
+        );
+    }
+
+    #[test]
+    fn swapping_a_single_pane_reports_no_move() {
+        let mut tree = PaneTree::new(area());
+        assert!(!tree.swap_view_direction(Direction::Left));
+        assert!(!tree.swap_view_next());
+        assert!(!tree.swap_view_prev());
     }
 
     #[test]
