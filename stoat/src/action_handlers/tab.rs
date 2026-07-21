@@ -28,6 +28,33 @@ pub(super) fn new_tab(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Switch to the next tab in display order, wrapping past the last.
+pub(super) fn next_tab(stoat: &mut Stoat) -> UpdateEffect {
+    cycle_tab(stoat, 1)
+}
+
+/// Switch to the previous tab in display order, wrapping past the first.
+pub(super) fn prev_tab(stoat: &mut Stoat) -> UpdateEffect {
+    cycle_tab(stoat, -1)
+}
+
+/// Step the active tab by `dir` (`+1` next, `-1` previous) with wraparound,
+/// reporting when the workspace has no other tab to move to.
+fn cycle_tab(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let len = ws.tabs.len();
+    if len < 2 {
+        stoat.set_status("no other tab");
+        return UpdateEffect::Redraw;
+    }
+
+    let step = if dir >= 0 { 1 } else { len - 1 };
+    let target = (ws.active_tab + step) % len;
+    ws.switch_tab(target);
+    relayout(stoat);
+    UpdateEffect::Redraw
+}
+
 /// Switch back to the previously active tab, reporting when there is none.
 pub(super) fn toggle_tab(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat.active_workspace_mut().toggle_tab() {
@@ -179,6 +206,55 @@ mod tests {
         let mut h = Stoat::test();
         dispatch(&mut h, &stoat_action::ToggleTab);
         assert_eq!(h.stoat.pending_message.as_deref(), Some("no previous tab"));
+    }
+
+    #[test]
+    fn next_and_prev_cycle_with_wraparound() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::NewTab);
+        dispatch(&mut h, &stoat_action::NewTab);
+        assert_eq!(h.stoat.active_workspace().active_tab, 2, "on the last tab");
+
+        dispatch(&mut h, &stoat_action::NextTab);
+        assert_eq!(
+            h.stoat.active_workspace().active_tab,
+            0,
+            "next from the last wraps to the first"
+        );
+
+        dispatch(&mut h, &stoat_action::PrevTab);
+        assert_eq!(
+            h.stoat.active_workspace().active_tab,
+            2,
+            "prev from the first wraps to the last"
+        );
+    }
+
+    #[test]
+    fn next_records_the_origin_as_the_toggle_target() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::NewTab);
+        dispatch(&mut h, &stoat_action::GotoTab { index: 1 });
+        assert_eq!(h.stoat.active_workspace().active_tab, 0);
+
+        dispatch(&mut h, &stoat_action::NextTab);
+        dispatch(&mut h, &stoat_action::ToggleTab);
+
+        assert_eq!(
+            h.stoat.active_workspace().active_tab,
+            0,
+            "toggle returns to the tab next moved away from"
+        );
+    }
+
+    #[test]
+    fn cycling_a_single_tab_reports_and_stays_put() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::NextTab);
+
+        assert_eq!(h.stoat.active_workspace().active_tab, 0);
+        assert_eq!(h.stoat.active_workspace().tabs.len(), 1);
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("no other tab"));
     }
 
     #[test]

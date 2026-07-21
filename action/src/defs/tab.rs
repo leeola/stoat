@@ -143,6 +143,32 @@ define_action!(
 );
 
 define_action!(
+    NextTabDef,
+    NextTab,
+    "NextTab",
+    ActionKind::NextTab,
+    "switch to the next tab",
+    "Switch to the next tab in display order, wrapping from the last tab back \
+     to the first. Reports in the status line when the workspace has only one \
+     tab.",
+    ActionPriority::Common,
+    aliases = &["tab-next"]
+);
+
+define_action!(
+    PrevTabDef,
+    PrevTab,
+    "PrevTab",
+    ActionKind::PrevTab,
+    "switch to the previous tab",
+    "Switch to the previous tab in display order, wrapping from the first tab \
+     back to the last. Reports in the status line when the workspace has only \
+     one tab.",
+    ActionPriority::Common,
+    aliases = &["tab-prev"]
+);
+
+define_action!(
     CloseTabDef,
     CloseTab,
     "CloseTab",

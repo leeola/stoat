@@ -113,7 +113,7 @@ use crate::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
         },
         set_theme::SetTheme,
-        tab::{CloseTab, GotoTab, NewTab, RenameTab, ToggleTab, ToggleTabBar},
+        tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
         terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
@@ -247,6 +247,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(RenameTab { name }))
     });
     add(NewTab::DEF, |_| Ok(Box::new(NewTab)));
+    add(NextTab::DEF, |_| Ok(Box::new(NextTab)));
+    add(PrevTab::DEF, |_| Ok(Box::new(PrevTab)));
     add(CloseTab::DEF, |_| Ok(Box::new(CloseTab)));
     add(ToggleTab::DEF, |_| Ok(Box::new(ToggleTab)));
     add(ToggleTabBar::DEF, |_| Ok(Box::new(ToggleTabBar)));
@@ -1609,6 +1611,7 @@ mod tests {
         // + 4 NewTab, CloseTab, GotoTab, ToggleTab.
         // + 1 ToggleTabBar.
         // + 1 RenameTab.
+        // + 2 NextTab, PrevTab.
         // + 2 CodeSearchPageDown, CodeSearchPageUp.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
@@ -1681,7 +1684,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 389);
+        assert_eq!(all().count(), 391);
     }
 
     #[test]
