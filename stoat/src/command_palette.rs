@@ -1849,6 +1849,41 @@ mod tests {
     }
 
     #[test]
+    fn theme_alias_reaches_set_theme() {
+        let mut h = Stoat::test();
+        let (cfg, errors) = stoat_config::parse("theme probe { ui.text.fg = \"#abcdef\"; }");
+        assert!(errors.is_empty(), "seed theme parses");
+        h.stoat
+            .theme_blocks
+            .extend(cfg.expect("parsed config").themes);
+
+        h.type_text(":theme ");
+        h.snapshot();
+        let listed: Vec<String> = {
+            let picker = arg_picker(&h);
+            picker
+                .core
+                .picklist
+                .filtered
+                .iter()
+                .map(|&i| picker.core.picklist.base[i].to_string_lossy().into_owned())
+                .collect()
+        };
+        assert!(
+            listed.iter().any(|n| n == "probe"),
+            "the alias opens the same theme arg picker: {listed:?}",
+        );
+
+        h.type_text("probe");
+        h.snapshot();
+        h.type_keys("enter");
+        assert_eq!(
+            h.stoat.theme.name, "probe",
+            "`:theme NAME` dispatches SetTheme with the argument"
+        );
+    }
+
+    #[test]
     fn dir_arg_picker_narrows_on_typing() {
         let mut h = Stoat::test();
         seed_palette_workspace(&mut h, &[("src/main.rs", ""), ("docs/readme.md", "")]);

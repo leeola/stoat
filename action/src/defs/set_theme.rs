@@ -33,6 +33,10 @@ impl ActionDef for SetThemeDef {
         "Re-resolve the named theme against the loaded theme blocks and apply it immediately, without restarting. Keeps the current theme and shows a message when the name is unknown."
     }
 
+    fn aliases(&self) -> &'static [&'static str] {
+        &["theme"]
+    }
+
     fn priority(&self) -> ActionPriority {
         ActionPriority::Normal
     }
@@ -70,5 +74,6 @@ mod tests {
         assert_eq!(action.def().name(), "SetTheme");
         assert_eq!(action.def().params().len(), 1);
         assert_eq!(action.def().params()[0].name, "name");
+        assert_eq!(action.def().aliases(), ["theme"]);
     }
 }
