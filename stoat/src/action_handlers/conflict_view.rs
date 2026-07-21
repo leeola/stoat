@@ -212,11 +212,7 @@ pub(super) fn close_conflict(stoat: &mut Stoat) {
         }
     }
 
-    let editor_referenced = ws
-        .panes
-        .split_panes()
-        .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == scratch_editor));
-    if !editor_referenced {
+    if !ws.editor_referenced(scratch_editor) {
         ws.editors.remove(scratch_editor);
         ws.buffers.remove(scratch_buffer);
     }

@@ -783,8 +783,10 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     // Purge the closed buffer from every pane's jumplist so a later walk can
     // never resolve a stale entry into it.
     let ws = stoat.active_workspace_mut();
-    for pane_id in ws.panes.split_pane_ids() {
-        ws.panes.pane_mut(pane_id).jumplist.remove_buffer(buffer_id);
+    for tree in ws.pane_trees_mut() {
+        for pane_id in tree.split_pane_ids() {
+            tree.pane_mut(pane_id).jumplist.remove_buffer(buffer_id);
+        }
     }
 
     if let Some(done) = stoat

@@ -904,11 +904,7 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
         ws.editors.remove(replacement_id);
     }
 
-    let still_referenced = ws
-        .panes
-        .split_panes()
-        .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == review_editor_id));
-    if !still_referenced {
+    if !ws.editor_referenced(review_editor_id) {
         ws.editors.remove(review_editor_id);
     }
 

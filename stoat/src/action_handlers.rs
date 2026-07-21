@@ -1081,11 +1081,7 @@ pub(crate) fn focused_pane_jumplist(stoat: &mut Stoat) -> Option<&mut JumpList> 
 /// review) call this on the editor they displaced so a pane never leaves a
 /// dangling editor behind, while the parked review editor survives a toggle.
 pub(crate) fn gc_editor_if_unreferenced(ws: &mut crate::workspace::Workspace, editor_id: EditorId) {
-    let referenced = ws
-        .panes
-        .split_panes()
-        .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == editor_id));
-    if referenced {
+    if ws.editor_referenced(editor_id) {
         return;
     }
     let parked = ws

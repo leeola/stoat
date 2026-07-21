@@ -91,6 +91,20 @@ impl std::fmt::Display for WorkspaceUid {
     }
 }
 
+/// One tab in a workspace, owning a pane layout.
+///
+/// The active tab's tree is not stored here. It lives in [`Workspace::panes`],
+/// where every rendering, focus, and layout site already reads it, so exactly
+/// the entry at [`Workspace::active_tab`] holds `None`. Switching parks the
+/// outgoing tree in its slot and takes the incoming one out.
+///
+/// A parked tree's [`EditorId`]s and [`TermId`]s stay valid while parked,
+/// because editors, terms, runs, and buffers belong to the workspace rather
+/// than to a tree.
+pub(crate) struct Tab {
+    pub(crate) parked: Option<PaneTree>,
+}
+
 /// A self-contained editing context: its own buffers, editors, pane layout, and
 /// git root. Workspaces are owned by the root [`crate::app::Stoat`]
 /// and can run in the background; switching between workspaces is a render-target
@@ -134,7 +148,17 @@ pub struct Workspace {
     /// Fish-style recall history of executed command-palette lines, walked by
     /// bare Up/Down in the palette. Persisted per workspace.
     pub(crate) palette_history: InputHistory,
+    /// The active tab's pane layout. Every render, focus, and navigation site
+    /// reads this and never sees the parked tabs.
     pub panes: PaneTree,
+    /// Ordered tabs, at least one. The entry at [`Self::active_tab`] parks
+    /// nothing because its tree is in [`Self::panes`].
+    pub(crate) tabs: Vec<Tab>,
+    pub(crate) active_tab: usize,
+    /// The tab to return to on a toggle, a most-recently-used depth of one.
+    /// `None` before the first switch, and cleared when the tab it names is
+    /// closed.
+    pub(crate) last_tab: Option<usize>,
     pub(crate) docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
     pub(crate) buffers: BufferRegistry,
@@ -238,15 +262,29 @@ struct DiffJobOutput {
     diff_map: Option<DiffMap>,
 }
 
+/// A one-pane tree showing a fresh scratch buffer, the shape a workspace and
+/// every new tab start in.
+///
+/// Takes the registry and slotmap rather than a `Workspace` so
+/// [`Workspace::new`] can call it while building its own fields.
+fn scratch_tree(
+    buffers: &mut BufferRegistry,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    executor: &Executor,
+) -> PaneTree {
+    let (buffer_id, buffer) = buffers.new_scratch();
+    let editor_id = editors.insert(EditorState::new(buffer_id, buffer, executor.clone()));
+    let mut panes = PaneTree::new(Rect::default());
+    let focus = panes.focus();
+    panes.pane_mut(focus).view = View::Editor(editor_id);
+    panes
+}
+
 impl Workspace {
     pub(crate) fn new(git_root: PathBuf, executor: &Executor) -> Self {
         let mut buffers = BufferRegistry::new();
-        let (buffer_id, buffer) = buffers.new_scratch();
         let mut editors = SlotMap::with_key();
-        let editor_id = editors.insert(EditorState::new(buffer_id, buffer, executor.clone()));
-        let mut panes = PaneTree::new(Rect::default());
-        let initial_focus = panes.focus();
-        panes.pane_mut(initial_focus).view = View::Editor(editor_id);
+        let panes = scratch_tree(&mut buffers, &mut editors, executor);
 
         let uid = WorkspaceUid::now(executor);
         let name = name::default_workspace_name(uid);
@@ -261,6 +299,9 @@ impl Workspace {
             last_finder_scope: None,
             palette_history: InputHistory::default(),
             panes,
+            tabs: vec![Tab { parked: None }],
+            active_tab: 0,
+            last_tab: None,
             docks: SlotMap::with_key(),
             focus: FocusTarget::SplitPane,
             buffers,
@@ -288,6 +329,113 @@ impl Workspace {
             agent: None,
             editor_bridge_waiters: HashMap::new(),
         }
+    }
+
+    /// Make tab `idx` active, parking the outgoing tree and taking the
+    /// incoming one out. Returns whether the switch happened.
+    ///
+    /// A no-op for an out-of-range index or the already-active tab. Pane focus
+    /// rides along inside each tree, and docks are workspace-level, so nothing
+    /// outside the tree needs restoring.
+    // Tests are the only caller until the NewTab, CloseTab, GotoTab, and
+    // ToggleTab actions land and dispatch into these four.
+    #[allow(dead_code)]
+    pub(crate) fn switch_tab(&mut self, idx: usize) -> bool {
+        if idx == self.active_tab || idx >= self.tabs.len() {
+            return false;
+        }
+        let Some(incoming) = self.tabs[idx].parked.take() else {
+            return false;
+        };
+
+        let outgoing = std::mem::replace(&mut self.panes, incoming);
+        self.tabs[self.active_tab].parked = Some(outgoing);
+        self.last_tab = Some(self.active_tab);
+        self.active_tab = idx;
+        true
+    }
+
+    /// Append a tab showing a fresh scratch buffer and switch to it.
+    #[allow(dead_code)]
+    pub(crate) fn new_tab(&mut self, executor: &Executor) {
+        let tree = scratch_tree(&mut self.buffers, &mut self.editors, executor);
+        self.tabs.push(Tab { parked: Some(tree) });
+        self.switch_tab(self.tabs.len() - 1);
+    }
+
+    /// Remove tab `idx`, returning its pane tree for the caller to dispose of.
+    ///
+    /// `None` when the index is out of range or only one tab is left, since a
+    /// workspace always has somewhere to show panes. Closing the active tab
+    /// first moves to the most recently used tab, or the nearest neighbour when
+    /// there is none.
+    #[allow(dead_code)]
+    pub(crate) fn close_tab(&mut self, idx: usize) -> Option<PaneTree> {
+        if idx >= self.tabs.len() || self.tabs.len() == 1 {
+            return None;
+        }
+
+        if idx == self.active_tab {
+            let target = match self.last_tab {
+                Some(prev) if prev != idx && prev < self.tabs.len() => prev,
+                _ => {
+                    if idx + 1 < self.tabs.len() {
+                        idx + 1
+                    } else {
+                        idx - 1
+                    }
+                },
+            };
+            self.switch_tab(target);
+        }
+
+        let removed = self.tabs.remove(idx).parked;
+
+        // Indices above the hole all shift down by one, and a toggle target
+        // that named the closed tab no longer refers to anything.
+        if self.active_tab > idx {
+            self.active_tab -= 1;
+        }
+        self.last_tab = match self.last_tab {
+            Some(prev) if prev == idx => None,
+            Some(prev) if prev > idx => Some(prev - 1),
+            other => other,
+        };
+        removed
+    }
+
+    /// Switch back to the most recently used tab. Returns whether it happened.
+    #[allow(dead_code)]
+    pub(crate) fn toggle_tab(&mut self) -> bool {
+        match self.last_tab {
+            Some(prev) => self.switch_tab(prev),
+            None => false,
+        }
+    }
+
+    /// Every pane tree in the workspace, the active one first.
+    ///
+    /// Use this for questions about whether anything still references an
+    /// editor, term, or buffer, since a pane in a parked tab references it just
+    /// as much as a visible one. Rendering, focus, and layout want
+    /// [`Self::panes`] instead.
+    pub(crate) fn pane_trees(&self) -> impl Iterator<Item = &PaneTree> {
+        std::iter::once(&self.panes).chain(self.tabs.iter().filter_map(|t| t.parked.as_ref()))
+    }
+
+    /// Every pane tree in the workspace mutably, the active one first. The
+    /// read-only [`Self::pane_trees`] explains when to reach for this.
+    pub(crate) fn pane_trees_mut(&mut self) -> impl Iterator<Item = &mut PaneTree> {
+        std::iter::once(&mut self.panes)
+            .chain(self.tabs.iter_mut().filter_map(|t| t.parked.as_mut()))
+    }
+
+    /// Whether any pane, in any tab, shows `editor_id`.
+    pub(crate) fn editor_referenced(&self, editor_id: EditorId) -> bool {
+        self.pane_trees().any(|tree| {
+            tree.split_panes()
+                .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == editor_id))
+        })
     }
 
     /// Stable identifier for this session across restarts.
@@ -1034,6 +1182,148 @@ mod tests {
             base_text: Arc::new(base.to_string()),
             buffer_text: Arc::new(buffer.to_string()),
         }
+    }
+
+    /// The editor showing in the workspace's focused pane, or `None` when the
+    /// focused pane shows something else.
+    fn focused_editor_id(ws: &Workspace) -> Option<crate::editor_state::EditorId> {
+        match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn new_tab_parks_the_old_tree_and_opens_a_scratch_pane() {
+        let mut h = TestHarness::with_size(80, 24);
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let first_editor = focused_editor_id(ws).expect("first tab shows an editor");
+
+        ws.new_tab(&executor);
+
+        assert_eq!(ws.tabs.len(), 2);
+        assert_eq!(ws.active_tab, 1);
+        assert!(
+            ws.tabs[0].parked.is_some(),
+            "the outgoing tree parks in its own slot"
+        );
+        assert!(
+            ws.tabs[1].parked.is_none(),
+            "the active tab parks nothing, its tree is in ws.panes"
+        );
+        assert_ne!(
+            focused_editor_id(ws),
+            Some(first_editor),
+            "the new tab shows its own scratch editor"
+        );
+    }
+
+    #[test]
+    fn switch_tab_round_trips_the_editor_and_its_cursor() {
+        let mut h = TestHarness::with_size(80, 24);
+        crate::test_harness::editor::seed_focused_buffer(&mut h.stoat, "alpha\nbeta\ngamma\n");
+        h.type_keys("j l l");
+        let cursor = crate::test_harness::editor::primary_head_offset(&mut h.stoat);
+
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let first_editor = focused_editor_id(ws).expect("editor in the first tab");
+        let first_buffer = ws.editors[first_editor].buffer_id;
+
+        ws.new_tab(&executor);
+        assert!(ws.switch_tab(0), "switching back to the first tab");
+
+        assert_eq!(ws.active_tab, 0);
+        assert_eq!(focused_editor_id(ws), Some(first_editor), "same editor id");
+        assert_eq!(
+            ws.editors[first_editor].buffer_id, first_buffer,
+            "same buffer"
+        );
+        assert_eq!(
+            crate::test_harness::editor::primary_head_offset(&mut h.stoat),
+            cursor,
+            "the cursor is where it was left"
+        );
+    }
+
+    #[test]
+    fn toggle_tab_alternates_between_the_last_two() {
+        let mut h = TestHarness::with_size(80, 24);
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+
+        assert!(!ws.toggle_tab(), "nothing to toggle back to yet");
+
+        ws.new_tab(&executor);
+        ws.new_tab(&executor);
+        assert_eq!(ws.active_tab, 2);
+
+        assert!(ws.toggle_tab());
+        assert_eq!(ws.active_tab, 1, "back to the previously active tab");
+        assert!(ws.toggle_tab());
+        assert_eq!(ws.active_tab, 2, "and forward again");
+    }
+
+    #[test]
+    fn close_tab_lands_on_the_most_recent_and_fixes_indices() {
+        let mut h = TestHarness::with_size(80, 24);
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        ws.new_tab(&executor);
+        ws.new_tab(&executor);
+
+        // Tab 0 was visited most recently before landing on 2.
+        assert!(ws.switch_tab(0));
+        assert!(ws.switch_tab(2));
+        assert_eq!(ws.last_tab, Some(0));
+
+        assert!(ws.close_tab(2).is_some(), "the closed tree is handed back");
+        assert_eq!(ws.tabs.len(), 2);
+        assert_eq!(ws.active_tab, 0, "closing the active tab lands on the MRU");
+        assert_eq!(
+            ws.last_tab, None,
+            "the toggle target named the tab we just left, which no longer exists"
+        );
+        assert!(
+            ws.tabs[0].parked.is_none(),
+            "the surviving active tab parks nothing"
+        );
+    }
+
+    #[test]
+    fn close_tab_refuses_to_remove_the_last_one() {
+        let mut h = TestHarness::with_size(80, 24);
+        let ws = h.stoat.active_workspace_mut();
+        assert!(ws.close_tab(0).is_none(), "a workspace keeps one tab");
+        assert_eq!(ws.tabs.len(), 1);
+    }
+
+    /// An editor visible only in a parked tab is still in use. Collecting it
+    /// would leave that tab pointing at a dangling id the moment it is shown
+    /// again.
+    #[test]
+    fn an_editor_shown_only_in_a_parked_tab_survives_gc() {
+        let mut h = TestHarness::with_size(80, 24);
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let parked_editor = focused_editor_id(ws).expect("editor in the first tab");
+
+        ws.new_tab(&executor);
+        assert_ne!(focused_editor_id(ws), Some(parked_editor));
+
+        crate::action_handlers::gc_editor_if_unreferenced(
+            h.stoat.active_workspace_mut(),
+            parked_editor,
+        );
+
+        assert!(
+            h.stoat
+                .active_workspace()
+                .editors
+                .contains_key(parked_editor),
+            "the parked tab still references it"
+        );
     }
 
     #[test]
