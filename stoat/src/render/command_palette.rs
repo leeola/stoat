@@ -303,7 +303,7 @@ fn render_palette_command_prelude(
     let layout = palette_filter_layout(area)?;
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    let title = format!(" {} ", entry.def.name());
+    let title = format!(" {} ", entry.command_name);
     Clear.render(layout.modal, buf);
     crate::render::chrome::modal_frame(
         buf,
@@ -460,7 +460,7 @@ pub(crate) fn paint_palette_rows(
         .iter()
         .skip(start_row)
         .take(rows)
-        .map(|e| e.def.name().len())
+        .map(|e| e.command_name.len())
         .max()
         .unwrap_or(0);
 
@@ -481,7 +481,7 @@ pub(crate) fn paint_palette_rows(
             buf[(col, row)].set_char(' ').set_style(style);
         }
 
-        let name = entry.def.name();
+        let name = entry.command_name.as_str();
         let name_x = area.x + 1;
         write_str(buf, name_x, row, name, style);
         let indices = match_indices.get(abs).unwrap_or(&empty_indices);

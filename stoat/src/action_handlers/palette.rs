@@ -375,7 +375,8 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
 /// Complete the highlighted candidate into the palette input, replacing the
 /// typed tail with exactly what the selected row shows.
 ///
-/// In command-list mode this completes the highlighted command's token. A
+/// In command-list mode this completes the highlighted command's name as the
+/// palette spells it, which is what the row shows and what matching sees. A
 /// command taking parameters completes with a trailing space so the argument
 /// picker opens. A parameterless one completes bare, which the exact-match arm
 /// of `handle_submit` dispatches on the next Enter.
@@ -402,9 +403,9 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
             let Some(entry) = palette.filtered.get(palette.selected).copied() else {
                 return UpdateEffect::None;
             };
-            let token = entry.def.name();
+            let token = &entry.command_name;
             let completed = if entry.def.params().is_empty() {
-                token.to_string()
+                token.clone()
             } else {
                 format!("{token} ")
             };

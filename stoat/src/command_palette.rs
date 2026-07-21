@@ -589,7 +589,7 @@ impl CommandPalette {
                 );
             }
             self.input
-                .replace_text(ws, &format!("{} ", entry.def.name()));
+                .replace_text(ws, &format!("{} ", entry.command_name));
             return PaletteOutcome::None;
         }
 
@@ -600,7 +600,7 @@ impl CommandPalette {
             },
             Some(entry) => {
                 self.input
-                    .replace_text(ws, &format!("{} ", entry.def.name()));
+                    .replace_text(ws, &format!("{} ", entry.command_name));
                 PaletteOutcome::None
             },
             None => PaletteOutcome::None,
@@ -677,10 +677,10 @@ pub(crate) fn refilter(
     let items = visible
         .iter()
         .copied()
-        .map(|entry| (entry, entry.def.name().to_string()));
+        .map(|entry| (entry, entry.command_name.clone()));
     let Some(mut matches) = fuzzy::match_and_rank(input, items) else {
         let mut all = visible;
-        all.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
+        all.sort_by_key(|e| (e.def.priority().ord(), e.command_name.as_str()));
         for entry in all {
             filtered.push(entry);
             match_indices.push(Vec::new());
@@ -698,7 +698,7 @@ pub(crate) fn refilter(
                 .priority()
                 .ord()
                 .cmp(&b.item.def.priority().ord())
-                .then_with(|| a.item.def.name().cmp(b.item.def.name()))
+                .then_with(|| a.item.command_name.cmp(&b.item.command_name))
         })
     });
     for m in matches {
@@ -722,8 +722,8 @@ pub(crate) fn refilter(
                 filtered.remove(pos);
                 match_indices.remove(pos)
             },
-            None if pinned.def.name().eq_ignore_ascii_case(needle) => {
-                (0..pinned.def.name().chars().count() as u32).collect()
+            None if pinned.command_name.eq_ignore_ascii_case(needle) => {
+                (0..pinned.command_name.chars().count() as u32).collect()
             },
             None => Vec::new(),
         };
@@ -765,15 +765,35 @@ mod tests {
             .expect("arg picker active")
     }
 
+    /// The command names the palette lists for `text`, in display order. Use
+    /// this for ranking and display assertions, which are about the text the
+    /// user sees.
     fn names_for(text: &str) -> Vec<&'static str> {
-        names_for_scope(text, PaletteScope::All, &Availability::default())
+        entries_for(text, PaletteScope::All, &Availability::default())
+            .iter()
+            .map(|e| e.command_name.as_str())
+            .collect()
     }
 
-    fn names_for_scope(
+    /// The action names the palette lists under `scope`. Use this for
+    /// availability assertions, which are about which actions appear rather
+    /// than how they are spelled.
+    fn action_names_for_scope(
         text: &str,
         scope: PaletteScope,
         availability: &Availability,
     ) -> Vec<&'static str> {
+        entries_for(text, scope, availability)
+            .iter()
+            .map(|e| e.def.name())
+            .collect()
+    }
+
+    fn entries_for(
+        text: &str,
+        scope: PaletteScope,
+        availability: &Availability,
+    ) -> Vec<&'static registry::RegistryEntry> {
         let mut filtered = Vec::new();
         let mut match_indices = Vec::new();
         let mut selected = 0;
@@ -785,13 +805,13 @@ mod tests {
             &mut match_indices,
             &mut selected,
         );
-        filtered.iter().map(|e| e.def.name()).collect()
+        filtered
     }
 
-    fn priority_ord_of(name: &str) -> u8 {
+    fn priority_ord_of(command_name: &str) -> u8 {
         registry::all()
-            .find(|e| e.def.name() == name)
-            .unwrap_or_else(|| panic!("action {name} not registered"))
+            .find(|e| e.command_name == command_name)
+            .unwrap_or_else(|| panic!("action {command_name} not registered"))
             .def
             .priority()
             .ord()
@@ -807,9 +827,9 @@ mod tests {
     #[test]
     fn empty_filter_groups_by_priority_then_alphabetical() {
         let listed = names_for("");
-        assert!(listed.contains(&"Quit"));
-        assert!(listed.contains(&"OpenFile"));
-        assert!(!listed.contains(&"OpenCommandPalette"));
+        assert!(listed.contains(&"quit"));
+        assert!(listed.contains(&"open-file"));
+        assert!(!listed.contains(&"open-command-palette"));
 
         let listed_with_prio: Vec<(u8, &&'static str)> =
             listed.iter().map(|n| (priority_ord_of(n), n)).collect();
@@ -817,7 +837,7 @@ mod tests {
         sorted.sort();
         assert_eq!(
             listed_with_prio, sorted,
-            "listing not sorted by (priority, name)"
+            "listing not sorted by (priority, command name)"
         );
     }
 
@@ -826,7 +846,7 @@ mod tests {
         let listed = names_for("");
         // `Run` is Common; `CloseCommits` is Normal. Alphabetically
         // `CloseCommits` < `Run`, so without priority it would come first.
-        assert!(pos_in(&listed, "Run") < pos_in(&listed, "CloseCommits"));
+        assert!(pos_in(&listed, "run") < pos_in(&listed, "close-commits"));
     }
 
     #[test]
@@ -834,20 +854,20 @@ mod tests {
         // `OpenRun` is Common but matches `"Run"` only as a substring, so it
         // must sink below every prefix-tier match regardless of that match's
         // priority (Common `Run`, Normal `RunSubmit`, etc.).
-        let listed = names_for("Run");
-        let open_run = pos_in(&listed, "OpenRun");
-        assert!(pos_in(&listed, "Run") < open_run);
-        assert!(pos_in(&listed, "RunSubmit") < open_run);
-        assert!(pos_in(&listed, "RunHistoryNext") < open_run);
+        let listed = names_for("run");
+        let open_run = pos_in(&listed, "open-run");
+        assert!(pos_in(&listed, "run") < open_run);
+        assert!(pos_in(&listed, "run-submit") < open_run);
+        assert!(pos_in(&listed, "run-history-next") < open_run);
     }
 
     #[test]
     fn fuzzy_matches_noncontiguous_subsequence() {
         // `:qa` matches `QuitAll` via subsequence Q(0),A(4); `Quit` has no `a`.
         let listed = names_for("qa");
-        assert!(listed.contains(&"QuitAll"), "QuitAll must match via fuzzy");
+        assert!(listed.contains(&"quit-all"), "QuitAll must match via fuzzy");
         assert!(
-            !listed.contains(&"Quit"),
+            !listed.contains(&"quit"),
             "Quit lacks 'a' and must not match"
         );
     }
@@ -859,9 +879,9 @@ mod tests {
         // - `CloseReview` contains "re" as a non-prefix substring.
         // - `RunInterrupt` has r(0),e(6) as a subsequence, no "re" substring.
         let listed = names_for("re");
-        let prefix = pos_in(&listed, "ReviewRefresh");
-        let substring = pos_in(&listed, "CloseReview");
-        let fuzzy = pos_in(&listed, "RunInterrupt");
+        let prefix = pos_in(&listed, "review-refresh");
+        let substring = pos_in(&listed, "close-review");
+        let fuzzy = pos_in(&listed, "run-interrupt");
         assert!(prefix < substring, "prefix ranks above substring");
         assert!(substring < fuzzy, "substring ranks above fuzzy");
     }
@@ -873,8 +893,8 @@ mod tests {
         // the hit set.
         let forward = names_for("open file");
         let reverse = names_for("file open");
-        assert!(forward.contains(&"OpenFile"));
-        assert!(reverse.contains(&"OpenFile"));
+        assert!(forward.contains(&"open-file"));
+        assert!(reverse.contains(&"open-file"));
     }
 
     #[test]
@@ -889,18 +909,18 @@ mod tests {
     #[test]
     fn alphabetical_within_same_priority() {
         let listed = names_for("");
-        assert!(pos_in(&listed, "CloseCommits") < pos_in(&listed, "CloseReview"));
-        assert!(pos_in(&listed, "CloseReview") < pos_in(&listed, "CloseWorkspace"));
+        assert!(pos_in(&listed, "close-commits") < pos_in(&listed, "close-review"));
+        assert!(pos_in(&listed, "close-review") < pos_in(&listed, "close-workspace"));
     }
 
     #[test]
     fn prefix_filter_ranks_first() {
-        let listed = names_for("Foc");
-        assert!(listed.contains(&"FocusLeft"));
-        let first_non_prefix = listed.iter().position(|n| !n.starts_with("Focus"));
+        let listed = names_for("foc");
+        assert!(listed.contains(&"focus-left"));
+        let first_non_prefix = listed.iter().position(|n| !n.starts_with("focus"));
         if let Some(idx) = first_non_prefix {
             assert!(
-                listed[idx..].iter().all(|n| !n.starts_with("Focus")),
+                listed[idx..].iter().all(|n| !n.starts_with("focus")),
                 "prefix matches must come before any fuzzy matches",
             );
         }
@@ -910,26 +930,26 @@ mod tests {
     fn exact_alias_match_pins_to_top() {
         assert_eq!(
             names_for("w").first().copied(),
-            Some("SaveBuffer"),
+            Some("save-buffer"),
             "`w` is SaveBuffer's alias and must pin to the top",
         );
         assert_eq!(
             names_for("o").first().copied(),
-            Some("OpenFile"),
+            Some("open-file"),
             "`o` is OpenFile's alias and must pin to the top",
         );
     }
 
     #[test]
     fn substring_filter_after_prefix() {
-        let listed = names_for("Pane");
+        let listed = names_for("pane");
         // ClosePane has "Pane" as a substring but not as a prefix.
-        assert!(listed.contains(&"ClosePane"));
+        assert!(listed.contains(&"close-pane"));
     }
 
     #[test]
     fn case_insensitive_filter() {
-        assert_eq!(names_for("quit"), vec!["Quit", "QuitAll", "WriteQuit"]);
+        assert_eq!(names_for("quit"), vec!["quit", "quit-all", "write-quit"]);
     }
 
     #[test]
@@ -979,7 +999,7 @@ mod tests {
 
     #[test]
     fn active_scope_default_availability_hides_contextual_actions() {
-        let listed = names_for_scope("", PaletteScope::Active, &Availability::default());
+        let listed = action_names_for_scope("", PaletteScope::Active, &Availability::default());
         for name in [
             "AbortRebase",
             "ExecuteRebase",
@@ -1011,7 +1031,7 @@ mod tests {
             in_rebase_plan: true,
             ..Availability::default()
         };
-        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
         for name in [
             "AbortRebase",
             "ExecuteRebase",
@@ -1031,7 +1051,7 @@ mod tests {
             in_rebase_reword: true,
             ..Availability::default()
         };
-        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
         for name in ["RewordConfirm", "RewordAbort", "RebaseContinue"] {
             assert!(listed.contains(&name), "{name} missing in reword");
         }
@@ -1045,7 +1065,7 @@ mod tests {
             in_conflict: true,
             ..Availability::default()
         };
-        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
         for name in [
             "RebaseConflictTakeOurs",
             "RebaseConflictTakeTheirs",
@@ -1063,7 +1083,7 @@ mod tests {
             review_open: true,
             ..Availability::default()
         };
-        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
         for name in ["ReviewStageChunk", "ReviewApplyStaged", "CloseReview"] {
             assert!(listed.contains(&name), "{name} missing when review_open");
         }
@@ -1076,7 +1096,7 @@ mod tests {
             commits_open: true,
             ..Availability::default()
         };
-        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
         for name in ["CommitsNext", "CommitsOpenReview", "EnterRebase"] {
             assert!(listed.contains(&name), "{name} missing when commits_open");
         }
@@ -1089,7 +1109,7 @@ mod tests {
             run_focused: true,
             ..Availability::default()
         };
-        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
         for name in ["RunSubmit", "RunInterrupt"] {
             assert!(listed.contains(&name), "{name} missing when run_focused");
         }
@@ -1097,7 +1117,7 @@ mod tests {
 
     #[test]
     fn all_scope_shows_contextual_actions_regardless_of_state() {
-        let listed = names_for_scope("", PaletteScope::All, &Availability::default());
+        let listed = action_names_for_scope("", PaletteScope::All, &Availability::default());
         for name in [
             "AbortRebase",
             "RewordConfirm",
@@ -1202,7 +1222,7 @@ mod tests {
     #[test]
     fn command_palette_down_then_enter_dispatches_selection() {
         let mut h = Stoat::test();
-        h.type_text(":Focus");
+        h.type_text(":focus");
         h.type_keys("down enter");
         assert!(h.stoat.command_palette.is_none());
     }
@@ -1319,7 +1339,7 @@ mod tests {
     #[test]
     fn a_fuzzy_list_submit_records_the_entry_head() {
         let mut h = Stoat::test();
-        h.type_text(":Focus");
+        h.type_text(":focus");
         h.type_keys("down enter");
 
         let history = h
@@ -1715,24 +1735,24 @@ mod tests {
         let mut h = Stoat::test();
         seed_palette_workspace(&mut h, &[("wsdir/f.rs", "")]);
 
-        h.type_text(":SetThem");
+        h.type_text(":set-them");
         let _ = h.snapshot();
         h.type_keys("tab");
         let _ = h.snapshot();
         assert_eq!(
             palette_text(&h),
-            "SetTheme ",
+            "set-theme ",
             "a param-taking command completes with the space that opens its arg picker"
         );
 
         h.type_keys("escape");
-        h.type_text(":QuitAl");
+        h.type_text(":quit-al");
         let _ = h.snapshot();
         h.type_keys("tab");
         let _ = h.snapshot();
         assert_eq!(
             palette_text(&h),
-            "QuitAll",
+            "quit-all",
             "a parameterless command completes bare, ready for Enter"
         );
     }
@@ -2150,13 +2170,13 @@ mod tests {
     }
 
     #[test]
-    fn palette_param_alias_expands_to_name() {
+    fn palette_param_alias_expands_to_the_command_name() {
         let mut h = Stoat::test();
         h.type_text(":o");
         let mut palette = h.stoat.command_palette.take().expect("palette open");
         let ws = h.stoat.active_workspace_mut();
         assert!(matches!(palette.handle_submit(ws), PaletteOutcome::None));
-        assert_eq!(palette.input.text(ws), "OpenFile ");
+        assert_eq!(palette.input.text(ws), "open-file ");
     }
 
     /// `:cd ` with no query lists the workspace's directories beside a cleared
@@ -2272,10 +2292,30 @@ mod tests {
         );
     }
 
+    /// Asserts against the painted frame rather than the filtered entries, so
+    /// it covers the renderer reading the same string the matcher ranked on.
+    #[test]
+    fn the_list_shows_kebab_command_names() {
+        let mut h = Stoat::test();
+        h.type_text(":auto");
+        let frame = h.snapshot();
+
+        assert!(
+            frame.content.contains("auto-reload"),
+            "the row reads as a user command, got:\n{}",
+            frame.content
+        );
+        assert!(
+            !frame.content.contains("AutoReload"),
+            "no row still reads as a code identifier, got:\n{}",
+            frame.content
+        );
+    }
+
     #[test]
     fn abort_rebase_hidden_by_default_visible_after_backtab() {
         let mut h = Stoat::test();
-        h.type_text(":Abort");
+        h.type_text(":abort");
         {
             let palette = h.stoat.command_palette.as_ref().unwrap();
             let names: Vec<_> = palette.filtered.iter().map(|e| e.def.name()).collect();
@@ -2292,7 +2332,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_filter_typing() {
         let mut h = Stoat::test();
-        h.type_text(":Foc");
+        h.type_text(":foc");
         h.assert_snapshot("command_palette_filter_typing");
     }
 
