@@ -81,6 +81,23 @@ pub fn user_config_path() -> Option<PathBuf> {
         .map(|x| x.config_dir().join("stoat/config.stcfg"))
 }
 
+/// Absolute path to stoatty's config file, `config.toml` under the XDG config
+/// home (typically `~/.config/stoatty/config.toml`).
+///
+/// stoat resolves the terminal's config through the same base-directory
+/// strategy stoatty itself uses, which holds because stoat runs as stoatty's
+/// local child and inherits its environment. Over ssh this names the remote
+/// host's file rather than the terminal's, so a caller acting on it is
+/// addressing the wrong machine.
+///
+/// Returns [`None`] when no config home resolves. The path is not guaranteed to
+/// exist.
+pub(crate) fn stoatty_config_path() -> Option<PathBuf> {
+    Xdg::new()
+        .ok()
+        .map(|x| x.config_dir().join("stoatty/config.toml"))
+}
+
 /// The directory VSCode theme JSON files are read from, shared with stoatty so
 /// one drop point serves both apps.
 pub fn user_themes_dir() -> Option<PathBuf> {

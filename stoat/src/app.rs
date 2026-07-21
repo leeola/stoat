@@ -62,6 +62,10 @@ use tokio::{
 };
 
 pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
+
+/// The default stoatty config, embedded so `:open-config stoatty` can seed a
+/// missing one with the same file the terminal ships.
+pub(crate) const DEFAULT_STOATTY_CONFIG: &str = include_str!("../../stoatty.toml");
 const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
 const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
 

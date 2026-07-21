@@ -57,9 +57,9 @@ pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::{collections::HashMap, path::Path, sync::Arc};
 use stoat_action::{
-    Action, ActionKind, AutoReload, Dump, FocusPane, OpenBuffer, OpenFile, OpenReviewAgentEdits,
-    OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
-    SetTheme,
+    Action, ActionKind, AutoReload, Dump, FocusPane, OpenBuffer, OpenConfig, OpenFile,
+    OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange, RenameWorkspace,
+    ReviewExternalEdit, Run, SetCwd, SetTheme,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -156,7 +156,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::OpenConfig => {
-            file::open_config(stoat);
+            let open = action
+                .as_any()
+                .downcast_ref::<OpenConfig>()
+                .expect("OpenConfig action downcast");
+            file::open_config(stoat, open.target.as_deref());
             UpdateEffect::Redraw
         },
         ActionKind::ToggleMinimap => {

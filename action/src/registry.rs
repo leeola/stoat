@@ -481,7 +481,23 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShellKeepPipe::DEF, |_| Ok(Box::new(ShellKeepPipe)));
     add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
     add(ForceSaveBuffer::DEF, |_| Ok(Box::new(ForceSaveBuffer)));
-    add(OpenConfig::DEF, |_| Ok(Box::new(OpenConfig)));
+    add(OpenConfig::DEF, |params| {
+        // The palette autospaces a submitted command, so a bare `open-config`
+        // arrives with an empty argument. That means the default target, not a
+        // target literally named "".
+        let target = params
+            .first()
+            .map(|param| {
+                param.as_string().context(WrongKindSnafu {
+                    name: "target",
+                    expected: ParamKind::String,
+                })
+            })
+            .transpose()?
+            .filter(|target| !target.is_empty())
+            .map(str::to_owned);
+        Ok(Box::new(OpenConfig { target }))
+    });
     add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
     add(ToggleWrap::DEF, |_| Ok(Box::new(ToggleWrap)));
     add(ToggleKeyHints::DEF, |_| Ok(Box::new(ToggleKeyHints)));

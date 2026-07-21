@@ -580,7 +580,7 @@ impl CommandPalette {
         if self.selected == 0
             && let Some(entry) = registry::lookup_alias(text.trim())
         {
-            if entry.def.params().is_empty() {
+            if dispatches_bare(entry) {
                 self.input.dispose(ws);
                 return PaletteOutcome::Dispatch(
                     entry,
@@ -594,7 +594,7 @@ impl CommandPalette {
         }
 
         match self.filtered.get(self.selected).copied() {
-            Some(entry) if entry.def.params().is_empty() => {
+            Some(entry) if dispatches_bare(entry) => {
                 self.input.dispose(ws);
                 PaletteOutcome::Dispatch(entry, Vec::new(), history_head(entry).to_string())
             },
@@ -621,6 +621,21 @@ fn parse_command(text: &str) -> Option<(&'static registry::RegistryEntry, &str)>
     let (head, arg) = text.split_once(' ')?;
     let entry = registry::lookup_alias(head)?;
     (!entry.def.params().is_empty()).then_some((entry, arg))
+}
+
+/// Whether submitting `entry`'s bare name runs it, rather than opening argument
+/// entry.
+///
+/// True for a command taking no arguments, and for one whose first argument is
+/// optional. The latter would otherwise be unreachable in its no-argument form,
+/// since the palette rewrites the input to `"<name> "` and waits for a value
+/// that the command does not require.
+fn dispatches_bare(entry: &registry::RegistryEntry) -> bool {
+    entry
+        .def
+        .params()
+        .first()
+        .is_none_or(|param| !param.required)
 }
 
 /// The head token to record for `entry` in palette history. It is the first
@@ -2001,6 +2016,31 @@ mod tests {
             palette_dispatch_name(&mut h, ":w!"),
             Some("ForceSaveBuffer"),
         );
+    }
+
+    #[test]
+    fn palette_optional_param_command_dispatches_bare() {
+        let mut h = Stoat::test();
+        assert_eq!(
+            palette_dispatch_name(&mut h, ":config"),
+            Some("OpenConfig"),
+            "an optional first argument still dispatches on a bare submit",
+        );
+    }
+
+    #[test]
+    fn palette_optional_param_command_dispatches_with_its_arg() {
+        let mut h = Stoat::test();
+        h.type_text(":config stoatty");
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let ws = h.stoat.active_workspace_mut();
+        match palette.handle_submit(ws) {
+            PaletteOutcome::Dispatch(entry, args, _) => {
+                assert_eq!(entry.def.name(), "OpenConfig");
+                assert_eq!(args, vec![ParamValue::String("stoatty".to_string())]);
+            },
+            _ => panic!("`config stoatty` should dispatch with the target argument"),
+        }
     }
 
     #[test]

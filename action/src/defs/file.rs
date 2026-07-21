@@ -61,6 +61,14 @@ impl Action for OpenFile {
     }
 }
 
+const OPEN_CONFIG_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "target",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: false,
+    description: "stoat (default) or stoatty",
+}];
+
 #[derive(Debug)]
 pub struct OpenConfigDef;
 
@@ -74,7 +82,7 @@ impl ActionDef for OpenConfigDef {
     }
 
     fn params(&self) -> &'static [ParamDef] {
-        &[]
+        OPEN_CONFIG_PARAMS
     }
 
     fn short_desc(&self) -> &'static str {
@@ -82,7 +90,7 @@ impl ActionDef for OpenConfigDef {
     }
 
     fn long_desc(&self) -> &'static str {
-        "Open the user config at ~/.config/stoat/config.stcfg in the focused pane, creating it from the built-in default keymap when it does not yet exist."
+        "Open a user config in the focused pane. Omitted or `stoat` opens ~/.config/stoat/config.stcfg; `stoatty` opens the terminal's ~/.config/stoatty/config.toml. A config that does not yet exist is created from the matching built-in default."
     }
 
     fn priority(&self) -> ActionPriority {
@@ -95,7 +103,10 @@ impl ActionDef for OpenConfigDef {
 }
 
 #[derive(Debug)]
-pub struct OpenConfig;
+pub struct OpenConfig {
+    /// Which program's config to open. [`None`] means stoat's own.
+    pub target: Option<String>,
+}
 
 impl OpenConfig {
     pub const DEF: &OpenConfigDef = &OpenConfigDef;
