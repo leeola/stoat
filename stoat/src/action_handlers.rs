@@ -1318,6 +1318,7 @@ mod tests {
             std::path::PathBuf::new(),
             user,
             Vec::new(),
+            None,
         );
         stoat.update(Event::Resize(80, 24));
         stoat

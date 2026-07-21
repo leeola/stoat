@@ -1109,7 +1109,14 @@ impl Stoat {
     }
 
     pub fn new(executor: Executor, cli_settings: Settings, initial_git_root: PathBuf) -> Self {
-        Self::new_with_user_config(executor, cli_settings, initial_git_root, None, Vec::new())
+        Self::new_with_user_config(
+            executor,
+            cli_settings,
+            initial_git_root,
+            None,
+            Vec::new(),
+            None,
+        )
     }
 
     /// Construct a [`Stoat`], preferring `user_config` over the embedded default when it parses
@@ -1126,12 +1133,20 @@ impl Stoat {
     /// user's theme dir. They join the pool after the built-in themes and before
     /// the user config's own `theme` blocks. One that fails to parse is skipped
     /// and surfaced in the same transient status.
+    ///
+    /// `env_theme` is the theme named by the environment (stoatty exports its
+    /// own theme as `STOAT_THEME` so a child stoat matches the terminal). It
+    /// applies only when neither `cli_settings` nor the user config names a
+    /// theme, so an explicit choice always outranks the inherited one. A name
+    /// that resolves to no theme block falls through to the same empty-theme
+    /// error path an unknown configured name takes.
     pub fn new_with_user_config(
         executor: Executor,
         cli_settings: Settings,
         initial_git_root: PathBuf,
         user_config: Option<String>,
         user_themes: Vec<(String, String)>,
+        env_theme: Option<String>,
     ) -> Self {
         let (config, theme_base, mut config_error) = match user_config {
             Some(source) => {
@@ -1153,11 +1168,28 @@ impl Stoat {
             None => (Self::parse_default_keymap(), None, None),
         };
 
-        let settings = config
-            .as_ref()
-            .map(Settings::from_config)
-            .unwrap_or_default()
-            .merge(cli_settings);
+        // A clean user config replaces the embedded one wholesale, so the
+        // config's own `theme` is an explicit user choice only when it came from
+        // the user source. The embedded default sets `theme = default_dark`
+        // unconditionally, which STOAT_THEME is meant to beat.
+        let settings = {
+            let cli_theme_set = cli_settings.theme.is_some();
+            let from_config = config
+                .as_ref()
+                .map(Settings::from_config)
+                .unwrap_or_default();
+            let user_theme_set = theme_base.is_some() && from_config.theme.is_some();
+
+            let mut settings = from_config.merge(cli_settings);
+            if !cli_theme_set
+                && !user_theme_set
+                && let Some(name) = env_theme
+            {
+                settings.theme = Some(name);
+            }
+
+            settings
+        };
 
         let highlight_retention = settings
             .highlight_retention
@@ -14870,6 +14902,7 @@ mod tests {
             PathBuf::new(),
             Some("on init { format_on_save = true; }".to_string()),
             Vec::new(),
+            None,
         );
 
         assert_eq!(stoat.settings.format_on_save, Some(true));
@@ -14891,6 +14924,7 @@ mod tests {
             PathBuf::new(),
             None,
             Vec::new(),
+            None,
         );
         let layered = Stoat::new_with_user_config(
             scheduler.executor(),
@@ -14898,6 +14932,7 @@ mod tests {
             PathBuf::new(),
             Some("theme default_dark { ui.modal.palette.fg = \"#ff0000\"; }".to_string()),
             Vec::new(),
+            None,
         );
 
         let red = Some(Color::Rgb(255, 0, 0));
@@ -14930,6 +14965,7 @@ mod tests {
             PathBuf::new(),
             Some("theme mine { ui.text.fg = \"#00ff00\"; }\non init { theme = mine; }".to_string()),
             Vec::new(),
+            None,
         );
 
         assert_eq!(stoat.theme.name, "mine", "the user-only theme activates");
@@ -14949,6 +14985,7 @@ mod tests {
             PathBuf::new(),
             Some("on init { format_on_save = ".to_string()),
             Vec::new(),
+            None,
         );
 
         assert_eq!(
@@ -14978,6 +15015,7 @@ mod tests {
             PathBuf::new(),
             None,
             user_themes,
+            None,
         );
 
         assert!(
@@ -15013,6 +15051,7 @@ mod tests {
             PathBuf::new(),
             None,
             user_themes,
+            None,
         );
 
         assert!(
@@ -15026,6 +15065,81 @@ mod tests {
                 .unwrap_or_default()
                 .contains("theme bad failed"),
             "the failure surfaces in the transient status",
+        );
+    }
+
+    fn stoat_with_env_theme(user_config: Option<&str>, cli: Settings, env: &str) -> Stoat {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        Stoat::new_with_user_config(
+            scheduler.executor(),
+            cli,
+            PathBuf::new(),
+            user_config.map(str::to_string),
+            Vec::new(),
+            Some(env.to_string()),
+        )
+    }
+
+    #[test]
+    fn env_theme_beats_the_embedded_default() {
+        let stoat = stoat_with_env_theme(None, Settings::default(), "gruvbox-dark");
+
+        assert_eq!(
+            stoat.theme.name, "gruvbox-dark",
+            "with nothing explicit set, the environment names the theme"
+        );
+    }
+
+    #[test]
+    fn env_theme_applies_when_the_user_config_names_no_theme() {
+        let stoat = stoat_with_env_theme(
+            Some("on init { format_on_save = true; }"),
+            Settings::default(),
+            "gruvbox-dark",
+        );
+
+        assert_eq!(
+            stoat.theme.name, "gruvbox-dark",
+            "a user config that sets other settings does not claim the theme"
+        );
+    }
+
+    #[test]
+    fn user_config_theme_beats_the_env_theme() {
+        let stoat = stoat_with_env_theme(
+            Some("theme mine { ui.text.fg = \"#00ff00\"; }\non init { theme = mine; }"),
+            Settings::default(),
+            "gruvbox-dark",
+        );
+
+        assert_eq!(
+            stoat.theme.name, "mine",
+            "an explicit user-config theme outranks the environment"
+        );
+    }
+
+    #[test]
+    fn cli_theme_beats_the_env_theme() {
+        let cli = Settings {
+            theme: Some("one-dark".to_string()),
+            ..Settings::default()
+        };
+        let stoat = stoat_with_env_theme(None, cli, "gruvbox-dark");
+
+        assert_eq!(
+            stoat.theme.name, "one-dark",
+            "an explicit CLI theme outranks the environment"
+        );
+    }
+
+    #[test]
+    fn unknown_env_theme_falls_through_to_the_empty_theme() {
+        let stoat = stoat_with_env_theme(None, Settings::default(), "no-such-theme");
+
+        assert_eq!(
+            stoat.theme.name,
+            String::new(),
+            "an unresolvable env theme takes the same path as an unknown configured name"
         );
     }
 

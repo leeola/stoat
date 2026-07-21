@@ -311,12 +311,14 @@ fn run_tui(
         let user_themes = stoat::user_themes_dir()
             .map(read_user_themes)
             .unwrap_or_default();
+        let env_theme = std::env::var("STOAT_THEME").ok().filter(|s| !s.is_empty());
         let mut stoat = Stoat::new_with_user_config(
             executor.clone(),
             cli_settings,
             initial_git_root,
             user_config,
             user_themes,
+            env_theme,
         );
         stoat.set_apc_tx(apc_tx);
         stoat.set_window_ipc(std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from));
