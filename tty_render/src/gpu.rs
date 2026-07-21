@@ -338,6 +338,16 @@ impl Renderer {
         self.minimap.set_metrics(metrics);
     }
 
+    /// Re-point the two colors baked in at construction, the surface clear and
+    /// the cursor tint.
+    ///
+    /// Every other color arrives per frame with the grid, so a theme change only
+    /// has to reach these two to take effect on the next draw.
+    pub fn set_theme_colors(&mut self, background: Rgb, cursor: Rgb) {
+        self.clear_color = rgb_to_color(background);
+        self.cursor_color = cursor;
+    }
+
     /// Draw a frame for `grid` into `view`: clear to the default background,
     /// fill each cell background, composite glyphs and decorations, tint the
     /// cursor cell, then draw overlays and their content on top.
@@ -994,6 +1004,12 @@ impl GpuContext {
     /// and resize the terminal and PTY to match.
     pub fn set_font_size(&mut self, font_size: u32, scale_factor: f32) {
         self.renderer.set_font_size(font_size, scale_factor);
+    }
+
+    /// Re-point the surface clear and cursor tint colors, so a theme change
+    /// shows on the next draw.
+    pub fn set_theme_colors(&mut self, background: Rgb, cursor: Rgb) {
+        self.renderer.set_theme_colors(background, cursor);
     }
 
     /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's

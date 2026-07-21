@@ -931,17 +931,33 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.dirty.store(false, Ordering::Relaxed);
                 state.window.request_redraw();
             },
-            PtyEvent::Term(events) => handle_term_events(
-                state,
-                event_loop,
-                &AuxWindowConfig {
-                    proxy: &self.proxy,
-                    theme: self.theme,
-                    font_family: &self.font_family,
-                    ligatures: self.ligatures,
-                },
-                events,
-            ),
+            PtyEvent::Term(mut events) => {
+                // The reload runs before the rest, so an aux window opened in
+                // the same batch is built against the new config rather than
+                // the one being replaced.
+                if events.contains(&TermEvent::ConfigReload) {
+                    events.retain(|event| *event != TermEvent::ConfigReload);
+                    apply_config_reload(
+                        state,
+                        &mut self.theme,
+                        &mut self.theme_name,
+                        &mut self.font_family,
+                        &mut self.ligatures,
+                        &mut self.cursor_animation,
+                    );
+                }
+                handle_term_events(
+                    state,
+                    event_loop,
+                    &AuxWindowConfig {
+                        proxy: &self.proxy,
+                        theme: self.theme,
+                        font_family: &self.font_family,
+                        ligatures: self.ligatures,
+                    },
+                    events,
+                );
+            },
             PtyEvent::AuxGpuReady { window, gpu } => {
                 if let Some(aux) = state.aux.iter_mut().find(|aux| aux.id == window) {
                     aux.gpu = Some(*gpu);
@@ -2251,6 +2267,64 @@ fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize) -> Vec<u8> {
     format!("\x1b[<{code};{};{}M", col + 1, row + 1).into_bytes()
 }
 
+/// Re-read the config file and apply what a running window can change.
+///
+/// Theme, font size, and cursor animation take effect on the next frame. Font
+/// family and ligatures are baked into the primary window's text pass when it is
+/// built, so a change to either only reaches windows opened afterward and is
+/// logged rather than silently dropped.
+///
+/// A config that fails to load leaves everything running as it was. Startup
+/// falls back to the embedded default, which is right when there is nothing to
+/// lose, but mid-session that would replace a working setup with the shipped
+/// one over a typo.
+fn apply_config_reload(
+    state: &mut State,
+    theme: &mut Theme,
+    theme_name: &mut String,
+    font_family: &mut Vec<String>,
+    ligatures: &mut bool,
+    cursor_animation: &mut CursorAnimation,
+) {
+    let config = match config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "config reload failed; keeping the running config");
+            return;
+        },
+    };
+
+    *theme = config.resolve_theme();
+    theme_name.clone_from(&config.theme);
+    state.terminal.lock().set_theme(*theme);
+    state.gpu.set_theme_colors(theme.background, theme.cursor);
+
+    if config.font_size != state.font_size {
+        state.font_size = config.font_size;
+        state
+            .gpu
+            .set_font_size(state.font_size, state.scale_factor as f32);
+        update_cell_pixels(&state.terminal, state.font_size, state.scale_factor as f32);
+
+        // The surface is unchanged, so only the cell metrics moved. Re-read the
+        // grid size and resize the rest to match, as the font-zoom path does.
+        let (rows, cols) = state.gpu.grid_size();
+        state.terminal.lock().resize(rows, cols);
+        let _ = state.pty.resize(rows as u16, cols as u16);
+    }
+
+    state.cursor_animation = config.cursor_animation;
+    *cursor_animation = config.cursor_animation;
+
+    if *font_family != config.font_family || *ligatures != config.ligatures {
+        tracing::info!("font family and ligature changes apply to this window on next launch");
+        font_family.clone_from(&config.font_family);
+        *ligatures = config.ligatures;
+    }
+
+    state.window.request_redraw();
+}
+
 /// Apply host-facing terminal notifications off the grid.
 ///
 /// Title and reset-title set the window title. Clipboard-store copies to the
@@ -2295,10 +2369,9 @@ fn handle_term_events(
                     aux.window.request_redraw();
                 }
             },
-            // Re-applying a config touches the theme, font metrics, and cursor
-            // state the window owns, so it is driven from the windowing path
-            // rather than this per-event fan-out.
-            TermEvent::ConfigReload => tracing::debug!("program reported a config change"),
+            // Filtered out before this fan-out, since re-applying a config
+            // touches window state this function has no handle on.
+            TermEvent::ConfigReload => {},
         }
     }
 }

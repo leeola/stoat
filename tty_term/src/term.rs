@@ -762,6 +762,17 @@ impl Terminal {
         self.cell_pixels = (width, height);
     }
 
+    /// Swap the color set the projection resolves against.
+    ///
+    /// Rebuilds the indexed palette too, since its ANSI slots and its default
+    /// fill both come from the theme. Cells resolve their colors on each
+    /// projection rather than storing them, so already-written content takes the
+    /// new theme on the next frame with no repaint from the program.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.palette = default_palette(&theme);
+    }
+
     /// Project the listener's queued `alacritty_terminal` events into
     /// [`TermEvent`]s, appending them to [`Self::pending_events`].
     ///
@@ -3101,6 +3112,43 @@ mod tests {
             grid.get(0, 1).fg,
             Rgb::new(10, 11, 12),
             "ANSI red from theme palette"
+        );
+    }
+
+    #[test]
+    fn set_theme_recolors_already_written_cells() {
+        let before = Theme {
+            foreground: Rgb::new(4, 5, 6),
+            background: Rgb::new(1, 2, 3),
+            cursor: Rgb::new(7, 8, 9),
+            ansi: [Rgb::new(10, 11, 12); 16],
+        };
+        let mut terminal = Terminal::new(1, 4, before);
+        let mut grid = Grid::new(1, 4);
+        terminal.advance(b"a\x1b[31mb");
+
+        terminal.set_theme(Theme {
+            foreground: Rgb::new(40, 50, 60),
+            background: Rgb::new(10, 20, 30),
+            cursor: Rgb::new(70, 80, 90),
+            ansi: [Rgb::new(100, 110, 120); 16],
+        });
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.get(0, 0).fg,
+            Rgb::new(40, 50, 60),
+            "default fg re-resolves against the new theme"
+        );
+        assert_eq!(
+            grid.get(0, 0).bg,
+            Rgb::new(10, 20, 30),
+            "default bg re-resolves against the new theme"
+        );
+        assert_eq!(
+            grid.get(0, 1).fg,
+            Rgb::new(100, 110, 120),
+            "the rebuilt palette recolors an ANSI cell written before the swap"
         );
     }
 
