@@ -358,6 +358,9 @@ pub enum TermEvent {
     /// A window-bound pool's content changed, so the aux window with this id
     /// needs a redraw. Coalesced to one per window within an advance.
     WindowDirty(u32),
+    /// A program reported that the terminal's config file changed on disk, so
+    /// the host should re-read and re-apply it.
+    ConfigReload,
 }
 
 /// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
@@ -681,6 +684,7 @@ impl Terminal {
                         | Command::WindowClose(_)
                         | Command::WindowFocus(_)
                         | Command::Hello(_)
+                        | Command::ConfigReload
                 );
                 if routed || (self.fill.is_none() && self.capture.is_none()) {
                     self.apply_command(command);
@@ -984,6 +988,10 @@ impl Terminal {
             Command::WindowFocus(focus) => self
                 .pending_events
                 .push(TermEvent::WindowFocus(focus.window)),
+            // Not a decoration, so it never stages behind a synchronized
+            // update. Rereading a config has nothing to do with the frame being
+            // composed, and delaying it would only defer the user's edit.
+            Command::ConfigReload => self.pending_events.push(TermEvent::ConfigReload),
         }
     }
 
@@ -1108,7 +1116,8 @@ impl Terminal {
             | Command::WindowOpen(_)
             | Command::WindowClose(_)
             | Command::WindowFocus(_)
-            | Command::Hello(_) => {},
+            | Command::Hello(_)
+            | Command::ConfigReload => {},
         }
     }
 
@@ -2885,13 +2894,14 @@ mod tests {
         theme::Theme,
     };
     use stoatty_protocol::command::{
-        encode_bar, encode_border, encode_fill, encode_fill_end, encode_hello, encode_icon,
-        encode_ident_reply, encode_line_layout, encode_minimap, encode_minimap_drop,
-        encode_minimap_lines, encode_minimap_view, encode_panel, encode_pool_cursor,
-        encode_pool_drop, encode_pool_region, encode_popover, encode_reposition, encode_reset,
-        encode_scale, encode_scroll, encode_scroll_region, encode_text_run, encode_window_open,
-        BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand,
-        IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
+        encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_end,
+        encode_hello, encode_icon, encode_ident_reply, encode_line_layout, encode_minimap,
+        encode_minimap_drop, encode_minimap_lines, encode_minimap_view, encode_panel,
+        encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
+        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
+        encode_text_run, encode_window_open, BarCommand, BorderCommand,
+        BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
+        IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
         MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
         PanelShadow as ProtoPanelShadow, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
         PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
@@ -4608,6 +4618,29 @@ mod tests {
         terminal.advance(&encode_window_open(&open));
 
         assert_eq!(terminal.take_events(), vec![TermEvent::WindowOpen(open)]);
+    }
+
+    #[test]
+    fn config_reload_command_surfaces_as_a_term_event() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(&encode_config_reload());
+
+        assert_eq!(terminal.take_events(), vec![TermEvent::ConfigReload]);
+    }
+
+    #[test]
+    fn config_reload_survives_an_active_fill() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+
+        terminal.advance(&encode_config_reload());
+
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::ConfigReload],
+            "a routed command is not swallowed by a fill redirect"
+        );
     }
 
     #[test]

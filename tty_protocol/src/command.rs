@@ -110,6 +110,10 @@ pub enum Command {
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
+    /// The terminal's own config file changed on disk, so it should re-read and
+    /// re-apply it. Carries no payload: the terminal reads the file itself, and
+    /// the program that sends this is only reporting that it wrote it.
+    ConfigReload,
     /// A handshake the program sends to identify itself to the terminal, so the
     /// terminal's log records which process drives it. The terminal replies with
     /// its own [`IdentReply`].
@@ -1209,6 +1213,20 @@ pub fn encode_reset_into(out: &mut Vec<u8>) {
     frame::end(out);
 }
 
+/// Encode a [`Command::ConfigReload`] as a full `Gstoatty;config_reload` frame
+/// for an emitter.
+pub fn encode_config_reload() -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_config_reload_into(&mut out);
+    out
+}
+
+/// Append an argument-less `Gstoatty;config_reload` frame to `out`.
+pub fn encode_config_reload_into(out: &mut Vec<u8>) {
+    frame::begin(out, "config_reload");
+    frame::end(out);
+}
+
 /// Encode a [`HelloCommand`] as a full `Gstoatty;hello` frame for an emitter.
 pub fn encode_hello(command: &HelloCommand) -> Vec<u8> {
     let mut out = Vec::new();
@@ -1329,6 +1347,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::WindowClose(c) => encode_window_close_into(out, c),
         Command::WindowFocus(c) => encode_window_focus_into(out, c),
         Command::Reset => encode_reset_into(out),
+        Command::ConfigReload => encode_config_reload_into(out),
         Command::Hello(c) => encode_hello_into(out, c),
     }
 }
@@ -1365,6 +1384,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "window_close" => decode_window_close(args).map(Command::WindowClose),
         "window_focus" => decode_window_focus(args).map(Command::WindowFocus),
         "reset" => Some(Command::Reset),
+        "config_reload" => Some(Command::ConfigReload),
         "hello" => decode_hello(args).map(Command::Hello),
         _ => None,
     }
@@ -1768,8 +1788,8 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, decode_ident_reply, decode_shadow, encode_bar, encode_border, encode_fill,
-        encode_fill_end, encode_hello, encode_icon, encode_ident_reply, encode_into,
+        decode, decode_ident_reply, decode_shadow, encode_bar, encode_border, encode_config_reload,
+        encode_fill, encode_fill_end, encode_hello, encode_icon, encode_ident_reply, encode_into,
         encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
         encode_minimap_view, encode_panel, encode_pool_cursor, encode_pool_drop,
         encode_pool_region, encode_popover, encode_popover_end, encode_reposition, encode_reset,
@@ -2548,6 +2568,11 @@ mod tests {
     #[test]
     fn reset_round_trips() {
         assert_eq!(decode(&encode_reset()), Some(Command::Reset));
+    }
+
+    #[test]
+    fn config_reload_round_trips() {
+        assert_eq!(decode(&encode_config_reload()), Some(Command::ConfigReload));
     }
 
     #[test]

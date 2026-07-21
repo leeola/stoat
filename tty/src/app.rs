@@ -2295,6 +2295,10 @@ fn handle_term_events(
                     aux.window.request_redraw();
                 }
             },
+            // Re-applying a config touches the theme, font metrics, and cursor
+            // state the window owns, so it is driven from the windowing path
+            // rather than this per-event fan-out.
+            TermEvent::ConfigReload => tracing::debug!("program reported a config change"),
         }
     }
 }
