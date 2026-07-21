@@ -131,14 +131,45 @@ pub type CreateFn = fn(&[ParamValue]) -> Result<Box<dyn Action>, ParamError>;
 pub struct RegistryEntry {
     pub def: &'static dyn ActionDef,
     pub create: CreateFn,
+    /// How the palette spells this action for the user, from the def's
+    /// [`ActionDef::command_name`] override or [`kebab`] of its name.
+    pub command_name: String,
 }
 
 static REGISTRY: OnceLock<HashMap<&'static str, RegistryEntry>> = OnceLock::new();
 
+/// Rewrite a PascalCase action name as the kebab-case token a user types, so
+/// `SetCwd` reads as `set-cwd`.
+///
+/// A dash goes before every uppercase letter except a leading one, and the
+/// result is lowercased throughout. A name that is already lowercase passes
+/// through unchanged.
+fn kebab(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            out.push('-');
+        }
+        out.extend(ch.to_lowercase());
+    }
+    out
+}
+
 fn init() -> HashMap<&'static str, RegistryEntry> {
     let mut map = HashMap::with_capacity(16);
     let mut add = |def: &'static dyn ActionDef, create: CreateFn| {
-        map.insert(def.name(), RegistryEntry { def, create });
+        let command_name = def
+            .command_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| kebab(def.name()));
+        map.insert(
+            def.name(),
+            RegistryEntry {
+                def,
+                create,
+                command_name,
+            },
+        );
     };
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
@@ -944,11 +975,17 @@ pub fn all() -> impl Iterator<Item = &'static RegistryEntry> {
     REGISTRY.get_or_init(init).values()
 }
 
-/// Resolve `token` to a registered action by exact name first, then by a
-/// case-insensitive alias match. A full name always wins over an alias, so a
-/// command stays reachable even if another action lists its name as an alias.
+/// Resolve `token` to a registered action by exact name first, then by
+/// case-insensitive [`RegistryEntry::command_name`], then by a case-insensitive
+/// alias match.
+///
+/// A full name always wins, so a command stays reachable even if another action
+/// spells its name as a command name or alias.
 pub fn lookup_alias(token: &str) -> Option<&'static RegistryEntry> {
     if let Some(entry) = lookup(token) {
+        return Some(entry);
+    }
+    if let Some(entry) = all().find(|entry| entry.command_name.eq_ignore_ascii_case(token)) {
         return Some(entry);
     }
     all().find(|entry| {
@@ -1184,6 +1221,62 @@ mod tests {
         "PaletteScopeToggle",
         "PaletteComplete",
     ];
+
+    #[test]
+    fn kebab_rewrites_pascal_case_names() {
+        assert_eq!(kebab("SetCwd"), "set-cwd");
+        assert_eq!(kebab("ToggleLspStatus"), "toggle-lsp-status");
+        assert_eq!(kebab("QuitAll"), "quit-all");
+        assert_eq!(
+            kebab("terminal"),
+            "terminal",
+            "already lowercase passes through"
+        );
+        assert_eq!(kebab("Quit"), "quit", "a single word loses only its case");
+    }
+
+    #[test]
+    fn lookup_alias_resolves_a_command_name() {
+        let entry = lookup_alias("set-cwd").expect("set-cwd resolves");
+        assert_eq!(entry.def.name(), "SetCwd");
+        assert_eq!(
+            lookup_alias("SET-CWD").map(|e| e.def.name()),
+            Some("SetCwd"),
+            "command names resolve case-insensitively"
+        );
+    }
+
+    /// Every way of addressing an action has to name exactly one of them, or
+    /// typing that token in the palette silently reaches whichever entry the
+    /// hash map happened to yield first.
+    #[test]
+    fn no_token_resolves_to_two_different_actions() {
+        let mut owner: HashMap<String, &'static str> = HashMap::new();
+        let mut collisions: Vec<String> = Vec::new();
+
+        for entry in all() {
+            let name = entry.def.name();
+            let tokens = std::iter::once(name.to_lowercase())
+                .chain(std::iter::once(entry.command_name.to_lowercase()))
+                .chain(entry.def.aliases().iter().map(|a| a.to_lowercase()));
+
+            for token in tokens {
+                match owner.insert(token.clone(), name) {
+                    Some(prev) if prev != name => {
+                        collisions.push(format!("{token:?}: {prev} and {name}"))
+                    },
+                    _ => {},
+                }
+            }
+        }
+
+        collisions.sort();
+        assert!(
+            collisions.is_empty(),
+            "tokens reaching two actions:\n{}",
+            collisions.join("\n")
+        );
+    }
 
     #[test]
     fn lookup_all_actions() {

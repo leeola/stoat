@@ -35,6 +35,19 @@ pub trait ActionDef: Debug + Send + Sync + 'static {
         true
     }
 
+    /// The name this action reads as in the command palette, overriding the
+    /// kebab-cased `name` the registry derives by default.
+    ///
+    /// `None` takes the derived form, which is right for most actions.
+    /// Override where mechanical kebab-casing reads badly, or where a shorter
+    /// noun is the command's only sensible spelling.
+    ///
+    /// Keymap and config files address actions by `name`, never by this, since
+    /// the config DSL rejects hyphenated identifiers.
+    fn command_name(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Short alternative tokens that resolve to this action in the command
     /// line, beyond its full `name`.
     ///
