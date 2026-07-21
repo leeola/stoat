@@ -81,6 +81,12 @@ pub fn user_config_path() -> Option<PathBuf> {
         .map(|x| x.config_dir().join("stoat/config.stcfg"))
 }
 
+/// The directory VSCode theme JSON files are read from, shared with stoatty so
+/// one drop point serves both apps.
+pub fn user_themes_dir() -> Option<PathBuf> {
+    Xdg::new().ok().map(|x| x.config_dir().join("stoat/themes"))
+}
+
 pub(crate) fn display_relative_with_home(
     path: &Path,
     context: &Path,

@@ -64,8 +64,6 @@ pub(crate) mod symbol_finder;
 pub mod term_screen;
 pub mod term_session;
 pub mod theme;
-// Exercised only by its own tests until the app's theme loading calls it.
-#[allow(dead_code)]
 mod theme_vscode;
 pub mod ui;
 pub mod workspace;
@@ -96,7 +94,7 @@ pub use pane::{
     Axis, Direction, DockId, DockPanel, DockSide, DockVisibility, FocusTarget, Pane, PaneId,
     PaneTree, Placement, View,
 };
-pub use paths::user_config_path;
+pub use paths::{user_config_path, user_themes_dir};
 pub use run::RunId;
 pub use stoat_config::{LineNumbers, MouseCapturePolicy, Settings};
 pub use stoat_log as log;

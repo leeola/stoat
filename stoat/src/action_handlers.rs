@@ -1317,6 +1317,7 @@ mod tests {
             stoat_config::Settings::default(),
             std::path::PathBuf::new(),
             user,
+            Vec::new(),
         );
         stoat.update(Event::Resize(80, 24));
         stoat

@@ -62,6 +62,8 @@ use tokio::{
 };
 
 pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
+const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
+const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
 
 /// Quiet window after the last filesystem-watch event for a path
 /// before [`ReviewExternalEdit`] dispatches. Mirrors
@@ -1107,7 +1109,7 @@ impl Stoat {
     }
 
     pub fn new(executor: Executor, cli_settings: Settings, initial_git_root: PathBuf) -> Self {
-        Self::new_with_user_config(executor, cli_settings, initial_git_root, None)
+        Self::new_with_user_config(executor, cli_settings, initial_git_root, None, Vec::new())
     }
 
     /// Construct a [`Stoat`], preferring `user_config` over the embedded default when it parses
@@ -1119,13 +1121,19 @@ impl Stoat {
     /// embedded config wholesale. One that fails to parse is discarded in favour
     /// of the embedded default, logged, and surfaced as a transient status
     /// message. CLI settings layer over the resolved config either way.
+    ///
+    /// `user_themes` are `(stem, JSON)` pairs of VSCode color themes from the
+    /// user's theme dir. They join the pool after the built-in themes and before
+    /// the user config's own `theme` blocks. One that fails to parse is skipped
+    /// and surfaced in the same transient status.
     pub fn new_with_user_config(
         executor: Executor,
         cli_settings: Settings,
         initial_git_root: PathBuf,
         user_config: Option<String>,
+        user_themes: Vec<(String, String)>,
     ) -> Self {
-        let (config, theme_base, config_error) = match user_config {
+        let (config, theme_base, mut config_error) = match user_config {
             Some(source) => {
                 let (parsed, errors) = stoat_config::parse(&source);
                 if errors.is_empty() {
@@ -1170,6 +1178,27 @@ impl Stoat {
             let mut blocks = Vec::new();
             if let Some(base) = theme_base.as_ref() {
                 blocks.extend(base.themes.iter().cloned());
+            }
+            let builtins = [
+                ("one-dark", THEME_ONE_DARK),
+                ("gruvbox-dark", THEME_GRUVBOX_DARK),
+            ];
+            let imports = builtins
+                .into_iter()
+                .map(|(stem, source)| (stem.to_string(), source.to_string()))
+                .chain(user_themes);
+            for (stem, source) in imports {
+                match vscode_theme::parse(&source) {
+                    Ok(theme) => blocks.push(crate::theme_vscode::theme_block(&stem, &theme)),
+                    Err(error) => {
+                        let message = format!("theme {stem} failed: {error}");
+                        tracing::error!("{message}");
+                        config_error = Some(match config_error.take() {
+                            Some(existing) => format!("{existing}; {message}"),
+                            None => message,
+                        });
+                    },
+                }
             }
             if let Some(c) = config.as_ref() {
                 blocks.extend(c.themes.iter().cloned());
@@ -14840,6 +14869,7 @@ mod tests {
             Settings::default(),
             PathBuf::new(),
             Some("on init { format_on_save = true; }".to_string()),
+            Vec::new(),
         );
 
         assert_eq!(stoat.settings.format_on_save, Some(true));
@@ -14860,12 +14890,14 @@ mod tests {
             Settings::default(),
             PathBuf::new(),
             None,
+            Vec::new(),
         );
         let layered = Stoat::new_with_user_config(
             scheduler.executor(),
             Settings::default(),
             PathBuf::new(),
             Some("theme default_dark { ui.modal.palette.fg = \"#ff0000\"; }".to_string()),
+            Vec::new(),
         );
 
         let red = Some(Color::Rgb(255, 0, 0));
@@ -14897,6 +14929,7 @@ mod tests {
             Settings::default(),
             PathBuf::new(),
             Some("theme mine { ui.text.fg = \"#00ff00\"; }\non init { theme = mine; }".to_string()),
+            Vec::new(),
         );
 
         assert_eq!(stoat.theme.name, "mine", "the user-only theme activates");
@@ -14915,6 +14948,7 @@ mod tests {
             Settings::default(),
             PathBuf::new(),
             Some("on init { format_on_save = ".to_string()),
+            Vec::new(),
         );
 
         assert_eq!(
@@ -14925,6 +14959,73 @@ mod tests {
         assert_eq!(
             stoat.pending_message.as_deref(),
             Some("user config parse failed; using built-in defaults")
+        );
+    }
+
+    #[test]
+    fn user_vscode_theme_joins_the_pool() {
+        use ratatui::style::Color;
+
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let user_themes = vec![(
+            "my-gruvbox".to_string(),
+            r##"{ "name": "my-gruvbox", "type": "dark", "colors": { "editor.background": "#282828" } }"##
+                .to_string(),
+        )];
+        let stoat = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            None,
+            user_themes,
+        );
+
+        assert!(
+            stoat
+                .theme_blocks
+                .iter()
+                .any(|b| b.node.name.node == "my-gruvbox"),
+            "the user theme joins the pool",
+        );
+        assert!(
+            stoat
+                .theme_blocks
+                .iter()
+                .any(|b| b.node.name.node == "gruvbox-dark"),
+            "the built-in themes join the pool too",
+        );
+
+        let all: Vec<&Spanned<ThemeBlock>> = stoat.theme_blocks.iter().collect();
+        let theme = crate::theme::Theme::from_blocks("my-gruvbox", &all).expect("theme resolves");
+        assert_eq!(
+            theme.get("ui.background").bg,
+            Some(Color::Rgb(0x28, 0x28, 0x28))
+        );
+    }
+
+    #[test]
+    fn broken_user_theme_surfaces_in_status() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let user_themes = vec![("bad".to_string(), "{ not json".to_string())];
+        let stoat = Stoat::new_with_user_config(
+            scheduler.executor(),
+            Settings::default(),
+            PathBuf::new(),
+            None,
+            user_themes,
+        );
+
+        assert!(
+            !stoat.theme_blocks.iter().any(|b| b.node.name.node == "bad"),
+            "a theme that fails to parse is skipped",
+        );
+        assert!(
+            stoat
+                .pending_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("theme bad failed"),
+            "the failure surfaces in the transient status",
         );
     }
 
