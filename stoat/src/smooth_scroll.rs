@@ -1,11 +1,10 @@
 //! Drives stoatty's region-scoped smooth-scroll pools for the visible editor
 //! panes.
 //!
-//! When stoat runs inside stoatty (detected by the `STOATTY` env var) each
-//! visible editor pane is handed to the terminal's recycled page pool as its own
-//! pool: stoat declares the pane's on-screen rectangle as that pool's region,
-//! renders the document a page at a time into off-grid pool slots, and reports an
-//! absolute scroll target each time the pane scrolls. The terminal eases each
+//! Every visible editor pane gets its own pool in the terminal's recycled page
+//! pool. Stoat declares the pane's on-screen rectangle as that pool's region,
+//! renders the document a page at a time into off-grid pool slots, and reports
+//! an absolute scroll target each time the pane scrolls. The terminal eases each
 //! pool's visible offset toward its target at sub-cell granularity, so several
 //! panes glide independently and at once while the chrome around them (status
 //! bars, dividers) stays fixed.
@@ -15,10 +14,6 @@
 //! -- closed, switched to another view, turned into a review, or hidden behind a
 //! full-screen overlay -- is retired with `Gstoatty;pool_drop` so the terminal
 //! frees its buffers and stops compositing it.
-//!
-//! Everything here degrades to nothing outside stoatty: the APC frames are
-//! ignored by other terminals, and the emit path is gated on the detected flag so
-//! a non-stoatty run pushes no bytes at all.
 //!
 //! A "page" is one region-sized screen of the document: `region.height` rows of
 //! `region.width` columns, the page at index `p` starting at document row

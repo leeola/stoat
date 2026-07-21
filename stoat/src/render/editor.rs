@@ -38,8 +38,8 @@ use stoatty_widgets::{
     ApcScene,
 };
 
-/// Columns reserved on a pane's right edge for the minimap strip under stoatty,
-/// matching the width stoatty's GPU minimap pass paints there.
+/// Columns reserved on a pane's right edge for the minimap strip, matching the
+/// width the terminal's GPU minimap pass paints there.
 pub(super) const MINIMAP_STRIP_COLS: u16 = 8;
 
 /// Narrowest pane, in columns, that still reserves a minimap strip. Below this
@@ -301,9 +301,9 @@ pub(crate) fn render_editor_with_overlay(
     };
     editor.gutter_width = gutter_w;
 
-    // Reserve the right-edge minimap strip under stoatty, recording its screen
-    // rect for pointer mapping. Only the text rect shrinks to clear the space.
-    // The reserved cells stay blank so stoatty's GPU minimap pass owns them.
+    // Reserve the right-edge minimap strip, recording its screen rect for
+    // pointer mapping. Only the text rect shrinks to clear the space. The
+    // reserved cells stay blank so the terminal's GPU minimap pass owns them.
     let inner = if minimap_enabled && inner.width >= MINIMAP_MIN_PANE_COLS {
         editor.minimap_rect = Some(Rect {
             x: inner.x + inner.width - MINIMAP_STRIP_COLS,
@@ -2678,8 +2678,11 @@ mod tests {
         );
     }
 
-    /// Render the focused editor's gutter in fallback (non-stoatty) mode and
-    /// return the trimmed number string each visible row paints.
+    /// Render the focused editor's gutter into cells and return the trimmed
+    /// number string each visible row paints.
+    ///
+    /// Passes no scene, so the gutter takes its cell fallback and the numbers
+    /// land as real glyphs the assertions can read.
     fn rendered_gutter(
         stoat: &mut Stoat,
         is_focused: bool,

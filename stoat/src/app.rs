@@ -1163,8 +1163,9 @@ pub struct Stoat {
     /// Ordered, non-dropping channel carrying stoatty APC byte batches from
     /// the app loop to the UI thread, written to stdout right after each
     /// rendered frame. Separate from the latest-wins render watch because
-    /// `fill` page content must not be coalesced or dropped. `None` outside
-    /// stoatty or before [`Self::set_apc_tx`] is called.
+    /// `fill` page content must not be coalesced or dropped. `None` until
+    /// [`Self::set_apc_tx`] installs it, which startup does after construction
+    /// and a test need not do at all.
     pub(crate) apc_tx: Option<UnboundedSender<Vec<u8>>>,
     /// Reused per-frame APC decoration buffer. Widgets append their component
     /// frames while painting; [`Self::emit_apc_scene`] diffs it against the last
@@ -5397,13 +5398,13 @@ impl Stoat {
     }
 
     /// Absolute terminal cell `(col, row)` of the primary cursor when the
-    /// focused pane is a document editor running inside stoatty, else `None`.
+    /// focused pane is a document editor, else `None`.
     ///
     /// Returns the position [`crate::render::editor::render_editor_with_overlay`]
     /// recorded while painting the current frame, so it is exactly where the
     /// cursor cell would otherwise be drawn. `None` for finder/palette/dock/run
-    /// focus and outside stoatty, where the editor paints its own cursor cell
-    /// and the terminal cursor stays hidden. Must be called after a render.
+    /// focus, where the editor paints its own cursor cell and the terminal
+    /// cursor stays hidden. Must be called after a render.
     pub(crate) fn primary_cursor_screen_pos(&self) -> Option<(u16, u16)> {
         let (focused_id, _) = self.focused_editor_ids()?;
         let ws = self.active_workspace();
@@ -6913,7 +6914,7 @@ impl Stoat {
     /// may render, so the declare widget can read the id while the frame paints.
     ///
     /// The summaries themselves sync afterward at the frame seam in
-    /// [`Self::emit_minimap`]. A no-op outside stoatty or with the minimap off.
+    /// [`Self::emit_minimap`]. A no-op with the minimap off.
     pub(crate) fn ensure_minimap_content_ids(&mut self) {
         if !self.minimap_enabled() {
             return;
@@ -6949,7 +6950,8 @@ impl Stoat {
     /// Runs at the frame seam after [`Self::emit_smooth_scroll`], so each editor's
     /// reserved strip rect from the paint is current. The strip declaration rides
     /// the diffed scene from the paint. This sends only the persistent content
-    /// stores. A no-op outside stoatty.
+    /// stores. A no-op until the APC channel is installed, or with the minimap
+    /// off.
     fn emit_minimap(&mut self) {
         // Recomputed below from each synced strip. Cleared first so the early
         // exits (no channel, minimap off) leave no build pending.

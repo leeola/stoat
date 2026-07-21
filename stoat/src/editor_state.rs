@@ -161,15 +161,18 @@ pub(crate) struct EditorState {
     /// Screen rect of the right-edge minimap strip the last render reserved,
     /// so pointer handlers can map a click inside it back to a buffer line.
     ///
-    /// `None` whenever the strip is absent (not under stoatty, minimap
-    /// disabled, or the pane too narrow to inset). Transient render state
-    /// written by `render_editor`, not persisted.
+    /// `None` whenever the strip is absent, meaning the minimap is disabled or
+    /// the pane is too narrow to inset. Transient render state written by
+    /// `render_editor`, not persisted.
     pub(crate) minimap_rect: Option<Rect>,
-    /// Absolute terminal cell `(col, row)` where the last render painted this
-    /// editor's primary cursor, set only while running inside stoatty so the
-    /// terminal cursor can be positioned there instead of a styled grid cell.
-    /// `None` when not focused, off-screen, or outside stoatty. Transient
-    /// render state, not persisted.
+    /// Absolute terminal cell `(col, row)` the last render reserved for this
+    /// editor's primary cursor, so the terminal can position its own cursor
+    /// there instead of the render painting a styled grid cell.
+    ///
+    /// Recorded only when the render had a scene to delegate the cursor to.
+    /// `None` when not focused, off-screen, or rendered without one, as an
+    /// input view or dock is, where the cursor is painted into the buffer
+    /// instead. Transient render state, not persisted.
     pub(crate) cursor_screen_cell: Option<(u16, u16)>,
 }
 
