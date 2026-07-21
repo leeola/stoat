@@ -59,7 +59,7 @@ pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::{collections::HashMap, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GotoTab, OpenBuffer,
-    OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange,
+    OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange, RenameTab,
     RenameWorkspace, ReviewExternalEdit, Run, SetCwd, SetTheme,
 };
 use stoat_text::{Anchor, BufferId, Selection};
@@ -139,6 +139,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CloseTab => tab::close_tab(stoat),
         ActionKind::ToggleTab => tab::toggle_tab(stoat),
         ActionKind::ToggleTabBar => tab::toggle_tab_bar(stoat),
+        ActionKind::RenameTab => {
+            let name = action
+                .as_any()
+                .downcast_ref::<RenameTab>()
+                .expect("RenameTab action downcast");
+            tab::rename_tab(stoat, name.name.as_deref())
+        },
         ActionKind::ClosePane => {
             pane::close_focused_pane(stoat);
             UpdateEffect::Redraw

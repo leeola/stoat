@@ -66,6 +66,69 @@ impl Action for GotoTab {
     }
 }
 
+const RENAME_TAB_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "name",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: false,
+    description: "new tab title; omitted prompts in the palette, empty clears the rename",
+}];
+
+#[derive(Debug)]
+pub struct RenameTabDef;
+
+impl ActionDef for RenameTabDef {
+    fn name(&self) -> &'static str {
+        "RenameTab"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::RenameTab
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        RENAME_TAB_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "rename the active tab"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Give the active tab a title that overrides the one derived from its \
+         focused pane, shown in the tab bar and kept across a restart. With no \
+         name it opens the command palette ready for one; an empty or \
+         whitespace name clears the override back to the derived title."
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["tab-rename"]
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+
+#[derive(Debug)]
+pub struct RenameTab {
+    pub name: Option<String>,
+}
+
+impl RenameTab {
+    pub const DEF: &RenameTabDef = &RenameTabDef;
+}
+
+impl Action for RenameTab {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 define_action!(
     NewTabDef,
     NewTab,

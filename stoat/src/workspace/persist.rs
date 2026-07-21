@@ -90,6 +90,11 @@ pub(crate) struct WorkspaceStateV1 {
     /// Index into [`Self::tabs`] of the tab whose tree is in [`Self::panes`].
     #[serde(default)]
     pub active_tab: usize,
+    /// One entry per tab in display order, holding each tab's `RenameTab`
+    /// override or `None`. Empty or short on files that predate the field, so
+    /// missing entries restore as unnamed tabs.
+    #[serde(default)]
+    pub tab_names: Vec<Option<String>>,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -249,6 +254,7 @@ impl Workspace {
                 .map(|tab| tab.parked.as_ref().map(clone_pane_tree))
                 .collect(),
             active_tab: self.active_tab,
+            tab_names: self.tabs.iter().map(|tab| tab.name.clone()).collect(),
         }
     }
 
@@ -384,14 +390,26 @@ impl Workspace {
                 .iter()
                 .enumerate()
                 .all(|(i, slot)| (i == state.active_tab) == slot.is_none());
+        // A short or missing name vec (a legacy or partially-written file) fills
+        // with None, so a tab past its end restores unnamed rather than failing.
+        let mut names = state.tab_names.into_iter();
         if coherent {
-            self.tabs = parked.into_iter().map(|parked| Tab { parked }).collect();
+            self.tabs = parked
+                .into_iter()
+                .map(|parked| Tab {
+                    parked,
+                    name: names.next().flatten(),
+                })
+                .collect();
             self.active_tab = state.active_tab;
         } else {
             // The file's tab shape disagrees with itself, and its intent is not
             // recoverable. One tab holding the restored active tree is always a
             // coherent workspace, and is what a legacy file means anyway.
-            self.tabs = vec![Tab { parked: None }];
+            self.tabs = vec![Tab {
+                parked: None,
+                name: None,
+            }];
             self.active_tab = 0;
         }
         // Which tab to toggle back to is session state, not layout.
@@ -628,6 +646,34 @@ mod tests {
             fresh.buffers.path_for(state.buffer_id),
             Some(ws_dir.join("a.txt").as_path()),
             "and still holds the buffer it was saved with"
+        );
+    }
+
+    /// A rename is per-tab state that must survive a restart, and the second
+    /// (parked) tab is the one whose name travels through the `tab_names` vec
+    /// rather than being read off the active tree.
+    #[test]
+    fn a_renamed_tab_keeps_its_title_across_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/named-tabs");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.new_tab(&exec);
+        ws.tabs[0].name = Some("first".to_string());
+        ws.tabs[1].name = Some("second".to_string());
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        assert_eq!(fresh.tab_title(0), "first", "the parked tab keeps its name");
+        assert_eq!(
+            fresh.tab_title(1),
+            "second",
+            "the active tab keeps its name"
         );
     }
 

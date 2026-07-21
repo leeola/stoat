@@ -103,6 +103,10 @@ impl std::fmt::Display for WorkspaceUid {
 /// than to a tree.
 pub(crate) struct Tab {
     pub(crate) parked: Option<PaneTree>,
+    /// A user-set title overriding the one derived from the tab's focused pane.
+    /// `None` falls back to [`Workspace::tab_title`]'s derived name. Set and
+    /// cleared by the `RenameTab` action and persisted with the workspace.
+    pub(crate) name: Option<String>,
 }
 
 /// A self-contained editing context: its own buffers, editors, pane layout, and
@@ -299,7 +303,10 @@ impl Workspace {
             last_finder_scope: None,
             palette_history: InputHistory::default(),
             panes,
-            tabs: vec![Tab { parked: None }],
+            tabs: vec![Tab {
+                parked: None,
+                name: None,
+            }],
             active_tab: 0,
             last_tab: None,
             docks: SlotMap::with_key(),
@@ -355,7 +362,10 @@ impl Workspace {
     /// Append a tab showing a fresh scratch buffer and switch to it.
     pub(crate) fn new_tab(&mut self, executor: &Executor) {
         let tree = scratch_tree(&mut self.buffers, &mut self.editors, executor);
-        self.tabs.push(Tab { parked: Some(tree) });
+        self.tabs.push(Tab {
+            parked: Some(tree),
+            name: None,
+        });
         self.switch_tab(self.tabs.len() - 1);
     }
 
@@ -416,7 +426,14 @@ impl Workspace {
     ///
     /// The kind names match the `pane` keymap predicate's, so what the bar
     /// shows and what a binding condition matches on read the same.
+    ///
+    /// A `RenameTab` override wins over the derived name, so a renamed tab keeps
+    /// its title no matter what its focused pane shows.
     pub(crate) fn tab_title(&self, idx: usize) -> String {
+        if let Some(name) = self.tabs.get(idx).and_then(|tab| tab.name.as_ref()) {
+            return name.clone();
+        }
+
         let tree = if idx == self.active_tab {
             Some(&self.panes)
         } else {
@@ -1351,6 +1368,23 @@ mod tests {
                 .editors
                 .contains_key(parked_editor),
             "the parked tab still references it"
+        );
+    }
+
+    #[test]
+    fn tab_title_prefers_a_rename_over_the_derived_name_and_clears_back() {
+        let mut h = TestHarness::with_size(80, 24);
+        let ws = h.stoat.active_workspace_mut();
+        let derived = ws.tab_title(0);
+
+        ws.tabs[0].name = Some("notes".to_string());
+        assert_eq!(ws.tab_title(0), "notes", "the override wins");
+
+        ws.tabs[0].name = None;
+        assert_eq!(
+            ws.tab_title(0),
+            derived,
+            "clearing falls back to the derived title"
         );
     }
 

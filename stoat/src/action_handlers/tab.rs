@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::pane::{dispose_view, EditorDisposal},
     app::{Stoat, UpdateEffect},
+    command_palette::{Availability, CommandPalette},
 };
 use stoat_config::TabBarMode;
 
@@ -75,6 +76,59 @@ pub(super) fn toggle_tab_bar(stoat: &mut Stoat) -> UpdateEffect {
     };
     stoat.tab_bar_override = Some(mode);
     stoat.set_status(status);
+    UpdateEffect::Redraw
+}
+
+/// Set, clear, or prompt for the active tab's title.
+///
+/// A `Some` name sets the override, or clears it when empty or all whitespace,
+/// so the tab falls back to its derived title. `None` opens the command palette
+/// seeded for `tab-rename`, which is how the bare keybinding reaches inline
+/// name entry.
+pub(super) fn rename_tab(stoat: &mut Stoat, name: Option<&str>) -> UpdateEffect {
+    let Some(name) = name else {
+        return open_rename_palette(stoat);
+    };
+
+    let trimmed = name.trim();
+    let status = {
+        let ws = stoat.active_workspace_mut();
+        let active = ws.active_tab;
+        if trimmed.is_empty() {
+            ws.tabs[active].name = None;
+            "tab name cleared".to_string()
+        } else {
+            ws.tabs[active].name = Some(trimmed.to_string());
+            format!("tab renamed to {trimmed}")
+        }
+    };
+
+    stoat.set_status(status);
+    UpdateEffect::Redraw
+}
+
+/// Open the command palette already collecting a `tab-rename` argument, so the
+/// bare action lands the user in inline name entry.
+///
+/// The seed is applied and the picker synced in the same tick, so the palette
+/// shows arg mode on the first frame rather than after the next keystroke.
+fn open_rename_palette(stoat: &mut Stoat) -> UpdateEffect {
+    let executor = stoat.executor.clone();
+    let availability = Availability::from_stoat(stoat);
+    {
+        let ws = stoat.active_workspace_mut();
+        stoat.command_palette = Some(CommandPalette::new(ws, executor, availability));
+    }
+
+    let active_idx = stoat.active_workspace;
+    {
+        let ws = &mut stoat.workspaces[active_idx];
+        if let Some(palette) = stoat.command_palette.as_ref() {
+            palette.input.replace_text(ws, "tab-rename ");
+        }
+    }
+    super::palette::sync_palette_picker(stoat);
+
     UpdateEffect::Redraw
 }
 
@@ -276,6 +330,70 @@ mod tests {
         assert!(
             ws.editors.contains_key(shared_editor),
             "an editor another tab still shows survives"
+        );
+    }
+
+    #[test]
+    fn rename_with_a_name_titles_the_active_tab() {
+        let mut h = Stoat::test();
+
+        dispatch(
+            &mut h,
+            &stoat_action::RenameTab {
+                name: Some("hello".to_string()),
+            },
+        );
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(ws.tab_title(ws.active_tab), "hello");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("tab renamed to hello")
+        );
+    }
+
+    #[test]
+    fn rename_with_a_whitespace_name_clears_the_override() {
+        let mut h = Stoat::test();
+        dispatch(
+            &mut h,
+            &stoat_action::RenameTab {
+                name: Some("hello".to_string()),
+            },
+        );
+
+        dispatch(
+            &mut h,
+            &stoat_action::RenameTab {
+                name: Some("   ".to_string()),
+            },
+        );
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            ws.tabs[ws.active_tab].name, None,
+            "a whitespace name clears the override"
+        );
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("tab name cleared"));
+    }
+
+    /// Bare `RenameTab` has to land the user in inline entry, so it opens the
+    /// palette already parsing `tab-rename` as a command with a pending argument
+    /// rather than as filter text.
+    #[test]
+    fn bare_rename_opens_the_palette_seeded_in_arg_mode() {
+        let mut h = Stoat::test();
+
+        dispatch(&mut h, &stoat_action::RenameTab { name: None });
+
+        let active_idx = h.stoat.active_workspace;
+        let ws = &h.stoat.workspaces[active_idx];
+        let palette = h.stoat.command_palette.as_ref().expect("the palette opens");
+        assert_eq!(palette.input.text(ws), "tab-rename ");
+        assert_eq!(
+            palette.command.map(|entry| entry.def.name()),
+            Some("RenameTab"),
+            "the seed parses into arg mode, not filter text"
         );
     }
 }

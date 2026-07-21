@@ -113,7 +113,7 @@ use crate::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
         },
         set_theme::SetTheme,
-        tab::{CloseTab, GotoTab, NewTab, ToggleTab, ToggleTabBar},
+        tab::{CloseTab, GotoTab, NewTab, RenameTab, ToggleTab, ToggleTabBar},
         terminal::Terminal,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
@@ -228,6 +228,23 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(GotoTab {
             index: raw as usize,
         }))
+    });
+    add(RenameTab::DEF, |params| {
+        // A present-but-empty argument (the palette's `tab-rename ` submit)
+        // clears the override, so unlike OpenConfig an empty string is kept as
+        // `Some("")` rather than folded to `None`. Only a fully absent argument
+        // (the bare keybinding) is `None`, which opens the palette.
+        let name = params
+            .first()
+            .map(|param| {
+                param.as_string().context(WrongKindSnafu {
+                    name: "name",
+                    expected: ParamKind::String,
+                })
+            })
+            .transpose()?
+            .map(str::to_owned);
+        Ok(Box::new(RenameTab { name }))
     });
     add(NewTab::DEF, |_| Ok(Box::new(NewTab)));
     add(CloseTab::DEF, |_| Ok(Box::new(CloseTab)));
@@ -1478,6 +1495,34 @@ mod tests {
     }
 
     #[test]
+    fn rename_tab_factory_keeps_an_empty_name_distinct_from_no_name() {
+        let entry = lookup("RenameTab").expect("RenameTab");
+        let name = |params: &[ParamValue]| {
+            (entry.create)(params)
+                .expect("valid")
+                .as_any()
+                .downcast_ref::<RenameTab>()
+                .expect("RenameTab")
+                .name
+                .clone()
+        };
+
+        // A bare keybinding passes no argument and opens the palette. The
+        // palette's empty submit passes `""` and clears. Folding empty to None
+        // would collapse the two.
+        assert_eq!(name(&[]), None, "no argument stays None");
+        assert_eq!(
+            name(&[ParamValue::String(String::new())]),
+            Some(String::new()),
+            "an empty argument is kept, not folded to None"
+        );
+        assert_eq!(
+            name(&[ParamValue::String("work".into())]),
+            Some("work".to_string())
+        );
+    }
+
+    #[test]
     fn all_returns_complete_list() {
         // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
         // + 4 workspace actions + 5 prompt-input plumbing actions
@@ -1563,6 +1608,7 @@ mod tests {
         // + 1 WorkspacePickerComplete.
         // + 4 NewTab, CloseTab, GotoTab, ToggleTab.
         // + 1 ToggleTabBar.
+        // + 1 RenameTab.
         // + 2 CodeSearchPageDown, CodeSearchPageUp.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
@@ -1635,7 +1681,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 388);
+        assert_eq!(all().count(), 389);
     }
 
     #[test]
