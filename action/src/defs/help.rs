@@ -220,6 +220,18 @@ plumbing_action!(
 );
 
 plumbing_action!(
+    HelpCompleteDef,
+    HelpComplete,
+    "HelpComplete",
+    ActionKind::HelpComplete,
+    "complete selected help entry",
+    "Complete the highlighted action's name into the help search input, \
+     replacing what was typed. The completed action stays selected. Bound by \
+     default to Tab while the help modal's search input is focused; a no-op \
+     when the list is empty."
+);
+
+plumbing_action!(
     HelpScopeToggleDef,
     HelpScopeToggle,
     "HelpScopeToggle",

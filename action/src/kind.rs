@@ -375,6 +375,7 @@ pub enum ActionKind {
     RunHistoryNext,
     HelpSelectPrev,
     HelpSelectNext,
+    HelpComplete,
     HelpScopeToggle,
     HelpScrollDetailUp,
     HelpScrollDetailDown,

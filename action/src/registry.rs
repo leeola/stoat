@@ -64,7 +64,7 @@ use crate::{
             OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
         },
         help::{
-            CloseHelp, DismissKeyHints, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
+            CloseHelp, DismissKeyHints, HelpComplete, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
             HelpScrollDetailDown, HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
             ToggleKeyHints,
         },
@@ -763,6 +763,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
     add(HelpSelectPrev::DEF, |_| Ok(Box::new(HelpSelectPrev)));
     add(HelpSelectNext::DEF, |_| Ok(Box::new(HelpSelectNext)));
+    add(HelpComplete::DEF, |_| Ok(Box::new(HelpComplete)));
     add(HelpScopeToggle::DEF, |_| Ok(Box::new(HelpScopeToggle)));
     add(HelpScrollDetailUp::DEF, |_| {
         Ok(Box::new(HelpScrollDetailUp))
@@ -1157,6 +1158,7 @@ mod tests {
         "ReloadEnv",
         "HelpSelectPrev",
         "HelpSelectNext",
+        "HelpComplete",
         "HelpScopeToggle",
         "HelpScrollDetailUp",
         "HelpScrollDetailDown",
@@ -1380,6 +1382,7 @@ mod tests {
         // + 1 OpenSymbolPicker.
         // + 4 SymbolFinder SelectPrev/Next/PageUp/PageDown.
         // + 1 SymbolFinderComplete.
+        // + 1 HelpComplete.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
         // + 1 Format.
@@ -1451,7 +1454,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 379);
+        assert_eq!(all().count(), 380);
     }
 
     #[test]

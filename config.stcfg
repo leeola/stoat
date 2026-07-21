@@ -730,6 +730,7 @@ on key {
         Ctrl-d -> HelpScrollDetailDown();
         PageUp -> HelpScrollDetailUp();
         PageDown -> HelpScrollDetailDown();
+        Tab -> HelpComplete();
         BackTab -> HelpScopeToggle();
     }
     modal && mode == insert {

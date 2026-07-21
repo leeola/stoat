@@ -62,7 +62,7 @@ pub use defs::{
         OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
     },
     help::{
-        CloseHelp, DismissKeyHints, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
+        CloseHelp, DismissKeyHints, HelpComplete, HelpJumpFirst, HelpJumpLast, HelpScopeToggle,
         HelpScrollDetailDown, HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
         ToggleKeyHints,
     },

@@ -8,6 +8,19 @@ pub(super) fn help_select_next(stoat: &mut Stoat) -> UpdateEffect {
     apply_to_help(stoat, |h| h.move_selection(1))
 }
 
+pub(super) fn help_complete(stoat: &mut Stoat) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+    let workspaces = &mut stoat.workspaces;
+    let Some(help) = stoat.help.as_mut() else {
+        return UpdateEffect::None;
+    };
+    if help.complete_selected(&mut workspaces[active_idx]) {
+        UpdateEffect::Redraw
+    } else {
+        UpdateEffect::None
+    }
+}
+
 pub(super) fn help_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
     let workspaces = &mut stoat.workspaces;

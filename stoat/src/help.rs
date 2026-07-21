@@ -231,6 +231,14 @@ impl Help {
         &self.entries
     }
 
+    #[cfg(test)]
+    pub(crate) fn entry_names(&self) -> Vec<&'static str> {
+        self.filtered
+            .iter()
+            .filter_map(|&i| self.entries.get(i).map(|e| e.def.name()))
+            .collect()
+    }
+
     pub fn filtered(&self) -> &[usize] {
         &self.filtered
     }
@@ -274,6 +282,33 @@ impl Help {
 
     pub(crate) fn toggle_scope_pub(&mut self, ws: &Workspace) {
         self.toggle_scope(ws);
+    }
+
+    /// Replace the search input with the highlighted entry's action name and
+    /// re-run the filter, leaving that entry selected.
+    ///
+    /// Returns whether anything was completed, which is `false` only for an
+    /// empty list.
+    ///
+    /// Refiltering rebuilds the list sorted by name, so the selection cursor is
+    /// repositioned onto the completed entry afterwards. It is tracked by its
+    /// index into [`Self::entries`] rather than assumed to land at the top,
+    /// because the active scope builds one entry per binding and so lists an
+    /// action bound to two keys twice under the same name.
+    pub(crate) fn complete_selected(&mut self, ws: &mut Workspace) -> bool {
+        let Some(&entry_idx) = self.filtered.get(self.selected) else {
+            return false;
+        };
+        let Some(name) = self.entries.get(entry_idx).map(|e| e.def.name()) else {
+            return false;
+        };
+
+        self.input.replace_text(ws, name);
+        self.refilter(ws);
+        if let Some(row) = self.filtered.iter().position(|&i| i == entry_idx) {
+            self.selected = row;
+        }
+        true
     }
 
     fn dispatch_selected_inner(&self) -> HelpOutcome {
@@ -908,6 +943,76 @@ mod tests {
         assert_eq!(entry.def.name(), "SetMode");
         assert_eq!(entry.key_label.as_deref(), Some("i"));
         assert!(!entry.bound_args.is_empty());
+    }
+
+    /// `OpenFileFinder` is chosen because completing it leaves its own
+    /// name-extensions on the list rather than narrowing to a single row. A
+    /// cursor left at its old index therefore stays in range and points at
+    /// `OpenFileFinderHSplit`, which the clamp in `refilter` would not catch.
+    #[test]
+    fn tab_completes_the_selected_entry_and_keeps_it_selected() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.type_keys("backtab");
+        h.type_text("openfile");
+        let _ = h.snapshot();
+        assert_eq!(
+            h.stoat.help.as_ref().unwrap().entry_names(),
+            [
+                "OpenFile",
+                "OpenFileFinder",
+                "OpenFileFinderHSplit",
+                "OpenFileFinderVSplit"
+            ],
+        );
+
+        h.type_keys("down");
+        let _ = h.snapshot();
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        let help = h.stoat.help.as_ref().unwrap();
+        assert_eq!(
+            help.input_text(h.stoat.active_workspace()),
+            "OpenFileFinder",
+            "Tab completes the highlighted action name into the search input"
+        );
+        assert_eq!(
+            help.entry_names(),
+            [
+                "OpenFileFinder",
+                "OpenFileFinderHSplit",
+                "OpenFileFinderVSplit"
+            ],
+            "the completed name still matches its extensions, so the list reshuffles"
+        );
+        assert_eq!(
+            help.selected_entry().map(|e| e.def.name()),
+            Some("OpenFileFinder"),
+            "the completed action stays selected"
+        );
+    }
+
+    #[test]
+    fn tab_with_an_empty_help_list_leaves_the_input_unchanged() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.type_text("zzzznomatch");
+        let _ = h.snapshot();
+        assert!(h.stoat.help.as_ref().unwrap().entry_names().is_empty());
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            h.stoat
+                .help
+                .as_ref()
+                .unwrap()
+                .input_text(h.stoat.active_workspace()),
+            "zzzznomatch",
+            "Tab with no selectable row leaves the query unchanged"
+        );
     }
 
     #[test]

@@ -624,6 +624,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RunHistoryNext => run::run_history_next(stoat),
         ActionKind::HelpSelectPrev => help::help_select_prev(stoat),
         ActionKind::HelpSelectNext => help::help_select_next(stoat),
+        ActionKind::HelpComplete => help::help_complete(stoat),
         ActionKind::HelpScopeToggle => help::help_scope_toggle(stoat),
         ActionKind::HelpScrollDetailUp => help::help_scroll_detail_up(stoat),
         ActionKind::HelpScrollDetailDown => help::help_scroll_detail_down(stoat),
