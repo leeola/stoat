@@ -1360,6 +1360,26 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_a_enters_the_prefix_from_insert_but_not_from_a_prompt() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let ctrl_a = key_event(KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+        let insert = TestState::new().set("mode", StateValue::String("insert".into()));
+        let entered = keymap
+            .lookup(&insert, &ctrl_a)
+            .expect("Ctrl-a is bound in insert mode");
+        assert_eq!(entered[0].name, "SetMode");
+        assert_eq!(entered[0].args[0].value, Value::Ident("prefix".into()));
+
+        let prompt = insert.set("modal", StateValue::String("palette".into()));
+        assert!(
+            keymap.lookup(&prompt, &ctrl_a).is_none(),
+            "an open prompt keeps Ctrl-a out of the prefix"
+        );
+    }
+
+    #[test]
     fn ca_prefix_chords_resolve_tab_actions() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);

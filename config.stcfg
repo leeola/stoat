@@ -700,6 +700,13 @@ on key {
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();
     }
+    # The tab prefix reaches insert mode too, so a tab chord needs no Escape
+    # first. The modal guard is required: no modal block binds Ctrl-a, so an
+    # unguarded binding would win over an open palette or finder prompt and
+    # strand it in prefix mode.
+    !modal && mode == insert {
+        Ctrl-a -> SetMode(prefix);
+    }
     modal == finder && mode == insert {
         Up -> FileFinderSelectPrev();
         Down -> FileFinderSelectNext();
