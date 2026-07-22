@@ -56,6 +56,11 @@ const UNSTAGED: Status = Status::WT_NEW
     .union(Status::WT_DELETED)
     .union(Status::WT_RENAMED);
 
+/// Longest line quoted into an apply-failure reason. The reason reaches the
+/// one-line status bar, so a long source line is truncated rather than
+/// pushing the rest of the message out of view.
+const QUOTED_LINE_MAX: usize = 80;
+
 impl GitRepo for LocalGitRepo {
     fn workdir(&self) -> Option<PathBuf> {
         let repo = self.repo.lock().expect("git repo lock");
@@ -169,9 +174,7 @@ impl GitRepo for LocalGitRepo {
         let repo = self.repo.lock().expect("git repo lock");
         let workdir = repo.workdir()?;
         let rel = path.strip_prefix(workdir).ok()?;
-        let entry = repo.index().ok()?.get_path(rel, 0)?;
-        let blob = repo.find_blob(entry.id).ok()?;
-        std::str::from_utf8(blob.content()).ok().map(String::from)
+        index_blob_text(&repo, rel)
     }
 
     fn conflicted_paths(&self) -> Vec<PathBuf> {
@@ -206,8 +209,10 @@ impl GitRepo for LocalGitRepo {
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
         let diff = Diff::from_buffer(patch.as_bytes()).map_err(err_msg)?;
-        repo.apply(&diff, ApplyLocation::Index, None)
-            .map_err(err_msg)
+        match repo.apply(&diff, ApplyLocation::Index, None) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(apply_error(&repo, patch, &err)),
+        }
     }
 
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>> {
@@ -535,6 +540,156 @@ fn err_msg(e: git2::Error) -> GitApplyError {
     .build()
 }
 
+/// Builds the error for a failed index apply, widening libgit2's message with
+/// the file the patch targets and the first preimage line that diverges from
+/// the index.
+///
+/// libgit2 reports only "hunk at line N did not apply", which names neither
+/// the file nor what it found there, so a report of the failure carries
+/// nothing to diagnose from. The full patch is warn-logged instead of folded
+/// into the reason, because callers put the reason in the one-line status bar
+/// while the log can hold a complete repro.
+fn apply_error(repo: &Repository, patch: &str, err: &git2::Error) -> GitApplyError {
+    let reason = err.message();
+    tracing::warn!(
+        target: "stoat::git",
+        reason,
+        patch,
+        "applying patch to index failed",
+    );
+
+    let Some(rel) = patch_target_path(patch) else {
+        return BackendSnafu {
+            reason: reason.to_string(),
+        }
+        .build();
+    };
+
+    let detail = apply_mismatch_detail(patch, index_blob_text(repo, rel).as_deref());
+    BackendSnafu {
+        reason: format!("{reason} ({}: {detail})", rel.display()),
+    }
+    .build()
+}
+
+/// The file a unified-diff patch targets, read from its `+++ b/<path>` header
+/// and falling back to `--- a/<path>` when the new side is `/dev/null`.
+///
+/// Only handles the headers stoat itself emits in
+/// [`rows_to_unified_diff`](crate::review_apply::patch), which is the sole
+/// source of the patches reaching the index.
+fn patch_target_path(patch: &str) -> Option<&Path> {
+    header_path(patch, "+++ ").or_else(|| header_path(patch, "--- "))
+}
+
+/// The path on the first `marker`-prefixed header line, with its `a/` or `b/`
+/// prefix removed. [`None`] when no such header exists or when that side is
+/// `/dev/null`, which marks the file as absent on that side rather than named.
+///
+/// Body lines can also start with `-` or `+`, so the first match wins. The
+/// headers always precede the hunks.
+fn header_path<'a>(patch: &'a str, marker: &str) -> Option<&'a Path> {
+    let rest = patch.lines().find_map(|line| line.strip_prefix(marker))?;
+    if rest == "/dev/null" {
+        return None;
+    }
+    let rel = rest
+        .strip_prefix("a/")
+        .or_else(|| rest.strip_prefix("b/"))
+        .unwrap_or(rest);
+    Some(Path::new(rel))
+}
+
+/// Describes where `patch`'s preimage stops matching `index_text`, as the
+/// parenthetical of an apply-failure reason.
+///
+/// Walks every `@@ -start,count` hunk and compares the context and `-` lines
+/// against the index at the line numbers the hunk claims, reporting the first
+/// divergence.
+///
+/// When nothing diverges the wording names no line at all. A patch whose text
+/// matches can still be rejected over line endings, trailing whitespace, or a
+/// mode change, and pointing at an innocent line would send the reader the
+/// wrong way.
+fn apply_mismatch_detail(patch: &str, index_text: Option<&str>) -> String {
+    let Some(index_text) = index_text else {
+        return "file not in index".to_string();
+    };
+    let index_lines: Vec<&str> = index_text.lines().collect();
+
+    let mut idx = 0usize;
+    let mut in_hunk = false;
+    for line in patch.lines() {
+        if let Some(start) = hunk_preimage_start(line) {
+            idx = start.saturating_sub(1);
+            in_hunk = true;
+            continue;
+        }
+        if line.starts_with("diff --git") {
+            in_hunk = false;
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+
+        let expected = match line.as_bytes().first() {
+            Some(b' ' | b'-') => &line[1..],
+            _ => continue,
+        };
+        let Some(actual) = index_lines.get(idx) else {
+            return format!(
+                "index ends at line {} but patch expects line {} to be {}",
+                index_lines.len(),
+                idx + 1,
+                quoted_line(expected)
+            );
+        };
+        if *actual != expected {
+            return format!(
+                "index line {} is {} but patch expects {}",
+                idx + 1,
+                quoted_line(actual),
+                quoted_line(expected)
+            );
+        }
+        idx += 1;
+    }
+
+    "patch preimage matches the index".to_string()
+}
+
+/// The 1-based preimage line a `@@ -start,count +start,count @@` header opens
+/// at, or [`None`] for any other line.
+fn hunk_preimage_start(line: &str) -> Option<usize> {
+    let rest = line.strip_prefix("@@ -")?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Quotes `text` for an error reason, truncating past [`QUOTED_LINE_MAX`]
+/// characters so one long source line cannot crowd out the rest.
+fn quoted_line(text: &str) -> String {
+    match text.char_indices().nth(QUOTED_LINE_MAX) {
+        Some((cut, _)) => format!("\"{}...\"", &text[..cut]),
+        None => format!("\"{text}\""),
+    }
+}
+
+/// The staged (stage 0) blob for `rel` as text, or [`None`] when the path is
+/// absent from the index or its content is not valid UTF-8.
+///
+/// Takes the [`Repository`] directly rather than going through
+/// [`GitRepo::index_content`], because the apply path already holds the repo
+/// mutex and it is not reentrant.
+fn index_blob_text(repo: &Repository, rel: &Path) -> Option<String> {
+    let entry = repo.index().ok()?.get_path(rel, 0)?;
+    let blob = repo.find_blob(entry.id).ok()?;
+    std::str::from_utf8(blob.content()).ok().map(String::from)
+}
+
 /// Returns `path` unchanged when it is already absolute, otherwise joins
 /// it onto the repo workdir so it lines up with the absolute paths that
 /// [`read_index_conflicts`] produces.
@@ -588,4 +743,112 @@ fn read_index_conflicts(repo: &Repository) -> Result<Vec<ConflictedFile>, GitApp
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_mismatch_detail, patch_target_path, QUOTED_LINE_MAX};
+    use std::path::Path;
+
+    const NAMED_SIDES: &str = "--- a/a.rs\n+++ b/a.rs\n";
+
+    fn patch(header: &str, body: &str) -> String {
+        format!("diff --git a/a.rs b/a.rs\n{header}@@ -1,2 +1,2 @@\n{body}")
+    }
+
+    #[test]
+    fn target_path_reads_the_new_side() {
+        assert_eq!(
+            patch_target_path(&patch(NAMED_SIDES, "")),
+            Some(Path::new("a.rs"))
+        );
+    }
+
+    #[test]
+    fn target_path_falls_back_to_old_side_for_deletion() {
+        assert_eq!(
+            patch_target_path(&patch("--- a/gone.rs\n+++ /dev/null\n", "")),
+            Some(Path::new("gone.rs"))
+        );
+    }
+
+    #[test]
+    fn target_path_reads_new_side_for_addition() {
+        assert_eq!(
+            patch_target_path(&patch("--- /dev/null\n+++ b/new.rs\n", "")),
+            Some(Path::new("new.rs"))
+        );
+    }
+
+    #[test]
+    fn target_path_none_without_headers() {
+        assert_eq!(patch_target_path("not a patch"), None);
+    }
+
+    #[test]
+    fn mismatch_detail_names_first_diverging_line() {
+        let patch = patch(NAMED_SIDES, " one\n-two\n+TWO\n");
+        assert_eq!(
+            apply_mismatch_detail(&patch, Some("one\nother\n")),
+            "index line 2 is \"other\" but patch expects \"two\""
+        );
+    }
+
+    #[test]
+    fn mismatch_detail_counts_from_the_hunk_header() {
+        let patch =
+            format!("diff --git a/a.rs b/a.rs\n{NAMED_SIDES}@@ -4,1 +4,1 @@\n-four\n+FOUR\n");
+        assert_eq!(
+            apply_mismatch_detail(&patch, Some("a\nb\nc\nd\n")),
+            "index line 4 is \"d\" but patch expects \"four\""
+        );
+    }
+
+    #[test]
+    fn mismatch_detail_reports_short_index() {
+        let patch = patch(NAMED_SIDES, " one\n-two\n+TWO\n");
+        assert_eq!(
+            apply_mismatch_detail(&patch, Some("one\n")),
+            "index ends at line 1 but patch expects line 2 to be \"two\""
+        );
+    }
+
+    #[test]
+    fn mismatch_detail_reports_missing_file() {
+        assert_eq!(
+            apply_mismatch_detail(&patch(NAMED_SIDES, "-x\n"), None),
+            "file not in index"
+        );
+    }
+
+    #[test]
+    fn mismatch_detail_claims_no_line_when_preimage_matches() {
+        let patch = patch(NAMED_SIDES, " one\n-two\n+TWO\n");
+        assert_eq!(
+            apply_mismatch_detail(&patch, Some("one\ntwo\n")),
+            "patch preimage matches the index"
+        );
+    }
+
+    #[test]
+    fn mismatch_detail_ignores_added_lines() {
+        let patch = patch(NAMED_SIDES, "+added\n one\n");
+        assert_eq!(
+            apply_mismatch_detail(&patch, Some("one\n")),
+            "patch preimage matches the index"
+        );
+    }
+
+    #[test]
+    fn mismatch_detail_truncates_long_lines() {
+        let long = "x".repeat(QUOTED_LINE_MAX + 10);
+        let patch = patch(NAMED_SIDES, &format!("-{long}\n"));
+        assert_eq!(
+            apply_mismatch_detail(&patch, Some("short\n")),
+            format!(
+                "index line 1 is \"short\" but patch expects \"{}...\"",
+                "x".repeat(QUOTED_LINE_MAX)
+            )
+        );
+    }
 }

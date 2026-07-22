@@ -312,7 +312,10 @@ fn apply_to_index_rejects_conflicting_patch() {
         .apply_to_index(patch)
         .expect_err("conflicting context must fail");
     let GitApplyError::Backend { reason, .. } = err;
-    assert!(!reason.is_empty(), "error must have message");
+    assert!(
+        reason.ends_with(r#"(a.rs: index line 1 is "actual" but patch expects "unexpected")"#),
+        "reason must name the file and the diverging line, got: {reason}"
+    );
 }
 
 #[test]
@@ -562,7 +565,10 @@ fn apply_to_index_rejects_double_apply() {
         .apply_to_index(patch)
         .expect_err("context no longer matches on second apply");
     let GitApplyError::Backend { reason, .. } = err;
-    assert!(!reason.is_empty());
+    assert!(
+        reason.ends_with(r#"(a.rs: index line 1 is "v2" but patch expects "v1")"#),
+        "reason must name the file and the already-applied line, got: {reason}"
+    );
 }
 
 #[test]
