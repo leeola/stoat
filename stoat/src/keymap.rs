@@ -204,6 +204,11 @@ fn resolve_key(key: &Key) -> Option<KeyCode> {
             "PageUp" => Some(KeyCode::PageUp),
             "PageDown" => Some(KeyCode::PageDown),
             "Insert" => Some(KeyCode::Insert),
+            // `+`/`-` cannot be written as literal keys: `-` is the chord
+            // separator in the key grammar, so both spell as named-key words
+            // like `Space`/`Enter` do.
+            "Plus" => Some(KeyCode::Char('+')),
+            "Minus" => Some(KeyCode::Char('-')),
             s if s.starts_with('F') => s[1..].parse::<u8>().ok().map(KeyCode::F),
             _ => None,
         },
@@ -1316,6 +1321,140 @@ mod tests {
             Value::Number(10.0),
             "0 focuses pane 10"
         );
+    }
+
+    #[test]
+    fn plus_and_minus_take_over_increment_and_decrement_from_ctrl_a() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+
+        let plus = keymap
+            .lookup(&normal, &key_event(KeyCode::Char('+'), KeyModifiers::NONE))
+            .expect("+ is bound in normal mode");
+        assert_eq!(plus[0].name, "Increment");
+
+        let minus = keymap
+            .lookup(&normal, &key_event(KeyCode::Char('-'), KeyModifiers::NONE))
+            .expect("- is bound in normal mode");
+        assert_eq!(minus[0].name, "Decrement");
+
+        let ctrl_a = keymap
+            .lookup(
+                &normal,
+                &key_event(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            )
+            .expect("Ctrl-a is bound in normal mode");
+        assert_eq!(ctrl_a[0].name, "SetMode");
+        assert_eq!(ctrl_a[0].args[0].value, Value::Ident("prefix".into()));
+
+        assert!(
+            keymap
+                .lookup(
+                    &normal,
+                    &key_event(KeyCode::Char('x'), KeyModifiers::CONTROL)
+                )
+                .is_none(),
+            "Ctrl-x no longer decrements after the relocation"
+        );
+    }
+
+    #[test]
+    fn ca_prefix_chords_resolve_tab_actions() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
+
+        let toggle = keymap
+            .lookup(
+                &prefix,
+                &key_event(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            )
+            .expect("Ctrl-a is bound in prefix mode");
+        assert_eq!(toggle[0].name, "SetMode");
+        assert_eq!(toggle[0].args[0].value, Value::Ident("normal".into()));
+        assert_eq!(toggle[1].name, "ToggleTab");
+
+        assert_eq!(
+            keymap
+                .lookup(&prefix, &key_event(KeyCode::Char('c'), KeyModifiers::NONE))
+                .expect("c is bound in prefix mode")[1]
+                .name,
+            "NewTab"
+        );
+        assert_eq!(
+            keymap
+                .lookup(&prefix, &key_event(KeyCode::Char('x'), KeyModifiers::NONE))
+                .expect("x is bound in prefix mode")[1]
+                .name,
+            "CloseTab"
+        );
+
+        let (three, captured) = keymap
+            .lookup_with_capture(&prefix, &key_event(KeyCode::Char('3'), KeyModifiers::NONE))
+            .expect("digits are bound in prefix mode");
+        assert_eq!(three[1].name, "GotoTab");
+        let goto = crate::keymap_state::resolve_action(&three[1].name, &three[1].args, captured)
+            .expect("GotoTab resolves with the captured digit");
+        assert_eq!(
+            goto.as_any()
+                .downcast_ref::<stoat_action::GotoTab>()
+                .expect("GotoTab")
+                .index,
+            3,
+            "C-a 3 jumps to tab 3 via the num placeholder"
+        );
+
+        let ten = keymap
+            .lookup(&prefix, &key_event(KeyCode::Char('0'), KeyModifiers::NONE))
+            .expect("0 is bound in prefix mode");
+        assert_eq!(ten[1].name, "GotoTab");
+        assert_eq!(
+            ten[1].args[0].value,
+            Value::Number(10.0),
+            "C-a 0 addresses tab 10, the exact key overriding the placeholder"
+        );
+
+        let t = keymap
+            .lookup(&prefix, &key_event(KeyCode::Char('t'), KeyModifiers::NONE))
+            .expect("t is bound in prefix mode");
+        assert_eq!(t[0].name, "SetMode");
+        assert_eq!(t[0].args[0].value, Value::Ident("prefix_tab".into()));
+
+        let esc = keymap
+            .lookup(&prefix, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in prefix mode");
+        assert_eq!(esc[0].name, "SetMode");
+        assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
+    }
+
+    #[test]
+    fn ca_t_tab_mode_chords_cycle_and_rename() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let tab = TestState::new().set("mode", StateValue::String("prefix_tab".into()));
+
+        let r = keymap
+            .lookup(&tab, &key_event(KeyCode::Char('r'), KeyModifiers::NONE))
+            .expect("r is bound in prefix_tab mode");
+        assert_eq!(r[1].name, "RenameTab");
+
+        let h = keymap
+            .lookup(&tab, &key_event(KeyCode::Char('h'), KeyModifiers::NONE))
+            .expect("h is bound in prefix_tab mode");
+        assert_eq!(h[0].name, "SetMode", "the mode resets before the switch");
+        assert_eq!(h[0].args[0].value, Value::Ident("normal".into()));
+        assert_eq!(h[1].name, "PrevTab");
+
+        let l = keymap
+            .lookup(&tab, &key_event(KeyCode::Char('l'), KeyModifiers::NONE))
+            .expect("l is bound in prefix_tab mode");
+        assert_eq!(l[1].name, "NextTab");
+
+        let esc = keymap
+            .lookup(&tab, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in prefix_tab mode");
+        assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
     #[test]

@@ -429,8 +429,11 @@ on key {
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
         Alt-` -> SwitchToUppercase();
-        Ctrl-a -> Increment();
-        Ctrl-x -> Decrement();
+        # `-` is the keychord separator, so the +/- keys bind via the
+        # Plus/Minus named-key aliases; Ctrl-a is now the tab prefix.
+        Plus -> Increment();
+        Minus -> Decrement();
+        Ctrl-a -> SetMode(prefix);
         d -> DeleteSelection();
         Alt-d -> DeleteSelectionNoYank();
         u -> Undo();
@@ -911,5 +914,32 @@ on key {
         8 -> [FocusPane(8), SetMode(normal)];
         9 -> [FocusPane(9), SetMode(normal)];
         0 -> [FocusPane(10), SetMode(normal)];
+    }
+    mode == prefix {
+        Escape -> SetMode(normal);
+        Ctrl-a -> [SetMode(normal), ToggleTab()];
+        c -> [SetMode(normal), NewTab()];
+        x -> [SetMode(normal), CloseTab()];
+        num -> [SetMode(normal), GotoTab($num)];
+        0 -> [SetMode(normal), GotoTab(10)];
+        t -> SetMode(prefix_tab);
+    }
+    mode == prefix_tab {
+        Escape -> SetMode(normal);
+        r -> [SetMode(normal), RenameTab()];
+        h -> [SetMode(normal), PrevTab()];
+        Left -> [SetMode(normal), PrevTab()];
+        k -> [SetMode(normal), PrevTab()];
+        Up -> [SetMode(normal), PrevTab()];
+        l -> [SetMode(normal), NextTab()];
+        Right -> [SetMode(normal), NextTab()];
+        j -> [SetMode(normal), NextTab()];
+        Down -> [SetMode(normal), NextTab()];
+        n -> [SetMode(normal), NewTab()];
+        x -> [SetMode(normal), CloseTab()];
+        Ctrl-a -> [SetMode(normal), ToggleTab()];
+        Tab -> [SetMode(normal), ToggleTab()];
+        num -> [SetMode(normal), GotoTab($num)];
+        0 -> [SetMode(normal), GotoTab(10)];
     }
 }

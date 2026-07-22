@@ -1741,7 +1741,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "let x = 10\n");
         h.open_file(&path);
-        h.type_keys("5 ctrl-a");
+        h.type_keys("5 plus");
         assert_eq!(focused_buffer_text(&mut h), "let x = 15\n");
     }
 
@@ -1750,7 +1750,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "let x = 10\n");
         h.open_file(&path);
-        h.type_keys("3 ctrl-x");
+        h.type_keys("3 minus");
         assert_eq!(focused_buffer_text(&mut h), "let x = 7\n");
     }
 
@@ -1759,7 +1759,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "let x = 0x10\n");
         h.open_file(&path);
-        h.type_keys("4 ctrl-a");
+        h.type_keys("4 plus");
         assert_eq!(focused_buffer_text(&mut h), "let x = 0x14\n");
     }
 

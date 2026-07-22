@@ -1360,6 +1360,8 @@ fn resolve_token(token: &str) -> (KeyCode, KeyModifiers) {
         "end" => (KeyCode::End, KeyModifiers::NONE),
         "pageup" => (KeyCode::PageUp, KeyModifiers::NONE),
         "pagedown" => (KeyCode::PageDown, KeyModifiers::NONE),
+        "plus" => (KeyCode::Char('+'), KeyModifiers::NONE),
+        "minus" => (KeyCode::Char('-'), KeyModifiers::NONE),
         s if s.starts_with('f') && s.len() > 1 => {
             if let Ok(n) = s[1..].parse::<u8>() {
                 return (KeyCode::F(n), KeyModifiers::NONE);
