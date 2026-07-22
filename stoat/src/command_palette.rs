@@ -64,17 +64,18 @@ pub struct CommandPalette {
     last_filter_key: u64,
 }
 
-/// The inline value-picker the palette shows while collecting a
-/// [`ValueSource::Files`], [`ValueSource::Directories`], or
-/// [`ValueSource::Buffers`] argument.
+/// The inline value-picker the palette shows while collecting an argument
+/// whose [`ValueSource`] offers candidates, such as [`ValueSource::Files`] or
+/// [`ValueSource::Values`].
 ///
 /// Wraps a shared [`PathPicker`] with the argument's [`ValueSource`], exactly as
 /// [`crate::file_finder::FileFinder`] does. The palette parses the command's
 /// trailing argument and drives the core's fuzzy list with it, so `:o src/ma`
 /// filters the same way the standalone finder does.
 pub(crate) struct ArgPicker {
-    /// Whether this picker lists workspace files, directories, or open buffers.
-    /// Selects the preview policy and whether a streaming walk feeds the list.
+    /// What this picker lists, such as workspace files or an argument's
+    /// accepted values. Selects the preview policy and whether a streaming
+    /// walk feeds the list.
     source: ValueSource,
     /// The shared walk / fuzzy-list / preview core. A file picker leaves its
     /// walk feeding `all_paths`. A buffer picker seeds `all_paths` with the
@@ -175,8 +176,9 @@ impl ArgPicker {
 
     /// Sync the preview pane per this picker's source. A buffer source previews
     /// the live in-memory buffer, falling back to the disk file when the path
-    /// has none. A directory source shows nothing. Every other source reads the
-    /// file from disk.
+    /// has none. A directory source shows nothing, as does a fixed value set,
+    /// whose rows name accepted values rather than readable files. Every other
+    /// source reads the file from disk.
     fn sync_preview(
         &mut self,
         ws: &mut Workspace,
@@ -185,7 +187,9 @@ impl ArgPicker {
     ) {
         let policy = match self.source {
             ValueSource::Buffers => PreviewPolicy::LiveBufferThenFile,
-            ValueSource::Directories | ValueSource::Themes => PreviewPolicy::NoPreview,
+            ValueSource::Directories | ValueSource::Themes | ValueSource::Values(_) => {
+                PreviewPolicy::NoPreview
+            },
             _ => PreviewPolicy::File,
         };
         self.active_core()
@@ -415,17 +419,15 @@ impl CommandPalette {
 
     /// The value source of the current command's first argument when it drives
     /// an inline picker ([`ValueSource::Files`], [`ValueSource::Directories`],
-    /// [`ValueSource::Buffers`], or [`ValueSource::Themes`], e.g. `:o `, `:cd `,
-    /// `:b `, or `:SetTheme `), or `None` otherwise. Gates rendering the picker
-    /// and routing selection keys to it.
+    /// [`ValueSource::Buffers`], [`ValueSource::Themes`], or
+    /// [`ValueSource::Values`], e.g. `:o `, `:cd `, `:b `, `:SetTheme `, or
+    /// `:auto-reload `), or `None` otherwise. Gates rendering the picker and
+    /// routing selection keys to it.
     pub(crate) fn arg_source(&self) -> Option<ValueSource> {
         let param = self.command?.def.params().first()?;
         match param.value_source {
             ValueSource::None => None,
-            source @ (ValueSource::Files
-            | ValueSource::Directories
-            | ValueSource::Buffers
-            | ValueSource::Themes) => Some(source),
+            source => Some(source),
         }
     }
 
@@ -739,7 +741,9 @@ pub(crate) fn refilter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{input_history::InputHistory, test_harness::TestHarness};
+    use crate::{
+        buffer_registry::AutoReloadMode, input_history::InputHistory, test_harness::TestHarness,
+    };
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
     /// point the active workspace at it, so the palette's inline file picker
@@ -753,6 +757,19 @@ mod tests {
         );
         h.stoat.active_workspace_mut().git_root = root.clone();
         root
+    }
+
+    /// The arg picker's filtered rows as the text they display, sorted so an
+    /// assertion pins the row set without pinning the fuzzy ranker's order.
+    fn arg_rows(h: &TestHarness) -> Vec<String> {
+        let picklist = &arg_picker(h).core.picklist;
+        let mut rows: Vec<String> = picklist
+            .filtered
+            .iter()
+            .map(|i| picklist.base[*i].display().to_string())
+            .collect();
+        rows.sort();
+        rows
     }
 
     fn arg_picker(h: &TestHarness) -> &ArgPicker {
@@ -2495,6 +2512,61 @@ mod tests {
             frame.content.contains("UNIQUE-PICKER-MARKER"),
             "selected candidate not opened:\n{}",
             frame.content
+        );
+    }
+
+    #[test]
+    fn arg_picker_lists_an_arguments_fixed_values() {
+        let mut h = Stoat::test();
+        h.type_text(":auto-reload ");
+        h.snapshot();
+        assert_eq!(arg_rows(&h), ["follow", "off", "on"]);
+    }
+
+    #[test]
+    fn arg_picker_lists_open_config_targets() {
+        let mut h = Stoat::test();
+        h.type_text(":config ");
+        h.snapshot();
+        assert_eq!(arg_rows(&h), ["stoat", "stoatty"]);
+    }
+
+    #[test]
+    fn arg_picker_narrows_fixed_values_on_typing() {
+        let mut h = Stoat::test();
+        h.type_text(":auto-reload ff");
+        h.snapshot();
+        assert_eq!(arg_rows(&h), ["off"]);
+    }
+
+    #[test]
+    fn arg_submit_dispatches_selected_value() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("note.txt", "hello\n")]);
+        h.type_text(":o note");
+        h.snapshot();
+        h.type_keys("enter");
+        h.snapshot();
+        let buffer = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor focused")
+            .buffer_id;
+
+        h.type_text(":auto-reload on");
+        h.snapshot();
+        h.type_keys("enter");
+        assert_eq!(
+            h.stoat.active_workspace().buffers.auto_reload_mode(buffer),
+            AutoReloadMode::Tail
+        );
+
+        // "ff" parses as no valid state on its own, so a mode change here can
+        // only have come from the picker's selected "off" row.
+        h.type_text(":auto-reload ff");
+        h.snapshot();
+        h.type_keys("enter");
+        assert_eq!(
+            h.stoat.active_workspace().buffers.auto_reload_mode(buffer),
+            AutoReloadMode::Off
         );
     }
 

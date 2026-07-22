@@ -29,8 +29,12 @@ pub(super) enum ArgCandidates {
 ///
 /// `Files` streams workspace paths via the same background walk the file finder
 /// uses. `Directories` streams the workspace's directories derived from that
-/// walk. `Buffers` returns the currently-open buffer paths. `None` yields no
-/// picker.
+/// walk. `Buffers` returns the currently-open buffer paths. `Values` returns the
+/// argument's accepted spellings. `None` yields no picker.
+///
+/// The non-path sources still ride [`ArgCandidates::Paths`]: the picker filters
+/// and displays a relative path by its text, so a bare name passes through it
+/// unchanged.
 pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCandidates> {
     match source {
         ValueSource::None => None,
@@ -58,6 +62,9 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
                 .collect();
             Some(ArgCandidates::Paths(names))
         },
+        ValueSource::Values(values) => Some(ArgCandidates::Paths(
+            values.iter().map(PathBuf::from).collect(),
+        )),
     }
 }
 

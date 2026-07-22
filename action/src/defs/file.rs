@@ -68,7 +68,7 @@ impl Action for OpenFile {
 const OPEN_CONFIG_PARAMS: &[ParamDef] = &[ParamDef {
     name: "target",
     kind: ParamKind::String,
-    value_source: ValueSource::None,
+    value_source: ValueSource::Values(&["stoat", "stoatty"]),
     required: false,
     description: "stoat (default) or stoatty",
 }];
@@ -293,7 +293,7 @@ impl Action for OpenBuffer {
 const AUTO_RELOAD_PARAMS: &[ParamDef] = &[ParamDef {
     name: "state",
     kind: ParamKind::String,
-    value_source: ValueSource::None,
+    value_source: ValueSource::Values(&["on", "off", "follow"]),
     required: true,
     description: "on, off, or follow",
 }];
@@ -349,7 +349,7 @@ impl Action for AutoReload {
 const AUTO_RELOAD_CONFIG_PARAMS: &[ParamDef] = &[ParamDef {
     name: "state",
     kind: ParamKind::String,
-    value_source: ValueSource::None,
+    value_source: ValueSource::Values(&["on", "off"]),
     required: true,
     description: "on or off",
 }];

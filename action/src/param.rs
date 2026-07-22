@@ -37,6 +37,10 @@ pub enum ValueSource {
     Directories,
     /// Names of the configured theme blocks, for the theme switcher.
     Themes,
+    /// A closed set of accepted values, listed verbatim. Arguments that read
+    /// as an enum (`on`, `off`, `follow`) carry their spellings here so the
+    /// picker can offer them instead of leaving the user to recall them.
+    Values(&'static [&'static str]),
 }
 
 pub struct ParamDef {
