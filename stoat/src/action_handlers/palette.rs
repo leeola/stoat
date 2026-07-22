@@ -389,11 +389,16 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
 /// of `handle_submit` dispatches on the next Enter.
 ///
 /// In argument mode it completes the selected row of any picker-sourced
-/// argument. A browse-mode tail keeps the typed directory prefix and appends the
+/// argument. Pressing it again without editing the tail in between steps to the
+/// next candidate the typed text matched, wrapping at the end, so a run of
+/// presses walks the whole match list.
+///
+/// A browse-mode tail keeps the typed directory prefix and appends the
 /// highlighted child, and no completion appends a trailing `/`, so the browse
 /// stays rooted where it was with the completed name highlighted and a following
 /// Enter opens that entry. Descending is a further `/` the user types, which
-/// re-roots the browse.
+/// re-roots the browse. A browse tail does not cycle, since a completed
+/// directory name is the prefix the next press builds on.
 ///
 /// No-op when no palette is open, or when the list it would complete from is
 /// empty. The picker is refiltered synchronously against the completed tail and
@@ -422,10 +427,20 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
             sync_palette_picker(stoat);
             return UpdateEffect::Redraw;
         }
-        let Some(picker) = palette.arg_picker.as_ref() else {
+        let ws = &stoat.workspaces[active_idx];
+        let text = palette.input.text(ws);
+        let Some((head, typed_tail)) = text.split_once(' ') else {
             return UpdateEffect::None;
         };
-        let ws = &stoat.workspaces[active_idx];
+
+        let git_root = &ws.git_root;
+        let Some(picker) = stoat
+            .command_palette
+            .as_mut()
+            .and_then(|palette| palette.arg_picker.as_mut())
+        else {
+            return UpdateEffect::None;
+        };
 
         let tail = match picker.browse.as_ref() {
             Some(browse) => {
@@ -435,17 +450,13 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
                 format!("{}{}", browse.typed_dir, name.to_string_lossy())
             },
             None => {
-                let Some(selected) = picker.selected_path() else {
+                let Some(cycled) = picker.advance_tab_cycle(typed_tail, git_root) else {
                     return UpdateEffect::None;
                 };
-                crate::paths::display_relative(selected, &ws.git_root)
+                cycled
             },
         };
 
-        let text = palette.input.text(ws);
-        let Some((head, _)) = text.split_once(' ') else {
-            return UpdateEffect::None;
-        };
         format!("{head} {tail}")
     };
 

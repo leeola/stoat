@@ -5,6 +5,7 @@ use crate::{
     host::FsHost,
     input_view::{InputView, SubmitTarget},
     pane::{FocusTarget, View},
+    paths,
     picker::{PathPicker, PreviewPolicy},
     rebase::RebasePause,
     workspace::Workspace,
@@ -87,6 +88,28 @@ pub(crate) struct ArgPicker {
     /// the typed directory, leaving `core` untouched so backspacing out of the
     /// path restores the workspace list.
     pub(crate) browse: Option<Browse>,
+    /// Position within a run of Tab presses, or `None` when the last Tab did
+    /// not complete or its result has since been edited. Driven entirely by
+    /// [`Self::advance_tab_cycle`].
+    cycle: Option<TabCycle>,
+}
+
+/// A run of Tab presses walking one query's matches.
+///
+/// Completing narrows the picker to the completed value, which would leave
+/// every later Tab re-completing that same row. Remembering the query the run
+/// started from lets each press restore the original match list and step one
+/// further into it.
+struct TabCycle {
+    /// Filter text the run started from. Refiltering against it undoes the
+    /// narrowing the previous completion caused.
+    query: String,
+    /// Row last completed, as an index into `query`'s match list.
+    index: usize,
+    /// Text last written into the argument tail. A tail that still equals it
+    /// means no edit landed between the two presses, which is what makes the
+    /// next press a continuation rather than a new run.
+    completed: String,
 }
 
 impl ArgPicker {
@@ -104,7 +127,55 @@ impl ArgPicker {
             source,
             core,
             browse: None,
+            cycle: None,
         }
+    }
+
+    /// The tail a Tab press should complete into the argument, advancing the
+    /// Tab cycle over the candidates matching what the user typed.
+    ///
+    /// The first press completes the highlighted row. Each press after it,
+    /// recognized by `tail` still holding the previous press's result, steps to
+    /// the next match of the query the run began with and wraps at the end, so
+    /// a run of presses walks every candidate. Any edit to the tail in between
+    /// ends the run, and the next press starts a fresh one from the edited
+    /// text.
+    ///
+    /// Returns [`None`] when no row is selectable, leaving the input untouched.
+    pub(crate) fn advance_tab_cycle(&mut self, tail: &str, git_root: &Path) -> Option<String> {
+        let resumed = self
+            .cycle
+            .as_ref()
+            .filter(|cycle| cycle.completed == tail)
+            .map(|cycle| (cycle.query.clone(), cycle.index));
+
+        let (query, index) = match resumed {
+            Some((query, previous)) => {
+                self.active_core().refilter(&query);
+                let matches = self.active_core_ref().picklist.filtered.len();
+                if matches == 0 {
+                    self.cycle = None;
+                    return None;
+                }
+                let index = (previous + 1) % matches;
+                self.active_core().picklist.selected = index;
+                (query, index)
+            },
+            None => (tail.to_string(), self.active_core_ref().picklist.selected),
+        };
+
+        let Some(selected) = self.selected_path() else {
+            self.cycle = None;
+            return None;
+        };
+        let completed = paths::display_relative(selected, git_root);
+
+        self.cycle = Some(TabCycle {
+            query,
+            index,
+            completed: completed.clone(),
+        });
+        Some(completed)
     }
 
     /// The picker currently driving the list. Browse mode (a `/` or `~/`
@@ -1822,6 +1893,70 @@ mod tests {
             palette_arg_tail(&h).as_deref(),
             Some("gruvbox-dark"),
             "Tab completes the highlighted theme row into the tail"
+        );
+    }
+
+    /// Press Tab and return the resulting argument tail.
+    fn tab_tail(h: &mut TestHarness) -> Option<String> {
+        h.type_keys("tab");
+        let _ = h.snapshot();
+        palette_arg_tail(h)
+    }
+
+    #[test]
+    fn repeated_tab_cycles_values_and_wraps() {
+        let mut h = Stoat::test();
+        h.type_text(":auto-reload ");
+        let _ = h.snapshot();
+
+        let cycled: Vec<String> = (0..4).filter_map(|_| tab_tail(&mut h)).collect();
+        assert_eq!(cycled, ["follow", "off", "on", "follow"]);
+    }
+
+    #[test]
+    fn repeated_tab_cycles_only_matched_values() {
+        let mut h = Stoat::test();
+        h.type_text(":auto-reload f");
+        let _ = h.snapshot();
+
+        let cycled: Vec<String> = (0..3).filter_map(|_| tab_tail(&mut h)).collect();
+        assert_eq!(
+            cycled,
+            ["follow", "off", "follow"],
+            "\"on\" never matched f"
+        );
+    }
+
+    #[test]
+    fn editing_between_tabs_restarts_the_cycle() {
+        let mut h = Stoat::test();
+        h.type_text(":auto-reload ");
+        let _ = h.snapshot();
+        assert_eq!(tab_tail(&mut h).as_deref(), Some("follow"));
+
+        h.type_keys("backspace");
+        let _ = h.snapshot();
+        assert_eq!(
+            tab_tail(&mut h).as_deref(),
+            Some("follow"),
+            "an edited tail completes afresh rather than advancing to \"off\""
+        );
+    }
+
+    #[test]
+    fn repeated_tab_cycles_file_candidates() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("wsdir/alpha.rs", ""), ("wsdir/beta.rs", "")]);
+        h.type_text(":OpenFile wsdir/");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        let first = tab_tail(&mut h);
+        let second = tab_tail(&mut h);
+        assert_eq!(
+            (first.as_deref(), second.as_deref()),
+            (Some("wsdir/alpha.rs"), Some("wsdir/beta.rs"))
         );
     }
 
