@@ -923,6 +923,7 @@ on key {
         num -> [SetMode(normal), GotoTab($num)];
         0 -> [SetMode(normal), GotoTab(10)];
         t -> SetMode(prefix_tab);
+        m -> SetMode(prefix_move);
     }
     mode == prefix_tab {
         Escape -> SetMode(normal);
@@ -941,5 +942,20 @@ on key {
         Tab -> [SetMode(normal), ToggleTab()];
         num -> [SetMode(normal), GotoTab($num)];
         0 -> [SetMode(normal), GotoTab(10)];
+    }
+    mode == prefix_move {
+        Escape -> SetMode(normal);
+        Ctrl-a -> SetMode(normal);
+        h -> MovePaneLeft();
+        Left -> MovePaneLeft();
+        j -> MovePaneDown();
+        Down -> MovePaneDown();
+        k -> MovePaneUp();
+        Up -> MovePaneUp();
+        l -> MovePaneRight();
+        Right -> MovePaneRight();
+        n -> MovePaneNext();
+        Tab -> MovePaneNext();
+        p -> MovePanePrev();
     }
 }

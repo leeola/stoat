@@ -1458,6 +1458,53 @@ mod tests {
     }
 
     #[test]
+    fn ca_m_move_mode_chords_move_the_pane_and_hold() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
+        let m = keymap
+            .lookup(&prefix, &key_event(KeyCode::Char('m'), KeyModifiers::NONE))
+            .expect("m is bound in prefix mode");
+        assert_eq!(m[0].name, "SetMode");
+        assert_eq!(m[0].args[0].value, Value::Ident("prefix_move".into()));
+
+        let mv = TestState::new().set("mode", StateValue::String("prefix_move".into()));
+
+        let h = keymap
+            .lookup(&mv, &key_event(KeyCode::Char('h'), KeyModifiers::NONE))
+            .expect("h is bound in prefix_move mode");
+        assert_eq!(
+            h.len(),
+            1,
+            "a move key holds the mode, resetting nothing so presses repeat"
+        );
+        assert_eq!(h[0].name, "MovePaneLeft");
+
+        let l = keymap
+            .lookup(&mv, &key_event(KeyCode::Char('l'), KeyModifiers::NONE))
+            .expect("l is bound in prefix_move mode");
+        assert_eq!(l[0].name, "MovePaneRight");
+
+        let n = keymap
+            .lookup(&mv, &key_event(KeyCode::Char('n'), KeyModifiers::NONE))
+            .expect("n is bound in prefix_move mode");
+        assert_eq!(n[0].name, "MovePaneNext");
+
+        let esc = keymap
+            .lookup(&mv, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in prefix_move mode");
+        assert_eq!(esc[0].name, "SetMode");
+        assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
+
+        let ctrl_a = keymap
+            .lookup(&mv, &key_event(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .expect("Ctrl-a is bound in prefix_move mode");
+        assert_eq!(ctrl_a[0].name, "SetMode");
+        assert_eq!(ctrl_a[0].args[0].value, Value::Ident("normal".into()));
+    }
+
+    #[test]
     fn diff_view_does_not_shadow_normal_mode_keys() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
