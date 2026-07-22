@@ -44,11 +44,17 @@ pub enum MouseKind {
 }
 
 /// A pointer button named by a [`MouseKind`].
+///
+/// [`Self::Back`] and [`Self::Forward`] are the side buttons (m4/m5). They have
+/// no in-band terminal encoding a child can parse, so this socket is the only
+/// way they reach one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MouseButton {
     Left,
     Middle,
     Right,
+    Back,
+    Forward,
 }
 
 impl MouseKind {
@@ -85,6 +91,8 @@ impl MouseButton {
             MouseButton::Left => "left",
             MouseButton::Middle => "middle",
             MouseButton::Right => "right",
+            MouseButton::Back => "back",
+            MouseButton::Forward => "forward",
         }
     }
 
@@ -93,6 +101,8 @@ impl MouseButton {
             "left" => Some(MouseButton::Left),
             "middle" => Some(MouseButton::Middle),
             "right" => Some(MouseButton::Right),
+            "back" => Some(MouseButton::Back),
+            "forward" => Some(MouseButton::Forward),
             _ => None,
         }
     }
@@ -242,9 +252,45 @@ mod tests {
                 row: 0,
                 mods: 1,
             },
+            WindowIpcEvent::Mouse {
+                window: 0,
+                kind: MouseKind::Press(MouseButton::Back),
+                col: 3,
+                row: 7,
+                mods: 0,
+            },
+            WindowIpcEvent::Mouse {
+                window: 0,
+                kind: MouseKind::Press(MouseButton::Forward),
+                col: 3,
+                row: 7,
+                mods: 0,
+            },
         ] {
             assert_eq!(parse_line(&event.encode_line()), Some(event));
         }
+    }
+
+    #[test]
+    fn side_buttons_encode_by_name() {
+        let line = |kind| {
+            WindowIpcEvent::Mouse {
+                window: 0,
+                kind,
+                col: 3,
+                row: 7,
+                mods: 0,
+            }
+            .encode_line()
+        };
+        assert_eq!(
+            line(MouseKind::Press(MouseButton::Back)),
+            "mouse 0 3 7 0 press back"
+        );
+        assert_eq!(
+            line(MouseKind::Press(MouseButton::Forward)),
+            "mouse 0 3 7 0 press forward"
+        );
     }
 
     #[test]

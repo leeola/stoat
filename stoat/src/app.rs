@@ -1775,6 +1775,41 @@ impl Stoat {
         UpdateEffect::Redraw
     }
 
+    /// Walk the jumplist for a press of the back or forward side button,
+    /// returning [`None`] when `kind` names any other button.
+    ///
+    /// These buttons reach stoat only over the window socket, since no in-band
+    /// terminal encoding carries them, so this runs before the window's pane
+    /// binding is resolved. The primary window has no binding of its own, and
+    /// its presses act on whatever pane holds focus. An aux window's presses
+    /// focus its pane first, as its other gestures do.
+    ///
+    /// Handling every gesture of both buttons here is what keeps them away from
+    /// [`mouse_event_kind`], which has no crossterm button to map them onto.
+    fn handle_jumplist_buttons(&mut self, window: u32, kind: MouseKind) -> Option<UpdateEffect> {
+        let backward = match kind {
+            MouseKind::Press(IpcMouseButton::Back) => true,
+            MouseKind::Press(IpcMouseButton::Forward) => false,
+            MouseKind::Release(IpcMouseButton::Back | IpcMouseButton::Forward)
+            | MouseKind::Drag(IpcMouseButton::Back | IpcMouseButton::Forward) => {
+                return Some(UpdateEffect::None);
+            },
+            _ => return None,
+        };
+
+        if window != 0
+            && let Some(pane_id) = pane_for_window(&self.active_workspace().panes, window)
+        {
+            self.active_workspace_mut().panes.set_focus(pane_id);
+        }
+
+        Some(if backward {
+            action_handlers::jump::jump_backward(self)
+        } else {
+            action_handlers::jump::jump_forward(self)
+        })
+    }
+
     /// Route a pointer event from aux window `window` to the pane bound to it.
     ///
     /// Resolves the window's pane and focuses it, so the shared apply targets it
@@ -1789,6 +1824,10 @@ impl Stoat {
         col: u16,
         row: u16,
     ) -> UpdateEffect {
+        if let Some(effect) = self.handle_jumplist_buttons(window, kind) {
+            return effect;
+        }
+
         let Some(pane_id) = pane_for_window(&self.active_workspace().panes, window) else {
             return UpdateEffect::None;
         };
@@ -1803,8 +1842,11 @@ impl Stoat {
             return self.scroll_view_at(view, area, matches!(kind, MouseKind::WheelDown));
         }
 
+        let Some(kind) = mouse_event_kind(kind) else {
+            return UpdateEffect::None;
+        };
         self.active_workspace_mut().panes.set_focus(pane_id);
-        self.apply_focused_pane_mouse(mouse_event_kind(kind), col, row)
+        self.apply_focused_pane_mouse(kind, col, row)
     }
 
     /// Inject the version string the `ShowVersion` action reports. The binary
@@ -8617,21 +8659,26 @@ fn pane_for_window(panes: &PaneTree, window: u32) -> Option<PaneId> {
 /// Map an aux window's pointer gesture onto the crossterm event kind the pane
 /// mouse handlers dispatch on. A wheel becomes a scroll. A button gesture keeps
 /// its button.
-fn mouse_event_kind(kind: MouseKind) -> MouseEventKind {
-    match kind {
-        MouseKind::Press(button) => MouseEventKind::Down(mouse_button(button)),
-        MouseKind::Release(button) => MouseEventKind::Up(mouse_button(button)),
-        MouseKind::Drag(button) => MouseEventKind::Drag(mouse_button(button)),
+///
+/// [`None`] for the side buttons, which crossterm does not model.
+/// [`Stoat::handle_jumplist_buttons`] takes every gesture of those before this
+/// runs, so the case does not arise in practice.
+fn mouse_event_kind(kind: MouseKind) -> Option<MouseEventKind> {
+    Some(match kind {
+        MouseKind::Press(button) => MouseEventKind::Down(mouse_button(button)?),
+        MouseKind::Release(button) => MouseEventKind::Up(mouse_button(button)?),
+        MouseKind::Drag(button) => MouseEventKind::Drag(mouse_button(button)?),
         MouseKind::WheelUp => MouseEventKind::ScrollUp,
         MouseKind::WheelDown => MouseEventKind::ScrollDown,
-    }
+    })
 }
 
-fn mouse_button(button: IpcMouseButton) -> MouseButton {
+fn mouse_button(button: IpcMouseButton) -> Option<MouseButton> {
     match button {
-        IpcMouseButton::Left => MouseButton::Left,
-        IpcMouseButton::Middle => MouseButton::Middle,
-        IpcMouseButton::Right => MouseButton::Right,
+        IpcMouseButton::Left => Some(MouseButton::Left),
+        IpcMouseButton::Middle => Some(MouseButton::Middle),
+        IpcMouseButton::Right => Some(MouseButton::Right),
+        IpcMouseButton::Back | IpcMouseButton::Forward => None,
     }
 }
 
@@ -8864,6 +8911,69 @@ mod tests {
             stoat.active_workspace().panes.focus(),
             split,
             "focused(0) returns focus to the split layout"
+        );
+    }
+
+    /// The buffer shown in the focused editor.
+    fn focused_buffer(h: &crate::test_harness::TestHarness) -> BufferId {
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("focused editor");
+        h.stoat
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .expect("editor exists")
+            .buffer_id
+    }
+
+    #[test]
+    fn window_ipc_side_buttons_walk_the_jumplist() {
+        use crate::test_harness::TestHarness;
+        use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
+
+        let mut h = TestHarness::with_size(40, 6);
+        let a = h.write_file("a.rs", "aaaa\nbbbb\n");
+        let b = h.write_file("b.rs", "xxxx\nyyyy\n");
+
+        h.open_file(&a);
+        h.type_keys("l");
+        let a_buffer = focused_buffer(&h);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.open_file(&b);
+        let b_buffer = focused_buffer(&h);
+        h.type_keys("l");
+
+        let side_event = |kind| {
+            WindowIpc::Event(WindowIpcEvent::Mouse {
+                window: 0,
+                kind,
+                col: 0,
+                row: 0,
+                mods: 0,
+            })
+        };
+
+        h.stoat
+            .handle_window_ipc(side_event(MouseKind::Press(IpcMouseButton::Back)));
+        assert_eq!(
+            (focused_buffer(&h), h.primary_head_offset()),
+            (a_buffer, 1),
+            "back re-shows a.rs at the saved offset"
+        );
+
+        h.stoat
+            .handle_window_ipc(side_event(MouseKind::Press(IpcMouseButton::Forward)));
+        assert_eq!(
+            (focused_buffer(&h), h.primary_head_offset()),
+            (b_buffer, 1),
+            "forward returns to where the jump left b.rs"
+        );
+
+        h.stoat
+            .handle_window_ipc(side_event(MouseKind::Release(IpcMouseButton::Back)));
+        assert_eq!(
+            (focused_buffer(&h), h.primary_head_offset()),
+            (b_buffer, 1),
+            "a release moves nothing, so one click walks one entry"
         );
     }
 

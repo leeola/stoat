@@ -1877,6 +1877,28 @@ impl ApplicationHandler<PtyEvent> for App {
                 button,
                 ..
             } => {
+                // The side buttons ride the window socket rather than the pty.
+                // Their xterm encoding sets the 128 bit, which the child's
+                // parser rejects outright, so no in-band report could reach it.
+                if matches!(button, MouseButton::Back | MouseButton::Forward)
+                    && let Some(ipc) = ipc_button(button)
+                {
+                    if element_state == ElementState::Pressed {
+                        let (col, row) = state.pointer_cell;
+                        send_window_event(
+                            state,
+                            WindowIpcEvent::Mouse {
+                                window: 0,
+                                kind: MouseKind::Press(ipc),
+                                col: col as u16,
+                                row: row as u16,
+                                mods: modifier_bits(state.modifiers),
+                            },
+                        );
+                    }
+                    return;
+                }
+
                 let code = match button {
                     MouseButton::Left => 0,
                     MouseButton::Middle => 1,
@@ -2201,13 +2223,15 @@ fn ctrl_byte(s: &str) -> Option<Vec<u8>> {
 /// `cell_height` into the same accumulator, so a whole-notch mouse (`y = 1.0`)
 /// still moves one line per event while a hi-res wheel's fractional line deltas
 /// carry across events instead of rounding to zero.
-/// Map a winit pointer button to the protocol button, or `None` for a button
-/// the pane mouse path does not act on (back, forward, extra).
+/// Map a winit pointer button to the protocol button, or `None` for one the
+/// protocol does not name (the extra buttons past forward).
 fn ipc_button(button: MouseButton) -> Option<IpcMouseButton> {
     match button {
         MouseButton::Left => Some(IpcMouseButton::Left),
         MouseButton::Middle => Some(IpcMouseButton::Middle),
         MouseButton::Right => Some(IpcMouseButton::Right),
+        MouseButton::Back => Some(IpcMouseButton::Back),
+        MouseButton::Forward => Some(IpcMouseButton::Forward),
         _ => None,
     }
 }
@@ -3195,7 +3219,7 @@ mod tests {
     use super::{
         alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, bell_should_ring,
         block_corners, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners, encode_key,
-        font_step, modifier_bits, paste_bytes, popover_overflow, seed_settle_flight,
+        font_step, ipc_button, modifier_bits, paste_bytes, popover_overflow, seed_settle_flight,
         selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor,
         step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
         step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation,
@@ -3823,6 +3847,20 @@ mod tests {
             b"\x1b[<35;1;1M".to_vec(),
             "buttonless any-motion is the no-button code 3+32=35 at the origin"
         );
+    }
+
+    #[test]
+    fn ipc_button_names_the_side_buttons() {
+        use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
+        use winit::event::MouseButton;
+
+        assert_eq!(ipc_button(MouseButton::Back), Some(IpcMouseButton::Back));
+        assert_eq!(
+            ipc_button(MouseButton::Forward),
+            Some(IpcMouseButton::Forward)
+        );
+        assert_eq!(ipc_button(MouseButton::Left), Some(IpcMouseButton::Left));
+        assert_eq!(ipc_button(MouseButton::Other(9)), None);
     }
 
     #[test]

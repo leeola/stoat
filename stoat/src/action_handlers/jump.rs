@@ -126,7 +126,7 @@ pub(super) fn save_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::None
 }
 
-pub(super) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let Some(live) = live_entry(stoat) else {
         return UpdateEffect::None;
@@ -151,7 +151,7 @@ pub(super) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn jump_forward(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn jump_forward(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let target = {
         let ws = stoat.active_workspace_mut();
