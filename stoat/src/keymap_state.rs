@@ -477,6 +477,22 @@ pub(crate) fn action_display_desc(action: &ResolvedAction) -> String {
         .unwrap_or_else(|| action.name.clone())
 }
 
+/// The hint label for a whole binding, naming what the key actually does.
+///
+/// A chord binding leads with `SetMode(normal)` so the origin editor's mode
+/// resets before the action runs, which means the first action describes the
+/// mode reset rather than the key's purpose. The label therefore names the
+/// first action that is not a mode switch, and falls back to the first action
+/// for a binding that only switches modes.
+pub(crate) fn binding_display_desc(actions: &[ResolvedAction]) -> String {
+    actions
+        .iter()
+        .find(|action| action.name != "SetMode")
+        .or_else(|| actions.first())
+        .map(action_display_desc)
+        .unwrap_or_default()
+}
+
 /// Build the action `name` with `args`, or `None` if unknown or an argument
 /// cannot be converted.
 ///
@@ -512,6 +528,7 @@ pub(crate) fn resolve_action(
 mod tests {
     use super::*;
     use crate::run::RunId;
+    use stoat_config::Value;
 
     fn field(state: &StoatKeymapState<'_>, name: &str) -> Option<String> {
         match state.get(name) {
@@ -763,5 +780,51 @@ mod tests {
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "sidebar"), Some("on".to_string()));
         assert_eq!(field(&state, "mode"), Some("normal".to_string()));
+    }
+
+    fn resolved(name: &str, args: Vec<Value>) -> ResolvedAction {
+        ResolvedAction {
+            name: name.to_string(),
+            args: args
+                .into_iter()
+                .map(|value| ResolvedArg { name: None, value })
+                .collect(),
+        }
+    }
+
+    fn set_mode(target: &str) -> ResolvedAction {
+        resolved("SetMode", vec![Value::Ident(target.to_string())])
+    }
+
+    #[test]
+    fn binding_desc_names_the_action_behind_a_mode_reset() {
+        let actions = [set_mode("normal"), resolved("PrevTab", vec![])];
+        assert_eq!(
+            binding_display_desc(&actions),
+            "switch to the previous tab",
+            "the leading mode reset is not what the key does"
+        );
+    }
+
+    #[test]
+    fn binding_desc_names_an_action_with_args_behind_a_mode_reset() {
+        let actions = [
+            set_mode("normal"),
+            resolved("GotoTab", vec![Value::Number(3.0)]),
+        ];
+        assert_eq!(binding_display_desc(&actions), "switch to tab by number");
+    }
+
+    #[test]
+    fn binding_desc_of_a_bare_mode_switch_names_the_mode() {
+        assert_eq!(binding_display_desc(&[set_mode("normal")]), "normal mode");
+    }
+
+    #[test]
+    fn binding_desc_of_a_bare_prefix_switch_names_the_prefix_mode() {
+        assert_eq!(
+            binding_display_desc(&[set_mode("prefix_tab")]),
+            "prefix_tab mode"
+        );
     }
 }

@@ -42,7 +42,7 @@ use crate::{
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
     keymap_state::{
-        action_display_desc, cursor_token, focus_flags, Flags, FocusFlags, StoatKeymapState,
+        binding_display_desc, cursor_token, focus_flags, Flags, FocusFlags, StoatKeymapState,
     },
     minimap::MinimapContent,
     pane::{DockVisibility, FocusTarget, View},
@@ -803,12 +803,7 @@ pub(crate) fn frame(
             };
             let bindings: Vec<(&str, String)> = raw
                 .iter()
-                .map(|(key, actions)| {
-                    (
-                        key.as_str(),
-                        actions.first().map(action_display_desc).unwrap_or_default(),
-                    )
-                })
+                .map(|(key, actions)| (key.as_str(), binding_display_desc(actions)))
                 .collect();
             stoat.hints_cache = Some(hints::HintsCache {
                 key,
@@ -937,12 +932,7 @@ fn cached_modal_hints(
         let raw = keymap.scoped_bindings(&state, "modal", modal);
         let bindings: Vec<(&str, String)> = raw
             .iter()
-            .map(|(key, actions)| {
-                (
-                    key.as_str(),
-                    actions.first().map(action_display_desc).unwrap_or_default(),
-                )
-            })
+            .map(|(key, actions)| (key.as_str(), binding_display_desc(actions)))
             .collect();
         *cache = Some(hints::HintsCache {
             key,
