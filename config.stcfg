@@ -806,6 +806,7 @@ on key {
     }
     mode == space_git {
         Escape -> SetMode(normal);
+        g -> SetMode(git_pin);
         d -> [Diff(), SetMode(normal)];
         s -> [StageHunk(), SetMode(normal)];
         u -> [UnstageHunk(), SetMode(normal)];
@@ -816,6 +817,26 @@ on key {
         p -> [GotoPrevChange(), SetMode(normal)];
         m -> [JumpToMoveSource(), SetMode(normal)];
         M -> [JumpToMoveTarget(), SetMode(normal)];
+    }
+    # The git chord, pinned. Only a binding changes the mode, never the action
+    # it runs, so space_git releases after one key purely because each of its
+    # bindings chains SetMode(normal). Dropping that chain is what holds the
+    # mode, letting n and s repeat to walk and stage hunks until Escape.
+    #
+    # Keys absent here are dead rather than falling back to normal mode, since
+    # bindings resolve within one mode only.
+    mode == git_pin {
+        Escape -> SetMode(normal);
+        d -> Diff();
+        s -> StageHunk();
+        u -> UnstageHunk();
+        S -> StageLine();
+        U -> UnstageLine();
+        t -> ToggleStageHunk();
+        n -> GotoNextChange();
+        p -> GotoPrevChange();
+        m -> JumpToMoveSource();
+        M -> JumpToMoveTarget();
     }
     mode == space_lsp {
         Escape -> SetMode(normal);

@@ -1505,6 +1505,46 @@ mod tests {
     }
 
     #[test]
+    fn space_g_g_pins_the_git_mode_and_holds_it() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+
+        let space_git = TestState::new().set("mode", StateValue::String("space_git".into()));
+        let g = keymap
+            .lookup(
+                &space_git,
+                &key_event(KeyCode::Char('g'), KeyModifiers::NONE),
+            )
+            .expect("g is bound in space_git mode");
+        assert_eq!(g[0].name, "SetMode");
+        assert_eq!(g[0].args[0].value, Value::Ident("git_pin".into()));
+
+        let pinned = TestState::new().set("mode", StateValue::String("git_pin".into()));
+
+        let n = keymap
+            .lookup(&pinned, &key_event(KeyCode::Char('n'), KeyModifiers::NONE))
+            .expect("n is bound in git_pin mode");
+        assert_eq!(
+            n.len(),
+            1,
+            "hopping holds the mode, resetting nothing so presses repeat"
+        );
+        assert_eq!(n[0].name, "GotoNextChange");
+
+        let s = keymap
+            .lookup(&pinned, &key_event(KeyCode::Char('s'), KeyModifiers::NONE))
+            .expect("s is bound in git_pin mode");
+        assert_eq!(s.len(), 1, "staging holds the mode too");
+        assert_eq!(s[0].name, "StageHunk");
+
+        let esc = keymap
+            .lookup(&pinned, &key_event(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Escape is bound in git_pin mode");
+        assert_eq!(esc[0].name, "SetMode");
+        assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
+    }
+
+    #[test]
     fn diff_view_does_not_shadow_normal_mode_keys() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
