@@ -3828,11 +3828,15 @@ impl Stoat {
             return effect;
         }
 
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            if let Some(hit) = self
-                .active_workspace()
-                .panes
-                .divider_at(mouse.column, mouse.row)
+        // Every button focuses the pane under the pointer, not just the left.
+        // The translation below is relative to the focused pane, so a middle or
+        // right click elsewhere would otherwise land in the wrong buffer.
+        if let MouseEventKind::Down(button) = mouse.kind {
+            if button == MouseButton::Left
+                && let Some(hit) = self
+                    .active_workspace()
+                    .panes
+                    .divider_at(mouse.column, mouse.row)
             {
                 self.divider_drag = Some(hit);
                 return UpdateEffect::Redraw;
@@ -4370,6 +4374,28 @@ impl Stoat {
         UpdateEffect::Redraw
     }
 
+    /// Collapse the focused editor's selection to a block cursor on the cell at
+    /// `col`/`row`, returning the buffer it landed in.
+    ///
+    /// [`None`] when the cell maps to no text position, such as a click in the
+    /// diagnostic gutter, leaving the cursor where it was.
+    fn place_cursor_at_click(
+        &mut self,
+        editor_id: EditorId,
+        area: Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<BufferId> {
+        let offset = self.editor_screen_to_offset(editor_id, area, col, row)?;
+
+        let ws = self.active_workspace_mut();
+        let editor = ws.editors.get_mut(editor_id).expect("editor exists");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        editor.selections.set_block_cursor(offset, buf_snap);
+        Some(editor.buffer_id)
+    }
+
     fn handle_editor_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
         let Some((editor_id, area)) = self.focused_editor_target() else {
             return false;
@@ -4380,18 +4406,34 @@ impl Stoat {
 
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let Some(offset) = self.editor_screen_to_offset(editor_id, area, col, row) else {
+                let Some(buffer_id) = self.place_cursor_at_click(editor_id, area, col, row) else {
                     return false;
                 };
-                let buffer_id = {
-                    let ws = self.active_workspace_mut();
-                    let editor = ws.editors.get_mut(editor_id).expect("editor exists");
-                    let snapshot = editor.display_map.snapshot();
-                    let buf_snap = snapshot.buffer_snapshot();
-                    editor.selections.set_block_cursor(offset, buf_snap);
-                    editor.buffer_id
-                };
                 self.editor_drag = Some((editor_id, buffer_id, false));
+                true
+            },
+            // Middle and right click drive the cursor-based LSP handlers, so
+            // they place the cursor first and the request reads the clicked
+            // symbol. Neither arms editor_drag, since a following Drag belongs
+            // to whatever left-button selection was in progress.
+            MouseEventKind::Down(MouseButton::Middle) => {
+                if self
+                    .place_cursor_at_click(editor_id, area, col, row)
+                    .is_none()
+                {
+                    return false;
+                }
+                action_handlers::lsp::goto_definition(self);
+                true
+            },
+            MouseEventKind::Down(MouseButton::Right) => {
+                if self
+                    .place_cursor_at_click(editor_id, area, col, row)
+                    .is_none()
+                {
+                    return false;
+                }
+                action_handlers::lsp::hover(self);
                 true
             },
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -18300,6 +18342,123 @@ mod tests {
         ));
         assert_eq!(focused_primary_offsets(&mut h), (3, 4));
         assert!(h.stoat.editor_drag.is_some(), "drag state armed");
+    }
+
+    /// Seed a definition-capable fake server, open `main.rs` holding
+    /// `abc\ndef\nghi\n`, and return its path.
+    fn open_file_with_lsp(h: &mut crate::test_harness::TestHarness) -> PathBuf {
+        use lsp_types::{OneOf, ServerCapabilities};
+
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            definition_provider: Some(OneOf::Left(true)),
+            hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+            ..Default::default()
+        });
+
+        let root = PathBuf::from("/mouse-lsp");
+        let path = root.join("main.rs");
+        h.fake_fs().insert_files(std::iter::once((
+            path.clone(),
+            b"abc\ndef\nghi\n".as_slice(),
+        )));
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        path
+    }
+
+    #[test]
+    fn middle_click_jumps_to_the_clicked_symbols_definition() {
+        let mut h = Stoat::test();
+        let path = open_file_with_lsp(&mut h);
+        let uri = path.to_str().expect("utf8 path");
+        h.fake_lsp().set_definition(uri, 1, 1, uri, 2, 0);
+
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Middle),
+            area.x + 1,
+            area.y + 1,
+        ));
+        h.settle();
+
+        assert!(
+            h.stoat.location_picker.is_none(),
+            "a single target skips the picker"
+        );
+        assert_eq!(
+            focused_primary_offsets(&mut h),
+            (8, 9),
+            "the jump landed on line 3, so the request read the clicked cell"
+        );
+    }
+
+    #[test]
+    fn middle_click_with_several_definitions_opens_the_picker() {
+        let mut h = Stoat::test();
+        let path = open_file_with_lsp(&mut h);
+        let uri = path.to_str().expect("utf8 path");
+        h.fake_lsp()
+            .set_definitions(uri, 0, 0, &[(uri, 1, 0), (uri, 2, 0)]);
+
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Middle),
+            area.x,
+            area.y,
+        ));
+        h.settle();
+
+        let picker = h.stoat.location_picker.as_ref().expect("picker open");
+        assert_eq!(picker.entries().len(), 2);
+    }
+
+    #[test]
+    fn right_click_requests_hover_at_the_clicked_cell() {
+        let mut h = Stoat::test();
+        open_file_with_lsp(&mut h);
+
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Right),
+            area.x + 2,
+            area.y + 1,
+        ));
+
+        assert_eq!(
+            focused_primary_offsets(&mut h),
+            (6, 7),
+            "hover reads the cursor, which the click moved to the clicked cell"
+        );
+        assert!(h.stoat.pending_hover_request.is_some(), "hover requested");
+        assert!(
+            h.stoat.editor_drag.is_none(),
+            "a right click is not a selection gesture"
+        );
+    }
+
+    #[test]
+    fn middle_click_focuses_the_pane_it_lands_in() {
+        let mut h = Stoat::test();
+        open_file_with_lsp(&mut h);
+        let left_pane = {
+            let ws = h.stoat.active_workspace_mut();
+            let left_pane = ws.panes.focus();
+            let right_pane = ws.panes.split(crate::pane::Axis::Vertical);
+            ws.panes.set_focus(right_pane);
+            ws.panes.pane_mut(left_pane).area = Rect::new(0, 0, 40, 24);
+            ws.panes.pane_mut(right_pane).area = Rect::new(40, 0, 40, 24);
+            left_pane
+        };
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Middle), 5, 5));
+
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            left_pane,
+            "the click focuses the pane under the pointer before dispatching"
+        );
     }
 
     #[test]
