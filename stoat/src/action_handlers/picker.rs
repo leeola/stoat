@@ -112,7 +112,7 @@ pub(super) fn location_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// Jump the focused editor to the goto candidate under the picker's
 /// selection, reusing the same apply path a single-location goto takes.
 /// An empty picker just closes.
-pub(super) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.location_picker.take() else {
         return UpdateEffect::None;
     };

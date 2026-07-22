@@ -3775,6 +3775,50 @@ impl Stoat {
         }
     }
 
+    /// Route a mouse press to the open location picker.
+    ///
+    /// A left press on a row selects it, and a press on the row already selected
+    /// jumps to it. The two-step keeps a misclick from navigating away, which
+    /// single-click-to-jump could not, and needs none of the timing machinery a
+    /// double-click would. Every other press, drag, and release is swallowed so
+    /// the buffer beneath keeps its cursor and focus.
+    fn handle_location_picker_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        let MouseEventKind::Down(MouseButton::Left) = mouse.kind else {
+            return UpdateEffect::None;
+        };
+        let Some(picker) = self.location_picker.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let (entries_len, selected) = (picker.entries().len(), picker.selected());
+
+        let Some((_, inner)) =
+            crate::render::location_picker::location_picker_layout(self.size(), entries_len)
+        else {
+            return UpdateEffect::None;
+        };
+        if !inner.contains(Position::new(mouse.column, mouse.row)) {
+            return UpdateEffect::None;
+        }
+
+        let start = crate::render::location_picker::location_picker_window_start(
+            selected,
+            inner.height as usize,
+        );
+        let index = start + (mouse.row - inner.y) as usize;
+        if index >= entries_len {
+            return UpdateEffect::None;
+        }
+        if index == selected {
+            return action_handlers::picker::location_picker_select(self);
+        }
+
+        self.location_picker
+            .as_mut()
+            .expect("picker present")
+            .set_selected(index);
+        UpdateEffect::Redraw
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
         if matches!(
             mouse.kind,
@@ -3784,6 +3828,10 @@ impl Stoat {
         }
         if let MouseEventKind::Moved = mouse.kind {
             return self.handle_hover(mouse.column, mouse.row);
+        }
+
+        if self.location_picker.is_some() {
+            return self.handle_location_picker_mouse(mouse);
         }
 
         // While a finder or palette modal is open, its list owns the pointer: a
@@ -4078,6 +4126,17 @@ impl Stoat {
     /// plain stepped scrolling of its output, three rows per notch, clamped to
     /// the top. Anything else drops the event.
     fn handle_mouse_scroll(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        // The location picker is modal, so it owns the wheel wherever the
+        // pointer sits and browses its candidates with it.
+        if let Some(picker) = self.location_picker.as_mut() {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => picker.select_next(),
+                MouseEventKind::ScrollUp => picker.select_prev(),
+                _ => return UpdateEffect::None,
+            }
+            return UpdateEffect::Redraw;
+        }
+
         // A wheel while a finder or palette modal is open moves its selection
         // rather than scrolling the pane beneath, so the event never falls
         // through. The two modals are mutually exclusive, so two checks suffice.
@@ -18342,6 +18401,186 @@ mod tests {
         ));
         assert_eq!(focused_primary_offsets(&mut h), (3, 4));
         assert!(h.stoat.editor_drag.is_some(), "drag state armed");
+    }
+
+    /// Open a location picker over `count` candidates in a seeded file, each
+    /// row's text naming its 1-based position, and return the file's path.
+    fn open_location_picker(h: &mut crate::test_harness::TestHarness, count: usize) -> PathBuf {
+        use crate::location_picker::{LocationEntry, LocationPicker};
+
+        let root = PathBuf::from("/loc-picker");
+        let path = root.join("target.rs");
+        let text = "line\n".repeat(count.max(1));
+        h.fake_fs()
+            .insert_files(std::iter::once((path.clone(), text.as_bytes())));
+        h.stoat.active_workspace_mut().git_root = root;
+
+        let entries = (0..count)
+            .map(|i| LocationEntry {
+                path: path.clone(),
+                offset: i * 5,
+                line: i as u32 + 1,
+                column: 1,
+                text: format!("candidate-{}", i + 1),
+            })
+            .collect();
+        h.stoat.location_picker = Some(LocationPicker::new(entries));
+        h.snapshot();
+        path
+    }
+
+    /// The location picker's inner rows rect for the harness' screen size.
+    fn location_picker_rows(h: &crate::test_harness::TestHarness) -> Rect {
+        let len = h
+            .stoat
+            .location_picker
+            .as_ref()
+            .expect("picker open")
+            .entries()
+            .len();
+        crate::render::location_picker::location_picker_layout(h.stoat.size(), len)
+            .expect("picker laid out")
+            .1
+    }
+
+    #[test]
+    fn location_picker_click_selects_the_clicked_row() {
+        let mut h = Stoat::test();
+        open_location_picker(&mut h, 4);
+        let rows = location_picker_rows(&h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x + 2,
+            rows.y + 1,
+        ));
+
+        let picker = h.stoat.location_picker.as_ref().expect("picker still open");
+        assert_eq!(
+            picker.selected(),
+            1,
+            "the second row is selected, not jumped"
+        );
+    }
+
+    #[test]
+    fn location_picker_click_on_the_selected_row_jumps() {
+        let mut h = Stoat::test();
+        let path = open_location_picker(&mut h, 4);
+        let rows = location_picker_rows(&h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x + 2,
+            rows.y + 1,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x + 2,
+            rows.y + 1,
+        ));
+        h.settle();
+
+        assert!(h.stoat.location_picker.is_none(), "the picker closed");
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.id_for_path(&path).expect("target opened");
+        assert_eq!(
+            h.stoat.focused_editor_ids().map(|(editor_id, _)| {
+                h.stoat
+                    .active_workspace()
+                    .editors
+                    .get(editor_id)
+                    .expect("editor")
+                    .buffer_id
+            }),
+            Some(buffer),
+            "the jump landed in the candidate's file"
+        );
+    }
+
+    #[test]
+    fn location_picker_wheel_moves_the_selection() {
+        let mut h = Stoat::test();
+        open_location_picker(&mut h, 4);
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::ScrollDown, 1, 1));
+        assert_eq!(
+            h.stoat.location_picker.as_ref().expect("open").selected(),
+            1
+        );
+
+        h.stoat.update(mouse_event(MouseEventKind::ScrollUp, 1, 1));
+        assert_eq!(
+            h.stoat.location_picker.as_ref().expect("open").selected(),
+            0
+        );
+    }
+
+    #[test]
+    fn location_picker_click_outside_is_swallowed() {
+        let mut h = Stoat::test();
+        open_location_picker(&mut h, 4);
+        let rows = location_picker_rows(&h);
+        let before = focused_primary_offsets(&mut h);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x,
+            rows.y.saturating_sub(2),
+        ));
+
+        assert_eq!(
+            h.stoat.location_picker.as_ref().expect("open").selected(),
+            0,
+            "a click outside the rows changes nothing"
+        );
+        assert_eq!(
+            focused_primary_offsets(&mut h),
+            before,
+            "the buffer beneath keeps its cursor"
+        );
+    }
+
+    #[test]
+    fn location_picker_renders_a_selection_past_the_visible_rows() {
+        let mut h = Stoat::test();
+        open_location_picker(&mut h, 15);
+        h.stoat
+            .location_picker
+            .as_mut()
+            .expect("open")
+            .set_selected(14);
+        h.snapshot();
+
+        // Rows are read individually rather than by scanning the whole frame.
+        // The key hints overlay paints across the right end of the bottom rows.
+        let rows = location_picker_rows(&h);
+        let row_text = |row: u16| -> String {
+            let buf = h.rendered_buffer();
+            (rows.x..rows.x + rows.width)
+                .map(|col| buf[(col, row)].symbol())
+                .collect()
+        };
+        let last_row = rows.y + rows.height - 1;
+
+        assert!(
+            row_text(rows.y).contains("candidate-4"),
+            "the window scrolled the first three candidates off: {}",
+            row_text(rows.y)
+        );
+        assert!(
+            row_text(last_row).contains("15:1"),
+            "the selected 15th candidate paints on the last row: {}",
+            row_text(last_row)
+        );
+
+        let selection = h.stoat.theme.get(crate::theme::scope::UI_SELECTION);
+        assert_eq!(
+            h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
+            selection.bg,
+            "the selected candidate is painted as selected"
+        );
     }
 
     /// Seed a definition-capable fake server, open `main.rs` holding

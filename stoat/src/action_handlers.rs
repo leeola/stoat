@@ -15,7 +15,7 @@ pub(crate) mod marks;
 pub(crate) mod movement;
 mod palette;
 mod pane;
-mod picker;
+pub(crate) mod picker;
 mod prompt;
 mod rebase;
 pub(crate) mod review;

@@ -49,6 +49,12 @@ impl LocationPicker {
         self.move_selection(-1);
     }
 
+    /// Move the selection to `index`, clamped to the last entry so a stale row
+    /// number from a hit test cannot select past the list.
+    pub(crate) fn set_selected(&mut self, index: usize) {
+        self.selected = index.min(self.entries.len().saturating_sub(1));
+    }
+
     pub(crate) fn hint_bindings(&self) -> Vec<(&'static str, String)> {
         vec![
             ("Enter", "jump".to_string()),
@@ -89,6 +95,19 @@ mod tests {
         assert_eq!(picker.selected(), 1);
         picker.select_prev();
         assert_eq!(picker.selected(), 0);
+    }
+
+    #[test]
+    fn set_selected_clamps_to_the_last_entry() {
+        let mut picker = LocationPicker::new(vec![entry(1), entry(2)]);
+        picker.set_selected(1);
+        assert_eq!(picker.selected(), 1);
+        picker.set_selected(9);
+        assert_eq!(
+            picker.selected(),
+            1,
+            "past the end clamps to the last entry"
+        );
     }
 
     #[test]
