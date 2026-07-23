@@ -24,7 +24,7 @@ use crate::{
     review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
     symbol_finder::SymbolFinder,
-    term_session::{TermId, TermSelection},
+    term_session::{TermId, TermReturnFocus, TermSelection},
     ui::RenderFrame,
     workspace::{Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
@@ -3070,8 +3070,9 @@ impl Stoat {
 
                 let before = self.focused_cursor_pos();
                 let term_before = self.focused_shell_term_id();
+                let origin = self.focus_location();
                 let effect = self.handle_key(key);
-                self.auto_insert_focused_terminal(term_before);
+                self.auto_insert_focused_terminal(term_before, origin);
                 let cursor_moved = self.focused_cursor_pos() != before;
 
                 // Re-follow the cursor when a key moved it, pulling the view
@@ -3097,8 +3098,9 @@ impl Stoat {
             },
             Event::Mouse(mouse) => {
                 let term_before = self.focused_shell_term_id();
+                let origin = self.focus_location();
                 let effect = self.handle_mouse(mouse);
-                self.auto_insert_focused_terminal(term_before);
+                self.auto_insert_focused_terminal(term_before, origin);
                 effect
             },
             _ => UpdateEffect::None,
@@ -5372,14 +5374,19 @@ impl Stoat {
     /// passthrough. The deferred per-agent normal-mode bindings would restore
     /// a way to send it.
     ///
-    /// For a `View::Terminal` pane the normal mode is temporary. Refocusing it
-    /// re-enters insert ([`Self::auto_insert_focused_terminal`]), so `Esc` is a
-    /// drop to normal for pane navigation rather than a lasting exit. A
-    /// `View::Agent` pane stays in normal until the user presses `i`.
+    /// For a `View::Terminal` pane the normal mode is a waypoint, not a
+    /// destination. A terminal has no cursor to move and no text to operate on,
+    /// so `Esc` also sends focus back where it came from
+    /// ([`Self::return_from_terminal`]) and refocusing re-enters insert
+    /// ([`Self::auto_insert_focused_terminal`]). With no origin to return to the
+    /// drop to normal stands on its own, which keeps normal mode reachable on a
+    /// lone terminal pane. A `View::Agent` pane never returns and stays in
+    /// normal until the user presses `i`.
     fn route_key_to_term(&mut self, agent_id: TermId, key: KeyEvent) -> UpdateEffect {
         self.clear_term_selection(agent_id);
         if key.code == KeyCode::Esc {
             self.transition_mode("normal".to_string());
+            self.return_from_terminal();
             return UpdateEffect::Redraw;
         }
 
@@ -5834,23 +5841,115 @@ impl Stoat {
         }
     }
 
-    /// Enter insert on a shell terminal that focus has just arrived on, so
+    /// Where focus sits right now, in the form a terminal records to return to.
+    ///
+    /// Captured before an event is handled, so it names the place the event is
+    /// about to leave.
+    fn focus_location(&self) -> TermReturnFocus {
+        let ws = self.active_workspace();
+        match ws.focus {
+            FocusTarget::SplitPane => TermReturnFocus::Pane {
+                tab: ws.active_tab,
+                pane: ws.panes.focus(),
+            },
+            FocusTarget::Dock(id) => TermReturnFocus::Dock(id),
+        }
+    }
+
+    /// Ready a shell terminal that focus has just arrived on.
+    ///
+    /// The terminal records where focus came from and then enters insert, so
     /// typing reaches the child without a manual `i`.
     ///
-    /// `prev` is [`Self::focused_shell_term_id`] captured before the event was
-    /// handled. Insert is forced only when a terminal is focused now, it is a
-    /// different terminal than `prev` (so focus genuinely arrived), and its mode
-    /// is not already insert. Comparing ids means an in-place `Esc` -- the same
-    /// terminal focused before and after -- is left in normal for pane
-    /// navigation rather than being re-entered.
-    fn auto_insert_focused_terminal(&mut self, prev: Option<TermId>) {
+    /// `prev` is [`Self::focused_shell_term_id`] and `origin` is
+    /// [`Self::focus_location`], both captured before the event was handled.
+    /// Both steps run only when a terminal is focused now and it is a different
+    /// terminal than `prev`, which is what "focus arrived" means. Comparing ids
+    /// this way leaves an in-place `Esc` -- the same terminal focused before and
+    /// after -- alone, so it keeps its own record and stays in normal.
+    ///
+    /// The record is what [`Self::return_from_terminal`] sends `Esc` back to,
+    /// and it is overwritten on every arrival, so hopping between two terminals
+    /// bounces between them.
+    fn auto_insert_focused_terminal(&mut self, prev: Option<TermId>, origin: TermReturnFocus) {
         let Some(term_id) = self.focused_shell_term_id() else {
             return;
         };
-        if prev == Some(term_id) || self.focused_mode() == "insert" {
+        if prev == Some(term_id) {
+            return;
+        }
+        if let Some(term) = self.active_workspace_mut().terms.get_mut(term_id) {
+            term.return_focus = Some(origin);
+        }
+        if self.focused_mode() == "insert" {
             return;
         }
         self.transition_mode("insert".to_string());
+    }
+
+    /// Send focus back to wherever it was when it last arrived on the focused
+    /// shell terminal. Returns whether focus actually moved.
+    ///
+    /// False when the focused pane is not a shell terminal, when it holds no
+    /// record, or when the record no longer names a reachable place -- a closed
+    /// pane, a dropped dock, a tab that has since gone. A record naming the
+    /// currently-focused location is also rejected, which is how a `:terminal`
+    /// opened in place keeps `Esc` as a plain drop to normal.
+    ///
+    /// The record is kept rather than consumed. Every arrival overwrites it
+    /// anyway, and a return that fails validation should not also erase where
+    /// the terminal came from.
+    fn return_from_terminal(&mut self) -> bool {
+        let Some(term_id) = self.focused_shell_term_id() else {
+            return false;
+        };
+        let Some(record) = self
+            .active_workspace()
+            .terms
+            .get(term_id)
+            .and_then(|term| term.return_focus)
+        else {
+            return false;
+        };
+
+        match record {
+            TermReturnFocus::Dock(id) => {
+                let ws = self.active_workspace_mut();
+                if ws.focus == FocusTarget::Dock(id) || !ws.docks.contains_key(id) {
+                    return false;
+                }
+                ws.focus = FocusTarget::Dock(id);
+                true
+            },
+            TermReturnFocus::Pane { tab, pane } if tab == self.active_workspace().active_tab => {
+                let ws = self.active_workspace_mut();
+                if pane == ws.panes.focus() || !ws.panes.split_pane_ids().contains(&pane) {
+                    return false;
+                }
+                ws.panes.set_focus(pane);
+                ws.focus = FocusTarget::SplitPane;
+                true
+            },
+            TermReturnFocus::Pane { tab, pane } => {
+                let parked_holds_pane = self
+                    .active_workspace()
+                    .tabs
+                    .get(tab)
+                    .and_then(|t| t.parked.as_ref())
+                    .is_some_and(|tree| tree.split_pane_ids().contains(&pane));
+                if !parked_holds_pane || !self.active_workspace_mut().switch_tab(tab) {
+                    return false;
+                }
+                // A parked tree carries the zero-sized rects it was stored with,
+                // so it has to be fitted to the screen before it is focused.
+                let size = self.size();
+                let ws = self.active_workspace_mut();
+                ws.layout(size);
+                ws.panes.set_focus(pane);
+                ws.focus = FocusTarget::SplitPane;
+                true
+            },
+        }
     }
 
     /// Switch the focused target's mode to `next`, opening or closing the
@@ -11001,6 +11100,179 @@ mod tests {
             h.stoat.focused_mode(),
             "insert",
             "returning focus to the terminal re-enters insert",
+        );
+    }
+
+    /// The input mode of the terminal shown in `pane`.
+    fn term_mode(stoat: &Stoat, pane: PaneId) -> String {
+        let ws = stoat.active_workspace();
+        match ws.panes.pane(pane).view {
+            View::Terminal(id) => ws.terms[id].mode.clone(),
+            ref other => panic!("pane shows {other:?}, not a terminal"),
+        }
+    }
+
+    /// A two-pane split with an editor on the left and a terminal on the right,
+    /// focus left on the editor. Returns the two pane ids.
+    fn split_editor_and_terminal(h: &mut crate::test_harness::TestHarness) -> (PaneId, PaneId) {
+        h.type_action("SplitRight()");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let term_pane = h.stoat.active_workspace().panes.focus();
+        h.type_action("FocusLeft()");
+        (h.stoat.active_workspace().panes.focus(), term_pane)
+    }
+
+    #[test]
+    fn esc_in_a_terminal_returns_to_the_pane_focus_arrived_from() {
+        let mut h = Stoat::test();
+        let (editor_pane, term_pane) = split_editor_and_terminal(&mut h);
+
+        h.type_action("FocusRight()");
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            editor_pane,
+            "Esc sends focus back to the pane it arrived from",
+        );
+        assert_eq!(
+            term_mode(&h.stoat, term_pane),
+            "normal",
+            "the terminal it left drops to normal",
+        );
+    }
+
+    #[test]
+    fn esc_in_a_terminal_returns_across_tabs() {
+        let mut h = Stoat::test();
+        let origin_pane = h.stoat.active_workspace().panes.focus();
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTab { index: 1 });
+        assert_eq!(h.stoat.active_workspace().active_tab, 0);
+
+        // C-a <digit> is GotoTab through the prefix mode's digit placeholder, so
+        // the arrival on tab 2's terminal runs through update()'s record seam.
+        h.type_keys("C-a 2");
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "arriving on the terminal auto-inserts",
+        );
+
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+
+        assert_eq!(
+            h.stoat.active_workspace().active_tab,
+            0,
+            "Esc returns to the tab focus came from",
+        );
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            origin_pane,
+            "and to the pane it was on there",
+        );
+    }
+
+    #[test]
+    fn esc_in_an_in_place_terminal_only_drops_to_normal() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let pane = h.stoat.active_workspace().panes.focus();
+
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            pane,
+            "a terminal opened in place has nowhere to return to",
+        );
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "so normal mode stays reachable",
+        );
+    }
+
+    #[test]
+    fn esc_in_a_terminal_whose_origin_pane_closed_drops_to_normal() {
+        let mut h = Stoat::test();
+        let (editor_pane, term_pane) = split_editor_and_terminal(&mut h);
+        h.type_action("FocusRight()");
+
+        assert!(
+            h.stoat.active_workspace_mut().panes.close(editor_pane),
+            "the recorded origin pane is closed out from under the record",
+        );
+
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            term_pane,
+            "a stale record leaves focus put",
+        );
+        assert_eq!(h.stoat.focused_mode(), "normal", "and only drops to normal");
+    }
+
+    #[test]
+    fn closing_a_tab_fixes_up_terminal_return_records() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+
+        let (at_closed, above_closed) = {
+            let ws = h.stoat.active_workspace_mut();
+            let pane = ws.panes.focus();
+            let at_closed = ws.terms.keys().next().expect("the opened terminal");
+            let above_closed = ws.terms.insert(crate::term_session::TermSession::new(
+                crate::term_screen::TermScreen::new(24, 80),
+                Arc::new(crate::host::FakeTerminalSession::default()),
+            ));
+            ws.terms[at_closed].return_focus = Some(TermReturnFocus::Pane { tab: 1, pane });
+            ws.terms[above_closed].return_focus = Some(TermReturnFocus::Pane { tab: 2, pane });
+            (at_closed, above_closed)
+        };
+
+        h.stoat.active_workspace_mut().close_tab(1);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            ws.terms[at_closed].return_focus, None,
+            "a record naming the closed tab is dropped",
+        );
+        assert_eq!(
+            ws.terms[above_closed].return_focus,
+            Some(TermReturnFocus::Pane {
+                tab: 1,
+                pane: ws.panes.focus()
+            }),
+            "a record above the closed tab shifts down with it",
+        );
+    }
+
+    #[test]
+    fn esc_bounces_between_two_terminals() {
+        let mut h = Stoat::test();
+        let (left_pane, right_pane) = split_editor_and_terminal(&mut h);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+
+        h.type_action("FocusRight()");
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            left_pane,
+            "Esc in the right terminal lands on the left one",
+        );
+
+        h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+        assert_eq!(
+            h.stoat.active_workspace().panes.focus(),
+            right_pane,
+            "the arrival re-recorded the origin, so Esc bounces back",
         );
     }
 

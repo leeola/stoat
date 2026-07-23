@@ -5,7 +5,11 @@
 //! can host several sessions at once, and a pane view such as
 //! [`View::Agent`](crate::pane::View::Agent) names one by its [`TermId`].
 
-use crate::{host::terminal::TerminalSession, term_screen::TermScreen};
+use crate::{
+    host::terminal::TerminalSession,
+    pane::{DockId, PaneId},
+    term_screen::TermScreen,
+};
 use futures::FutureExt;
 use slotmap::new_key_type;
 use std::sync::Arc;
@@ -64,6 +68,23 @@ impl TermSelection {
     }
 }
 
+/// Where focus sat when it last arrived on a terminal, so `Esc` can send it
+/// back there.
+///
+/// A terminal pane has no editing state of its own, which makes its normal mode
+/// a dead end. Remembering the origin turns `Esc` into the inverse of whatever
+/// motion reached the terminal.
+///
+/// The pane arm carries a tab index because a return can cross tabs, and the
+/// index is only meaningful against the workspace that recorded it. Both arms
+/// are validated at use, since a pane or dock can be closed while the record
+/// still names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TermReturnFocus {
+    Pane { tab: usize, pane: PaneId },
+    Dock(DockId),
+}
+
 /// A live term session pairing its screen emulator with the PTY session that
 /// drives it.
 ///
@@ -85,6 +106,13 @@ pub struct TermSession {
     /// [`View::Agent`](crate::pane::View::Agent) pane preserves a non-insert
     /// mode across focus changes.
     pub mode: String,
+    /// Where focus came from when it last arrived on this terminal, or `None`
+    /// when it was never reached by a focus motion.
+    ///
+    /// Overwritten on every arrival, so terminal-to-terminal hops ping-pong.
+    /// The record is deliberately not persisted. Sessions die with the process,
+    /// and a respawned shell starts with no history to return to.
+    pub(crate) return_focus: Option<TermReturnFocus>,
 }
 
 impl TermSession {
@@ -100,6 +128,7 @@ impl TermSession {
             session,
             selection: None,
             mode: "normal".into(),
+            return_focus: None,
         }
     }
 
