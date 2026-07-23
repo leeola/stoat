@@ -42,9 +42,17 @@ use stoatty_widgets::{
 /// width the terminal's GPU minimap pass paints there.
 pub(super) const MINIMAP_STRIP_COLS: u16 = 8;
 
-/// Narrowest pane, in columns, that still reserves a minimap strip. Below this
-/// the strip would crowd the remaining text, so the pane keeps its full width.
-pub(super) const MINIMAP_MIN_PANE_COLS: u16 = 60;
+/// Narrowest pane, in columns, that still reserves a minimap strip.
+///
+/// At this width 100 text columns remain beside the 8-column strip. Anything
+/// narrower is around half a screen or less, where the strip would crowd the
+/// text, so those panes keep their full width instead.
+///
+/// The gates reading this measure slightly different widths. The per-pane gate
+/// compares the width left after the gutter, while the Single-mode band
+/// compares the whole window width and so runs a few columns looser. One
+/// shared constant is worth that imprecision.
+pub(super) const MINIMAP_MIN_PANE_COLS: u16 = 108;
 
 /// Each server name mapped to its negotiated offset encoding, so a diagnostic's
 /// LSP position converts to a byte column through the server that published it.
@@ -2784,10 +2792,10 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        let (rect, strip) = render_minimap(&mut h.stoat, true, 80, 3);
+        let (rect, strip) = render_minimap(&mut h.stoat, true, 120, 3);
         assert_eq!(
             rect,
-            Some(Rect::new(72, 0, super::MINIMAP_STRIP_COLS, 3)),
+            Some(Rect::new(112, 0, super::MINIMAP_STRIP_COLS, 3)),
             "strip pins to the right edge at full width"
         );
         assert!(
@@ -2807,14 +2815,14 @@ mod tests {
         h.settle();
 
         assert_eq!(
-            render_minimap(&mut h.stoat, false, 80, 3).0,
+            render_minimap(&mut h.stoat, false, 120, 3).0,
             None,
             "no strip when the minimap is disabled"
         );
         assert_eq!(
-            render_minimap(&mut h.stoat, true, 50, 3).0,
+            render_minimap(&mut h.stoat, true, 107, 3).0,
             None,
-            "no strip below the minimum pane width"
+            "no strip one column below the minimum pane width"
         );
     }
 

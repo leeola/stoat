@@ -11384,7 +11384,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
-        h.resize(80, 24);
+        h.resize(120, 24);
 
         let _ = h.stoat.render();
         h.stoat.emit_apc_scene();
@@ -11519,7 +11519,7 @@ mod tests {
         h.stoat.set_apc_tx(tx);
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         // Wide enough that each vertical split clears the minimap min-width gate.
-        h.resize(200, 24);
+        h.resize(260, 24);
 
         let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
         let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
@@ -11787,7 +11787,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
-        h.resize(80, 24);
+        h.resize(120, 24);
 
         let _ = h.stoat.render();
         h.stoat.emit_smooth_scroll();
@@ -14378,6 +14378,7 @@ mod tests {
         use stoatty_protocol::command::{Command, PoolRegionCommand};
 
         let mut h = Stoat::test();
+        h.resize(120, 24);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
