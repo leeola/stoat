@@ -663,9 +663,11 @@ fn advance_pool_glide(
 
     // A reposition jump re-anchors the offset to a local neighbour of the
     // destination, so the ease lands softly within the freshly-buffered window
-    // instead of dragging across the unbuffered gap.
+    // instead of dragging across the unbuffered gap. The neighbour sits on the
+    // side the viewport travelled from, read here from the pre-reposition
+    // offset, so the landing continues the motion instead of reversing it.
     if let Some(target) = reposition {
-        anim.scroll = (target as f32 - REPOSITION_LAND_PAGES).max(0.0);
+        anim.scroll = reposition_scroll(anim.scroll, target);
     }
 
     let (scroll, easing) = step_document_scroll(anim.scroll, target_pages, page_rows, dt);
@@ -3214,16 +3216,39 @@ fn step_document_scroll(scroll: f32, target: f32, page_rows: f32, dt: Duration) 
     (scroll + step.copysign(remaining), true)
 }
 
+/// The document-page offset a reposition jump re-anchors to, one page to the
+/// side the viewport travelled from.
+///
+/// `current` is the offset before the jump, which is what reveals the travel
+/// direction. Landing on the side the viewport came from is what makes the
+/// glide read as continuing the motion. A jump up re-anchors below the target
+/// so content glides downward into place, and a jump down re-anchors above it.
+/// Seeding the same side every time reverses half of all landings.
+///
+/// Clamped at zero, since no document exists above the first page.
+fn reposition_scroll(current: f32, target: u64) -> f32 {
+    let target = target as f32;
+    let travelled_down = current < target;
+
+    let landed = if travelled_down {
+        target - REPOSITION_LAND_PAGES
+    } else {
+        target + REPOSITION_LAND_PAGES
+    };
+
+    landed.max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, bell_should_ring,
         block_corners, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners, encode_key,
-        font_step, ipc_button, modifier_bits, paste_bytes, popover_overflow, seed_settle_flight,
-        selection_copy_text, sgr_button_bytes, sgr_motion_bytes, sgr_wheel_bytes, step_cursor,
-        step_document_scroll, step_grid_scroll, step_popover_scroll, step_region_scroll,
-        step_scrollback_scroll, swallow_super_combo, wheel_lines, CursorAnimation,
-        EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
+        font_step, ipc_button, modifier_bits, paste_bytes, popover_overflow, reposition_scroll,
+        seed_settle_flight, selection_copy_text, sgr_button_bytes, sgr_motion_bytes,
+        sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll, step_popover_scroll,
+        step_region_scroll, step_scrollback_scroll, swallow_super_combo, wheel_lines,
+        CursorAnimation, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{window_socket_path, PathBuf};
@@ -3539,6 +3564,39 @@ mod tests {
             whole[0]
         );
         assert!(halfway[0] < whole[0], "a half frame advances less");
+    }
+
+    #[test]
+    fn reposition_lands_on_the_side_the_viewport_travelled_from() {
+        // A viewport travelling down to page 20 lands a page above it.
+        let seeded = reposition_scroll(2.0, 20);
+        assert_eq!(seeded, 19.0, "a downward jump lands above the target");
+        let (next, _) = step_document_scroll(seeded, 20.0, 40.0, EASE_BASELINE_FRAME);
+        assert!(
+            next > seeded,
+            "the landing glide continues downward, got {next}"
+        );
+
+        // A viewport travelling up to the same page lands a page below it.
+        let seeded = reposition_scroll(90.0, 20);
+        assert_eq!(seeded, 21.0, "an upward jump lands below the target");
+        let (next, _) = step_document_scroll(seeded, 20.0, 40.0, EASE_BASELINE_FRAME);
+        assert!(
+            next < seeded,
+            "the landing glide continues upward, got {next}"
+        );
+    }
+
+    #[test]
+    fn reposition_to_the_first_page_still_leaves_a_glide() {
+        // Nothing exists above page 0, so an upward jump there has to land below
+        // it. Seeding above would clamp onto the target and skip the glide.
+        let seeded = reposition_scroll(50.0, 0);
+        assert_eq!(seeded, 1.0, "an upward jump to page 0 lands a page below");
+
+        let (next, easing) = step_document_scroll(seeded, 0.0, 40.0, EASE_BASELINE_FRAME);
+        assert!(easing, "there is still a glide to run");
+        assert!(next < seeded, "and it runs upward toward page 0");
     }
 
     #[test]
