@@ -3330,6 +3330,17 @@ fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>)
 }
 
 pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+    // In the conflict view the standard change-navigation chords step between
+    // conflict chunks. The center is a pathless scratch buffer with no diff map,
+    // so the hunk walk below would find nothing. Redirecting to the chunk walk
+    // gives the same git-hunk muscle memory. Gate on the per-editor marker, not
+    // the session, so a plain diff pane open alongside a conflict still walks its
+    // own hunks.
+    if focused_editor_mut(stoat).is_some_and(|editor| editor.conflict_view.is_some()) {
+        super::conflict_view::conflict_step_chunk(stoat, matches!(dir, ChangeDir::Next));
+        return UpdateEffect::Redraw;
+    }
+
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let origin = super::jump::live_entry(stoat);
     let current_path = stoat.focused_editor_ids().and_then(|(_, buffer_id)| {

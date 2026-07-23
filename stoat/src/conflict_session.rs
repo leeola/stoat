@@ -99,6 +99,7 @@ mod tests {
         Action, CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
         ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
         ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
+        GotoNextChange, GotoPrevChange,
     };
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
@@ -489,6 +490,27 @@ mod tests {
 
         pick(&mut h, &ConflictPrevChunk);
         assert_eq!(cursor_row(&mut h), 1, "p at the first chunk does not wrap");
+    }
+
+    #[test]
+    fn git_change_navigation_steps_conflict_chunks() {
+        let mut h = Stoat::test();
+        seed_two_chunks(&mut h);
+        dispatch_conflict(&mut h);
+        assert_eq!(cursor_row(&mut h), 1, "opens on the first chunk");
+
+        // The git hunk-jump chords (space g n, git_pin n, ]c) all dispatch
+        // GotoNextChange, which walks conflict chunks in the conflict view
+        // rather than no-opping against the scratch center's absent diff map.
+        pick(&mut h, &GotoNextChange);
+        assert_eq!(
+            cursor_row(&mut h),
+            7,
+            "GotoNextChange steps to the next chunk"
+        );
+
+        pick(&mut h, &GotoPrevChange);
+        assert_eq!(cursor_row(&mut h), 1, "GotoPrevChange steps back");
     }
 
     #[test]
