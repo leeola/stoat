@@ -958,11 +958,15 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     }
 
     // The background diff job usually has the map ready (it drives the gutter
-    // marks), so only compute it here when the fast path is empty.
+    // marks), so only compute it here when the fast path is empty. A map left
+    // over from before an external git mutation counts as empty. It describes a
+    // base that has since moved, so trusting it would open the view on hunks
+    // measured against a HEAD that no longer exists.
+    let map_current = stoat.active_workspace().diff_map_current(buffer_id);
     let has_map = super::focused_editor_mut(stoat)
         .map(|editor| editor.display_map.snapshot().diff_map().is_some())
         .unwrap_or(false);
-    if !has_map {
+    if !has_map || !map_current {
         let git_host = stoat.git_host.clone();
         let language_registry = stoat.language_registry.clone();
         let syntax_styles = stoat.syntax_styles.clone();
@@ -2170,7 +2174,7 @@ mod tests {
         app::REVIEW_EXTERNAL_EDIT_DEBOUNCE, diff_cache::DiffCacheKey, editor_state::ScrollGlide,
         host::FsEventKind, review_session::ChunkStatus, test_harness::TestHarness,
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn install_review_session_populates_diff_cache() {
@@ -2390,6 +2394,37 @@ mod tests {
     }
 
     #[test]
+    fn diff_recomputes_a_map_staled_by_an_external_git_mutation() {
+        let mut h = TestHarness::with_size(80, 14);
+        // a.txt matches HEAD, so its first diff map holds no hunks at all --
+        // exactly the state a buffer is left in when it was clean before an
+        // external rebase moved HEAD out from under it.
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .head_file("a.txt", "a\nb\nc\n");
+        h.fake_fs()
+            .insert_file(PathBuf::from("/repo/a.txt"), b"a\nb\nc\n");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        h.fake_git()
+            .add_repo("/repo")
+            .head_file("a.txt", "a\nOLD\nc\n");
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff);
+
+        assert_eq!(
+            review_cursor_row(&mut h),
+            1,
+            "the stale empty map is recomputed and the cursor lands on the new first hunk",
+        );
+    }
+
+    #[test]
     fn toggle_diff_back_restores_the_diff_with_staging_intact() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.rs", "a\nb\nc\nd\n", "a\nb\nX\nd\n")]);
@@ -2600,7 +2635,7 @@ mod tests {
 
         let before_version = h.with_review(|s| s.version);
         h.fake_fs()
-            .write(std::path::Path::new("a.txt"), b"Z\n")
+            .write(Path::new("a.txt"), b"Z\n")
             .expect("FakeFs::write");
         h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
 

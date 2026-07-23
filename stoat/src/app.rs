@@ -3154,7 +3154,14 @@ impl Stoat {
         let git_dir = git_root.join(".git");
         let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
         for path in paths {
-            if review_active {
+            if path.starts_with(&git_dir) {
+                // A .git write (a commit, reset, rebase step, or branch switch)
+                // moved HEAD and staled every diff base, so it refreshes through
+                // the shared debounce whatever the session state is. Its drain
+                // refreshes an open review, clears the diff_warmed flag, and
+                // stales every open buffer's diff map.
+                self.arm_review_git_refresh_debounce();
+            } else if review_active {
                 let in_session = self
                     .active_workspace()
                     .review
@@ -3164,10 +3171,6 @@ impl Stoat {
                     // A tracked file keeps the per-path debounce, which scrolls
                     // the review to the edited chunk when the refresh lands.
                     self.arm_review_external_edit_debounce(path.clone());
-                } else if path.starts_with(&git_dir) {
-                    // A .git write (a commit, reset, or branch switch) refreshes
-                    // the whole session through one shared debounce.
-                    self.arm_review_git_refresh_debounce();
                 } else if path.starts_with(&git_root) {
                     // A change to a working-tree file not yet in the session
                     // pulls it in on the next refresh, unless gitignored so
@@ -3177,19 +3180,12 @@ impl Stoat {
                         self.arm_review_git_refresh_debounce();
                     }
                 }
-            } else if precompute {
-                if path.starts_with(&git_dir) {
-                    // A .git write moved HEAD and staled every cached base, so
-                    // re-arm the full warm through the shared git-refresh
-                    // debounce. Its drain clears the diff_warmed flag.
-                    self.arm_review_git_refresh_debounce();
-                } else if path.starts_with(&git_root) {
-                    // An edited working-tree file warms its own diff, unless
-                    // gitignored so build churn cannot thrash the recompute.
-                    let repo = repo.get_or_insert_with(|| self.git_host.discover(&git_root));
-                    if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
-                        self.arm_diff_warm_file_debounce(path.clone());
-                    }
+            } else if precompute && path.starts_with(&git_root) {
+                // An edited working-tree file warms its own diff, unless
+                // gitignored so build churn cannot thrash the recompute.
+                let repo = repo.get_or_insert_with(|| self.git_host.discover(&git_root));
+                if !repo.as_ref().is_some_and(|r| r.is_path_ignored(&path)) {
+                    self.arm_diff_warm_file_debounce(path.clone());
                 }
             }
             if path.starts_with(&git_root) && self.language_registry.for_path(&path).is_some() {
@@ -3384,6 +3380,12 @@ impl Stoat {
     /// relies on not churning, and in-memory agent-edit sources are not
     /// git-backed. With no working-tree review, a `.git` change instead re-arms
     /// the full background warm, since HEAD moved and staled every cached base.
+    ///
+    /// Either way the drain stales every open buffer's diff map, since those are
+    /// keyed by buffer version alone and a moved HEAD leaves them describing a
+    /// base that no longer exists. Gutter marks and the per-file `:diff` view
+    /// then follow each rebase step instead of freezing at the pre-rebase base.
+    ///
     /// Returns `true` if a refresh dispatched so the test harness settle loop
     /// re-iterates.
     pub(crate) fn drain_pending_git_refresh(&mut self) -> bool {
@@ -3393,6 +3395,7 @@ impl Stoat {
                 break;
             };
             self.review_pending_git_refresh = None;
+            self.active_workspace_mut().invalidate_all_diffs();
             // A working-tree review refreshes on any git write. An auto_source
             // session refreshes too even when it currently displays a Commit,
             // so a rebase-fallback view re-decides and follows each rebase step.
@@ -16513,13 +16516,8 @@ mod tests {
                 text,
             );
             h.stoat
-                .active_workspace()
-                .buffers
-                .get(buffer_id)
-                .expect("buffer")
-                .write()
-                .expect("poisoned")
-                .diff_map = Some(dm);
+                .active_workspace_mut()
+                .install_test_diff_map(buffer_id, dm);
         }
 
         let cursor_row = |stoat: &mut Stoat| {
@@ -16566,13 +16564,8 @@ mod tests {
             text,
         );
         h.stoat
-            .active_workspace()
-            .buffers
-            .get(buffer_id)
-            .expect("buffer")
-            .write()
-            .expect("poisoned")
-            .diff_map = Some(dm);
+            .active_workspace_mut()
+            .install_test_diff_map(buffer_id, dm);
     }
 
     #[test]
@@ -16723,13 +16716,8 @@ mod tests {
                 &text,
             );
             h.stoat
-                .active_workspace()
-                .buffers
-                .get(buffer_id)
-                .expect("buffer")
-                .write()
-                .expect("poisoned")
-                .diff_map = Some(dm);
+                .active_workspace_mut()
+                .install_test_diff_map(buffer_id, dm);
         }
 
         // A ten-row viewport with the first hunk (buffer row 20) far below it.
@@ -16868,6 +16856,38 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("no more changes"),
             "the status reports that there are no changes",
+        );
+    }
+
+    #[test]
+    fn a_git_write_stales_open_diffs_with_no_review_and_no_precompute() {
+        let mut h = Stoat::test();
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        assert!(
+            h.stoat.active_workspace().diff_map_current(buffer_id),
+            "the settled job leaves the buffer's diff current",
+        );
+
+        // Neither gate that used to arm the git-refresh debounce applies here.
+        // No review session is open, and precompute is off.
+        h.stoat.set_diff_warm_auto(false);
+        assert!(h.stoat.active_workspace().review.is_none());
+
+        h.fake_fs_watcher().inject(
+            Path::new("/repo/.git/HEAD"),
+            crate::host::FsEventKind::Modified,
+        );
+        h.stoat.drain_fs_watch_events();
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert!(
+            !h.stoat.active_workspace().diff_map_current(buffer_id),
+            "a .git write stales the open buffer's diff map even with no review and no precompute",
         );
     }
 

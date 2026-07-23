@@ -536,6 +536,37 @@ impl Workspace {
         self.diff_versions.remove(&id);
     }
 
+    /// Stale every buffer's diff map by dropping all recorded versions and
+    /// in-flight jobs.
+    ///
+    /// Used after git state moves under the editor -- an external rebase or
+    /// checkout changes HEAD, so a map computed against the old one describes a
+    /// base that no longer exists, whatever the buffer's own version says.
+    ///
+    /// In-flight jobs are dropped as [`Self::invalidate_diff`] drops them, since
+    /// their results would carry the same stale base. The next
+    /// [`Self::drive_diff_jobs`] pass recomputes only visible buffers, so hidden
+    /// ones re-diff lazily when they are next shown.
+    pub(crate) fn invalidate_all_diffs(&mut self) {
+        self.diff_jobs.clear();
+        self.diff_versions.clear();
+    }
+
+    /// Whether `id`'s installed diff map was computed for the buffer's current
+    /// content and the current git state.
+    ///
+    /// False for a buffer edited past its recorded version, one whose map was
+    /// invalidated, and one that never had a map. Callers that need fresh hunks
+    /// on the current turn pair this with [`Self::install_diff_map_now`], since
+    /// the presence of a map alone does not prove it is current.
+    pub(crate) fn diff_map_current(&self, id: BufferId) -> bool {
+        let Some(shared) = self.buffers.get(id) else {
+            return false;
+        };
+        let version = shared.read().expect("buffer poisoned").snapshot.version;
+        self.diff_versions.get(&id) == Some(&version)
+    }
+
     /// Compute and install `id`'s diff map synchronously, bypassing the
     /// background job so its hunks are available on the current turn.
     ///
@@ -576,6 +607,25 @@ impl Workspace {
         if let Some(shared) = self.buffers.get(id) {
             shared.write().expect("buffer poisoned").diff_map = diff_map;
         }
+        self.diff_versions.insert(id, version);
+    }
+
+    /// Install `diff_map` on `id` and record it as computed for the buffer's
+    /// current version, so it reads as current to [`Self::diff_map_current`].
+    ///
+    /// Lets a test stand up a diff map without a git fixture behind it. Writing
+    /// the map alone would leave it version-less, which every caller correctly
+    /// treats as stale.
+    #[cfg(test)]
+    pub(crate) fn install_test_diff_map(&mut self, id: BufferId, diff_map: DiffMap) {
+        let Some(shared) = self.buffers.get(id) else {
+            return;
+        };
+        let version = {
+            let mut guard = shared.write().expect("buffer poisoned");
+            guard.diff_map = Some(diff_map);
+            guard.snapshot.version
+        };
         self.diff_versions.insert(id, version);
     }
 
@@ -1211,7 +1261,10 @@ fn changed_byte_ranges(input: &ReviewFileInput) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{changed_byte_ranges, ParseJob, Workspace, SYNC_PARSE_MAX_BYTES};
-    use crate::{host::DiffStatus, pane::View, review::ReviewFileInput, test_harness::TestHarness};
+    use crate::{
+        buffer::BufferId, host::DiffStatus, pane::View, review::ReviewFileInput,
+        test_harness::TestHarness,
+    };
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
@@ -1450,6 +1503,51 @@ mod tests {
             h.stoat.active_workspace().diff_jobs.is_empty(),
             "a drive over an already-diffed buffer spawns no new job",
         );
+    }
+
+    #[test]
+    fn invalidate_all_diffs_redrives_a_visible_buffer_against_the_new_head() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\n", "a\nc\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        assert!(
+            h.stoat.active_workspace().diff_map_current(buffer_id),
+            "the settled job leaves the buffer's diff current",
+        );
+        assert_eq!(
+            base_text_of(&h, buffer_id),
+            "a\nb\n",
+            "the first diff is computed against the original HEAD",
+        );
+
+        // An external rebase moves HEAD under the editor. The buffer is
+        // untouched, so only the invalidation can force a re-diff.
+        h.fake_git().add_repo("/repo").head_file("a.txt", "a\nZ\n");
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+
+        assert!(
+            !h.stoat.active_workspace().diff_map_current(buffer_id),
+            "invalidation drops the recorded version",
+        );
+        h.settle_diff_jobs();
+        assert_eq!(
+            base_text_of(&h, buffer_id),
+            "a\nZ\n",
+            "the redrive diffs the buffer against the moved HEAD",
+        );
+    }
+
+    /// The base text of `buffer_id`'s installed diff map.
+    fn base_text_of(h: &TestHarness, buffer_id: BufferId) -> String {
+        let ws = h.stoat.active_workspace();
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        let dm = guard.diff_map.as_ref().expect("diff map populated");
+        dm.base_text().expect("base text").to_string()
     }
 
     #[test]
