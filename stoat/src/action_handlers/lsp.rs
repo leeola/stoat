@@ -4721,9 +4721,25 @@ pub(crate) fn apply_jump(stoat: &mut Stoat, path: &Path, offset: usize) {
         super::jump::push_jump(stoat);
     }
 
+    let buffer_before =
+        crate::action_handlers::focused_editor_mut(stoat).map(|editor| editor.buffer_id);
+
     let focused = stoat.active_workspace().panes.focus();
     super::file::open_file_in_pane(stoat, focused, path);
     super::movement::jump_to_offset(stoat, offset);
+
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+        return;
+    };
+
+    // Landing in another file means a freshly shown editor with no prior view to
+    // glide from, so it snaps.
+    if Some(editor.buffer_id) == buffer_before {
+        super::movement::follow_jump(editor, scrolloff);
+    } else {
+        super::movement::ensure_cursor_in_view(editor, scrolloff);
+    }
 }
 
 /// Convert an absolute filesystem path to an `lsp_types::Uri`. Returns
@@ -9828,6 +9844,58 @@ mod tests {
         assert_eq!(
             crease_point_ranges(&mut h),
             vec![stoat_text::Point::new(0, 8)..stoat_text::Point::new(2, 1)]
+        );
+    }
+
+    #[test]
+    fn a_same_file_jump_glides_while_a_cross_file_jump_snaps() {
+        use crate::editor_state::ScrollGlide;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let long: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+        let root = seed(&mut h, &[("a.rs", long.as_str()), ("b.rs", long.as_str())]);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("a.rs"),
+            },
+        );
+        h.settle();
+        {
+            let editor =
+                crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            editor.scroll_glide = ScrollGlide::None;
+        }
+
+        super::apply_jump(&mut h.stoat, &root.join("a.rs"), long.len());
+        {
+            let editor =
+                crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            assert!(
+                editor.scroll_row > 20,
+                "the view followed the cursor down the file"
+            );
+            assert_eq!(
+                editor.scroll_glide,
+                ScrollGlide::Page,
+                "a same-file jump glides from where the view was"
+            );
+            editor.scroll_glide = ScrollGlide::None;
+        }
+
+        super::apply_jump(&mut h.stoat, &root.join("b.rs"), long.len());
+        h.settle();
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        assert!(
+            editor.scroll_row > 20,
+            "the cursor is still pulled into view across files"
+        );
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::None,
+            "a fresh editor has no origin to glide from, so it snaps"
         );
     }
 }

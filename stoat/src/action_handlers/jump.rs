@@ -106,19 +106,32 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
         }
     };
 
+    let swapped_buffer = resolved.is_some();
     if let Some((pane_id, buffer)) = resolved {
         let executor = stoat.executor.clone();
         super::file::show_buffer_in_pane(stoat, pane_id, entry.buffer_id, buffer, executor);
     }
 
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return;
     };
-    let snapshot = editor.display_map.snapshot();
-    let buf_snap = snapshot.buffer_snapshot();
-    editor
-        .selections
-        .replace_with(entry.selections.clone(), buf_snap);
+
+    {
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        editor
+            .selections
+            .replace_with(entry.selections.clone(), buf_snap);
+    }
+
+    // A cross-buffer jump lands in a freshly shown editor with no prior view to
+    // glide from, so it snaps.
+    if swapped_buffer {
+        super::movement::ensure_cursor_in_view(editor, scrolloff);
+    } else {
+        super::movement::follow_jump(editor, scrolloff);
+    }
 }
 
 pub(super) fn save_selection(stoat: &mut Stoat) -> UpdateEffect {

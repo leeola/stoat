@@ -3080,8 +3080,7 @@ impl Stoat {
                 // (z j / z k) never moves the cursor, so its view stays put.
                 let scrolled = match action_handlers::focused_editor_mut(self) {
                     Some(editor) => {
-                        cursor_moved
-                            && action_handlers::movement::ensure_cursor_in_view(editor, scrolloff)
+                        cursor_moved && action_handlers::movement::follow_jump(editor, scrolloff)
                     },
                     None => false,
                 };
@@ -8974,6 +8973,55 @@ mod tests {
             (focused_buffer(&h), h.primary_head_offset()),
             (b_buffer, 1),
             "a release moves nothing, so one click walks one entry"
+        );
+    }
+
+    #[test]
+    fn a_side_button_jump_glides_the_view_back_to_the_entry() {
+        use crate::{editor_state::ScrollGlide, test_harness::TestHarness};
+        use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
+
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+
+        // Strand the view far down the file, then clear the glide that put it
+        // there so the assertions can only see what the jump itself arms.
+        action_handlers::movement::jump_to_offset(&mut h.stoat, body.len());
+        let away = {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            action_handlers::movement::ensure_cursor_in_view(editor, 3);
+            editor.scroll_glide = ScrollGlide::None;
+            editor.scroll_row
+        };
+        assert!(away > 20, "precondition: the view left the origin");
+
+        h.stoat
+            .handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Mouse {
+                window: 0,
+                kind: MouseKind::Press(IpcMouseButton::Back),
+                col: 0,
+                row: 0,
+                mods: 0,
+            }));
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        assert_eq!(
+            editor.scroll_row, 0,
+            "back pulls the view to the recorded entry"
+        );
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::Page,
+            "the jump arms the glide that ships the cursor anchor"
+        );
+        assert_eq!(
+            editor.scroll_offset, away as f32,
+            "the glide starts where the view was, so the cursor arrives from below"
         );
     }
 
@@ -14926,6 +14974,68 @@ mod tests {
             (anchor.row, anchor.col),
             (15, 7),
             "the anchor carries the cursor's display row and recorded column"
+        );
+    }
+
+    #[test]
+    fn a_jump_ships_the_cursor_anchor_at_the_landed_row() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = std::path::PathBuf::from("/pool");
+        let path = root.join("a.txt");
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        while rx.try_recv().is_ok() {}
+
+        // Record line 80 in the jumplist, then strand the view back at the top
+        // so returning to that entry is a long jump down.
+        let line_80 = body.find("line 80\n").expect("line 80 exists");
+        action_handlers::movement::jump_to_offset(&mut h.stoat, line_80);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        action_handlers::movement::jump_to_offset(&mut h.stoat, 0);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.viewport_rows = Some(10);
+            editor.cursor_screen_cell = Some((4, 2));
+            action_handlers::movement::ensure_cursor_in_view(editor, 3);
+            editor.scroll_glide = ScrollGlide::None;
+        }
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            assert_eq!(
+                editor.scroll_glide,
+                ScrollGlide::Page,
+                "the jump back arms the glide the anchor emit gates on"
+            );
+        }
+
+        h.stoat.emit_smooth_scroll();
+        let mut cmds = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            cmds.extend(decode_apc_stream(&bytes));
+        }
+        let anchor = cmds
+            .iter()
+            .find_map(|c| match c {
+                Command::PoolCursor(p) => Some(*p),
+                _ => None,
+            })
+            .expect("a jump arms a glide, so the emit carries a cursor anchor");
+        assert_eq!(
+            (anchor.row, anchor.col),
+            (80, 4),
+            "the anchor carries the landed display row, so the cursor rides the content to it"
         );
     }
 

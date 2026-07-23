@@ -4217,6 +4217,29 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
     editor.scroll_row != before
 }
 
+/// Follow the cursor after a jump, gliding the view from where it was instead of
+/// teleporting, and report whether the view moved.
+///
+/// The cursor's content anchor is only sent to the terminal while a glide is
+/// armed, so a jump that moved the view bare leaves the terminal easing the
+/// cursor from wherever it sat on screen. Seeding `scroll_offset` with the
+/// pre-jump row makes the cursor ride the eased content and arrive from the
+/// direction it came from in the document.
+///
+/// A single-row follow stays a snap, so plain motion at the viewport margin
+/// keeps its immediate feel.
+pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
+    let prev = editor.scroll_row;
+    let scrolled = ensure_cursor_in_view(editor, scrolloff);
+
+    if scrolled && prev.abs_diff(editor.scroll_row) > 1 {
+        editor.scroll_offset = prev as f32;
+        editor.scroll_glide = ScrollGlide::Page;
+    }
+
+    scrolled
+}
+
 /// The display row the primary cursor's caret sits on.
 ///
 /// Resolves the newest selection's caret to a buffer offset and maps it through
@@ -4736,6 +4759,81 @@ mod tests {
         assert_eq!(
             editor.scroll_row, 5,
             "upward jump keeps a 3-row margin above the cursor",
+        );
+    }
+
+    #[test]
+    fn follow_jump_glides_a_far_move_from_the_pre_jump_row() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        set_cursor_row(editor, 50);
+        editor.scroll_row = 0;
+        editor.scroll_offset = 0.0;
+        editor.scroll_glide = ScrollGlide::None;
+
+        assert!(follow_jump(editor, 3), "a far jump scrolls the view");
+        assert_eq!(editor.scroll_row, 44, "the view follows the cursor");
+        assert_eq!(
+            editor.scroll_offset, 0.0,
+            "the glide starts from the pre-jump row so the cursor rides the content"
+        );
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::Page,
+            "a far jump arms the glide that ships the cursor anchor"
+        );
+    }
+
+    #[test]
+    fn follow_jump_snaps_a_single_row_move() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        // One row past the bottom margin, the follow every plain j at the edge does.
+        set_cursor_row(editor, 7);
+        editor.scroll_row = 0;
+        editor.scroll_offset = 0.0;
+        editor.scroll_glide = ScrollGlide::None;
+
+        assert!(follow_jump(editor, 3), "the margin follow still scrolls");
+        assert_eq!(editor.scroll_row, 1, "the view moves exactly one row");
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::None,
+            "a one-row follow stays a snap, keeping plain motion immediate"
+        );
+    }
+
+    #[test]
+    fn follow_jump_leaves_a_visible_cursor_alone() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+
+        set_cursor_row(editor, 45);
+        editor.scroll_row = 41;
+        editor.scroll_glide = ScrollGlide::None;
+
+        assert!(!follow_jump(editor, 0), "an in-view cursor does not scroll");
+        assert_eq!(
+            editor.scroll_glide,
+            ScrollGlide::None,
+            "no view move arms no glide"
         );
     }
 
