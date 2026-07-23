@@ -141,6 +141,63 @@ fn fixture_harness(name: &str) -> (TempDir, PathBuf, LiveHarness) {
     (dir, root, harness)
 }
 
+/// The conflict view's three columns come from the on-disk index stages, which
+/// only a real repository mid-merge produces. This drives the whole chain --
+/// stage read, merge alignment, and paint -- against one, so a regression
+/// anywhere along it shows up as an empty flanking column.
+#[test]
+fn conflict_view_shows_side_columns_in_a_real_merge() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize tempdir");
+    fixture::materialize("conflict", &root).expect("materialize fixture");
+
+    {
+        let repo = git2::Repository::open(&root).expect("open fixture repo");
+        let theirs = repo
+            .find_branch("theirs", git2::BranchType::Local)
+            .expect("theirs branch")
+            .get()
+            .peel_to_commit()
+            .expect("theirs commit");
+        let annotated = repo
+            .find_annotated_commit(theirs.id())
+            .expect("annotated commit");
+        repo.merge(&[&annotated], None, None)
+            .expect("merge theirs into main");
+        // Flush the merged index so the stage reads see the conflict on disk.
+        repo.index().expect("index").write().expect("write index");
+    }
+
+    let mut harness = LiveHarness::open(&root, Settings::default()).expect("open harness");
+    harness.run(|mut handle| async move {
+        handle
+            .send_keys(":conflict<Enter>")
+            .await
+            .expect("open the conflict view");
+        let frame = handle
+            .await_frame(|text| text.contains("<<<<<<< ours"), Duration::from_secs(5))
+            .await
+            .expect("the conflict view renders its marker band");
+
+        // Read each column off the rules. A whole-frame check would pass on the
+        // center alone, which is exactly the failure this pins.
+        let band = frame
+            .lines()
+            .find(|line| line.contains("<<<<<<< ours"))
+            .expect("the marker band row");
+        let mut columns = band.split('│');
+        let ours = columns.next().unwrap_or_default().trim();
+        let theirs = columns.nth(1).unwrap_or_default().trim();
+
+        assert_eq!(
+            (ours, theirs),
+            ("2 ours edit", "2 theirs edit"),
+            "both flanking columns carry their stage content beside the marker \
+             band, got frame:\n{frame}",
+        );
+    });
+}
+
 fn require_rust_analyzer() {
     let available = Command::new("rust-analyzer")
         .arg("--version")

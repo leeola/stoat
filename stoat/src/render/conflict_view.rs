@@ -350,7 +350,99 @@ fn paint_side(
 #[cfg(test)]
 mod tests {
     use super::ConflictColumns;
+    use crate::test_harness::TestHarness;
     use ratatui::layout::Rect;
+    use std::path::PathBuf;
+
+    /// Open the conflict view on one three-stage file in a `width`-wide harness.
+    fn conflict_harness(width: u16, ancestor: &str, ours: &str, theirs: &str) -> TestHarness {
+        let mut h = TestHarness::with_size(width, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .conflicted_file("f.txt", Some(ancestor), Some(ours), Some(theirs));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Conflict);
+        h.settle();
+        h
+    }
+
+    /// Split each rendered row on the two column rules into its trimmed ours,
+    /// center, and theirs text.
+    ///
+    /// Reading each column on its own is what makes these tests meaningful. A
+    /// whole-frame substring check passes on a painting center even when both
+    /// sides are blank, which is exactly the failure being pinned. Rows are read
+    /// off the rules rather than off [`ConflictColumns`] so the assertions
+    /// describe what reached the screen, not what the geometry intended.
+    fn split_columns(frame: &str) -> Vec<(String, String, String)> {
+        frame
+            .lines()
+            .map(|line| {
+                let mut parts = line.split('│');
+                let ours = parts.next().unwrap_or_default().trim().to_string();
+                let center = parts.next().unwrap_or_default().trim().to_string();
+                let theirs = parts.next().unwrap_or_default().trim().to_string();
+                (ours, center, theirs)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn side_columns_carry_the_ours_and_theirs_content() {
+        let mut h = conflict_harness(150, "a\nbase\nz\n", "a\nOURS\nz\n", "a\nTHEIRS\nz\n");
+        let rows = split_columns(&h.snapshot().content);
+
+        assert_eq!(
+            rows[0],
+            ("1 a".into(), "1 a".into(), "1 a".into()),
+            "context above the conflict reads across all three columns, each \
+             numbered from its own stage",
+        );
+        assert_eq!(
+            (rows[1].0.as_str(), rows[1].2.as_str()),
+            ("2 OURS", "2 THEIRS"),
+            "each side's stage content sits on the band's first row",
+        );
+        assert_eq!(
+            rows[1].1, "?   2 <<<<<<< ours",
+            "and lines up with the center's marker band",
+        );
+    }
+
+    #[test]
+    fn side_columns_stay_aligned_while_scrolled() {
+        let stage = |edit: &str| -> String {
+            (0..200)
+                .map(|i| match i {
+                    120 => format!("{edit}\n"),
+                    _ => format!("line {i:03}\n"),
+                })
+                .collect()
+        };
+        let base: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+
+        let mut h = conflict_harness(150, &base, &stage("OURS EDIT"), &stage("THEIRS EDIT"));
+        // Park the marker band one row below the top so it renders clear of the
+        // conflict hint box, which the view always overlays bottom-right.
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .scroll_row = 119;
+
+        let rows = split_columns(&h.snapshot().content);
+
+        assert_eq!(
+            (rows[0].0.as_str(), rows[0].2.as_str()),
+            ("120 line 119", "120 line 119"),
+            "the sides start at the scrolled row, so the align plan is indexed \
+             by absolute display row rather than by screen row",
+        );
+        assert_eq!(
+            (rows[1].0.as_str(), rows[1].2.as_str()),
+            ("121 OURS EDIT", "121 THEIRS EDIT"),
+            "and the scrolled conflict band still carries both sides",
+        );
+    }
 
     #[test]
     fn wide_layout_lays_out_three_columns_with_side_gutters() {
