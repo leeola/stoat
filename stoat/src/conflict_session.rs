@@ -76,6 +76,7 @@ pub(crate) struct FileResolveState {
 /// from `doc` each frame. `file_index`/`file_count`/`rel_path` feed the hints
 /// footer. Refreshed alongside the session when a pick reassembles a region.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub(crate) struct ConflictViewState {
     pub(crate) doc: MergeDoc,
     /// Start/end anchors of each chunk's center region, so the renderer can

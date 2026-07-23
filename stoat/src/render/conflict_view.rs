@@ -1,4 +1,5 @@
 use crate::{
+    conflict_session::ConflictViewState,
     display_map::{BlockRowKind, DisplaySnapshot},
     editor_state::EditorState,
     merge_view::{ChunkState, MergeDoc, RowPick},
@@ -106,16 +107,11 @@ pub(crate) fn render_conflict_view(
     let scroll_row = editor.scroll_row;
 
     if let Some(state) = editor.conflict_view.as_ref() {
-        let chunk_center_rows = chunk_center_rows(&snapshot, &state.chunk_anchors);
-        let chunk_states = chunk_states(&snapshot, &state.doc, &state.chunk_anchors, &state.picks);
-        paint_conflict_rows(
+        render_conflict_rows(
             &snapshot,
+            state,
             scroll_row,
             inner,
-            &cols,
-            &state.doc,
-            &chunk_center_rows,
-            &chunk_states,
             fallback_style,
             theme,
             buf,
@@ -130,6 +126,42 @@ pub(crate) fn render_conflict_view(
         theme,
         buf,
         stoatty,
+    );
+}
+
+/// Paint the three-column body -- ours, the merged center, and theirs -- for the
+/// `inner`-sized window starting at display row `scroll_row`.
+///
+/// The single seam the live grid and the pooled smooth-scroll pages share, so a
+/// glide cannot drift from the frame it settles into. Everything downstream of
+/// the snapshot is derived here rather than passed in, which lets a pooled page
+/// render off the run loop from an owned [`ConflictViewState`] clone.
+///
+/// Paints rows only. The cursor belongs to the live grid alone, since a pooled
+/// page never carries one.
+pub(crate) fn render_conflict_rows(
+    snapshot: &DisplaySnapshot,
+    state: &ConflictViewState,
+    scroll_row: u32,
+    inner: Rect,
+    fallback_style: Style,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
+    let cols = ConflictColumns::compute(inner);
+    let chunk_center_rows = chunk_center_rows(snapshot, &state.chunk_anchors);
+    let chunk_states = chunk_states(snapshot, &state.doc, &state.chunk_anchors, &state.picks);
+    paint_conflict_rows(
+        snapshot,
+        scroll_row,
+        inner,
+        &cols,
+        &state.doc,
+        &chunk_center_rows,
+        &chunk_states,
+        fallback_style,
+        theme,
+        buf,
     );
 }
 

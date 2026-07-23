@@ -7553,6 +7553,10 @@ impl Stoat {
             view: crate::review_session::ReviewViewState,
             theme: Arc<crate::theme::Theme>,
         }
+        struct ConflictFillParts {
+            state: crate::conflict_session::ConflictViewState,
+            theme: Arc<crate::theme::Theme>,
+        }
         enum PoolFill {
             Editor {
                 snapshot: crate::display_map::DisplaySnapshot,
@@ -7567,6 +7571,14 @@ impl Stoat {
             Review {
                 snapshot: crate::display_map::DisplaySnapshot,
                 parts: Box<ReviewFillParts>,
+                pages: Vec<u64>,
+                pool: u32,
+                width: u16,
+                height: u16,
+            },
+            Conflict {
+                snapshot: crate::display_map::DisplaySnapshot,
+                parts: Box<ConflictFillParts>,
                 pages: Vec<u64>,
                 pool: u32,
                 width: u16,
@@ -7745,6 +7757,21 @@ impl Stoat {
                         snapshot,
                         parts: Box::new(ReviewFillParts {
                             view: view.clone(),
+                            theme: theme.clone(),
+                        }),
+                        pages: entered,
+                        pool: region.pool,
+                        width: region.width,
+                        height: region.height,
+                    });
+                } else if let Some(state) = editor.conflict_view.as_ref() {
+                    // The conflict pane is a View::Editor, so without its own
+                    // arm it would fill through the plain-editor page and paint
+                    // the bare center buffer, dropping the flanking columns.
+                    async_jobs.push(PoolFill::Conflict {
+                        snapshot,
+                        parts: Box::new(ConflictFillParts {
+                            state: state.clone(),
                             theme: theme.clone(),
                         }),
                         pages: entered,
@@ -8194,6 +8221,37 @@ impl Stoat {
                                 let fill = crate::smooth_scroll::render_review_page_from_parts(
                                     &snapshot,
                                     &view,
+                                    &theme,
+                                    pool,
+                                    index,
+                                    fallback_style,
+                                    width,
+                                    height,
+                                );
+                                let _ = apc_tx.send(fill);
+                            })
+                            .detach();
+                    }
+                },
+                PoolFill::Conflict {
+                    snapshot,
+                    parts,
+                    pages,
+                    pool,
+                    width,
+                    height,
+                } => {
+                    let ConflictFillParts { state, theme } = *parts;
+                    for index in pages {
+                        let snapshot = snapshot.clone();
+                        let state = state.clone();
+                        let theme = theme.clone();
+                        let apc_tx = apc_tx.clone();
+                        self.executor
+                            .spawn_blocking(move || {
+                                let fill = crate::smooth_scroll::render_conflict_page_from_parts(
+                                    &snapshot,
+                                    &state,
                                     &theme,
                                     pool,
                                     index,
@@ -15037,6 +15095,68 @@ mod tests {
                 pool: crate::smooth_scroll::non_pane_pool::COMMITS,
             })),
             "leaving commits mode retires its pool"
+        );
+    }
+
+    /// A conflict pane is a `View::Editor`, so without its own fill arm it
+    /// routes to the plain-editor page and its pooled fills paint the bare
+    /// center scratch buffer, dropping the flanking columns wherever a pool page
+    /// covers the region. Pins the routing rather than the page renderer.
+    #[test]
+    fn a_conflict_pane_fills_with_the_three_column_body() {
+        use crate::render::conflict_view::render_conflict_rows;
+        use ratatui::{buffer::Buffer, layout::Rect};
+
+        let mut h = crate::test_harness::TestHarness::with_size(150, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .conflicted_file(
+                "f.txt",
+                Some("a\nbase\nz\n"),
+                Some("a\nOURS\nz\n"),
+                Some("a\nTHEIRS\nz\n"),
+            );
+        action_handlers::dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.emit_smooth_scroll();
+        // The fills render on blocking workers, so settle before draining.
+        h.settle();
+
+        let (_, _, region) = h
+            .stoat
+            .editor_pool_panes()
+            .into_iter()
+            .next()
+            .expect("the conflict pane declares a pool region");
+        let theme = Arc::new(h.stoat.theme.clone());
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let (snapshot, state) = {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+            (
+                editor.display_map.snapshot(),
+                editor.conflict_view.clone().expect("conflict view state"),
+            )
+        };
+
+        let area = Rect::new(0, 0, region.width, region.height);
+        let mut expected = Buffer::empty(area);
+        render_conflict_rows(&snapshot, &state, 0, area, fallback, &theme, &mut expected);
+        let expected = crate::smooth_scroll::serialize_buffer(&expected);
+
+        let mut fills = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            fills.push(bytes);
+        }
+        assert!(
+            fills
+                .iter()
+                .any(|batch| batch.windows(expected.len()).any(|w| w == expected)),
+            "a pooled fill carries the live three-column body, not the bare center buffer",
         );
     }
 

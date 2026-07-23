@@ -24,6 +24,7 @@ use crate::{
     command_palette::ArgPicker,
     commit_list::CommitListState,
     completion::CompletionItem,
+    conflict_session::ConflictViewState,
     display_map::DisplaySnapshot,
     file_finder::FileFinder,
     help::Help,
@@ -31,6 +32,7 @@ use crate::{
         command_palette::paint_palette_rows,
         commits::paint_commit_rows,
         completion::paint_completion_rows,
+        conflict_view::render_conflict_rows,
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
             rich_gutter, RichGutterColors,
@@ -674,6 +676,48 @@ pub(crate) fn render_review_page_from_parts(
     frame
 }
 
+/// Render conflict-view page `index` from owned parts and wrap it in the pool
+/// fill frames, so the returned bytes are a self-contained fill the terminal
+/// applies to slot `index`.
+///
+/// The conflict analogue of [`render_review_page_from_parts`]. It calls the same
+/// [`render_conflict_rows`] the live grid calls, so a wheel glide keeps all
+/// three columns rather than dropping to the bare center buffer the plain-editor
+/// page would paint.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_conflict_page_from_parts(
+    snapshot: &DisplaySnapshot,
+    state: &ConflictViewState,
+    theme: &crate::theme::Theme,
+    pool: u32,
+    index: u64,
+    fallback_style: Style,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let scroll_row = index
+        .saturating_mul(region_height as u64)
+        .min(u32::MAX as u64) as u32;
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+    render_conflict_rows(
+        snapshot,
+        state,
+        scroll_row,
+        area,
+        fallback_style,
+        theme,
+        &mut buf,
+    );
+    let bytes = serialize_buffer(&buf);
+
+    let mut frame = Vec::with_capacity(bytes.len() + 16);
+    encode_fill_into(&mut frame, pool, index);
+    frame.extend_from_slice(&bytes);
+    encode_fill_end_into(&mut frame);
+    frame
+}
+
 /// Render `region_height` rows of the file finder list starting at row
 /// `page * region_height` into a fresh region-sized [`Buffer`], returning the
 /// page's self-contained VT byte stream.
@@ -1103,6 +1147,55 @@ mod tests {
         assert_eq!(
             got, expected,
             "the diff-view page paints the two-column body, not the single-column path"
+        );
+    }
+
+    /// A conflict-view page must carry the same three columns as the live grid,
+    /// so a wheel glide over the pool does not drop to the bare center buffer
+    /// and back at settle.
+    #[test]
+    fn conflict_view_page_paints_the_three_column_body() {
+        use super::{
+            render_conflict_page_from_parts, render_conflict_rows, serialize_buffer, Buffer, Rect,
+        };
+        use crate::{test_harness::TestHarness, theme::scope};
+        use std::path::PathBuf;
+
+        let mut h = TestHarness::with_size(150, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .conflicted_file(
+                "f.txt",
+                Some("a\nbase\nz\n"),
+                Some("a\nOURS\nz\n"),
+                Some("a\nTHEIRS\nz\n"),
+            );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Conflict);
+        h.settle();
+
+        let theme = Arc::new(h.stoat.theme.clone());
+        let fallback = theme.get(scope::UI_TEXT);
+        let (snapshot, state) = {
+            let editor =
+                crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+            (
+                editor.display_map.snapshot(),
+                editor.conflict_view.clone().expect("conflict view state"),
+            )
+        };
+
+        let area = Rect::new(0, 0, 150, 8);
+        let mut expected = Buffer::empty(area);
+        render_conflict_rows(&snapshot, &state, 0, area, fallback, &theme, &mut expected);
+        let expected = serialize_buffer(&expected);
+
+        let got =
+            render_conflict_page_from_parts(&snapshot, &state, &theme, 7, 0, fallback, 150, 8);
+        assert!(
+            got.windows(expected.len()).any(|w| w == expected),
+            "the conflict page carries the live three-column body inside its fill frames",
         );
     }
 
