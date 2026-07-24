@@ -4,7 +4,7 @@ use crate::{
         app::{OpenLogs, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
-            CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
+            CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, GitLs, OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -899,6 +899,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsLast::DEF, |_| Ok(Box::new(CommitsLast)));
     add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
     add(CommitsOpenReview::DEF, |_| Ok(Box::new(CommitsOpenReview)));
+    add(GitLs::DEF, |_| Ok(Box::new(GitLs)));
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
     add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
     add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
@@ -1220,6 +1221,7 @@ mod tests {
         "CommitsLast",
         "CommitsRefresh",
         "CommitsOpenReview",
+        "GitLs",
         "EnterRebase",
         "AbortRebase",
         "ExecuteRebase",
@@ -1735,7 +1737,8 @@ mod tests {
         // + 4 CommitPickerNext/Prev/Select/Close.
         // + 1 GitReview.
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
-        assert_eq!(all().count(), 409);
+        // + 1 GitLs.
+        assert_eq!(all().count(), 410);
     }
 
     #[test]

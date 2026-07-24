@@ -833,6 +833,7 @@ on key {
         p -> [GotoPrevChange(), SetMode(normal)];
         m -> [JumpToMoveSource(), SetMode(normal)];
         M -> [JumpToMoveTarget(), SetMode(normal)];
+        l -> GitLs();
     }
     # The git chord, pinned. Only a binding changes the mode, never the action
     # it runs, so space_git releases after one key purely because each of its

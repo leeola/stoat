@@ -9,7 +9,7 @@ pub use defs::{
     app::{OpenLogs, Quit, QuitAll, ShowVersion},
     commits::{
         CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
-        CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
+        CommitsPageUp, CommitsPrev, CommitsRefresh, GitLs, OpenCommits,
     },
     conflict::{
         CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,

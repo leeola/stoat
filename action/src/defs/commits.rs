@@ -96,6 +96,19 @@ define_action!(
 );
 
 define_action!(
+    GitLsDef,
+    GitLs,
+    "GitLs",
+    ActionKind::GitLs,
+    "browse commit history",
+    "Open a read-only picker over the current branch's first-parent history, \
+     with a fuzzy filter and a diff preview of the highlighted commit. \
+     Selecting a row dismisses the picker without changing the working tree.",
+    ActionPriority::Rare,
+    command_name = "git-ls"
+);
+
+define_action!(
     CommitsOpenReviewDef,
     CommitsOpenReview,
     "CommitsOpenReview",

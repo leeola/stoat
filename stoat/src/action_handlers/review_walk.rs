@@ -32,6 +32,42 @@ pub(crate) fn git_review(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
             Some(format!("no revision named {reference}")),
         );
     };
+    open_commit_picker(stoat, &repo, CommitPickerRole::PickBase, workdir, ref_sha)
+}
+
+/// List the current branch's history read-only.
+///
+/// The same picker `:git-review` opens, in a role where selecting a row
+/// dismisses rather than starting a walk, so browsing history never touches the
+/// working tree.
+pub(crate) fn git_ls(stoat: &mut Stoat) -> UpdateEffect {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        return review_error(stoat, "not in a git repository", None);
+    };
+    let Some(workdir) = repo.workdir() else {
+        return review_error(stoat, "git repo has no working tree", None);
+    };
+    let Some(head) = repo.resolve_rev("HEAD") else {
+        return review_error(stoat, "no commits on this branch", None);
+    };
+    open_commit_picker(stoat, &repo, CommitPickerRole::Browse, workdir, head)
+}
+
+/// Build and install a picker over `ref_sha`'s first-parent history.
+///
+/// The editor underneath is dropped to normal mode first, so a chord that
+/// opened the picker releases rather than waiting for a key the picker has
+/// taken focus away from. The picker's own input then supplies the insert mode
+/// its keymap block is gated on.
+fn open_commit_picker(
+    stoat: &mut Stoat,
+    repo: &Arc<dyn crate::host::GitRepo>,
+    role: CommitPickerRole,
+    workdir: PathBuf,
+    ref_sha: String,
+) -> UpdateEffect {
+    stoat.set_focused_mode("normal".to_string());
 
     let commits = repo.log_from(&ref_sha, WALK_LIMIT);
     let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
@@ -43,7 +79,7 @@ pub(crate) fn git_review(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
     let picker = CommitPicker::new(
         stoat.active_workspace_mut(),
         executor,
-        CommitPickerRole::PickBase,
+        role,
         workdir,
         ref_sha,
         commits,
@@ -79,6 +115,7 @@ pub(crate) fn commit_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     };
     match picker.role {
         CommitPickerRole::PickBase => install_walk(stoat),
+        CommitPickerRole::Browse => commit_picker_close(stoat),
     }
 }
 
@@ -355,7 +392,9 @@ fn spawn_preview_load(
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, badge::BadgeSource, test_harness::TestHarness};
+    use crate::{
+        app::Stoat, badge::BadgeSource, commit_picker::CommitPickerRole, test_harness::TestHarness,
+    };
 
     /// A harness whose `/repo` carries three commits, `main` on the tip and
     /// `feature` one commit back, with the workspace rooted there.
@@ -476,6 +515,90 @@ mod tests {
             Some(0),
             "typing filters the list rather than editing the buffer behind it"
         );
+    }
+
+    fn picker_shas(h: &TestHarness) -> Vec<String> {
+        h.stoat
+            .commit_picker
+            .as_ref()
+            .map(|p| p.commits.iter().map(|c| c.sha.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn git_ls_browses_head_history() {
+        let mut h = harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker open");
+        assert_eq!(picker.role, CommitPickerRole::Browse);
+        assert_eq!(
+            picker.selected_commit().map(|c| c.sha.as_str()),
+            Some("c3d4e5f6"),
+            "a browser starts at the newest commit, not a branch-tip heuristic"
+        );
+        assert_eq!(picker_shas(&h), ["c3d4e5f6", "b2c3d4e5", "a1b2c3d4"]);
+    }
+
+    #[test]
+    fn space_g_l_opens_the_browser() {
+        let mut h = harness();
+        h.type_keys("space g l");
+        h.settle();
+
+        assert_eq!(
+            h.stoat.commit_picker.as_ref().map(|p| p.role),
+            Some(CommitPickerRole::Browse),
+        );
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "insert",
+            "the chord releases into the picker's query field"
+        );
+
+        h.type_keys("escape");
+        h.settle();
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "closing the picker leaves normal mode, not the space_git chord"
+        );
+    }
+
+    #[test]
+    fn selecting_while_browsing_changes_nothing() {
+        let mut h = harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        h.type_keys("down");
+        h.type_keys("enter");
+        h.settle();
+
+        assert!(h.stoat.commit_picker.is_none(), "the picker dismisses");
+        assert!(
+            h.stoat.active_workspace().review_walk.is_none(),
+            "browsing installs no walk"
+        );
+        assert!(
+            checkouts(&h).is_empty(),
+            "browsing never touches the working tree"
+        );
+    }
+
+    #[test]
+    fn git_ls_outside_a_repository_badges() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = "/elsewhere".into();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        assert!(h.stoat.commit_picker.is_none());
+        assert_eq!(review_badge(&h).as_deref(), Some("not in a git repository"));
     }
 
     fn checkouts(h: &TestHarness) -> Vec<String> {

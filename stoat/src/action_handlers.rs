@@ -534,6 +534,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("GitReview action downcast");
             review_walk::git_review(stoat, &action.reference)
         },
+        ActionKind::GitLs => review_walk::git_ls(stoat),
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
         ActionKind::ReviewDone => review_walk::review_done(stoat),

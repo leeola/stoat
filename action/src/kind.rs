@@ -334,6 +334,7 @@ pub enum ActionKind {
     ReviewApplyStaged,
     CloseReview,
     GitReview,
+    GitLs,
     ReviewNextCommit,
     ReviewPrevCommit,
     ReviewDone,

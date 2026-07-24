@@ -18,6 +18,9 @@ use stoat_scheduler::Executor;
 pub(crate) enum CommitPickerRole {
     /// Choose the commit a review walk starts from.
     PickBase,
+    /// Read-only listing. Selecting a row dismisses the picker without
+    /// touching the working tree.
+    Browse,
 }
 
 /// One rendered picker row, and the segment lengths the renderer colors by.
@@ -197,13 +200,19 @@ impl CommitPicker {
 
     /// The filtered row to start on.
     ///
-    /// This is the newest commit carrying a local branch other than the ref the
-    /// picker was opened over, falling back to the newest row.
+    /// Under [`CommitPickerRole::PickBase`] this is the newest commit carrying
+    /// a local branch other than the ref the picker was opened over, falling
+    /// back to the newest row. Opening `:git-review main` from `main` most
+    /// often means reviewing what another branch added, so the nearest such
+    /// branch tip is a better landing spot than the tip the user is already
+    /// sitting on.
     ///
-    /// Opening `:git-review main` from `main` most often means reviewing what
-    /// another branch added, so the nearest such branch tip is a better landing
-    /// spot than the tip the user is already sitting on.
+    /// A browser starts at the newest row instead. That heuristic answers
+    /// "where would a review begin", which is not a question a listing asks.
     pub(crate) fn default_selection(&self) -> usize {
+        if self.role == CommitPickerRole::Browse {
+            return 0;
+        }
         self.filtered
             .iter()
             .position(|&idx| {
