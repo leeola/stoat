@@ -25,7 +25,7 @@ use crate::{
     commit_list::CommitListState,
     completion::CompletionItem,
     conflict_session::ConflictViewState,
-    display_map::DisplaySnapshot,
+    display_map::{display_width, DisplaySnapshot},
     file_finder::FileFinder,
     help::Help,
     render::{
@@ -493,11 +493,25 @@ pub(crate) fn render_page_from_snapshot(
                     }
                     continue;
                 }
+                let w = display_width(ch);
+                if w == 0 {
+                    continue;
+                }
+                // Guard `x` from growing unbounded past the pane on an over-wide
+                // line, which would overflow the u16 column. Off-screen chars
+                // never paint, so this matches the wide-aware column model.
                 if x >= right {
                     continue;
                 }
-                buf[(x, y)].set_char(ch).set_style(style);
-                x += 1;
+                if x + w as u16 <= right {
+                    buf[(x, y)].set_char(ch).set_style(style);
+                    // A double-width glyph occupies two cells. Clear the second
+                    // so stale content under it does not show through.
+                    if w == 2 {
+                        buf[(x + 1, y)].set_char(' ').set_style(style);
+                    }
+                }
+                x += w as u16;
             }
         }
     }
@@ -1032,6 +1046,72 @@ mod tests {
 
             assert_eq!(got, expected, "page at top_row {top_row}");
         }
+    }
+
+    #[test]
+    fn pooled_page_places_wide_chars_like_the_live_grid() {
+        use super::{render_page_from_snapshot, serialize_buffer, Buffer, PageGutter, Rect};
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::render_editor_with_overlay,
+            theme::{scope, Theme},
+            LineNumbers, Stoat,
+        };
+        use std::{collections::BTreeMap, path::PathBuf};
+        use stoat_action::OpenFile;
+        use stoat_config::WrapMode;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-cjk");
+        let path = root.join("doc.txt");
+        h.fake_fs()
+            .insert_file(&path, "\u{6c49}\u{5b57}ab\n".as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = Theme::empty();
+        let fallback = theme.get(scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(BTreeMap::new()),
+            Arc::new(theme.clone()),
+            None,
+            None,
+        );
+
+        let area = Rect::new(0, 0, 12, 2);
+        let mut expected = Buffer::empty(area);
+        render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut expected,
+            false,
+            false,
+            LineNumbers::Absolute,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+        let expected = serialize_buffer(&expected);
+
+        let snapshot = editor.display_map.snapshot();
+        let got = render_page_from_snapshot(&snapshot, 0, fallback, 12, 2, &gutter, false, 0.0);
+
+        assert_eq!(
+            got, expected,
+            "the pooled page places wide chars by display width like the live grid",
+        );
     }
 
     /// A pooled page for an unfocused pane must dim exactly as the live grid does:

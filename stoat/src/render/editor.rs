@@ -1,7 +1,7 @@
 use super::TEXT_SCALE_COMPACT;
 use crate::{
     diff_map::DiffHunkStatus,
-    display_map::{tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
+    display_map::{display_width, tab_map, BlockRowKind, DisplayPoint, DisplaySnapshot},
     editor_state::{EditorState, SearchMatchCache},
     host::OffsetEncoding,
     lsp::registry::LspRegistry,
@@ -356,11 +356,25 @@ pub(crate) fn render_editor_with_overlay(
                     }
                     continue;
                 }
+                let w = display_width(ch);
+                if w == 0 {
+                    continue;
+                }
+                // Guard `x` from growing unbounded past the pane on an over-wide
+                // line, which would overflow the u16 column. Off-screen chars
+                // never paint, so this matches the wide-aware column model.
                 if x >= right {
                     continue;
                 }
-                buf[(x, y)].set_char(ch).set_style(style);
-                x += 1;
+                if x + w as u16 <= right {
+                    buf[(x, y)].set_char(ch).set_style(style);
+                    // A double-width glyph occupies two cells. Clear the second
+                    // so stale content under it does not show through.
+                    if w == 2 {
+                        buf[(x + 1, y)].set_char(' ').set_style(style);
+                    }
+                }
+                x += w as u16;
             }
         }
     }
@@ -2408,6 +2422,78 @@ mod tests {
         );
     }
 
+    fn open_wide_row(h: &mut crate::test_harness::TestHarness, root: &str) {
+        let root = PathBuf::from(root);
+        let path = root.join("wide.txt");
+        h.fake_fs()
+            .insert_file(&path, "\u{6c49}\u{5b57}ab\n".as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+    }
+
+    #[test]
+    fn wide_glyphs_advance_by_display_width() {
+        let mut h = Stoat::test();
+        open_wide_row(&mut h, "/cjk-glyphs");
+
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = Buffer::empty(area);
+        super::render_editor(editor, area, fallback, &theme, &mut buf, true);
+
+        let base = (0..area.width)
+            .find(|&x| buf[(x, 0)].symbol() == "\u{6c49}")
+            .expect("the first wide glyph is painted");
+        assert_eq!(
+            buf[(base + 1, 0)].symbol(),
+            " ",
+            "the wide glyph clears its trailing cell",
+        );
+        assert_eq!(buf[(base + 2, 0)].symbol(), "\u{5b57}");
+        assert_eq!(buf[(base + 3, 0)].symbol(), " ");
+        assert_eq!(buf[(base + 4, 0)].symbol(), "a");
+        assert_eq!(buf[(base + 5, 0)].symbol(), "b");
+
+        let snapshot = editor.display_map.snapshot();
+        let a_point = snapshot.buffer_snapshot().rope().offset_to_point(6);
+        assert_eq!(
+            snapshot.buffer_to_display(a_point).column,
+            4,
+            "a is painted at the display column the width model reports",
+        );
+    }
+
+    #[test]
+    fn the_cursor_lands_on_the_glyph_after_wide_chars() {
+        let mut h = Stoat::test();
+        open_wide_row(&mut h, "/cjk-cursor");
+        dispatch(&mut h.stoat, &MoveRight);
+        dispatch(&mut h.stoat, &MoveRight);
+        let cursor_col = h.cursor_display_positions()[0].1;
+
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = Buffer::empty(area);
+        super::render_editor(editor, area, fallback, &theme, &mut buf, true);
+
+        let base = (0..area.width)
+            .find(|&x| buf[(x, 0)].symbol() == "\u{6c49}")
+            .expect("the first wide glyph is painted");
+        let a_col = (0..area.width)
+            .find(|&x| buf[(x, 0)].symbol() == "a")
+            .expect("a is painted");
+        assert_eq!(
+            (a_col - base) as u32,
+            cursor_col,
+            "the a glyph is painted at the cursor's display column",
+        );
+    }
+
     /// Open a single 200-column line with no trailing newline, so any wrapping
     /// splits it across display rows.
     fn open_long_line(h: &mut crate::test_harness::TestHarness) {
@@ -3613,9 +3699,9 @@ mod tests {
         let path = h.write_file("s.txt", "a世z\n");
         h.open_file(&path);
         dispatch(&mut h.stoat, &ExtendToLineEnd);
-        // The text pass advances one terminal cell per glyph, so glyphs after a
-        // wide char diverge from the selection/cursor columns, which do account
-        // for display width. This locks that width-aware column math.
+        // The text pass advances by display width per glyph, so glyphs after a
+        // wide char stay aligned with the selection and cursor columns, which
+        // also account for display width. This locks that width-aware column math.
         h.assert_snapshot("selection_over_wide_chars");
     }
 
