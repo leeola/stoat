@@ -8639,8 +8639,8 @@ fn editor_page_content_version(
 /// the byte ranges are exact regardless of tab expansion, soft-wrap, or inlays --
 /// unlike display chunks. Each token splits across the buffer lines it spans, and
 /// the pieces bucket per row as line-relative [`crate::minimap::LineToken`]s
-/// carrying their foreground's palette class. Tokens resolving to class 0 drop,
-/// and `syntax_on` off yields an empty map.
+/// carrying their scope's palette class. Tokens whose style names no syntax
+/// scope classify 0 and drop, and `syntax_on` off yields an empty map.
 fn minimap_line_tokens(
     snapshot: &crate::display_map::DisplaySnapshot,
     buffer_id: BufferId,
@@ -8679,9 +8679,7 @@ fn minimap_line_tokens(
         let bounds =
             channel.overlap_bounds(&byte_range, |anchor| buffer_snap.resolve_anchor(anchor));
         for span in &channel.tokens[bounds] {
-            let class = channel.interner[span.style]
-                .foreground
-                .map_or(0, |fg| class_table.class_of_color(fg));
+            let class = class_table.class_of(span.style);
             if class == 0 {
                 continue;
             }
@@ -12608,12 +12606,27 @@ mod tests {
         assert_eq!(touched, vec![1], "only the formerly-marked line re-splices");
     }
 
+    /// The style id and interner for the first `THEME_KEYS` scope, as the
+    /// production paths hand them to a token channel.
+    ///
+    /// Tokens must intern through the shared table, since that is what the
+    /// minimap's class lookup is keyed by.
+    fn first_scope_style(
+        stoat: &Stoat,
+    ) -> (
+        crate::display_map::highlights::HighlightStyleId,
+        Arc<crate::display_map::highlights::HighlightStyleInterner>,
+    ) {
+        let style = stoat
+            .syntax_styles
+            .id_for_highlight(stoat_language::HighlightId(0))
+            .expect("the first theme key resolves");
+        (style, stoat.syntax_styles.interner.clone())
+    }
+
     #[test]
     fn minimap_colors_align_past_a_leading_tab() {
-        use crate::display_map::highlights::{
-            HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
-        };
-        use ratatui::style::Color;
+        use crate::display_map::highlights::SemanticTokenHighlight;
         use std::sync::Arc;
         use stoatty_protocol::command::Command;
 
@@ -12633,24 +12646,14 @@ mod tests {
             (ids.0, ids.1)
         };
 
-        // Color the token a real syntax-scope color so it maps to a class.
-        let [r, g, b] = h.stoat.minimap_class_table.palette()[1];
-        let color = Color::Rgb(r, g, b);
-        let expected_class = h.stoat.minimap_class_table.class_of_color(color);
+        // Give the token a real syntax scope so it maps to a class.
+        let (style, interner) = first_scope_style(&h.stoat);
+        let expected_class = h.stoat.minimap_class_table.class_of(style);
         assert_ne!(
             expected_class, 0,
-            "the test color must map to a syntax class"
+            "the test style must map to a syntax class"
         );
 
-        let mut interner = HighlightStyleInterner::default();
-        let style = interner.intern(HighlightStyle {
-            foreground: Some(color),
-            background: None,
-            bold: None,
-            italic: None,
-            underline: None,
-            strikethrough: None,
-        });
         let range = {
             let shared = h
                 .stoat
@@ -12665,7 +12668,7 @@ mod tests {
             Arc::from(vec![SemanticTokenHighlight { range, style }]);
         h.stoat.active_workspace_mut().editors[editor_id]
             .display_map
-            .set_semantic_token_highlights(buffer_id, tokens, Arc::new(interner));
+            .set_semantic_token_highlights(buffer_id, tokens, interner);
 
         h.stoat
             .active_workspace_mut()
@@ -12697,10 +12700,7 @@ mod tests {
 
     #[test]
     fn minimap_recolors_on_syntax_toggle() {
-        use crate::display_map::highlights::{
-            HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
-        };
-        use ratatui::style::Color;
+        use crate::display_map::highlights::SemanticTokenHighlight;
         use std::sync::Arc;
         use stoatty_protocol::command::Command;
 
@@ -12720,23 +12720,13 @@ mod tests {
             (ids.0, ids.1)
         };
 
-        let [r, g, b] = h.stoat.minimap_class_table.palette()[1];
-        let color = Color::Rgb(r, g, b);
-        let colored_class = h.stoat.minimap_class_table.class_of_color(color);
+        let (style, interner) = first_scope_style(&h.stoat);
+        let colored_class = h.stoat.minimap_class_table.class_of(style);
         assert_ne!(
             colored_class, 0,
-            "the test color must map to a syntax class"
+            "the test style must map to a syntax class"
         );
 
-        let mut interner = HighlightStyleInterner::default();
-        let style = interner.intern(HighlightStyle {
-            foreground: Some(color),
-            background: None,
-            bold: None,
-            italic: None,
-            underline: None,
-            strikethrough: None,
-        });
         let range = {
             let shared = h
                 .stoat
@@ -12751,7 +12741,7 @@ mod tests {
             Arc::from(vec![SemanticTokenHighlight { range, style }]);
         h.stoat.active_workspace_mut().editors[editor_id]
             .display_map
-            .set_semantic_token_highlights(buffer_id, tokens, Arc::new(interner));
+            .set_semantic_token_highlights(buffer_id, tokens, interner);
         h.stoat
             .active_workspace_mut()
             .panes
@@ -12788,6 +12778,85 @@ mod tests {
             line0_class(&mono),
             Some(0),
             "the toggle recolors line 0 monochrome, got {mono:?}"
+        );
+    }
+
+    /// A theme switch keeps the minimap's syntax highlighting.
+    ///
+    /// Classifying by resolved color meant a switch left the token's stale
+    /// foreground matching nothing in the new table, so it classified 0 and the
+    /// token vanished from the strip. Classifying by style id is immune,
+    /// because the id names the scope rather than a color.
+    #[test]
+    fn minimap_keeps_its_classes_across_a_theme_switch() {
+        use crate::display_map::highlights::SemanticTokenHighlight;
+        use std::sync::Arc;
+
+        let mut h = Stoat::test();
+        let root = std::path::PathBuf::from("/minimap-theme");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"foo\nbar\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (editor_id, buffer_id) = {
+            let ids = h.stoat.focused_editor_ids().expect("editor");
+            (ids.0, ids.1)
+        };
+
+        let (style, interner) = first_scope_style(&h.stoat);
+        let expected = h.stoat.minimap_class_table.class_of(style);
+        assert_ne!(expected, 0, "the test style must map to a syntax class");
+
+        let range = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let snap = shared.read().expect("poisoned").snapshot.clone();
+            snap.anchor_at(0, Bias::Right)..snap.anchor_at(3, Bias::Left)
+        };
+        let tokens: Arc<[SemanticTokenHighlight]> =
+            Arc::from(vec![SemanticTokenHighlight { range, style }]);
+        h.stoat.active_workspace_mut().editors[editor_id]
+            .display_map
+            .set_semantic_token_highlights(buffer_id, tokens, interner);
+
+        let row0_classes = |stoat: &mut Stoat| {
+            let snapshot = stoat.active_workspace_mut().editors[editor_id]
+                .display_map
+                .snapshot();
+            minimap_line_tokens(
+                &snapshot,
+                buffer_id,
+                stoat.syntax_highlight,
+                &stoat.minimap_class_table,
+                0..1,
+            )
+            .remove(&0)
+            .unwrap_or_default()
+            .iter()
+            .map(|token| token.class)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(row0_classes(&mut h.stoat), vec![expected]);
+
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::SetTheme {
+                name: "gruvbox-light".to_string(),
+            },
+        );
+
+        let after = h.stoat.minimap_class_table.class_of(style);
+        assert_ne!(after, 0, "the scope still has a class under the new theme");
+        assert_eq!(
+            row0_classes(&mut h.stoat),
+            vec![after],
+            "the token keeps its class instead of dropping off the strip"
         );
     }
 

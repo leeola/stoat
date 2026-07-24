@@ -607,7 +607,6 @@ pub fn click_target_line(
 pub struct ClassTable {
     palette: Vec<[u8; 3]>,
     by_style: HashMap<HighlightStyleId, u8>,
-    by_color: HashMap<[u8; 3], u8>,
     edge_base: u8,
 }
 
@@ -618,7 +617,6 @@ impl ClassTable {
 
         let mut palette = vec![default_fg];
         let mut by_style = HashMap::new();
-        let mut by_color = HashMap::new();
         for index in 0..styles.theme_keys().len() {
             let Some(style_id) = styles.id_for_highlight(HighlightId(index as u32)) else {
                 palette.push(default_fg);
@@ -627,9 +625,7 @@ impl ClassTable {
             let class = (index + 1) as u8;
             by_style.insert(style_id, class);
             let fg = styles.interner[style_id].foreground.unwrap_or(Color::White);
-            let rgb = color_to_rgb(fg);
-            by_color.entry(rgb).or_insert(class);
-            palette.push(rgb);
+            palette.push(color_to_rgb(fg));
         }
 
         // The six edge classes follow the syntax scopes, in EdgeClass order, so a
@@ -649,7 +645,6 @@ impl ClassTable {
         ClassTable {
             palette,
             by_style,
-            by_color,
             edge_base,
         }
     }
@@ -667,19 +662,6 @@ impl ClassTable {
     /// recognized syntax scope.
     pub fn class_of(&self, style: HighlightStyleId) -> u8 {
         self.by_style.get(&style).copied().unwrap_or(0)
-    }
-
-    /// The class a token whose resolved foreground is `color` maps to, or 0 when
-    /// no syntax scope draws in that color.
-    ///
-    /// The emission layer resolves highlights to [`Color`] rather than a
-    /// [`HighlightStyleId`], so this bridges a rendered token's foreground to its
-    /// palette class where [`Self::class_of`] would need the interned id.
-    pub fn class_of_color(&self, color: Color) -> u8 {
-        self.by_color
-            .get(&color_to_rgb(color))
-            .copied()
-            .unwrap_or(0)
     }
 
     /// The rgb color of each class, indexed by class.
@@ -1451,30 +1433,34 @@ mod tests {
         );
     }
 
+    /// Scopes keep distinct classes even when they paint the same color.
+    ///
+    /// An unstyled theme gives every scope the same fallback foreground. A
+    /// color-keyed lookup cannot tell those apart, and would collapse every
+    /// scope onto whichever one it saw first.
     #[test]
-    fn class_of_color_bridges_foreground_to_class() {
+    fn class_of_maps_a_style_id_to_its_scope_class() {
         use super::ClassTable;
-        use crate::theme::Theme;
-        use ratatui::style::Color;
+        use crate::{display_map::syntax_theme::SyntaxStyles, theme::Theme};
+        use stoat_language::HighlightId;
 
-        let table = ClassTable::from_theme(&Theme::empty());
-        let palette = table.palette();
-
-        let [r, g, b] = palette[1];
-        let class = table.class_of_color(Color::Rgb(r, g, b));
-        assert!(class >= 1, "a scope foreground maps to a syntax class");
+        let theme = Theme::empty();
+        let table = ClassTable::from_theme(&theme);
+        let styles = SyntaxStyles::from_theme(&theme);
         assert_eq!(
-            palette[class as usize], palette[1],
-            "the mapped class paints the queried color",
+            table.palette()[1],
+            table.palette()[2],
+            "the two scopes do paint identically, so only the id separates them",
         );
 
-        if !palette.contains(&[1, 2, 3]) {
-            assert_eq!(
-                table.class_of_color(Color::Rgb(1, 2, 3)),
-                0,
-                "a foreground no scope uses is the default class",
-            );
-        }
+        let first = styles
+            .id_for_highlight(HighlightId(0))
+            .expect("the first theme key resolves");
+        assert_eq!(table.class_of(first), 1, "the i-th scope takes class i + 1",);
+        assert_eq!(
+            table.class_of(styles.id_for_highlight(HighlightId(1)).expect("second key")),
+            2,
+        );
     }
 
     #[test]
