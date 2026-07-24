@@ -256,7 +256,7 @@ fn render_commit_summary(
 /// painted sequentially with a yellow file/chunk header, top-to-bottom
 /// within `area`. Does not rely on editor machinery; used by the
 /// commits view's right pane.
-fn render_commit_preview(
+pub(crate) fn render_commit_preview(
     session: &ReviewSession,
     theme: &crate::theme::Theme,
     area: Rect,

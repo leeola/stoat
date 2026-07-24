@@ -84,7 +84,8 @@ use crate::{
         },
         picker::{
             CodeSearchClose, CodeSearchModeToggle, CodeSearchNext, CodeSearchPageDown,
-            CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, DiagnosticsPickerClose,
+            CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, CommitPickerClose,
+            CommitPickerNext, CommitPickerPrev, CommitPickerSelect, DiagnosticsPickerClose,
             DiagnosticsPickerNext, DiagnosticsPickerPrev, DiagnosticsPickerSelect,
             JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect,
             LocationPickerClose, LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
@@ -548,6 +549,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DiagnosticsPickerClose::DEF, |_| {
         Ok(Box::new(DiagnosticsPickerClose))
     });
+    add(CommitPickerNext::DEF, |_| Ok(Box::new(CommitPickerNext)));
+    add(CommitPickerPrev::DEF, |_| Ok(Box::new(CommitPickerPrev)));
+    add(CommitPickerSelect::DEF, |_| {
+        Ok(Box::new(CommitPickerSelect))
+    });
+    add(CommitPickerClose::DEF, |_| Ok(Box::new(CommitPickerClose)));
     add(LocationPickerNext::DEF, |_| {
         Ok(Box::new(LocationPickerNext))
     });
@@ -1243,6 +1250,10 @@ mod tests {
         "DiagnosticsPickerPrev",
         "DiagnosticsPickerSelect",
         "DiagnosticsPickerClose",
+        "CommitPickerNext",
+        "CommitPickerPrev",
+        "CommitPickerSelect",
+        "CommitPickerClose",
         "LocationPickerNext",
         "LocationPickerPrev",
         "LocationPickerSelect",
@@ -1702,7 +1713,8 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 401);
+        // + 4 CommitPickerNext/Prev/Select/Close.
+        assert_eq!(all().count(), 405);
     }
 
     #[test]

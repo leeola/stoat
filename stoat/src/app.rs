@@ -397,6 +397,10 @@ pub struct Stoat {
     /// the modal is open; cleared on Esc, on selection (after
     /// jumping the focused editor's cursor), and on Ctrl-C.
     pub(crate) diagnostics_picker: Option<crate::diagnostics_picker::DiagnosticsPicker>,
+    /// Active commit picker modal, opened by `:git-review` to choose the
+    /// commit a review walk starts from. `Some` while the modal is open;
+    /// cleared on Esc, on selection, and on Ctrl-C.
+    pub(crate) commit_picker: Option<crate::commit_picker::CommitPicker>,
     /// Active multi-location goto picker modal. `Some` while a goto
     /// request that resolved to two or more locations is awaiting the
     /// user's choice. Cleared on Esc (restoring the prior mode), on
@@ -1423,6 +1427,7 @@ impl Stoat {
             quit_all_confirm: None,
             jumplist_picker: None,
             diagnostics_picker: None,
+            commit_picker: None,
             location_picker: None,
             last_picker_action: None,
             code_search: None,
@@ -4893,6 +4898,10 @@ impl Stoat {
                 return UpdateEffect::Redraw;
             }
             if self.diagnostics_picker.take().is_some() {
+                return UpdateEffect::Redraw;
+            }
+            if self.commit_picker.is_some() {
+                action_handlers::review_walk::commit_picker_close(self);
                 return UpdateEffect::Redraw;
             }
             if self.location_picker.take().is_some() {
@@ -8437,6 +8446,8 @@ impl Stoat {
         self.drive_parse_jobs();
         self.drive_diff_jobs();
         action_handlers::pump_commits(self);
+        action_handlers::review_walk::pump_commit_picker(self);
+        action_handlers::review_walk::sync_commit_picker(self);
         action_handlers::pump_review_scan(self);
         action_handlers::code_search::pump_code_search(self);
         action_handlers::code_search::sync_code_search(self);

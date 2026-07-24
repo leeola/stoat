@@ -8,6 +8,7 @@ mod buffer_registry;
 mod code_index;
 pub mod command_palette;
 mod commit_list;
+mod commit_picker;
 pub mod completion;
 pub(crate) mod conflict_session;
 pub mod diagnostics;

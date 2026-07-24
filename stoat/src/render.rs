@@ -3,6 +3,7 @@ pub(crate) mod chrome;
 pub(crate) mod code_action;
 pub(crate) mod code_search;
 pub(crate) mod command_palette;
+pub(crate) mod commit_picker;
 pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
@@ -284,6 +285,7 @@ fn modal_overlay_open(stoat: &Stoat) -> bool {
         || stoat.quit_all_confirm.is_some()
         || stoat.jumplist_picker.is_some()
         || stoat.diagnostics_picker.is_some()
+        || stoat.commit_picker.is_some()
         || stoat.location_picker.is_some()
         || stoat.code_search.is_some()
 }
@@ -765,6 +767,18 @@ pub(crate) fn frame(
             "jumplist",
             &bindings,
             None,
+            &stoat.theme,
+            full,
+            buf,
+            &mut *scene,
+        );
+    } else if let Some(picker) = &mut stoat.commit_picker {
+        commit_picker::render_commit_picker(picker, ws, &stoat.theme, full, buf, &mut *scene);
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
+            "commit_picker",
             &stoat.theme,
             full,
             buf,

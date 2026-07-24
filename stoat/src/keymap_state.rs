@@ -368,6 +368,8 @@ pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
         Some("jumplist")
     } else if stoat.diagnostics_picker.is_some() {
         Some("diagnostics")
+    } else if stoat.commit_picker.is_some() {
+        Some("commit_picker")
     } else if stoat.location_picker.is_some() {
         Some("location")
     } else if stoat.file_finder.is_some() {

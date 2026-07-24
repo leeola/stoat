@@ -89,6 +89,50 @@ define_action!(
 );
 
 define_action!(
+    CommitPickerNextDef,
+    CommitPickerNext,
+    "CommitPickerNext",
+    ActionKind::CommitPickerNext,
+    "next commit row",
+    "Move the commit picker's selection to the next row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPickerPrevDef,
+    CommitPickerPrev,
+    "CommitPickerPrev",
+    ActionKind::CommitPickerPrev,
+    "previous commit row",
+    "Move the commit picker's selection to the previous row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPickerSelectDef,
+    CommitPickerSelect,
+    "CommitPickerSelect",
+    ActionKind::CommitPickerSelect,
+    "review from the selected commit",
+    "Take the commit under the picker's selection as the review base.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPickerCloseDef,
+    CommitPickerClose,
+    "CommitPickerClose",
+    ActionKind::CommitPickerClose,
+    "close commit picker",
+    "Dismiss the commit picker without starting a review.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     LocationPickerNextDef,
     LocationPickerNext,
     "LocationPickerNext",

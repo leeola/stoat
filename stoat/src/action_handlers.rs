@@ -19,6 +19,7 @@ pub(crate) mod picker;
 mod prompt;
 mod rebase;
 pub(crate) mod review;
+pub(crate) mod review_walk;
 mod reword;
 mod run;
 pub(crate) mod search;
@@ -526,6 +527,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DiagnosticsPickerPrev => picker::diagnostics_picker_prev(stoat),
         ActionKind::DiagnosticsPickerSelect => picker::diagnostics_picker_select(stoat),
         ActionKind::DiagnosticsPickerClose => picker::diagnostics_picker_close(stoat),
+        ActionKind::CommitPickerNext => review_walk::commit_picker_step(stoat, 1),
+        ActionKind::CommitPickerPrev => review_walk::commit_picker_step(stoat, -1),
+        ActionKind::CommitPickerSelect => review_walk::commit_picker_select(stoat),
+        ActionKind::CommitPickerClose => review_walk::commit_picker_close(stoat),
         ActionKind::LocationPickerNext => picker::location_picker_next(stoat),
         ActionKind::LocationPickerPrev => picker::location_picker_prev(stoat),
         ActionKind::LocationPickerSelect => picker::location_picker_select(stoat),

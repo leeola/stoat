@@ -597,6 +597,9 @@ impl TestHarness {
         loop {
             self.scheduler.run_until_parked();
             let commits = crate::action_handlers::pump_commits(&mut self.stoat);
+            let commit_picker =
+                crate::action_handlers::review_walk::pump_commit_picker(&mut self.stoat);
+            crate::action_handlers::review_walk::sync_commit_picker(&mut self.stoat);
             let review = crate::action_handlers::pump_review_scan(&mut self.stoat);
             let lsp_jumps = crate::action_handlers::pump_lsp_jumps(&mut self.stoat);
             let lsp_hover = crate::action_handlers::lsp::pump_lsp_hover(&mut self.stoat);
@@ -639,6 +642,7 @@ impl TestHarness {
             let external_edits = self.stoat.drain_pending_external_edits();
             let git_refresh = self.stoat.drain_pending_git_refresh();
             if !commits
+                && !commit_picker
                 && !review
                 && !lsp_jumps
                 && !lsp_hover

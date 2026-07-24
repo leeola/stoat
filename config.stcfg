@@ -726,6 +726,14 @@ on key {
         Ctrl-b -> SymbolFinderPageUp();
         Tab -> SymbolFinderComplete();
     }
+    modal == commit_picker && mode == insert {
+        Up -> CommitPickerPrev();
+        Down -> CommitPickerNext();
+        Ctrl-p -> CommitPickerPrev();
+        Ctrl-n -> CommitPickerNext();
+        Enter -> CommitPickerSelect();
+        Escape -> CommitPickerClose();
+    }
     modal == code_search && mode == insert {
         Up -> CodeSearchPrev();
         Down -> CodeSearchNext();
