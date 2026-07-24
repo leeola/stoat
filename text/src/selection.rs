@@ -111,13 +111,14 @@ impl<T: Copy + Ord> Selection<T> {
 
 impl Selection<usize> {
     /// Move the block cursor to `target` under the 1-width-cursor model,
-    /// returning a selection whose ends stay at least one character apart.
+    /// returning a selection whose ends stay at least one grapheme cluster
+    /// apart.
     ///
-    /// Without `extend` the result is the one-character block at `target`,
+    /// Without `extend` the result is the one-cluster block at `target`,
     /// discarding the old selection. At the rope end, where there is no next
-    /// character, that block covers the previous character instead. With
-    /// `extend` the tail is held and the head moves to `target`, and when the
-    /// head crosses the tail the tail steps one character so the range never
+    /// cluster, that block covers the previous cluster instead. With `extend`
+    /// the tail is held and the head moves to `target`, and when the head
+    /// crosses the tail the tail steps one cluster so the range never
     /// collapses onto the anchor.
     ///
     /// The vertical-movement goal is reset, since this is a horizontal move.
@@ -158,12 +159,12 @@ impl Selection<usize> {
         }
     }
 
-    /// Widen an empty selection to cover one character, leaving any non-empty
-    /// selection untouched, so the block cursor always has a cell.
+    /// Widen an empty selection to cover one grapheme cluster, leaving any
+    /// non-empty selection untouched, so the block cursor always has a cell.
     ///
-    /// An empty selection widens its head forward over the next character, or
+    /// An empty selection widens its head forward over the next cluster, or
     /// backward over the previous one at the rope end where there is no next
-    /// character. The vertical-movement goal is preserved.
+    /// cluster. The vertical-movement goal is preserved.
     pub fn min_width_1(&self, rope: &Rope) -> Selection<usize> {
         if !self.is_empty() {
             return self.clone();
@@ -191,47 +192,49 @@ impl Selection<usize> {
 /// `anchor` to `head`.
 ///
 /// Under Helix's 1-width cursor convention a forward selection (`head >
-/// anchor`) draws its block cursor one character back from the head, on the
-/// last selected cell rather than the boundary past it. Collapsed and reversed
-/// selections place the cursor on the head, so `head` is returned unchanged.
+/// anchor`) draws its block cursor one grapheme cluster back from the head, on
+/// the last selected cell rather than the boundary past it. Collapsed and
+/// reversed selections place the cursor on the head, so `head` is returned
+/// unchanged.
+///
+/// Stepping by cluster rather than by scalar is what keeps the cursor off the
+/// inside of a decomposed accent or an emoji sequence, which no consumer of
+/// this convention could render as a cell.
 pub fn cursor_offset(rope: &Rope, anchor: usize, head: usize) -> usize {
     if head > anchor {
-        rope.reversed_chars_at(head)
-            .next()
-            .map(|ch| head - ch.len_utf8())
-            .unwrap_or(head)
+        rope.prev_grapheme_boundary(head)
     } else {
         head
     }
 }
 
-/// Offset one character past `offset`, or `offset` itself at the rope end.
+/// Offset one grapheme cluster past `offset`, or `offset` itself at the rope
+/// end.
 ///
 /// Forward mirror of the back-step in [`cursor_offset`]. A forward selection
-/// whose block cursor should sit on the character at `offset` stores its head
-/// here, one cell past it, so [`cursor_offset`] recovers that character.
+/// whose block cursor should sit on the cluster at `offset` stores its head
+/// here, one cell past it, so [`cursor_offset`] recovers that cluster.
 pub fn next_char_boundary(rope: &Rope, offset: usize) -> usize {
-    rope.chars_at(offset)
-        .next()
-        .map(|ch| offset + ch.len_utf8())
-        .unwrap_or(offset)
+    rope.next_grapheme_boundary(offset)
 }
 
-/// Offset one character before `offset`, or `offset` itself at the rope start.
+/// Offset one grapheme cluster before `offset`, or `offset` itself at the rope
+/// start.
 ///
-/// Backward mirror of [`next_char_boundary`], stepping by a whole character
-/// the way [`cursor_offset`] does when a forward selection's block cursor sits
-/// one cell back from the head.
+/// Backward mirror of [`next_char_boundary`], stepping by a whole cluster the
+/// way [`cursor_offset`] does when a forward selection's block cursor sits one
+/// cell back from the head.
 pub fn prev_char_boundary(rope: &Rope, offset: usize) -> usize {
-    rope.reversed_chars_at(offset)
-        .next()
-        .map(|ch| offset - ch.len_utf8())
-        .unwrap_or(offset)
+    rope.prev_grapheme_boundary(offset)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A father-mother-daughter ZWJ sequence. Three 4-byte emoji joined by two
+    /// 3-byte zero-width joiners, so 18 bytes rendering as one cell.
+    const FAMILY: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
 
     fn sel(start: i32, end: i32, reversed: bool) -> Selection<i32> {
         Selection {
@@ -359,6 +362,49 @@ mod tests {
         assert_eq!(cursor_offset(&Rope::from("café"), 0, 5), 3);
         assert_eq!(cursor_offset(&Rope::from("abcd"), 3, 3), 3);
         assert_eq!(cursor_offset(&Rope::from("abcd"), 5, 1), 1);
+    }
+
+    #[test]
+    fn cursor_offset_lands_on_a_cluster_start_not_inside_it() {
+        let rope = Rope::from(format!("a{FAMILY}b").as_str());
+        assert_eq!(
+            cursor_offset(&rope, 0, 19),
+            1,
+            "a forward selection ending past the family lands on its first byte",
+        );
+        assert_eq!(
+            cursor_offset(&rope, 0, 20),
+            19,
+            "the cell after the family is the plain b",
+        );
+    }
+
+    #[test]
+    fn boundaries_round_trip_over_a_decomposed_accent() {
+        let rope = Rope::from("e\u{301}x");
+        assert_eq!(
+            next_char_boundary(&rope, 0),
+            3,
+            "e and its mark step as one"
+        );
+        assert_eq!(prev_char_boundary(&rope, 3), 0);
+        assert_eq!(next_char_boundary(&rope, 3), 4);
+        assert_eq!(prev_char_boundary(&rope, 4), 3);
+    }
+
+    #[test]
+    fn min_width_1_covers_a_whole_cluster() {
+        let rope = Rope::from(FAMILY);
+        assert_eq!(
+            usel(0, 0, false).min_width_1(&rope),
+            usel(0, 18, false),
+            "the block cursor covers the whole sequence, not its first scalar",
+        );
+        assert_eq!(
+            usel(18, 18, false).min_width_1(&rope),
+            usel(0, 18, false),
+            "at the rope end it widens backward over the same cluster",
+        );
     }
 
     #[test]
