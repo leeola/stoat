@@ -361,20 +361,17 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
         let cursor = cursor_offset(rope, tail_offset, head_offset);
         // Step the block-cursor cell, not the raw head: a forward 1-wide
         // selection stores its head one cell past the cursor. Both move and
-        // extend step whole characters, crossing line boundaries like Helix.
-        let target = if delta > 0 {
-            let mut t = cursor;
-            for ch in rope.chars_at(cursor).take(count) {
-                t += ch.len_utf8();
+        // extend step whole grapheme clusters, crossing line boundaries like
+        // Helix. A step at the rope end returns the offset it was given, so a
+        // count that runs off the buffer stalls there instead of overshooting.
+        let step = |offset| {
+            if delta > 0 {
+                rope.next_grapheme_boundary(offset)
+            } else {
+                rope.prev_grapheme_boundary(offset)
             }
-            t
-        } else {
-            let mut t = cursor;
-            for ch in rope.reversed_chars_at(cursor).take(count) {
-                t -= ch.len_utf8();
-            }
-            t
         };
+        let target = (0..count).fold(cursor, |t, _| step(t));
         if target == cursor {
             return sel.clone();
         }

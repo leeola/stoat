@@ -464,7 +464,7 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                     (PasteSide::Before, false) => lo,
                     (PasteSide::After, false) => {
                         if lo == hi {
-                            rope.chars_at(hi).next().map_or(hi, |c| hi + c.len_utf8())
+                            rope.next_grapheme_boundary(hi)
                         } else {
                             hi
                         }

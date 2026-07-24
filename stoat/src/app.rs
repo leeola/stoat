@@ -6044,8 +6044,11 @@ impl Stoat {
                 buf_snap.resolve_anchor(&sel.tail()),
                 buf_snap.resolve_anchor(&sel.head()),
             );
+            // The guard peeks at the preceding scalar rather than the cluster,
+            // since only a literal newline pins the cursor in place. Any other
+            // cluster is stepped over whole.
             let back = match rope.reversed_chars_at(cursor).next() {
-                Some(ch) if ch != '\n' => cursor - ch.len_utf8(),
+                Some(ch) if ch != '\n' => rope.prev_grapheme_boundary(cursor),
                 _ => cursor,
             };
             action_handlers::movement::land_block_cursor(
@@ -6391,12 +6394,7 @@ impl Stoat {
 
     fn editor_delete(&mut self, editor_id: EditorId, buffer_id: BufferId) {
         self.editor_delete_ranges(editor_id, buffer_id, |rope, cursor| {
-            let next_len = rope
-                .chars_at(cursor)
-                .next()
-                .map(|ch| ch.len_utf8())
-                .unwrap_or(0);
-            (cursor, cursor + next_len)
+            (cursor, rope.next_grapheme_boundary(cursor))
         });
     }
 
@@ -6419,12 +6417,7 @@ impl Stoat {
             if cursor < line_end {
                 return (cursor, line_end);
             }
-            let next_len = rope
-                .chars_at(cursor)
-                .next()
-                .map(|ch| ch.len_utf8())
-                .unwrap_or(0);
-            (cursor, cursor + next_len)
+            (cursor, rope.next_grapheme_boundary(cursor))
         });
     }
 
@@ -8692,7 +8685,7 @@ fn backspace_range(rope: &stoat_text::Rope, cursor: usize, indent_width: usize) 
     }
 
     let prev = rope.reversed_chars_at(cursor).next();
-    let one_back = (cursor - prev.map(|ch| ch.len_utf8()).unwrap_or(1), cursor);
+    let one_back = (rope.prev_grapheme_boundary(cursor), cursor);
 
     let row = rope.offset_to_point(cursor).row;
     let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
@@ -18039,6 +18032,73 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "abdef");
         h.type_keys("delete");
         assert_eq!(buffer_text(&h, &path), "abef");
+    }
+
+    /// A father-mother-daughter ZWJ sequence. Three 4-byte emoji joined by two
+    /// 3-byte zero-width joiners, so 18 bytes rendering as one cell.
+    const FAMILY: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+
+    #[test]
+    fn backspace_in_insert_mode_removes_a_whole_cluster() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("xe\u{301}");
+        h.type_keys("backspace");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "x",
+            "the combining acute leaves with the e it sits on",
+        );
+    }
+
+    #[test]
+    fn delete_in_insert_mode_removes_a_whole_cluster() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, &format!("a{FAMILY}b"));
+        h.type_keys("l i");
+        h.type_keys("delete");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "ab",
+            "the whole joined sequence goes, not its first emoji",
+        );
+    }
+
+    /// The block cursor sits on a cluster start at every step of an `l`/`h`
+    /// walk, never on a byte inside the joined sequence.
+    #[test]
+    fn horizontal_motion_never_lands_inside_a_cluster() {
+        let mut h = Stoat::test();
+        open_scratch_file(&mut h, &format!("a{FAMILY}b"));
+
+        assert_eq!(h.head_offsets(), vec![0], "starts on the a");
+        h.type_keys("l");
+        assert_eq!(
+            h.head_offsets(),
+            vec![1],
+            "l lands on the family's first byte"
+        );
+        h.type_keys("l");
+        assert_eq!(h.head_offsets(), vec![19], "l clears all 18 bytes of it");
+        h.type_keys("h");
+        assert_eq!(h.head_offsets(), vec![1], "h returns over it whole");
+        h.type_keys("h");
+        assert_eq!(h.head_offsets(), vec![0]);
+    }
+
+    #[test]
+    fn esc_from_append_steps_back_onto_a_cluster_start() {
+        let mut h = Stoat::test();
+        open_scratch_file(&mut h, "");
+        h.type_keys("A");
+        h.type_text(FAMILY);
+        h.type_keys("escape");
+        assert_eq!(
+            h.head_offsets(),
+            vec![0],
+            "the cursor lands on the sequence's first byte, not inside it",
+        );
     }
 
     #[test]
