@@ -30,20 +30,25 @@ use lsp_types::{
     InlayHintParams, Location, MarkupContent, MarkupKind, NumberOrString, Position,
     PositionEncodingKind, PrepareRenameResponse, Range, ReferenceParams,
     RelatedFullDocumentDiagnosticReport, RenameFilesParams, RenameParams, SelectionRange,
-    SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, SignatureHelp,
-    SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
-    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri, WorkspaceEdit,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    SelectionRangeParams, SemanticToken, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpParams,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    TypeHierarchySupertypesParams, Uri, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 use std::{
     collections::{HashMap, HashSet},
     io,
     sync::{Arc, LazyLock, Mutex},
 };
-use stoat_config::{EventType, PathSeg, SettingDef, Span, Spanned, Statement, ValueShape};
+use stoat_config::{
+    ActionExpr, Arg, Binding, EventBlock, EventType, Expr, PathSeg, Predicate, Setting, SettingDef,
+    Span, Spanned, Statement, ThemeBlock, Value, ValueShape,
+};
 
 /// In-process settings language server backing `.stcfg` buffers.
 ///
@@ -80,6 +85,28 @@ static STCFG_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> = LazyLock::new(|| 
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
             DiagnosticOptions::default(),
+        )),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: SemanticTokensLegend {
+                    token_types: vec![
+                        SemanticTokenType::KEYWORD,
+                        SemanticTokenType::PROPERTY,
+                        SemanticTokenType::VARIABLE,
+                        SemanticTokenType::FUNCTION,
+                        SemanticTokenType::PARAMETER,
+                        SemanticTokenType::ENUM_MEMBER,
+                        SemanticTokenType::TYPE,
+                        SemanticTokenType::STRING,
+                        SemanticTokenType::NUMBER,
+                        SemanticTokenType::COMMENT,
+                    ],
+                    token_modifiers: vec![],
+                },
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: None,
+                work_done_progress_options: Default::default(),
+            },
         )),
         ..ServerCapabilities::default()
     })
@@ -270,9 +297,21 @@ impl LspHost for StcfgLsp {
 
     async fn semantic_tokens_full(
         &self,
-        _params: SemanticTokensParams,
+        params: SemanticTokensParams,
     ) -> io::Result<Option<SemanticTokensResult>> {
-        Ok(None)
+        let data = {
+            let docs = self.docs.lock().expect("stcfg docs poisoned");
+            let Some(text) = docs.get(&params.text_document.uri) else {
+                return Ok(None);
+            };
+            semantic_tokens(text)
+        };
+        Ok(data.map(|data| {
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data,
+            })
+        }))
     }
 
     async fn semantic_tokens_range(
@@ -425,7 +464,10 @@ impl LspHost for StcfgLsp {
         Ok(None)
     }
 
-    async fn execute_command(&self, _params: ExecuteCommandParams) -> io::Result<Option<Value>> {
+    async fn execute_command(
+        &self,
+        _params: ExecuteCommandParams,
+    ) -> io::Result<Option<JsonValue>> {
         Ok(None)
     }
 
@@ -448,7 +490,7 @@ impl LspHost for StcfgLsp {
     async fn reply(
         &self,
         _id: NumberOrString,
-        _result: Result<Value, LspResponseError>,
+        _result: Result<JsonValue, LspResponseError>,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -719,6 +761,327 @@ fn position_to_offset(text: &str, position: Position) -> usize {
     text.len()
 }
 
+const TK_KEYWORD: u32 = 0;
+const TK_PROPERTY: u32 = 1;
+const TK_VARIABLE: u32 = 2;
+const TK_FUNCTION: u32 = 3;
+const TK_PARAMETER: u32 = 4;
+const TK_ENUM_MEMBER: u32 = 5;
+const TK_TYPE: u32 = 6;
+const TK_STRING: u32 = 7;
+const TK_NUMBER: u32 = 8;
+const TK_COMMENT: u32 = 9;
+
+/// Encode `text` as the semantic-token stream for `.stcfg` highlighting.
+///
+/// Returns [`None`] when the text does not parse to a config, so the client
+/// keeps its last-good colors during a broken mid-edit state rather than
+/// clearing them. Token type indices match the legend order declared in
+/// [`STCFG_CAPABILITIES`].
+fn semantic_tokens(text: &str) -> Option<Vec<SemanticToken>> {
+    let (config, _errors) = stoat_config::parse(text);
+    let config = config?;
+
+    let mut spans: Vec<(Span, u32)> = Vec::new();
+    for block in &config.blocks {
+        walk_event_block(text, block, &mut spans);
+    }
+    for theme in &config.themes {
+        walk_theme_block(text, theme, &mut spans);
+    }
+    collect_comment_spans(text, &mut spans);
+
+    spans.sort_by_key(|(span, _)| span.start);
+    Some(encode_tokens(text, &spans))
+}
+
+fn event_keyword(event: EventType) -> &'static str {
+    match event {
+        EventType::Init => "init",
+        EventType::Buffer => "buffer",
+        EventType::Key => "key",
+    }
+}
+
+fn walk_event_block(text: &str, block: &Spanned<EventBlock>, out: &mut Vec<(Span, u32)>) {
+    let on_start = block.span.start;
+    out.push((on_start..on_start + "on".len(), TK_KEYWORD));
+
+    let keyword = event_keyword(block.node.event);
+    if let Some(rel) = text[block.span.clone()].find(keyword) {
+        let start = block.span.start + rel;
+        out.push((start..start + keyword.len(), TK_KEYWORD));
+    }
+
+    for statement in &block.node.statements {
+        walk_statement(text, statement, out);
+    }
+}
+
+fn walk_theme_block(text: &str, theme: &Spanned<ThemeBlock>, out: &mut Vec<(Span, u32)>) {
+    let start = theme.span.start;
+    out.push((start..start + "theme".len(), TK_KEYWORD));
+
+    let name = &theme.node.name;
+    out.push((name.span.clone(), TK_TYPE));
+
+    if let Some(parent) = &theme.node.parent {
+        if let Some(rel) = text[name.span.end..parent.span.start].find("inherits") {
+            let start = name.span.end + rel;
+            out.push((start..start + "inherits".len(), TK_KEYWORD));
+        }
+        out.push((parent.span.clone(), TK_TYPE));
+    }
+
+    for statement in &theme.node.statements {
+        walk_statement(text, statement, out);
+    }
+}
+
+fn walk_statement(text: &str, statement: &Spanned<Statement>, out: &mut Vec<(Span, u32)>) {
+    match &statement.node {
+        Statement::Setting(setting) => walk_setting(setting, out),
+        Statement::Binding(binding) => walk_binding(binding, out),
+        Statement::Let(binding) => {
+            let start = statement.span.start;
+            out.push((start..start + "let".len(), TK_KEYWORD));
+            out.push((binding.name.span.clone(), TK_VARIABLE));
+            walk_expr(text, &binding.value, out);
+        },
+        Statement::FnDecl(decl) => {
+            let start = statement.span.start;
+            out.push((start..start + "fn".len(), TK_KEYWORD));
+            out.push((decl.name.span.clone(), TK_FUNCTION));
+            for inner in &decl.body {
+                walk_statement(text, inner, out);
+            }
+        },
+        Statement::FnCall(name) => out.push((name.span.clone(), TK_FUNCTION)),
+        Statement::PredicateBlock(block) => {
+            walk_predicate(&block.predicate, out);
+            for inner in &block.body {
+                walk_statement(text, inner, out);
+            }
+        },
+    }
+}
+
+fn walk_setting(setting: &Setting, out: &mut Vec<(Span, u32)>) {
+    for segment in &setting.path {
+        out.push((segment.span.clone(), TK_PROPERTY));
+    }
+    walk_value(&setting.value, out);
+}
+
+fn walk_binding(binding: &Binding, out: &mut Vec<(Span, u32)>) {
+    out.push((binding.key.span.clone(), TK_ENUM_MEMBER));
+    match &binding.action.node {
+        ActionExpr::Single(action) => {
+            let start = binding.action.span.start;
+            out.push((start..start + action.name.len(), TK_FUNCTION));
+            for arg in &action.args {
+                walk_arg(arg, out);
+            }
+        },
+        ActionExpr::Sequence(actions) => {
+            for action in actions {
+                let start = action.span.start;
+                out.push((start..start + action.node.name.len(), TK_FUNCTION));
+                for arg in &action.node.args {
+                    walk_arg(arg, out);
+                }
+            }
+        },
+    }
+}
+
+fn walk_arg(arg: &Spanned<Arg>, out: &mut Vec<(Span, u32)>) {
+    match &arg.node {
+        Arg::Positional(value) => walk_value(value, out),
+        Arg::Named { name, value } => {
+            out.push((name.span.clone(), TK_PARAMETER));
+            walk_value(value, out);
+        },
+    }
+}
+
+fn walk_expr(text: &str, expr: &Spanned<Expr>, out: &mut Vec<(Span, u32)>) {
+    match &expr.node {
+        Expr::Value(value) => {
+            if let Some(kind) = scalar_token(value) {
+                out.push((expr.span.clone(), kind));
+            }
+        },
+        Expr::Variable(_) => out.push((expr.span.clone(), TK_VARIABLE)),
+        Expr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let start = expr.span.start;
+            out.push((start..start + "if".len(), TK_KEYWORD));
+            walk_predicate(condition, out);
+            walk_expr(text, then_expr, out);
+            if let Some(rel) = text[then_expr.span.end..else_expr.span.start].find("else") {
+                let start = then_expr.span.end + rel;
+                out.push((start..start + "else".len(), TK_KEYWORD));
+            }
+            walk_expr(text, else_expr, out);
+        },
+    }
+}
+
+fn walk_predicate(predicate: &Spanned<Predicate>, out: &mut Vec<(Span, u32)>) {
+    match &predicate.node {
+        Predicate::Eq(field, value)
+        | Predicate::NotEq(field, value)
+        | Predicate::Gt(field, value)
+        | Predicate::Lt(field, value)
+        | Predicate::Gte(field, value)
+        | Predicate::Lte(field, value) => {
+            out.push((field.span.clone(), TK_VARIABLE));
+            walk_value(value, out);
+        },
+        Predicate::Matches(field, glob) => {
+            out.push((field.span.clone(), TK_VARIABLE));
+            out.push((glob.span.clone(), TK_STRING));
+        },
+        Predicate::Bool(field) => out.push((field.span.clone(), TK_VARIABLE)),
+        Predicate::Not(inner) => walk_predicate(inner, out),
+        Predicate::And(left, right) | Predicate::Or(left, right) => {
+            walk_predicate(left, out);
+            walk_predicate(right, out);
+        },
+    }
+}
+
+fn walk_value(value: &Spanned<Value>, out: &mut Vec<(Span, u32)>) {
+    match &value.node {
+        Value::Array(elements) => {
+            for element in elements {
+                walk_value(element, out);
+            }
+        },
+        Value::Map(entries) => {
+            for (key, entry) in entries {
+                out.push((key.span.clone(), TK_PROPERTY));
+                walk_value(entry, out);
+            }
+        },
+        scalar => {
+            if let Some(kind) = scalar_token(scalar) {
+                out.push((value.span.clone(), kind));
+            }
+        },
+    }
+}
+
+/// Token type for a scalar [`Value`], or [`None`] for the compound Array and Map
+/// variants that carry their own spanned children.
+fn scalar_token(value: &Value) -> Option<u32> {
+    Some(match value {
+        Value::String(_) => TK_STRING,
+        Value::Number(_) => TK_NUMBER,
+        Value::Bool(_) => TK_KEYWORD,
+        Value::Ident(_) | Value::StateRef(_) => TK_VARIABLE,
+        Value::Enum { .. } => TK_ENUM_MEMBER,
+        Value::Array(_) | Value::Map(_) => return None,
+    })
+}
+
+/// Append a comment token for every `#`-to-end-of-line run outside a string.
+///
+/// A raw scan rather than an AST walk because the parser's whitespace rule eats
+/// comments before they reach the AST. String tracking honors backslash escapes
+/// so a `#` inside a `"..."` literal never opens a comment.
+fn collect_comment_spans(text: &str, out: &mut Vec<(Span, u32)>) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'#' {
+            let end = text[i..].find('\n').map_or(text.len(), |n| i + n);
+            out.push((i..end, TK_COMMENT));
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+}
+
+/// Encode `(byte span, token type)` pairs as the LSP relative token stream.
+///
+/// Spans crossing a newline split at line boundaries, since LSP tokens are
+/// single-line. Pairs need not arrive sorted: the split pieces are ordered by
+/// line then column before the relative deltas are computed.
+fn encode_tokens(text: &str, spans: &[(Span, u32)]) -> Vec<SemanticToken> {
+    let mut pieces: Vec<(u32, u32, u32, u32)> = Vec::new();
+    for (span, token_type) in spans {
+        let mut line_start = span.start;
+        for (rel, byte) in text[span.clone()].bytes().enumerate() {
+            if byte == b'\n' {
+                push_piece(text, line_start, span.start + rel, *token_type, &mut pieces);
+                line_start = span.start + rel + 1;
+            }
+        }
+        push_piece(text, line_start, span.end, *token_type, &mut pieces);
+    }
+    pieces.sort_by_key(|&(line, column, ..)| (line, column));
+
+    let mut tokens = Vec::with_capacity(pieces.len());
+    let mut prev_line = 0;
+    let mut prev_column = 0;
+    for (line, column, length, token_type) in pieces {
+        let delta_line = line - prev_line;
+        let delta_start = if delta_line == 0 {
+            column - prev_column
+        } else {
+            column
+        };
+        tokens.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            token_modifiers_bitset: 0,
+        });
+        prev_line = line;
+        prev_column = column;
+    }
+    tokens
+}
+
+fn push_piece(
+    text: &str,
+    start: usize,
+    end: usize,
+    token_type: u32,
+    pieces: &mut Vec<(u32, u32, u32, u32)>,
+) {
+    if end <= start {
+        return;
+    }
+    let position = offset_to_position(text, start);
+    pieces.push((
+        position.line,
+        position.character,
+        (end - start) as u32,
+        token_type,
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,6 +1296,108 @@ mod tests {
                 .completion(completion_at(uri(), Position::new(0, 0)))
                 .await
                 .expect("completion");
+            assert_eq!(response, None);
+        });
+    }
+
+    fn decode(tokens: &[SemanticToken]) -> Vec<(u32, u32, u32, u32)> {
+        let mut out = Vec::with_capacity(tokens.len());
+        let mut line = 0;
+        let mut column = 0;
+        for token in tokens {
+            if token.delta_line == 0 {
+                column += token.delta_start;
+            } else {
+                line += token.delta_line;
+                column = token.delta_start;
+            }
+            out.push((line, column, token.length, token.token_type));
+        }
+        out
+    }
+
+    /// Expected token tuple for the first occurrence of `needle`, in the
+    /// `(line, column, length, token type)` shape [`decode`] produces.
+    fn tok(text: &str, needle: &str, token_type: u32) -> (u32, u32, u32, u32) {
+        let at = text.find(needle).expect("needle present");
+        let position = offset_to_position(text, at);
+        (
+            position.line,
+            position.character,
+            needle.len() as u32,
+            token_type,
+        )
+    }
+
+    fn semantic_params(uri: Uri) -> SemanticTokensParams {
+        SemanticTokensParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
+    }
+
+    #[test]
+    fn semantic_tokens_cover_a_theme_and_key_block() {
+        let text = [
+            "theme ocean {",
+            "  let accent = \"#ff8800\";",
+            "  editor.wrap = true;",
+            "  # note",
+            "}",
+            "on key {",
+            "  Ctrl-x -> Jump(count: 7);",
+            "}",
+        ]
+        .join("\n");
+
+        let tokens = semantic_tokens(&text).expect("a parseable config yields tokens");
+        assert_eq!(
+            decode(&tokens),
+            vec![
+                tok(&text, "theme", TK_KEYWORD),
+                tok(&text, "ocean", TK_TYPE),
+                tok(&text, "let", TK_KEYWORD),
+                tok(&text, "accent", TK_VARIABLE),
+                tok(&text, "\"#ff8800\"", TK_STRING),
+                tok(&text, "editor", TK_PROPERTY),
+                tok(&text, "wrap", TK_PROPERTY),
+                tok(&text, "true", TK_KEYWORD),
+                tok(&text, "# note", TK_COMMENT),
+                tok(&text, "on", TK_KEYWORD),
+                tok(&text, "key", TK_KEYWORD),
+                tok(&text, "Ctrl-x", TK_ENUM_MEMBER),
+                tok(&text, "Jump", TK_FUNCTION),
+                tok(&text, "count", TK_PARAMETER),
+                tok(&text, "7", TK_NUMBER),
+            ],
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_full_is_none_for_a_broken_document() {
+        TestScheduler::new().block_on(async {
+            let server = StcfgLsp::new();
+            server
+                .did_open(open_params(uri(), "on init {"))
+                .await
+                .expect("did_open");
+            let response = server
+                .semantic_tokens_full(semantic_params(uri()))
+                .await
+                .expect("semantic_tokens_full");
+            assert_eq!(response, None);
+        });
+    }
+
+    #[test]
+    fn semantic_tokens_full_is_none_for_an_unopened_document() {
+        TestScheduler::new().block_on(async {
+            let server = StcfgLsp::new();
+            let response = server
+                .semantic_tokens_full(semantic_params(uri()))
+                .await
+                .expect("semantic_tokens_full");
             assert_eq!(response, None);
         });
     }

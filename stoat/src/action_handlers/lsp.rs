@@ -9797,6 +9797,26 @@ mod tests {
         assert_eq!(lsp_token_count(&mut h), 1, "cached tokens are reinstalled");
     }
 
+    #[test]
+    fn stcfg_buffer_receives_semantic_tokens_from_the_in_process_server() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.allow_host_swap();
+        open_stcfg_with_server(&mut h);
+
+        h.type_text("on init { format_on_save = true; }");
+        h.type_keys("escape");
+
+        // did_change (50ms) syncs the buffer to the server before the semantic
+        // tokens request (500ms debounce) reads it.
+        h.advance_clock(super::LSP_DID_CHANGE_DEBOUNCE);
+        h.advance_clock(Duration::from_millis(550));
+
+        assert!(
+            lsp_token_count(&mut h) > 0,
+            "the in-process stcfg server highlights the config buffer",
+        );
+    }
+
     fn enable_folding_range(h: &TestHarness) {
         use lsp_types::{FoldingRangeProviderCapability, ServerCapabilities};
         h.fake_lsp().set_capabilities(ServerCapabilities {
