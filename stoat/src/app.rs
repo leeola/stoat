@@ -12464,6 +12464,58 @@ mod tests {
         );
     }
 
+    /// The palette is the one centered modal that does not hide the strip.
+    ///
+    /// Its box is capped at 80 columns and centered, so it cannot reach a band
+    /// that only exists from 108 columns up. Hiding the strip for it would
+    /// cost the minimap on every palette open for no overlap.
+    #[test]
+    fn the_palette_leaves_the_single_strip_declared() {
+        use stoat_action::OpenCommandPalette;
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let strip_declared = |cmds: &[Command]| -> bool {
+            cmds.iter()
+                .any(|c| matches!(c, Command::Minimap(m) if m.strip_id == u32::MAX))
+        };
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
+        h.open_file(&a);
+        h.settle();
+
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        assert!(strip_declared(&drain_apc(&mut rx)));
+
+        action_handlers::dispatch(&mut h.stoat, &OpenCommandPalette);
+        h.settle();
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        assert!(
+            h.stoat.command_palette.is_some(),
+            "the palette must actually be open for this to mean anything"
+        );
+        assert!(
+            strip_declared(&drain_apc(&mut rx)),
+            "the strip survives the palette rather than vanishing under it"
+        );
+
+        h.stoat.command_palette = None;
+        let _ = h.stoat.render();
+        h.stoat.emit_apc_scene();
+        assert!(
+            strip_declared(&drain_apc(&mut rx)),
+            "and stays declared once the palette closes"
+        );
+    }
+
     #[test]
     fn the_hints_box_draws_over_the_single_strip() {
         use stoat_config::MinimapMode;

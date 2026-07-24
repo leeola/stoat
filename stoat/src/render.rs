@@ -268,19 +268,24 @@ pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
     }
 }
 
-/// True while any centered modal owns the screen's right edge.
+/// True while a centered modal could paint where the single-minimap strip
+/// draws.
 ///
-/// The single-minimap strip and every modal draw in the same GPU passes with
-/// the strip on top, so a modal cannot paint over the strip. Instead the strip
-/// is undeclared on frames where a modal is open, and the modal lays out on the
-/// full window rather than yielding the band. These are the ten mutually
-/// exclusive overlays of the frame's modal chain.
+/// The strip and every modal share the same GPU passes with the strip on top,
+/// so a modal cannot paint over it. The strip is undeclared instead on frames
+/// where one is open, and the modal lays out on the full window rather than
+/// yielding the band.
+///
+/// The command palette is deliberately absent. Its box is capped at 80 columns
+/// and centered, so its right edge never passes `width / 2 + 40`, while the
+/// 8-column band exists only from `MINIMAP_MIN_PANE_COLS` up. The two rects are
+/// disjoint at every width where a band exists at all, so hiding the strip for
+/// the palette would cost the user their minimap for no overlap.
 fn modal_overlay_open(stoat: &Stoat) -> bool {
     stoat.modal_run.is_some()
         || stoat.help.is_some()
         || stoat.file_finder.is_some()
         || stoat.symbol_finder.is_some()
-        || stoat.command_palette.is_some()
         || stoat.workspace_picker.is_some()
         || stoat.quit_all_confirm.is_some()
         || stoat.jumplist_picker.is_some()
