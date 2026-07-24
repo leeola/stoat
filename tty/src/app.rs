@@ -45,7 +45,7 @@ use stoatty_render::{
     render,
 };
 use stoatty_term::{
-    grid::{Bar, Grid, Overlay, TextRun},
+    grid::{Bar, Grid, Overlay, Rgb, TextRun},
     term::{Cursor, CursorShape, Damage, PoolView, TermEvent, Terminal},
     theme::Theme,
 };
@@ -369,6 +369,9 @@ struct AuxWindow {
     /// Reused buffer for the window's pool snapshots, so a redraw allocates no
     /// fresh Vec to gather them.
     pool_scratch: Vec<PoolView>,
+    /// The background this window's GPU clear was last set to, mirroring
+    /// [`State::last_clear_bg`] so each window follows the override on its own.
+    last_clear_bg: Option<Rgb>,
 }
 
 /// The renderer-construction inputs an aux window needs, read from [`App`]
@@ -477,6 +480,10 @@ struct State {
     /// or live output redamaged the grid. `None` when the previous frame
     /// rendered the live grid.
     last_scrollback_offset: Option<i32>,
+    /// The background the GPU clear was last set to, so the setter runs only
+    /// when the terminal's default background actually moves. `None` until the
+    /// first frame reads it.
+    last_clear_bg: Option<Rgb>,
     /// The scroll region's eased vertical offset, in rows. Seeded by the change
     /// in the region's declared offset and eased toward zero, so the region's
     /// content glides when the program scrolls it.
@@ -898,6 +905,7 @@ impl ApplicationHandler<PtyEvent> for App {
             scrollback_target: 0.0,
             scrollback_grid: Grid::new(0, 0),
             last_scrollback_offset: None,
+            last_clear_bg: None,
             region_scroll: 0.0,
             last_region_offset: 0.0,
             pool_anims: BTreeMap::new(),
@@ -1304,8 +1312,12 @@ impl ApplicationHandler<PtyEvent> for App {
                     active,
                     pool_easing,
                     cursor_anchor,
+                    clear_colors,
                 ) = {
                     let mut terminal = state.terminal.lock();
+                    // Read under the projection's lock, so the clear color and
+                    // the cells it surrounds come from one view of the terminal.
+                    let clear_colors = (terminal.default_background(), terminal.default_cursor());
                     let (cursor, scroll_delta, damage) = terminal.project(&mut state.grid);
                     let decoration_damage = terminal.take_decoration_damage();
                     let display_offset = terminal.display_offset();
@@ -1375,8 +1387,18 @@ impl ApplicationHandler<PtyEvent> for App {
                         active,
                         pool_easing,
                         cursor_anchor,
+                        clear_colors,
                     )
                 };
+
+                // A program that set OSC 11 recolors the cells, but the gutter
+                // past the grid keeps whatever the clear was last set to, so
+                // follow the override here rather than only at config reload.
+                let (clear_bg, clear_cursor) = clear_colors;
+                if state.last_clear_bg != Some(clear_bg) {
+                    state.last_clear_bg = Some(clear_bg);
+                    state.gpu.set_theme_colors(clear_bg, clear_cursor);
+                }
 
                 let mut overflows = mem::take(&mut state.overflows_scratch);
                 overflows.clear();
@@ -2450,6 +2472,7 @@ fn open_aux_window(
         last_redraw: None,
         last_compose: None,
         pool_scratch: Vec::new(),
+        last_clear_bg: None,
     });
 
     let size = window.inner_size();
@@ -2519,6 +2542,15 @@ fn redraw_aux(
     let mut recomposed = false;
     {
         let mut terminal = terminal.lock();
+        // The aux clear follows the terminal's default background for the same
+        // reason the primary one does, so an OSC 11 override reaches the gutter
+        // of every window rather than only the first.
+        let clear_bg = terminal.default_background();
+        if aux.last_clear_bg != Some(clear_bg) {
+            aux.last_clear_bg = Some(clear_bg);
+            gpu.set_theme_colors(clear_bg, terminal.default_cursor());
+        }
+
         let mut pools = mem::take(&mut aux.pool_scratch);
         terminal.window_pools_into(aux.id, &mut pools);
 

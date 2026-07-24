@@ -810,6 +810,31 @@ impl Terminal {
         }
     }
 
+    /// The background the terminal currently resolves a default-background cell
+    /// to.
+    ///
+    /// A program that set OSC 11 gets its own color back, and OSC 111 restores
+    /// the theme's. The window clear reads this rather than the theme directly,
+    /// so the sub-cell gutter at the window edges matches the cells beside it
+    /// instead of stranding the old background around a recolored grid.
+    pub fn default_background(&self) -> Rgb {
+        named_color(
+            NamedColor::Background,
+            self.term.colors(),
+            &self.theme,
+            &self.palette,
+        )
+    }
+
+    /// The color the terminal currently resolves the cursor to, honoring an
+    /// OSC 12 override the way [`Self::default_background`] honors OSC 11.
+    pub fn default_cursor(&self) -> Rgb {
+        match self.term.colors()[NamedColor::Cursor as usize] {
+            Some(over) => Rgb::new(over.r, over.g, over.b),
+            None => self.theme.cursor,
+        }
+    }
+
     /// Resolve a color-query index to the concrete channels for its reply.
     ///
     /// An OSC 4 query carries a palette index below [`PALETTE_LEN`]; OSC 10, 11,
@@ -3342,6 +3367,46 @@ mod tests {
             b"\x1b]10;rgb:cccc/cccc/cccc\x07".to_vec(),
             "OSC 110 reset restores the theme foreground"
         );
+    }
+
+    /// The window clear reads `default_background`, so an OSC 11 override has
+    /// to reach it or the gutter past the cell grid strands the old color.
+    #[test]
+    fn default_background_follows_the_osc11_override() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let themed = Theme::default().background;
+
+        assert_eq!(
+            terminal.default_background(),
+            themed,
+            "with no override the theme's background stands"
+        );
+
+        terminal.advance(b"\x1b]11;#ff0000\x07");
+        assert_eq!(
+            terminal.default_background(),
+            Rgb::new(0xff, 0, 0),
+            "a program's OSC 11 wins over the theme"
+        );
+
+        terminal.advance(b"\x1b]111\x07");
+        assert_eq!(
+            terminal.default_background(),
+            themed,
+            "OSC 111 hands the theme's background back"
+        );
+    }
+
+    #[test]
+    fn default_cursor_follows_the_osc12_override() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        let themed = Theme::default().cursor;
+
+        terminal.advance(b"\x1b]12;#00ff00\x07");
+        assert_eq!(terminal.default_cursor(), Rgb::new(0, 0xff, 0));
+
+        terminal.advance(b"\x1b]112\x07");
+        assert_eq!(terminal.default_cursor(), themed);
     }
 
     #[test]
