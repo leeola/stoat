@@ -167,13 +167,18 @@ impl MinimapContent {
         self.synced_version
     }
 
-    /// Whether the initial chunked build still has lines to summarize.
+    /// Whether chunked work is still outstanding, from either the initial build
+    /// or a recolor sweep.
     ///
-    /// True from the first [`Self::sync`] on a file larger than one chunk until
-    /// its last chunk fills, so the caller keeps ticking [`Self::sync`] to drive
-    /// the build to completion on idle frames instead of stalling until an event.
+    /// The caller ticks [`Self::sync`] on idle frames while this holds, so both
+    /// cursors run to completion instead of stalling until the next user event.
+    /// The sweep needs this as much as the build does. It advances one
+    /// [`RESYNC_CHUNK`] per sync on a file that is already fully built, so
+    /// without it every row past the first chunk keeps stale colors until some
+    /// unrelated event happens to tick another sync.
     pub fn build_pending(&self) -> bool {
-        !self.disabled && self.built_upto < line_count(&self.synced_rope)
+        !self.disabled
+            && (self.built_upto < line_count(&self.synced_rope) || self.resync_upto.is_some())
     }
 
     /// Drain the pending splices for the emission layer.
@@ -1154,6 +1159,46 @@ mod tests {
             built[1][0],
             run(0, 2, 40),
             "a marked line leads with its edge"
+        );
+    }
+
+    /// The frame loop only ticks more syncs while `build_pending` holds, so a
+    /// sweep that reports false after its first chunk strands every row past it
+    /// with stale colors.
+    #[test]
+    fn an_in_flight_sweep_keeps_reporting_pending() {
+        let (rope, mut content) = built_recolor_fixture();
+        assert!(
+            !content.build_pending(),
+            "the fixture is fully built, so nothing is pending before the bump"
+        );
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        let _ = content.take_queued();
+        assert!(
+            content.build_pending(),
+            "the sweep has rows left, so idle ticks must keep coming"
+        );
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        let _ = content.take_queued();
+        assert!(
+            !content.build_pending(),
+            "the finished sweep lets the frame loop go idle again"
         );
     }
 
