@@ -147,28 +147,7 @@ fn fixture_harness(name: &str) -> (TempDir, PathBuf, LiveHarness) {
 /// anywhere along it shows up as an empty flanking column.
 #[test]
 fn conflict_view_shows_side_columns_in_a_real_merge() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let root = std::fs::canonicalize(dir.path()).expect("canonicalize tempdir");
-    fixture::materialize("conflict", &root).expect("materialize fixture");
-
-    {
-        let repo = git2::Repository::open(&root).expect("open fixture repo");
-        let theirs = repo
-            .find_branch("theirs", git2::BranchType::Local)
-            .expect("theirs branch")
-            .get()
-            .peel_to_commit()
-            .expect("theirs commit");
-        let annotated = repo
-            .find_annotated_commit(theirs.id())
-            .expect("annotated commit");
-        repo.merge(&[&annotated], None, None)
-            .expect("merge theirs into main");
-        // Flush the merged index so the stage reads see the conflict on disk.
-        repo.index().expect("index").write().expect("write index");
-    }
-
-    let mut harness = LiveHarness::open(&root, Settings::default()).expect("open harness");
+    let (_dir, _root, mut harness) = fixture_harness("conflict");
     harness.run(|mut handle| async move {
         handle
             .send_keys(":conflict<Enter>")

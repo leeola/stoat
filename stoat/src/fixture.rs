@@ -376,7 +376,9 @@ pub enum FixtureError {
 ///   [`crate::host::GitRepo::log_commits`] and [`crate::host::GitRepo::commit_file_changes`] real
 ///   history to walk.
 /// - `conflict`: a base commit with two divergent children on `main` and `theirs` editing the same
-///   lines, so [`crate::host::GitRepo::cherry_pick_tree`] between the tips conflicts.
+///   lines, so [`crate::host::GitRepo::cherry_pick_tree`] between the tips conflicts. The repo is
+///   left mid-merge of `theirs` into `main`, with `file.txt` unmerged in the index and marker soup
+///   in the working tree, so `:conflict` opens the three-way view straight away.
 /// - `rebase`: a base commit with `main` and `feature` diverging over disjoint files -- two commits
 ///   advance `main`, three advance `feature` -- so [`crate::host::GitRepo::run_rebase`] replays
 ///   `feature` onto `main` cleanly. The non-conflicting complement to `conflict`; HEAD is left on
@@ -481,6 +483,7 @@ fn materialize_conflict(dest: &Path) -> Result<(), FixtureError> {
     repo.checkout("theirs")?;
     repo.commit("theirs change", &[("file.txt", CONFLICT_THEIRS)])?;
     repo.checkout("main")?;
+    repo.merge_branch("theirs")?;
     Ok(())
 }
 
@@ -661,6 +664,32 @@ impl FixtureRepo {
         Ok(self)
     }
 
+    /// Merge branch `name` into HEAD and leave the merge in progress.
+    ///
+    /// The index is flushed to disk because that is where the conflict view
+    /// reads its stages from. A merge held only in memory leaves the on-disk
+    /// index clean, which is indistinguishable from no conflict at all.
+    ///
+    /// Creates no commit, so every sha in the fixture is unchanged and the
+    /// module's reproducibility guarantee still holds.
+    fn merge_branch(&self, name: &str) -> Result<&Self, FixtureError> {
+        let refname = format!("refs/heads/{name}");
+        let target = self.repo.revparse_single(&refname).context(GitSnafu)?;
+        let annotated = self
+            .repo
+            .find_annotated_commit(target.id())
+            .context(GitSnafu)?;
+        self.repo
+            .merge(&[&annotated], None, None)
+            .context(GitSnafu)?;
+        self.repo
+            .index()
+            .context(GitSnafu)?
+            .write()
+            .context(GitSnafu)?;
+        Ok(self)
+    }
+
     fn workdir(&self) -> PathBuf {
         self.repo
             .workdir()
@@ -838,6 +867,53 @@ mod tests {
             },
             other => panic!("expected conflict, got {other:?}"),
         }
+    }
+
+    /// The fixture ships mid-merge, which is what `:conflict` needs.
+    ///
+    /// Reading the stages off the on-disk index is the same thing the conflict
+    /// view does, so a fixture that only diverged two branches would look
+    /// identical to a repo with nothing to resolve.
+    #[test]
+    fn conflict_leaves_an_unmerged_index() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("conflict", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let conflicted = repo.conflicted_paths();
+        assert_eq!(conflicted.len(), 1, "got {conflicted:?}");
+        assert!(conflicted[0].ends_with("file.txt"), "got {conflicted:?}");
+    }
+
+    /// The paused merge writes index stages and working-tree markers but no
+    /// commit, so every sha the fixture promises to reproduce is untouched.
+    #[test]
+    fn conflict_shas_survive_the_merge() {
+        let sha = |dir: &Path| {
+            let git = Repository::open(dir).unwrap();
+            (
+                git.revparse_single("main").unwrap().id().to_string(),
+                git.revparse_single("theirs").unwrap().id().to_string(),
+                git.head()
+                    .unwrap()
+                    .peel_to_commit()
+                    .unwrap()
+                    .id()
+                    .to_string(),
+            )
+        };
+
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        materialize("conflict", a.path()).unwrap();
+        materialize("conflict", b.path()).unwrap();
+
+        let (main, theirs, head) = sha(a.path());
+        assert_eq!(sha(b.path()), (main.clone(), theirs, head.clone()));
+        assert_eq!(
+            head, main,
+            "the merge is paused, so HEAD is still main's tip"
+        );
     }
 
     #[test]
