@@ -420,7 +420,7 @@ pub(crate) fn render_hover_page(
     region_height: u16,
 ) -> Vec<u8> {
     let area = Rect::new(0, 0, region_width, region_height);
-    let buf = Buffer::empty(area);
+    let mut buf = Buffer::empty(area);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let modal_fg = crate::render::review::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
@@ -458,7 +458,7 @@ pub(crate) fn render_hover_page(
     }
 
     let apc = scene.buffer().clone();
-    let mut bytes = crate::smooth_scroll::serialize_buffer(&buf);
+    let mut bytes = crate::smooth_scroll::serialize_buffer(&mut buf, theme);
     bytes.extend_from_slice(&apc);
     bytes
 }

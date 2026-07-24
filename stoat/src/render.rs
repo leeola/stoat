@@ -51,7 +51,7 @@ use crate::{
     term_session::{TermId, TermSession},
     workspace::{Workspace, WorkspaceId},
 };
-use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::StatefulWidget};
 use slotmap::SlotMap;
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
@@ -286,6 +286,48 @@ fn modal_overlay_open(stoat: &Stoat) -> bool {
         || stoat.diagnostics_picker.is_some()
         || stoat.location_picker.is_some()
         || stoat.code_search.is_some()
+}
+
+/// Resolve every `Color::Reset` cell in `buf` against `theme`.
+///
+/// A cell left at Reset is resolved by whatever terminal stoat is running
+/// inside, against *that* terminal's theme rather than stoat's, so the ambient
+/// background ignores `:theme` entirely and disagrees with the widgets that do
+/// paint `ui.background` for themselves. Stamping the theme's own colors in
+/// before the cells leave stoat makes the whole screen follow the active theme
+/// and match those widgets.
+///
+/// A channel the theme does not define is left at Reset, since there is nothing
+/// truer to put there than the terminal's own default.
+pub(crate) fn normalize_reset_colors(buf: &mut Buffer, theme: &crate::theme::Theme) {
+    use crate::theme::scope;
+
+    replace_reset_colors(
+        buf,
+        theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg),
+        theme.try_get(scope::UI_TEXT).and_then(|s| s.fg),
+    );
+}
+
+/// Stamp `bg` and `fg` over the cells still carrying `Color::Reset`, skipping
+/// either channel that is `None`.
+fn replace_reset_colors(buf: &mut Buffer, bg: Option<Color>, fg: Option<Color>) {
+    if bg.is_none() && fg.is_none() {
+        return;
+    }
+
+    for cell in &mut buf.content {
+        if let Some(bg) = bg
+            && cell.bg == Color::Reset
+        {
+            cell.bg = bg;
+        }
+        if let Some(fg) = fg
+            && cell.fg == Color::Reset
+        {
+            cell.fg = fg;
+        }
+    }
 }
 
 /// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
@@ -1055,6 +1097,64 @@ mod perf_tests {
             p95_input_us: 34,
         };
         assert_eq!(perf_label(seg), " paint 12us in-p95 34us ");
+    }
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::replace_reset_colors;
+    use crate::app::Stoat;
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+
+    fn one_cell(fg: Color, bg: Color) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buf[(0u16, 0u16)].set_fg(fg).set_bg(bg);
+        buf
+    }
+
+    #[test]
+    fn reset_channels_take_the_theme_colors() {
+        let mut buf = one_cell(Color::Reset, Color::Reset);
+        replace_reset_colors(&mut buf, Some(Color::Blue), Some(Color::Red));
+
+        assert_eq!(buf[(0u16, 0u16)].bg, Color::Blue);
+        assert_eq!(buf[(0u16, 0u16)].fg, Color::Red);
+    }
+
+    #[test]
+    fn explicit_colors_survive_normalization() {
+        let mut buf = one_cell(Color::Green, Color::Yellow);
+        replace_reset_colors(&mut buf, Some(Color::Blue), Some(Color::Red));
+
+        assert_eq!(
+            (buf[(0u16, 0u16)].fg, buf[(0u16, 0u16)].bg),
+            (Color::Green, Color::Yellow),
+            "a cell that chose its own colors is left alone",
+        );
+    }
+
+    #[test]
+    fn a_channel_the_theme_omits_stays_reset() {
+        let mut buf = one_cell(Color::Reset, Color::Reset);
+        replace_reset_colors(&mut buf, Some(Color::Blue), None);
+
+        assert_eq!(buf[(0u16, 0u16)].bg, Color::Blue);
+        assert_eq!(
+            buf[(0u16, 0u16)].fg,
+            Color::Reset,
+            "with no ui.text fg there is nothing truer than the terminal default",
+        );
+    }
+
+    #[test]
+    fn a_painted_frame_leaves_no_reset_background() {
+        let mut h = Stoat::test();
+        let buf = h.render_composited();
+
+        assert!(
+            buf.content.iter().all(|cell| cell.bg != Color::Reset),
+            "every cell carries the theme's background, so the screen tracks :theme",
+        );
     }
 }
 

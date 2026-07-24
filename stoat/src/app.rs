@@ -6888,6 +6888,10 @@ impl Stoat {
         crate::render::frame(self, buf, &mut scene, &mut undercurls);
         self.apc_scene = scene;
         self.pending_undercurls = undercurls;
+
+        // Last, so cells a widget left blank via Clear resolve to the theme too
+        // rather than to whatever the hosting terminal would pick.
+        crate::render::normalize_reset_colors(buf, &self.theme);
     }
 
     /// Flush the frame's APC decoration scene to the channel, when it changed.
@@ -7105,7 +7109,7 @@ impl Stoat {
                     }
                 }
 
-                let bytes = crate::smooth_scroll::serialize_buffer(&content_buf);
+                let bytes = crate::smooth_scroll::serialize_buffer(&mut content_buf, &self.theme);
                 let content_version = {
                     let mut hasher = DefaultHasher::new();
                     bytes.hash(&mut hasher);
@@ -7160,7 +7164,7 @@ impl Stoat {
                 &mut buf,
             );
 
-            let bytes = crate::smooth_scroll::serialize_buffer(&buf);
+            let bytes = crate::smooth_scroll::serialize_buffer(&mut buf, &self.theme);
             let content_version = {
                 let mut hasher = DefaultHasher::new();
                 bytes.hash(&mut hasher);
@@ -15147,7 +15151,7 @@ mod tests {
             &theme,
             &mut expected,
         );
-        let expected = crate::smooth_scroll::serialize_buffer(&expected);
+        let expected = crate::smooth_scroll::serialize_buffer(&mut expected, &theme);
 
         let mut fills = Vec::new();
         while let Ok(bytes) = rx.try_recv() {

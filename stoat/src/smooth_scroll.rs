@@ -453,7 +453,7 @@ pub(crate) fn render_page_from_snapshot(
             dim,
         );
         dim_page(&mut buf, area, gutter.theme(), dim);
-        let mut bytes = serialize_buffer(&buf);
+        let mut bytes = serialize_buffer(&mut buf, gutter.theme());
         if let Some(mut scene) = scene {
             bytes.extend_from_slice(scene.buffer());
         }
@@ -525,7 +525,7 @@ pub(crate) fn render_page_from_snapshot(
     }
 
     dim_page(&mut buf, area, gutter.theme(), dim);
-    let mut bytes = serialize_buffer(&buf);
+    let mut bytes = serialize_buffer(&mut buf, gutter.theme());
     bytes.extend_from_slice(&apc);
     bytes
 }
@@ -689,7 +689,7 @@ pub(crate) fn render_review_page_from_parts(
         &mut buf,
         None,
     );
-    let bytes = serialize_buffer(&buf);
+    let bytes = serialize_buffer(&mut buf, theme);
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
     encode_fill_into(&mut frame, pool, index);
@@ -731,7 +731,7 @@ pub(crate) fn render_conflict_page_from_parts(
         theme,
         &mut buf,
     );
-    let bytes = serialize_buffer(&buf);
+    let bytes = serialize_buffer(&mut buf, theme);
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
     encode_fill_into(&mut frame, pool, index);
@@ -762,7 +762,7 @@ pub(crate) fn render_finder_page(
         .min(usize::MAX as u64) as usize;
     paint_finder_rows(finder, area, start_row, theme, &mut buf);
 
-    serialize_buffer(&buf)
+    serialize_buffer(&mut buf, theme)
 }
 
 /// Render `region_height` rows of the command-palette result list starting at
@@ -796,7 +796,7 @@ pub(crate) fn render_palette_page(
         &mut buf,
     );
 
-    serialize_buffer(&buf)
+    serialize_buffer(&mut buf, theme)
 }
 
 /// Render `region_height` rows of the palette's inline argument-picker list
@@ -835,7 +835,7 @@ pub(crate) fn render_arg_page(
         &mut buf,
     );
 
-    serialize_buffer(&buf)
+    serialize_buffer(&mut buf, theme)
 }
 
 /// Render `region_height` rows of the completion popup list starting at row
@@ -869,7 +869,7 @@ pub(crate) fn render_completion_page(
         &mut buf,
     );
 
-    serialize_buffer(&buf)
+    serialize_buffer(&mut buf, theme)
 }
 
 /// Render `region_height` rows of the help entry list starting at row
@@ -893,7 +893,7 @@ pub(crate) fn render_help_list_page(
         .min(usize::MAX as u64) as usize;
     paint_help_list_rows(help, area, start_row, theme, &mut buf);
 
-    serialize_buffer(&buf)
+    serialize_buffer(&mut buf, theme)
 }
 
 /// Render `region_height` lines of the selected help entry's detail starting at
@@ -917,7 +917,7 @@ pub(crate) fn render_help_detail_page(
         .min(usize::MAX as u64) as usize;
     paint_help_detail_rows(help, area, start_row, theme, &mut buf);
 
-    serialize_buffer(&buf)
+    serialize_buffer(&mut buf, theme)
 }
 
 /// Render `region_height` rows of the commit list starting at row
@@ -941,7 +941,7 @@ pub(crate) fn render_commits_page(
         .min(usize::MAX as u64) as usize;
     paint_commit_rows(state, area, start_row, theme, &mut buf);
 
-    serialize_buffer(&buf)
+    serialize_buffer(&mut buf, theme)
 }
 
 /// Serialize every cell of `buf` to a self-contained VT byte stream via a
@@ -952,8 +952,13 @@ pub(crate) fn render_commits_page(
 /// regardless of what that slot held before. Cursor moves are absolute, so the
 /// stream is positioned for the page's top-left independent of the live grid
 /// cursor.
-pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
+///
+/// `buf` is normalized against `theme` first, so a pooled page carries the same
+/// resolved colors the live grid does and a glide shows no shift.
+pub(crate) fn serialize_buffer(buf: &mut Buffer, theme: &crate::theme::Theme) -> Vec<u8> {
     use ratatui::backend::{Backend, CrosstermBackend};
+
+    crate::render::normalize_reset_colors(buf, theme);
 
     let mut bytes = Vec::new();
     {
@@ -1046,7 +1051,7 @@ mod tests {
                 80,
             );
             editor.scroll_row = saved;
-            let expected = serialize_buffer(&expected);
+            let expected = serialize_buffer(&mut expected, &theme);
 
             let snapshot = editor.display_map.snapshot();
             let got =
@@ -1111,7 +1116,7 @@ mod tests {
             WrapMode::None,
             80,
         );
-        let expected = serialize_buffer(&expected);
+        let expected = serialize_buffer(&mut expected, &theme);
 
         let snapshot = editor.display_map.snapshot();
         let got = render_page_from_snapshot(&snapshot, 0, fallback, 12, 2, &gutter, false, 0.0);
@@ -1186,7 +1191,7 @@ mod tests {
             WrapMode::None,
             80,
         );
-        let expected = serialize_buffer(&expected);
+        let expected = serialize_buffer(&mut expected, &theme);
 
         let snapshot = editor.display_map.snapshot();
         let got = render_page_from_snapshot(&snapshot, 0, fallback, 20, 3, &gutter, false, 0.0);
@@ -1304,7 +1309,7 @@ mod tests {
             None,
             0.0,
         );
-        let expected = serialize_buffer(&expected);
+        let expected = serialize_buffer(&mut expected, &theme);
 
         let got = render_page_from_snapshot(&snapshot, 0, fallback, 40, 8, &gutter, true, 0.0);
         assert_eq!(
@@ -1360,7 +1365,7 @@ mod tests {
             &theme,
             &mut expected,
         );
-        let expected = serialize_buffer(&expected);
+        let expected = serialize_buffer(&mut expected, &theme);
 
         let got =
             render_conflict_page_from_parts(&snapshot, &mut state, &theme, 7, 0, fallback, 150, 8);
@@ -1818,7 +1823,7 @@ mod tests {
             None,
         );
         assert!(
-            find(&frame, &serialize_buffer(&rows_only)).is_some(),
+            find(&frame, &serialize_buffer(&mut rows_only, &theme)).is_some(),
             "the page's row bytes ride between the fill markers"
         );
 
