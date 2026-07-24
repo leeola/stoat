@@ -233,7 +233,7 @@ impl MinimapContent {
             let tokens = tokens_for(self.built_upto..end);
             let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
             let lines = summarize_rows(new_rope, self.built_upto..end, &line_tokens, &edge_of);
-            self.queued.push(Splice {
+            self.queue_splice(Splice {
                 start: self.built_upto,
                 removed: 0,
                 lines: lines.clone(),
@@ -297,7 +297,7 @@ impl MinimapContent {
             }
             self.lines[row as usize] = summary.clone();
             self.edges[row as usize] = edge;
-            self.queued.push(Splice {
+            self.queue_splice(Splice {
                 start: row,
                 removed: 1,
                 lines: vec![summary],
@@ -327,7 +327,7 @@ impl MinimapContent {
             let summary = summarize_line(&text, &line_tokens(row, &text), new_edge);
             self.lines[row as usize] = summary.clone();
             self.edges[row as usize] = new_edge;
-            self.queued.push(Splice {
+            self.queue_splice(Splice {
                 start: row,
                 removed: 1,
                 lines: vec![summary],
@@ -378,11 +378,40 @@ impl MinimapContent {
         let delta = inserted.len() as i64 - removed as i64;
         self.built_upto = (self.built_upto as i64 + delta).max(0) as u32;
 
-        self.queued.push(Splice {
+        self.queue_splice(Splice {
             start: old_start_row,
             removed,
             lines: inserted,
         });
+    }
+
+    /// Queue `splice`, folding it into the pending tail when the two describe
+    /// one contiguous run.
+    ///
+    /// The sweeps walk rows in order and queue a splice per changed row, so
+    /// without this a full recolor ships thousands of one-line APC frames, each
+    /// paying its own framing, a journal clone, and an O(store-tail) memmove on
+    /// the terminal.
+    ///
+    /// Only 1:1 replacements merge. Two contiguous ones replace `start ..
+    /// start + r1 + r2` between them, which is exactly what the merged splice
+    /// does. A build splice inserts without removing, so folding a later splice
+    /// into it would remove rows the pair never touched -- requiring 1:1 on the
+    /// tail as well as the incoming splice is what rules that out.
+    fn queue_splice(&mut self, splice: Splice) {
+        let mergeable = self.queued.last().is_some_and(|tail| {
+            tail.removed as usize == tail.lines.len()
+                && splice.removed as usize == splice.lines.len()
+                && splice.start == tail.start + tail.lines.len() as u32
+        });
+
+        match self.queued.last_mut() {
+            Some(tail) if mergeable => {
+                tail.removed += splice.removed;
+                tail.lines.extend(splice.lines);
+            },
+            _ => self.queued.push(splice),
+        }
     }
 }
 
@@ -976,11 +1005,15 @@ mod tests {
         let first = content.take_queued();
         assert_eq!(
             first.len(),
-            RESYNC_CHUNK as usize,
-            "first sync sweeps one chunk"
+            1,
+            "the chunk's changed rows are contiguous, so they ship as one splice"
         );
         assert_eq!(first[0].start, 0);
-        assert_eq!(first.last().unwrap().start, RESYNC_CHUNK - 1);
+        assert_eq!(
+            (first[0].removed, first[0].lines.len()),
+            (RESYNC_CHUNK, RESYNC_CHUNK as usize),
+            "and that splice still covers the whole chunk"
+        );
         assert_eq!(
             first[0].lines[0],
             summarize_line("line", &[tok(0..4, 1)], None),
@@ -996,8 +1029,9 @@ mod tests {
             no_edges,
         );
         let second = content.take_queued();
+        assert_eq!(second.len(), 1, "the remainder ships as one splice too");
         assert_eq!(
-            second.len(),
+            second[0].lines.len(),
             (total - RESYNC_CHUNK) as usize,
             "the remainder finishes the sweep"
         );
@@ -1048,7 +1082,8 @@ mod tests {
             restarted[0].start, 0,
             "a fresh bump restarts the sweep at the top"
         );
-        assert_eq!(restarted.len(), RESYNC_CHUNK as usize);
+        assert_eq!(restarted.len(), 1, "the restarted chunk ships coalesced");
+        assert_eq!(restarted[0].lines.len(), RESYNC_CHUNK as usize);
         assert_eq!(
             restarted[0].lines[0],
             summarize_line("line", &[tok(0..4, 2)], None)
@@ -1120,6 +1155,72 @@ mod tests {
             run(0, 2, 40),
             "a marked line leads with its edge"
         );
+    }
+
+    /// Coalescing must not paper over a gap. An unchanged row between two
+    /// changed ones has to break the run, or the merged splice would overwrite
+    /// it with whatever fell either side.
+    #[test]
+    fn an_unchanged_row_breaks_the_coalesced_run() {
+        let total = 6u32;
+        let text: String = vec!["line"; total as usize].join("\n");
+        let rope = rope(&text);
+        let mut content = MinimapContent::new(1);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        let _ = content.take_queued();
+
+        // Recolor every row but 3, so the sweep changes 0-2 and 4-5.
+        let tokens = |rows: Range<u32>| {
+            rows.filter(|row| *row != 3)
+                .map(|row| (row, vec![tok(0..4, 1)]))
+                .collect::<HashMap<_, _>>()
+        };
+        content.sync(&rope, 1, &Patch::empty(), versions(0, 1), tokens, no_edges);
+
+        let splices = content.take_queued();
+        assert_eq!(splices.len(), 2, "the untouched row splits the run");
+        assert_eq!((splices[0].start, splices[0].lines.len()), (0, 3));
+        assert_eq!((splices[1].start, splices[1].lines.len()), (4, 2));
+    }
+
+    #[test]
+    fn an_edge_sweep_coalesces_each_contiguous_run() {
+        let total = 10u32;
+        let text: String = vec!["line"; total as usize].join("\n");
+        let rope = rope(&text);
+        let mut content = MinimapContent::new(1);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        let _ = content.take_queued();
+
+        // Marks appear on rows 5, 6, and 9: one adjacent pair and a loner.
+        let edge_of = |row: u32| matches!(row, 5 | 6 | 9).then_some(40);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(1, 0),
+            no_tokens,
+            edge_of,
+        );
+
+        let splices = content.take_queued();
+        assert_eq!(splices.len(), 2, "5-6 merge, 9 stands alone");
+        assert_eq!((splices[0].start, splices[0].lines.len()), (5, 2));
+        assert_eq!((splices[1].start, splices[1].lines.len()), (9, 1));
     }
 
     #[test]
