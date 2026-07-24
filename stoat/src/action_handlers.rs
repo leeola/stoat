@@ -959,17 +959,25 @@ fn manages_own_undo_group(kind: ActionKind) -> bool {
 /// pre-action selections to restore on undo. Returns the grouped buffer, or
 /// `None` when the focused pane is not an editor. Lazy group materialization
 /// means a non-editing action leaves the undo history untouched.
+///
+/// An already-open group (an in-flight insert session) takes precedence: the
+/// action opens no group of its own, returns `None` so [`end_action_group`]
+/// seals nothing, and its edits join the session's single undo step.
 fn begin_action_group(stoat: &mut Stoat) -> Option<BufferId> {
     let (editor_id, buffer_id) = stoat.focused_editor_ids()?;
     let before = editor_selection_snapshot(stoat, editor_id);
     let buffer = stoat.active_workspace().buffers.get(buffer_id)?;
-    buffer.write().expect("poisoned").begin_group(before);
-    Some(buffer_id)
+    let opened = buffer.write().expect("poisoned").try_begin_group(before);
+    opened.then_some(buffer_id)
 }
 
 /// Seal the group opened by [`begin_action_group`], capturing the post-action
 /// selections to restore on redo. The group self-discards when the action made
 /// no edits.
+///
+/// A `None` buffer id means [`begin_action_group`] joined an already-open
+/// insert session instead of opening its own group, so there is nothing to seal
+/// and the session stays open.
 fn end_action_group(stoat: &mut Stoat, buffer_id: Option<BufferId>) {
     let Some(buffer_id) = buffer_id else {
         return;

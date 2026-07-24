@@ -492,6 +492,23 @@ impl TextBuffer {
         self.open_group_before = selections_before;
     }
 
+    /// Open an undo group only when none is already open, returning whether it
+    /// did.
+    ///
+    /// Unlike [`Self::begin_group`], an already-open group is left untouched
+    /// rather than sealed, so a mid-session action's edits join the enclosing
+    /// insert session's single undo step instead of splitting it. Returns
+    /// `false` when a group was already open, `true` when a fresh one opened.
+    pub(crate) fn try_begin_group(&mut self, selections_before: Vec<Selection<Anchor>>) -> bool {
+        if self.open_group {
+            return false;
+        }
+        self.open_group = true;
+        self.open_group_started = false;
+        self.open_group_before = selections_before;
+        true
+    }
+
     /// Close the open undo group, recording `selections_after` to restore on
     /// redo. A group that took no edits was never materialized, so a non-editing
     /// action leaves no undo step behind.
@@ -1476,6 +1493,43 @@ mod tests {
             b.snapshot.visible_text.to_string(),
             "abc",
             "one redo restores the whole group"
+        );
+    }
+
+    #[test]
+    fn try_begin_group_leaves_an_open_group_untouched() {
+        let mut b = buf("");
+        b.begin_group(Vec::new());
+        b.edit(0..0, "a");
+        assert!(
+            !b.try_begin_group(Vec::new()),
+            "an already-open group is not reopened"
+        );
+        b.edit(1..1, "b");
+        b.seal_group(Vec::new());
+        assert!(b.undo().is_some());
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "",
+            "the edit after try_begin_group joined the original group"
+        );
+    }
+
+    #[test]
+    fn try_begin_group_opens_a_group_on_an_idle_buffer() {
+        let mut b = buf("");
+        assert!(
+            b.try_begin_group(Vec::new()),
+            "a fresh group opens when none is active"
+        );
+        b.edit(0..0, "a");
+        b.edit(1..1, "b");
+        b.seal_group(Vec::new());
+        assert!(b.undo().is_some());
+        assert_eq!(
+            b.snapshot.visible_text.to_string(),
+            "",
+            "try_begin_group collapsed the edits into one step like begin_group"
         );
     }
 

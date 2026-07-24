@@ -18248,6 +18248,47 @@ mod tests {
     }
 
     #[test]
+    fn a_mid_session_motion_keeps_the_insert_session_one_undo_step() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("abc");
+        h.type_keys("left");
+        h.type_text("x");
+        h.type_keys("esc");
+        assert_eq!(buffer_text(&h, &path), "abxc");
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "",
+            "one undo reverts the whole session despite the mid-session motion"
+        );
+        h.type_keys("U");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "abxc",
+            "one redo restores the whole session"
+        );
+    }
+
+    #[test]
+    fn a_mid_session_dispatched_action_joins_the_insert_session() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("a");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SmartTab);
+        h.type_text("b");
+        h.type_keys("esc");
+        h.type_keys("u");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "",
+            "a mid-session dispatched action leaves the session's single undo step intact"
+        );
+    }
+
+    #[test]
     fn delete_undoes_both_cursors_and_restores_selections() {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "ab\nab\n");
