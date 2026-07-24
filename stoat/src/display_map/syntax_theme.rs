@@ -80,6 +80,21 @@ pub(crate) fn theme_scope_for_id(id: HighlightId) -> Option<String> {
         .map(|key| theme_scope_for_key(key))
 }
 
+/// Resolve a [`THEME_KEYS`] stem to the [`HighlightId`] that indexes it, or
+/// `None` when the stem is not one this build recognizes.
+///
+/// The inverse of [`theme_scope_for_id`], for a producer that names a scope
+/// directly rather than deriving one from a tree-sitter capture. It is what
+/// lets such a producer reach [`SyntaxStyles`] rather than resolving colors
+/// against the theme itself, which would bake the current theme into whatever
+/// it stores.
+pub(crate) fn highlight_id_for_key(key: &str) -> Option<HighlightId> {
+    THEME_KEYS
+        .iter()
+        .position(|stem| *stem == key)
+        .map(|idx| HighlightId(idx as u32))
+}
+
 /// The active theme's syntax colors, as one interned style per [`THEME_KEYS`]
 /// stem.
 ///
@@ -226,6 +241,18 @@ mod tests {
     fn id_for_highlight_returns_none_for_default() {
         let styles = SyntaxStyles::from_theme(&Theme::empty());
         assert!(styles.id_for_highlight(HighlightId::DEFAULT).is_none());
+    }
+
+    #[test]
+    fn highlight_id_for_key_inverts_the_theme_key_index() {
+        for (idx, key) in THEME_KEYS.iter().enumerate() {
+            assert_eq!(
+                super::highlight_id_for_key(key),
+                Some(HighlightId(idx as u32)),
+                "{key} must resolve to its own index"
+            );
+        }
+        assert_eq!(super::highlight_id_for_key("not.a.stem"), None);
     }
 
     #[test]

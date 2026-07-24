@@ -16,7 +16,7 @@ use crate::{
     buffer_registry::{BufferRegistry, LspSymbolKindIndex},
     display_map::{
         syntax_theme, DisplayPoint, DisplaySnapshot, HighlightKey, HighlightLayer, HighlightStyle,
-        HighlightStyleInterner, InlayKind, SemanticTokenHighlight,
+        InlayKind, SemanticTokenHighlight,
     },
     editor_state::EditorId,
     host::{LanguageServerFeature, LocalLsp, LspHost, LspTranscript, OffsetEncoding},
@@ -2834,17 +2834,19 @@ fn apply_semantic_tokens(
     // The highlight channel takes the scope-bearing spans, the symbol-kind index
     // the kind-bearing ones. A token may feed one, both, or (dropped in decode)
     // neither.
-    let mut interner = HighlightStyleInterner::default();
+    //
+    // Ids come from the shared theme table rather than a per-response interner,
+    // so a stored token means the same scope after a theme switch and can be
+    // recolored by swapping the table instead of re-requesting it.
     let styled: Vec<(std::ops::Range<usize>, _)> = items
         .iter()
         .filter_map(|(range, scope, _)| {
-            let scope = (*scope)?;
-            let scope_path = syntax_theme::theme_scope_for_key(scope);
-            let style = syntax_theme::style_to_highlight_style(&stoat.theme.get(&scope_path));
-            Some((range.clone(), interner.intern(style)))
+            let id = syntax_theme::highlight_id_for_key((*scope)?)?;
+            let style = stoat.syntax_styles.id_for_highlight(id)?;
+            Some((range.clone(), style))
         })
         .collect();
-    let interner = Arc::new(interner);
+    let interner = stoat.syntax_styles.interner.clone();
 
     let kind_spans: Vec<(std::ops::Range<usize>, LspSymbolKind)> = items
         .iter()
@@ -9791,6 +9793,114 @@ mod tests {
             "a version-current cache hit spawns no request"
         );
         assert_eq!(lsp_token_count(&mut h), 1, "cached tokens are reinstalled");
+    }
+
+    /// Every scope stem the LSP mapping can emit is a key the shared theme
+    /// table knows.
+    ///
+    /// The two lists live in different files, so one drifting from the other
+    /// would silently drop those tokens from highlighting rather than fail to
+    /// build.
+    #[test]
+    fn every_lsp_token_scope_resolves_to_a_theme_key() {
+        use crate::display_map::syntax_theme;
+
+        let token_types = [
+            "function",
+            "method",
+            "macro",
+            "type",
+            "class",
+            "enum",
+            "interface",
+            "struct",
+            "typeParameter",
+            "variable",
+            "parameter",
+            "property",
+            "enumMember",
+            "keyword",
+            "modifier",
+            "comment",
+            "string",
+            "number",
+            "operator",
+        ];
+        for token_type in token_types {
+            let scope = super::lsp_token_scope(token_type)
+                .unwrap_or_else(|| panic!("{token_type} must map to a scope"));
+            assert!(
+                syntax_theme::highlight_id_for_key(scope).is_some(),
+                "{token_type} maps to {scope}, which is not a theme key"
+            );
+        }
+        assert_eq!(super::lsp_token_scope("noSuchTokenType"), None);
+    }
+
+    /// An applied token carries the shared theme table's id for its scope, not
+    /// an id minted per response. That is what lets a theme switch recolor
+    /// retained tokens by swapping the table.
+    #[test]
+    fn lsp_tokens_carry_the_shared_theme_table_id() {
+        use crate::display_map::syntax_theme;
+        use lsp_types::{
+            SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+            SemanticTokensLegend, SemanticTokensOptions, SemanticTokensResult,
+            SemanticTokensServerCapabilities, ServerCapabilities,
+        };
+
+        let mut h = TestHarness::with_size(24, 4);
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            semantic_tokens_provider: Some(
+                SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                    legend: SemanticTokensLegend {
+                        token_types: vec![SemanticTokenType::new("keyword")],
+                        token_modifiers: vec![],
+                    },
+                    full: Some(SemanticTokensFullOptions::Bool(true)),
+                    range: None,
+                    work_done_progress_options: Default::default(),
+                }),
+            ),
+            ..Default::default()
+        });
+
+        let root = seed(&mut h, &[("a.rs", "let x = y\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_semantic_tokens_full(
+            path.to_str().unwrap(),
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: vec![SemanticToken {
+                    delta_line: 0,
+                    delta_start: 0,
+                    length: 3,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                }],
+            }),
+        );
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+
+        let expected = h
+            .stoat
+            .syntax_styles
+            .id_for_highlight(
+                syntax_theme::highlight_id_for_key("keyword").expect("keyword is a theme key"),
+            )
+            .expect("keyword resolves through the shared table");
+
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let ids: Vec<_> = snapshot
+            .lsp_token_highlights()
+            .values()
+            .flat_map(|channel| channel.tokens.iter().map(|token| token.style))
+            .collect();
+        assert_eq!(ids, vec![expected]);
     }
 
     #[test]
