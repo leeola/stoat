@@ -1134,24 +1134,87 @@ pub fn encode_minimap_into(out: &mut Vec<u8>, command: &MinimapCommand) {
     frame::end(out);
 }
 
-/// Encode a [`MinimapLinesCommand`] as a full `Gstoatty;minimap_lines` frame.
+/// Raw argument bytes one `minimap_lines` frame may carry.
 ///
-/// The splice header and every inserted line's runs ride in a single argument.
+/// Base64 turns 3 bytes into 4, so the pre-image of a full payload is three
+/// quarters of [`frame::MAX_APC_PAYLOAD`]. The 64 subtracted covers the
+/// `Gstoatty;minimap_lines;` prefix, which shares the payload budget with the
+/// argument, plus margin.
+const MINIMAP_LINES_RAW_BUDGET: usize = (frame::MAX_APC_PAYLOAD - 64) / 4 * 3;
+
+/// Bytes the fixed fields take ahead of the line data in a splice argument.
+/// Four `u32`s carry the content id, start, removed count, and line count.
+const MINIMAP_LINES_HEADER: usize = 16;
+
+/// Encode a [`MinimapLinesCommand`] as `Gstoatty;minimap_lines` frames.
+///
+/// A splice too large for one APC payload is spread over several frames, so the
+/// result is one frame for an ordinary splice and a run of them for a big one.
+/// See [`encode_minimap_lines_into`] for what the split guarantees.
 pub fn encode_minimap_lines(command: &MinimapLinesCommand) -> Vec<u8> {
     let mut out = Vec::new();
     encode_minimap_lines_into(&mut out, command);
     out
 }
 
-/// Append a `Gstoatty;minimap_lines` frame for `command` to `out`.
+/// Append the `Gstoatty;minimap_lines` frames for `command` to `out`.
+///
+/// The terminal's scanner discards an APC payload past
+/// [`frame::MAX_APC_PAYLOAD`] whole rather than truncating it, so a splice whose
+/// lines would overrun that is packed into as many frames as it takes. Applying
+/// them in order has the same effect as applying `command` in one go. The first
+/// frame carries the removal and the leading lines, and each later one inserts
+/// its share at the point the previous frame stopped.
+///
+/// A splice that fits emits exactly one frame, as does a pure deletion.
 pub fn encode_minimap_lines_into(out: &mut Vec<u8>, command: &MinimapLinesCommand) {
+    let budget = MINIMAP_LINES_RAW_BUDGET - MINIMAP_LINES_HEADER;
+    let mut emitted = 0;
+    loop {
+        let mut used = 0;
+        let mut take = 0;
+        for line in &command.lines[emitted..] {
+            let cost = 1 + 3 * line.len();
+            // Always take one line, so a hypothetical line past the whole
+            // budget still advances rather than looping forever. A line maxes
+            // out at 1 + 3 * 255 bytes, far under it.
+            if take > 0 && used + cost > budget {
+                break;
+            }
+            used += cost;
+            take += 1;
+        }
+
+        write_minimap_lines_frame(
+            out,
+            command.content_id,
+            command.start + emitted as u32,
+            if emitted == 0 { command.removed } else { 0 },
+            &command.lines[emitted..emitted + take],
+        );
+
+        emitted += take;
+        if emitted >= command.lines.len() {
+            return;
+        }
+    }
+}
+
+/// Append one `Gstoatty;minimap_lines` frame splicing `lines` in at `start`.
+fn write_minimap_lines_frame(
+    out: &mut Vec<u8>,
+    content_id: u32,
+    start: u32,
+    removed: u32,
+    lines: &[LineSummary],
+) {
     frame::begin(out, "minimap_lines");
     frame::push_arg(out, |w| {
-        w.write_all(&command.content_id.to_be_bytes())?;
-        w.write_all(&command.start.to_be_bytes())?;
-        w.write_all(&command.removed.to_be_bytes())?;
-        w.write_all(&(command.lines.len() as u32).to_be_bytes())?;
-        for line in &command.lines {
+        w.write_all(&content_id.to_be_bytes())?;
+        w.write_all(&start.to_be_bytes())?;
+        w.write_all(&removed.to_be_bytes())?;
+        w.write_all(&(lines.len() as u32).to_be_bytes())?;
+        for line in lines {
             w.write_all(&[line.len() as u8])?;
             for run in line {
                 w.write_all(&[run.start_col, run.len, run.class])?;
@@ -1796,12 +1859,13 @@ mod tests {
         encode_scale, encode_scroll, encode_scroll_region, encode_text_run_end,
         encode_window_close, encode_window_focus, encode_window_open, BarCommand, BorderCommand,
         BorderStyle, Command, FillCommand, HelloCommand, IconCommand, IconKind, IdentReply,
-        LineLayoutCommand, MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun,
-        MinimapViewCommand, PanelCommand, PanelShadow, PoolCursorCommand, PoolDropCommand,
-        PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
-        ScrollRegionCommand, TextRunCommand, WindowCloseCommand, WindowFocusCommand,
+        LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand,
+        MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow, PoolCursorCommand,
+        PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand,
+        ScrollCommand, ScrollRegionCommand, TextRunCommand, WindowCloseCommand, WindowFocusCommand,
         WindowOpenCommand,
     };
+    use crate::frame::MAX_APC_PAYLOAD;
 
     #[test]
     fn border_round_trips() {
@@ -2470,6 +2534,105 @@ mod tests {
         assert_eq!(
             decode(&encode_minimap_lines(&command)),
             Some(Command::MinimapLines(command))
+        );
+    }
+
+    /// Split `bytes` into the APC payloads it carries, the stretches between
+    /// `ESC _` and the terminator that the terminal's scanner buffers and caps.
+    fn apc_payloads(bytes: &[u8]) -> Vec<&[u8]> {
+        bytes
+            .split(|&b| b == 0x1b)
+            .filter_map(|part| part.strip_prefix(b"_"))
+            .collect()
+    }
+
+    /// Apply one splice to `store`, mirroring the terminal's own store update.
+    fn apply_splice(store: &mut Vec<LineSummary>, c: &MinimapLinesCommand) {
+        let start = (c.start as usize).min(store.len());
+        let end = start.saturating_add(c.removed as usize).min(store.len());
+        store.splice(start..end, c.lines.iter().cloned());
+    }
+
+    /// A splice of `lines` rows at `runs` runs each, sized by the caller to sit
+    /// either side of one APC payload's worth of content.
+    fn dense_splice(lines: usize, runs: usize) -> MinimapLinesCommand {
+        MinimapLinesCommand {
+            content_id: 7,
+            start: 2,
+            removed: 5,
+            lines: (0..lines)
+                .map(|i| {
+                    (0..runs)
+                        .map(|r| MinimapRun {
+                            start_col: (r * 2) as u8,
+                            len: (i % 7 + 1) as u8,
+                            class: (r % 4) as u8,
+                        })
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_oversized_splice_paginates_within_the_payload_cap() {
+        let command = dense_splice(4096, 12);
+        let bytes = encode_minimap_lines(&command);
+        let payloads = apc_payloads(&bytes);
+
+        assert!(
+            payloads.len() > 1,
+            "a 4096-line by 12-run splice cannot fit one payload",
+        );
+        for payload in &payloads {
+            assert!(
+                payload.len() <= MAX_APC_PAYLOAD,
+                "a payload of {} bytes would be discarded by the scanner",
+                payload.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn paginated_frames_apply_to_the_same_store_as_one_splice() {
+        let command = dense_splice(4096, 12);
+
+        let mut expected: Vec<LineSummary> = vec![vec![]; 40];
+        apply_splice(&mut expected, &command);
+
+        let mut got: Vec<LineSummary> = vec![vec![]; 40];
+        let bytes = encode_minimap_lines(&command);
+        let mut frames = 0;
+        for payload in apc_payloads(&bytes) {
+            match decode(payload) {
+                Some(Command::MinimapLines(part)) => {
+                    assert_eq!(part.content_id, command.content_id);
+                    apply_splice(&mut got, &part);
+                    frames += 1;
+                },
+                other => panic!("frame {frames} decoded as {other:?}"),
+            }
+        }
+
+        assert!(frames > 1, "the splice really did paginate");
+        assert_eq!(
+            got, expected,
+            "applying every frame in order rebuilds the single splice's result",
+        );
+    }
+
+    #[test]
+    fn a_splice_that_fits_stays_one_frame() {
+        let command = dense_splice(64, 3);
+        assert_eq!(
+            apc_payloads(&encode_minimap_lines(&command)).len(),
+            1,
+            "an ordinary splice is not split",
+        );
+        assert_eq!(
+            decode(&encode_minimap_lines(&command)),
+            Some(Command::MinimapLines(command)),
+            "and still round-trips as one command",
         );
     }
 

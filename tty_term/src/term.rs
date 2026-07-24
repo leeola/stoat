@@ -41,7 +41,7 @@ use stoatty_protocol::{
         PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
         WindowOpenCommand,
     },
-    frame::FrameScratch,
+    frame::{FrameScratch, MAX_APC_PAYLOAD},
 };
 
 const PALETTE_LEN: usize = 256;
@@ -1899,10 +1899,6 @@ const STRING_TERMINATOR: u8 = b'\\';
 /// Bell, accepted as an alternate string terminator.
 const BEL: u8 = 0x07;
 
-/// Cap on a buffered APC payload, bounding memory against an APC string that
-/// never terminates. Stoatty frames are far smaller, so an overrun is discarded.
-const MAX_APC_BYTES: usize = 64 * 1024;
-
 /// Extracts APC string payloads from a VT byte stream as they complete.
 ///
 /// `alacritty_terminal` consumes APC strings without surfacing them, so the
@@ -1992,8 +1988,11 @@ impl ApcScanner {
     }
 
     /// Buffer one payload byte, abandoning the frame if it overruns the cap.
+    ///
+    /// The cap is [`MAX_APC_PAYLOAD`], shared with the encoders so a frame they
+    /// emit can never be the thing this discards.
     fn push(&mut self, byte: u8) {
-        if self.payload.len() < MAX_APC_BYTES {
+        if self.payload.len() < MAX_APC_PAYLOAD {
             self.payload.push(byte);
         } else {
             self.payload.clear();

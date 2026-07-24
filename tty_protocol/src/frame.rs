@@ -21,6 +21,18 @@ const BEL: u8 = 0x07;
 /// The namespace tag claiming the whole stoatty sub-protocol.
 const PREFIX: &[u8] = b"Gstoatty";
 
+/// Largest APC payload the terminal's scanner will buffer, in bytes.
+///
+/// The cap bounds memory against an APC string that never terminates. A payload
+/// that reaches it is dropped whole rather than truncated, so a frame over the
+/// limit loses all of its content silently. An encoder whose argument could grow
+/// past this has to split its work across several frames.
+///
+/// The budget covers everything between `ESC _` and the terminator, so the
+/// `Gstoatty;<sub>;` prefix and the base64 expansion of the argument both count
+/// against it.
+pub const MAX_APC_PAYLOAD: usize = 64 * 1024;
+
 /// A parsed stoatty frame: a sub-command and its decoded binary arguments.
 ///
 /// `args` holds the raw bytes of each argument after base64 decoding, in
