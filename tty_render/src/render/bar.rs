@@ -30,7 +30,7 @@ const SIXTEENTHS: f32 = 16.0;
 /// cell-fraction units, the fill color, and the declaration-order seq the
 /// fragment shader occludes by.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct BarInstance {
     origin: [f32; 2],
     size: [f32; 2],
@@ -61,6 +61,8 @@ pub struct BarPass {
     bind_group: BindGroup,
     instances: Buffer,
     capacity: usize,
+    /// The instances last uploaded, so an unchanged frame skips the write.
+    last_instances: Vec<BarInstance>,
     count: u32,
     /// Bars of a pool grid being composited over the live grid, built by
     /// [`Self::prepare_composite`] into a buffer separate from
@@ -170,6 +172,7 @@ impl BarPass {
             globals,
             bind_group,
             instances,
+            last_instances: Vec::new(),
             capacity: INITIAL_CAPACITY,
             count: 0,
             composite_instances,
@@ -189,19 +192,20 @@ impl BarPass {
     /// Upload the frame's uniform, one occluder per live panel, and one instance
     /// per grid bar.
     ///
-    /// `resolution` is the surface size in physical pixels. `panels` are the live
-    /// panels the bars occlude against. Reallocates the instance or occluder
-    /// buffer only when its count outgrows the current capacity.
-    pub fn prepare(
+    /// `resolution` is the surface size in physical pixels. `occluders` are the
+    /// live panels' rects, built once per frame and shared with the icon pass.
+    /// Reallocates the instance or occluder buffer only when its count outgrows
+    /// the current capacity, and skips the instance upload when they match what
+    /// was last sent.
+    pub(crate) fn prepare(
         &mut self,
         device: &Device,
         queue: &Queue,
         bars: &[Bar],
-        panels: &[Panel],
+        occluders: &[Occluder],
         resolution: [f32; 2],
     ) {
-        let occluders = build_occluders(panels);
-        self.upload_occluders(device, queue, &occluders);
+        self.upload_occluders(device, queue, occluders);
 
         let globals = Globals {
             resolution,
@@ -218,11 +222,16 @@ impl BarPass {
             return;
         }
 
+        if !crate::render::upload_needed(&instances, &self.last_instances) {
+            return;
+        }
+
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        self.last_instances = instances;
     }
 
     /// Upload the panel occluders, reallocating the buffer and rebuilding the
@@ -418,6 +427,38 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate bar");
+    }
+
+    /// The pass skips its GPU write when the rebuilt instances match the last
+    /// upload, so unchanged chrome must compare equal across rebuilds and a
+    /// real change must not.
+    #[test]
+    fn rebuilt_bars_compare_equal_until_one_changes() {
+        use crate::render::upload_needed;
+
+        let bars = [Bar {
+            x: 8,
+            y: 16,
+            width: 3,
+            height: 24,
+            color: Rgb::new(220, 50, 47),
+            seq: 7,
+        }];
+        let first = build_bar_instances(&bars, 0.0);
+        assert!(
+            !upload_needed(&build_bar_instances(&bars, 0.0), &first),
+            "an unchanged bar rebuilds to the same bytes, so no upload is needed",
+        );
+
+        let moved = [Bar { x: 9, ..bars[0] }];
+        assert!(
+            upload_needed(&build_bar_instances(&moved, 0.0), &first),
+            "a moved bar must reach the GPU",
+        );
+        assert!(
+            upload_needed(&build_bar_instances(&[], 0.0), &first),
+            "so must dropping the bar entirely",
+        );
     }
 
     #[test]

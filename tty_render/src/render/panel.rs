@@ -44,7 +44,7 @@ const SHADOW_MARGIN_OVERHANG: f32 = 5.0;
 /// radius, a flag selecting whether the fill is painted, the border style code,
 /// and the shadow mode (0 drop, 1 tucked, 2 overhang).
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct PanelInstance {
     cell: [f32; 2],
     size: [f32; 2],
@@ -80,6 +80,8 @@ pub struct PanelPass {
     bind_group: BindGroup,
     instances: Buffer,
     capacity: usize,
+    /// The instances last uploaded, so an unchanged frame skips the write.
+    last_instances: Vec<PanelInstance>,
     count: u32,
     metrics: CellMetrics,
 }
@@ -184,6 +186,7 @@ impl PanelPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            last_instances: Vec::new(),
             metrics,
         }
     }
@@ -213,6 +216,10 @@ impl PanelPass {
             return;
         }
 
+        if !crate::render::upload_needed(&instances, &self.last_instances) {
+            return;
+        }
+
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
@@ -224,6 +231,7 @@ impl PanelPass {
             );
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        self.last_instances = instances;
     }
 
     /// Record the panel draw into `render_pass`.
@@ -340,6 +348,42 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate panel");
+    }
+
+    /// The pass skips its GPU write when the rebuilt instances match the last
+    /// upload, so unchanged chrome must compare equal across rebuilds and a
+    /// real change must not.
+    #[test]
+    fn rebuilt_panels_compare_equal_until_one_changes() {
+        use crate::render::upload_needed;
+
+        let panels = [Panel {
+            top: 3,
+            left: 5,
+            width: 8,
+            height: 4,
+            style: BorderStyle::Heavy,
+            border: Rgb::new(0, 255, 0),
+            corner_radius: 6,
+            fill: Some(Rgb::new(255, 0, 0)),
+            shadow: PanelShadow::Drop,
+            inset_x: 0,
+            seq: 0,
+        }];
+        let first = build_panel_instances(&panels);
+        assert!(
+            !upload_needed(&build_panel_instances(&panels), &first),
+            "an unchanged panel rebuilds to the same bytes, so no upload is needed",
+        );
+
+        let recolored = [Panel {
+            border: Rgb::new(0, 254, 0),
+            ..panels[0]
+        }];
+        assert!(
+            upload_needed(&build_panel_instances(&recolored), &first),
+            "a one-channel color change must still reach the GPU",
+        );
     }
 
     #[test]

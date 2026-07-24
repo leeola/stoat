@@ -5,9 +5,9 @@
 //! z-order. Icons are not cell attributes: like overlays they float over the
 //! grid, so this pass runs after the overlays and alpha-blends its shapes on top.
 
-use crate::render::{build_occluders, CellMetrics, Occluder};
+use crate::render::{CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
-use stoatty_term::grid::{Icon, IconKind, Panel, Rgb};
+use stoatty_term::grid::{Icon, IconKind, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
@@ -30,7 +30,7 @@ const KIND_INFO: u32 = 2;
 /// cells, the color, the icon kind, the anchor offset, and the
 /// declaration-order seq the fragment shader occludes by.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct IconInstance {
     cell: [f32; 2],
     size: f32,
@@ -61,6 +61,8 @@ pub struct IconPass {
     bind_group: BindGroup,
     instances: Buffer,
     capacity: usize,
+    /// The instances last uploaded, so an unchanged frame skips the write.
+    last_instances: Vec<IconInstance>,
     count: u32,
     /// One occluder per live panel, read by the fragment shader to discard icon
     /// fragments a later box covers. Bound alongside the globals, and rebuilt
@@ -167,6 +169,7 @@ impl IconPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            last_instances: Vec::new(),
             occluders,
             occluder_capacity: INITIAL_CAPACITY,
             metrics,
@@ -181,19 +184,20 @@ impl IconPass {
     /// Upload the frame's uniform, one occluder per live panel, and one instance
     /// per grid icon.
     ///
-    /// `resolution` is the surface size in physical pixels. `panels` are the live
-    /// panels the icons occlude against. Reallocates the instance or occluder
-    /// buffer only when its count outgrows the current capacity.
-    pub fn prepare(
+    /// `resolution` is the surface size in physical pixels. `occluders` are the
+    /// live panels' rects, built once per frame and shared with the bar pass.
+    /// Reallocates the instance or occluder buffer only when its count outgrows
+    /// the current capacity, and skips the instance upload when they match what
+    /// was last sent.
+    pub(crate) fn prepare(
         &mut self,
         device: &Device,
         queue: &Queue,
         icons: &[Icon],
-        panels: &[Panel],
+        occluders: &[Occluder],
         resolution: [f32; 2],
     ) {
-        let occluders = build_occluders(panels);
-        self.upload_occluders(device, queue, &occluders);
+        self.upload_occluders(device, queue, occluders);
 
         let globals = Globals {
             resolution,
@@ -209,11 +213,16 @@ impl IconPass {
             return;
         }
 
+        if !crate::render::upload_needed(&instances, &self.last_instances) {
+            return;
+        }
+
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        self.last_instances = instances;
     }
 
     /// Upload the panel occluders, reallocating the buffer and rebuilding the

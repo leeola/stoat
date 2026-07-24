@@ -39,7 +39,7 @@ const CORNER_RADIUS: f32 = 6.0;
 /// Per-overlay instance: the anchor cell, the size in cells, the two colors, the
 /// drop-shadow displacement and blur radius, and the corner radius.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct OverlayInstance {
     cell: [f32; 2],
     size: [f32; 2],
@@ -67,6 +67,8 @@ pub struct OverlayPass {
     bind_group: BindGroup,
     instances: Buffer,
     capacity: usize,
+    /// The instances last uploaded, so an unchanged frame skips the write.
+    last_instances: Vec<OverlayInstance>,
     count: u32,
     metrics: CellMetrics,
 }
@@ -163,6 +165,7 @@ impl OverlayPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            last_instances: Vec::new(),
             metrics,
         }
     }
@@ -190,11 +193,16 @@ impl OverlayPass {
             return;
         }
 
+        if !crate::render::upload_needed(&instances, &self.last_instances) {
+            return;
+        }
+
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
             self.instances = alloc_instances(device, self.capacity);
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        self.last_instances = instances;
     }
 
     /// Record the overlay draw into `render_pass`.

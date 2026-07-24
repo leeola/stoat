@@ -120,6 +120,17 @@ pub(crate) struct Occluder {
     _pad: [u32; 3],
 }
 
+/// Whether `built` differs from what was last uploaded, and so has to be sent
+/// to the GPU again.
+///
+/// Chrome changes far less often than frames are drawn, so without this a
+/// cursor blink or a scroll ease re-uploads bytes the GPU already holds. A
+/// caller that grows its buffer never reaches a false answer, since a grow
+/// implies the instance count changed.
+pub(crate) fn upload_needed<T: PartialEq>(built: &[T], last: &[T]) -> bool {
+    built != last
+}
+
 /// One occluder per panel, in declaration order.
 pub(crate) fn build_occluders(panels: &[Panel]) -> Vec<Occluder> {
     panels

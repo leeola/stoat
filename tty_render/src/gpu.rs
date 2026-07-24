@@ -389,10 +389,13 @@ impl Renderer {
         self.text.prepare(device, queue, grid, resolution, &frame);
         self.panel.prepare(device, queue, grid, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
+        // Built once here rather than per pass, since both derive the same
+        // list from the same panels.
+        let occluders = crate::render::build_occluders(grid.panels());
         self.icon
-            .prepare(device, queue, grid.icons(), grid.panels(), resolution);
+            .prepare(device, queue, grid.icons(), &occluders, resolution);
         self.bar
-            .prepare(device, queue, grid.bars(), grid.panels(), resolution);
+            .prepare(device, queue, grid.bars(), &occluders, resolution);
         self.minimap.prepare(device, queue, grid, resolution);
 
         // Time this frame's GPU work when the timer's current slot is free.
