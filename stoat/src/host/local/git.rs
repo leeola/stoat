@@ -7,8 +7,8 @@ use crate::host::git::{
     RewriteResult,
 };
 use git2::{
-    ApplyLocation, BranchType, Diff, DiffOptions, Repository, RepositoryState, Sort, Status,
-    StatusOptions,
+    build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Diff, DiffOptions, Repository,
+    RepositoryState, Sort, Status, StatusOptions,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -457,7 +457,7 @@ impl GitRepo for LocalGitRepo {
             },
             None => None,
         };
-        let parents: Vec<&git2::Commit<'_>> = parent_commit.as_ref().into_iter().collect();
+        let parents: Vec<&Commit<'_>> = parent_commit.as_ref().into_iter().collect();
         let new_id = repo
             .commit(None, &sig, &sig, message, &tree, &parents)
             .map_err(err_msg)?;
@@ -470,6 +470,27 @@ impl GitRepo for LocalGitRepo {
         repo.reference("HEAD", oid, true, "stoat rebase")
             .map_err(err_msg)?;
         Ok(())
+    }
+
+    fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let oid = git2::Oid::from_str(sha).map_err(err_msg)?;
+        let commit = repo.find_commit(oid).map_err(err_msg)?;
+
+        checkout_commit(&repo, &commit)?;
+        repo.set_head_detached(oid).map_err(err_msg)
+    }
+
+    fn checkout_ref(&self, name: &str) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let full_name = format!("refs/heads/{name}");
+        let commit = repo
+            .find_reference(&full_name)
+            .and_then(|branch| branch.peel_to_commit())
+            .map_err(err_msg)?;
+
+        checkout_commit(&repo, &commit)?;
+        repo.set_head(&full_name).map_err(err_msg)
     }
 
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
@@ -587,6 +608,19 @@ fn walk_first_parent(repo: &Repository, start: git2::Oid, limit: usize) -> Vec<C
         });
     }
     out
+}
+
+/// Update the working tree and index to `commit`'s tree without moving HEAD.
+///
+/// Safe mode means libgit2 refuses the whole checkout when a tracked file
+/// carries local modifications it would have to overwrite. HEAD is left for the
+/// caller to move afterwards, so a refusal leaves the repository exactly as it
+/// was rather than stranding HEAD at a commit the files do not match.
+fn checkout_commit(repo: &Repository, commit: &Commit<'_>) -> Result<(), GitApplyError> {
+    let mut opts = CheckoutBuilder::new();
+    opts.safe();
+    repo.checkout_tree(commit.as_object(), Some(&mut opts))
+        .map_err(err_msg)
 }
 
 fn err_msg(e: git2::Error) -> GitApplyError {
@@ -1006,5 +1040,59 @@ mod tests {
                 ("main".to_string(), shas[2].clone()),
             ]
         );
+    }
+
+    #[test]
+    fn checkout_detached_rewrites_the_working_tree() {
+        let (dir, _repo, shas) = seeded_repo();
+        let git = discover(&dir);
+        let tracked = dir.path().join("a.txt");
+
+        git.checkout_detached(&shas[0]).unwrap();
+        assert_eq!(std::fs::read_to_string(&tracked).unwrap(), "one");
+        assert_eq!(git.resolve_rev("HEAD").as_deref(), Some(shas[0].as_str()));
+        assert_eq!(git.head_branch(), None);
+    }
+
+    #[test]
+    fn checkout_ref_returns_to_the_branch_tip() {
+        let (dir, _repo, shas) = seeded_repo();
+        let git = discover(&dir);
+        let tracked = dir.path().join("a.txt");
+
+        git.checkout_detached(&shas[0]).unwrap();
+        git.checkout_ref("main").unwrap();
+        assert_eq!(std::fs::read_to_string(&tracked).unwrap(), "three");
+        assert_eq!(git.head_branch().as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn checkout_refuses_over_a_dirty_tracked_file() {
+        let (dir, _repo, shas) = seeded_repo();
+        let git = discover(&dir);
+        let tracked = dir.path().join("a.txt");
+        std::fs::write(&tracked, "local edit").unwrap();
+
+        assert!(git.checkout_detached(&shas[0]).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&tracked).unwrap(),
+            "local edit",
+            "a refused checkout must not overwrite the edit"
+        );
+        assert_eq!(
+            git.resolve_rev("HEAD").as_deref(),
+            Some(shas[2].as_str()),
+            "a refused checkout must not move HEAD"
+        );
+    }
+
+    #[test]
+    fn checkout_ref_rejects_an_unknown_branch() {
+        let (dir, _repo, shas) = seeded_repo();
+        let git = discover(&dir);
+
+        assert!(git.checkout_ref("nope").is_err());
+        assert_eq!(git.head_branch().as_deref(), Some("main"));
+        assert_eq!(git.resolve_rev("HEAD").as_deref(), Some(shas[2].as_str()));
     }
 }

@@ -125,6 +125,20 @@ impl FakeGit {
             .unwrap_or_default()
     }
 
+    /// Snapshot the checkouts performed against `workdir`, in call order, each
+    /// `detached:<sha>` or `ref:<name>`.
+    ///
+    /// Only successful calls appear, so an empty list is proof the working tree
+    /// never moved. Empty when the repo is unknown.
+    pub fn checkouts(&self, workdir: &Path) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| repo.state.lock().unwrap().checkouts.clone())
+            .unwrap_or_default()
+    }
+
     /// Snapshot the absolute paths marked resolved via
     /// [`GitRepo::mark_resolved`] against `workdir`, in call order. Empty when
     /// none were marked or the repo is unknown.
@@ -585,6 +599,10 @@ struct FakeRepoState {
     /// Absolute paths passed to [`GitRepo::mark_resolved`], in call order, so
     /// tests can assert the git-add happened.
     resolved_paths: Vec<PathBuf>,
+    /// Successful checkouts in call order, each `detached:<sha>` or
+    /// `ref:<name>`. Read via [`FakeGit::checkouts`], which is how a walk test
+    /// asserts which commits the working tree visited and in what order.
+    checkouts: Vec<String>,
 }
 
 impl FakeRepoState {
@@ -925,6 +943,42 @@ impl GitRepo for FakeGitRepo {
             .fail();
         }
         state.head = Some(sha.to_string());
+        Ok(())
+    }
+
+    /// Records the checkout and moves head, without modelling libgit2's refusal
+    /// to overwrite a dirty working tree.
+    ///
+    /// Seeded `changed` entries are ignored. The review walk guards on
+    /// [`GitRepo::has_tracked_changes`] before it ever calls this, and a fake
+    /// that refused too would leave that guard untestable in isolation.
+    fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if !state.commits.contains_key(sha) {
+            return BackendSnafu {
+                reason: format!("unknown sha: {sha}"),
+            }
+            .fail();
+        }
+
+        state.checkouts.push(format!("detached:{sha}"));
+        state.head = Some(sha.to_string());
+        state.head_branch = None;
+        Ok(())
+    }
+
+    fn checkout_ref(&self, name: &str) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        let Some(tip) = state.branches.get(name).cloned() else {
+            return BackendSnafu {
+                reason: format!("unknown branch: {name}"),
+            }
+            .fail();
+        };
+
+        state.checkouts.push(format!("ref:{name}"));
+        state.head = Some(tip);
+        state.head_branch = Some(name.to_string());
         Ok(())
     }
 
@@ -1391,6 +1445,50 @@ mod tests {
             ]
         );
         assert_eq!(repo.head_branch().as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn checkout_detached_records_the_move_and_drops_the_branch() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .branch("main", "c2")
+            .set_head_branch("main");
+        let repo = host.discover(&workdir()).unwrap();
+
+        repo.checkout_detached("c1").unwrap();
+        assert_eq!(host.checkouts(&workdir()), ["detached:c1"]);
+        assert_eq!(repo.resolve_rev("HEAD").as_deref(), Some("c1"));
+        assert_eq!(repo.head_branch(), None, "a detached checkout leaves HEAD");
+    }
+
+    #[test]
+    fn checkout_ref_attaches_head_to_the_branch_tip() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .branch("main", "c2");
+        let repo = host.discover(&workdir()).unwrap();
+
+        repo.checkout_detached("c1").unwrap();
+        repo.checkout_ref("main").unwrap();
+        assert_eq!(host.checkouts(&workdir()), ["detached:c1", "ref:main"]);
+        assert_eq!(repo.resolve_rev("HEAD").as_deref(), Some("c2"));
+        assert_eq!(repo.head_branch().as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_refused_checkout_records_nothing() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).commit("c1", &[]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert!(repo.checkout_ref("nope").is_err());
+        assert!(repo.checkout_detached("nope").is_err());
+        assert!(host.checkouts(&workdir()).is_empty());
+        assert_eq!(repo.resolve_rev("HEAD").as_deref(), Some("c1"));
     }
 
     #[test]
