@@ -319,7 +319,7 @@ fn emit_review_info_badge(stoat: &mut Stoat, label: &str) {
     });
 }
 
-fn emit_review_error_badge(stoat: &mut Stoat, label: &str, detail: Option<String>) {
+pub(super) fn emit_review_error_badge(stoat: &mut Stoat, label: &str, detail: Option<String>) {
     use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
     let ws = stoat.active_workspace_mut();
     ws.badges.remove_by_source(BadgeSource::Review);

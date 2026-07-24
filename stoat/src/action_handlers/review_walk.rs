@@ -1,10 +1,62 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     commit_list::PendingPreview,
-    commit_picker::CommitPickerRole,
+    commit_picker::{CommitPicker, CommitPickerRole},
     review_session::ReviewSession,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+
+/// Commits the picker loads for a ref. Bounds the eager walk on a long
+/// history without paging, which fuzzy filtering could not work across.
+const WALK_LIMIT: usize = 1000;
+
+/// Open the commit picker over `reference`'s first-parent history.
+///
+/// The whole walk is loaded up front rather than paged. The picker filters
+/// across every row, and a virtualized window would only ever search the part
+/// already fetched. [`WALK_LIMIT`] bounds that, so a history longer than the
+/// limit is silently truncated at its oldest end.
+pub(crate) fn git_review(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        return review_error(stoat, "not in a git repository", None);
+    };
+    let Some(workdir) = repo.workdir() else {
+        return review_error(stoat, "git repo has no working tree", None);
+    };
+    let Some(ref_sha) = repo.resolve_rev(reference) else {
+        return review_error(
+            stoat,
+            "unknown revision",
+            Some(format!("no revision named {reference}")),
+        );
+    };
+
+    let commits = repo.log_from(&ref_sha, WALK_LIMIT);
+    let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, sha) in repo.local_branches() {
+        branch_tips.entry(sha).or_default().push(name);
+    }
+
+    let executor = stoat.executor.clone();
+    let picker = CommitPicker::new(
+        stoat.active_workspace_mut(),
+        executor,
+        CommitPickerRole::PickBase,
+        workdir,
+        ref_sha,
+        commits,
+        branch_tips,
+    );
+    stoat.commit_picker = Some(picker);
+    ensure_selected_preview(stoat);
+    UpdateEffect::Redraw
+}
+
+fn review_error(stoat: &mut Stoat, label: &str, detail: Option<String>) -> UpdateEffect {
+    super::review::emit_review_error_badge(stoat, label, detail);
+    UpdateEffect::Redraw
+}
 
 pub(crate) fn commit_picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let Some(picker) = stoat.commit_picker.as_mut() else {
@@ -117,7 +169,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
 /// Poll the pending build, caching a finished session under its sha. A session
 /// for a sha the selection has since moved off is dropped rather than cached,
 /// since the picker only ever renders the selected commit's preview.
-fn poll_pending_preview(picker: &mut crate::commit_picker::CommitPicker) -> bool {
+fn poll_pending_preview(picker: &mut CommitPicker) -> bool {
     use std::{
         future::Future,
         pin::Pin,
@@ -171,4 +223,129 @@ fn spawn_preview_load(
             &new_tree,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{app::Stoat, badge::BadgeSource, test_harness::TestHarness};
+
+    /// A harness whose `/repo` carries three commits, `main` on the tip and
+    /// `feature` one commit back, with the workspace rooted there.
+    fn harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+                (
+                    "b2c3d4e5",
+                    "chore: tweak a",
+                    &[("a.rs", "fn a() {}\nfn a2() {}\n")],
+                ),
+                (
+                    "c3d4e5f6",
+                    "feat: add b.rs",
+                    &[("a.rs", "fn a() {}\nfn a2() {}\n"), ("b.rs", "fn b() {}\n")],
+                ),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "c3d4e5f6")
+            .branch("feature", "b2c3d4e5");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h
+    }
+
+    fn review_badge(h: &TestHarness) -> Option<String> {
+        let ws = h.stoat.active_workspace();
+        ws.badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| ws.badges.get(id))
+            .map(|badge| badge.label.clone())
+    }
+
+    #[test]
+    fn git_review_opens_the_picker_over_the_refs_history() {
+        let mut h = harness();
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker open");
+        assert_eq!(
+            picker
+                .commits
+                .iter()
+                .map(|c| c.sha.as_str())
+                .collect::<Vec<_>>(),
+            ["c3d4e5f6", "b2c3d4e5", "a1b2c3d4"],
+            "the walk runs newest-first from the ref tip"
+        );
+        assert_eq!(
+            picker.selected_commit().map(|c| c.sha.as_str()),
+            Some("b2c3d4e5"),
+            "selection starts on the nearest branch tip that is not the ref"
+        );
+        assert_eq!(review_badge(&h), None);
+    }
+
+    #[test]
+    fn git_review_resolves_a_sha_as_well_as_a_branch() {
+        let mut h = harness();
+        h.type_text(":git-review b2c3d4e5");
+        h.type_keys("enter");
+        h.settle();
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker open");
+        assert_eq!(
+            picker
+                .commits
+                .iter()
+                .map(|c| c.sha.as_str())
+                .collect::<Vec<_>>(),
+            ["b2c3d4e5", "a1b2c3d4"],
+            "the walk starts at the named commit, not the branch tip"
+        );
+    }
+
+    #[test]
+    fn an_unknown_revision_badges_without_opening_anything() {
+        let mut h = harness();
+        h.type_text(":git-review junk");
+        h.type_keys("enter");
+        h.settle();
+
+        assert!(h.stoat.commit_picker.is_none());
+        assert_eq!(review_badge(&h).as_deref(), Some("unknown revision"));
+    }
+
+    #[test]
+    fn outside_a_repository_it_badges_too() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = "/elsewhere".into();
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+
+        assert!(h.stoat.commit_picker.is_none());
+        assert_eq!(review_badge(&h).as_deref(), Some("not in a git repository"));
+    }
+
+    #[test]
+    fn the_picker_takes_typing_as_its_query() {
+        let mut h = harness();
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(h.stoat.focused_mode(), "insert", "the query field is live");
+
+        h.type_text("widget");
+        h.settle();
+        assert_eq!(
+            h.stoat.commit_picker.as_ref().map(|p| p.filtered.len()),
+            Some(0),
+            "typing filters the list rather than editing the buffer behind it"
+        );
+    }
 }

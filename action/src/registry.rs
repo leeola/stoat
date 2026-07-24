@@ -104,7 +104,7 @@ use crate::{
             SetRebaseOpSquash,
         },
         review::{
-            CloseReview, Diff, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
+            CloseReview, Diff, GitReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
             JumpToPrevMoveSource, OpenReviewCommit, OpenReviewCommitRange, QueryMoveRelationships,
             ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk, ReviewRefresh,
             ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
@@ -390,6 +390,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CloseReview::DEF, |_| Ok(Box::new(CloseReview)));
     add(ReviewRemoveSelected::DEF, |_| {
         Ok(Box::new(ReviewRemoveSelected))
+    });
+    add(GitReview::DEF, |params| {
+        let reference = params
+            .first()
+            .context(MissingSnafu { name: "reference" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "reference",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(GitReview {
+            reference: reference.to_owned(),
+        }))
     });
     add(OpenReviewCommit::DEF, |params| {
         let workdir = params
@@ -1714,7 +1727,8 @@ mod tests {
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
         // + 4 CommitPickerNext/Prev/Select/Close.
-        assert_eq!(all().count(), 405);
+        // + 1 GitReview.
+        assert_eq!(all().count(), 406);
     }
 
     #[test]

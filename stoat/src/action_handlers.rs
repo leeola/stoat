@@ -59,9 +59,9 @@ pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::{collections::HashMap, path::Path, sync::Arc};
 use stoat_action::{
-    Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GotoTab, OpenBuffer,
-    OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange, RenameTab,
-    RenameWorkspace, ReviewExternalEdit, Run, SetCwd, SetTheme,
+    Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GitReview, GotoTab,
+    OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
+    OpenReviewCommitRange, RenameTab, RenameWorkspace, ReviewExternalEdit, Run, SetCwd, SetTheme,
 };
 use stoat_text::{Anchor, BufferId, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -527,6 +527,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DiagnosticsPickerPrev => picker::diagnostics_picker_prev(stoat),
         ActionKind::DiagnosticsPickerSelect => picker::diagnostics_picker_select(stoat),
         ActionKind::DiagnosticsPickerClose => picker::diagnostics_picker_close(stoat),
+        ActionKind::GitReview => {
+            let action = action
+                .as_any()
+                .downcast_ref::<GitReview>()
+                .expect("GitReview action downcast");
+            review_walk::git_review(stoat, &action.reference)
+        },
         ActionKind::CommitPickerNext => review_walk::commit_picker_step(stoat, 1),
         ActionKind::CommitPickerPrev => review_walk::commit_picker_step(stoat, -1),
         ActionKind::CommitPickerSelect => review_walk::commit_picker_select(stoat),

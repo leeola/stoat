@@ -5542,6 +5542,10 @@ impl Stoat {
             return Some((finder.input.editor_id, finder.input.buffer_id));
         }
 
+        if let Some(picker) = &self.commit_picker {
+            return Some((picker.input.editor_id, picker.input.buffer_id));
+        }
+
         if let Some(picker) = &self.workspace_picker {
             return Some((picker.input.editor_id, picker.input.buffer_id));
         }

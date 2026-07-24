@@ -15,9 +15,6 @@ use stoat_scheduler::Executor;
 /// used for, so a future commit-listing surface adds a variant here and a
 /// select semantic rather than a second picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// `:git-review` is the only thing that opens a picker, so nothing constructs a
-// role until that command lands.
-#[allow(dead_code)]
 pub(crate) enum CommitPickerRole {
     /// Choose the commit a review walk starts from.
     PickBase,
@@ -51,7 +48,6 @@ pub(crate) struct CommitPicker {
     /// Full sha of the ref the picker was opened over. Excluded from
     /// [`Self::default_selection`], which looks for a branch other than the one
     /// the user is already looking at.
-    #[allow(dead_code)]
     pub(crate) ref_sha: String,
     pub(crate) input: InputView,
     /// Walked history, newest first.
@@ -75,9 +71,6 @@ pub(crate) struct CommitPicker {
 
 impl CommitPicker {
     /// Build a picker over `commits`, starting on [`Self::default_selection`].
-    ///
-    /// Unused until `:git-review` lands, which is the command that opens one.
-    #[allow(dead_code)]
     pub(crate) fn new(
         ws: &mut Workspace,
         executor: Executor,
@@ -210,7 +203,6 @@ impl CommitPicker {
     /// Opening `:git-review main` from `main` most often means reviewing what
     /// another branch added, so the nearest such branch tip is a better landing
     /// spot than the tip the user is already sitting on.
-    #[allow(dead_code)]
     pub(crate) fn default_selection(&self) -> usize {
         self.filtered
             .iter()

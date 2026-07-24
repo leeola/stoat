@@ -333,6 +333,7 @@ pub enum ActionKind {
     ReviewExternalEdit,
     ReviewApplyStaged,
     CloseReview,
+    GitReview,
     OpenReviewCommit,
     OpenReviewCommitRange,
     OpenReviewAgentEdits,

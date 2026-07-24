@@ -275,6 +275,69 @@ define_action!(
 use crate::{Action, ActionDef, ParamDef, ParamKind, ValueSource};
 use std::{any::Any, path::PathBuf};
 
+const GIT_REVIEW_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "reference",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: true,
+    description: "Branch, tag, sha, or revspec whose history to review from.",
+}];
+
+#[derive(Debug)]
+pub struct GitReviewDef;
+
+impl ActionDef for GitReviewDef {
+    fn name(&self) -> &'static str {
+        "GitReview"
+    }
+
+    fn command_name(&self) -> Option<&'static str> {
+        Some("git-review")
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::GitReview
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        GIT_REVIEW_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "review from a commit on a ref"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Resolve the given branch, tag, sha, or revspec and open a picker over \
+         its first-parent history so a commit can be chosen as the review \
+         base. Reports an error without opening anything when the revision \
+         does not resolve or the workspace is not inside a repository."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Normal
+    }
+}
+
+#[derive(Debug)]
+pub struct GitReview {
+    pub reference: String,
+}
+
+impl GitReview {
+    pub const DEF: &GitReviewDef = &GitReviewDef;
+}
+
+impl Action for GitReview {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 const OPEN_REVIEW_COMMIT_PARAMS: &[ParamDef] = &[
     ParamDef {
         name: "workdir",
