@@ -507,11 +507,6 @@ impl DisplayMap {
         self.highlights_dirty = true;
     }
 
-    pub fn invalidate_lsp_highlights(&mut self, buffer_id: BufferId) {
-        Arc::make_mut(&mut self.lsp_token_highlights).remove(&buffer_id);
-        self.highlights_dirty = true;
-    }
-
     pub fn highlight_inlays(
         &mut self,
         key: HighlightKey,

@@ -2574,9 +2574,10 @@ fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
 /// Request semantic tokens for the focused editor when the server advertises a
 /// full-document legend and the `(buffer, version)` key changed.
 ///
-/// A newly-focused buffer and each edit re-request behind a 500ms debounce. A key
-/// change also clears the stale LSP highlights first. Tokens layer over the
-/// tree-sitter baseline, so they never replace it -- only recolor on top.
+/// A newly-focused buffer and each edit re-request behind a 500ms debounce. The
+/// stale anchored tokens keep painting until the fresh response replaces them,
+/// so an edit never flashes the buffer plain. Tokens layer over the tree-sitter
+/// baseline and never replace it, only recoloring on top.
 /// [`pump_lsp_semantic_tokens`] applies the response.
 pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
@@ -2605,8 +2606,7 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
     stoat.last_semantic_tokens_key = Some(key);
 
     // When the buffer is unchanged since tokens were last computed, reinstall
-    // the retained set instead of re-requesting behind the debounce. The
-    // invalidate below then fires only on the true re-request path.
+    // the retained set instead of re-requesting behind the debounce.
     if let Some((cached_version, tokens, interner)) =
         stoat.active_workspace().buffers.lsp_tokens_for(buffer_id)
         && cached_version == version
@@ -2617,10 +2617,6 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
                 .set_lsp_token_highlights(buffer_id, tokens, interner);
         }
         return;
-    }
-
-    if let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) {
-        editor.display_map.invalidate_lsp_highlights(buffer_id);
     }
 
     let executor = stoat.executor.clone();
@@ -9795,6 +9791,59 @@ mod tests {
             "a version-current cache hit spawns no request"
         );
         assert_eq!(lsp_token_count(&mut h), 1, "cached tokens are reinstalled");
+    }
+
+    #[test]
+    fn an_edit_keeps_lsp_tokens_until_the_fresh_set_arrives() {
+        use lsp_types::{SemanticToken, SemanticTokens, SemanticTokensResult};
+
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_tokens(&h);
+        let root = seed(&mut h, &[("a.rs", "let x = y\n")]);
+        let path_a = root.join("a.rs");
+        let token = |delta_start: u32| SemanticToken {
+            delta_line: 0,
+            delta_start,
+            length: 1,
+            token_type: 0,
+            token_modifiers_bitset: 0,
+        };
+
+        open_buffer(&mut h, path_a.clone());
+        h.fake_lsp().set_semantic_tokens_full(
+            path_a.to_str().unwrap(),
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: vec![token(8)],
+            }),
+        );
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        assert_eq!(lsp_token_count(&mut h), 1, "the first token set lands");
+
+        // Editing re-requests behind the debounce. The stale anchored token
+        // keeps painting in the meantime instead of clearing to plain.
+        h.fake_lsp().set_semantic_tokens_full(
+            path_a.to_str().unwrap(),
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: vec![token(0), token(2)],
+            }),
+        );
+        h.type_keys("i");
+        h.type_text("z");
+        h.type_keys("escape");
+        assert!(
+            lsp_token_count(&mut h) > 0,
+            "the stale token rides the edit while the new request is in flight",
+        );
+
+        h.advance_clock(Duration::from_millis(550));
+        assert_eq!(
+            lsp_token_count(&mut h),
+            2,
+            "the fresh set replaces the stale one",
+        );
     }
 
     #[test]
