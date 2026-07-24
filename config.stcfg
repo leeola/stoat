@@ -789,6 +789,7 @@ on key {
         l -> SetMode(space_lsp);
         " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
+        r -> [ReloadAll(), SetMode(normal)];
         g -> SetMode(space_git);
         d -> [Diff(), SetMode(normal)];
         s -> [SaveSelection(), SetMode(normal)];

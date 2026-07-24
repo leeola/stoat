@@ -2166,6 +2166,28 @@ mod tests {
     }
 
     #[test]
+    fn space_r_reloads_all_and_returns_to_normal() {
+        let mut h = Stoat::test();
+        let root = Path::new("/space-r");
+        let path = root.join("a.txt");
+        let id = open_plain(&mut h, root, "a.txt", b"before\n");
+
+        h.fake_fs().insert_file(&path, b"after\n");
+        h.type_keys("space r");
+
+        assert_eq!(
+            buffer_text(&h, id),
+            "after\n",
+            "space r reloads the buffer from disk",
+        );
+        assert_eq!(
+            h.stoat.focused_mode(),
+            "normal",
+            "space r returns to normal mode",
+        );
+    }
+
+    #[test]
     fn set_buffer_auto_reload_follow_twice_toggles_off() {
         let mut h = Stoat::test();
         let id = open_plain(&mut h, &PathBuf::from("/ar-follow"), "a.txt", b"x\n");
