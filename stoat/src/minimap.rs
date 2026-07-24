@@ -315,28 +315,47 @@ impl MinimapContent {
     ///
     /// The syntax content is unaffected by a diff or diagnostic change, so only
     /// the changed lines pay for a re-summarize.
+    ///
+    /// Which rows changed is settled first, from `edge_of` alone, so
+    /// `tokens_for` is called only over the runs that actually need
+    /// re-summarizing. This runs on every decoration bump, and a diff recompute
+    /// or diagnostic batch usually moves no mark at all, so resolving tokens for
+    /// the whole built range up front would be the dominant cost of doing
+    /// nothing.
     fn resync_edges(
         &mut self,
         new_rope: &Rope,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         edge_of: &impl Fn(u32) -> Option<u8>,
     ) {
-        let tokens = tokens_for(0..self.built_upto);
-        let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
-        for row in 0..self.built_upto {
-            let new_edge = edge_of(row);
-            if self.edges[row as usize] == new_edge {
-                continue;
+        let changed: Vec<(u32, Option<u8>)> = (0..self.built_upto)
+            .filter_map(|row| {
+                let new_edge = edge_of(row);
+                (self.edges[row as usize] != new_edge).then_some((row, new_edge))
+            })
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+
+        for run in contiguous_runs(&changed) {
+            let rows = changed[run].iter();
+            let span = rows.clone().next().expect("a run is non-empty").0
+                ..rows.clone().next_back().expect("a run is non-empty").0 + 1;
+            let tokens = tokens_for(span);
+            let line_tokens = |row: u32, _: &str| tokens.get(&row).cloned().unwrap_or_default();
+
+            for &(row, new_edge) in rows {
+                let text = line_text(new_rope, row);
+                let summary = summarize_line(&text, &line_tokens(row, &text), new_edge);
+                self.lines[row as usize] = summary.clone();
+                self.edges[row as usize] = new_edge;
+                self.queue_splice(Splice {
+                    start: row,
+                    removed: 1,
+                    lines: vec![summary],
+                });
             }
-            let text = line_text(new_rope, row);
-            let summary = summarize_line(&text, &line_tokens(row, &text), new_edge);
-            self.lines[row as usize] = summary.clone();
-            self.edges[row as usize] = new_edge;
-            self.queue_splice(Splice {
-                start: row,
-                removed: 1,
-                lines: vec![summary],
-            });
         }
     }
 
@@ -418,6 +437,25 @@ impl MinimapContent {
             _ => self.queued.push(splice),
         }
     }
+}
+
+/// Index ranges of `changed` splitting it into runs of consecutive rows.
+///
+/// `changed` is ascending by row. Marks usually land in clusters, so grouping
+/// them lets one token fetch cover a whole run instead of one fetch per row.
+fn contiguous_runs(changed: &[(u32, Option<u8>)]) -> Vec<Range<usize>> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for i in 1..changed.len() {
+        if changed[i].0 != changed[i - 1].0 + 1 {
+            runs.push(start..i);
+            start = i;
+        }
+    }
+    if !changed.is_empty() {
+        runs.push(start..changed.len());
+    }
+    runs
 }
 
 /// Summarize each row in `rows`, one [`LineToken`] set per row from `line_tokens`
@@ -1266,6 +1304,77 @@ mod tests {
         assert_eq!(splices.len(), 2, "5-6 merge, 9 stands alone");
         assert_eq!((splices[0].start, splices[0].lines.len()), (5, 2));
         assert_eq!((splices[1].start, splices[1].lines.len()), (9, 1));
+    }
+
+    /// A decoration bump runs on every diff recompute and diagnostic batch, and
+    /// usually moves no mark, so it must not resolve tokens for the whole built
+    /// range just to discover there is nothing to do.
+    #[test]
+    fn an_edge_resync_that_changes_nothing_fetches_no_tokens() {
+        let text = rope("alpha\nbravo\ncharlie");
+        let mut content = MinimapContent::new(1);
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        let _ = content.take_queued();
+
+        let fetches = std::cell::Cell::new(0);
+        let counting = |rows: Range<u32>| {
+            fetches.set(fetches.get() + 1);
+            no_tokens(rows)
+        };
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(1, 0),
+            counting,
+            no_edges,
+        );
+
+        assert_eq!(fetches.get(), 0, "no mark moved, so no tokens are resolved");
+        assert!(content.take_queued().is_empty());
+    }
+
+    #[test]
+    fn an_edge_resync_fetches_only_the_changed_rows() {
+        let text = rope("alpha\nbravo\ncharlie\ndelta\necho");
+        let mut content = MinimapContent::new(1);
+        content.sync(
+            &text,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+        );
+        let _ = content.take_queued();
+
+        let spans = std::cell::RefCell::new(Vec::new());
+        let counting = |rows: Range<u32>| {
+            spans.borrow_mut().push(rows.clone());
+            no_tokens(rows)
+        };
+        // Marks land on rows 1, 2, and 4: one adjacent pair and a loner.
+        let edge_of = |row: u32| matches!(row, 1 | 2 | 4).then_some(40);
+        content.sync(&text, 1, &Patch::empty(), versions(1, 0), counting, edge_of);
+
+        assert_eq!(
+            *spans.borrow(),
+            vec![1..3, 4..5],
+            "one fetch per contiguous run of changed rows, never the whole file",
+        );
+        let queued = content.take_queued();
+        assert_eq!(
+            queued.iter().map(|s| s.start).collect::<Vec<_>>(),
+            vec![1, 4],
+            "1 and 2 coalesce into one splice, 4 stands alone",
+        );
     }
 
     #[test]
