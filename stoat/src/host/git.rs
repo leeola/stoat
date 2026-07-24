@@ -197,6 +197,37 @@ pub trait GitRepo: Send + Sync {
     /// scrolls. Empty on orphan branches or when `after` is unknown.
     fn log_commits(&self, after: Option<&str>, limit: usize) -> Vec<CommitInfo>;
 
+    /// Walk first-parent history from `start_sha` and return up to `limit`
+    /// commits, newest first.
+    ///
+    /// Differs from [`Self::log_commits`] on both ends of the walk: the start
+    /// is an explicit commit rather than HEAD, and `start_sha` is itself the
+    /// first row rather than being stepped past. Review mode walks the history
+    /// of a ref the user named, and the named commit is part of what they
+    /// asked to see. Empty when `start_sha` is unknown.
+    fn log_from(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo>;
+
+    /// Resolve a revision the user typed to a full commit sha.
+    ///
+    /// Accepts whatever the backend's revision syntax accepts: a branch or tag
+    /// name, a full or abbreviated sha, or an expression like `HEAD~2`. The
+    /// result is peeled to a commit, so a tag resolves to the commit it points
+    /// at rather than the tag object. `None` when the revision names nothing.
+    fn resolve_rev(&self, rev: &str) -> Option<String>;
+
+    /// Every local branch as `(short name, tip sha)`, e.g. `("main", sha)`.
+    ///
+    /// Local branches only. Remote-tracking branches are excluded because the
+    /// commit picker decorates rows with names the user can check out.
+    fn local_branches(&self) -> Vec<(String, String)>;
+
+    /// Short name of the branch HEAD is attached to, e.g. `"main"`.
+    ///
+    /// `None` when HEAD is detached or points at an unborn branch. A review
+    /// walk captures this before detaching so it can reattach afterwards, and
+    /// the `None` case is what makes it record a bare sha to return to instead.
+    fn head_branch(&self) -> Option<String>;
+
     /// Per-file summary of what changed between `sha` and its first
     /// parent (empty tree for a root commit). Lighter than building a
     /// full review: the left pane of the commit list renders these

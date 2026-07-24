@@ -7,7 +7,8 @@ use crate::host::git::{
     RewriteResult,
 };
 use git2::{
-    ApplyLocation, Diff, DiffOptions, Repository, RepositoryState, Sort, Status, StatusOptions,
+    ApplyLocation, BranchType, Diff, DiffOptions, Repository, RepositoryState, Sort, Status,
+    StatusOptions,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -290,54 +291,52 @@ impl GitRepo for LocalGitRepo {
             },
         };
 
-        let mut walk = match repo.revwalk() {
-            Ok(w) => w,
-            Err(_) => return Vec::new(),
-        };
-        if walk.set_sorting(Sort::TOPOLOGICAL).is_err() {
-            return Vec::new();
-        }
-        if walk.simplify_first_parent().is_err() {
-            return Vec::new();
-        }
-        if walk.push(start_oid).is_err() {
-            return Vec::new();
-        }
+        walk_first_parent(&repo, start_oid, limit)
+    }
 
-        // Cap the reserved capacity so callers passing `usize::MAX` as
-        // "unbounded" don't trigger an allocation overflow; the Vec
-        // grows on demand if the walk actually yields more rows.
-        let mut out: Vec<CommitInfo> = Vec::with_capacity(limit.min(4096));
-        for oid_res in walk.take(limit) {
-            let Ok(oid) = oid_res else { continue };
-            let Ok(commit) = repo.find_commit(oid) else {
-                continue;
-            };
-            let sha = oid.to_string();
-            let short_sha = sha.chars().take(7).collect();
-            let summary = commit
-                .summary()
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let author = commit.author();
-            let author_name = author.name().unwrap_or_default().to_string();
-            let author_email = author.email().unwrap_or_default().to_string();
-            let time = commit.time().seconds();
-            let parent_count = commit.parent_count() as u32;
-            out.push(CommitInfo {
-                sha,
-                short_sha,
-                summary,
-                author_name,
-                author_email,
-                time,
-                parent_count,
-            });
+    fn log_from(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo> {
+        if limit == 0 {
+            return Vec::new();
         }
-        out
+        let repo = self.repo.lock().expect("git repo lock");
+        let Ok(oid) = git2::Oid::from_str(start_sha) else {
+            return Vec::new();
+        };
+        if repo.find_commit(oid).is_err() {
+            return Vec::new();
+        }
+        walk_first_parent(&repo, oid, limit)
+    }
+
+    fn resolve_rev(&self, rev: &str) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let object = repo.revparse_single(rev).ok()?;
+        let commit = object.peel_to_commit().ok()?;
+        Some(commit.id().to_string())
+    }
+
+    fn local_branches(&self) -> Vec<(String, String)> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Ok(branches) = repo.branches(Some(BranchType::Local)) else {
+            return Vec::new();
+        };
+        branches
+            .filter_map(|entry| {
+                let (branch, _) = entry.ok()?;
+                let name = branch.name().ok().flatten()?.to_string();
+                let tip = branch.get().peel_to_commit().ok()?.id().to_string();
+                Some((name, tip))
+            })
+            .collect()
+    }
+
+    fn head_branch(&self) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let head = repo.head().ok()?;
+        if !head.is_branch() {
+            return None;
+        }
+        head.shorthand().ok().map(|name| name.to_string())
     }
 
     fn amend_head(
@@ -531,6 +530,63 @@ impl GitRepo for LocalGitRepo {
         }
         out
     }
+}
+
+/// Walk first-parent history from `start`, newest first, yielding at most
+/// `limit` commits.
+///
+/// Shared by [`GitRepo::log_commits`] and [`GitRepo::log_from`], which differ
+/// only in how they pick the starting commit. A commit the walk cannot read is
+/// skipped rather than truncating the rest of the history.
+fn walk_first_parent(repo: &Repository, start: git2::Oid, limit: usize) -> Vec<CommitInfo> {
+    let mut walk = match repo.revwalk() {
+        Ok(w) => w,
+        Err(_) => return Vec::new(),
+    };
+    if walk.set_sorting(Sort::TOPOLOGICAL).is_err() {
+        return Vec::new();
+    }
+    if walk.simplify_first_parent().is_err() {
+        return Vec::new();
+    }
+    if walk.push(start).is_err() {
+        return Vec::new();
+    }
+
+    // Cap the reserved capacity so callers passing `usize::MAX` as
+    // "unbounded" don't trigger an allocation overflow. The Vec grows on
+    // demand if the walk actually yields more rows.
+    let mut out: Vec<CommitInfo> = Vec::with_capacity(limit.min(4096));
+    for oid_res in walk.take(limit) {
+        let Ok(oid) = oid_res else { continue };
+        let Ok(commit) = repo.find_commit(oid) else {
+            continue;
+        };
+        let sha = oid.to_string();
+        let short_sha = sha.chars().take(7).collect();
+        let summary = commit
+            .summary()
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let author = commit.author();
+        let author_name = author.name().unwrap_or_default().to_string();
+        let author_email = author.email().unwrap_or_default().to_string();
+        let time = commit.time().seconds();
+        let parent_count = commit.parent_count() as u32;
+        out.push(CommitInfo {
+            sha,
+            short_sha,
+            summary,
+            author_name,
+            author_email,
+            time,
+            parent_count,
+        });
+    }
+    out
 }
 
 fn err_msg(e: git2::Error) -> GitApplyError {
@@ -747,8 +803,11 @@ fn read_index_conflicts(repo: &Repository) -> Result<Vec<ConflictedFile>, GitApp
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_mismatch_detail, patch_target_path, QUOTED_LINE_MAX};
-    use std::path::Path;
+    use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
+    use crate::host::git::{GitHost, GitRepo};
+    use git2::{Oid, Repository, RepositoryInitOptions, Signature};
+    use std::{path::Path, sync::Arc};
+    use tempfile::TempDir;
 
     const NAMED_SIDES: &str = "--- a/a.rs\n+++ b/a.rs\n";
 
@@ -849,6 +908,103 @@ mod tests {
                 "index line 1 is \"short\" but patch expects \"{}...\"",
                 "x".repeat(QUOTED_LINE_MAX)
             )
+        );
+    }
+
+    /// A repo with three commits on `main`, returned oldest-sha first.
+    ///
+    /// The initial branch is pinned rather than left to libgit2, whose default
+    /// comes from the ambient git config and would otherwise make the branch
+    /// assertions depend on whoever runs the tests.
+    fn seeded_repo() -> (TempDir, Repository, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = {
+            let mut opts = RepositoryInitOptions::new();
+            opts.initial_head("main");
+            Repository::init_opts(dir.path(), &opts).unwrap()
+        };
+
+        let sig = Signature::now("test", "t@t").unwrap();
+        let mut shas: Vec<String> = Vec::new();
+        for content in ["one", "two", "three"] {
+            std::fs::write(dir.path().join("a.txt"), content).unwrap();
+            let tree = {
+                let mut index = repo.index().unwrap();
+                index.add_path(Path::new("a.txt")).unwrap();
+                index.write().unwrap();
+                repo.find_tree(index.write_tree().unwrap()).unwrap()
+            };
+
+            let parent = shas
+                .last()
+                .map(|sha| repo.find_commit(Oid::from_str(sha).unwrap()).unwrap());
+            let parents: Vec<_> = parent.iter().collect();
+            let oid = repo
+                .commit(Some("HEAD"), &sig, &sig, content, &tree, &parents)
+                .unwrap();
+            shas.push(oid.to_string());
+        }
+
+        (dir, repo, shas)
+    }
+
+    fn discover(dir: &TempDir) -> Arc<dyn GitRepo> {
+        LocalGit::new().discover(dir.path()).unwrap()
+    }
+
+    #[test]
+    fn resolve_rev_reads_branches_shas_and_expressions() {
+        let (dir, _repo, shas) = seeded_repo();
+        let git = discover(&dir);
+
+        assert_eq!(git.resolve_rev("main").as_deref(), Some(shas[2].as_str()));
+        assert_eq!(
+            git.resolve_rev(&shas[0][..7]).as_deref(),
+            Some(shas[0].as_str())
+        );
+        assert_eq!(git.resolve_rev("HEAD~1").as_deref(), Some(shas[1].as_str()));
+        assert_eq!(git.resolve_rev("nope"), None);
+    }
+
+    #[test]
+    fn log_from_includes_the_start_and_stops_at_the_root() {
+        let (dir, _repo, shas) = seeded_repo();
+        let git = discover(&dir);
+
+        let walked: Vec<String> = git
+            .log_from(&shas[1], 10)
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(walked, [shas[1].clone(), shas[0].clone()]);
+        assert!(git.log_from(&"0".repeat(40), 10).is_empty());
+    }
+
+    #[test]
+    fn head_branch_follows_attachment() {
+        let (dir, repo, shas) = seeded_repo();
+        let git = discover(&dir);
+        assert_eq!(git.head_branch().as_deref(), Some("main"));
+
+        repo.set_head_detached(Oid::from_str(&shas[0]).unwrap())
+            .unwrap();
+        assert_eq!(git.head_branch(), None, "a detached HEAD names no branch");
+    }
+
+    #[test]
+    fn local_branches_pairs_every_branch_with_its_tip() {
+        let (dir, repo, shas) = seeded_repo();
+        let root = repo.find_commit(Oid::from_str(&shas[0]).unwrap()).unwrap();
+        repo.branch("feature", &root, false).unwrap();
+
+        let mut branches = discover(&dir).local_branches();
+        branches.sort();
+        assert_eq!(
+            branches,
+            [
+                ("feature".to_string(), shas[0].clone()),
+                ("main".to_string(), shas[2].clone()),
+            ]
         );
     }
 }

@@ -454,6 +454,25 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Point local branch `name` at `sha`, as [`GitRepo::local_branches`] and
+    /// [`GitRepo::resolve_rev`] report it. The commit need not exist yet.
+    pub fn branch(&mut self, name: &str, sha: &str) -> &mut Self {
+        let (name, sha) = (name.to_string(), sha.to_string());
+        self.mutate_repo(|state| {
+            state.branches.insert(name, sha);
+        });
+        self
+    }
+
+    /// Attach HEAD to branch `name`, as [`GitRepo::head_branch`] reports it.
+    /// Independent of [`Self::set_head`], so a test wanting both an attached
+    /// branch and a matching head sha sets both.
+    pub fn set_head_branch(&mut self, name: &str) -> &mut Self {
+        let name = name.to_string();
+        self.mutate_repo(|state| state.head_branch = Some(name));
+        self
+    }
+
     /// Program the repo to return `Err(GitApplyError::Backend(message))`
     /// for every subsequent call to [`GitRepo::apply_to_index`] until
     /// [`Self::clear_apply_failure`] is called. The failing calls still
@@ -540,6 +559,16 @@ struct FakeRepoState {
     /// The tip of the simulated branch. Defaults to the last inserted
     /// commit, overridable via [`FakeRepoBuilder::set_head`].
     head: Option<String>,
+    /// Local branch short name to tip sha, seeded via
+    /// [`FakeRepoBuilder::branch`]. Ordered so [`GitRepo::local_branches`]
+    /// reports the same sequence every run, which keeps tests asserting on the
+    /// whole list rather than sorting it first.
+    branches: BTreeMap<String, String>,
+    /// The branch [`GitRepo::head_branch`] reports, seeded via
+    /// [`FakeRepoBuilder::set_head_branch`]. `None` models a detached HEAD,
+    /// which is the default because a seeded repo has no branch until a test
+    /// asks for one.
+    head_branch: Option<String>,
     /// When set, rewrite/rebase calls that touch this sha return a
     /// conflict error without mutating state. Used by error-path tests.
     conflict_at: Option<String>,
@@ -556,6 +585,37 @@ struct FakeRepoState {
     /// Absolute paths passed to [`GitRepo::mark_resolved`], in call order, so
     /// tests can assert the git-add happened.
     resolved_paths: Vec<PathBuf>,
+}
+
+impl FakeRepoState {
+    /// Follow parent links from `start`, newest first, yielding at most `limit`
+    /// commits. Stops early at a root commit or a sha with no seeded commit,
+    /// which is how a test seeding a partial chain gets a bounded walk.
+    fn walk_first_parent(&self, start: String, limit: usize) -> Vec<CommitInfo> {
+        let mut cursor = start;
+        let mut out: Vec<CommitInfo> = Vec::with_capacity(limit.min(4096));
+
+        while out.len() < limit {
+            let Some(commit) = self.commits.get(&cursor) else {
+                break;
+            };
+            out.push(CommitInfo {
+                sha: cursor.clone(),
+                short_sha: cursor.chars().take(7).collect(),
+                summary: commit.message.lines().next().unwrap_or("").to_string(),
+                author_name: commit.author_name.clone(),
+                author_email: commit.author_email.clone(),
+                time: commit.time,
+                parent_count: commit.parent.as_ref().map(|_| 1).unwrap_or(0),
+            });
+            match &commit.parent {
+                Some(p) => cursor = p.clone(),
+                None => break,
+            }
+        }
+
+        out
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -701,32 +761,54 @@ impl GitRepo for FakeGitRepo {
             Some(sha) => state.commits.get(sha).and_then(|c| c.parent.clone()),
             None => state.head.clone(),
         };
-        let Some(mut cursor) = start else {
+        let Some(cursor) = start else {
             return Vec::new();
         };
+        state.walk_first_parent(cursor, limit)
+    }
 
-        let mut out: Vec<CommitInfo> = Vec::with_capacity(limit.min(4096));
-        while out.len() < limit {
-            let Some(commit) = state.commits.get(&cursor) else {
-                break;
-            };
-            let parent_count = commit.parent.as_ref().map(|_| 1).unwrap_or(0);
-            let short_sha = cursor.chars().take(7).collect();
-            out.push(CommitInfo {
-                sha: cursor.clone(),
-                short_sha,
-                summary: commit.message.lines().next().unwrap_or("").to_string(),
-                author_name: commit.author_name.clone(),
-                author_email: commit.author_email.clone(),
-                time: commit.time,
-                parent_count,
-            });
-            match &commit.parent {
-                Some(p) => cursor = p.clone(),
-                None => break,
-            }
+    fn log_from(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo> {
+        if limit == 0 {
+            return Vec::new();
         }
-        out
+        let state = self.state.lock().unwrap();
+        state.walk_first_parent(start_sha.to_string(), limit)
+    }
+
+    fn resolve_rev(&self, rev: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        if state.commits.contains_key(rev) {
+            return Some(rev.to_string());
+        }
+
+        // An ambiguous prefix resolves to nothing rather than picking a side,
+        // matching git's own refusal to guess between candidates.
+        let mut prefixed = state.commits.keys().filter(|sha| sha.starts_with(rev));
+        if let (Some(sha), None) = (prefixed.next(), prefixed.next()) {
+            return Some(sha.clone());
+        }
+
+        if let Some(tip) = state.branches.get(rev) {
+            return Some(tip.clone());
+        }
+        if rev == "HEAD" {
+            return state.head.clone();
+        }
+        None
+    }
+
+    fn local_branches(&self) -> Vec<(String, String)> {
+        let state = self.state.lock().unwrap();
+        state
+            .branches
+            .iter()
+            .map(|(name, sha)| (name.clone(), sha.clone()))
+            .collect()
+    }
+
+    fn head_branch(&self) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state.head_branch.clone()
     }
 
     fn amend_head(
@@ -1245,6 +1327,80 @@ mod tests {
         assert_eq!(repo.parent_sha("c2").as_deref(), Some("c1"));
         assert!(repo.parent_sha("c1").is_none());
         assert!(repo.parent_sha("missing").is_none());
+    }
+
+    #[test]
+    fn resolve_rev_reads_shas_branches_and_head() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("aaa111", &[])
+            .commit_with_parent("bbb222", "aaa111", &[])
+            .branch("feature", "bbb222")
+            .set_head("bbb222");
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(repo.resolve_rev("aaa111").as_deref(), Some("aaa111"));
+        assert_eq!(repo.resolve_rev("bbb").as_deref(), Some("bbb222"));
+        assert_eq!(repo.resolve_rev("feature").as_deref(), Some("bbb222"));
+        assert_eq!(repo.resolve_rev("HEAD").as_deref(), Some("bbb222"));
+        assert_eq!(repo.resolve_rev("nope"), None);
+    }
+
+    #[test]
+    fn resolve_rev_refuses_an_ambiguous_prefix() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("aaa111", &[])
+            .commit_with_parent("aaa222", "aaa111", &[]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(repo.resolve_rev("aaa"), None);
+        assert_eq!(repo.resolve_rev("aaa1").as_deref(), Some("aaa111"));
+    }
+
+    #[test]
+    fn log_from_starts_at_the_given_commit() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .commit_with_parent("c3", "c2", &[]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        let walked: Vec<String> = repo.log_from("c2", 10).into_iter().map(|c| c.sha).collect();
+        assert_eq!(walked, ["c2", "c1"], "start included, root ends the walk");
+        assert!(repo.log_from("missing", 10).is_empty());
+        assert!(repo.log_from("c3", 0).is_empty());
+    }
+
+    #[test]
+    fn branches_and_head_branch_report_seeded_state() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .branch("main", "c1")
+            .branch("feature", "c1")
+            .set_head_branch("feature");
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            repo.local_branches(),
+            [
+                ("feature".to_string(), "c1".to_string()),
+                ("main".to_string(), "c1".to_string()),
+            ]
+        );
+        assert_eq!(repo.head_branch().as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn head_branch_is_none_without_seeding() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).commit("c1", &[]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(repo.head_branch(), None);
+        assert!(repo.local_branches().is_empty());
     }
 
     #[test]
