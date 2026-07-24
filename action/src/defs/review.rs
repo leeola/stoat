@@ -275,6 +275,45 @@ define_action!(
 use crate::{Action, ActionDef, ParamDef, ParamKind, ValueSource};
 use std::{any::Any, path::PathBuf};
 
+define_action!(
+    ReviewNextCommitDef,
+    ReviewNextCommit,
+    "ReviewNextCommit",
+    ActionKind::ReviewNextCommit,
+    "review the next commit",
+    "Step a review walk one commit toward the ref tip, checking that commit \
+     out and showing its diff. Does nothing at the tip. Refuses while the \
+     working tree has uncommitted changes to tracked files.",
+    ActionPriority::Rare,
+    command_name = "review-next-commit"
+);
+
+define_action!(
+    ReviewPrevCommitDef,
+    ReviewPrevCommit,
+    "ReviewPrevCommit",
+    ActionKind::ReviewPrevCommit,
+    "review the previous commit",
+    "Step a review walk one commit back toward its base, checking that commit \
+     out and showing its diff. Does nothing at the base. Refuses while the \
+     working tree has uncommitted changes to tracked files.",
+    ActionPriority::Rare,
+    command_name = "review-prev-commit"
+);
+
+define_action!(
+    ReviewDoneDef,
+    ReviewDone,
+    "ReviewDone",
+    ActionKind::ReviewDone,
+    "end the review walk",
+    "End a review walk, checking out the branch or commit the working tree \
+     was on when the walk started and closing any open diff. Keeps the walk \
+     so it can be retried when the checkout back fails.",
+    ActionPriority::Rare,
+    command_name = "review-done"
+);
+
 const GIT_REVIEW_PARAMS: &[ParamDef] = &[ParamDef {
     name: "reference",
     kind: ParamKind::String,

@@ -341,6 +341,20 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
     }) else {
         return UpdateEffect::None;
     };
+    open_commit_review(stoat, workdir, sha, ReviewOrigin::FromCommits)
+}
+
+/// Open a review session diffing `sha` against its first parent, tagged with
+/// `origin` so `CloseReview` knows where to return the user.
+///
+/// The scan runs off the event loop and installs the session when it lands, so
+/// this returns as soon as the work is queued.
+pub(super) fn open_commit_review(
+    stoat: &mut Stoat,
+    workdir: std::path::PathBuf,
+    sha: String,
+    origin: crate::review_session::ReviewOrigin,
+) -> UpdateEffect {
     let git_host = stoat.git_host.clone();
     let langs = stoat.language_registry.clone();
 
@@ -349,7 +363,7 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
             return;
         }
         if let Some(mut session) = scan_commit_pure(&*git_host, &langs, &workdir, &sha) {
-            session.origin = ReviewOrigin::FromCommits;
+            session.origin = origin;
             if cancel.load(Ordering::Relaxed) {
                 return;
             }

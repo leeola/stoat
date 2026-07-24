@@ -22,6 +22,7 @@ pub mod display_map;
 pub mod dump;
 mod editor_state;
 pub mod file_finder;
+mod review_walk;
 // Materializes real sample repositories on disk for the CLI by design.
 pub(crate) mod code_search;
 #[cfg(feature = "fixture")]

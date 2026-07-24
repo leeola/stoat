@@ -2,7 +2,8 @@ use crate::{
     app::{Stoat, UpdateEffect},
     commit_list::PendingPreview,
     commit_picker::{CommitPicker, CommitPickerRole},
-    review_session::ReviewSession,
+    review_session::{ReviewOrigin, ReviewSession},
+    review_walk::{ReturnRef, ReviewWalk},
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -67,16 +68,143 @@ pub(crate) fn commit_picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect 
     UpdateEffect::Redraw
 }
 
-/// Take the selected commit as the review base.
+/// Take the selected commit as the review base and start walking from it.
+///
+/// The walk spans the selected commit through the ref tip, including commits
+/// the query filtered out of view. The user picked a starting point in
+/// history, not a subset of rows.
 pub(crate) fn commit_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.commit_picker.as_ref() else {
         return UpdateEffect::None;
     };
     match picker.role {
-        // FIXME: installing the walk lands with the ReviewWalk item. Until
-        // then, selecting only dismisses the picker.
-        CommitPickerRole::PickBase => commit_picker_close(stoat),
+        CommitPickerRole::PickBase => install_walk(stoat),
     }
+}
+
+fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(picker) = stoat.commit_picker.as_ref() else {
+        return UpdateEffect::None;
+    };
+    let Some(base_sha) = picker.selected_commit().map(|c| c.sha.clone()) else {
+        return UpdateEffect::None;
+    };
+    let workdir = picker.workdir.clone();
+    let Some(base_idx) = picker.commits.iter().position(|c| c.sha == base_sha) else {
+        return UpdateEffect::None;
+    };
+    let mut commits = picker.commits[..=base_idx].to_vec();
+    commits.reverse();
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        return review_error(stoat, "not in a git repository", None);
+    };
+    if repo.has_tracked_changes() {
+        return dirty_tree_error(stoat);
+    }
+    let return_ref = match repo.head_branch() {
+        Some(branch) => ReturnRef::Branch(branch),
+        None => match repo.resolve_rev("HEAD") {
+            Some(sha) => ReturnRef::Detached(sha),
+            None => return review_error(stoat, "cannot resolve HEAD", None),
+        },
+    };
+
+    commit_picker_close(stoat);
+    stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
+        workdir,
+        commits,
+        cursor: 0,
+        return_ref,
+    });
+    walk_navigate(stoat)
+}
+
+/// Check the walk's current commit out and open its diff.
+///
+/// The session opens as [`ReviewOrigin::Standalone`] so closing the diff drops
+/// to normal mode with the walk still running, which is what lets the user
+/// look around a commit's files and then step on.
+fn walk_navigate(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((workdir, sha)) = stoat
+        .active_workspace()
+        .review_walk
+        .as_ref()
+        .map(|walk| (walk.workdir.clone(), walk.current().sha.clone()))
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        return review_error(stoat, "not in a git repository", None);
+    };
+
+    // Re-entering a commit the tree already sits on has nothing to check out,
+    // so the dirty guard would only reject a tree the walk itself is fine with.
+    if repo.resolve_rev("HEAD").as_deref() != Some(sha.as_str()) {
+        if repo.has_tracked_changes() {
+            return dirty_tree_error(stoat);
+        }
+        if let Err(err) = repo.checkout_detached(&sha) {
+            return review_error(stoat, "checkout failed", Some(err.to_string()));
+        }
+    }
+
+    super::review::open_commit_review(stoat, workdir, sha, ReviewOrigin::Standalone)
+}
+
+pub(crate) fn review_next_commit(stoat: &mut Stoat) -> UpdateEffect {
+    walk_step(stoat, 1)
+}
+
+pub(crate) fn review_prev_commit(stoat: &mut Stoat) -> UpdateEffect {
+    walk_step(stoat, -1)
+}
+
+fn walk_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    let Some(walk) = stoat.active_workspace_mut().review_walk.as_mut() else {
+        return UpdateEffect::None;
+    };
+    if !walk.step(delta) {
+        return UpdateEffect::Redraw;
+    }
+    walk_navigate(stoat)
+}
+
+/// End the walk, putting the working tree back where it started.
+///
+/// A failed checkout back keeps the walk, so the user can fix whatever blocked
+/// it and retry rather than being stranded detached with no record of where
+/// they came from.
+pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(walk) = stoat.active_workspace_mut().review_walk.take() else {
+        return UpdateEffect::None;
+    };
+    let Some(repo) = stoat.git_host.discover(&walk.workdir) else {
+        stoat.active_workspace_mut().review_walk = Some(walk);
+        return review_error(stoat, "not in a git repository", None);
+    };
+
+    let restored = match &walk.return_ref {
+        ReturnRef::Branch(name) => repo.checkout_ref(name),
+        ReturnRef::Detached(sha) => repo.checkout_detached(sha),
+    };
+    if let Err(err) = restored {
+        stoat.active_workspace_mut().review_walk = Some(walk);
+        return review_error(stoat, "could not return", Some(err.to_string()));
+    }
+
+    if stoat.active_workspace().review.is_some() {
+        super::review::close_review(stoat);
+    }
+    UpdateEffect::Redraw
+}
+
+fn dirty_tree_error(stoat: &mut Stoat) -> UpdateEffect {
+    review_error(
+        stoat,
+        "uncommitted changes",
+        Some("commit or stash tracked changes before reviewing".to_string()),
+    )
 }
 
 pub(crate) fn commit_picker_close(stoat: &mut Stoat) -> UpdateEffect {
@@ -252,7 +380,8 @@ mod tests {
         h.fake_git()
             .add_repo("/repo")
             .branch("main", "c3d4e5f6")
-            .branch("feature", "b2c3d4e5");
+            .branch("feature", "b2c3d4e5")
+            .set_head_branch("main");
         h.stoat.active_workspace_mut().git_root = "/repo".into();
         h
     }
@@ -347,5 +476,204 @@ mod tests {
             Some(0),
             "typing filters the list rather than editing the buffer behind it"
         );
+    }
+
+    fn checkouts(h: &TestHarness) -> Vec<String> {
+        h.fake_git().checkouts(std::path::Path::new("/repo"))
+    }
+
+    fn walk_shas(h: &TestHarness) -> Vec<String> {
+        h.stoat
+            .active_workspace()
+            .review_walk
+            .as_ref()
+            .map(|w| w.commits.iter().map(|c| c.sha.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn walk_cursor(h: &TestHarness) -> Option<usize> {
+        h.stoat
+            .active_workspace()
+            .review_walk
+            .as_ref()
+            .map(|w| w.cursor)
+    }
+
+    /// Open the picker over `main` and select the oldest commit as the base.
+    fn start_walk(h: &mut TestHarness) {
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+        h.type_keys("down");
+        h.settle();
+        assert_eq!(
+            h.stoat
+                .commit_picker
+                .as_ref()
+                .and_then(|p| p.selected_commit())
+                .map(|c| c.sha.as_str()),
+            Some("a1b2c3d4"),
+        );
+        h.type_keys("enter");
+        h.settle();
+    }
+
+    #[test]
+    fn selecting_a_base_installs_the_walk_oldest_first() {
+        let mut h = harness();
+        start_walk(&mut h);
+
+        assert!(h.stoat.commit_picker.is_none(), "the picker closes");
+        assert_eq!(walk_shas(&h), ["a1b2c3d4", "b2c3d4e5", "c3d4e5f6"]);
+        assert_eq!(walk_cursor(&h), Some(0));
+        assert_eq!(checkouts(&h), ["detached:a1b2c3d4"]);
+    }
+
+    #[test]
+    fn the_walk_spans_history_the_query_hid() {
+        let mut h = harness();
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+        h.type_text("a1b2");
+        h.settle();
+        assert_eq!(
+            h.stoat.commit_picker.as_ref().map(|p| p.filtered.len()),
+            Some(1),
+            "the sha query hides the two newer commits"
+        );
+
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            walk_shas(&h),
+            ["a1b2c3d4", "b2c3d4e5", "c3d4e5f6"],
+            "the filtered-out commits are still walked through"
+        );
+    }
+
+    #[test]
+    fn stepping_checks_each_commit_out_and_clamps_at_the_tip() {
+        let mut h = harness();
+        start_walk(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(walk_cursor(&h), Some(2));
+        assert_eq!(
+            checkouts(&h),
+            [
+                "detached:a1b2c3d4",
+                "detached:b2c3d4e5",
+                "detached:c3d4e5f6"
+            ]
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        assert_eq!(walk_cursor(&h), Some(2), "a step past the tip is a no-op");
+        assert_eq!(checkouts(&h).len(), 3, "and checks nothing else out");
+    }
+
+    #[test]
+    fn stepping_back_walks_toward_the_base() {
+        let mut h = harness();
+        start_walk(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewPrevCommit);
+        h.settle();
+        assert_eq!(walk_cursor(&h), Some(0));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewPrevCommit);
+        h.settle();
+        assert_eq!(walk_cursor(&h), Some(0), "a step past the base is a no-op");
+    }
+
+    #[test]
+    fn a_dirty_tree_refuses_to_start_the_walk() {
+        let mut h = harness();
+        h.fake_git()
+            .add_repo("/repo")
+            .modified("a.rs", "fn a() {}\n", "fn a() { edited }\n");
+
+        start_walk(&mut h);
+
+        assert!(h.stoat.active_workspace().review_walk.is_none());
+        assert_eq!(review_badge(&h).as_deref(), Some("uncommitted changes"));
+        assert!(checkouts(&h).is_empty(), "nothing was checked out");
+        assert!(
+            h.stoat.commit_picker.is_some(),
+            "the picker stays open so the base is not lost"
+        );
+    }
+
+    #[test]
+    fn review_done_returns_to_the_starting_branch() {
+        let mut h = harness();
+        start_walk(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        assert!(h.stoat.active_workspace().review_walk.is_none());
+        assert_eq!(
+            checkouts(&h).last().map(String::as_str),
+            Some("ref:main"),
+            "the branch HEAD was attached to is restored"
+        );
+    }
+
+    #[test]
+    fn review_done_from_a_detached_head_returns_to_the_sha() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        h.fake_git().add_repo("/repo").branch("main", "b2c3d4e5");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+        h.type_keys("down");
+        h.type_keys("enter");
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+        assert_eq!(
+            checkouts(&h).last().map(String::as_str),
+            Some("detached:b2c3d4e5"),
+            "an already-detached HEAD is restored by sha, not attached to a branch"
+        );
+    }
+
+    /// The fake fails a return checkout on an unknown branch rather than on a
+    /// dirty tree, which it does not model. Either way this is the path where
+    /// the return fails and the walk has to survive it.
+    #[test]
+    fn a_failed_return_keeps_the_walk() {
+        let mut h = harness();
+        h.fake_git().add_repo("/repo").set_head_branch("gone");
+        start_walk(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        assert!(
+            h.stoat.active_workspace().review_walk.is_some(),
+            "the walk survives so :review-done can be retried"
+        );
+        assert_eq!(review_badge(&h).as_deref(), Some("could not return"));
     }
 }

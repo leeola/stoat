@@ -211,6 +211,10 @@ pub struct Workspace {
     /// populated while the user is in `"commits"` mode and dropped on
     /// `CloseCommits`.
     pub(crate) commits: Option<CommitListState>,
+    /// Active commit-by-commit review walk (if any). Outlives the review
+    /// session it opens, so closing a diff leaves the walk in place and only
+    /// `ReviewDone` ends it.
+    pub(crate) review_walk: Option<crate::review_walk::ReviewWalk>,
     /// Active rebase plan (if any). Populated when the user enters
     /// `"rebase"` mode from the commit list; dropped on abort or after
     /// successful execution.
@@ -326,6 +330,7 @@ impl Workspace {
             review: None,
             conflict: None,
             commits: None,
+            review_walk: None,
             rebase: None,
             rebase_active: None,
             parse_jobs: HashMap::new(),

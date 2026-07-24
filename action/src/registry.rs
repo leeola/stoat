@@ -106,10 +106,10 @@ use crate::{
         review::{
             CloseReview, Diff, GitReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
             JumpToPrevMoveSource, OpenReviewCommit, OpenReviewCommitRange, QueryMoveRelationships,
-            ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk, ReviewRefresh,
-            ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
-            ReviewUnstageChunk, StageHunk, StageLine, ToggleDiff, ToggleStageHunk, ToggleStageLine,
-            UnstageHunk, UnstageLine,
+            ReviewApplyStaged, ReviewDone, ReviewNextChunk, ReviewNextCommit, ReviewPrevChunk,
+            ReviewPrevCommit, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk,
+            ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk, StageHunk, StageLine,
+            ToggleDiff, ToggleStageHunk, ToggleStageLine, UnstageHunk, UnstageLine,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -391,6 +391,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ReviewRemoveSelected::DEF, |_| {
         Ok(Box::new(ReviewRemoveSelected))
     });
+    add(ReviewNextCommit::DEF, |_| Ok(Box::new(ReviewNextCommit)));
+    add(ReviewPrevCommit::DEF, |_| Ok(Box::new(ReviewPrevCommit)));
+    add(ReviewDone::DEF, |_| Ok(Box::new(ReviewDone)));
     add(GitReview::DEF, |params| {
         let reference = params
             .first()
@@ -1196,6 +1199,9 @@ mod tests {
         "ToggleInlayHints",
         "ReviewNextChunk",
         "ReviewPrevChunk",
+        "ReviewNextCommit",
+        "ReviewPrevCommit",
+        "ReviewDone",
         "ReviewStageChunk",
         "ReviewUnstageChunk",
         "ReviewToggleStage",
@@ -1728,7 +1734,8 @@ mod tests {
         // + 1 OpenWorkspaceFileFinder.
         // + 4 CommitPickerNext/Prev/Select/Close.
         // + 1 GitReview.
-        assert_eq!(all().count(), 406);
+        // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
+        assert_eq!(all().count(), 409);
     }
 
     #[test]
