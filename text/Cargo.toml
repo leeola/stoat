@@ -10,4 +10,5 @@ workspace = true
 [dependencies]
 arrayvec.workspace = true
 smallvec.workspace = true
+unicode-segmentation.workspace = true
 serde = { workspace = true, features = ["derive"] }

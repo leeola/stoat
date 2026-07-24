@@ -4104,6 +4104,7 @@ dependencies = [
  "arrayvec",
  "serde",
  "smallvec",
+ "unicode-segmentation",
 ]
 
 [[package]]

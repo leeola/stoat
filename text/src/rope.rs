@@ -4,6 +4,7 @@ use crate::{
 };
 use arrayvec::ArrayString;
 use std::{cmp, ops::Range};
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 
 #[cfg(not(test))]
 type Bitmap = u128;
@@ -658,6 +659,104 @@ impl Rope {
             },
         };
         chunk_start_offset + clipped_local
+    }
+
+    /// Offset of the first grapheme-cluster boundary after `offset`, or
+    /// `offset` itself at the rope end.
+    ///
+    /// A cluster is what a reader calls one character. A base plus its
+    /// combining marks, an emoji ZWJ sequence, a regional-indicator flag pair,
+    /// and a skin-tone modifier each form exactly one. Stepping by scalar
+    /// instead lands the cursor inside one of those and lets a delete take it
+    /// apart. An `offset` off a char boundary is clipped left before stepping.
+    ///
+    /// See also:
+    /// - [`Self::prev_grapheme_boundary`] for the backward step.
+    pub fn next_grapheme_boundary(&self, offset: usize) -> usize {
+        let offset = self.clip_offset(offset, Bias::Left);
+        if offset >= self.len() {
+            return offset;
+        }
+
+        let mut cursor = GraphemeCursor::new(offset, self.len(), true);
+        let mut pos = offset;
+        loop {
+            let Some((chunk, chunk_start)) = self.chunk_at(pos) else {
+                return offset;
+            };
+            match cursor.next_boundary(chunk, chunk_start) {
+                Ok(Some(boundary)) => return boundary,
+                // `NextChunk` only fires when the chunk ends before the rope
+                // does, so the follow-up chunk is always there.
+                Err(GraphemeIncomplete::NextChunk) => pos = chunk_start + chunk.len(),
+                Err(GraphemeIncomplete::PreContext(end)) => {
+                    let Some((ctx, ctx_start)) = self.chunk_ending_at(end) else {
+                        return offset;
+                    };
+                    cursor.provide_context(ctx, ctx_start);
+                },
+                Ok(None) | Err(_) => return offset,
+            }
+        }
+    }
+
+    /// Offset of the first grapheme-cluster boundary before `offset`, or
+    /// `offset` itself at the rope start.
+    ///
+    /// Backward mirror of [`Self::next_grapheme_boundary`], with the same
+    /// cluster definition and the same left-clipping of an `offset` that is not
+    /// on a char boundary.
+    pub fn prev_grapheme_boundary(&self, offset: usize) -> usize {
+        let offset = self.clip_offset(offset, Bias::Left);
+        if offset == 0 {
+            return 0;
+        }
+
+        let mut cursor = GraphemeCursor::new(offset, self.len(), true);
+        let mut pos = offset - 1;
+        loop {
+            let Some((chunk, chunk_start)) = self.chunk_at(pos) else {
+                return offset;
+            };
+            match cursor.prev_boundary(chunk, chunk_start) {
+                Ok(Some(boundary)) => return boundary,
+                Err(GraphemeIncomplete::PrevChunk) => {
+                    if chunk_start == 0 {
+                        return offset;
+                    }
+                    pos = chunk_start - 1;
+                },
+                Err(GraphemeIncomplete::PreContext(end)) => {
+                    let Some((ctx, ctx_start)) = self.chunk_ending_at(end) else {
+                        return offset;
+                    };
+                    cursor.provide_context(ctx, ctx_start);
+                },
+                Ok(None) | Err(_) => return offset,
+            }
+        }
+    }
+
+    /// The chunk holding `offset` paired with the offset it starts at, or
+    /// `None` past the last chunk.
+    fn chunk_at(&self, offset: usize) -> Option<(&str, usize)> {
+        let (start, _end, chunk) =
+            self.chunks
+                .find::<Dimensions<usize, Point>, _>((), &offset, Bias::Right);
+        let Dimensions(chunk_start, _, ()) = start;
+        chunk.map(|chunk| (chunk.text.as_str(), chunk_start))
+    }
+
+    /// The chunk truncated so it ends exactly at `end`, paired with the offset
+    /// it starts at.
+    ///
+    /// `GraphemeCursor::provide_context` asserts the chunk handed back ends at
+    /// the offset its `PreContext` named, so the chunk holding `end - 1` has to
+    /// be cut down rather than passed whole.
+    fn chunk_ending_at(&self, end: usize) -> Option<(&str, usize)> {
+        let (chunk, chunk_start) = self.chunk_at(end.checked_sub(1)?)?;
+        let local_end = end.checked_sub(chunk_start)?;
+        chunk.get(..local_end).map(|ctx| (ctx, chunk_start))
     }
 
     pub fn starts_with(&self, s: &str) -> bool {
@@ -2546,5 +2645,139 @@ mod tests {
         let points = [Point::new(2, 0), Point::new(0, 0), Point::new(1, 0)];
         let offsets = rope.points_to_offsets_batch(&points);
         assert_eq!(offsets, vec![6, 0, 3]);
+    }
+
+    /// Every cluster boundary in `text`, walked forward from 0 and backward
+    /// from the end, so both steppers are pinned against one expectation.
+    fn assert_cluster_walk(text: &str, expected: &[usize]) {
+        let rope = Rope::from(text);
+
+        let mut forward = vec![0];
+        let mut offset = 0;
+        while offset < rope.len() {
+            let next = rope.next_grapheme_boundary(offset);
+            assert!(
+                next > offset,
+                "forward walk stalled at {offset} in {text:?}"
+            );
+            forward.push(next);
+            offset = next;
+        }
+        assert_eq!(forward, expected, "forward cluster walk over {text:?}");
+
+        let mut backward = vec![rope.len()];
+        let mut offset = rope.len();
+        while offset > 0 {
+            let prev = rope.prev_grapheme_boundary(offset);
+            assert!(
+                prev < offset,
+                "backward walk stalled at {offset} in {text:?}"
+            );
+            backward.push(prev);
+            offset = prev;
+        }
+        backward.reverse();
+        assert_eq!(backward, expected, "backward cluster walk over {text:?}");
+    }
+
+    #[test]
+    fn combining_mark_joins_its_base() {
+        assert_cluster_walk("ae\u{301}b", &[0, 1, 4, 5]);
+    }
+
+    #[test]
+    fn zwj_sequence_is_one_cluster() {
+        assert_cluster_walk(
+            "a\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}b",
+            &[0, 1, 19, 20],
+        );
+    }
+
+    #[test]
+    fn regional_indicators_pair_into_flags() {
+        assert_cluster_walk("\u{1F1F7}\u{1F1F8}\u{1F1EE}\u{1F1F4}", &[0, 8, 16]);
+    }
+
+    #[test]
+    fn skin_tone_modifier_joins_its_base() {
+        assert_cluster_walk("\u{1F44D}\u{1F3FD}!", &[0, 8, 9]);
+    }
+
+    #[test]
+    fn ascii_steps_one_byte_at_a_time() {
+        assert_cluster_walk("hello", &[0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn stepping_stops_at_the_rope_ends() {
+        let rope = Rope::from("hi");
+        assert_eq!(rope.next_grapheme_boundary(2), 2, "no step past the end");
+        assert_eq!(
+            rope.prev_grapheme_boundary(0),
+            0,
+            "no step before the start"
+        );
+
+        let empty = Rope::from("");
+        assert_eq!(empty.next_grapheme_boundary(0), 0);
+        assert_eq!(empty.prev_grapheme_boundary(0), 0);
+    }
+
+    #[test]
+    fn an_offset_inside_a_scalar_clips_left_before_stepping() {
+        let rope = Rope::from("e\u{301}b");
+        assert_eq!(
+            rope.next_grapheme_boundary(2),
+            3,
+            "an offset mid-scalar clips back onto the cluster it splits",
+        );
+        assert_eq!(rope.prev_grapheme_boundary(2), 0);
+    }
+
+    /// A cluster split across rope chunks makes `GraphemeCursor` ask for
+    /// pre-context and for neighbouring chunks, exercising the paths a
+    /// single-chunk rope never reaches. Chunks cap at `MAX_BASE` bytes, which
+    /// is 16 under `cfg(test)`, so the padding only has to clear that.
+    #[test]
+    fn clusters_spanning_chunk_boundaries_still_resolve() {
+        for pad in 0..24usize {
+            let text = format!(
+                "{}\u{1F1F7}\u{1F1F8}e\u{301}{}",
+                "a".repeat(pad),
+                "b".repeat(24),
+            );
+            let mut rope = Rope::new();
+            for ch in text.chars() {
+                rope.push(&ch.to_string());
+            }
+            assert!(
+                rope.chunks().count() > 1,
+                "pad {pad} must build a multi-chunk rope"
+            );
+
+            let flag = pad;
+            let decomposed = flag + 8;
+            let tail = decomposed + 3;
+            assert_eq!(
+                rope.next_grapheme_boundary(flag),
+                decomposed,
+                "the flag pair is one cluster at pad {pad}",
+            );
+            assert_eq!(
+                rope.next_grapheme_boundary(decomposed),
+                tail,
+                "the decomposed e keeps its combining mark at pad {pad}",
+            );
+            assert_eq!(
+                rope.prev_grapheme_boundary(tail),
+                decomposed,
+                "stepping back off the tail lands on the decomposed e at pad {pad}",
+            );
+            assert_eq!(
+                rope.prev_grapheme_boundary(decomposed),
+                flag,
+                "stepping back over the flag pair takes both halves at pad {pad}",
+            );
+        }
     }
 }

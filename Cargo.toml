@@ -58,6 +58,7 @@ smallvec = { version = "1", features = ["const_generics"] }
 imara-diff = "0.1.8"
 pulldown-cmark = { version = "0.13", default-features = false }
 unicode-width = "0.2"
+unicode-segmentation = "1"
 slotmap = { version = "1", features = ["serde"] }
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
