@@ -2436,6 +2436,48 @@ mod tests {
     }
 
     #[test]
+    fn palette_reload_bang_routes_to_force_reload_buffer() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/palette-reload");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"disk\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile { path: path.clone() },
+        );
+        h.settle();
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        buffer.write().expect("poisoned").edit(0..0, "edited ");
+
+        h.type_text(":reload!");
+        h.type_keys("enter");
+
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        assert!(!guard.dirty, ":reload! discards the buffer's unsaved edits");
+        assert_eq!(
+            guard.snapshot.visible_text.to_string(),
+            "disk\n",
+            ":reload! reverts the buffer to the on-disk content",
+        );
+    }
+
+    #[test]
     fn snapshot_command_palette_filter_empty() {
         let mut h = Stoat::test();
         h.type_text(":");

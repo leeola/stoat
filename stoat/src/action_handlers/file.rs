@@ -552,6 +552,120 @@ pub(crate) fn pump_auto_reload(stoat: &mut Stoat) {
     }
 }
 
+/// Re-read the focused buffer's backing file from disk, backing `:reload` and
+/// `:reload!`.
+///
+/// Refuses when the buffer has unsaved edits unless `force` discards them. A
+/// scratch buffer with no path reports and changes nothing, as does a file that
+/// no longer exists on disk (the buffer keeps its content). A successful reload
+/// replaces the buffer content in one undoable edit, marks it clean, records the
+/// new disk mtime, and notifies the language server. Returns [`UpdateEffect::None`]
+/// only when no editor is focused. Every other path redraws.
+pub(super) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
+    let Some(id) = super::focused_editor_mut(stoat).map(|e| e.buffer_id) else {
+        return UpdateEffect::None;
+    };
+
+    let Some(path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(id)
+        .map(Path::to_path_buf)
+    else {
+        stoat.set_status("buffer has no file to reload");
+        return UpdateEffect::Redraw;
+    };
+
+    let dirty = stoat
+        .active_workspace()
+        .buffers
+        .get(id)
+        .map(|b| b.read().expect("buffer poisoned").dirty)
+        .unwrap_or(false);
+    if dirty && !force {
+        stoat.set_status("unsaved changes; :reload! discards them");
+        return UpdateEffect::Redraw;
+    }
+
+    match reload_from_disk(stoat, id, &path) {
+        ReloadOutcome::Missing => stoat.set_status("file no longer exists on disk"),
+        ReloadOutcome::Unchanged => stoat.set_status("already up to date"),
+        ReloadOutcome::Reloaded => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            stoat.set_status(format!("reloaded {name}"));
+            super::lsp::notify_buffer_changes_pending(stoat);
+        },
+    }
+    UpdateEffect::Redraw
+}
+
+/// The disposition of a [`reload_from_disk`] attempt.
+enum ReloadOutcome {
+    /// The buffer content was replaced with the file's newer bytes.
+    Reloaded,
+    /// The file already matched the buffer. Only the clean flag and mtime
+    /// baseline were refreshed.
+    Unchanged,
+    /// The file has no metadata or could not be read. The buffer is untouched.
+    Missing,
+}
+
+/// Replace buffer `id`'s content with `path`'s current bytes, mirroring
+/// [`pump_auto_reload`]'s replace arm without the cursor-follow logic.
+///
+/// A file that cannot be stat-ed or read yields [`ReloadOutcome::Missing`] and
+/// leaves the buffer untouched. A file already byte-identical to the buffer is
+/// left un-edited to avoid version churn, but the buffer is still marked clean
+/// and its mtime baseline refreshed. Otherwise the whole buffer is replaced in
+/// one undoable edit and marked clean.
+fn reload_from_disk(stoat: &mut Stoat, id: BufferId, path: &Path) -> ReloadOutcome {
+    let Some(mtime) = stoat
+        .fs_host
+        .metadata(path)
+        .ok()
+        .flatten()
+        .map(|m| m.modified)
+    else {
+        return ReloadOutcome::Missing;
+    };
+    let Ok(new) = read_string_via_host(&*stoat.fs_host, path) else {
+        return ReloadOutcome::Missing;
+    };
+    let Some(buffer) = stoat.active_workspace().buffers.get(id) else {
+        return ReloadOutcome::Missing;
+    };
+
+    let (old_len, common) = {
+        let guard = buffer.read().expect("buffer poisoned");
+        let text = &guard.snapshot.visible_text;
+        (text.len(), common_prefix_len(text.chunks(), &new))
+    };
+    let unchanged = common == old_len && new.len() == old_len;
+
+    if unchanged {
+        if buffer.read().expect("buffer poisoned").dirty {
+            buffer.write().expect("buffer poisoned").mark_clean();
+        }
+    } else {
+        let mut guard = buffer.write().expect("buffer poisoned");
+        guard.edit(0..old_len, &new);
+        guard.mark_clean();
+    }
+    stoat
+        .active_workspace_mut()
+        .buffers
+        .set_disk_mtime(id, mtime);
+
+    if unchanged {
+        ReloadOutcome::Unchanged
+    } else {
+        ReloadOutcome::Reloaded
+    }
+}
+
 /// Open this session's log file and follow it as new lines are written.
 ///
 /// Resolves `stoat_log::log_dir()/stoat-<pid>.log` and delegates to
@@ -1769,6 +1883,116 @@ mod tests {
         assert!(
             h.stoat.auto_reload_poll.is_none(),
             "no poll armed for a scratch buffer"
+        );
+    }
+
+    #[test]
+    fn reload_replaces_a_clean_buffer_and_advances_the_mtime() {
+        let mut h = Stoat::test();
+        let path = Path::new("/reload-clean").join("a.txt");
+        let id = open_plain(&mut h, Path::new("/reload-clean"), "a.txt", b"old\n");
+        let before = h.stoat.active_workspace().buffers.disk_mtime(id);
+
+        h.fake_fs().insert_file(&path, b"new\n");
+        let effect = super::reload_focused(&mut h.stoat, false);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(buffer_text(&h, id), "new\n");
+        assert!(!focused_dirty(&h.stoat), "a reloaded buffer is clean");
+        assert!(
+            h.stoat.active_workspace().buffers.disk_mtime(id) > before,
+            "the reload records the advanced disk mtime",
+        );
+    }
+
+    #[test]
+    fn reload_on_unchanged_disk_reports_up_to_date() {
+        let mut h = Stoat::test();
+        let id = open_plain(&mut h, Path::new("/reload-same"), "a.txt", b"same\n");
+
+        let effect = super::reload_focused(&mut h.stoat, false);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("already up to date")
+        );
+        assert_eq!(buffer_text(&h, id), "same\n");
+    }
+
+    #[test]
+    fn reload_unforced_refuses_a_dirty_buffer() {
+        let mut h = Stoat::test();
+        open_edited(&mut h, Path::new("/reload-dirty"), "a.txt", b"disk\n");
+        let id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+
+        let effect = super::reload_focused(&mut h.stoat, false);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("unsaved changes; :reload! discards them"),
+        );
+        assert_eq!(
+            buffer_text(&h, id),
+            "edited disk\n",
+            "the unsaved edits survive"
+        );
+        assert!(focused_dirty(&h.stoat), "the buffer stays dirty");
+    }
+
+    #[test]
+    fn reload_forced_discards_edits_and_reloads() {
+        let mut h = Stoat::test();
+        let path = open_edited(&mut h, Path::new("/reload-force"), "a.txt", b"disk\n");
+        let id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        h.fake_fs().insert_file(&path, b"changed\n");
+
+        let effect = super::reload_focused(&mut h.stoat, true);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(buffer_text(&h, id), "changed\n");
+        assert!(
+            !focused_dirty(&h.stoat),
+            "the forced reload clears the dirty flag"
+        );
+    }
+
+    #[test]
+    fn reload_reports_a_file_missing_on_disk() {
+        let mut h = Stoat::test();
+        let path = Path::new("/reload-gone").join("a.txt");
+        let id = open_plain(&mut h, Path::new("/reload-gone"), "a.txt", b"content\n");
+
+        h.fake_fs().remove_file(&path).expect("remove");
+        let effect = super::reload_focused(&mut h.stoat, false);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("file no longer exists on disk"),
+        );
+        assert_eq!(
+            buffer_text(&h, id),
+            "content\n",
+            "the buffer keeps its content"
+        );
+    }
+
+    #[test]
+    fn reload_rejects_a_scratch_buffer() {
+        let mut h = Stoat::test();
+
+        let effect = super::reload_focused(&mut h.stoat, false);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("buffer has no file to reload"),
         );
     }
 

@@ -158,6 +158,8 @@ pub enum ActionKind {
     CloseBuffer,
     AutoReload,
     AutoReloadConfig,
+    ReloadBuffer,
+    ForceReloadBuffer,
     AcceptCompletion,
     SmartTab,
     InsertTab,

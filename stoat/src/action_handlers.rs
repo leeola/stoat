@@ -360,6 +360,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ShellKeepPipe => shell::open_keep_pipe(stoat),
         ActionKind::SaveBuffer => file::save_buffer(stoat),
         ActionKind::ForceSaveBuffer => file::force_save_buffer(stoat),
+        ActionKind::ReloadBuffer => file::reload_focused(stoat, false),
+        ActionKind::ForceReloadBuffer => file::reload_focused(stoat, true),
         ActionKind::WriteQuit => file::write_quit(stoat),
         ActionKind::CloseBuffer => file::close_buffer(stoat),
         ActionKind::AutoReload => {
