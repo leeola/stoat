@@ -323,6 +323,10 @@ fn run_tui(
             env_theme,
         );
         stoat.set_apc_tx(apc_tx);
+        // Push the theme's colors as the terminal's defaults up front, so the
+        // window gutter matches from the first frame rather than only after a
+        // `:theme` switch.
+        stoat.emit_theme_default_colors();
         stoat.set_window_ipc(std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from));
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);

@@ -2365,6 +2365,8 @@ impl Stoat {
             }
         }
 
+        self.emit_reset_default_colors();
+
         tracing::info!(target: "stoat::app", "stoat exiting");
 
         #[cfg(feature = "perf")]
@@ -6920,6 +6922,37 @@ impl Stoat {
         }
     }
 
+    /// Push the active theme's colors to the hosting terminal as its defaults.
+    ///
+    /// Normalized cells cover the grid, but the terminal resolves its own
+    /// defaults wherever no cell reaches, so without this the window gutter past
+    /// the grid keeps showing the host's theme. Sent at startup and on every
+    /// theme switch. A no-op outside stoatty, and when the theme defines neither
+    /// color as RGB.
+    pub fn emit_theme_default_colors(&self) {
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+
+        let out = osc_default_colors(&self.theme);
+        if !out.is_empty() {
+            let _ = apc_tx.send(out);
+        }
+    }
+
+    /// Hand the hosting terminal its own default colors back as the session
+    /// ends, so quitting does not leave the enclosing terminal recolored.
+    ///
+    /// Sent once the run loop breaks. `apc_tx` is unbounded and the UI thread
+    /// only observes the channel closing after draining what is queued, so this
+    /// reaches stdout even though the process is on its way out.
+    fn emit_reset_default_colors(&self) {
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+        let _ = apc_tx.send(OSC_RESET_DEFAULT_COLORS.to_vec());
+    }
+
     /// Tell the hosting terminal its config file changed on disk, so it re-reads
     /// and re-applies it.
     ///
@@ -8509,6 +8542,37 @@ impl Stoat {
             )
         });
     }
+}
+
+/// OSC 110 and OSC 111, restoring the terminal's own default foreground and
+/// background after [`osc_default_colors`] overrode them.
+const OSC_RESET_DEFAULT_COLORS: &[u8] = b"\x1b]110\x1b\\\x1b]111\x1b\\";
+
+/// OSC 10 and OSC 11 setting the hosting terminal's default foreground and
+/// background to `theme`'s own.
+///
+/// A channel the theme leaves undefined or non-RGB is skipped rather than
+/// guessed at, so a partial theme overrides only what it actually specifies and
+/// leaves the rest to the terminal. Both missing yields empty bytes.
+fn osc_default_colors(theme: &crate::theme::Theme) -> Vec<u8> {
+    use crate::{render::review::style_rgb, theme::scope};
+
+    let mut out = Vec::new();
+    let mut push = |code: u8, rgb: Option<[u8; 3]>| {
+        if let Some([r, g, b]) = rgb {
+            out.extend_from_slice(format!("\x1b]{code};#{r:02x}{g:02x}{b:02x}\x1b\\").as_bytes());
+        }
+    };
+
+    push(
+        10,
+        style_rgb(theme.try_get(scope::UI_TEXT).and_then(|s| s.fg)),
+    );
+    push(
+        11,
+        style_rgb(theme.try_get(scope::UI_BACKGROUND).and_then(|s| s.bg)),
+    );
+    out
 }
 
 /// Content version of a pooled editor page, hashing the inputs whose change
@@ -19111,6 +19175,32 @@ mod tests {
         assert_eq!(
             without, 0,
             "with no diagnostics and no line numbers there is no gutter"
+        );
+    }
+
+    #[test]
+    fn quitting_hands_the_terminal_its_own_defaults_back() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        h.stoat.emit_reset_default_colors();
+
+        let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flatten()
+            .collect();
+        assert_eq!(
+            sent,
+            b"\x1b]110\x1b\\\x1b]111\x1b\\".to_vec(),
+            "OSC 110 and 111 undo the defaults the session overrode",
+        );
+    }
+
+    #[test]
+    fn a_theme_defining_no_colors_pushes_nothing() {
+        assert!(
+            osc_default_colors(&crate::theme::Theme::empty()).is_empty(),
+            "with nothing to say, the terminal's own defaults stand",
         );
     }
 

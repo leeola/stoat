@@ -1065,6 +1065,7 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
             stoat.minimap_content.clear();
             stoat.theme_epoch += 1;
+            stoat.emit_theme_default_colors();
             UpdateEffect::Redraw
         },
         Err(e) => {
@@ -1416,6 +1417,55 @@ mod tests {
         assert_eq!(
             stoat.theme.get(UI_TEXT).fg,
             Some(Color::Rgb(0xab, 0xcd, 0xef))
+        );
+    }
+
+    #[test]
+    fn a_theme_switch_pushes_its_colors_as_terminal_defaults() {
+        let mut stoat = stoat_with_config(Some(
+            "theme mine { ui.text.fg = \"#abcdef\"; ui.background.bg = \"#123456\"; }".to_string(),
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        stoat.set_apc_tx(tx);
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "mine".to_string(),
+            },
+        );
+
+        let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flatten()
+            .collect();
+        assert_eq!(
+            sent,
+            b"\x1b]10;#abcdef\x1b\\\x1b]11;#123456\x1b\\".to_vec(),
+            "the switch hands the terminal both defaults, foreground then background",
+        );
+    }
+
+    #[test]
+    fn a_theme_without_a_background_pushes_only_the_foreground() {
+        let mut stoat =
+            stoat_with_config(Some("theme mine { ui.text.fg = \"#abcdef\"; }".to_string()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        stoat.set_apc_tx(tx);
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "mine".to_string(),
+            },
+        );
+
+        let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flatten()
+            .collect();
+        assert_eq!(
+            sent,
+            b"\x1b]10;#abcdef\x1b\\".to_vec(),
+            "a color the theme does not define is left to the terminal",
         );
     }
 
