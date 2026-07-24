@@ -274,39 +274,50 @@ impl InlayMap {
 
     fn resolve_all(&mut self, buffer_snapshot: &MultiBufferSnapshot) -> (Vec<Inlay>, Vec<usize>) {
         let anchors: Vec<Anchor> = self.inlays.iter().map(|ai| ai.position).collect();
-        let offsets = buffer_snapshot.resolve_anchors_batch(&anchors);
-        let mut resolved: Vec<Inlay> = self
+        let text_len = buffer_snapshot.rope().len();
+        let offsets: Vec<usize> = buffer_snapshot
+            .resolve_anchors_batch(&anchors)
+            .into_iter()
+            .map(|offset| offset.min(text_len))
+            .collect();
+        let points = buffer_snapshot.rope().offsets_to_points_batch(&offsets);
+
+        // Paired with their offsets so the sort below can order by offset and
+        // the offsets ride along, rather than converting each sorted point back.
+        let mut resolved: Vec<(usize, Inlay)> = self
             .inlays
             .iter()
-            .zip(offsets.iter())
-            .map(|(ai, &offset)| Inlay {
-                id: ai.id,
-                position: buffer_snapshot.rope().offset_to_point(offset),
-                text: Arc::clone(&ai.text),
-                kind: ai.kind,
+            .zip(offsets)
+            .zip(points)
+            .map(|((ai, offset), position)| {
+                (
+                    offset,
+                    Inlay {
+                        id: ai.id,
+                        position,
+                        text: Arc::clone(&ai.text),
+                        kind: ai.kind,
+                    },
+                )
             })
             .collect();
+
         if !self.inlays_sorted {
-            resolved.sort_by_key(|i| (i.position.row, i.position.column));
+            // Points are monotonic in offset, so this is the (row, column)
+            // order, and the sort is stable either way for inlays sharing one
+            // offset.
+            resolved.sort_by_key(|(offset, _)| *offset);
             let id_to_pos: HashMap<usize, usize> = resolved
                 .iter()
                 .enumerate()
-                .map(|(i, r)| (r.id.0, i))
+                .map(|(i, (_, r))| (r.id.0, i))
                 .collect();
             self.inlays
                 .sort_by_key(|ai| id_to_pos.get(&ai.id.0).copied().unwrap_or(usize::MAX));
             self.inlays_sorted = true;
         }
-        let inlay_offsets: Vec<usize> = resolved
-            .iter()
-            .map(|i| {
-                buffer_snapshot
-                    .rope()
-                    .point_to_offset(i.position)
-                    .min(buffer_snapshot.rope().len())
-            })
-            .collect();
-        (resolved, inlay_offsets)
+
+        resolved.into_iter().map(|(offset, i)| (i, offset)).unzip()
     }
 
     /// Only re-resolve anchors for inlays within edit ranges; adjust the rest
@@ -320,20 +331,7 @@ impl InlayMap {
         let text_len = buffer_snapshot.rope().len();
         let mut needs_resolve: Vec<bool> = vec![false; offsets.len()];
 
-        // Process edits in reverse to avoid index shifting issues
-        for edit in buffer_edits.into_iter().rev() {
-            let delta = (edit.new.end as isize) - (edit.old.end as isize);
-            let start_idx = offsets.partition_point(|&o| o < edit.old.start);
-            let end_idx = offsets.partition_point(|&o| o < edit.old.end);
-
-            for flag in &mut needs_resolve[start_idx..end_idx] {
-                *flag = true;
-            }
-
-            for offset in &mut offsets[end_idx..] {
-                *offset = ((*offset as isize) + delta).max(0) as usize;
-            }
-        }
+        shift_offsets(&mut offsets, &mut needs_resolve, buffer_edits);
 
         let affected: Vec<(usize, Anchor)> = needs_resolve
             .iter()
@@ -350,22 +348,22 @@ impl InlayMap {
             }
         }
 
+        let inlay_offsets: Vec<usize> = offsets.iter().map(|&o| o.min(text_len)).collect();
+        let points = buffer_snapshot
+            .rope()
+            .offsets_to_points_batch(&inlay_offsets);
         let resolved: Vec<Inlay> = self
             .inlays
             .iter()
-            .zip(offsets.iter())
-            .map(|(ai, &offset)| {
-                let clamped = offset.min(text_len);
-                Inlay {
-                    id: ai.id,
-                    position: buffer_snapshot.rope().offset_to_point(clamped),
-                    text: Arc::clone(&ai.text),
-                    kind: ai.kind,
-                }
+            .zip(points)
+            .map(|(ai, position)| Inlay {
+                id: ai.id,
+                position,
+                text: Arc::clone(&ai.text),
+                kind: ai.kind,
             })
             .collect();
 
-        let inlay_offsets: Vec<usize> = offsets.iter().map(|&o| o.min(text_len)).collect();
         (resolved, inlay_offsets)
     }
 
@@ -399,6 +397,36 @@ impl InlayMap {
         self.inlays_sorted = false;
         self.version += 1;
         new_ids
+    }
+}
+
+/// Carry each offset in `offsets` across `edits`, flagging in `needs_resolve`
+/// the ones that land inside an edit's replaced range.
+///
+/// One forward pass over both ascending sequences, rather than re-shifting the
+/// whole trailing slice once per edit. An offset ends up carrying the summed
+/// delta of every edit it sits at or after, including one that lands inside an
+/// edit. Those are additionally flagged, and the caller re-resolves them from
+/// their anchors, so their carried value is overwritten rather than used.
+///
+/// `offsets` must be ascending, which is the order the inlay set is kept in.
+fn shift_offsets(offsets: &mut [usize], needs_resolve: &mut [bool], edits: &Patch<usize>) {
+    let mut delta: isize = 0;
+    let mut i = 0;
+    for edit in edits {
+        while i < offsets.len() && offsets[i] < edit.old.start {
+            offsets[i] = ((offsets[i] as isize) + delta).max(0) as usize;
+            i += 1;
+        }
+        while i < offsets.len() && offsets[i] < edit.old.end {
+            offsets[i] = ((offsets[i] as isize) + delta).max(0) as usize;
+            needs_resolve[i] = true;
+            i += 1;
+        }
+        delta += (edit.new.end as isize) - (edit.old.end as isize);
+    }
+    for offset in &mut offsets[i..] {
+        *offset = ((*offset as isize) + delta).max(0) as usize;
     }
 }
 
@@ -1190,5 +1218,113 @@ mod tests {
             .collect();
         let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
         assert_eq!(text, "de!!fg");
+    }
+
+    /// `resolve_all` sorts by offset now rather than by (row, column). Both are
+    /// stable sorts, so two inlays anchored at one offset have to keep the order
+    /// they were spliced in.
+    #[test]
+    fn inlays_sharing_an_offset_keep_insertion_order() {
+        let snap = make_snapshot_with_inlays(
+            "hello\nworld",
+            vec![
+                (Point::new(0, 2), "<first>".to_string()),
+                (Point::new(0, 2), "<second>".to_string()),
+            ],
+        );
+
+        let total = snap.buffer.rope().len() + "<first><second>".len();
+        let text: String = snap
+            .chunks(
+                super::InlayOffset(0)..super::InlayOffset(total),
+                Arc::from(Vec::new()),
+            )
+            .map(|c| c.text.into_owned())
+            .collect();
+
+        assert_eq!(
+            text, "he<first><second>llo\nworld",
+            "the tied inlays render in splice order, not reversed or interleaved",
+        );
+    }
+
+    fn edit(
+        old: std::ops::Range<usize>,
+        new: std::ops::Range<usize>,
+    ) -> stoat_text::patch::Edit<usize> {
+        stoat_text::patch::Edit { old, new }
+    }
+
+    /// The reverse per-edit shift the forward walk replaced, kept here as the
+    /// oracle its results are compared against.
+    fn shift_offsets_per_edit(
+        offsets: &mut [usize],
+        needs_resolve: &mut [bool],
+        edits: &Patch<usize>,
+    ) {
+        for edit in edits.clone().into_iter().rev() {
+            let delta = (edit.new.end as isize) - (edit.old.end as isize);
+            let start_idx = offsets.partition_point(|&o| o < edit.old.start);
+            let end_idx = offsets.partition_point(|&o| o < edit.old.end);
+            for flag in &mut needs_resolve[start_idx..end_idx] {
+                *flag = true;
+            }
+            for offset in &mut offsets[end_idx..] {
+                *offset = ((*offset as isize) + delta).max(0) as usize;
+            }
+        }
+    }
+
+    /// Shifted offsets paired with the re-resolve flags, one walk's whole
+    /// output.
+    type Shifted = (Vec<usize>, Vec<bool>);
+
+    fn both_shifts(offsets: &[usize], edits: &Patch<usize>) -> (Shifted, Shifted) {
+        let mut a = (offsets.to_vec(), vec![false; offsets.len()]);
+        super::shift_offsets(&mut a.0, &mut a.1, edits);
+        let mut b = (offsets.to_vec(), vec![false; offsets.len()]);
+        shift_offsets_per_edit(&mut b.0, &mut b.1, edits);
+        (a, b)
+    }
+
+    #[test]
+    fn shifting_offsets_lands_hand_computed_values() {
+        // 5..8 shrinks to 2 bytes for -1, then 20..20 inserts 5 for +5.
+        let edits = Patch::new(vec![edit(5..8, 5..7), edit(20..20, 19..24)]);
+        let offsets = [0, 4, 5, 7, 8, 12, 20, 30];
+        let (mine, _) = both_shifts(&offsets, &edits);
+
+        assert_eq!(
+            mine.0,
+            vec![0, 4, 5, 7, 7, 11, 23, 33],
+            "before the first edit unshifted, after it -1, and past the insert a further +4",
+        );
+        assert_eq!(
+            mine.1,
+            vec![false, false, true, true, false, false, false, false],
+            "only the offsets inside 5..8 are flagged for re-resolution",
+        );
+    }
+
+    #[test]
+    fn shifting_offsets_matches_the_per_edit_walk() {
+        let cases = [
+            (
+                Patch::new(vec![
+                    edit(5..8, 5..7),
+                    edit(20..20, 19..24),
+                    edit(40..50, 44..44),
+                ]),
+                vec![0, 3, 5, 6, 8, 19, 20, 21, 39, 40, 45, 50, 80],
+            ),
+            (Patch::new(vec![edit(0..10, 0..0)]), vec![0, 5, 10, 11, 99]),
+            (Patch::new(vec![edit(0..0, 0..4)]), vec![0, 1, 2]),
+            (Patch::new(Vec::new()), vec![0, 7, 13]),
+        ];
+
+        for (edits, offsets) in cases {
+            let (mine, oracle) = both_shifts(&offsets, &edits);
+            assert_eq!(mine, oracle, "offsets {offsets:?}");
+        }
     }
 }
