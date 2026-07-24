@@ -443,5 +443,27 @@ mod tests {
             gruvbox.token_colors.len(),
             "and its token rules",
         );
+
+        let one_light =
+            parse(include_str!("../../themes/one-light.json")).expect("one-light parses");
+        assert_eq!(one_light.name.as_deref(), Some("one-light"));
+        assert_eq!(
+            one_light
+                .colors
+                .get("editor.background")
+                .map(String::as_str),
+            Some("#fafafa"),
+            "the light variant reads light, not a copy of the dark background",
+        );
+        assert_eq!(
+            one_light.colors.len(),
+            one_dark.colors.len(),
+            "the light variant mirrors the dark one's key set",
+        );
+        assert_eq!(
+            one_light.token_colors.len(),
+            one_dark.token_colors.len(),
+            "and its token rules",
+        );
     }
 }

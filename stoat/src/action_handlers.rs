@@ -1443,6 +1443,28 @@ mod tests {
     }
 
     #[test]
+    fn one_light_is_selectable_as_a_builtin() {
+        use crate::theme::scope::UI_BACKGROUND;
+        use ratatui::style::Color;
+
+        let mut stoat = stoat_with_config(None);
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "one-light".to_string(),
+            },
+        );
+
+        assert_eq!(stoat.theme.name, "one-light");
+        assert_eq!(
+            stoat.theme.get(UI_BACKGROUND).bg,
+            Some(Color::Rgb(0xfa, 0xfa, 0xfa)),
+            "the builtin carries its light background through the import",
+        );
+    }
+
+    #[test]
     fn a_theme_switch_pushes_its_colors_as_terminal_defaults() {
         let mut stoat = stoat_with_config(Some(
             "theme mine { ui.text.fg = \"#abcdef\"; ui.background.bg = \"#123456\"; }".to_string(),

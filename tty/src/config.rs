@@ -21,6 +21,7 @@ const DEFAULT_CONFIG: &str = include_str!("../../stoatty.toml");
 const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
 const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
 const THEME_GRUVBOX_LIGHT: &str = include_str!("../../themes/gruvbox-light.json");
+const THEME_ONE_LIGHT: &str = include_str!("../../themes/one-light.json");
 
 /// The `terminal.ansi*` color keys in palette-index order, the 8 normal colors
 /// followed by the 8 bright ones.
@@ -390,6 +391,7 @@ fn builtin_vscode_themes() -> Vec<(String, String)> {
         ("one-dark".to_string(), THEME_ONE_DARK.to_string()),
         ("gruvbox-dark".to_string(), THEME_GRUVBOX_DARK.to_string()),
         ("gruvbox-light".to_string(), THEME_GRUVBOX_LIGHT.to_string()),
+        ("one-light".to_string(), THEME_ONE_LIGHT.to_string()),
     ]
 }
 
@@ -629,6 +631,22 @@ mod tests {
         );
         assert_eq!(theme.foreground, Rgb::new(0x3c, 0x38, 0x36));
         assert_eq!(theme.ansi[9], Rgb::new(0x9d, 0x00, 0x06), "ansi bright red");
+    }
+
+    #[test]
+    fn one_light_resolves_as_a_builtin() {
+        let mut config = settle(DEFAULT_CONFIG, Some("theme = \"one-light\"\n")).unwrap();
+        config.vscode_themes = parse_vscode_themes(builtin_vscode_themes());
+        let theme = config.resolve_theme();
+
+        assert_eq!(
+            theme.background,
+            Rgb::new(0xfa, 0xfa, 0xfa),
+            "naming it in the config resolves without any file on disk",
+        );
+        assert_eq!(theme.foreground, Rgb::new(0x38, 0x3a, 0x42));
+        assert_eq!(theme.cursor, Rgb::new(0x40, 0x78, 0xf2));
+        assert_eq!(theme.ansi[1], Rgb::new(0xe4, 0x56, 0x49), "ansi red");
     }
 
     #[test]
