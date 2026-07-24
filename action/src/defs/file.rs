@@ -552,6 +552,106 @@ impl Action for ForceReloadBuffer {
     }
 }
 
+#[derive(Debug)]
+pub struct ReloadAllDef;
+
+impl ActionDef for ReloadAllDef {
+    fn name(&self) -> &'static str {
+        "ReloadAll"
+    }
+
+    fn command_name(&self) -> Option<&'static str> {
+        Some("reload-all")
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ReloadAll
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "re-read every open file-backed buffer from disk"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Re-read every open file-backed buffer from its backing file, replacing buffer content. A buffer with unsaved edits is skipped; use ForceReloadAll to discard them. A file missing on disk is reported and left untouched. Reports how many buffers reloaded, were skipped, or were missing."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+
+#[derive(Debug)]
+pub struct ReloadAll;
+
+impl ReloadAll {
+    pub const DEF: &ReloadAllDef = &ReloadAllDef;
+}
+
+impl Action for ReloadAll {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct ForceReloadAllDef;
+
+impl ActionDef for ForceReloadAllDef {
+    fn name(&self) -> &'static str {
+        "ForceReloadAll"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ForceReloadAll
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "re-read every open file-backed buffer, discarding unsaved edits"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Re-read every open file-backed buffer from its backing file even when a buffer has unsaved edits, discarding them. The unforced ReloadAll skips unsaved buffers instead. A file missing on disk is reported and left untouched."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["reload-all!"]
+    }
+}
+
+#[derive(Debug)]
+pub struct ForceReloadAll;
+
+impl ForceReloadAll {
+    pub const DEF: &ForceReloadAllDef = &ForceReloadAllDef;
+}
+
+impl Action for ForceReloadAll {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

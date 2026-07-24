@@ -602,6 +602,70 @@ pub(super) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Re-read every open file-backed buffer from disk, backing `:reload-all` and
+/// `:reload-all!`.
+///
+/// Each buffer reloads via [`reload_from_disk`]. The unforced form skips a
+/// buffer with unsaved edits, while the forced form discards them. A file
+/// missing on disk is reported and its buffer left intact, never blocking the
+/// other reloads. The status summarizes the outcome by cause: how many buffers
+/// reloaded, how many unsaved buffers were skipped, and how many files were
+/// missing.
+pub(super) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
+    let paths = stoat.active_workspace().buffers.open_paths();
+    if paths.is_empty() {
+        stoat.set_status("no files to reload");
+        return UpdateEffect::Redraw;
+    }
+
+    let mut reloaded = 0usize;
+    let mut skipped = 0usize;
+    let mut missing = 0usize;
+
+    for path in paths {
+        let Some(id) = stoat.active_workspace().buffers.id_for_path(&path) else {
+            continue;
+        };
+        let dirty = stoat
+            .active_workspace()
+            .buffers
+            .get(id)
+            .map(|b| b.read().expect("buffer poisoned").dirty)
+            .unwrap_or(false);
+        if dirty && !force {
+            skipped += 1;
+            continue;
+        }
+        match reload_from_disk(stoat, id, &path) {
+            ReloadOutcome::Reloaded => reloaded += 1,
+            ReloadOutcome::Missing => missing += 1,
+            ReloadOutcome::Unchanged => {},
+        }
+    }
+
+    if reloaded > 0 {
+        super::lsp::notify_buffer_changes_pending(stoat);
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if reloaded > 0 {
+        parts.push(format!("reloaded {reloaded}"));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} unsaved skipped (:reload-all! discards)"));
+    }
+    if missing > 0 {
+        parts.push(format!("{missing} missing on disk"));
+    }
+    let status = if parts.is_empty() {
+        "all files up to date".to_string()
+    } else {
+        parts.join("; ")
+    };
+    stoat.set_status(status);
+    UpdateEffect::Redraw
+}
+
 /// The disposition of a [`reload_from_disk`] attempt.
 enum ReloadOutcome {
     /// The buffer content was replaced with the file's newer bytes.
@@ -1993,6 +2057,111 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("buffer has no file to reload"),
+        );
+    }
+
+    fn buffer_dirty(h: &TestHarness, id: BufferId) -> bool {
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(id)
+            .expect("buffer")
+            .read()
+            .expect("poisoned")
+            .dirty
+    }
+
+    #[test]
+    fn reload_all_unforced_reloads_clean_skips_dirty_reports_missing() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-all");
+        let clean = root.join("clean.txt");
+        let gone = root.join("gone.txt");
+        let clean_id = open_plain(&mut h, root, "clean.txt", b"aaa\n");
+        open_edited(&mut h, root, "dirty.txt", b"bbb\n");
+        let dirty_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let gone_id = open_plain(&mut h, root, "gone.txt", b"ccc\n");
+
+        h.fake_fs().insert_file(&clean, b"AAA\n");
+        h.fake_fs().remove_file(&gone).expect("remove");
+
+        let effect = super::reload_all(&mut h.stoat, false);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(
+            buffer_text(&h, clean_id),
+            "AAA\n",
+            "the clean buffer reloads"
+        );
+        assert_eq!(
+            buffer_text(&h, dirty_id),
+            "edited bbb\n",
+            "the dirty buffer keeps its edits",
+        );
+        assert_eq!(
+            buffer_text(&h, gone_id),
+            "ccc\n",
+            "the missing buffer keeps its content",
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("reloaded 1; 1 unsaved skipped (:reload-all! discards); 1 missing on disk"),
+        );
+    }
+
+    #[test]
+    fn reload_all_forced_replaces_dirty_and_still_reports_missing() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-all-force");
+        let dirty = root.join("dirty.txt");
+        let gone = root.join("gone.txt");
+        open_edited(&mut h, root, "dirty.txt", b"bbb\n");
+        let dirty_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let gone_id = open_plain(&mut h, root, "gone.txt", b"ccc\n");
+
+        h.fake_fs().insert_file(&dirty, b"BBB\n");
+        h.fake_fs().remove_file(&gone).expect("remove");
+
+        let effect = super::reload_all(&mut h.stoat, true);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(
+            buffer_text(&h, dirty_id),
+            "BBB\n",
+            "the forced reload replaces the dirty buffer",
+        );
+        assert!(
+            !buffer_dirty(&h, dirty_id),
+            "the forced reload clears the dirty flag",
+        );
+        assert_eq!(
+            buffer_text(&h, gone_id),
+            "ccc\n",
+            "the missing buffer keeps its content",
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("reloaded 1; 1 missing on disk"),
+        );
+    }
+
+    #[test]
+    fn reload_all_reports_up_to_date_when_nothing_changed() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-all-same");
+        open_plain(&mut h, root, "a.txt", b"aaa\n");
+        open_plain(&mut h, root, "b.txt", b"bbb\n");
+
+        let effect = super::reload_all(&mut h.stoat, false);
+
+        assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("all files up to date"),
         );
     }
 

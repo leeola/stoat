@@ -160,6 +160,8 @@ pub enum ActionKind {
     AutoReloadConfig,
     ReloadBuffer,
     ForceReloadBuffer,
+    ReloadAll,
+    ForceReloadAll,
     AcceptCompletion,
     SmartTab,
     InsertTab,

@@ -55,8 +55,8 @@ use crate::{
             YankToClipboard,
         },
         file::{
-            AutoReload, AutoReloadConfig, ForceReloadBuffer, ForceSaveBuffer, OpenBuffer,
-            OpenConfig, OpenFile, ReloadBuffer, ToggleMinimap, ToggleWrap,
+            AutoReload, AutoReloadConfig, ForceReloadAll, ForceReloadBuffer, ForceSaveBuffer,
+            OpenBuffer, OpenConfig, OpenFile, ReloadAll, ReloadBuffer, ToggleMinimap, ToggleWrap,
         },
         file_finder::{
             FileFinderComplete, FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle,
@@ -575,6 +575,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ForceSaveBuffer::DEF, |_| Ok(Box::new(ForceSaveBuffer)));
     add(ReloadBuffer::DEF, |_| Ok(Box::new(ReloadBuffer)));
     add(ForceReloadBuffer::DEF, |_| Ok(Box::new(ForceReloadBuffer)));
+    add(ReloadAll::DEF, |_| Ok(Box::new(ReloadAll)));
+    add(ForceReloadAll::DEF, |_| Ok(Box::new(ForceReloadAll)));
     add(OpenConfig::DEF, |params| {
         // The palette autospaces a submitted command, so a bare `open-config`
         // arrives with an empty argument. That means the default target, not a
@@ -1275,6 +1277,8 @@ mod tests {
         "PaletteComplete",
         "ReloadBuffer",
         "ForceReloadBuffer",
+        "ReloadAll",
+        "ForceReloadAll",
     ];
 
     #[test]
@@ -1585,6 +1589,7 @@ mod tests {
         // + 1 SaveBuffer.
         // + 1 ForceSaveBuffer.
         // + 2 ReloadBuffer/ForceReloadBuffer.
+        // + 2 ReloadAll/ForceReloadAll.
         // + 1 WriteQuit.
         // + 1 CloseBuffer.
         // + 1 AcceptCompletion.
@@ -1697,7 +1702,7 @@ mod tests {
         // + 2 ConflictNextFile, ConflictPrevFile.
         // + 1 ConflictApply.
         // + 1 OpenWorkspaceFileFinder.
-        assert_eq!(all().count(), 399);
+        assert_eq!(all().count(), 401);
     }
 
     #[test]

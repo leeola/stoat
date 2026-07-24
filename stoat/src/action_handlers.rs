@@ -362,6 +362,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ForceSaveBuffer => file::force_save_buffer(stoat),
         ActionKind::ReloadBuffer => file::reload_focused(stoat, false),
         ActionKind::ForceReloadBuffer => file::reload_focused(stoat, true),
+        ActionKind::ReloadAll => file::reload_all(stoat, false),
+        ActionKind::ForceReloadAll => file::reload_all(stoat, true),
         ActionKind::WriteQuit => file::write_quit(stoat),
         ActionKind::CloseBuffer => file::close_buffer(stoat),
         ActionKind::AutoReload => {
