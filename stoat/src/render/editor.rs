@@ -347,7 +347,21 @@ pub(crate) fn render_editor_with_overlay(
                     .map(|hs| hs.to_ratatui_style())
                     .unwrap_or(fallback_style)
             };
-            for ch in chunk.text.chars() {
+            let mut rest: &str = &chunk.text;
+            while let Some(ch) = rest.chars().next() {
+                // `x` only grows within a line and only resets on a newline, so
+                // once it reaches the pane edge nothing on the rest of the line
+                // can paint. Jump straight to the newline rather than stepping
+                // an over-wide line's remainder every frame. A chunk holding no
+                // newline ends here, and the line's next chunk repeats the check.
+                if x >= right && ch != '\n' {
+                    match memchr::memchr(b'\n', rest.as_bytes()) {
+                        Some(nl) => rest = &rest[nl..],
+                        None => break,
+                    }
+                    continue;
+                }
+                rest = &rest[ch.len_utf8()..];
                 if ch == '\n' {
                     y += 1;
                     x = inner.x;
@@ -358,12 +372,6 @@ pub(crate) fn render_editor_with_overlay(
                 }
                 let w = display_width(ch);
                 if w == 0 {
-                    continue;
-                }
-                // Guard `x` from growing unbounded past the pane on an over-wide
-                // line, which would overflow the u16 column. Off-screen chars
-                // never paint, so this matches the wide-aware column model.
-                if x >= right {
                     continue;
                 }
                 if x + w as u16 <= right {
@@ -2491,6 +2499,53 @@ mod tests {
             (a_col - base) as u32,
             cursor_col,
             "the a glyph is painted at the cursor's display column",
+        );
+    }
+
+    /// Open a line many times wider than any test pane, carrying wide chars
+    /// past the right edge and spanning several rope chunks, followed by a
+    /// second line whose row proves the newline reset survives the skip.
+    fn open_over_wide_line(h: &mut crate::test_harness::TestHarness, root: &str) {
+        let root = PathBuf::from(root);
+        let path = root.join("wide-line.txt");
+        let line = format!(
+            "{}{}{}",
+            "x".repeat(10),
+            "\u{6c49}".repeat(40),
+            "y".repeat(30),
+        );
+        h.fake_fs()
+            .insert_file(&path, format!("{line}\nsecond line\n").as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+    }
+
+    fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
+        (0..width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn an_over_wide_line_paints_its_visible_prefix_and_the_next_row() {
+        let mut h = Stoat::test();
+        open_over_wide_line(&mut h, "/over-wide");
+
+        let theme = crate::theme::Theme::empty();
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let area = Rect::new(0, 0, 20, 3);
+        let mut buf = Buffer::empty(area);
+        super::render_editor(editor, area, fallback, &theme, &mut buf, true);
+
+        assert_eq!(
+            row_text(&buf, 0, area.width),
+            "xxxxxxxxxx\u{6c49} \u{6c49} \u{6c49} \u{6c49} \u{6c49} ",
+            "the over-wide line paints only the glyphs that fit",
+        );
+        assert_eq!(
+            row_text(&buf, 1, area.width),
+            "second line         ",
+            "the newline resets the column after the skipped remainder",
         );
     }
 

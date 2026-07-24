@@ -3969,6 +3969,7 @@ dependencies = [
  "insta",
  "libc",
  "lsp-types",
+ "memchr",
  "nucleo",
  "portable-pty",
  "pulldown-cmark",

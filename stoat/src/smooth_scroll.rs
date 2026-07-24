@@ -484,7 +484,21 @@ pub(crate) fn render_page_from_snapshot(
                     .map(|hs| hs.to_ratatui_style())
                     .unwrap_or(fallback_style)
             };
-            for ch in chunk.text.chars() {
+            let mut rest: &str = &chunk.text;
+            while let Some(ch) = rest.chars().next() {
+                // `x` only grows within a line and only resets on a newline, so
+                // once it reaches the page edge nothing on the rest of the line
+                // can paint. Jump straight to the newline rather than stepping
+                // an over-wide line's remainder every frame. A chunk holding no
+                // newline ends here, and the line's next chunk repeats the check.
+                if x >= right && ch != '\n' {
+                    match memchr::memchr(b'\n', rest.as_bytes()) {
+                        Some(nl) => rest = &rest[nl..],
+                        None => break,
+                    }
+                    continue;
+                }
+                rest = &rest[ch.len_utf8()..];
                 if ch == '\n' {
                     y += 1;
                     x = text_x;
@@ -495,12 +509,6 @@ pub(crate) fn render_page_from_snapshot(
                 }
                 let w = display_width(ch);
                 if w == 0 {
-                    continue;
-                }
-                // Guard `x` from growing unbounded past the pane on an over-wide
-                // line, which would overflow the u16 column. Off-screen chars
-                // never paint, so this matches the wide-aware column model.
-                if x >= right {
                     continue;
                 }
                 if x + w as u16 <= right {
@@ -1111,6 +1119,81 @@ mod tests {
         assert_eq!(
             got, expected,
             "the pooled page places wide chars by display width like the live grid",
+        );
+    }
+
+    /// A line far wider than the page carries wide chars past the right edge and
+    /// spans several rope chunks, so the pooled fill's skip to the next newline
+    /// must land on a char boundary and still reset the column for the next row.
+    #[test]
+    fn a_pooled_page_clips_an_over_wide_line_like_the_live_grid() {
+        use super::{render_page_from_snapshot, serialize_buffer, Buffer, PageGutter, Rect};
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::render_editor_with_overlay,
+            theme::{scope, Theme},
+            LineNumbers, Stoat,
+        };
+        use std::{collections::BTreeMap, path::PathBuf};
+        use stoat_action::OpenFile;
+        use stoat_config::WrapMode;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-over-wide");
+        let path = root.join("doc.txt");
+        let line = format!(
+            "{}{}{}",
+            "x".repeat(10),
+            "\u{6c49}".repeat(40),
+            "y".repeat(30),
+        );
+        h.fake_fs()
+            .insert_file(&path, format!("{line}\nsecond line\n").as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = Theme::empty();
+        let fallback = theme.get(scope::UI_TEXT);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(BTreeMap::new()),
+            Arc::new(theme.clone()),
+            None,
+            None,
+        );
+
+        let area = Rect::new(0, 0, 20, 3);
+        let mut expected = Buffer::empty(area);
+        render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut expected,
+            false,
+            false,
+            LineNumbers::Absolute,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            WrapMode::None,
+            80,
+        );
+        let expected = serialize_buffer(&expected);
+
+        let snapshot = editor.display_map.snapshot();
+        let got = render_page_from_snapshot(&snapshot, 0, fallback, 20, 3, &gutter, false, 0.0);
+
+        assert_eq!(
+            got, expected,
+            "the pooled page clips the over-wide line where the live grid does",
         );
     }
 
