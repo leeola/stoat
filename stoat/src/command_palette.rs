@@ -312,6 +312,9 @@ pub struct Availability {
     pub review_open: bool,
     /// `workspace.commits.is_some()`.
     pub commits_open: bool,
+    /// `workspace.review_walk.is_some()`: a commit-by-commit review walk is
+    /// running, whether or not one of its diffs is currently open.
+    pub review_walk_open: bool,
     /// Focused pane hosts a [`View::Run`], or a modal run is active.
     pub run_focused: bool,
 }
@@ -346,6 +349,7 @@ impl Availability {
             in_conflict,
             review_open: ws.review.is_some(),
             commits_open: ws.commits.is_some(),
+            review_walk_open: ws.review_walk.is_some(),
             run_focused,
         }
     }
@@ -393,6 +397,8 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
         | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
+
+        ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
 
@@ -580,7 +586,7 @@ impl CommandPalette {
         self.last_filter_key = key;
         self.generation = crate::picker::next_generation();
 
-        self.command = parse_command(&text).map(|(entry, _)| entry);
+        self.command = parse_command(&text, &self.availability).map(|(entry, _)| entry);
         if self.command.is_some() {
             self.filtered.clear();
             self.match_indices.clear();
@@ -607,7 +613,7 @@ impl CommandPalette {
     /// `SubmitPromptInput` action handler while the palette is open.
     pub(crate) fn handle_submit(&mut self, ws: &mut Workspace) -> PaletteOutcome {
         let text = self.input.text(ws);
-        if let Some((entry, arg)) = parse_command(&text) {
+        if let Some((entry, arg)) = parse_command(&text, &self.availability) {
             let param = &entry.def.params()[0];
             // An explicit `/` or `~` path browses the real filesystem, so a
             // highlighted browse directory wins and Enter descends into it.
@@ -650,8 +656,14 @@ impl CommandPalette {
         // the typed text wins, so `w` dispatches SaveBuffer and a name-free
         // alias like `w!` stays reachable. Arrowing to a candidate takes that
         // highlighted entry instead.
+        // A conditional token resolves ahead of the alias table so an active
+        // context wins, and falls through to it when no context claims the
+        // token. Zero-argument commands never reach `parse_command`, so this is
+        // where a bare `next` or `done` is resolved.
+        let bare = text.trim();
         if self.selected == 0
-            && let Some(entry) = registry::lookup_alias(text.trim())
+            && let Some(entry) = resolve_conditional(bare, &self.availability)
+                .or_else(|| registry::lookup_alias(bare))
         {
             if dispatches_bare(entry) {
                 self.input.dispose(ws);
@@ -681,6 +693,41 @@ impl CommandPalette {
     }
 }
 
+/// Bare palette tokens whose meaning depends on application state.
+///
+/// A conditional command is a short generic word that would be a poor global
+/// alias -- `next` is meaningful during a review walk and meaningless outside
+/// one -- so instead of claiming the name once, it resolves per invocation
+/// against the same [`Availability`] snapshot the Active scope filters by.
+///
+/// Each token carries an ordered candidate list, so a second context wanting
+/// `next` appends its action rather than fighting over the name. The first
+/// candidate whose context is active wins. Resolution runs ahead of the static
+/// alias table, so an active context beats a 1:1 command name, and falls
+/// through to [`registry::lookup_alias`] when no candidate applies.
+const CONDITIONAL_COMMANDS: &[(&str, &[ActionKind])] = &[
+    ("next", &[ActionKind::ReviewNextCommit]),
+    ("prev", &[ActionKind::ReviewPrevCommit]),
+    ("done", &[ActionKind::ReviewDone]),
+];
+
+/// Resolve `token` to the first [`CONDITIONAL_COMMANDS`] candidate whose
+/// context is active, or `None` when the token is not conditional or no
+/// candidate applies.
+fn resolve_conditional(
+    token: &str,
+    ctx: &Availability,
+) -> Option<&'static registry::RegistryEntry> {
+    let (_, candidates) = CONDITIONAL_COMMANDS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(token))?;
+    let kind = candidates
+        .iter()
+        .copied()
+        .find(|kind| action_is_available(*kind, ctx))?;
+    registry::all().find(|entry| entry.def.kind() == kind)
+}
+
 /// Split palette input into a resolved command and its trailing argument text.
 ///
 /// Returns `Some((entry, arg))` only when the text is a command token followed
@@ -690,9 +737,12 @@ impl CommandPalette {
 /// itself contain spaces. Returns `None` for plain filter text, an unknown
 /// head, or a zero-argument command, keeping the palette in command-filter
 /// mode.
-fn parse_command(text: &str) -> Option<(&'static registry::RegistryEntry, &str)> {
+fn parse_command<'a>(
+    text: &'a str,
+    ctx: &Availability,
+) -> Option<(&'static registry::RegistryEntry, &'a str)> {
     let (head, arg) = text.split_once(' ')?;
-    let entry = registry::lookup_alias(head)?;
+    let entry = resolve_conditional(head, ctx).or_else(|| registry::lookup_alias(head))?;
     (!entry.def.params().is_empty()).then_some((entry, arg))
 }
 
@@ -1238,6 +1288,7 @@ mod tests {
             in_conflict: true,
             review_open: true,
             commits_open: true,
+            review_walk_open: true,
             run_focused: true,
         };
         for entry in registry::all() {
@@ -2249,6 +2300,104 @@ mod tests {
             PaletteOutcome::Dispatch(entry, _, _) => Some(entry.def.name()),
             _ => None,
         }
+    }
+
+    /// A harness sitting mid-walk over a two-commit `/repo`.
+    fn walking_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "b2c3d4e5")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+        h.type_keys("down");
+        h.type_keys("enter");
+        h.settle();
+        assert!(
+            h.stoat.active_workspace().review_walk.is_some(),
+            "the walk must be running for the conditional tokens to resolve"
+        );
+        h
+    }
+
+    #[test]
+    fn conditional_tokens_dispatch_the_walk_actions() {
+        for (token, action) in [
+            ("next", "ReviewNextCommit"),
+            ("prev", "ReviewPrevCommit"),
+            ("done", "ReviewDone"),
+        ] {
+            let mut h = walking_harness();
+            assert_eq!(
+                palette_dispatch_name(&mut h, &format!(":{token}")),
+                Some(action),
+                "{token} resolves to {action} during a walk"
+            );
+        }
+    }
+
+    /// Outside a walk the tokens are ordinary filter text, so Enter takes
+    /// whatever the fuzzy list highlights. What must not happen is a walk
+    /// action running with no walk to run it against.
+    #[test]
+    fn conditional_tokens_reach_no_walk_action_outside_their_context() {
+        for token in ["next", "prev", "done"] {
+            let mut h = Stoat::test();
+            let dispatched = palette_dispatch_name(&mut h, &format!(":{token}"));
+            assert!(
+                !matches!(
+                    dispatched,
+                    Some("ReviewNextCommit" | "ReviewPrevCommit" | "ReviewDone")
+                ),
+                "{token} dispatched {dispatched:?} without a walk"
+            );
+        }
+    }
+
+    #[test]
+    fn the_active_scope_lists_walk_actions_only_during_a_walk() {
+        let walking = Availability {
+            review_walk_open: true,
+            ..Availability::default()
+        };
+        let listed = action_names_for_scope("review", PaletteScope::Active, &walking);
+        assert!(listed.contains(&"ReviewNextCommit"));
+
+        let idle = action_names_for_scope("review", PaletteScope::Active, &Availability::default());
+        assert!(
+            !idle.contains(&"ReviewNextCommit"),
+            "outside a walk the Active scope hides it"
+        );
+    }
+
+    /// History stores the resolved command, not the token, so a recalled line
+    /// replays as that command whatever the context is at recall time.
+    #[test]
+    fn a_conditional_token_is_recorded_as_its_command() {
+        let mut h = walking_harness();
+        h.type_text(":next");
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let ws = h.stoat.active_workspace_mut();
+        let PaletteOutcome::Dispatch(_, _, line) = palette.handle_submit(ws) else {
+            panic!("next must dispatch during a walk");
+        };
+        assert_eq!(line, "ReviewNextCommit");
+        assert_eq!(
+            registry::lookup_alias(&line).map(|e| e.def.name()),
+            Some("ReviewNextCommit"),
+            "the recorded line re-resolves without needing the walk context"
+        );
     }
 
     #[test]
