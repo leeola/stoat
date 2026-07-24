@@ -21,7 +21,7 @@ use cosmic_text::{
 use rustc_hash::FxHashMap;
 use std::{mem, sync::Arc};
 use stoatty_term::{
-    grid::{Cell, Grid, Overlay, Panel, Rgb, Scale, UnderlineStyle},
+    grid::{Cell, Grid, Overlay, Panel, Rgb, Scale, ScrollRegion, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -201,6 +201,10 @@ pub struct TextPass {
     /// pool composite between frames, or an eviction (which reuses a slot without
     /// moving the texture size). Persisting the epoch heals those cached rows on
     /// the next prepare.
+    ///
+    /// This records the epoch the *settled* atlas reached, after any in-frame
+    /// re-resolve. A build that moved the atlas itself is healed within the same
+    /// prepare, so this value never has to signal a rebuild the next frame owes.
     grid_atlas_epoch: u64,
     overlay_instances: Buffer,
     overlay_capacity: usize,
@@ -839,13 +843,13 @@ impl TextPass {
         let (text_run_instances, run_rects) = if runs_unchanged {
             (None, None)
         } else {
-            let atlas_dims = self.atlas.texture_dims();
+            let epoch_at_build = self.atlas.content_epoch();
             let mut instances = self.build_text_run_instances(device, queue, grid);
-            // Packing a run glyph can grow the atlas, rescaling the UVs the
-            // instances already emitted this pass froze. Every run glyph is
-            // resident after the first pass, so a second one reads final UVs
-            // without growing again.
-            if self.atlas.texture_dims() != atlas_dims {
+            // Packing a run glyph can move the UVs the instances already emitted
+            // this pass froze. An eviction reuses a slot without resizing the
+            // texture, so only the content epoch reveals it. Every run glyph is
+            // resident after the first pass, so a second one reads final UVs.
+            if self.atlas.content_epoch() != epoch_at_build {
                 instances = self.build_text_run_instances(device, queue, grid);
             }
             let rects = self.build_run_rects(grid);
@@ -866,54 +870,20 @@ impl TextPass {
         );
 
         if build != GridBuild::Reuse {
-            match region {
-                // A scroll region splits each row's glyphs across the plain and
-                // region buffers, so build the whole grid and drop the per-row
-                // cache; the next region-free frame rebuilds it. Regions are rare,
-                // so this falls back rather than tracking the split per row.
-                Some(region) => {
-                    let mut plain_pending = mem::take(&mut self.plain_pending_scratch);
-                    let mut region_pending = mem::take(&mut self.region_pending_scratch);
-                    plain_pending.clear();
-                    region_pending.clear();
-                    for glyph in self.glyph_row_cache.iter().flatten() {
-                        if region.contains(glyph.row, glyph.col) {
-                            region_pending.push(*glyph);
-                        } else {
-                            plain_pending.push(*glyph);
-                        }
-                    }
-
-                    let plain_instances = self.build_text_instances(device, queue, &plain_pending);
-                    let region_instances =
-                        self.build_text_instances(device, queue, &region_pending);
-
-                    self.count = plain_instances.len() as u32;
-                    self.region_count = region_instances.len() as u32;
-                    upload_instances(
-                        device,
-                        queue,
-                        &plain_instances,
-                        &mut self.instances,
-                        &mut self.capacity,
-                        "text instances",
-                    );
-                    upload_instances(
-                        device,
-                        queue,
-                        &region_instances,
-                        &mut self.region_instances,
-                        &mut self.region_capacity,
-                        "scroll region text instances",
-                    );
-                    self.plain_row_instances.clear();
-                    self.plain_pending_scratch = plain_pending;
-                    self.region_pending_scratch = region_pending;
-                },
-                None => {
-                    let rebuild_all = build == GridBuild::RebuildAll;
-                    self.patch_plain_rows(device, queue, &rebuilt, rebuild_all);
-                },
+            let epoch_at_build = self.atlas.content_epoch();
+            self.build_grid_instances(
+                device,
+                queue,
+                region,
+                &rebuilt,
+                build == GridBuild::RebuildAll,
+            );
+            // Resolving a row re-packs any glyph evicted on an earlier frame,
+            // which moves every UV partway through the pass and leaves the rows
+            // resolved before it holding pre-move ones. Every grid glyph is
+            // resident after the first pass, so a second one settles them all.
+            if self.atlas.content_epoch() != epoch_at_build {
+                self.build_grid_instances(device, queue, region, &rebuilt, true);
             }
             // Both arms resolved every grid glyph against the current atlas, so
             // record the epoch they built against for the next frame's compare.
@@ -1829,6 +1799,67 @@ impl TextPass {
     #[cfg(test)]
     fn collect_grid_glyphs(&self) -> Vec<PendingGlyph> {
         self.glyph_row_cache.iter().flatten().copied().collect()
+    }
+
+    /// Resolve the cached grid glyphs into instance buffers against the atlas as
+    /// it currently stands.
+    ///
+    /// Idempotent, so `prepare` can run it a second time when the resolve itself
+    /// moved the atlas. `rebuild_all` reaches only the region-free arm. A region
+    /// splits every row across two buffers, so that arm always rebuilds whole.
+    fn build_grid_instances(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        region: Option<ScrollRegion>,
+        rebuilt: &[usize],
+        rebuild_all: bool,
+    ) {
+        match region {
+            // A scroll region splits each row's glyphs across the plain and
+            // region buffers, so build the whole grid and drop the per-row
+            // cache; the next region-free frame rebuilds it. Regions are rare,
+            // so this falls back rather than tracking the split per row.
+            Some(region) => {
+                let mut plain_pending = mem::take(&mut self.plain_pending_scratch);
+                let mut region_pending = mem::take(&mut self.region_pending_scratch);
+                plain_pending.clear();
+                region_pending.clear();
+                for glyph in self.glyph_row_cache.iter().flatten() {
+                    if region.contains(glyph.row, glyph.col) {
+                        region_pending.push(*glyph);
+                    } else {
+                        plain_pending.push(*glyph);
+                    }
+                }
+
+                let plain_instances = self.build_text_instances(device, queue, &plain_pending);
+                let region_instances = self.build_text_instances(device, queue, &region_pending);
+
+                self.count = plain_instances.len() as u32;
+                self.region_count = region_instances.len() as u32;
+                upload_instances(
+                    device,
+                    queue,
+                    &plain_instances,
+                    &mut self.instances,
+                    &mut self.capacity,
+                    "text instances",
+                );
+                upload_instances(
+                    device,
+                    queue,
+                    &region_instances,
+                    &mut self.region_instances,
+                    &mut self.region_capacity,
+                    "scroll region text instances",
+                );
+                self.plain_row_instances.clear();
+                self.plain_pending_scratch = plain_pending;
+                self.region_pending_scratch = region_pending;
+            },
+            None => self.patch_plain_rows(device, queue, rebuilt, rebuild_all),
+        }
     }
 
     /// Rebuild and re-upload only the changed rows' plain-glyph instances.

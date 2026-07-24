@@ -1134,12 +1134,6 @@ impl GpuContext {
         let cursor_corners = frame.cursor_corners;
         let cursor_scroll = frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback;
 
-        // The live buffers are drawn against the atlas as it stands now. A pool
-        // composite below can grow or evict from it, moving every UV, so capture
-        // the epoch first to tell afterward whether the buffers just drawn have
-        // gone stale.
-        let epoch_before = self.renderer.content_epoch();
-
         // The pool composites paint over the cursor's cell, so the base draws
         // without its cursor block and the block is drawn on top afterward. The
         // ligature-break cell (`frame.cursor`) stays, keeping the live grid's
@@ -1154,6 +1148,12 @@ impl GpuContext {
                 ..frame
             },
         );
+        // The live build above heals any atlas movement it caused before it
+        // returns, so its buffers are settled here. Capture the epoch now, after
+        // that draw, so the compare below reports pool-composite movement alone
+        // rather than firing on every frame that packs a new live glyph.
+        let epoch_before = self.renderer.content_epoch();
+
         let panels = live_grid.panels();
         for pool in pools {
             self.renderer.composite_pool(
