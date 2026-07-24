@@ -1421,6 +1421,28 @@ mod tests {
     }
 
     #[test]
+    fn gruvbox_light_is_selectable_as_a_builtin() {
+        use crate::theme::scope::UI_BACKGROUND;
+        use ratatui::style::Color;
+
+        let mut stoat = stoat_with_config(None);
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "gruvbox-light".to_string(),
+            },
+        );
+
+        assert_eq!(stoat.theme.name, "gruvbox-light");
+        assert_eq!(
+            stoat.theme.get(UI_BACKGROUND).bg,
+            Some(Color::Rgb(0xfb, 0xf1, 0xc7)),
+            "the builtin carries its light background through the import",
+        );
+    }
+
+    #[test]
     fn a_theme_switch_pushes_its_colors_as_terminal_defaults() {
         let mut stoat = stoat_with_config(Some(
             "theme mine { ui.text.fg = \"#abcdef\"; ui.background.bg = \"#123456\"; }".to_string(),

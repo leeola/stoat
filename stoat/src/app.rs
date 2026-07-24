@@ -68,6 +68,7 @@ pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 pub(crate) const DEFAULT_STOATTY_CONFIG: &str = include_str!("../../stoatty.toml");
 const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
 const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
+const THEME_GRUVBOX_LIGHT: &str = include_str!("../../themes/gruvbox-light.json");
 
 /// Quiet window after the last filesystem-watch event for a path
 /// before [`ReviewExternalEdit`] dispatches. Mirrors
@@ -1330,6 +1331,7 @@ impl Stoat {
             let builtins = [
                 ("one-dark", THEME_ONE_DARK),
                 ("gruvbox-dark", THEME_GRUVBOX_DARK),
+                ("gruvbox-light", THEME_GRUVBOX_LIGHT),
             ];
             let sources = builtins
                 .into_iter()

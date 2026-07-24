@@ -16,10 +16,11 @@ use vscode_theme::{Rgba, VsCodeTheme};
 /// carries it without the source tree.
 const DEFAULT_CONFIG: &str = include_str!("../../stoatty.toml");
 
-/// The built-in VSCode themes, embedded so `theme = "one-dark"` and
-/// `theme = "gruvbox-dark"` resolve without any file on disk.
+/// The built-in VSCode themes, embedded so `theme = "one-dark"` and its
+/// siblings resolve without any file on disk.
 const THEME_ONE_DARK: &str = include_str!("../../themes/one-dark.json");
 const THEME_GRUVBOX_DARK: &str = include_str!("../../themes/gruvbox-dark.json");
+const THEME_GRUVBOX_LIGHT: &str = include_str!("../../themes/gruvbox-light.json");
 
 /// The `terminal.ansi*` color keys in palette-index order, the 8 normal colors
 /// followed by the 8 bright ones.
@@ -388,6 +389,7 @@ fn builtin_vscode_themes() -> Vec<(String, String)> {
     vec![
         ("one-dark".to_string(), THEME_ONE_DARK.to_string()),
         ("gruvbox-dark".to_string(), THEME_GRUVBOX_DARK.to_string()),
+        ("gruvbox-light".to_string(), THEME_GRUVBOX_LIGHT.to_string()),
     ]
 }
 
@@ -612,6 +614,21 @@ mod tests {
             Rgb::new(0xfa, 0xfa, 0xfa),
             "ansi bright white"
         );
+    }
+
+    #[test]
+    fn gruvbox_light_resolves_as_a_builtin() {
+        let mut config = settle(DEFAULT_CONFIG, Some("theme = \"gruvbox-light\"\n")).unwrap();
+        config.vscode_themes = parse_vscode_themes(builtin_vscode_themes());
+        let theme = config.resolve_theme();
+
+        assert_eq!(
+            theme.background,
+            Rgb::new(0xfb, 0xf1, 0xc7),
+            "naming it in the config resolves without any file on disk",
+        );
+        assert_eq!(theme.foreground, Rgb::new(0x3c, 0x38, 0x36));
+        assert_eq!(theme.ansi[9], Rgb::new(0x9d, 0x00, 0x06), "ansi bright red");
     }
 
     #[test]

@@ -421,5 +421,27 @@ mod tests {
             gruvbox.colors.get("terminal.ansiRed").map(String::as_str),
             Some("#cc241d")
         );
+
+        let gruvbox_light =
+            parse(include_str!("../../themes/gruvbox-light.json")).expect("gruvbox-light parses");
+        assert_eq!(gruvbox_light.name.as_deref(), Some("gruvbox-light"));
+        assert_eq!(
+            gruvbox_light
+                .colors
+                .get("editor.background")
+                .map(String::as_str),
+            Some("#fbf1c7"),
+            "the light variant reads light, not a copy of the dark background",
+        );
+        assert_eq!(
+            gruvbox_light.colors.len(),
+            gruvbox.colors.len(),
+            "the light variant mirrors the dark one's key set",
+        );
+        assert_eq!(
+            gruvbox_light.token_colors.len(),
+            gruvbox.token_colors.len(),
+            "and its token rules",
+        );
     }
 }
