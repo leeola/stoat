@@ -709,7 +709,7 @@ pub(crate) fn render_review_page_from_parts(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_conflict_page_from_parts(
     snapshot: &DisplaySnapshot,
-    state: &ConflictViewState,
+    state: &mut ConflictViewState,
     theme: &crate::theme::Theme,
     pool: u32,
     index: u64,
@@ -1340,7 +1340,7 @@ mod tests {
 
         let theme = Arc::new(h.stoat.theme.clone());
         let fallback = theme.get(scope::UI_TEXT);
-        let (snapshot, state) = {
+        let (snapshot, mut state) = {
             let editor =
                 crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
             (
@@ -1351,11 +1351,19 @@ mod tests {
 
         let area = Rect::new(0, 0, 150, 8);
         let mut expected = Buffer::empty(area);
-        render_conflict_rows(&snapshot, &state, 0, area, fallback, &theme, &mut expected);
+        render_conflict_rows(
+            &snapshot,
+            &mut state,
+            0,
+            area,
+            fallback,
+            &theme,
+            &mut expected,
+        );
         let expected = serialize_buffer(&expected);
 
         let got =
-            render_conflict_page_from_parts(&snapshot, &state, &theme, 7, 0, fallback, 150, 8);
+            render_conflict_page_from_parts(&snapshot, &mut state, &theme, 7, 0, fallback, 150, 8);
         assert!(
             got.windows(expected.len()).any(|w| w == expected),
             "the conflict page carries the live three-column body inside its fill frames",

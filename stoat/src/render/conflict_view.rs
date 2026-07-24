@@ -2,7 +2,7 @@ use crate::{
     conflict_session::ConflictViewState,
     display_map::{BlockRowKind, DisplaySnapshot},
     editor_state::EditorState,
-    merge_view::{ChunkState, MergeDoc, RowPick},
+    merge_view::{AlignRow, ChunkState, MergeDoc},
     render::review::{
         dim_rgb, fill_line_tint, paint_highlighted_row, render_empty_num, render_review_cursor,
         render_side_num, render_side_text, style_rgb,
@@ -10,7 +10,6 @@ use crate::{
     review::ReviewSide,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-use stoat_text::Anchor;
 
 /// At or above this inner width the ours and theirs columns keep a line-number
 /// gutter. Below it they drop it so their text has room to read.
@@ -106,7 +105,7 @@ pub(crate) fn render_conflict_view(
     let snapshot = editor.display_map.snapshot();
     let scroll_row = editor.scroll_row;
 
-    if let Some(state) = editor.conflict_view.as_ref() {
+    if let Some(state) = editor.conflict_view.as_mut() {
         render_conflict_rows(
             &snapshot,
             state,
@@ -141,7 +140,7 @@ pub(crate) fn render_conflict_view(
 /// page never carries one.
 pub(crate) fn render_conflict_rows(
     snapshot: &DisplaySnapshot,
-    state: &ConflictViewState,
+    state: &mut ConflictViewState,
     scroll_row: u32,
     inner: Rect,
     fallback_style: Style,
@@ -149,69 +148,19 @@ pub(crate) fn render_conflict_rows(
     buf: &mut Buffer,
 ) {
     let cols = ConflictColumns::compute(inner);
-    let chunk_center_rows = chunk_center_rows(snapshot, &state.chunk_anchors);
-    let chunk_states = chunk_states(snapshot, &state.doc, &state.chunk_anchors, &state.picks);
+    let (doc, derived) = state.derived(snapshot);
     paint_conflict_rows(
         snapshot,
         scroll_row,
         inner,
         &cols,
-        &state.doc,
-        &chunk_center_rows,
-        &chunk_states,
+        doc,
+        &derived.states,
+        &derived.plan,
         fallback_style,
         theme,
         buf,
     );
-}
-
-/// Resolve each chunk's anchors to the row span it currently occupies in the
-/// center buffer.
-///
-/// A pick reassembles a chunk's marker block into its chosen resolution, which
-/// is usually fewer rows, so the span shrinks. Sizing the side band to this live
-/// span rather than the original marker height keeps the ours and theirs columns
-/// aligned after a pick. Feeds [`crate::merge_view::MergeDoc::align`].
-fn chunk_center_rows(snapshot: &DisplaySnapshot, chunk_anchors: &[(Anchor, Anchor)]) -> Vec<usize> {
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    chunk_anchors
-        .iter()
-        .map(|(start, end)| {
-            let start_row = rope
-                .offset_to_point(buffer_snapshot.resolve_anchor(start))
-                .row;
-            let end_row = rope
-                .offset_to_point(buffer_snapshot.resolve_anchor(end))
-                .row;
-            end_row.saturating_sub(start_row) as usize
-        })
-        .collect()
-}
-
-/// Classify each chunk against its live center-region text so the gutter glyph
-/// and unresolved wash follow picks and hand edits.
-///
-/// The state is derived, never stored, so a buffer edit or undo can never leave
-/// the glyph disagreeing with the text. Feeds [`state_glyph`].
-fn chunk_states(
-    snapshot: &DisplaySnapshot,
-    doc: &MergeDoc,
-    chunk_anchors: &[(Anchor, Anchor)],
-    picks: &[Vec<RowPick>],
-) -> Vec<ChunkState> {
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    chunk_anchors
-        .iter()
-        .enumerate()
-        .map(|(i, (start, end))| {
-            let start = buffer_snapshot.resolve_anchor(start);
-            let end = buffer_snapshot.resolve_anchor(end);
-            let region_text: String = rope.chunks_in_range(start..end).collect();
-            doc.chunks[i].classify(&doc.rows, &picks[i], &region_text)
-        })
-        .collect()
 }
 
 /// The one-cell gutter marker for a chunk's resolution state.
@@ -234,8 +183,8 @@ fn paint_conflict_rows(
     inner: Rect,
     cols: &ConflictColumns,
     doc: &MergeDoc,
-    chunk_center_rows: &[usize],
     chunk_states: &[ChunkState],
+    plan: &[AlignRow],
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
@@ -256,7 +205,6 @@ fn paint_conflict_rows(
         }
     };
 
-    let plan = doc.align(chunk_center_rows);
     let total = snapshot.line_count();
     let end_row = (scroll_row + inner.height as u32).min(total);
     if end_row <= scroll_row {
@@ -313,7 +261,7 @@ fn paint_conflict_rows(
                 cols.ours_num_x,
                 cols.ours_text_x,
                 y,
-                row.ours,
+                row.ours.and_then(|i| doc.rows[i].ours.as_ref()),
                 cols.side_w,
                 cols.side_nums,
                 fallback_style,
@@ -325,7 +273,7 @@ fn paint_conflict_rows(
                 cols.theirs_num_x,
                 cols.theirs_text_x,
                 y,
-                row.theirs,
+                row.theirs.and_then(|i| doc.rows[i].theirs.as_ref()),
                 cols.side_w,
                 cols.side_nums,
                 fallback_style,
@@ -418,6 +366,87 @@ mod tests {
                 (ours, center, theirs)
             })
             .collect()
+    }
+
+    /// The focused editor's conflict state paired with a snapshot of its center
+    /// buffer, which is what `derived` is keyed on.
+    fn view_and_snapshot(
+        h: &mut TestHarness,
+    ) -> (
+        crate::conflict_session::ConflictViewState,
+        crate::display_map::DisplaySnapshot,
+    ) {
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+        (
+            editor.conflict_view.clone().expect("conflict view"),
+            editor.display_map.snapshot(),
+        )
+    }
+
+    /// A rebuild allocates a fresh plan, so a stable pointer is proof the cached
+    /// one was handed back rather than recomputed.
+    fn plan_ptr(
+        state: &mut crate::conflict_session::ConflictViewState,
+        snap: &crate::display_map::DisplaySnapshot,
+    ) -> *const crate::merge_view::AlignRow {
+        state.derived(snap).1.plan.as_ptr()
+    }
+
+    #[test]
+    fn derived_layout_is_reused_while_the_buffer_holds() {
+        let mut h = conflict_harness(150, "a\nbase\nz\n", "a\nOURS\nz\n", "a\nTHEIRS\nz\n");
+        let (mut state, snap) = view_and_snapshot(&mut h);
+
+        let first = plan_ptr(&mut state, &snap);
+        assert_eq!(
+            plan_ptr(&mut state, &snap),
+            first,
+            "a second paint against the same snapshot reuses the derived layout",
+        );
+    }
+
+    #[test]
+    fn an_edit_to_the_center_forces_a_recompute() {
+        let mut h = conflict_harness(150, "a\nbase\nz\n", "a\nOURS\nz\n", "a\nTHEIRS\nz\n");
+        let (mut state, before) = view_and_snapshot(&mut h);
+        let stale = plan_ptr(&mut state, &before);
+
+        h.type_keys("i");
+        h.type_text("edited");
+        h.type_keys("escape");
+
+        let (_, after) = view_and_snapshot(&mut h);
+        assert_ne!(
+            plan_ptr(&mut state, &after),
+            stale,
+            "a changed buffer version rebuilds rather than reusing",
+        );
+
+        let mut scratch = state.clone();
+        scratch.invalidate_derived();
+        assert_eq!(
+            state.derived(&after).1.states,
+            scratch.derived(&after).1.states,
+            "the rebuilt states match a from-scratch classification",
+        );
+    }
+
+    #[test]
+    fn a_pick_forces_a_recompute() {
+        let mut h = conflict_harness(150, "a\nbase\nz\n", "a\nOURS\nz\n", "a\nTHEIRS\nz\n");
+        let (mut state, snap) = view_and_snapshot(&mut h);
+        let before = state.derived(&snap).1.states.clone();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ConflictPickOurs);
+        h.settle();
+
+        let (mut picked, after) = view_and_snapshot(&mut h);
+        assert_ne!(
+            picked.derived(&after).1.states,
+            before,
+            "the pick's new chunk state reaches the painter rather than a stale one",
+        );
     }
 
     #[test]

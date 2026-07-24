@@ -200,20 +200,22 @@ impl MergeDoc {
     /// taller side still emits a row per side line. The rows past the center
     /// span line up with the padding blocks the view installs to make room. A
     /// missing entry falls back to the marker or auto-resolution height.
-    pub(crate) fn align(&self, chunk_center_rows: &[usize]) -> Vec<AlignRow<'_>> {
+    pub(crate) fn align(&self, chunk_center_rows: &[usize]) -> Vec<AlignRow> {
         let mut plan = Vec::new();
         let mut chunk_idx = 0;
         let mut i = 0;
         while i < self.rows.len() {
             if chunk_idx < self.chunks.len() && self.chunks[chunk_idx].row_range.start == i {
                 let chunk = &self.chunks[chunk_idx];
-                let ours: Vec<&ReviewSide> = self.rows[chunk.row_range.clone()]
-                    .iter()
-                    .filter_map(|r| r.ours.as_ref())
+                let ours: Vec<usize> = chunk
+                    .row_range
+                    .clone()
+                    .filter(|&j| self.rows[j].ours.is_some())
                     .collect();
-                let theirs: Vec<&ReviewSide> = self.rows[chunk.row_range.clone()]
-                    .iter()
-                    .filter_map(|r| r.theirs.as_ref())
+                let theirs: Vec<usize> = chunk
+                    .row_range
+                    .clone()
+                    .filter(|&j| self.rows[j].theirs.is_some())
                     .collect();
                 let center_lines = match &chunk.auto {
                     Some(auto) => auto.lines.len(),
@@ -241,8 +243,8 @@ impl MergeDoc {
             let row = &self.rows[i];
             if auto_merge_line(row).is_some() {
                 plan.push(AlignRow {
-                    ours: row.ours.as_ref(),
-                    theirs: row.theirs.as_ref(),
+                    ours: row.ours.as_ref().map(|_| i),
+                    theirs: row.theirs.as_ref().map(|_| i),
                     chunk: None,
                 });
             }
@@ -254,9 +256,15 @@ impl MergeDoc {
 
 /// One center line of a [`MergeDoc`] paired with the ours and theirs side
 /// content the three-column conflict view aligns beside it.
-pub(crate) struct AlignRow<'a> {
-    pub(crate) ours: Option<&'a ReviewSide>,
-    pub(crate) theirs: Option<&'a ReviewSide>,
+///
+/// The sides are recorded as indices into [`MergeDoc::rows`] rather than
+/// borrows of it, so a plan can be cached alongside the doc it describes
+/// instead of borrowing from it. Resolve one with
+/// `doc.rows[i].ours.as_ref()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AlignRow {
+    pub(crate) ours: Option<usize>,
+    pub(crate) theirs: Option<usize>,
     /// Index into [`MergeDoc::chunks`] when this line sits in a conflict band.
     pub(crate) chunk: Option<usize>,
 }

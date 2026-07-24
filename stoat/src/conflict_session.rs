@@ -1,6 +1,7 @@
 use crate::{
+    display_map::DisplaySnapshot,
     editor_state::EditorId,
-    merge_view::{MergeDoc, RowPick},
+    merge_view::{AlignRow, ChunkState, MergeDoc, RowPick},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -90,6 +91,128 @@ pub(crate) struct ConflictViewState {
     pub(crate) file_index: usize,
     pub(crate) file_count: usize,
     pub(crate) rel_path: String,
+    /// Layout and chunk classification derived from the center buffer, rebuilt
+    /// only when that buffer or [`Self::picks`] changes. See [`Self::derived`].
+    derived: Option<ConflictDerived>,
+}
+
+/// Everything the three-column painter needs that falls out of the center
+/// buffer's current contents rather than being stored.
+///
+/// Deriving it costs four anchor resolutions and a whole-region `String` per
+/// chunk, for every chunk in the file rather than just the visible ones, so it
+/// is far too expensive to repeat per frame. `buffer_version` keys the cache to
+/// the snapshot it was built from, which keeps the derived-never-stored
+/// guarantee intact. A classification can never outlive the text that produced
+/// it, so an edit or undo cannot leave a gutter glyph disagreeing with the
+/// lines beside it.
+#[derive(Clone)]
+pub(crate) struct ConflictDerived {
+    buffer_version: u64,
+    pub(crate) states: Vec<ChunkState>,
+    pub(crate) plan: Vec<AlignRow>,
+}
+
+impl ConflictViewState {
+    pub(crate) fn new(
+        doc: MergeDoc,
+        chunk_anchors: Vec<(Anchor, Anchor)>,
+        picks: Vec<Vec<RowPick>>,
+        file_index: usize,
+        file_count: usize,
+        rel_path: String,
+    ) -> Self {
+        Self {
+            doc,
+            chunk_anchors,
+            picks,
+            file_index,
+            file_count,
+            rel_path,
+            derived: None,
+        }
+    }
+
+    /// The merge doc paired with its derived layout for `snapshot`, rebuilding
+    /// the layout only when the center buffer has changed since the last call.
+    ///
+    /// The doc rides along because every consumer needs both and the rebuild
+    /// takes `&mut self`, so handing them back together is what lets a caller
+    /// hold the two at once.
+    ///
+    /// A pick can rewrite a region to the same text it already held, leaving the
+    /// version untouched, so the pick site clears the cache outright rather than
+    /// relying on the version to notice.
+    pub(crate) fn derived(&mut self, snapshot: &DisplaySnapshot) -> (&MergeDoc, &ConflictDerived) {
+        let version = snapshot.buffer_snapshot().version();
+        if self
+            .derived
+            .as_ref()
+            .is_none_or(|d| d.buffer_version != version)
+        {
+            let states = chunk_states(snapshot, &self.doc, &self.chunk_anchors, &self.picks);
+            let plan = self
+                .doc
+                .align(&chunk_center_rows(snapshot, &self.chunk_anchors));
+            self.derived = Some(ConflictDerived {
+                buffer_version: version,
+                states,
+                plan,
+            });
+        }
+        (&self.doc, self.derived.as_ref().expect("just populated"))
+    }
+
+    /// Drop the derived layout so the next paint rebuilds it.
+    pub(crate) fn invalidate_derived(&mut self) {
+        self.derived = None;
+    }
+}
+
+/// Resolve each chunk's anchors to the row span it currently occupies in the
+/// center buffer.
+///
+/// A pick reassembles a chunk's marker block into its chosen resolution, which
+/// is usually fewer rows, so the span shrinks. Sizing the side band to this live
+/// span rather than the original marker height keeps the ours and theirs columns
+/// aligned after a pick. Feeds [`MergeDoc::align`].
+fn chunk_center_rows(snapshot: &DisplaySnapshot, chunk_anchors: &[(Anchor, Anchor)]) -> Vec<usize> {
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    chunk_anchors
+        .iter()
+        .map(|(start, end)| {
+            let start_row = rope
+                .offset_to_point(buffer_snapshot.resolve_anchor(start))
+                .row;
+            let end_row = rope
+                .offset_to_point(buffer_snapshot.resolve_anchor(end))
+                .row;
+            end_row.saturating_sub(start_row) as usize
+        })
+        .collect()
+}
+
+/// Classify each chunk against its live center-region text so the gutter glyph
+/// and unresolved wash follow picks and hand edits.
+fn chunk_states(
+    snapshot: &DisplaySnapshot,
+    doc: &MergeDoc,
+    chunk_anchors: &[(Anchor, Anchor)],
+    picks: &[Vec<RowPick>],
+) -> Vec<ChunkState> {
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    chunk_anchors
+        .iter()
+        .enumerate()
+        .map(|(i, (start, end))| {
+            let start = buffer_snapshot.resolve_anchor(start);
+            let end = buffer_snapshot.resolve_anchor(end);
+            let region_text: String = rope.chunks_in_range(start..end).collect();
+            doc.chunks[i].classify(&doc.rows, &picks[i], &region_text)
+        })
+        .collect()
 }
 
 #[cfg(test)]

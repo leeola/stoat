@@ -166,14 +166,14 @@ fn prepare_file(
         .collect();
 
     let mut editor = EditorState::new(buffer_id, buffer, executor);
-    editor.conflict_view = Some(ConflictViewState {
-        doc: doc.clone(),
-        chunk_anchors: chunk_anchors.clone(),
-        picks: picks.clone(),
-        file_index: index,
+    editor.conflict_view = Some(ConflictViewState::new(
+        doc.clone(),
+        chunk_anchors.clone(),
+        picks.clone(),
+        index,
         file_count,
         rel_path,
-    });
+    ));
     let editor_id = ws.editors.insert(editor);
 
     Some((
@@ -824,6 +824,9 @@ fn apply_resolution(
         .and_then(|editor| editor.conflict_view.as_mut())
     {
         view.picks[chunk_idx] = picks;
+        // A pick can reassemble a region to text it already held, leaving the
+        // buffer version unmoved, so the version key alone would miss it.
+        view.invalidate_derived();
     }
 
     refresh_padding(stoat, editor_id);

@@ -8237,14 +8237,14 @@ impl Stoat {
                     let ConflictFillParts { state, theme } = *parts;
                     for index in pages {
                         let snapshot = snapshot.clone();
-                        let state = state.clone();
+                        let mut state = state.clone();
                         let theme = theme.clone();
                         let apc_tx = apc_tx.clone();
                         self.executor
                             .spawn_blocking(move || {
                                 let fill = crate::smooth_scroll::render_conflict_page_from_parts(
                                     &snapshot,
-                                    &state,
+                                    &mut state,
                                     &theme,
                                     pool,
                                     index,
@@ -15128,7 +15128,7 @@ mod tests {
             .expect("the conflict pane declares a pool region");
         let theme = Arc::new(h.stoat.theme.clone());
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
-        let (snapshot, state) = {
+        let (snapshot, mut state) = {
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
             (
                 editor.display_map.snapshot(),
@@ -15138,7 +15138,15 @@ mod tests {
 
         let area = Rect::new(0, 0, region.width, region.height);
         let mut expected = Buffer::empty(area);
-        render_conflict_rows(&snapshot, &state, 0, area, fallback, &theme, &mut expected);
+        render_conflict_rows(
+            &snapshot,
+            &mut state,
+            0,
+            area,
+            fallback,
+            &theme,
+            &mut expected,
+        );
         let expected = crate::smooth_scroll::serialize_buffer(&expected);
 
         let mut fills = Vec::new();
