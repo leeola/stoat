@@ -137,6 +137,20 @@ impl HighlightStyleInterner {
         self.styles.push(style);
         HighlightStyleId(id)
     }
+
+    /// Append `style` and return its id, never reusing an existing entry.
+    ///
+    /// For interners built one entry per fixed table slot, where an id has to
+    /// mean the same slot in every interner built that way. Deduping would
+    /// break that. Whether two slots collapse onto one id depends on whether
+    /// those slots happen to share a style, which differs from theme to theme,
+    /// so an id recorded under one theme would index a different slot under the
+    /// next.
+    pub fn push(&mut self, style: HighlightStyle) -> HighlightStyleId {
+        let id = self.styles.len() as u32;
+        self.styles.push(style);
+        HighlightStyleId(id)
+    }
 }
 
 impl std::ops::Index<HighlightStyleId> for HighlightStyleInterner {

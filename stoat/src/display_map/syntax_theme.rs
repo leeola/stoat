@@ -80,6 +80,15 @@ pub(crate) fn theme_scope_for_id(id: HighlightId) -> Option<String> {
         .map(|key| theme_scope_for_key(key))
 }
 
+/// The active theme's syntax colors, as one interned style per [`THEME_KEYS`]
+/// stem.
+///
+/// Style ids mean the same stem under every theme. The interner holds exactly
+/// `THEME_KEYS.len()` styles, and [`Self::id_for_highlight`] on `HighlightId(i)`
+/// is always `HighlightStyleId(i)`. Token highlights anchored in a buffer
+/// outlive the theme they were produced under, so an id has to keep naming the
+/// same stem after a switch. That is what lets a theme change swap the retained
+/// interner instead of re-deriving every token.
 #[derive(Clone)]
 pub struct SyntaxStyles {
     pub interner: Arc<HighlightStyleInterner>,
@@ -103,7 +112,7 @@ impl SyntaxStyles {
             .map(|key| {
                 let scope = theme_scope_for_key(key);
                 let style = theme.get(&scope);
-                interner.intern(style_to_highlight_style(&style))
+                interner.push(style_to_highlight_style(&style))
             })
             .collect();
         Self {
@@ -203,6 +212,7 @@ impl DiffTheme {
 mod tests {
     use super::{theme_scope_for_key, DiffTheme, SyntaxStyles, THEME_KEYS};
     use crate::theme::Theme;
+    use std::collections::HashSet;
     use stoat_config::parse;
     use stoat_language::HighlightId;
 
@@ -216,6 +226,56 @@ mod tests {
     fn id_for_highlight_returns_none_for_default() {
         let styles = SyntaxStyles::from_theme(&Theme::empty());
         assert!(styles.id_for_highlight(HighlightId::DEFAULT).is_none());
+    }
+
+    #[test]
+    fn style_ids_match_across_themes() {
+        let two_colors = SyntaxStyles::from_theme(&theme_from(
+            r##"theme t {
+                syntax.keyword.fg = blue;
+                syntax.string.fg = green;
+            }"##,
+        ));
+        let one_color = SyntaxStyles::from_theme(&theme_from(
+            r##"theme t {
+                syntax.keyword.fg = red;
+                syntax.string.fg = red;
+            }"##,
+        ));
+
+        let keyword = HighlightId(THEME_KEYS.iter().position(|k| *k == "keyword").unwrap() as u32);
+        assert_ne!(
+            two_colors.interner[two_colors.id_for_highlight(keyword).unwrap()],
+            one_color.interner[one_color.id_for_highlight(keyword).unwrap()],
+            "themes must resolve keyword differently for this comparison to mean anything"
+        );
+
+        for (idx, key) in THEME_KEYS.iter().enumerate() {
+            let id = HighlightId(idx as u32);
+            assert_eq!(
+                two_colors.id_for_highlight(id),
+                one_color.id_for_highlight(id),
+                "{key} must carry the same id under both themes"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_keys_sharing_a_style_keep_distinct_ids() {
+        let styles = SyntaxStyles::from_theme(&Theme::empty());
+        let ids = (0..THEME_KEYS.len())
+            .map(|idx| {
+                styles
+                    .id_for_highlight(HighlightId(idx as u32))
+                    .expect("every theme key must resolve")
+            })
+            .collect::<HashSet<_>>();
+
+        assert_eq!(
+            ids.len(),
+            THEME_KEYS.len(),
+            "an unstyled theme gives every key the same style, but each still needs its own id"
+        );
     }
 
     #[test]
@@ -293,10 +353,7 @@ mod tests {
             theme.color_for(DiffStatus::Moved).unwrap(),
         ];
         assert_eq!(
-            colors
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
+            colors.iter().collect::<HashSet<_>>().len(),
             3,
             "Added/Modified/Moved must be visually distinct"
         );
