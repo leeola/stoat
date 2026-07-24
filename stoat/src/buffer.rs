@@ -910,8 +910,98 @@ impl TextBufferSnapshot {
         (item, start.1)
     }
 
+    /// Resolve a batch of anchors to byte offsets in two forward passes.
+    ///
+    /// Equivalent to [`Self::resolve_anchor`] on each, but advances one cursor
+    /// per tree over the anchors sorted into that tree's key order rather than
+    /// seeking from the root twice per anchor. Results come back in input order.
+    ///
+    /// The two passes are separate because the trees are keyed differently. An
+    /// anchor's insertion key says nothing about where its fragment sorts, so
+    /// the whole set has to be resolved to fragment ids before the second walk
+    /// can visit them in Locator order.
     pub fn resolve_anchors_batch(&self, anchors: &[Anchor]) -> Vec<usize> {
-        anchors.iter().map(|a| self.resolve_anchor(a)).collect()
+        let mut results = vec![0usize; anchors.len()];
+
+        // Anchors needing a real lookup, paired with their input index. The
+        // sentinels answer without touching either tree.
+        let mut pending: Vec<usize> = Vec::with_capacity(anchors.len());
+        for (i, anchor) in anchors.iter().enumerate() {
+            if anchor.is_min() {
+                results[i] = 0;
+            } else if anchor.is_max() {
+                results[i] = self.visible_text.len();
+            } else {
+                pending.push(i);
+            }
+        }
+        if pending.is_empty() {
+            return results;
+        }
+
+        // Left before Right at an equal key, so the cursor only ever advances.
+        pending.sort_unstable_by_key(|&i| {
+            let a = &anchors[i];
+            (a.timestamp, a.offset, a.bias)
+        });
+
+        let mut fragment_ids: Vec<(usize, Locator)> = Vec::with_capacity(pending.len());
+        {
+            let mut cursor = self.insertions.cursor::<InsertionFragmentKey>(());
+            for &i in &pending {
+                let anchor = &anchors[i];
+                let key = InsertionFragmentKey {
+                    timestamp: anchor.timestamp,
+                    split_offset: anchor.offset,
+                };
+                cursor.seek_forward(&key, anchor.bias);
+
+                let fragment_id = match cursor.item() {
+                    Some(insertion) => {
+                        let ins_key = InsertionFragmentKey {
+                            timestamp: insertion.timestamp,
+                            split_offset: insertion.split_offset,
+                        };
+                        if ins_key > key
+                            || (anchor.bias == Bias::Left && ins_key == key && anchor.offset > 0)
+                        {
+                            match cursor.prev_item() {
+                                Some(p) => p.fragment_id.clone(),
+                                None => Locator::min_ref().clone(),
+                            }
+                        } else {
+                            insertion.fragment_id.clone()
+                        }
+                    },
+                    None => match self.insertions.last() {
+                        Some(ins) => ins.fragment_id.clone(),
+                        None => Locator::min_ref().clone(),
+                    },
+                };
+                fragment_ids.push((i, fragment_id));
+            }
+        }
+
+        fragment_ids.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let cx = &None;
+        let mut cursor = self
+            .fragments
+            .cursor::<Dimensions<Option<Locator>, usize>>(cx);
+        for (i, fragment_id) in fragment_ids {
+            let target = Some(fragment_id);
+            cursor.seek_forward(&target, Bias::Left);
+            let base_offset = cursor.start().1;
+            let anchor = &anchors[i];
+            results[i] = match cursor.item() {
+                Some(f) if f.visible => {
+                    base_offset + anchor.offset.saturating_sub(f.insertion_offset) as usize
+                },
+                _ => base_offset,
+            };
+        }
+
+        results
     }
 
     pub fn point_for_anchor(&self, anchor: &Anchor) -> Point {
@@ -1049,6 +1139,89 @@ mod tests {
                     "anchors_at_batch disagrees at offset {off} bias {bias:?}"
                 );
             }
+        }
+    }
+
+    /// A deterministic pseudo-random walk, so the fixture below fragments the
+    /// tree in a shape nobody hand-picked while staying reproducible.
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
+    }
+
+    /// `resolve_anchors_batch` must agree with `resolve_anchor` on every anchor,
+    /// including ones left inside regions a later edit deleted, since the two
+    /// walk the fragment trees by different routes.
+    #[test]
+    fn resolve_anchors_batch_matches_resolve_anchor() {
+        // A spread of seeds, since one tree shape can easily miss a boundary
+        // case in a cursor walk.
+        for seed in [0x5eed_1234, 0x0bad_c0de, 0x1357_9bdf, 7, 0xffff_0001] {
+            check_batch_matches_per_anchor(seed);
+        }
+    }
+
+    fn check_batch_matches_per_anchor(seed: u64) {
+        let mut b = buf("hello world\nsecond line\nthird line\nfourth line\n");
+        let mut seed = seed;
+
+        // Fragment the tree through a few dozen interleaved edits.
+        for _ in 0..30 {
+            let len = b.snapshot.visible_text.len();
+            let at = (lcg(&mut seed) as usize) % (len + 1);
+            if lcg(&mut seed).is_multiple_of(3) && at < len {
+                let end = (at + 1 + (lcg(&mut seed) as usize) % 5).min(len);
+                b.edit(at..end, "");
+            } else {
+                b.edit(at..at, "xy\n");
+            }
+        }
+
+        let mid = b.snapshot.clone();
+        let len = mid.visible_text.len();
+        let mut anchors = vec![
+            stoat_text::Anchor::min_for_buffer(BufferId::new(0)),
+            stoat_text::Anchor::max_for_buffer(BufferId::new(0)),
+        ];
+        for _ in 0..50 {
+            let off = (lcg(&mut seed) as usize) % (len + 1);
+            let bias = if lcg(&mut seed).is_multiple_of(2) {
+                Bias::Left
+            } else {
+                Bias::Right
+            };
+            anchors.push(mid.anchor_at(off, bias));
+        }
+
+        // More edits after anchoring, so some anchors now sit in deleted text.
+        for _ in 0..15 {
+            let len = b.snapshot.visible_text.len();
+            let at = (lcg(&mut seed) as usize) % (len + 1);
+            if at < len {
+                let end = (at + 1 + (lcg(&mut seed) as usize) % 7).min(len);
+                b.edit(at..end, "z");
+            } else {
+                b.edit(at..at, "tail\n");
+            }
+        }
+
+        let snap = b.snapshot.clone();
+        let expected: Vec<usize> = anchors.iter().map(|a| snap.resolve_anchor(a)).collect();
+        assert_eq!(
+            snap.resolve_anchors_batch(&anchors),
+            expected,
+            "the batch walk must land every anchor where the per-anchor seek does",
+        );
+
+        // A single-anchor batch and an empty one take the same routes.
+        assert!(snap.resolve_anchors_batch(&[]).is_empty());
+        for anchor in &anchors {
+            assert_eq!(
+                snap.resolve_anchors_batch(std::slice::from_ref(anchor)),
+                vec![snap.resolve_anchor(anchor)],
+            );
         }
     }
 
