@@ -139,7 +139,17 @@ fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> 
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let text = rope.to_string();
+    // The regex needs one flat &str, so reuse the last one taken at this
+    // version rather than re-flattening the whole file on every n/N.
+    let version = buffer_snapshot.version();
+    let text = match &editor.search_text_cache {
+        Some((cached, text)) if *cached == version => text.clone(),
+        _ => {
+            let text = std::sync::Arc::new(rope.to_string());
+            editor.search_text_cache = Some((version, text.clone()));
+            text
+        },
+    };
     let sel = editor.selections.newest_anchor();
     let cursor = stoat_text::cursor_offset(
         rope,
@@ -169,17 +179,21 @@ fn find_forward(regex: &regex::Regex, text: &str, head: usize, len: usize) -> Op
     next_match_at_or_after(regex, text, 0)
 }
 
+/// The last match starting before `head`, or the last in the file when there is
+/// none, so a reverse search wraps around.
+///
+/// One forward pass keeping the two candidates, since the file's other match
+/// starts are never consulted.
 fn find_reverse(regex: &regex::Regex, text: &str, head: usize) -> Option<usize> {
-    let starts: Vec<usize> = regex.find_iter(text).map(|m| m.start()).collect();
-    if starts.is_empty() {
-        return None;
+    let mut before = None;
+    let mut last = None;
+    for m in regex.find_iter(text) {
+        if m.start() < head {
+            before = Some(m.start());
+        }
+        last = Some(m.start());
     }
-    starts
-        .iter()
-        .rev()
-        .find(|&&pos| pos < head)
-        .copied()
-        .or_else(|| starts.last().copied())
+    before.or(last)
 }
 
 /// Finds the first regex match whose start is at or after `at`.
@@ -296,6 +310,83 @@ mod tests {
         assert_eq!(cursor_offset(&mut h), 8);
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
         assert_eq!(cursor_offset(&mut h), 0);
+    }
+
+    /// The buffer version the search text was flattened at, or `None` when
+    /// nothing is cached.
+    fn cached_text_version(h: &mut TestHarness) -> Option<u64> {
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .search_text_cache
+            .as_ref()
+            .map(|(version, _)| *version)
+    }
+
+    #[test]
+    fn repeat_jumps_reuse_the_flattened_buffer() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc xyz\n");
+        assert_eq!(
+            cached_text_version(&mut h),
+            None,
+            "nothing is flattened before a search runs"
+        );
+
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        let first = cached_text_version(&mut h).expect("the jump flattened the buffer");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+        assert_eq!(
+            cached_text_version(&mut h),
+            Some(first),
+            "a repeat on an unchanged buffer reuses the same flattening",
+        );
+    }
+
+    #[test]
+    fn an_edit_invalidates_the_flattened_buffer() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc xyz\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        let before = cached_text_version(&mut h).expect("the jump flattened the buffer");
+
+        h.type_keys("i");
+        h.type_text("zz");
+        h.type_keys("escape");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+
+        let after = cached_text_version(&mut h).expect("the repeat re-flattened");
+        assert_ne!(
+            after, before,
+            "an edit moves the version, so the stale text is not reused",
+        );
+    }
+
+    /// The reverse walk keeps only two candidates, so pin both the ordinary
+    /// pick and the wrap-around against a buffer with matches either side of
+    /// the cursor.
+    #[test]
+    fn find_reverse_picks_the_last_match_before_the_cursor() {
+        let regex = super::compile_search_regex("ab").expect("valid regex");
+        let text = "ab..ab..ab";
+
+        assert_eq!(
+            super::find_reverse(&regex, text, 8),
+            Some(4),
+            "the nearest match before the cursor wins, not the first or last",
+        );
+        assert_eq!(super::find_reverse(&regex, text, 9), Some(8));
+        assert_eq!(super::find_reverse(&regex, text, 5), Some(4));
+        assert_eq!(
+            super::find_reverse(&regex, text, 0),
+            Some(8),
+            "with nothing before the cursor it wraps to the last match",
+        );
+        assert_eq!(super::find_reverse(&regex, "nope", 2), None);
     }
 
     #[test]

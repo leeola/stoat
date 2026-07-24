@@ -132,6 +132,15 @@ pub(crate) struct EditorState {
     /// Cached search-match byte ranges for the current `(version, query)`.
     /// See [`SearchMatchCache`]. Transient render state, not persisted.
     pub(crate) search_match_cache: Option<SearchMatchCache>,
+    /// The buffer materialized as one string for regex search, keyed by the
+    /// snapshot version it was taken at.
+    ///
+    /// The regex crate matches over `&str`, so a jump has to flatten the rope
+    /// first. Without this every `/` submit and every n/N repeat re-allocates a
+    /// copy of the whole file. Byte offsets in the string equal rope offsets, so
+    /// a cached one is interchangeable with a fresh one. Transient, not
+    /// persisted.
+    pub(crate) search_text_cache: Option<(u64, std::sync::Arc<String>)>,
     /// Cached visible syntax-highlight endpoints, keyed by buffer version,
     /// highlight identity, and visible byte range. Lets `render_editor` reuse
     /// resolved endpoints across repaints that change none of those. Transient
@@ -214,6 +223,7 @@ impl EditorState {
             expansion_history: Vec::new(),
             expansion_tip: None,
             search_match_cache: None,
+            search_text_cache: None,
             highlight_endpoint_cache: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
@@ -251,6 +261,7 @@ impl EditorState {
             expansion_history: Vec::new(),
             expansion_tip: None,
             search_match_cache: None,
+            search_text_cache: None,
             highlight_endpoint_cache: None,
             hint_inlay_ids: Vec::new(),
             gutter_severity_cache: None,
