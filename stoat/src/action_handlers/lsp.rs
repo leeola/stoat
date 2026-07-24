@@ -9795,6 +9795,70 @@ mod tests {
         assert_eq!(lsp_token_count(&mut h), 1, "cached tokens are reinstalled");
     }
 
+    /// A cached reinstall after a theme switch paints the current theme.
+    ///
+    /// The cache is keyed by buffer version alone, so a switch with no edit
+    /// reinstalls the same tokens forever. Before the interners were swapped
+    /// that meant reinstalling the colors of whichever theme was active when
+    /// the response landed.
+    #[test]
+    fn a_cached_reinstall_after_a_theme_switch_uses_the_new_theme() {
+        use crate::display_map::syntax_theme;
+        use stoat_action::SetTheme;
+
+        let mut h = TestHarness::with_size(24, 4);
+        enable_semantic_tokens(&h);
+        let root = seed(&mut h, &[("a.rs", "let x = y\n")]);
+        let path = root.join("a.rs");
+
+        open_buffer(&mut h, path.clone());
+        one_full_token(&path)(&h);
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        assert_eq!(lsp_token_count(&mut h), 1);
+
+        let function = syntax_theme::highlight_id_for_key("function").expect("function is a key");
+        let color_now = |h: &mut TestHarness| {
+            let style_id = h
+                .stoat
+                .syntax_styles
+                .id_for_highlight(function)
+                .expect("function resolves");
+            let editor =
+                crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            let snapshot = editor.display_map.snapshot();
+            snapshot
+                .lsp_token_highlights()
+                .values()
+                .next()
+                .map(|channel| channel.interner[style_id].foreground)
+                .expect("a token channel is installed")
+        };
+        let before = color_now(&mut h);
+
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &SetTheme {
+                name: "gruvbox-light".to_string(),
+            },
+        );
+
+        // Force the version-hit path. The buffer is unedited, so the trigger
+        // reinstalls the cached tokens rather than asking the server again.
+        h.stoat.last_semantic_tokens_key = None;
+        super::semantic_tokens_trigger(&mut h.stoat);
+        assert!(
+            h.stoat.pending_semantic_tokens.is_none(),
+            "a version-current cache hit spawns no request"
+        );
+        assert_eq!(lsp_token_count(&mut h), 1, "cached tokens are reinstalled");
+        assert_ne!(
+            color_now(&mut h),
+            before,
+            "the reinstalled tokens carry the new theme's colors"
+        );
+    }
+
     /// Every scope stem the LSP mapping can emit is a key the shared theme
     /// table knows.
     ///

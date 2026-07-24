@@ -1069,14 +1069,28 @@ fn open_last_picker(stoat: &mut Stoat) -> UpdateEffect {
 /// On success the theme and its derived style tables are swapped and every
 /// minimap content store is dropped so each strip re-ships against the new
 /// palette. On failure the current theme is kept and a transient message names
-/// the problem. Per-language highlight maps are not rebuilt: they index the
-/// static theme-key table, so only the resolved colors change.
+/// the problem.
+///
+/// Per-language highlight maps are not rebuilt, because they index the static
+/// theme-key table and only the resolved colors change. For the same reason
+/// tokens already produced are recolored by pointing them at the new style
+/// table rather than by reparsing or re-requesting them, which would leave them
+/// showing the previous theme until an edit or a server response arrived.
 fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
     let all: Vec<_> = stoat.theme_blocks.iter().collect();
     match crate::theme::Theme::from_blocks(name, &all) {
         Ok(theme) => {
             stoat.theme = Arc::new(theme);
             stoat.syntax_styles = SyntaxStyles::from_theme(&stoat.theme);
+
+            let interner = stoat.syntax_styles.interner.clone();
+            for (_, ws) in stoat.workspaces.iter_mut() {
+                ws.buffers.swap_token_interners(&interner);
+                for editor in ws.editors.values_mut() {
+                    editor.display_map.swap_style_interner(&interner);
+                }
+            }
+
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
             stoat.minimap_content.clear();
             stoat.theme_epoch += 1;
@@ -1432,6 +1446,77 @@ mod tests {
         assert_eq!(
             stoat.theme.get(UI_TEXT).fg,
             Some(Color::Rgb(0xab, 0xcd, 0xef))
+        );
+    }
+
+    /// The foreground a retained tree-sitter token channel currently resolves
+    /// `keyword`-scoped tokens to, and how many tokens carry that scope.
+    fn keyword_channel_color(
+        h: &mut crate::test_harness::TestHarness,
+    ) -> (Option<ratatui::style::Color>, usize) {
+        let keyword = crate::display_map::syntax_theme::highlight_id_for_key("keyword")
+            .expect("keyword is a theme key");
+        let style_id = h
+            .stoat
+            .syntax_styles
+            .id_for_highlight(keyword)
+            .expect("keyword resolves");
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let channels = snapshot.semantic_token_highlights();
+        let color = channels
+            .values()
+            .next()
+            .map(|channel| channel.interner[style_id].foreground)
+            .unwrap_or_default();
+        let count = channels
+            .values()
+            .flat_map(|channel| channel.tokens.iter())
+            .filter(|token| token.style == style_id)
+            .count();
+        (color, count)
+    }
+
+    /// A theme switch recolors tokens already on screen, with no edit to force
+    /// a reparse. This is the reported bug: a keyword kept the previous theme's
+    /// color, and further switches never reset it.
+    #[test]
+    fn set_theme_recolors_retained_tree_sitter_tokens() {
+        let mut h = crate::test_harness::TestHarness::with_size(24, 4);
+        let path = std::path::PathBuf::from("/theme-swap/a.rs");
+        h.fake_fs()
+            .insert_files(std::iter::once((path.clone(), b"fn a() {}\n".as_slice())));
+        h.stoat.active_workspace_mut().git_root = "/theme-swap".into();
+        h.open_file(&path);
+        h.snapshot();
+
+        let (dark, count) = keyword_channel_color(&mut h);
+        assert!(count > 0, "the parse produced keyword-scoped tokens");
+
+        dispatch(
+            &mut h.stoat,
+            &SetTheme {
+                name: "gruvbox-light".to_string(),
+            },
+        );
+        let (light, after) = keyword_channel_color(&mut h);
+        assert_eq!(after, count, "the same tokens are retained, not dropped");
+        assert_ne!(
+            light, dark,
+            "the retained channel resolves keywords through the new theme"
+        );
+
+        dispatch(
+            &mut h.stoat,
+            &SetTheme {
+                name: "default_dark".to_string(),
+            },
+        );
+        assert_eq!(
+            keyword_channel_color(&mut h).0,
+            dark,
+            "switching back restores the original color rather than sticking"
         );
     }
 

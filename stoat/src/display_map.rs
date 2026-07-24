@@ -507,6 +507,34 @@ impl DisplayMap {
         self.highlights_dirty = true;
     }
 
+    /// Re-resolve every retained token channel through `interner`.
+    ///
+    /// Style ids are stable across themes, so a theme switch changes what a
+    /// token paints as without changing which scope it names. This recolors
+    /// tokens already on screen with no reparse and no fresh LSP request.
+    ///
+    /// The channel maps are rebuilt into new [`Arc`]s rather than mutated in
+    /// place, because [`CachedHighlightEndpoints`] validates by `Arc` pointer
+    /// and bakes a resolved style into each endpoint. `Arc::make_mut` would
+    /// only change that pointer while a second reference happens to exist, so
+    /// it would leave the cache serving the previous theme's colors whenever it
+    /// did not. Allocating unconditionally does not depend on a refcount that
+    /// nothing here guarantees.
+    pub fn swap_style_interner(&mut self, interner: &Arc<HighlightStyleInterner>) {
+        let reintern = |channels: &SemanticTokensHighlights| -> SemanticTokensHighlights {
+            Arc::new(
+                channels
+                    .iter()
+                    .map(|(id, channel)| (*id, channel.with_interner(interner.clone())))
+                    .collect(),
+            )
+        };
+
+        self.semantic_token_highlights = reintern(&self.semantic_token_highlights);
+        self.lsp_token_highlights = reintern(&self.lsp_token_highlights);
+        self.highlights_dirty = true;
+    }
+
     pub fn highlight_inlays(
         &mut self,
         key: HighlightKey,
@@ -1809,5 +1837,66 @@ mod tests {
         h.open_file(&path);
         h.fold_focused(Point::new(1, 7)..Point::new(1, 12));
         h.assert_snapshot("snapshot_open_rust_file_with_fold");
+    }
+
+    /// Swapping the interner reaches the painted chunks, not just the stored
+    /// channels.
+    ///
+    /// Endpoints bake a resolved style and are cached across frames, so a swap
+    /// that updated the channels without invalidating that cache would leave
+    /// the old colors on screen. This drives the same cache across the swap.
+    #[test]
+    fn swapping_the_interner_repaints_through_the_endpoint_cache() {
+        use crate::display_map::highlights::{
+            HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
+        };
+        use ratatui::style::Color;
+
+        let interner_with = |color: Color| {
+            let mut interner = HighlightStyleInterner::default();
+            interner.push(HighlightStyle {
+                foreground: Some(color),
+                ..Default::default()
+            });
+            Arc::new(interner)
+        };
+
+        let mut display_map = create_display_map("let x = 1\n");
+        let style_id = {
+            let mut probe = HighlightStyleInterner::default();
+            probe.push(HighlightStyle::default())
+        };
+        let token = {
+            let snap = display_map.multi_buffer.snapshot();
+            let start = snap.anchor_at(0, stoat_text::Bias::Right);
+            let end = snap.anchor_at(3, stoat_text::Bias::Left);
+            SemanticTokenHighlight {
+                range: start..end,
+                style: style_id,
+            }
+        };
+        display_map.set_semantic_token_highlights(
+            BufferId::new(0),
+            Arc::from(vec![token]),
+            interner_with(Color::Red),
+        );
+
+        let mut cache = None;
+        let painted = |display_map: &mut DisplayMap, cache: &mut Option<_>| {
+            let snapshot = display_map.snapshot();
+            snapshot
+                .highlighted_chunks_cached(0..1, cache)
+                .filter_map(|chunk| chunk.highlight_style?.foreground)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(painted(&mut display_map, &mut cache), vec![Color::Red]);
+
+        display_map.swap_style_interner(&interner_with(Color::Blue));
+        assert_eq!(
+            painted(&mut display_map, &mut cache),
+            vec![Color::Blue],
+            "the cached endpoints are rebuilt against the new interner"
+        );
     }
 }

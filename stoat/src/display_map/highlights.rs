@@ -208,6 +208,19 @@ impl BufferSemanticTokens {
         }
     }
 
+    /// The same tokens resolved through a different interner.
+    ///
+    /// For a theme switch, where style ids keep their meaning but the styles
+    /// behind them change. `prefix_max_end` carries over because it is an
+    /// argmax over resolved anchor ends, and re-interning moves no anchor.
+    pub fn with_interner(&self, interner: Arc<HighlightStyleInterner>) -> Self {
+        Self {
+            tokens: self.tokens.clone(),
+            interner,
+            prefix_max_end: self.prefix_max_end.clone(),
+        }
+    }
+
     /// The half-open index range of [`Self::tokens`] that can overlap `byte_range`.
     ///
     /// Tokens are start-sorted, so a `partition_point` caps the upper bound at the

@@ -504,6 +504,23 @@ impl BufferRegistry {
         self.buffers.get(&id)?.lsp_tokens.clone()
     }
 
+    /// Re-point every retained token cache at `interner`.
+    ///
+    /// Called on a theme switch so a fresh editor seeded from these caches, and
+    /// the version-keyed LSP reinstall that skips re-requesting, both paint the
+    /// current theme. Without it the LSP cache would serve the theme that was
+    /// active when the response landed for as long as the buffer went unedited.
+    pub(crate) fn swap_token_interners(&mut self, interner: &Arc<HighlightStyleInterner>) {
+        for entry in self.buffers.values_mut() {
+            if let Some((_, cached)) = entry.tokens.as_mut() {
+                *cached = interner.clone();
+            }
+            if let Some((_, _, cached)) = entry.lsp_tokens.as_mut() {
+                *cached = interner.clone();
+            }
+        }
+    }
+
     /// Retain the anchored symbol-kind index from the LSP semantic-tokens
     /// response for `id`, replacing any prior index.
     ///
