@@ -1064,6 +1064,7 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
             stoat.syntax_styles = SyntaxStyles::from_theme(&stoat.theme);
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
             stoat.minimap_content.clear();
+            stoat.theme_epoch += 1;
             UpdateEffect::Redraw
         },
         Err(e) => {
@@ -1415,6 +1416,35 @@ mod tests {
         assert_eq!(
             stoat.theme.get(UI_TEXT).fg,
             Some(Color::Rgb(0xab, 0xcd, 0xef))
+        );
+    }
+
+    /// The pool content versions hash `theme_epoch`, so it has to move on a
+    /// real switch and hold still on a failed one. Otherwise a buffered page
+    /// either glides back in the old theme's colors or refills for nothing.
+    #[test]
+    fn set_theme_bumps_the_epoch_only_when_it_switches() {
+        let mut stoat =
+            stoat_with_config(Some("theme mine { ui.text.fg = \"#abcdef\"; }".to_string()));
+        assert_eq!(stoat.theme_epoch, 0, "a fresh session starts at zero");
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "mine".to_string(),
+            },
+        );
+        assert_eq!(stoat.theme_epoch, 1, "a switch stales every buffered page");
+
+        dispatch(
+            &mut stoat,
+            &SetTheme {
+                name: "nonexistent".to_string(),
+            },
+        );
+        assert_eq!(
+            stoat.theme_epoch, 1,
+            "a theme that failed to load repaints nothing, so nothing is staled",
         );
     }
 

@@ -1186,6 +1186,13 @@ pub struct Stoat {
     /// turns it into the curly-underline VT re-stamp carried on the frame. Reused
     /// across frames like [`Self::apc_scene`] to avoid a per-frame allocation.
     pub(crate) pending_undercurls: Vec<UndercurlSpan>,
+    /// Counter bumped every time the active theme changes.
+    ///
+    /// Every pooled surface paints theme colors, so a page buffered in the
+    /// terminal goes stale the moment the theme does. The pool content versions
+    /// hash this in, which is what makes a `:theme` switch refill them instead of
+    /// gliding old-theme pixels back onto the screen.
+    pub(crate) theme_epoch: u64,
     /// Smooth-scroll pool emit state for the focused editor. Tracks the
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
@@ -1590,6 +1597,7 @@ impl Stoat {
             apc_tx: None,
             apc_scene: ApcScene::new(),
             pending_undercurls: Vec::new(),
+            theme_epoch: 0,
             smooth_scroll: crate::smooth_scroll::SmoothScrollState::default(),
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
@@ -7112,6 +7120,7 @@ impl Stoat {
                 let bytes = crate::smooth_scroll::serialize_buffer(&mut content_buf, &self.theme);
                 let content_version = {
                     let mut hasher = DefaultHasher::new();
+                    self.theme_epoch.hash(&mut hasher);
                     bytes.hash(&mut hasher);
                     hasher.finish()
                 };
@@ -7167,6 +7176,7 @@ impl Stoat {
             let bytes = crate::smooth_scroll::serialize_buffer(&mut buf, &self.theme);
             let content_version = {
                 let mut hasher = DefaultHasher::new();
+                self.theme_epoch.hash(&mut hasher);
                 bytes.hash(&mut hasher);
                 hasher.finish()
             };
@@ -7602,6 +7612,7 @@ impl Stoat {
         // The focused detached pane's pool cursor, collected during the pane loop
         // and emitted after it, past the workspace borrow.
         let mut detached_cursor: Option<(u32, u64, u16)> = None;
+        let theme_epoch = self.theme_epoch;
         let ws = &mut self.workspaces[self.active_workspace];
         let theme = &self.theme;
         let fallback_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -7679,6 +7690,7 @@ impl Stoat {
                     editor.display_map.diff_version(),
                     dim,
                     snapshot_version,
+                    theme_epoch,
                 ),
             };
             let entered = crate::smooth_scroll::emit_into(
@@ -7834,6 +7846,7 @@ impl Stoat {
             // pool's content version: a re-filter or a re-root refills it.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
+                self.theme_epoch.hash(&mut hasher);
                 finder
                     .browse
                     .as_ref()
@@ -7881,6 +7894,7 @@ impl Stoat {
             // arg-mode list that shares this pool id and matches region and scroll.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
+                self.theme_epoch.hash(&mut hasher);
                 0u8.hash(&mut hasher);
                 palette.generation.hash(&mut hasher);
                 hasher.finish()
@@ -7933,6 +7947,7 @@ impl Stoat {
             // different roots cannot alias.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
+                self.theme_epoch.hash(&mut hasher);
                 1u8.hash(&mut hasher);
                 picker
                     .browse
@@ -8133,6 +8148,7 @@ impl Stoat {
             // of the line texts is the pool's content version.
             let content_version = {
                 let mut hasher = DefaultHasher::new();
+                self.theme_epoch.hash(&mut hasher);
                 popup.generation.hash(&mut hasher);
                 hasher.finish()
             };
@@ -8500,8 +8516,9 @@ impl Stoat {
 ///
 /// A page stays cached while the surface scrolls, but must repaint when the
 /// syntax-highlight toggle recolors every row, a diagnostics change restyles
-/// the gutter, a gutter-width or wrap-width change reflows the text, or the
-/// cursor's buffer line moves under relative numbering.
+/// the gutter, a gutter-width or wrap-width change reflows the text, the
+/// cursor's buffer line moves under relative numbering, or the theme changes
+/// every color on the page.
 #[allow(clippy::too_many_arguments)]
 fn editor_page_content_version(
     syntax_highlight: bool,
@@ -8513,6 +8530,7 @@ fn editor_page_content_version(
     diff_version: usize,
     dim: f32,
     snapshot_version: usize,
+    theme_epoch: u64,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
@@ -8528,6 +8546,7 @@ fn editor_page_content_version(
     // a file outside git (diff_version stuck at 0) would glide stale text
     // without it.
     snapshot_version.hash(&mut hasher);
+    theme_epoch.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -19097,41 +19116,46 @@ mod tests {
 
     #[test]
     fn editor_page_content_version_tracks_the_cursor_line() {
-        let base = editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0);
+        let base = editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, 0);
         assert_eq!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, 0),
             "identical inputs keep a buffered page cached"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(11), 0, false, 0, 0.0, 0),
+            editor_page_content_version(true, 3, None, Some(11), 0, false, 0, 0.0, 0, 0),
             "a cursor-line move refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0, 0),
+            editor_page_content_version(true, 3, None, None, 0, false, 0, 0.0, 0, 0),
             "switching to absolute numbering refills"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, Some(72), Some(10), 0, false, 0, 0.0, 0),
+            editor_page_content_version(true, 3, Some(72), Some(10), 0, false, 0, 0.0, 0, 0),
             "a wrap-width change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0, 0),
+            editor_page_content_version(true, 3, None, Some(10), 0, true, 7, 0.0, 0, 0),
             "a diff-view hunk change refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.25, 0),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.25, 0, 0),
             "a focus change to a dimmed pane refills buffered pages"
         );
         assert_ne!(
             base,
-            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 1),
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 1, 0),
             "a buffer edit (snapshot version bump) refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(true, 3, None, Some(10), 0, false, 0, 0.0, 0, 1),
+            "a theme switch refills buffered pages"
         );
     }
 
