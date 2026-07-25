@@ -13,6 +13,11 @@ new_key_type! {
 /// resize can never collapse a neighbor to nothing.
 const MIN_PANE_EXTENT: u16 = 2;
 
+/// Denominator of one focused-pane resize step. Each step moves the pane by
+/// this fraction of its parent split's extent, so a step feels the same on a
+/// small screen and a large one.
+const RESIZE_STEP_DIVISOR: u16 = 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     /// Children stacked top-to-bottom (horizontal divider line).
@@ -809,6 +814,84 @@ impl PaneTree {
         self.recalculate();
     }
 
+    /// Grow or shrink the focused pane by `delta` steps within the split that
+    /// holds it, taking the space from its siblings or handing it back.
+    ///
+    /// One step is a tenth of that split's extent, along whichever axis the
+    /// split runs. Growing steals from every sibling evenly and shrinking
+    /// returns to them the same way, and no sibling is ever driven below
+    /// [`MIN_PANE_EXTENT`], so a resize cannot collapse a neighbor.
+    ///
+    /// A no-op for a pane with no split above it, which covers both a lone pane
+    /// and a windowed one. The resulting weights persist across restart.
+    ///
+    /// Nothing calls this yet. The zoom routing reaches it when no modal is
+    /// open.
+    ///
+    /// See also:
+    /// - [`Self::set_divider`] for the pointer-driven resize of one boundary.
+    #[allow(dead_code)]
+    pub(crate) fn resize_focused_pane(&mut self, delta: i32) {
+        let Some(leaf) = self.leaf_node(self.focus) else {
+            return;
+        };
+        // The root's parent is the null key, so a lone pane resolves to no node
+        // rather than needing a root check of its own.
+        let parent = self.nodes[leaf].parent;
+        let Some(NodeContent::Split(split)) = self.nodes.get(parent).map(|node| &node.content)
+        else {
+            return;
+        };
+        let (axis, children) = (split.axis, split.children.clone());
+
+        let Some(focused) = children.iter().position(|&child| child == leaf) else {
+            return;
+        };
+        let Ok(siblings) = u16::try_from(children.len() - 1) else {
+            return;
+        };
+        if siblings == 0 {
+            return;
+        }
+
+        let mut extents: Vec<u16> = children
+            .iter()
+            .map(|&child| {
+                let area = self.node_area(child);
+                match axis {
+                    Axis::Vertical => area.width,
+                    Axis::Horizontal => area.height,
+                }
+            })
+            .collect();
+
+        // Every sibling keeps its floor, which is what bounds how far the
+        // focused pane may grow.
+        let total: u16 = extents.iter().sum();
+        let ceiling = total.saturating_sub(siblings.saturating_mul(MIN_PANE_EXTENT));
+        if ceiling < MIN_PANE_EXTENT {
+            return;
+        }
+
+        let step = i32::from((total / RESIZE_STEP_DIVISOR).max(1)) * delta;
+        let target = (i32::from(extents[focused]) + step)
+            .clamp(i32::from(MIN_PANE_EXTENT), i32::from(ceiling)) as u16;
+        let moved = i32::from(target) - i32::from(extents[focused]);
+        if moved == 0 {
+            return;
+        }
+
+        extents[focused] = target;
+        spread_across_siblings(&mut extents, focused, -moved);
+
+        if let Some(NodeContent::Split(split)) =
+            self.nodes.get_mut(parent).map(|node| &mut node.content)
+        {
+            split.weights = extents.iter().map(|&e| f32::from(e)).collect();
+        }
+        self.recalculate();
+    }
+
     fn split_pane_count(&self) -> usize {
         self.panes
             .values()
@@ -1068,6 +1151,44 @@ fn child_extents(weights: &[f32], len: usize, usable: u16) -> Vec<u16> {
         }
     }
     extents
+}
+
+/// Move `amount` cells across every entry of `extents` but `skip`, positive to
+/// hand cells out and negative to take them back.
+///
+/// Cells move one at a time round-robin, so the share lands as even as the
+/// sibling count allows without a separate remainder pass. An entry already at
+/// [`MIN_PANE_EXTENT`] is passed over, so taking never collapses a neighbor.
+///
+/// The caller bounds `amount` to what the entries can absorb. The no-progress
+/// break is a backstop for a bound that was ever wrong, so this stops rather
+/// than spins.
+fn spread_across_siblings(extents: &mut [u16], skip: usize, amount: i32) {
+    let hand_out = amount > 0;
+    let mut remaining = amount.unsigned_abs();
+
+    while remaining > 0 {
+        let before = remaining;
+        for (i, extent) in extents.iter_mut().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+            if i == skip {
+                continue;
+            }
+            if hand_out {
+                *extent += 1;
+            } else if *extent > MIN_PANE_EXTENT {
+                *extent -= 1;
+            } else {
+                continue;
+            }
+            remaining -= 1;
+        }
+        if remaining == before {
+            break;
+        }
+    }
 }
 
 pub struct Traverse<'a> {
@@ -1576,6 +1697,123 @@ mod tests {
             tree.pane(right).area.width,
             98,
             "right keeps the remaining space"
+        );
+    }
+
+    #[test]
+    fn resize_focused_pane_round_trips_a_grow_and_a_shrink() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 101, 40));
+        let left = tree.focus();
+        let right = tree.split(Axis::Vertical);
+        tree.set_focus(left);
+
+        // 100 usable columns, so one step is 10.
+        tree.resize_focused_pane(1);
+        assert_eq!(tree.pane(left).area.width, 60, "a step grows by a tenth");
+        assert_eq!(tree.pane(right).area.width, 40, "the sibling gives it up");
+
+        tree.resize_focused_pane(-1);
+        assert_eq!(tree.pane(left).area.width, 50, "the step comes back");
+        assert_eq!(tree.pane(right).area.width, 50);
+    }
+
+    #[test]
+    fn resize_focused_pane_takes_from_every_sibling_evenly() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 40, 62));
+        let top = tree.focus();
+        let mid = tree.split(Axis::Horizontal);
+        let bottom = tree.split(Axis::Horizontal);
+        tree.set_focus(top);
+        assert_eq!(
+            [
+                tree.pane(top).area.height,
+                tree.pane(mid).area.height,
+                tree.pane(bottom).area.height
+            ],
+            [20, 20, 20],
+            "three even rows before the resize"
+        );
+
+        // 60 usable rows, so one step is 6, split evenly across two siblings.
+        tree.resize_focused_pane(1);
+        assert_eq!(
+            [
+                tree.pane(top).area.height,
+                tree.pane(mid).area.height,
+                tree.pane(bottom).area.height
+            ],
+            [26, 17, 17],
+            "both siblings give up the same three rows"
+        );
+    }
+
+    #[test]
+    fn resize_focused_pane_refuses_to_collapse_a_sibling() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 101, 40));
+        let left = tree.focus();
+        let right = tree.split(Axis::Vertical);
+        tree.set_focus(left);
+
+        for _ in 0..20 {
+            tree.resize_focused_pane(1);
+        }
+
+        assert_eq!(
+            tree.pane(right).area.width,
+            MIN_PANE_EXTENT,
+            "the sibling stops at the floor however far the pane grows"
+        );
+        assert_eq!(
+            tree.pane(left).area.width,
+            98,
+            "and the focused pane takes everything but that floor"
+        );
+    }
+
+    #[test]
+    fn resize_focused_pane_is_a_no_op_without_a_split() {
+        let mut tree = PaneTree::new(Rect::new(0, 0, 101, 40));
+        let only = tree.focus();
+
+        tree.resize_focused_pane(1);
+
+        assert_eq!(
+            tree.pane(only).area,
+            Rect::new(0, 0, 101, 40),
+            "a lone pane has no siblings to resize against"
+        );
+    }
+
+    /// A nested split must resize against its own siblings, leaving the outer
+    /// split's boundary where the user put it.
+    #[test]
+    fn resize_focused_pane_moves_only_its_immediate_parent_level() {
+        let (mut tree, left, [r1, r2, r3]) = one_left_three_right();
+        let outer_width = tree.pane(left).area.width;
+        let rows = |tree: &PaneTree| {
+            [
+                tree.pane(r1).area.height,
+                tree.pane(r2).area.height,
+                tree.pane(r3).area.height,
+            ]
+        };
+        tree.set_focus(r1);
+        // The column's 38 usable rows divide 12/12/14, since the last child
+        // absorbs the rounding remainder.
+        assert_eq!(rows(&tree), [12, 12, 14]);
+
+        tree.resize_focused_pane(1);
+
+        assert_eq!(
+            tree.pane(left).area.width,
+            outer_width,
+            "the outer vertical split is untouched"
+        );
+        assert_eq!(
+            rows(&tree),
+            [15, 10, 13],
+            "the focused row takes three rows, split as evenly across two \
+             siblings as an odd count allows"
         );
     }
 
