@@ -114,6 +114,26 @@ pub enum Command {
     /// re-apply it. Carries no payload: the terminal reads the file itself, and
     /// the program that sends this is only reporting that it wrote it.
     ConfigReload,
+    /// The program claims the platform zoom combo for its session, or releases
+    /// it.
+    ///
+    /// While claimed the terminal forwards each press upstream instead of
+    /// stepping its own font size, so the program can make the combo mean
+    /// whatever its current context calls for. A program that never sends this
+    /// leaves the terminal's native font zoom exactly as it was, which is what
+    /// keeps a plain shell child working and what a crashed program degrades
+    /// back to.
+    ZoomCapture {
+        on: bool,
+    },
+    /// Step the terminal's font size by `delta`, positive to grow.
+    ///
+    /// The counterpart to claiming the combo. A program that took the combo
+    /// away from font zoom uses this to offer font zoom back through its own
+    /// commands.
+    FontStep {
+        delta: i32,
+    },
     /// A handshake the program sends to identify itself to the terminal, so the
     /// terminal's log records which process drives it. The terminal replies with
     /// its own [`IdentReply`].
@@ -1290,6 +1310,40 @@ pub fn encode_config_reload_into(out: &mut Vec<u8>) {
     frame::end(out);
 }
 
+/// Encode a [`Command::ZoomCapture`] as a full `Gstoatty;zoom_capture` frame for
+/// an emitter.
+pub fn encode_zoom_capture(on: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_zoom_capture_into(&mut out, on);
+    out
+}
+
+/// Append a `Gstoatty;zoom_capture` frame for `on` to `out`.
+///
+/// The claim rides as the word `on` or `off` rather than a byte, since it is a
+/// once-per-session handshake and a readable frame is worth more there than a
+/// byte saved.
+pub fn encode_zoom_capture_into(out: &mut Vec<u8>, on: bool) {
+    frame::begin(out, "zoom_capture");
+    frame::push_arg(out, |w| w.write_all(if on { b"on" } else { b"off" }));
+    frame::end(out);
+}
+
+/// Encode a [`Command::FontStep`] as a full `Gstoatty;font_step` frame for an
+/// emitter.
+pub fn encode_font_step(delta: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_font_step_into(&mut out, delta);
+    out
+}
+
+/// Append a `Gstoatty;font_step` frame for `delta` to `out`.
+pub fn encode_font_step_into(out: &mut Vec<u8>, delta: i32) {
+    frame::begin(out, "font_step");
+    frame::push_arg(out, |w| write!(w, "{delta}"));
+    frame::end(out);
+}
+
 /// Encode a [`HelloCommand`] as a full `Gstoatty;hello` frame for an emitter.
 pub fn encode_hello(command: &HelloCommand) -> Vec<u8> {
     let mut out = Vec::new();
@@ -1308,6 +1362,26 @@ pub fn encode_hello_into(out: &mut Vec<u8>, command: &HelloCommand) {
     frame::push_arg(out, |w| w.write_all(command.hostname.as_bytes()));
     frame::push_arg(out, |w| w.write_all(command.version.as_bytes()));
     frame::end(out);
+}
+
+fn decode_zoom_capture(args: &[Vec<u8>]) -> Option<Command> {
+    let [on] = args else {
+        return None;
+    };
+    match on.as_slice() {
+        b"on" => Some(Command::ZoomCapture { on: true }),
+        b"off" => Some(Command::ZoomCapture { on: false }),
+        _ => None,
+    }
+}
+
+fn decode_font_step(args: &[Vec<u8>]) -> Option<Command> {
+    let [delta] = args else {
+        return None;
+    };
+    Some(Command::FontStep {
+        delta: std::str::from_utf8(delta).ok()?.parse().ok()?,
+    })
 }
 
 fn decode_hello(args: &[Vec<u8>]) -> Option<HelloCommand> {
@@ -1411,6 +1485,8 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::WindowFocus(c) => encode_window_focus_into(out, c),
         Command::Reset => encode_reset_into(out),
         Command::ConfigReload => encode_config_reload_into(out),
+        Command::ZoomCapture { on } => encode_zoom_capture_into(out, *on),
+        Command::FontStep { delta } => encode_font_step_into(out, *delta),
         Command::Hello(c) => encode_hello_into(out, c),
     }
 }
@@ -1448,6 +1524,8 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "window_focus" => decode_window_focus(args).map(Command::WindowFocus),
         "reset" => Some(Command::Reset),
         "config_reload" => Some(Command::ConfigReload),
+        "zoom_capture" => decode_zoom_capture(args),
+        "font_step" => decode_font_step(args),
         "hello" => decode_hello(args).map(Command::Hello),
         _ => None,
     }
@@ -1852,18 +1930,18 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, decode_ident_reply, decode_shadow, encode_bar, encode_border, encode_config_reload,
-        encode_fill, encode_fill_end, encode_hello, encode_icon, encode_ident_reply, encode_into,
-        encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_lines,
-        encode_minimap_view, encode_panel, encode_pool_cursor, encode_pool_drop,
-        encode_pool_region, encode_popover, encode_popover_end, encode_reposition, encode_reset,
-        encode_scale, encode_scroll, encode_scroll_region, encode_text_run_end,
-        encode_window_close, encode_window_focus, encode_window_open, BarCommand, BorderCommand,
-        BorderStyle, Command, FillCommand, HelloCommand, IconCommand, IconKind, IdentReply,
-        LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand,
-        MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow, PoolCursorCommand,
-        PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand,
-        ScrollCommand, ScrollRegionCommand, TextRunCommand, WindowCloseCommand, WindowFocusCommand,
-        WindowOpenCommand,
+        encode_fill, encode_fill_end, encode_font_step, encode_hello, encode_icon,
+        encode_ident_reply, encode_into, encode_line_layout, encode_minimap, encode_minimap_drop,
+        encode_minimap_lines, encode_minimap_view, encode_panel, encode_pool_cursor,
+        encode_pool_drop, encode_pool_region, encode_popover, encode_popover_end,
+        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
+        encode_text_run_end, encode_window_close, encode_window_focus, encode_window_open,
+        encode_zoom_capture, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
+        HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand, LineSummary,
+        MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
+        PanelCommand, PanelShadow, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
+        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+        TextRunCommand, WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
     };
     use crate::frame::MAX_APC_PAYLOAD;
 
@@ -2736,6 +2814,42 @@ mod tests {
     #[test]
     fn config_reload_round_trips() {
         assert_eq!(decode(&encode_config_reload()), Some(Command::ConfigReload));
+    }
+
+    #[test]
+    fn zoom_capture_round_trips_both_states() {
+        for on in [true, false] {
+            assert_eq!(
+                decode(&encode_zoom_capture(on)),
+                Some(Command::ZoomCapture { on })
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_an_unreadable_zoom_capture_payload() {
+        // "eWVz" is base64 for "yes", which is neither of the two words.
+        assert!(decode(b"Gstoatty;zoom_capture;eWVz").is_none());
+        assert!(
+            decode(b"Gstoatty;zoom_capture").is_none(),
+            "the claim has to say which way"
+        );
+    }
+
+    #[test]
+    fn font_step_round_trips_in_both_directions() {
+        for delta in [1, -1, 4] {
+            assert_eq!(
+                decode(&encode_font_step(delta)),
+                Some(Command::FontStep { delta })
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_font_step_payload() {
+        // "Ymln" is base64 for "big".
+        assert!(decode(b"Gstoatty;font_step;Ymln").is_none());
     }
 
     #[test]

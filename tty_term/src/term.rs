@@ -361,6 +361,13 @@ pub enum TermEvent {
     /// A program reported that the terminal's config file changed on disk, so
     /// the host should re-read and re-apply it.
     ConfigReload,
+    /// A program claimed the platform zoom combo for its session, or released
+    /// it. While claimed the host forwards each press upstream rather than
+    /// stepping its own font size.
+    ZoomCapture(bool),
+    /// A program asked the host to step its font size by this many steps,
+    /// positive to grow.
+    FontStep(i32),
 }
 
 /// A snapshot of one smooth-scroll pool, for the render loop's per-pool ease.
@@ -685,6 +692,8 @@ impl Terminal {
                         | Command::WindowFocus(_)
                         | Command::Hello(_)
                         | Command::ConfigReload
+                        | Command::ZoomCapture { .. }
+                        | Command::FontStep { .. }
                 );
                 if routed || (self.fill.is_none() && self.capture.is_none()) {
                     self.apply_command(command);
@@ -1028,6 +1037,12 @@ impl Terminal {
             // update. Rereading a config has nothing to do with the frame being
             // composed, and delaying it would only defer the user's edit.
             Command::ConfigReload => self.pending_events.push(TermEvent::ConfigReload),
+            // Neither is a decoration either. A zoom claim and a font step both
+            // act on the window rather than the frame being composed, so
+            // holding them behind an update would only defer what the user
+            // pressed.
+            Command::ZoomCapture { on } => self.pending_events.push(TermEvent::ZoomCapture(on)),
+            Command::FontStep { delta } => self.pending_events.push(TermEvent::FontStep(delta)),
         }
     }
 
@@ -1153,7 +1168,9 @@ impl Terminal {
             | Command::WindowClose(_)
             | Command::WindowFocus(_)
             | Command::Hello(_)
-            | Command::ConfigReload => {},
+            | Command::ConfigReload
+            | Command::ZoomCapture { .. }
+            | Command::FontStep { .. } => {},
         }
     }
 
@@ -2930,11 +2947,11 @@ mod tests {
     };
     use stoatty_protocol::command::{
         encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_end,
-        encode_hello, encode_icon, encode_ident_reply, encode_line_layout, encode_minimap,
-        encode_minimap_drop, encode_minimap_lines, encode_minimap_view, encode_panel,
-        encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
+        encode_font_step, encode_hello, encode_icon, encode_ident_reply, encode_line_layout,
+        encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
+        encode_panel, encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
         encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-        encode_text_run, encode_window_open, BarCommand, BorderCommand,
+        encode_text_run, encode_window_open, encode_zoom_capture, BarCommand, BorderCommand,
         BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
         IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
         MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
@@ -4752,6 +4769,46 @@ mod tests {
             terminal.take_events(),
             vec![TermEvent::ConfigReload],
             "a routed command is not swallowed by a fill redirect"
+        );
+    }
+
+    #[test]
+    fn zoom_capture_command_surfaces_as_a_term_event() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(&encode_zoom_capture(true));
+        terminal.advance(&encode_zoom_capture(false));
+
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::ZoomCapture(true), TermEvent::ZoomCapture(false)],
+            "a claim and its release both reach the host, in order"
+        );
+    }
+
+    #[test]
+    fn font_step_command_surfaces_as_a_term_event() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(&encode_font_step(-2));
+
+        assert_eq!(terminal.take_events(), vec![TermEvent::FontStep(-2)]);
+    }
+
+    /// A zoom press acts on the window, not on the frame being composed, so
+    /// holding it behind a redirect would drop what the user just pressed.
+    #[test]
+    fn zoom_commands_survive_an_active_fill() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+
+        terminal.advance(&encode_zoom_capture(true));
+        terminal.advance(&encode_font_step(1));
+
+        assert_eq!(
+            terminal.take_events(),
+            vec![TermEvent::ZoomCapture(true), TermEvent::FontStep(1)],
+            "both route past a fill redirect"
         );
     }
 

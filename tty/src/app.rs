@@ -2420,6 +2420,11 @@ fn handle_term_events(
             // Filtered out before this fan-out, since re-applying a config
             // touches window state this function has no handle on.
             TermEvent::ConfigReload => {},
+            // FIXME: honouring these lands with the combo-forwarding item. Both
+            // resize the grid or redirect key handling, which this fan-out has
+            // no handle on, so they will be filtered out ahead of it like
+            // ConfigReload rather than handled here.
+            TermEvent::ZoomCapture(_) | TermEvent::FontStep(_) => {},
         }
     }
 }

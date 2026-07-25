@@ -31,6 +31,13 @@ pub enum WindowIpcEvent {
         row: u16,
         mods: u8,
     },
+    /// The platform zoom combo was pressed while the program held the zoom
+    /// claim, `delta` steps in the direction pressed.
+    ///
+    /// Forwarded rather than acted on, so the program decides what a zoom step
+    /// means in its current context. A program that never claims the combo
+    /// never sees this and the terminal steps its own font size instead.
+    Zoom { window: u32, delta: i32 },
 }
 
 /// A pointer gesture carried by [`WindowIpcEvent::Mouse`].
@@ -127,6 +134,7 @@ impl WindowIpcEvent {
                 let (verb, arg) = kind.words();
                 format!("mouse {window} {col} {row} {mods} {verb} {arg}")
             },
+            WindowIpcEvent::Zoom { window, delta } => format!("zoom {window} {delta}"),
         }
     }
 }
@@ -163,6 +171,10 @@ pub fn parse_line(line: &str) -> Option<WindowIpcEvent> {
                 row,
                 mods,
             }
+        },
+        "zoom" => WindowIpcEvent::Zoom {
+            window: parts.next()?.parse().ok()?,
+            delta: parts.next()?.parse().ok()?,
         },
         _ => return None,
     };
@@ -212,6 +224,38 @@ mod tests {
         ] {
             assert_eq!(parse_line(&event.encode_line()), Some(event));
         }
+    }
+
+    #[test]
+    fn zoom_events_round_trip_in_both_directions() {
+        for event in [
+            WindowIpcEvent::Zoom {
+                window: 0,
+                delta: 1,
+            },
+            WindowIpcEvent::Zoom {
+                window: 3,
+                delta: -2,
+            },
+        ] {
+            assert_eq!(parse_line(&event.encode_line()), Some(event));
+        }
+        assert_eq!(
+            WindowIpcEvent::Zoom {
+                window: 0,
+                delta: -1,
+            }
+            .encode_line(),
+            "zoom 0 -1",
+            "a shrink step carries its sign on the wire"
+        );
+    }
+
+    #[test]
+    fn malformed_zoom_lines_yield_none() {
+        assert_eq!(parse_line("zoom 0"), None, "missing delta");
+        assert_eq!(parse_line("zoom 0 up"), None, "non-numeric delta");
+        assert_eq!(parse_line("zoom 0 1 2"), None, "trailing token");
     }
 
     #[test]

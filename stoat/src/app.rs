@@ -1837,6 +1837,10 @@ impl Stoat {
                 }
             },
             WindowIpcEvent::Mouse { .. } => unreachable!("mouse events return above"),
+            // FIXME: routing lands with the context-relative zoom item. Nothing
+            // claims the combo yet, so a forwarded step is dropped rather than
+            // acted on, and no redraw is owed for it.
+            WindowIpcEvent::Zoom { .. } => return UpdateEffect::None,
         }
         UpdateEffect::Redraw
     }
