@@ -386,9 +386,22 @@ fn minimap_top(total: f32, visible_lines: f32, view_top: f32, view_visible: f32)
 ///
 /// The height floors at [`MIN_THUMB_PX`] so the thumb stays visible on a large
 /// file where its proportional height would collapse.
-fn thumb_geometry(view_top: f32, top: f32, view_visible: f32, line_h: f32) -> (f32, f32) {
-    let offset = (view_top - top) * line_h;
+///
+/// That floor is what makes the offset clamp necessary. A purely proportional
+/// thumb already ends flush with the strip at max scroll, since the offset gives
+/// back exactly the pixels the height takes. Substituting the taller floored
+/// height breaks that identity and pushes the thumb's bottom past `strip_h`,
+/// where the strip's scissor crops it. Clamping against the floored height keeps
+/// the whole thumb on the strip and leaves the proportional case untouched.
+fn thumb_geometry(
+    view_top: f32,
+    top: f32,
+    view_visible: f32,
+    line_h: f32,
+    strip_h: f32,
+) -> (f32, f32) {
     let height = (view_visible * line_h).max(MIN_THUMB_PX);
+    let offset = ((view_top - top) * line_h).min(strip_h - height).max(0.0);
     (offset, height)
 }
 
@@ -456,7 +469,8 @@ fn build_strip(
         }
     }
 
-    let (thumb_offset, thumb_height) = thumb_geometry(view_top, top, view_visible, layout.line_h);
+    let (thumb_offset, thumb_height) =
+        thumb_geometry(view_top, top, view_visible, layout.line_h, layout.strip_h);
     instances.push(MinimapInstance {
         origin: [layout.strip_x, layout.strip_y + thumb_offset],
         size: [layout.strip_w, thumb_height],
@@ -575,15 +589,29 @@ mod tests {
 
     #[test]
     fn thumb_height_floors_at_the_minimum() {
+        // The strip is 10 cells of 12px, so 120px tall.
+        const STRIP_H: f32 = 120.0;
+
         // A one-line viewport at 1.5px per line would be a sliver, so it floors.
-        let (_, height) = thumb_geometry(0.0, 0.0, 1.0, 1.5);
+        let (_, height) = thumb_geometry(0.0, 0.0, 1.0, 1.5, STRIP_H);
         assert_eq!(height, MIN_THUMB_PX);
 
-        let (offset, height) = thumb_geometry(20.0, 10.0, 40.0, 1.5);
+        let (offset, height) = thumb_geometry(20.0, 10.0, 40.0, 1.5, STRIP_H);
         assert_eq!(offset, 15.0, "thumb offset is (view_top - top) * line_h");
         assert_eq!(
             height, 60.0,
             "a tall viewport keeps its proportional height"
+        );
+
+        // A 5-line viewport over a 10000-line file scrolled to the bottom has a
+        // 7.5px proportional thumb, which floors to 12. Its unclamped offset of
+        // 112.5 would hang 4.5px below the strip.
+        let top = minimap_top(10_000.0, 80.0, 9_995.0, 5.0);
+        let (offset, height) = thumb_geometry(9_995.0, top, 5.0, 1.5, STRIP_H);
+        assert_eq!(
+            (offset, height, offset + height),
+            (108.0, MIN_THUMB_PX, STRIP_H),
+            "a bottom-scrolled floored thumb ends flush with the strip"
         );
     }
 
