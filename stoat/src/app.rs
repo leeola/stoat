@@ -3856,8 +3856,11 @@ impl Stoat {
                 core.picklist.filtered.len(),
             )
         } else if let Some(palette) = self.command_palette.as_ref() {
+            let rows = palette.list_rows_hint();
+            let zoom = modal_zoom_steps(&self.modal_zoom, ModalKind::Palette);
             if palette.command.is_none() {
-                let Some(layout) = crate::render::command_palette::palette_filter_layout(size)
+                let Some(layout) =
+                    crate::render::command_palette::palette_filter_layout(size, rows, zoom)
                 else {
                     return UpdateEffect::None;
                 };
@@ -3865,7 +3868,9 @@ impl Stoat {
             } else if palette.arg_source().is_some()
                 && let Some(picker) = palette.arg_picker.as_ref()
             {
-                let Some(list) = crate::render::command_palette::palette_arg_list_rect(size) else {
+                let Some(list) =
+                    crate::render::command_palette::palette_arg_list_rect(size, rows, zoom)
+                else {
                     return UpdateEffect::None;
                 };
                 let core = picker.active_core_ref();
@@ -4295,9 +4300,13 @@ impl Stoat {
                 if palette.arg_source().is_some()
                     && let Some(picker) = palette.arg_picker.as_ref()
                 {
-                    crate::render::command_palette::palette_arg_body(size)
-                        .and_then(|(_, preview)| preview)
-                        .map(|rect| (rect, picker.active_core_ref().preview.editor))
+                    crate::render::command_palette::palette_arg_body(
+                        size,
+                        palette.list_rows_hint(),
+                        modal_zoom_steps(&self.modal_zoom, ModalKind::Palette),
+                    )
+                    .and_then(|(_, preview)| preview)
+                    .map(|rect| (rect, picker.active_core_ref().preview.editor))
                 } else {
                     None
                 }
@@ -7573,26 +7582,34 @@ impl Stoat {
         // The command palette is a modal over normal mode like the finder. Its
         // fixed list region pools as a non-pane surface. Command-filter mode
         // pools the command list.
-        let palette_list = (!overlay
-            && self
-                .command_palette
-                .as_ref()
-                .is_some_and(|p| p.command.is_none()))
-        .then(|| crate::render::command_palette::palette_filter_layout(self.size()))
-        .flatten()
-        .map(|layout| layout.list);
+        let palette_list = (!overlay)
+            .then_some(self.command_palette.as_ref())
+            .flatten()
+            .filter(|p| p.command.is_none())
+            .and_then(|p| {
+                crate::render::command_palette::palette_filter_layout(
+                    self.size(),
+                    p.list_rows_hint(),
+                    modal_zoom_steps(&self.modal_zoom, ModalKind::Palette),
+                )
+            })
+            .map(|layout| layout.list);
 
         // Argument mode (`:o `/`:cd `/`:b `) shows the inline picker in place of
         // the command list, and its result list pools into the same PALETTE id.
         // Filter and arg modes are mutually exclusive -- arg mode needs a parsed
         // command, filter mode needs none -- so one pool id serves both.
-        let palette_arg_list = (!overlay
-            && self
-                .command_palette
-                .as_ref()
-                .is_some_and(|p| p.arg_picker.is_some() && p.arg_source().is_some()))
-        .then(|| crate::render::command_palette::palette_arg_list_rect(self.size()))
-        .flatten();
+        let palette_arg_list = (!overlay)
+            .then_some(self.command_palette.as_ref())
+            .flatten()
+            .filter(|p| p.arg_picker.is_some() && p.arg_source().is_some())
+            .and_then(|p| {
+                crate::render::command_palette::palette_arg_list_rect(
+                    self.size(),
+                    p.list_rows_hint(),
+                    modal_zoom_steps(&self.modal_zoom, ModalKind::Palette),
+                )
+            });
 
         // The commits overlay renders into the focused pane; its left list pools
         // as a non-pane surface while editor panes stay suppressed in this mode.
@@ -9796,6 +9813,20 @@ mod tests {
         finder_layout(h).list
     }
 
+    /// The open palette's sizing inputs, so a test lays its box out exactly as
+    /// the renderer would.
+    fn palette_sizing(h: &crate::test_harness::TestHarness) -> (u16, i8) {
+        let palette = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open");
+        (
+            palette.list_rows_hint(),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Palette),
+        )
+    }
+
     /// The open finder's layout, sized from the same content and zoom the
     /// renderer would read, so a test rect matches the painted one.
     fn finder_layout(
@@ -9998,7 +10029,8 @@ mod tests {
         h.type_text(":o ");
         h.settle();
 
-        let preview = crate::render::command_palette::palette_arg_body(h.stoat.size())
+        let (rows, zoom) = palette_sizing(&h);
+        let preview = crate::render::command_palette::palette_arg_body(h.stoat.size(), rows, zoom)
             .and_then(|(_, preview)| preview)
             .expect("the arg preview pane is present at this width");
         let preview_id = h
@@ -15405,9 +15437,11 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let list = crate::render::command_palette::palette_filter_layout(h.stoat.size())
-            .expect("the palette fits the test terminal")
-            .list;
+        let (rows, zoom) = palette_sizing(&h);
+        let list =
+            crate::render::command_palette::palette_filter_layout(h.stoat.size(), rows, zoom)
+                .expect("the palette fits the test terminal")
+                .list;
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
             top: list.y,
@@ -15453,8 +15487,10 @@ mod tests {
         let _ = drain_apc(&mut rx);
 
         h.stoat.emit_smooth_scroll();
-        let list = crate::render::command_palette::palette_arg_list_rect(h.stoat.size())
-            .expect("the arg picker fits the test terminal");
+        let (rows, zoom) = palette_sizing(&h);
+        let list =
+            crate::render::command_palette::palette_arg_list_rect(h.stoat.size(), rows, zoom)
+                .expect("the arg picker fits the test terminal");
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
             top: list.y,
@@ -15507,8 +15543,10 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
         h.stoat.emit_smooth_scroll();
 
-        let arg_list = crate::render::command_palette::palette_arg_list_rect(h.stoat.size())
-            .expect("the arg picker fits the test terminal");
+        let (rows, zoom) = palette_sizing(&h);
+        let arg_list =
+            crate::render::command_palette::palette_arg_list_rect(h.stoat.size(), rows, zoom)
+                .expect("the arg picker fits the test terminal");
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
             top: arg_list.y,

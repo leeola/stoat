@@ -14,12 +14,25 @@ use stoat_action::registry::RegistryEntry;
 const LIST_ROWS: u16 = 10;
 const DOC_ROWS: u16 = 6;
 
+/// Box rows the chrome takes around the list. Two borders, the `:` input, the
+/// separator under it, the doc separator, and the doc region itself.
+const CHROME_ROWS: u16 = 5 + DOC_ROWS;
+
+/// Widest the box may be, and the width it holds at on any terminal with room.
+///
+/// Hard cap, not a preference. The minimap band is left visible while the
+/// palette is open precisely because this keeps the box's right edge at
+/// `area.width / 2 + 40`, disjoint from the band at every width where a band
+/// exists. See the note on `modal_overlay_open` in [`crate::render`].
+const MAX_WIDTH: u16 = 80;
+
 /// The on-screen rectangles of the command-palette filter modal, derived from a
 /// terminal `area` by [`palette_filter_layout`].
 ///
-/// The box height is constant rather than content-sized, so the modal stays put
-/// as the selection and filter change. Shared by the renderer and the
-/// smooth-scroll emit so the pooled list region matches the painted one exactly.
+/// The box height follows the candidate set measured when the palette opened,
+/// never the filtered rows, so the modal stays put as the selection and filter
+/// change. Shared by the renderer and the smooth-scroll emit so the pooled list
+/// region matches the painted one exactly.
 pub(crate) struct PaletteFilterLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
@@ -34,29 +47,51 @@ pub(crate) struct PaletteFilterLayout {
 /// Lay out the command-palette filter modal within `area`, or `None` when
 /// `area` is too small to host it.
 ///
-/// The box height is the constant `1+1+1+LIST_ROWS+1+DOC_ROWS+1`, clamped to
-/// `area.height - 4`. When clamped the list keeps its rows and the doc region
-/// shrinks first, since the list is the primary content.
-pub(crate) fn palette_filter_layout(area: Rect) -> Option<PaletteFilterLayout> {
+/// `content_rows` is the rows the caller's whole candidate list would need,
+/// measured from the unfiltered set when the palette opened. The box holds at
+/// `LIST_ROWS` for a short list and grows for a long one, up to half the area
+/// so the palette never swallows the screen. `zoom` steps it further, in tenths
+/// of the area.
+///
+/// Only the height responds to either. The width stays at [`MAX_WIDTH`], since
+/// the minimap band beside the palette depends on that cap.
+///
+/// A box too short for everything shrinks the doc region first and the list
+/// last, since the list is the primary content.
+pub(crate) fn palette_filter_layout(
+    area: Rect,
+    content_rows: u16,
+    zoom: i8,
+) -> Option<PaletteFilterLayout> {
     if area.width < 30 || area.height < 10 {
         return None;
     }
 
-    let box_width = 80u16.min(area.width.saturating_sub(4));
+    let box_width = MAX_WIDTH.min(area.width.saturating_sub(4));
     if box_width < 20 {
         return None;
     }
 
-    let full_height = 1 + 1 + 1 + LIST_ROWS + 1 + DOC_ROWS + 1;
-    let box_height = full_height.min(area.height.saturating_sub(4));
+    let content_height = content_rows
+        .saturating_add(CHROME_ROWS)
+        .min(area.height / 2);
+    let sized = crate::render::chrome::modal_box(
+        area,
+        (box_width, content_height),
+        (box_width, LIST_ROWS + CHROME_ROWS),
+        (20, 6),
+        zoom,
+    )?;
 
+    // modal_box zooms both dimensions, but a wider palette would paint over the
+    // minimap band left visible beside it, so the width is put back afterwards
+    // and the box re-centered around it.
     let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal = Rect::new(x, y, box_width, box_height);
+    let modal = Rect::new(x, sized.y, box_width, sized.height);
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
     let body = inner.height.saturating_sub(3);
-    let list_height = LIST_ROWS.min(body);
+    let list_height = body.saturating_sub(DOC_ROWS).max(LIST_ROWS).min(body);
     let doc_height = DOC_ROWS.min(body.saturating_sub(list_height));
 
     let list = Rect::new(inner.x, inner.y + 2, inner.width, list_height);
@@ -76,15 +111,19 @@ pub(crate) fn palette_filter_layout(area: Rect) -> Option<PaletteFilterLayout> {
 ///
 /// Shared with [`render_palette_arg_picker`] through [`arg_body_split`] so the
 /// pooled region and the painted list are the same rect.
-pub(crate) fn palette_arg_list_rect(area: Rect) -> Option<Rect> {
-    palette_arg_body(area).map(|(list, _)| list)
+pub(crate) fn palette_arg_list_rect(area: Rect, content_rows: u16, zoom: i8) -> Option<Rect> {
+    palette_arg_body(area, content_rows, zoom).map(|(list, _)| list)
 }
 
 /// The arg-picker body split into its result-list rect and optional preview
 /// rect, sharing [`arg_body_split`] with the painter so hit-testing and
 /// rendering agree. `None` when the modal does not fit or the body has no rows.
-pub(crate) fn palette_arg_body(area: Rect) -> Option<(Rect, Option<Rect>)> {
-    let layout = palette_filter_layout(area)?;
+pub(crate) fn palette_arg_body(
+    area: Rect,
+    content_rows: u16,
+    zoom: i8,
+) -> Option<(Rect, Option<Rect>)> {
+    let layout = palette_filter_layout(area, content_rows, zoom)?;
     arg_body_split(layout.inner)
 }
 
@@ -111,11 +150,12 @@ pub(crate) fn render_command_palette(
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
-        render_palette_arg_picker(palette, ws, theme, area, buf, scene);
+        render_palette_arg_picker(palette, ws, theme, area, zoom, buf, scene);
         return;
     }
 
@@ -126,13 +166,14 @@ pub(crate) fn render_command_palette(
     if let Some(entry) = palette.command
         && palette.arg_source().is_none()
     {
-        render_palette_free_arg(palette, entry, ws, theme, area, buf, scene);
+        render_palette_free_arg(palette, entry, ws, theme, area, zoom, buf, scene);
         return;
     }
 
     let scope = palette.scope();
+    let content_rows = palette.list_rows_hint();
     if palette.command.is_none()
-        && let Some(layout) = palette_filter_layout(area)
+        && let Some(layout) = palette_filter_layout(area, content_rows, zoom)
     {
         palette.viewport_rows = Some(layout.list.height as usize);
     }
@@ -143,6 +184,8 @@ pub(crate) fn render_command_palette(
         &palette.match_indices,
         palette.selected,
         scope,
+        content_rows,
+        zoom,
         ws,
         theme,
         area,
@@ -163,12 +206,13 @@ fn render_palette_arg_picker(
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
     let entry = palette.command.expect("arg picker requires a command");
     let Some(layout) =
-        render_palette_command_prelude(palette, entry, ws, theme, area, buf, &mut *scene)
+        render_palette_command_prelude(palette, entry, ws, theme, area, zoom, buf, &mut *scene)
     else {
         return;
     };
@@ -230,16 +274,19 @@ fn render_palette_arg_picker(
 /// command's long description -- so the modal describes what to type instead of
 /// showing the emptied command list. State is synced before the frame, so this
 /// only paints.
+#[allow(clippy::too_many_arguments)]
 fn render_palette_free_arg(
     palette: &mut CommandPalette,
     entry: &'static RegistryEntry,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    let Some(layout) = render_palette_command_prelude(palette, entry, ws, theme, area, buf, scene)
+    let Some(layout) =
+        render_palette_command_prelude(palette, entry, ws, theme, area, zoom, buf, scene)
     else {
         return;
     };
@@ -291,16 +338,18 @@ fn render_palette_free_arg(
 /// See also:
 /// - [`render_palette_arg_picker`] for the inline-picker body.
 /// - [`render_palette_free_arg`] for the free-typed argument body.
+#[allow(clippy::too_many_arguments)]
 fn render_palette_command_prelude(
     palette: &mut CommandPalette,
     entry: &'static RegistryEntry,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) -> Option<PaletteFilterLayout> {
-    let layout = palette_filter_layout(area)?;
+    let layout = palette_filter_layout(area, palette.list_rows_hint(), zoom)?;
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     let title = format!(" {} ", entry.command_name);
@@ -351,13 +400,15 @@ fn render_palette_filter(
     match_indices: &[Vec<u32>],
     selected: usize,
     scope: PaletteScope,
+    content_rows: u16,
+    zoom: i8,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    let Some(layout) = palette_filter_layout(area) else {
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom) else {
         return;
     };
 
@@ -499,5 +550,88 @@ pub(crate) fn paint_palette_rows(
             let desc_style = if is_selected { style } else { desc_style };
             write_str(buf, desc_col, row, entry.def.short_desc(), desc_style);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{palette_filter_layout, DOC_ROWS, LIST_ROWS, MAX_WIDTH};
+    use ratatui::layout::Rect;
+
+    fn layout(area: Rect, content_rows: u16, zoom: i8) -> super::PaletteFilterLayout {
+        palette_filter_layout(area, content_rows, zoom).expect("the area hosts the palette")
+    }
+
+    #[test]
+    fn a_short_command_list_keeps_the_recommended_box() {
+        let laid = layout(Rect::new(0, 0, 200, 60), 4, 0);
+        assert_eq!(
+            (laid.modal.width, laid.modal.height),
+            (MAX_WIDTH, 21),
+            "a list under LIST_ROWS leaves the box at its recommended size"
+        );
+        assert_eq!(
+            (laid.list.height, laid.doc.height),
+            (LIST_ROWS, DOC_ROWS),
+            "and the list and doc keep their fixed shares"
+        );
+    }
+
+    #[test]
+    fn a_long_command_list_grows_the_list_not_the_doc() {
+        let laid = layout(Rect::new(0, 0, 200, 60), 18, 0);
+        assert_eq!(
+            laid.modal.height, 29,
+            "eighteen rows plus eleven chrome rows size the box"
+        );
+        assert_eq!(
+            (laid.list.height, laid.doc.height),
+            (18, DOC_ROWS),
+            "the extra rows all land in the list, leaving the doc at its share"
+        );
+    }
+
+    #[test]
+    fn the_box_never_takes_more_than_half_the_area() {
+        // A `:o ` over thousands of files would otherwise swallow the screen.
+        let laid = layout(Rect::new(0, 0, 200, 60), u16::MAX - 100, 0);
+        assert_eq!(
+            laid.modal.height, 30,
+            "a list larger than the screen stops at half the area"
+        );
+    }
+
+    #[test]
+    fn zoom_moves_the_height_alone() {
+        let area = Rect::new(0, 0, 200, 60);
+        let grown = layout(area, 4, 2);
+        let shrunk = layout(area, 4, -1);
+
+        assert_eq!(
+            (grown.modal.height, shrunk.modal.height),
+            (33, 15),
+            "each step moves the height by a tenth of the area"
+        );
+        assert_eq!(
+            (grown.modal.width, shrunk.modal.width),
+            (MAX_WIDTH, MAX_WIDTH),
+            "but the width holds at the cap the minimap band depends on"
+        );
+    }
+
+    #[test]
+    fn a_box_too_short_for_everything_gives_up_the_doc_first() {
+        // The list is the primary content, so a cramped terminal keeps its rows
+        // and drops the documentation pane.
+        let laid = layout(Rect::new(0, 0, 200, 16), 4, 0);
+        assert_eq!(
+            laid.modal.height, 12,
+            "the box takes the area less its margin"
+        );
+        assert_eq!(
+            (laid.list.height, laid.doc.height),
+            (7, 0),
+            "every remaining body row goes to the list"
+        );
     }
 }

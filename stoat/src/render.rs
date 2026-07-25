@@ -727,7 +727,16 @@ pub(crate) fn frame(
             &mut *scene,
         );
     } else if let Some(palette) = &mut stoat.command_palette {
-        command_palette::render_command_palette(palette, ws, &stoat.theme, full, buf, &mut *scene);
+        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette);
+        command_palette::render_command_palette(
+            palette,
+            ws,
+            &stoat.theme,
+            full,
+            zoom,
+            buf,
+            &mut *scene,
+        );
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,

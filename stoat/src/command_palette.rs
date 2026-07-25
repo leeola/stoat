@@ -63,6 +63,13 @@ pub struct CommandPalette {
     /// [`Self::generation`] so it bumps only on a real filter change, not on
     /// every per-frame refilter.
     last_filter_key: u64,
+    /// Commands the current scope offers before any query narrows them, which
+    /// the renderer sizes the modal's list against.
+    ///
+    /// Captured from the unfiltered set rather than [`Self::filtered`], so
+    /// typing a query cannot resize the box out from under the user typing it.
+    /// Only a scope flip changes it.
+    command_rows: u16,
 }
 
 /// The inline value-picker the palette shows while collecting an argument
@@ -437,6 +444,9 @@ impl CommandPalette {
             &mut match_indices,
             &mut selected,
         );
+        // The empty-query refilter above leaves `filtered` holding the scope's
+        // whole offering, which is exactly the base the box sizes to.
+        let command_rows = rows_of(filtered.len());
         Self {
             input,
             filtered,
@@ -449,6 +459,20 @@ impl CommandPalette {
             arg_picker: None,
             generation: crate::picker::next_generation(),
             last_filter_key: 0,
+            command_rows,
+        }
+    }
+
+    /// Rows the modal's list would need for the whole candidate set behind it,
+    /// whichever list is showing.
+    ///
+    /// Arg mode lists the argument picker's candidates, so `:o ` over a large
+    /// workspace sizes to the file count rather than the command count. Both
+    /// sources are unfiltered bases, so the answer holds while the user types.
+    pub(crate) fn list_rows_hint(&self) -> u16 {
+        match self.arg_picker.as_ref().filter(|_| self.command.is_some()) {
+            Some(picker) => rows_of(picker.active_core_ref().picklist.base.len()),
+            None => self.command_rows,
         }
     }
 
@@ -464,6 +488,7 @@ impl CommandPalette {
             PaletteScope::Active => PaletteScope::All,
             PaletteScope::All => PaletteScope::Active,
         };
+        self.command_rows = rows_of(scope_offering(self.scope, &self.availability));
         self.refilter_from_input(ws);
     }
 
@@ -776,6 +801,32 @@ fn history_head(entry: &registry::RegistryEntry) -> &'static str {
         .unwrap_or_else(|| entry.def.name())
 }
 
+/// Whether `entry` belongs in the palette's list under `scope`.
+///
+/// The Active scope hides actions the current workspace state cannot run, so a
+/// scope flip changes how many commands the palette offers, not just their
+/// order.
+fn offers(
+    entry: &registry::RegistryEntry,
+    scope: PaletteScope,
+    availability: &Availability,
+) -> bool {
+    entry.def.palette_visible()
+        && (scope != PaletteScope::Active || action_is_available(entry.def.kind(), availability))
+}
+
+/// How many commands `scope` offers before any query narrows them.
+fn scope_offering(scope: PaletteScope, availability: &Availability) -> usize {
+    registry::all()
+        .filter(|entry| offers(entry, scope, availability))
+        .count()
+}
+
+/// A candidate count as list rows, saturating past what any screen could show.
+fn rows_of(count: usize) -> u16 {
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     input: &str,
@@ -785,14 +836,9 @@ pub(crate) fn refilter(
     match_indices: &mut Vec<Vec<u32>>,
     selected: &mut usize,
 ) {
-    let passes = |entry: &registry::RegistryEntry| {
-        entry.def.palette_visible()
-            && (scope != PaletteScope::Active
-                || action_is_available(entry.def.kind(), availability))
-    };
-
-    let visible: Vec<&'static registry::RegistryEntry> =
-        registry::all().filter(|entry| passes(entry)).collect();
+    let visible: Vec<&'static registry::RegistryEntry> = registry::all()
+        .filter(|entry| offers(entry, scope, availability))
+        .collect();
 
     filtered.clear();
     match_indices.clear();
@@ -835,7 +881,7 @@ pub(crate) fn refilter(
     // when the name lacks the typed characters.
     let needle = input.trim();
     if let Some(pinned) = registry::lookup_alias(needle)
-        && passes(pinned)
+        && offers(pinned, scope, availability)
     {
         let indices = match filtered
             .iter()
