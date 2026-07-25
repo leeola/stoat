@@ -10,6 +10,82 @@ use ratatui::{
     widgets::{Clear, Widget},
 };
 
+/// Share of the body the commit list takes, the rest going to the diff below
+/// it. A percentage rather than a row count so the split holds at any modal
+/// size.
+const LIST_BODY_PERCENT: u16 = 40;
+
+/// Rows the list keeps however small the body gets, so a short modal still
+/// shows enough history to choose from.
+const MIN_LIST_ROWS: u16 = 5;
+
+/// The on-screen rectangles of the commit picker modal.
+///
+/// The diff preview sits *below* the list rather than beside it, so each side
+/// of a changed line gets the modal's full width instead of half of it.
+///
+/// Shared by the renderer and the wheel hit-test so a scroll lands on the
+/// region it appears over.
+pub(crate) struct CommitPickerLayout {
+    /// The bordered modal box.
+    pub(crate) modal: Rect,
+    /// Inside the border: input row, separator, header, list, then preview.
+    pub(crate) inner: Rect,
+    /// The commit table's column labels, above the rows they name. Reserved
+    /// here and painted when the rows become a table, so the rects below it
+    /// settle once rather than shifting a row later.
+    #[allow(dead_code)]
+    pub(crate) header: Rect,
+    /// The commit rows.
+    pub(crate) list: Rect,
+    /// The selected commit's diff, at the modal's full width. `None` when the
+    /// body has no rows left for it.
+    pub(crate) preview: Option<Rect>,
+}
+
+/// Lay out the commit picker within `area`, or `None` when `area` is too small
+/// to host it.
+///
+/// Takes its box from [`file_finder_layout`] so the picker sizes and centers
+/// like the rest of the modal family, then splits the body horizontally rather
+/// than using that layout's side-by-side split.
+pub(crate) fn commit_picker_layout(area: Rect, zoom: i8) -> Option<CommitPickerLayout> {
+    // A commit row plus its diff preview both want room, and the history behind
+    // them is arbitrarily long, so the picker asks for the whole area rather
+    // than measuring a list it would only ever outgrow.
+    let box_layout = file_finder_layout(area, (u16::MAX, u16::MAX), zoom)?;
+    let inner = box_layout.inner;
+
+    let header = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+    let body_top = header.y + 1;
+    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+
+    let list_height = (body_height * LIST_BODY_PERCENT / 100)
+        .max(MIN_LIST_ROWS)
+        .min(body_height);
+    let list = Rect::new(inner.x, body_top, inner.width, list_height);
+
+    // One row goes to the separator between the two, so a body with nothing
+    // left over shows the list alone.
+    let preview_height = body_height.saturating_sub(list_height + 1);
+    let preview = (preview_height > 0).then(|| {
+        Rect::new(
+            inner.x,
+            list.y + list_height + 1,
+            inner.width,
+            preview_height,
+        )
+    });
+
+    Some(CommitPickerLayout {
+        modal: box_layout.modal,
+        inner,
+        header,
+        list,
+        preview,
+    })
+}
+
 pub(crate) fn render_commit_picker(
     picker: &mut CommitPicker,
     ws: &mut Workspace,
@@ -19,10 +95,7 @@ pub(crate) fn render_commit_picker(
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    // A commit row plus its diff preview both want room, and the history behind
-    // them is arbitrarily long, so the picker asks for the whole area rather
-    // than measuring a list it would only ever outgrow.
-    let Some(layout) = file_finder_layout(area, (u16::MAX, u16::MAX), zoom) else {
+    let Some(layout) = commit_picker_layout(area, zoom) else {
         return;
     };
 
@@ -68,13 +141,13 @@ pub(crate) fn render_commit_picker(
     );
 
     if let Some(preview_rect) = layout.preview {
-        crate::render::chrome::vline(
+        crate::render::chrome::hline(
             buf,
-            layout.list.x + layout.list.width,
-            layout.list.y,
-            layout.list.height,
+            layout.list.x,
+            layout.list.y + layout.list.height,
+            layout.list.width,
             separator_style,
-            scene,
+            Some(&mut *scene),
         );
         render_preview(picker, preview_rect, theme, buf, scene);
     }
