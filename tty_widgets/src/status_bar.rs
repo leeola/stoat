@@ -2,12 +2,18 @@ use crate::{bar::Bar, text_run::TextRun, ApcScene};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 
 /// A status bar composed of left- and right-anchored scaled text segments and a
-/// top hairline separator that reads across the bare background between them.
+/// top hairline separator that reads across the background between them.
 ///
-/// Segments fill the row's full height and break the hairline where they sit.
-/// The separator is emitted first so they can. A hairline painted over a segment
+/// A segment paints a full-row background box only where its background differs
+/// from [`Self::bg`], and that box breaks the hairline where it sits. The
+/// separator is emitted first so it can. A hairline painted over a segment
 /// instead clips its top sliver, which reads as the segment starting below the
 /// bar's own top edge.
+///
+/// A segment on the bar's own background paints no box, so the hairline reads
+/// through it. The cell grid already carries that color under the whole row, so
+/// such a box would be invisible apart from erasing the hairline over exactly
+/// the segment's text.
 ///
 /// Components-only, like [`TextRun`] and [`Bar`]: it emits off-grid APC frames
 /// and writes no cell fallback, so the caller paints its own degraded cells for
@@ -27,15 +33,21 @@ pub struct StatusBar<'a> {
     pub scale: u16,
     /// Hairline separator color, drawn along the row's top edge.
     pub separator: [u8; 3],
+    /// The row's own background, matching what the cell grid paints beneath it.
+    /// A segment carrying this same background paints no box of its own.
+    pub bg: [u8; 3],
 }
 
-/// A single segment of a [`StatusBar`], drawn as a full-row background bar with
-/// a box-less scaled text run over it.
+/// A single segment of a [`StatusBar`], drawn as a box-less scaled text run over
+/// a full-row background bar.
 ///
 /// The text carries its own surrounding padding (a segment reads ` label `),
 /// and that padded width sizes the background bar. The run stays box-less so the
 /// background comes from the bar, which spans the row's full height and so
 /// covers the hairline emitted before it.
+///
+/// [`Self::bg`] matching [`StatusBar::bg`] drops the bar, leaving the run over
+/// the row's own background.
 pub struct StatusSegment<'a> {
     pub text: &'a str,
     pub fg: [u8; 3],
@@ -76,13 +88,17 @@ impl StatusBar<'_> {
         }
     }
 
-    /// Draw one segment as a full-row background bar with a box-less text run
-    /// over it.
+    /// Draw one segment as a box-less text run, over a full-row background bar
+    /// when the segment's background differs from the bar's own.
     ///
     /// The bar carries the segment background and spans the row's full height,
     /// so it covers the top hairline emitted before it and the segment reads
     /// flush with the bar's top edge. A box on the run instead would paint from
     /// the later text pass and bury the segment's own background.
+    ///
+    /// A segment matching [`StatusBar::bg`] emits no bar. The cell grid already
+    /// paints that color under the whole row, so the only thing such a bar
+    /// would do is erase the hairline over the segment's text.
     fn draw_segment(
         &self,
         x: u16,
@@ -92,14 +108,16 @@ impl StatusBar<'_> {
         buf: &mut Buffer,
         scene: &mut ApcScene,
     ) {
-        Bar {
-            x,
-            y: 0,
-            width: advance,
-            height: 16,
-            color: seg.bg,
+        if seg.bg != self.bg {
+            Bar {
+                x,
+                y: 0,
+                width: advance,
+                height: 16,
+                color: seg.bg,
+            }
+            .render(area, buf, scene);
         }
-        .render(area, buf, scene);
         TextRun {
             col: x,
             row: 0,
@@ -153,6 +171,7 @@ mod tests {
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
+            bg: [0, 0, 0],
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
@@ -221,6 +240,7 @@ mod tests {
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
+            bg: [0, 0, 0],
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
@@ -271,6 +291,7 @@ mod tests {
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
+            bg: [0, 0, 0],
         };
         let area = Rect::new(0, 0, 3, 1);
         let mut buf = Buffer::empty(area);
@@ -312,6 +333,7 @@ mod tests {
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
+            bg: [0, 0, 0],
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
@@ -349,6 +371,7 @@ mod tests {
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
+            bg: [0, 0, 0],
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
@@ -391,6 +414,82 @@ mod tests {
         assert!(
             separator_at < right_at,
             "the hairline precedes the right segment bar that covers it"
+        );
+    }
+
+    /// A bar whose segments all sit on its own background carries no visible
+    /// boxes, so a covering bar per segment would show up only as gaps chewed
+    /// out of the hairline over exactly the segment texts.
+    #[test]
+    fn a_segment_on_the_bar_background_emits_no_covering_bar() {
+        let bar_bg = [30, 31, 32];
+        let left = [StatusSegment {
+            text: "ab",
+            fg: [1, 2, 3],
+            bg: bar_bg,
+        }];
+        let right = [StatusSegment {
+            text: "xy",
+            fg: [7, 8, 9],
+            bg: [10, 11, 12],
+        }];
+        let status = StatusBar {
+            left: &left,
+            right: &right,
+            scale: 160,
+            separator: [60, 66, 77],
+            bg: bar_bg,
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+
+        status.draw_components(area, &mut buf, &mut scene);
+
+        // advance("ab") = advance("xy") = 20; right start = 320 - 20 = 300.
+        let base_bar = encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 16,
+            color: bar_bg,
+        });
+        let base_run = encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: None,
+            text: "ab".to_owned(),
+        });
+        let separator = encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 1,
+            color: [60, 66, 77],
+        });
+        let distinct_bar = encode_bar(&BarCommand {
+            x: 300,
+            y: 0,
+            width: 20,
+            height: 16,
+            color: [10, 11, 12],
+        });
+
+        let frames = scene.buffer();
+        assert!(
+            !contains(frames, &base_bar),
+            "a segment on the bar background emits no covering bar"
+        );
+        assert!(contains(frames, &base_run), "but still emits its text run");
+        assert!(
+            contains(frames, &separator),
+            "so the hairline still reads across it"
+        );
+        assert!(
+            contains(frames, &distinct_bar),
+            "a distinct-background segment keeps covering the hairline"
         );
     }
 }

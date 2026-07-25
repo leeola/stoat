@@ -522,18 +522,20 @@ fn render_status_segments(
 ) {
     let rich = (|| {
         let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg)?;
+        let base_bg = style_rgb(base_style.bg)?;
         let left_rich = resolve_rich_segments(left, base_style)?;
         let right_rich = resolve_rich_segments(right, base_style)?;
-        Some((separator, left_rich, right_rich))
+        Some((separator, base_bg, left_rich, right_rich))
     })();
 
     match rich {
-        Some((separator, left_rich, right_rich)) => {
+        Some((separator, base_bg, left_rich, right_rich)) => {
             StatusBar {
                 left: &left_rich,
                 right: &right_rich,
                 scale: TEXT_SCALE_COMPACT,
                 separator,
+                bg: base_bg,
             }
             .draw_components(area, buf, scene);
         },
