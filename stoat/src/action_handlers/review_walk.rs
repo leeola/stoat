@@ -104,6 +104,19 @@ pub(crate) fn commit_picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect 
     UpdateEffect::Redraw
 }
 
+/// Page the commit picker's selection by half its visible rows in `dir`.
+///
+/// The paging counterpart to [`commit_picker_step`], and it syncs the preview
+/// the same way so the diff follows a paged selection as it does a stepped one.
+pub(crate) fn commit_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    let Some(picker) = stoat.commit_picker.as_mut() else {
+        return UpdateEffect::None;
+    };
+    picker.page(dir);
+    ensure_selected_preview(stoat);
+    UpdateEffect::Redraw
+}
+
 /// Take the selected commit as the review base and start walking from it.
 ///
 /// The walk spans the selected commit through the ref tip, including commits

@@ -86,10 +86,11 @@ use crate::{
         picker::{
             CodeSearchClose, CodeSearchModeToggle, CodeSearchNext, CodeSearchPageDown,
             CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, CommitPickerClose,
-            CommitPickerNext, CommitPickerPrev, CommitPickerSelect, DiagnosticsPickerClose,
-            DiagnosticsPickerNext, DiagnosticsPickerPrev, DiagnosticsPickerSelect,
-            JumplistPickerClose, JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect,
-            LocationPickerClose, LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
+            CommitPickerColumnCycle, CommitPickerNext, CommitPickerPageDown, CommitPickerPageUp,
+            CommitPickerPrev, CommitPickerSelect, DiagnosticsPickerClose, DiagnosticsPickerNext,
+            DiagnosticsPickerPrev, DiagnosticsPickerSelect, JumplistPickerClose,
+            JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect, LocationPickerClose,
+            LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
         },
         prompt::{
             CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
@@ -568,6 +569,15 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(CommitPickerNext::DEF, |_| Ok(Box::new(CommitPickerNext)));
     add(CommitPickerPrev::DEF, |_| Ok(Box::new(CommitPickerPrev)));
+    add(CommitPickerPageDown::DEF, |_| {
+        Ok(Box::new(CommitPickerPageDown))
+    });
+    add(CommitPickerPageUp::DEF, |_| {
+        Ok(Box::new(CommitPickerPageUp))
+    });
+    add(CommitPickerColumnCycle::DEF, |_| {
+        Ok(Box::new(CommitPickerColumnCycle))
+    });
     add(CommitPickerSelect::DEF, |_| {
         Ok(Box::new(CommitPickerSelect))
     });
@@ -1276,6 +1286,9 @@ mod tests {
         "DiagnosticsPickerClose",
         "CommitPickerNext",
         "CommitPickerPrev",
+        "CommitPickerPageDown",
+        "CommitPickerPageUp",
+        "CommitPickerColumnCycle",
         "CommitPickerSelect",
         "CommitPickerClose",
         "LocationPickerNext",
@@ -1742,7 +1755,8 @@ mod tests {
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
         // + 1 GitLs.
         // + 2 FontSizeInc/FontSizeDec.
-        assert_eq!(all().count(), 412);
+        // + 3 CommitPickerPageDown/PageUp/ColumnCycle.
+        assert_eq!(all().count(), 415);
     }
 
     #[test]

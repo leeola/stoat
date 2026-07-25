@@ -100,6 +100,39 @@ define_action!(
 );
 
 define_action!(
+    CommitPickerPageDownDef,
+    CommitPickerPageDown,
+    "CommitPickerPageDown",
+    ActionKind::CommitPickerPageDown,
+    "page the commit list down",
+    "Move the commit picker's selection down by half the visible rows, matching how every other modal list pages.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPickerPageUpDef,
+    CommitPickerPageUp,
+    "CommitPickerPageUp",
+    ActionKind::CommitPickerPageUp,
+    "page the commit list up",
+    "Move the commit picker's selection up by half the visible rows, the counterpart to CommitPickerPageDown.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPickerColumnCycleDef,
+    CommitPickerColumnCycle,
+    "CommitPickerColumnCycle",
+    ActionKind::CommitPickerColumnCycle,
+    "cycle the filtered commit column",
+    "Advance which column of the commit table the query filters, cycling through every column and back to searching all of them.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     CommitPickerPrevDef,
     CommitPickerPrev,
     "CommitPickerPrev",

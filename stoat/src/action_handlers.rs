@@ -542,6 +542,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewDone => review_walk::review_done(stoat),
         ActionKind::CommitPickerNext => review_walk::commit_picker_step(stoat, 1),
         ActionKind::CommitPickerPrev => review_walk::commit_picker_step(stoat, -1),
+        ActionKind::CommitPickerPageDown => review_walk::commit_picker_page(stoat, 1),
+        ActionKind::CommitPickerPageUp => review_walk::commit_picker_page(stoat, -1),
+        // FIXME: cycling lands with the commit table's column filter, which is
+        // what a column to filter by requires. Nothing binds this until then.
+        ActionKind::CommitPickerColumnCycle => UpdateEffect::None,
         ActionKind::CommitPickerSelect => review_walk::commit_picker_select(stoat),
         ActionKind::CommitPickerClose => review_walk::commit_picker_close(stoat),
         ActionKind::LocationPickerNext => picker::location_picker_next(stoat),

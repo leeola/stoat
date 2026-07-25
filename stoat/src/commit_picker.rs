@@ -180,10 +180,6 @@ impl CommitPicker {
     /// Page the selection by half the rendered list height in `dir` (negative
     /// up, positive down). Falls back to a single row before the first render
     /// sets [`Self::viewport_rows`].
-    ///
-    /// No key binds this yet. It exists so the picker matches the other modal
-    /// lists, whose keymaps all page with Ctrl-F and Ctrl-B.
-    #[allow(dead_code)]
     pub(crate) fn page(&mut self, dir: i32) {
         let step = self
             .viewport_rows
@@ -406,26 +402,57 @@ mod tests {
         assert_eq!(p.selected_commit().map(|c| c.sha.as_str()), Some("bbb2222"));
     }
 
-    /// The `modal == commit_picker` keymap block reaches the handlers.
+    /// The `modal == commit_picker` keymap block reaches the handlers, over a
+    /// picker opened the way a user opens one.
     ///
     /// Worth pinning because an unresolvable action name in config.stcfg is
     /// silently dropped, so a mistyped binding would leave the modal inert with
-    /// nothing else to catch it.
+    /// nothing else to catch it. Opening through `:git-ls` rather than
+    /// installing the picker by hand is what makes that real. The block is
+    /// gated on insert mode, and only the true open path proves the picker
+    /// lands there.
     #[test]
     fn the_keymap_block_drives_the_picker() {
-        let mut h = seeded_picker_harness();
-        h.stoat.set_focused_mode("insert".to_string());
-
-        h.type_keys("down");
+        let mut h = seeded_repo_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
         h.settle();
-        assert_eq!(
+        let selected = |h: &crate::test_harness::TestHarness| {
             h.stoat
                 .commit_picker
                 .as_ref()
                 .and_then(|p| p.selected_commit())
-                .map(|c| c.sha.as_str()),
+                .map(|c| c.sha.to_string())
+        };
+        assert_eq!(
+            selected(&h).as_deref(),
+            Some("c3d4e5f6"),
+            "the browser opens on the newest commit"
+        );
+
+        h.type_keys("down");
+        h.settle();
+        assert_eq!(
+            selected(&h).as_deref(),
+            Some("b2c3d4e5"),
+            "Down steps one commit back through history"
+        );
+
+        h.type_keys("ctrl-f");
+        h.settle();
+        assert_eq!(
+            selected(&h).as_deref(),
             Some("a1b2c3d4"),
-            "Down steps past the default selection to the oldest commit"
+            "Ctrl-f pages by half the viewport, which this short list clamps \
+             to the oldest commit"
+        );
+
+        h.type_keys("ctrl-b");
+        h.settle();
+        assert_eq!(
+            selected(&h).as_deref(),
+            Some("c3d4e5f6"),
+            "and Ctrl-b pages back the same distance"
         );
 
         h.type_keys("escape");
@@ -440,8 +467,9 @@ mod tests {
     }
 
     /// A harness with a three-commit `/repo`, `main` on its tip and `feature`
-    /// one commit back, and an open picker built over that history.
-    fn seeded_picker_harness() -> crate::test_harness::TestHarness {
+    /// one commit back, and that repo as the workspace root so the git actions
+    /// find it.
+    fn seeded_repo_harness() -> crate::test_harness::TestHarness {
         let mut h = crate::app::Stoat::test();
         h.resize(100, 24);
         h.seed_linear_history(
@@ -463,7 +491,17 @@ mod tests {
         h.fake_git()
             .add_repo("/repo")
             .branch("main", "c3d4e5f6")
-            .branch("feature", "b2c3d4e5");
+            .branch("feature", "b2c3d4e5")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h
+    }
+
+    /// [`seeded_repo_harness`] with a PickBase picker installed over that
+    /// history, which is the role a review walk starts from and `:git-ls`
+    /// cannot produce.
+    fn seeded_picker_harness() -> crate::test_harness::TestHarness {
+        let mut h = seeded_repo_harness();
 
         let (commits, branch_tips) = {
             let repo = h
