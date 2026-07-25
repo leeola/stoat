@@ -4107,21 +4107,34 @@ impl Stoat {
             return;
         };
 
-        let total = editor.display_map.snapshot().line_count();
+        let snapshot = editor.display_map.snapshot();
         let viewport = editor.viewport_rows.unwrap_or(strip.height as u32).max(1);
         let strip_local_row = screen_row.saturating_sub(strip.y);
+        // The strip is drawn in buffer lines, so the click resolves against the
+        // same window the emit ships rather than the editor's display rows.
+        let (view_top, view_visible) =
+            minimap_view_window(&snapshot, editor.scroll_offset, viewport);
+        let buffer_lines = snapshot.buffer_line_count();
         let target_line = crate::minimap::click_target_line(
             strip.height,
             strip_local_row,
-            total as f32,
-            editor.scroll_offset,
-            viewport as f32,
+            buffer_lines as f32,
+            view_top,
+            view_visible as f32,
         );
 
-        let max_scroll = total
+        // A strip taller than the file resolves cells past its last line, and
+        // scrolling happens in display rows, so the target converts back.
+        let target_line = target_line.min(buffer_lines.saturating_sub(1));
+        let target_display = snapshot
+            .buffer_to_display(stoat_text::Point::new(target_line, 0))
+            .row;
+
+        let max_scroll = snapshot
+            .line_count()
             .saturating_sub(1)
             .saturating_sub(viewport.saturating_sub(1));
-        let target_row = target_line.saturating_sub(viewport / 2).min(max_scroll);
+        let target_row = target_display.saturating_sub(viewport / 2).min(max_scroll);
 
         let prev = editor.scroll_row;
         editor.scroll_row = target_row;
@@ -17823,6 +17836,49 @@ mod tests {
             h.stoat.minimap_drag,
             Some(editor_id),
             "the press arms the scrub"
+        );
+    }
+
+    /// The strip draws one row per buffer line, so a click resolves to a buffer
+    /// line and must be converted before it drives the display-row scroll. With
+    /// every line wrapped in two, an unconverted target lands halfway up the
+    /// file from the block the pointer was over.
+    #[test]
+    fn minimap_click_targets_the_clicked_buffer_line_when_wrapped() {
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+        let body: String = (0..60)
+            .map(|_| "w".repeat(100))
+            .collect::<Vec<_>>()
+            .join("\n");
+        open_scratch_file(&mut h, &body);
+        let editor_id = h.stoat.focused_editor_ids().expect("editor").0;
+        let display_rows = {
+            let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
+            editor.minimap_rect = Some(Rect::new(72, 0, 8, 10));
+            editor.viewport_rows = Some(20);
+            editor.display_map.set_wrap_width(Some(60));
+            editor.display_map.snapshot().line_count()
+        };
+        assert_eq!(display_rows, 120, "every line must wrap into two rows");
+
+        // The 60-line file fits the strip's 10 * LINES_PER_CELL rows, so cell
+        // row 5 points at buffer line 5*8+4.
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 74, 5));
+
+        let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
+        let scroll_row = editor.scroll_row;
+        let centered = editor
+            .display_map
+            .snapshot()
+            .display_to_buffer(DisplayPoint::new(scroll_row + 10, 0))
+            .expect("a text row")
+            .row;
+        assert_eq!(
+            (scroll_row, centered),
+            (78, 44),
+            "the click centers the buffer line under the pointer, not the display row"
         );
     }
 
