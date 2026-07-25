@@ -350,6 +350,27 @@ enum WindowIpc {
     Event(WindowIpcEvent),
 }
 
+/// A modal that sizes itself to its content, and so carries its own zoom level.
+///
+/// The zoom combo is context-relative, so a step has to land on whichever modal
+/// the user is looking at rather than on a single global level. This names that
+/// target. Modals sized entirely by their content already (the location,
+/// diagnostics, jumplist, and workspace pickers) have nothing to zoom and are
+/// absent.
+///
+/// Nothing reads this yet. The layout adoptions size their boxes by it, and the
+/// zoom routing steps [`Stoat::modal_zoom`] under it.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ModalKind {
+    FileFinder,
+    CodeSearch,
+    CommitPicker,
+    Palette,
+    Help,
+    SymbolFinder,
+}
+
 pub struct Stoat {
     size: Rect,
     /// Fallback mode store, read and written only when the focused target has
@@ -376,6 +397,19 @@ pub struct Stoat {
     /// theme directory. Retained so a config reload rebuilds the same pool
     /// without re-reading or re-parsing the theme files.
     pub(crate) imported_theme_blocks: Vec<Spanned<ThemeBlock>>,
+    /// How far the user has zoomed each modal past the size its content asks
+    /// for, in steps of a tenth of the screen. An absent kind sits at zero.
+    ///
+    /// Steps live here rather than on the modal state itself so a level outlives
+    /// the modal it belongs to. Reopening the file finder brings back the size
+    /// the user last chose for it. They are session-scoped and deliberately not
+    /// persisted, because a zoom is a reaction to what is on screen right now.
+    /// Callers keep each step within `-4..=8`.
+    ///
+    /// Nothing writes this yet. The zoom routing steps it, and the layout
+    /// adoptions read it.
+    #[allow(dead_code)]
+    pub(crate) modal_zoom: std::collections::BTreeMap<ModalKind, i8>,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
@@ -1419,6 +1453,7 @@ impl Stoat {
             theme: Arc::new(theme),
             theme_blocks,
             imported_theme_blocks,
+            modal_zoom: std::collections::BTreeMap::new(),
             command_palette: None,
             help: None,
             file_finder: None,

@@ -9,6 +9,88 @@ use ratatui::{
 use stoatty_protocol::command::{self, BorderStyle, PanelCommand, PanelShadow};
 use stoatty_widgets::{bar::Bar, text_run::TextRun, ApcScene};
 
+/// Cells left bare between a modal box and the edge of the area it floats over,
+/// split evenly across the two opposing edges.
+const MODAL_MARGIN: u16 = 4;
+
+/// The same margin at its thinnest, which is what a zoomed-out-to-nothing or
+/// zoomed-all-the-way-up box is allowed to shrink the surround to.
+const MODAL_MARGIN_MIN: u16 = 2;
+
+/// Denominator of one zoom step. Each step moves a dimension by this fraction of
+/// the area, so a step feels the same size on a small screen and a large one.
+const ZOOM_STEP_DIVISOR: u16 = 10;
+
+/// Size and center a modal box over `area` for content of `content` cells,
+/// returning `None` when `area` is too small to host `min`.
+///
+/// This is the sizing rule behind every content-sized modal. Per dimension the
+/// box is `content` bounded below by `recommended` and above by `area` less
+/// [`MODAL_MARGIN`]. Small content therefore keeps the recommended size a
+/// fixed-size modal always had, and only content that outgrows it expands. A
+/// dimension of [`u16::MAX`] is how a data-heavy modal asks for the largest box
+/// the area allows without having to measure anything.
+///
+/// `zoom` then moves each dimension by that many tenths of the area, positive to
+/// grow, and the result is clamped to between `min` and `area` less
+/// [`MODAL_MARGIN_MIN`]. The clamp is what bounds the caller's zoom steps, so a
+/// caller need not pre-limit them.
+///
+/// `content` is expected to be measured once when the modal opens rather than
+/// per frame. The box's position is derived from its size, so re-measuring
+/// against a filtered list would move the box while the user types into it.
+///
+/// See also:
+/// - [`modal_frame`] to draw the returned rect's border and title.
+#[allow(dead_code)]
+pub(crate) fn modal_box(
+    area: Rect,
+    content: (u16, u16),
+    recommended: (u16, u16),
+    min: (u16, u16),
+    zoom: i8,
+) -> Option<Rect> {
+    let ceiling = (
+        area.width.saturating_sub(MODAL_MARGIN_MIN),
+        area.height.saturating_sub(MODAL_MARGIN_MIN),
+    );
+    if ceiling.0 < min.0 || ceiling.1 < min.1 {
+        return None;
+    }
+
+    let width = zoomed(area.width, content.0, recommended.0, min.0, ceiling.0, zoom);
+    let height = zoomed(
+        area.height,
+        content.1,
+        recommended.1,
+        min.1,
+        ceiling.1,
+        zoom,
+    );
+
+    Some(Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    ))
+}
+
+/// Size one dimension of a [`modal_box`], fitting `content` between
+/// `recommended` and the margin, applying `zoom` steps, then clamping to
+/// `min..=ceiling`.
+///
+/// The zoom arithmetic runs in [`i32`] because a negative step can carry the
+/// dimension below zero before the clamp pulls it back up to `min`.
+fn zoomed(area: u16, content: u16, recommended: u16, min: u16, ceiling: u16, zoom: i8) -> u16 {
+    let base = content
+        .max(recommended)
+        .min(area.saturating_sub(MODAL_MARGIN));
+    let step = i32::from(area / ZOOM_STEP_DIVISOR) * i32::from(zoom);
+
+    (i32::from(base) + step).clamp(i32::from(min), i32::from(ceiling)) as u16
+}
+
 /// Draw a modal frame around `area` and return the inner content rect.
 ///
 /// This is the single chrome primitive behind every stoat modal and cursor
@@ -255,7 +337,7 @@ pub(crate) fn text(
 
 #[cfg(test)]
 mod tests {
-    use super::{hline, modal_frame, popout_frame, text, vline, POPOUT_INSET_PX};
+    use super::{hline, modal_box, modal_frame, popout_frame, text, vline, POPOUT_INSET_PX};
     use crate::theme::Theme;
     use ratatui::{
         buffer::Buffer,
@@ -276,6 +358,69 @@ mod tests {
     /// these helpers to their cell fallback now that a scene is always present.
     fn plain_style() -> Style {
         Style::default().fg(Color::Reset)
+    }
+
+    /// Recommended and minimum sizes roughly matching the file finder's, over an
+    /// area sized so one zoom step is a round 20 columns by 6 rows.
+    const RECOMMENDED: (u16, u16) = (120, 32);
+    const MIN: (u16, u16) = (40, 12);
+
+    fn sized(content: (u16, u16), zoom: i8) -> Option<Rect> {
+        modal_box(Rect::new(0, 0, 200, 60), content, RECOMMENDED, MIN, zoom)
+    }
+
+    #[test]
+    fn small_content_keeps_the_recommended_box_centered() {
+        assert_eq!(sized((10, 5), 0), Some(Rect::new(40, 14, 120, 32)));
+        assert_eq!(
+            modal_box(Rect::new(10, 5, 200, 60), (10, 5), RECOMMENDED, MIN, 0),
+            Some(Rect::new(50, 19, 120, 32)),
+            "centered within the area's own origin"
+        );
+    }
+
+    #[test]
+    fn content_past_the_recommended_size_expands_to_the_margin() {
+        let expanded = Some(Rect::new(2, 2, 196, 56));
+        assert_eq!(sized((400, 100), 0), expanded);
+        assert_eq!(
+            sized((u16::MAX, u16::MAX), 0),
+            expanded,
+            "u16::MAX asks for the largest box the area allows"
+        );
+    }
+
+    #[test]
+    fn zoom_steps_the_box_by_a_tenth_of_the_area() {
+        assert_eq!(sized((10, 5), 1), Some(Rect::new(30, 11, 140, 38)));
+        assert_eq!(sized((10, 5), -1), Some(Rect::new(50, 17, 100, 26)));
+    }
+
+    #[test]
+    fn zoom_clamps_between_the_minimum_and_the_thin_margin() {
+        assert_eq!(sized((10, 5), 8), Some(Rect::new(1, 1, 198, 58)));
+        assert_eq!(
+            sized((10, 5), -8),
+            Some(Rect::new(80, 24, 40, 12)),
+            "a step past zero clamps up to the minimum rather than underflowing"
+        );
+    }
+
+    #[test]
+    fn an_area_too_small_for_the_minimum_has_no_box() {
+        assert_eq!(
+            modal_box(Rect::new(0, 0, 41, 60), (10, 5), RECOMMENDED, MIN, 0),
+            None
+        );
+        assert_eq!(
+            modal_box(Rect::new(0, 0, 200, 13), (10, 5), RECOMMENDED, MIN, 0),
+            None
+        );
+        assert_eq!(
+            modal_box(Rect::new(0, 0, 42, 14), (10, 5), RECOMMENDED, MIN, 0),
+            Some(Rect::new(1, 1, 40, 12)),
+            "the smallest hostable area yields the minimum box"
+        );
     }
 
     #[test]
