@@ -327,6 +327,9 @@ fn run_tui(
         // window gutter matches from the first frame rather than only after a
         // `:theme` switch.
         stoat.emit_theme_default_colors();
+        // Claimed for the whole session, so the combo is stoat's to route by
+        // context from the first keypress rather than stepping the font size.
+        stoat.emit_zoom_capture(true);
         stoat.set_window_ipc(std::env::var_os("STOATTY_WINDOW_SOCKET").map(PathBuf::from));
         stoat.set_version_info(VERSION_INFO);
         stoat.set_lsp_auto_spawn(true);

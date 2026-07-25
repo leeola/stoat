@@ -295,6 +295,48 @@ fn modal_overlay_open(stoat: &Stoat) -> bool {
         || stoat.code_search.is_some()
 }
 
+/// True while an open modal owns the zoom combo, so a zoom step belongs to it
+/// rather than to the panes behind it.
+///
+/// Wider than [`modal_overlay_open`] by the command palette, which that
+/// predicate leaves out to keep the minimap band visible beside it. That has
+/// nothing to do with input, and the palette takes zoom steps like any other
+/// modal.
+///
+/// A modal with no [`ModalKind`] of its own still holds here. Those size
+/// entirely to their content and have nothing to zoom, so a step over them does
+/// nothing -- resizing a pane hidden behind a modal would be a change the user
+/// cannot see or connect to what they pressed.
+pub(crate) fn zoom_context_modal(stoat: &Stoat) -> bool {
+    modal_overlay_open(stoat) || stoat.command_palette.is_some()
+}
+
+/// The open modal a zoom step applies to, or `None` when the open modal has no
+/// zoom of its own and when no modal is open at all.
+///
+/// Walks the same priority order as the render dispatch chain in [`frame`], so
+/// the modal that zooms is the one actually being painted.
+///
+/// See also:
+/// - [`zoom_context_modal`] to tell a zoomless modal apart from no modal.
+pub(crate) fn zoom_target_kind(stoat: &Stoat) -> Option<ModalKind> {
+    if stoat.help.is_some() {
+        Some(ModalKind::Help)
+    } else if stoat.file_finder.is_some() {
+        Some(ModalKind::FileFinder)
+    } else if stoat.symbol_finder.is_some() {
+        Some(ModalKind::SymbolFinder)
+    } else if stoat.code_search.is_some() {
+        Some(ModalKind::CodeSearch)
+    } else if stoat.command_palette.is_some() {
+        Some(ModalKind::Palette)
+    } else if stoat.commit_picker.is_some() {
+        Some(ModalKind::CommitPicker)
+    } else {
+        None
+    }
+}
+
 /// Resolve every `Color::Reset` cell in `buf` against `theme`.
 ///
 /// A cell left at Reset is resolved by whatever terminal stoat is running

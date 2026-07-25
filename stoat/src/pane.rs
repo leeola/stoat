@@ -825,12 +825,8 @@ impl PaneTree {
     /// A no-op for a pane with no split above it, which covers both a lone pane
     /// and a windowed one. The resulting weights persist across restart.
     ///
-    /// Nothing calls this yet. The zoom routing reaches it when no modal is
-    /// open.
-    ///
     /// See also:
     /// - [`Self::set_divider`] for the pointer-driven resize of one boundary.
-    #[allow(dead_code)]
     pub(crate) fn resize_focused_pane(&mut self, delta: i32) {
         let Some(leaf) = self.leaf_node(self.focus) else {
             return;

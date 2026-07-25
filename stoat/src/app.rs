@@ -362,7 +362,6 @@ enum WindowIpc {
 /// absent.
 ///
 /// Every kind here sizes its box against its own [`Stoat::modal_zoom`] entry.
-/// The zoom routing that steps those entries is still to come.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ModalKind {
     FileFinder,
@@ -372,6 +371,16 @@ pub(crate) enum ModalKind {
     Help,
     SymbolFinder,
 }
+
+/// Furthest a modal may be zoomed out, in steps of a tenth of the screen.
+///
+/// Shallower than the grow limit because a modal shrinks toward a minimum size
+/// it reaches quickly, while growing has most of the screen to cross.
+const MODAL_ZOOM_MIN: i8 = -4;
+
+/// Furthest a modal may be zoomed in, in steps of a tenth of the screen. Enough
+/// to reach the screen edge from any starting size.
+const MODAL_ZOOM_MAX: i8 = 8;
 
 /// Zoom steps the user has applied to `kind`, zero for a kind they never zoomed.
 ///
@@ -419,10 +428,8 @@ pub struct Stoat {
     /// the modal it belongs to. Reopening the file finder brings back the size
     /// the user last chose for it. They are session-scoped and deliberately not
     /// persisted, because a zoom is a reaction to what is on screen right now.
-    /// Callers keep each step within `-4..=8`.
-    ///
-    /// Nothing writes this yet, so every kind still sits at zero. The layouts
-    /// already size by it. The zoom routing is what will step it.
+    /// Every entry sits within [`MODAL_ZOOM_MIN`]`..=`[`MODAL_ZOOM_MAX`], which
+    /// [`Self::handle_zoom_step`] enforces as the only writer.
     pub(crate) modal_zoom: std::collections::BTreeMap<ModalKind, i8>,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
@@ -1811,6 +1818,12 @@ impl Stoat {
             return self.handle_aux_mouse(window, kind, col, row);
         }
 
+        // Routing a zoom step reads the open modal and the zoom ledger, neither
+        // of which the pane-tree borrow below leaves reachable.
+        if let WindowIpcEvent::Zoom { delta, .. } = event {
+            return self.handle_zoom_step(delta);
+        }
+
         let panes = &mut self.active_workspace_mut().panes;
         match event {
             WindowIpcEvent::Focused { window: 0 } => {
@@ -1837,11 +1850,33 @@ impl Stoat {
                 }
             },
             WindowIpcEvent::Mouse { .. } => unreachable!("mouse events return above"),
-            // FIXME: routing lands with the context-relative zoom item. Nothing
-            // claims the combo yet, so a forwarded step is dropped rather than
-            // acted on, and no redraw is owed for it.
-            WindowIpcEvent::Zoom { .. } => return UpdateEffect::None,
+            WindowIpcEvent::Zoom { .. } => unreachable!("zoom events return above"),
         }
+        UpdateEffect::Redraw
+    }
+
+    /// Apply `delta` zoom steps to whatever the user is looking at.
+    ///
+    /// An open modal owns the combo. One with a zoom of its own grows or
+    /// shrinks, and one sized entirely by its content swallows the step, since
+    /// resizing a pane hidden behind it would be a change the user cannot see.
+    /// With no modal open the step resizes the focused pane against its split.
+    ///
+    /// Modal levels are clamped to the range [`Self::modal_zoom`] documents.
+    /// They are per modal kind and outlive the modal, so reopening one brings
+    /// back the size the user last chose for it.
+    fn handle_zoom_step(&mut self, delta: i32) -> UpdateEffect {
+        if let Some(kind) = crate::render::zoom_target_kind(self) {
+            let level = self.modal_zoom.entry(kind).or_insert(0);
+            let stepped = i32::from(*level).saturating_add(delta);
+            *level = stepped.clamp(MODAL_ZOOM_MIN.into(), MODAL_ZOOM_MAX.into()) as i8;
+            return UpdateEffect::Redraw;
+        }
+        if crate::render::zoom_context_modal(self) {
+            return UpdateEffect::None;
+        }
+
+        self.active_workspace_mut().panes.resize_focused_pane(delta);
         UpdateEffect::Redraw
     }
 
@@ -7069,6 +7104,26 @@ impl Stoat {
         let _ = apc_tx.send(out);
     }
 
+    /// Claim the platform zoom combo from the hosting terminal, or release it.
+    ///
+    /// While claimed the terminal forwards each press as a
+    /// [`WindowIpcEvent::Zoom`] instead of stepping its own font size, which is
+    /// what lets the combo mean whatever the current context calls for. The
+    /// claim lasts the session, so this is sent once at startup rather than
+    /// tracked per frame, and the terminal drops it when this process exits.
+    ///
+    /// A no-op outside stoatty, where the combo never reaches stoat at all and
+    /// the terminal keeps its own font zoom.
+    pub fn emit_zoom_capture(&self, on: bool) {
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+
+        let mut out = Vec::new();
+        stoatty_protocol::command::encode_zoom_capture_into(&mut out, on);
+        let _ = apc_tx.send(out);
+    }
+
     /// Open and close the aux windows detached panes render into.
     ///
     /// Diffs the [`Self::aux_windows`] ledger against the active workspace's
@@ -9323,6 +9378,117 @@ mod tests {
         let panes = &stoat.active_workspace().panes;
         assert_eq!(panes.pane(detached).placement, Placement::Split);
         assert!(panes.split_pane_ids().contains(&detached));
+    }
+
+    fn zoom(delta: i32) -> WindowIpc {
+        WindowIpc::Event(WindowIpcEvent::Zoom { window: 0, delta })
+    }
+
+    /// With nothing over the panes the combo is a pane resize, so the focused
+    /// pane takes room from its neighbor.
+    #[test]
+    fn a_zoom_step_with_no_modal_open_resizes_the_focused_pane() {
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        let left = h.stoat.active_workspace().panes.focus();
+        let right = h
+            .stoat
+            .active_workspace_mut()
+            .panes
+            .split(crate::pane::Axis::Vertical);
+        h.stoat.active_workspace_mut().panes.set_focus(left);
+        let width = |h: &crate::test_harness::TestHarness, id| {
+            h.stoat.active_workspace().panes.pane(id).area.width
+        };
+        assert_eq!((width(&h, left), width(&h, right)), (50, 50));
+
+        h.stoat.handle_window_ipc(zoom(1));
+
+        assert_eq!(
+            (width(&h, left), width(&h, right)),
+            (60, 40),
+            "the focused pane grew a step against its neighbor"
+        );
+    }
+
+    /// An open modal owns the combo, so the panes behind it must not move.
+    #[test]
+    fn a_zoom_step_with_a_modal_open_zooms_it_and_leaves_the_panes_alone() {
+        use stoat_action::OpenFileFinder;
+
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        let left = h.stoat.active_workspace().panes.focus();
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .split(crate::pane::Axis::Vertical);
+        h.stoat.active_workspace_mut().panes.set_focus(left);
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+
+        h.stoat.handle_window_ipc(zoom(1));
+
+        assert_eq!(
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            1,
+            "the open finder took the step"
+        );
+        assert_eq!(
+            h.stoat.active_workspace().panes.pane(left).area.width,
+            50,
+            "and the pane behind it kept its share"
+        );
+    }
+
+    #[test]
+    fn modal_zoom_steps_clamp_at_both_ends() {
+        use stoat_action::OpenFileFinder;
+
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+
+        for _ in 0..20 {
+            h.stoat.handle_window_ipc(zoom(1));
+        }
+        assert_eq!(
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            MODAL_ZOOM_MAX,
+            "growing stops at the ceiling"
+        );
+
+        for _ in 0..40 {
+            h.stoat.handle_window_ipc(zoom(-1));
+        }
+        assert_eq!(
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            MODAL_ZOOM_MIN,
+            "and shrinking stops at the floor"
+        );
+    }
+
+    /// A modal already sized to its content has nothing to zoom, but it still
+    /// owns the combo, so the step must not fall through to the panes it hides.
+    #[test]
+    fn a_zoomless_modal_swallows_the_step() {
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+        let left = h.stoat.active_workspace().panes.focus();
+        h.stoat
+            .active_workspace_mut()
+            .panes
+            .split(crate::pane::Axis::Vertical);
+        h.stoat.active_workspace_mut().panes.set_focus(left);
+        h.stoat.quit_all_confirm = Some(QuitAllConfirm::new(&[], std::path::Path::new("/")));
+
+        assert_eq!(
+            h.stoat.handle_window_ipc(zoom(1)),
+            UpdateEffect::None,
+            "nothing changed, so no redraw is owed"
+        );
+        assert_eq!(
+            h.stoat.active_workspace().panes.pane(left).area.width,
+            50,
+            "the panes behind the picker kept their shares"
+        );
     }
 
     #[test]
