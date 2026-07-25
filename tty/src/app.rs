@@ -416,6 +416,14 @@ struct State {
     /// The most recent modifier state, tracked from `ModifiersChanged` so a key
     /// press can tell whether the platform zoom modifier is held.
     modifiers: ModifiersState,
+    /// Whether the child has claimed the platform zoom combo for its session, so
+    /// each press is forwarded upstream instead of stepping the font size.
+    ///
+    /// False until a child asks for it, which is what leaves a plain shell child
+    /// with instant native font zoom. A child that claims it and then wedges
+    /// keeps the claim, since releasing on silence would make the combo flicker
+    /// between meanings whenever the child was merely busy.
+    zoom_capture: bool,
     /// Whether the primary window currently holds focus, tracked from
     /// `WindowEvent::Focused`. Combined with each aux window's focus into the
     /// app-wide DECSET 1004 report via [`reconcile_app_focus`].
@@ -891,6 +899,7 @@ impl ApplicationHandler<PtyEvent> for App {
             font_size: self.font_size,
             scale_factor,
             modifiers: ModifiersState::empty(),
+            zoom_capture: false,
             focused: true,
             app_focused: true,
             last_bell: None,
@@ -1718,21 +1727,11 @@ impl ApplicationHandler<PtyEvent> for App {
                 // control. Per-window font zoom is out of scope, so an aux zoom
                 // combo falls through and reaches the PTY as a plain keystroke.
                 if primary && let Some(delta) = font_step(platform_mod_held, &event.logical_key) {
-                    let font_size =
-                        (state.font_size as i32 + delta).max(FONT_SIZE_FLOOR as i32) as u32;
-                    state.font_size = font_size;
-                    state
-                        .gpu
-                        .set_font_size(font_size, state.scale_factor as f32);
-                    update_cell_pixels(&state.terminal, font_size, state.scale_factor as f32);
-
-                    // The surface is unchanged, so skip `gpu.resize`; only the cell
-                    // metrics moved, so re-read the grid size and resize the rest.
-                    let (rows, cols) = state.gpu.grid_size();
-                    state.terminal.lock().resize(rows, cols);
-                    let _ = state.pty.resize(rows as u16, cols as u16);
-
-                    state.window.request_redraw();
+                    if forwards_zoom(state.zoom_capture, state.window_event_tx.is_some()) {
+                        send_window_event(state, WindowIpcEvent::Zoom { window: 0, delta });
+                    } else {
+                        apply_font_step(state, delta);
+                    }
                     return;
                 }
 
@@ -2172,6 +2171,37 @@ fn font_step(platform_mod_held: bool, key: &Key) -> Option<i32> {
     }
 }
 
+/// Whether a zoom-combo press goes to the child instead of stepping the font.
+///
+/// The claim alone is not enough. Without the window socket the press has
+/// nowhere to go and would simply vanish, so a claimed combo with no way
+/// upstream falls back to font zoom rather than doing nothing.
+fn forwards_zoom(zoom_capture: bool, has_socket: bool) -> bool {
+    zoom_capture && has_socket
+}
+
+/// Step the terminal's font size by `delta` and re-fit everything measured in
+/// cells.
+///
+/// Shared by the zoom combo and a child's `font_step` request, so both paths
+/// land the same metrics. The surface itself does not change, only the cell
+/// size, so the grid is re-read and the terminal and pty resized without a
+/// `gpu.resize`.
+fn apply_font_step(state: &mut State, delta: i32) {
+    let font_size = (state.font_size as i32 + delta).max(FONT_SIZE_FLOOR as i32) as u32;
+    state.font_size = font_size;
+    state
+        .gpu
+        .set_font_size(font_size, state.scale_factor as f32);
+    update_cell_pixels(&state.terminal, font_size, state.scale_factor as f32);
+
+    let (rows, cols) = state.gpu.grid_size();
+    state.terminal.lock().resize(rows, cols);
+    let _ = state.pty.resize(rows as u16, cols as u16);
+
+    state.window.request_redraw();
+}
+
 /// Encode clipboard `text` for the PTY on paste.
 ///
 /// In bracketed-paste mode the payload is wrapped in the DECSET 2004 guard
@@ -2420,11 +2450,8 @@ fn handle_term_events(
             // Filtered out before this fan-out, since re-applying a config
             // touches window state this function has no handle on.
             TermEvent::ConfigReload => {},
-            // FIXME: honouring these lands with the combo-forwarding item. Both
-            // resize the grid or redirect key handling, which this fan-out has
-            // no handle on, so they will be filtered out ahead of it like
-            // ConfigReload rather than handled here.
-            TermEvent::ZoomCapture(_) | TermEvent::FontStep(_) => {},
+            TermEvent::ZoomCapture(on) => state.zoom_capture = on,
+            TermEvent::FontStep(delta) => apply_font_step(state, delta),
         }
     }
 }
@@ -3281,11 +3308,11 @@ mod tests {
     use super::{
         alternate_scroll_bytes, anchored_cursor_pos, app_has_focus, bell_should_ring,
         block_corners, cell_at, copy_pool_region, cursor_in_region, ease, ease_corners, encode_key,
-        font_step, ipc_button, modifier_bits, paste_bytes, popover_overflow, reposition_scroll,
-        seed_settle_flight, selection_copy_text, sgr_button_bytes, sgr_motion_bytes,
-        sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll, step_popover_scroll,
-        step_region_scroll, step_scrollback_scroll, swallow_super_combo, wheel_lines,
-        CursorAnimation, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
+        font_step, forwards_zoom, ipc_button, modifier_bits, paste_bytes, popover_overflow,
+        reposition_scroll, seed_settle_flight, selection_copy_text, sgr_button_bytes,
+        sgr_motion_bytes, sgr_wheel_bytes, step_cursor, step_document_scroll, step_grid_scroll,
+        step_popover_scroll, step_region_scroll, step_scrollback_scroll, swallow_super_combo,
+        wheel_lines, CursorAnimation, EASE_BASELINE_FRAME, SCROLLBACK_MIN_STEP,
     };
     #[cfg(unix)]
     use super::{window_socket_path, PathBuf};
@@ -3330,6 +3357,22 @@ mod tests {
         // Ctrl (SIGINT, the Linux clipboard chord) and no modifier never are.
         assert!(!swallow_super_combo(ModifiersState::CONTROL));
         assert!(!swallow_super_combo(ModifiersState::empty()));
+    }
+
+    /// A claimed combo with nowhere to send it must not vanish, so the socket
+    /// is as much a precondition as the claim itself.
+    #[test]
+    fn a_zoom_combo_forwards_only_with_both_a_claim_and_a_socket() {
+        assert!(forwards_zoom(true, true), "claimed with a socket forwards");
+        assert!(
+            !forwards_zoom(true, false),
+            "claimed with no socket falls back to font zoom"
+        );
+        assert!(
+            !forwards_zoom(false, true),
+            "an unclaimed combo zooms the font even though a socket exists"
+        );
+        assert!(!forwards_zoom(false, false), "neither forwards");
     }
 
     #[test]
