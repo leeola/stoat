@@ -7406,10 +7406,8 @@ impl Stoat {
             None => return,
         };
 
-        let buffer_syntax_version = self.workspaces[ws_id]
-            .buffers
-            .syntax_version(buffer_id)
-            .unwrap_or(0);
+        let buffer_syntax_version = self.workspaces[ws_id].buffers.syntax_version(buffer_id);
+        let lsp_token_version = self.workspaces[ws_id].buffers.lsp_token_version(buffer_id);
         let (snapshot, diff_version, diag_version, severity_map) =
             match self.workspaces[ws_id].editors.get_mut(editor_id) {
                 Some(editor) => {
@@ -7439,12 +7437,11 @@ impl Stoat {
             diag_version.hash(&mut hasher);
             hasher.finish()
         };
-        let syntax_version = {
-            let mut hasher = DefaultHasher::new();
-            self.syntax_highlight.hash(&mut hasher);
-            buffer_syntax_version.hash(&mut hasher);
-            hasher.finish()
-        };
+        let syntax_version = minimap_syntax_version(
+            self.syntax_highlight,
+            buffer_syntax_version,
+            lsp_token_version,
+        );
 
         let syntax_on = self.syntax_highlight;
         let class_table = &self.minimap_class_table;
@@ -8665,6 +8662,23 @@ fn editor_page_content_version(
     // without it.
     snapshot_version.hash(&mut hasher);
     theme_epoch.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Content version of a minimap strip's coloring, hashing the inputs whose
+/// change must re-summarize every row already built.
+///
+/// The parse and LSP versions stay [`Option`]s rather than collapsing to a
+/// sentinel. Both count *buffer* versions and a freshly opened buffer sits at
+/// version 0, so flattening `None` to 0 would make "not parsed yet" and "parsed
+/// the untouched file" hash alike. Any buffer past the sync-parse cap summarizes
+/// its rows before its first parse lands, and that collision would leave them
+/// monochrome until an unrelated edit re-summarized them.
+fn minimap_syntax_version(syntax_on: bool, parse: Option<u64>, lsp: Option<u64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    syntax_on.hash(&mut hasher);
+    parse.hash(&mut hasher);
+    lsp.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -12246,6 +12260,41 @@ mod tests {
             single_strips(&cmds).last().copied(),
             Some(a_content),
             "the strip redeclares for the newly focused buffer"
+        );
+    }
+
+    #[test]
+    fn minimap_syntax_version_separates_unparsed_from_parsed_at_zero() {
+        let base = minimap_syntax_version(true, None, None);
+        assert_eq!(
+            base,
+            minimap_syntax_version(true, None, None),
+            "identical inputs leave the built rows alone"
+        );
+        assert_ne!(
+            base,
+            minimap_syntax_version(true, Some(0), None),
+            "the first parse of an unedited buffer recolors the strip"
+        );
+        assert_ne!(
+            minimap_syntax_version(true, Some(0), None),
+            minimap_syntax_version(true, Some(1), None),
+            "a reparse after an edit recolors the strip"
+        );
+        assert_ne!(
+            base,
+            minimap_syntax_version(true, None, Some(0)),
+            "the first LSP semantic tokens for an unedited buffer recolor the strip"
+        );
+        assert_ne!(
+            minimap_syntax_version(true, Some(0), Some(0)),
+            minimap_syntax_version(true, Some(0), Some(1)),
+            "LSP tokens for a newer buffer version recolor the strip"
+        );
+        assert_ne!(
+            base,
+            minimap_syntax_version(false, None, None),
+            "toggling syntax highlighting recolors the strip"
         );
     }
 

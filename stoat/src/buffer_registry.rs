@@ -437,6 +437,22 @@ impl BufferRegistry {
         self.buffers.get(&id)?.syntax.as_ref().map(|s| s.version)
     }
 
+    /// The buffer version the retained LSP semantic tokens were computed against,
+    /// or `None` while no response has been applied to `id`.
+    ///
+    /// This is a buffer version, not a response counter, so it does not advance
+    /// when a re-request returns tokens for unchanged content. Callers watching
+    /// for tokens arriving must treat `None` and `Some(0)` as different states --
+    /// a freshly opened buffer sits at version 0, so the first response for it
+    /// stores 0.
+    pub(crate) fn lsp_token_version(&self, id: BufferId) -> Option<u64> {
+        self.buffers
+            .get(&id)?
+            .lsp_tokens
+            .as_ref()
+            .map(|(version, _, _)| *version)
+    }
+
     /// Borrow the stored [`SyntaxState`] (tree plus the rope it parsed) for `id`,
     /// if the parse pipeline has produced one. Used by auto-indent to read the
     /// syntax tree.
