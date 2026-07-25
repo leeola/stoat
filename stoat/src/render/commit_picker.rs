@@ -15,10 +15,14 @@ pub(crate) fn render_commit_picker(
     ws: &mut Workspace,
     theme: &Theme,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    let Some(layout) = file_finder_layout(area) else {
+    // A commit row plus its diff preview both want room, and the history behind
+    // them is arbitrarily long, so the picker asks for the whole area rather
+    // than measuring a list it would only ever outgrow.
+    let Some(layout) = file_finder_layout(area, (u16::MAX, u16::MAX), zoom) else {
         return;
     };
 

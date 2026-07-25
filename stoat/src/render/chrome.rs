@@ -42,7 +42,6 @@ const ZOOM_STEP_DIVISOR: u16 = 10;
 ///
 /// See also:
 /// - [`modal_frame`] to draw the returned rect's border and title.
-#[allow(dead_code)]
 pub(crate) fn modal_box(
     area: Rect,
     content: (u16, u16),

@@ -38,7 +38,7 @@ pub(crate) mod workspace_picker;
 
 use self::undercurl::UndercurlSpan;
 use crate::{
-    app::{self, Stoat},
+    app::{self, modal_zoom_steps, ModalKind, Stoat},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
@@ -681,7 +681,8 @@ pub(crate) fn frame(
             &mut *scene,
         );
     } else if let Some(finder) = &mut stoat.file_finder {
-        file_finder::render_file_finder(finder, ws, &stoat.theme, full, buf, &mut *scene);
+        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder);
+        file_finder::render_file_finder(finder, ws, &stoat.theme, full, zoom, buf, &mut *scene);
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,
@@ -713,7 +714,8 @@ pub(crate) fn frame(
             &mut *scene,
         );
     } else if let Some(finder) = &mut stoat.code_search {
-        code_search::render_code_search(finder, ws, &stoat.theme, full, buf, &mut *scene);
+        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CodeSearch);
+        code_search::render_code_search(finder, ws, &stoat.theme, full, zoom, buf, &mut *scene);
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,
@@ -778,7 +780,8 @@ pub(crate) fn frame(
             &mut *scene,
         );
     } else if let Some(picker) = &mut stoat.commit_picker {
-        commit_picker::render_commit_picker(picker, ws, &stoat.theme, full, buf, &mut *scene);
+        let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker);
+        commit_picker::render_commit_picker(picker, ws, &stoat.theme, full, zoom, buf, &mut *scene);
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,

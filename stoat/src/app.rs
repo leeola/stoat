@@ -361,8 +361,9 @@ enum WindowIpc {
 /// diagnostics, jumplist, and workspace pickers) have nothing to zoom and are
 /// absent.
 ///
-/// Nothing reads this yet. The layout adoptions size their boxes by it, and the
-/// zoom routing steps [`Stoat::modal_zoom`] under it.
+/// The finder-family kinds size their boxes by this. The palette, help, and
+/// symbol-finder layouts have yet to adopt it, and the zoom routing that steps
+/// [`Stoat::modal_zoom`] under a kind is likewise still to come.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ModalKind {
@@ -372,6 +373,19 @@ pub(crate) enum ModalKind {
     Palette,
     Help,
     SymbolFinder,
+}
+
+/// Zoom steps the user has applied to `kind`, zero for a kind they never zoomed.
+///
+/// Free rather than a [`Stoat`] method because the render dispatch reads this
+/// while already holding a mutable borrow of the open modal. The two are
+/// disjoint fields, which the borrow checker only sees through direct field
+/// access.
+pub(crate) fn modal_zoom_steps(
+    zooms: &std::collections::BTreeMap<ModalKind, i8>,
+    kind: ModalKind,
+) -> i8 {
+    zooms.get(&kind).copied().unwrap_or(0)
 }
 
 pub struct Stoat {
@@ -409,9 +423,8 @@ pub struct Stoat {
     /// persisted, because a zoom is a reaction to what is on screen right now.
     /// Callers keep each step within `-4..=8`.
     ///
-    /// Nothing writes this yet. The zoom routing steps it, and the layout
-    /// adoptions read it.
-    #[allow(dead_code)]
+    /// Nothing writes this yet, so every kind still sits at zero. The layouts
+    /// already size by it. The zoom routing is what will step it.
     pub(crate) modal_zoom: std::collections::BTreeMap<ModalKind, i8>,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
@@ -3829,7 +3842,11 @@ impl Stoat {
         let size = self.size();
 
         let (list, selected, filtered_len) = if let Some(finder) = self.file_finder.as_ref() {
-            let Some(layout) = crate::render::file_finder::file_finder_layout(size) else {
+            let Some(layout) = crate::render::file_finder::file_finder_layout(
+                size,
+                finder.content_size,
+                modal_zoom_steps(&self.modal_zoom, ModalKind::FileFinder),
+            ) else {
                 return UpdateEffect::None;
             };
             let core = finder.active_core_ref();
@@ -4267,9 +4284,13 @@ impl Stoat {
             // A wheel over the visible preview pane scrolls the preview content
             // instead of moving the selection, mirroring the editor-pane path.
             let preview = if let Some(finder) = self.file_finder.as_ref() {
-                crate::render::file_finder::file_finder_layout(size)
-                    .and_then(|layout| layout.preview)
-                    .map(|rect| (rect, finder.active_core_ref().preview.editor))
+                crate::render::file_finder::file_finder_layout(
+                    size,
+                    finder.content_size,
+                    modal_zoom_steps(&self.modal_zoom, ModalKind::FileFinder),
+                )
+                .and_then(|layout| layout.preview)
+                .map(|rect| (rect, finder.active_core_ref().preview.editor))
             } else if let Some(palette) = self.command_palette.as_ref() {
                 if palette.arg_source().is_some()
                     && let Some(picker) = palette.arg_picker.as_ref()
@@ -7537,9 +7558,16 @@ impl Stoat {
 
         // The file finder is a modal over normal mode (not a full-screen overlay
         // mode); its result list pools as a non-pane surface above the panes.
-        let finder_list = (!overlay && self.file_finder.is_some())
-            .then(|| crate::render::file_finder::file_finder_layout(self.size()))
+        let finder_list = (!overlay)
+            .then_some(self.file_finder.as_ref())
             .flatten()
+            .and_then(|finder| {
+                crate::render::file_finder::file_finder_layout(
+                    self.size(),
+                    finder.content_size,
+                    modal_zoom_steps(&self.modal_zoom, ModalKind::FileFinder),
+                )
+            })
             .map(|layout| layout.list);
 
         // The command palette is a modal over normal mode like the finder. Its
@@ -9765,9 +9793,21 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
         h.settle();
 
-        crate::render::file_finder::file_finder_layout(h.stoat.size())
-            .expect("finder fits the test terminal")
-            .list
+        finder_layout(h).list
+    }
+
+    /// The open finder's layout, sized from the same content and zoom the
+    /// renderer would read, so a test rect matches the painted one.
+    fn finder_layout(
+        h: &crate::test_harness::TestHarness,
+    ) -> crate::render::file_finder::FinderLayout {
+        let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
+        crate::render::file_finder::file_finder_layout(
+            h.stoat.size(),
+            finder.content_size,
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+        )
+        .expect("the finder fits the test terminal")
     }
 
     fn finder_selected(h: &crate::test_harness::TestHarness) -> usize {
@@ -9778,6 +9818,55 @@ mod tests {
             .active_core_ref()
             .picklist
             .selected
+    }
+
+    /// The box sizes to the whole candidate list, so narrowing the query must
+    /// not resize it out from under the user still typing that query.
+    #[test]
+    fn the_finder_box_sizes_to_its_base_list_and_holds_while_filtering() {
+        use stoat_action::OpenFileFinder;
+
+        let mut h = crate::test_harness::TestHarness::with_size(140, 60);
+        let root = std::path::PathBuf::from("/sized-finder");
+        for i in 0..50 {
+            h.fake_fs()
+                .insert_file(root.join(format!("f{i}.rs")), b"fn main() {}");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        h.snapshot();
+
+        let opened = finder_layout(&h).modal;
+        assert_eq!(
+            opened.height, 54,
+            "fifty rows plus four chrome rows outgrow the recommended 32"
+        );
+
+        h.type_text("f1");
+        h.settle();
+        h.snapshot();
+
+        assert!(
+            finder_filtered_len(&h) < 50,
+            "the filter has to actually narrow the list for the box to be held over anything"
+        );
+        assert_eq!(
+            finder_layout(&h).modal,
+            opened,
+            "but the box stays exactly where it opened"
+        );
+    }
+
+    fn finder_filtered_len(h: &crate::test_harness::TestHarness) -> usize {
+        h.stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .active_core_ref()
+            .picklist
+            .filtered
+            .len()
     }
 
     #[test]
@@ -9870,8 +9959,8 @@ mod tests {
         action_handlers::sync_file_finder_preview(&mut h.stoat);
         h.settle();
 
-        let preview = crate::render::file_finder::file_finder_layout(h.stoat.size())
-            .and_then(|layout| layout.preview)
+        let preview = finder_layout(&h)
+            .preview
             .expect("the preview pane is present at this width");
         let preview_id = finder_preview_id(&h);
 
@@ -15234,9 +15323,7 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let list = crate::render::file_finder::file_finder_layout(h.stoat.size())
-            .expect("finder fits the test terminal")
-            .list;
+        let list = finder_layout(&h).list;
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::FINDER,
             top: list.y,
@@ -15288,9 +15375,7 @@ mod tests {
         let _ = drain_apc(&mut rx);
 
         h.stoat.emit_smooth_scroll();
-        let list = crate::render::file_finder::file_finder_layout(h.stoat.size())
-            .expect("finder fits the full-window terminal")
-            .list;
+        let list = finder_layout(&h).list;
         let expected = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::FINDER,
             top: list.y,

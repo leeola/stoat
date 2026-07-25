@@ -27,20 +27,20 @@ pub(crate) struct FinderLayout {
 
 /// Lay out the file finder modal within `area`, or `None` when `area` is too
 /// small to host it.
-pub(crate) fn file_finder_layout(area: Rect) -> Option<FinderLayout> {
-    if area.width < 40 || area.height < 12 {
-        return None;
-    }
-
-    let box_width = 120u16.min(area.width.saturating_sub(4));
-    let box_height = 32u16.min(area.height.saturating_sub(4));
-    if box_width < 40 || box_height < 12 {
-        return None;
-    }
-
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal = Rect::new(x, y, box_width, box_height);
+///
+/// `content` is the cells the caller's list would need in full. Below the
+/// recommended 120x32 it changes nothing, and a data-heavy caller passes
+/// [`u16::MAX`] to ask for the whole area. `zoom` is the caller's step count
+/// from [`modal_zoom`](crate::app::Stoat::modal_zoom).
+///
+/// Code search and the commit picker share this layout, so all three modals
+/// keep one box rule and one list/preview split.
+pub(crate) fn file_finder_layout(
+    area: Rect,
+    content: (u16, u16),
+    zoom: i8,
+) -> Option<FinderLayout> {
+    let modal = crate::render::chrome::modal_box(area, content, (120, 32), (40, 12), zoom)?;
     // The title rides the top border, so it does not shrink the inner rect.
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
@@ -73,10 +73,11 @@ pub(crate) fn render_file_finder(
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    let Some(layout) = file_finder_layout(area) else {
+    let Some(layout) = file_finder_layout(area, finder.content_size, zoom) else {
         return;
     };
 
@@ -197,4 +198,62 @@ fn render_preview(
         ws,
         buf,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_finder_layout;
+    use ratatui::layout::Rect;
+
+    /// Every caller of this layout must fit inside the same area, so the box a
+    /// short list gets and the box a data-heavy modal gets are checked together.
+    fn box_of(area: Rect, content: (u16, u16)) -> Rect {
+        file_finder_layout(area, content, 0)
+            .expect("the area hosts the finder")
+            .modal
+    }
+
+    #[test]
+    fn a_short_list_keeps_the_recommended_box() {
+        let area = Rect::new(0, 0, 200, 60);
+        assert_eq!(
+            box_of(area, (120, 9)),
+            Rect::new(40, 14, 120, 32),
+            "content under the recommended size leaves the box at 120x32, centered"
+        );
+    }
+
+    #[test]
+    fn a_long_list_grows_the_box_to_fit_it() {
+        let area = Rect::new(0, 0, 200, 60);
+        assert_eq!(
+            box_of(area, (120, 44)),
+            Rect::new(40, 8, 120, 44),
+            "a list past the recommended height takes the rows it asks for"
+        );
+    }
+
+    #[test]
+    fn a_data_heavy_modal_fills_the_area_less_its_margin() {
+        // Code search and the commit picker declare u16::MAX rather than
+        // measuring, so they land on the largest box the margin allows.
+        let area = Rect::new(0, 0, 200, 60);
+        assert_eq!(
+            box_of(area, (u16::MAX, u16::MAX)),
+            Rect::new(2, 2, 196, 56),
+            "a max declaration clamps to the area less the full margin"
+        );
+    }
+
+    #[test]
+    fn an_area_too_small_for_the_minimum_hosts_nothing() {
+        assert!(
+            file_finder_layout(Rect::new(0, 0, 41, 60), (120, 32), 0).is_none(),
+            "a width under the 40-column minimum plus its thinnest margin fails"
+        );
+        assert!(
+            file_finder_layout(Rect::new(0, 0, 200, 13), (120, 32), 0).is_none(),
+            "so does a height under the 12-row minimum plus its thinnest margin"
+        );
+    }
 }

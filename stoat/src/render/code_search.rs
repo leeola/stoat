@@ -17,10 +17,16 @@ pub(crate) fn render_code_search(
     ws: &mut Workspace,
     theme: &Theme,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    let Some(layout) = crate::render::file_finder::file_finder_layout(area) else {
+    // Search hits are unbounded and each one is worth reading in context, so the
+    // modal asks for the whole area rather than measuring a list it would only
+    // ever outgrow.
+    let Some(layout) =
+        crate::render::file_finder::file_finder_layout(area, (u16::MAX, u16::MAX), zoom)
+    else {
         return;
     };
 

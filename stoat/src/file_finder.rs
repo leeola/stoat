@@ -18,6 +18,16 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// dropped, keeping the list and its refilter bounded.
 pub(crate) const BROWSE_PATH_CAP: usize = 100_000;
 
+/// Columns [`FileFinder::content_size`] always asks for, matching the recommended
+/// box width the renderer sizes against. The list is one path per row, so its
+/// length drives height alone and the box only ever widens through zoom.
+const FINDER_CONTENT_COLS: u16 = 120;
+
+/// Rows the finder's chrome occupies above and below its list: the two border
+/// rows, the input row, and the separator under it. Content rows plus this is
+/// the box height that shows the whole list.
+const FINDER_CHROME_ROWS: u16 = 4;
+
 /// Which subset of files the finder currently lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinderScope {
@@ -134,6 +144,14 @@ pub struct FileFinder {
     /// keyed by scope name. Rebuilt when the walk grows or the scope changes,
     /// so a stable Named query does not re-run the globset over `all_paths`.
     pub(crate) named_cache: Option<(String, Vec<PathBuf>)>,
+    /// Cells the modal would need to show the whole unfiltered list, which the
+    /// renderer sizes the box against.
+    ///
+    /// Derived from the candidate base rather than the filtered rows, so
+    /// narrowing a query never moves the box out from under the user typing it.
+    /// The base grows while the background walk streams in, so a large workspace
+    /// settles at its full size over the first frames after opening.
+    pub(crate) content_size: (u16, u16),
 }
 
 impl FileFinder {
@@ -170,6 +188,7 @@ impl FileFinder {
             browse: None,
             named_scopes: compile_named_scopes(finder_scopes),
             named_cache: None,
+            content_size: (FINDER_CONTENT_COLS, 0),
         };
         // Uniformly seed the initial (empty-query) list for whatever scope
         // opened, including a named scope's glob filter.
@@ -263,6 +282,7 @@ impl FileFinder {
                 browse.picker.stop_walk();
             }
             browse.picker.refilter(&browse.partial);
+            self.remeasure_content();
             return;
         }
         let pumped = self.core.pump_walk();
@@ -289,6 +309,18 @@ impl FileFinder {
                 }
             },
         }
+        self.remeasure_content();
+    }
+
+    /// Re-derive [`Self::content_size`] from the active picker's candidate base.
+    ///
+    /// The base is the scope's whole list, not the filtered rows, so this lands
+    /// the same answer for every query and only moves when the walk delivers or
+    /// the scope flips. A list longer than [`u16::MAX`] just asks for the
+    /// largest box there is.
+    fn remeasure_content(&mut self) {
+        let rows = u16::try_from(self.active_core_ref().picklist.base.len()).unwrap_or(u16::MAX);
+        self.content_size = (FINDER_CONTENT_COLS, rows.saturating_add(FINDER_CHROME_ROWS));
     }
 
     /// The subset of the walked `all_paths` whose repo-relative display matches
