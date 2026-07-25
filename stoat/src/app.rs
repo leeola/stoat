@@ -6,7 +6,10 @@ use crate::{
     buffer::{BufferId, TextBufferSnapshot},
     code_index::build::IndexUpdate,
     command_palette::CommandPalette,
-    display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
+    display_map::{
+        highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles, DisplayPoint,
+        DisplaySnapshot,
+    },
     editor_state::{EditorId, ScrollGlide},
     file_finder::FileFinder,
     help::Help,
@@ -7648,7 +7651,7 @@ impl Stoat {
         }
         enum PoolFill {
             Editor {
-                snapshot: crate::display_map::DisplaySnapshot,
+                snapshot: DisplaySnapshot,
                 pages: Vec<u64>,
                 pool: u32,
                 width: u16,
@@ -7658,7 +7661,7 @@ impl Stoat {
                 dim: f32,
             },
             Review {
-                snapshot: crate::display_map::DisplaySnapshot,
+                snapshot: DisplaySnapshot,
                 parts: Box<ReviewFillParts>,
                 pages: Vec<u64>,
                 pool: u32,
@@ -7666,7 +7669,7 @@ impl Stoat {
                 height: u16,
             },
             Conflict {
-                snapshot: crate::display_map::DisplaySnapshot,
+                snapshot: DisplaySnapshot,
                 parts: Box<ConflictFillParts>,
                 pages: Vec<u64>,
                 pool: u32,
@@ -7802,12 +7805,19 @@ impl Stoat {
                 editor.minimap_rect.is_some().then_some(region.pool)
             };
             if let Some(strip_id) = view_strip {
+                // The strip is one row per buffer line while the editor scrolls in
+                // display rows, so the window converts before it ships.
+                let (top, visible) = minimap_view_window(
+                    &editor.display_map.snapshot(),
+                    scroll_offset,
+                    region.height as u32,
+                );
                 self.smooth_scroll.emit_minimap_view(
                     &mut out,
                     strip_id,
                     region.pool,
-                    (scroll_offset * 256.0) as u32,
-                    region.height,
+                    (top * 256.0) as u32,
+                    visible,
                 );
             }
 
@@ -8682,6 +8692,56 @@ fn minimap_syntax_version(syntax_on: bool, parse: Option<u64>, lsp: Option<u64>)
     hasher.finish()
 }
 
+/// The viewport's top and span in buffer lines, for a minimap view emit.
+///
+/// A minimap strip is one row per buffer line, but the editor scrolls in display
+/// rows, which soft-wrap, folds, and block rows all inflate. Emitting the display
+/// figures unconverted overshoots the strip's scrollable span, so the terminal
+/// clamps its ratio while the thumb offset keeps climbing and the thumb slides
+/// off the strip's bottom edge.
+///
+/// The returned top is fractional so a sub-row glide still moves the thumb. It
+/// interpolates toward the next display row's line rather than adding the raw
+/// fraction, because several display rows of one wrapped line share a buffer
+/// line and a raw fraction would run the thumb backward on each row boundary.
+///
+/// The span is at least 1, so an empty or single-line viewport still leaves the
+/// terminal a non-degenerate window to place the thumb in.
+fn minimap_view_window(
+    snapshot: &DisplaySnapshot,
+    scroll_offset: f32,
+    viewport_rows: u32,
+) -> (f32, u16) {
+    let display_top = scroll_offset.max(0.0).floor();
+    let top_row = display_top as u32;
+    let top_line = minimap_buffer_line(snapshot, top_row);
+
+    let next_line = minimap_buffer_line(snapshot, top_row.saturating_add(1));
+    let step = next_line.saturating_sub(top_line) as f32;
+    let top = top_line as f32 + (scroll_offset - display_top) * step;
+
+    let last_row = top_row
+        .saturating_add(viewport_rows.max(1))
+        .saturating_sub(1);
+    let end_line = minimap_buffer_line(snapshot, last_row)
+        .saturating_add(1)
+        .min(snapshot.buffer_line_count());
+    let visible = end_line.saturating_sub(top_line).max(1);
+
+    (top, visible.min(u16::MAX as u32) as u16)
+}
+
+/// The buffer line a display row sits on.
+///
+/// A block row belongs to no buffer line, so it resolves to the line of the
+/// nearest row above it -- the line the block annotates.
+fn minimap_buffer_line(snapshot: &DisplaySnapshot, display_row: u32) -> u32 {
+    let clipped = snapshot.clip_ignoring_line_ends(DisplayPoint::new(display_row, 0), Bias::Left);
+    snapshot
+        .display_to_buffer(clipped)
+        .map_or(0, |point| point.row)
+}
+
 /// Resolve a buffer's syntax highlights into minimap line tokens bucketed by row.
 ///
 /// Reads the tree-sitter and LSP semantic tokens, which are buffer-anchored, so
@@ -8691,7 +8751,7 @@ fn minimap_syntax_version(syntax_on: bool, parse: Option<u64>, lsp: Option<u64>)
 /// carrying their scope's palette class. Tokens whose style names no syntax
 /// scope classify 0 and drop, and `syntax_on` off yields an empty map.
 fn minimap_line_tokens(
-    snapshot: &crate::display_map::DisplaySnapshot,
+    snapshot: &DisplaySnapshot,
     buffer_id: BufferId,
     syntax_on: bool,
     class_table: &crate::minimap::ClassTable,
@@ -8771,7 +8831,7 @@ fn minimap_line_tokens(
 /// A diagnostic on the row wins over its diff status, mirroring the gutter. The
 /// severity or diff status resolves to a class against `class_table`.
 fn minimap_edge_class(
-    snapshot: &crate::display_map::DisplaySnapshot,
+    snapshot: &DisplaySnapshot,
     severity_map: &std::collections::BTreeMap<u32, lsp_types::DiagnosticSeverity>,
     class_table: &crate::minimap::ClassTable,
     row: u32,
@@ -12386,6 +12446,136 @@ mod tests {
             top_after_scroll,
             Some(50 * 256),
             "the thumb tracks the scrolled top row, got {scrolled:?}"
+        );
+    }
+
+    /// Several soft-wrapped display rows share one buffer line, and the strip
+    /// draws one row per buffer line. An unconverted display top therefore
+    /// overruns the strip's scrollable span near the bottom of the file, which
+    /// pushes the thumb past the strip's bottom edge entirely.
+    #[test]
+    fn minimap_view_maps_wrapped_rows_to_buffer_lines() {
+        use stoatty_protocol::command::Command;
+
+        fn view_after_scroll(
+            h: &mut crate::test_harness::TestHarness,
+            rx: &mut UnboundedReceiver<Vec<u8>>,
+            editor_id: EditorId,
+            display_row: u32,
+        ) -> (u32, u16) {
+            let _ = drain_apc(rx);
+            {
+                let editor = h
+                    .stoat
+                    .active_workspace_mut()
+                    .editors
+                    .get_mut(editor_id)
+                    .expect("editor");
+                editor.scroll_row = display_row;
+                editor.scroll_offset = display_row as f32;
+            }
+            let _ = h.stoat.render();
+            h.stoat.emit_smooth_scroll();
+            let cmds = drain_apc(rx);
+            cmds.iter()
+                .rev()
+                .find_map(|cmd| match cmd {
+                    Command::MinimapView(v) => Some((v.top_256, v.visible_lines)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("a minimap view emit, got {cmds:?}"))
+        }
+
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = std::path::PathBuf::from("/minimap-wrap");
+        let path = root.join("wide.txt");
+        // No trailing newline, so every buffer line is a long one and the wrap
+        // ratio stays uniform across the file.
+        let body = (0..60)
+            .map(|i| format!("{i}{}", "w".repeat(150)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        // Wide enough for the minimap strip to render at all, so the wrap comes
+        // from the line length rather than a cramped pane.
+        h.resize(120, 24);
+        let _ = h.stoat.render();
+
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        // The emit measures the window against the pool region, so the expected
+        // spans below must be derived from that same height.
+        let pool_rows = {
+            let panes = h.stoat.editor_pool_panes();
+            let (_, _, region) = panes[0];
+            region.height as u32
+        };
+        let (display_rows, buffer_lines, mid, bottom) = {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let display_rows = snapshot.line_count();
+            let line_at = |row: u32| {
+                snapshot
+                    .display_to_buffer(DisplayPoint::new(row, 0))
+                    .expect("a text row")
+                    .row
+            };
+            // The top display row, its buffer line, and the buffer lines the
+            // pooled viewport covers from there.
+            let window = |top_row: u32| {
+                let last = (top_row + pool_rows - 1).min(display_rows - 1);
+                (
+                    top_row,
+                    line_at(top_row),
+                    line_at(last) - line_at(top_row) + 1,
+                )
+            };
+            let max_scroll = display_rows
+                .saturating_sub(1)
+                .saturating_sub(pool_rows.saturating_sub(1));
+            (
+                display_rows,
+                snapshot.buffer_line_count(),
+                window(display_rows / 2),
+                window(max_scroll),
+            )
+        };
+        assert_eq!(
+            display_rows,
+            buffer_lines * 2,
+            "the fixture must soft-wrap every line into exactly two display rows"
+        );
+
+        let (mid_row, mid_line, mid_visible) = mid;
+        let emitted = view_after_scroll(&mut h, &mut rx, editor_id, mid_row);
+        assert_eq!(
+            emitted,
+            (mid_line * 256, mid_visible as u16),
+            "display row {mid_row} maps to buffer line {mid_line} over {mid_visible} lines"
+        );
+
+        let (max_row, max_line, max_visible) = bottom;
+        let (top_256, visible) = view_after_scroll(&mut h, &mut rx, editor_id, max_row);
+        assert_eq!(
+            (top_256, visible),
+            (max_line * 256, max_visible as u16),
+            "the bottom-scrolled top maps to buffer line {max_line} over {max_visible} lines"
+        );
+        assert_eq!(
+            top_256 / 256 + visible as u32,
+            buffer_lines,
+            "the bottom-scrolled window ends exactly at the last buffer line, so the thumb \
+             stays on the strip"
         );
     }
 
