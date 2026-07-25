@@ -360,7 +360,7 @@ impl MinimapContent {
     }
 
     /// Apply one edit that falls inside the built prefix, re-summarizing the new
-    /// rows and shifting the build cursor by the line delta.
+    /// rows and shifting the build and recolor-sweep cursors by the line delta.
     ///
     /// An edit starting past the build cursor is left for the chunked build to
     /// summarize fresh when it reaches those rows.
@@ -401,6 +401,18 @@ impl MinimapContent {
 
         let delta = inserted.len() as i64 - removed as i64;
         self.built_upto = (self.built_upto as i64 + delta).max(0) as u32;
+
+        // The sweep cursor is an absolute row, so rows the edit slid underneath
+        // it would never be swept and would keep their pre-recolor runs. Rows
+        // the edit re-summarized already carry current tokens, so resuming at
+        // the seam of a straddling edit re-sweeps them idempotently.
+        if let Some(upto) = self.resync_upto {
+            if old_end_row < upto {
+                self.resync_upto = Some((upto as i64 + delta).max(old_start_row as i64) as u32);
+            } else if old_start_row < upto {
+                self.resync_upto = Some(old_start_row);
+            }
+        }
 
         self.queue_splice(Splice {
             start: old_start_row,
@@ -702,7 +714,10 @@ mod tests {
         MAX_LINES, RESYNC_CHUNK,
     };
     use std::{collections::HashMap, ops::Range};
-    use stoat_text::{patch::Patch, Rope};
+    use stoat_text::{
+        patch::{Edit, Patch},
+        Rope,
+    };
 
     fn rope(text: &str) -> Rope {
         Rope::from(text)
@@ -804,7 +819,7 @@ mod tests {
 
         // Replace "beta" (line 1) in place.
         let after = rope("alpha\nBETA!\ngamma\n");
-        let edit = Patch::new(vec![stoat_text::patch::Edit {
+        let edit = Patch::new(vec![Edit {
             old: 6..10,
             new: 6..11,
         }]);
@@ -849,7 +864,7 @@ mod tests {
 
         // An in-place edit on row 2 queries only that row, not the whole buffer.
         let after = rope("a\nb\nC\nd\ne\nf\n");
-        let edit = Patch::new(vec![stoat_text::patch::Edit {
+        let edit = Patch::new(vec![Edit {
             old: 4..5,
             new: 4..5,
         }]);
@@ -877,7 +892,7 @@ mod tests {
 
         // Insert a newline inside "beta", splitting line 1 into two.
         let after = rope("alpha\nbe\nta\ngamma\n");
-        let edit = Patch::new(vec![stoat_text::patch::Edit {
+        let edit = Patch::new(vec![Edit {
             old: 8..8,
             new: 8..9,
         }]);
@@ -908,7 +923,7 @@ mod tests {
 
         // Replace lines 1..=3 ("b\nc\nd") with one line "X".
         let after = rope("a\nX\ne\n");
-        let edit = Patch::new(vec![stoat_text::patch::Edit {
+        let edit = Patch::new(vec![Edit {
             old: 2..7,
             new: 2..3,
         }]);
@@ -1219,6 +1234,65 @@ mod tests {
         assert!(
             !content.build_pending(),
             "the finished sweep lets the frame loop go idle again"
+        );
+    }
+
+    /// The sweep cursor is an absolute row, so a deletion above it slides
+    /// unswept rows underneath it. A cursor left in place resumes past those
+    /// rows and strands them on their pre-recolor runs.
+    #[test]
+    fn an_edit_above_the_sweep_cursor_moves_it_with_the_rows() {
+        let total = RESYNC_CHUNK + RESYNC_CHUNK / 2;
+        let (before, mut content) = built_recolor_fixture();
+
+        // Sweep the first chunk, parking the cursor at RESYNC_CHUNK.
+        content.sync(
+            &before,
+            1,
+            &Patch::empty(),
+            versions(0, 1),
+            color(1),
+            no_edges,
+        );
+        content.take_queued();
+
+        // Delete the first four lines, well above the cursor, so every unswept
+        // row slides four rows up.
+        let after = rope(&vec!["line"; total as usize - 4].join("\n"));
+        let edit = Patch::new(vec![Edit {
+            old: 0..20,
+            new: 0..0,
+        }]);
+        content.sync(&after, 2, &edit, versions(0, 1), color(1), no_edges);
+
+        while content.build_pending() {
+            content.sync(
+                &after,
+                2,
+                &Patch::empty(),
+                versions(0, 1),
+                color(1),
+                no_edges,
+            );
+        }
+
+        let recolored = summarize_line("line", &[tok(0..4, 1)], None);
+        let stale: Vec<usize> = content
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| **line != recolored)
+            .map(|(row, _)| row)
+            .collect();
+
+        assert_eq!(
+            content.lines.len(),
+            total as usize - 4,
+            "the edit shortened the strip by four rows"
+        );
+        assert!(
+            stale.is_empty(),
+            "the finished sweep left rows {stale:?} on their pre-recolor runs"
         );
     }
 
