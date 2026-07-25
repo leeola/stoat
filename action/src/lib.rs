@@ -53,8 +53,9 @@ pub use defs::{
         UnindentSelection, WriteQuit, Yank, YankMainToClipboard, YankToClipboard,
     },
     file::{
-        AutoReload, AutoReloadConfig, ForceReloadAll, ForceReloadBuffer, ForceSaveBuffer,
-        OpenBuffer, OpenConfig, OpenFile, ReloadAll, ReloadBuffer, ToggleMinimap, ToggleWrap,
+        AutoReload, AutoReloadConfig, FontSizeDec, FontSizeInc, ForceReloadAll, ForceReloadBuffer,
+        ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ReloadAll, ReloadBuffer, ToggleMinimap,
+        ToggleWrap,
     },
     file_finder::{
         FileFinderComplete, FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle,

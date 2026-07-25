@@ -162,6 +162,8 @@ pub enum ActionKind {
     CloseBuffer,
     AutoReload,
     AutoReloadConfig,
+    FontSizeInc,
+    FontSizeDec,
     ReloadBuffer,
     ForceReloadBuffer,
     ReloadAll,

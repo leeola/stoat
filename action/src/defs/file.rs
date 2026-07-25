@@ -603,6 +603,98 @@ impl Action for ReloadAll {
 }
 
 #[derive(Debug)]
+pub struct FontSizeIncDef;
+
+impl ActionDef for FontSizeIncDef {
+    fn name(&self) -> &'static str {
+        "FontSizeInc"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::FontSizeInc
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "grow the terminal's font size a step"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Ask the hosting stoatty to render one font size larger, re-fitting the cell grid around it. This is the explicit way to reach font zoom, because stoat claims the platform zoom combo to resize whatever the user is looking at instead. Reports that it needs stoatty under any other terminal, which has no way to be asked."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Normal
+    }
+}
+
+#[derive(Debug)]
+pub struct FontSizeInc;
+
+impl FontSizeInc {
+    pub const DEF: &FontSizeIncDef = &FontSizeIncDef;
+}
+
+impl Action for FontSizeInc {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct FontSizeDecDef;
+
+impl ActionDef for FontSizeDecDef {
+    fn name(&self) -> &'static str {
+        "FontSizeDec"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::FontSizeDec
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "shrink the terminal's font size a step"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Ask the hosting stoatty to render one font size smaller, re-fitting the cell grid around it. The counterpart to FontSizeInc, and subject to the same stoatty requirement. The terminal holds a floor, so repeated steps stop at its smallest size rather than reaching zero."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Normal
+    }
+}
+
+#[derive(Debug)]
+pub struct FontSizeDec;
+
+impl FontSizeDec {
+    pub const DEF: &FontSizeDecDef = &FontSizeDecDef;
+}
+
+impl Action for FontSizeDec {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct ForceReloadAllDef;
 
 impl ActionDef for ForceReloadAllDef {

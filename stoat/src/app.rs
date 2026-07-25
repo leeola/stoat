@@ -7124,6 +7124,22 @@ impl Stoat {
         let _ = apc_tx.send(out);
     }
 
+    /// Ask the hosting terminal to step its font size by `delta`, positive to
+    /// grow.
+    ///
+    /// The way font zoom is reached now that the platform combo belongs to
+    /// stoat. Sending is unconditional here, so the caller decides whether a
+    /// terminal is listening and reports it otherwise.
+    pub(crate) fn emit_font_step(&self, delta: i32) {
+        let Some(apc_tx) = self.apc_tx.clone() else {
+            return;
+        };
+
+        let mut out = Vec::new();
+        stoatty_protocol::command::encode_font_step_into(&mut out, delta);
+        let _ = apc_tx.send(out);
+    }
+
     /// Open and close the aux windows detached panes render into.
     ///
     /// Diffs the [`Self::aux_windows`] ledger against the active workspace's

@@ -371,6 +371,31 @@ fn maybe_apply_config_save(
     }
 }
 
+/// Drive [`ActionKind::FontSizeInc`](stoat_action::ActionKind::FontSizeInc) and
+/// its decrementing twin, stepping the hosting terminal's font size by `delta`.
+///
+/// Only stoatty can be asked. Under any other terminal the frame would be
+/// swallowed silently, so this reports the requirement rather than appearing to
+/// work.
+pub(crate) fn font_size_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    if !under_stoatty(stoat) {
+        stoat.set_status("font size needs stoatty");
+        return UpdateEffect::Redraw;
+    }
+
+    stoat.emit_font_step(delta);
+    UpdateEffect::None
+}
+
+/// Whether stoat is running inside stoatty.
+///
+/// stoatty sets `STOATTY_VERSION` on its child. A release older than that
+/// variable sets only `STOATTY`, so either one counts.
+fn under_stoatty(stoat: &Stoat) -> bool {
+    let env = stoat.env_host();
+    env.var("STOATTY_VERSION").is_some() || env.var("STOATTY").is_some()
+}
+
 /// True when the file at `path` has an on-disk mtime newer than the baseline
 /// recorded for `buffer_id` at open or last save.
 ///
@@ -2392,6 +2417,65 @@ mod tests {
             bytes.extend_from_slice(&batch);
         }
         crate::test_harness::apc::decode_apc_stream(&bytes)
+    }
+
+    /// Dispatch `action` with an APC channel installed, and return every
+    /// command the handler put on the wire.
+    fn commands_from(
+        h: &mut TestHarness,
+        action: &dyn stoat_action::Action,
+    ) -> Vec<stoatty_protocol::command::Command> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        dispatch(&mut h.stoat, action);
+
+        let mut bytes = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            bytes.extend_from_slice(&batch);
+        }
+        crate::test_harness::apc::decode_apc_stream(&bytes)
+    }
+
+    #[test]
+    fn font_size_actions_step_the_terminal_under_stoatty() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = Stoat::test();
+        h.fake_env()
+            .set("STOATTY_VERSION", "0.2.0 (aaa 2026-07-03)");
+
+        assert_eq!(
+            commands_from(&mut h, &stoat_action::FontSizeInc),
+            vec![Command::FontStep { delta: 1 }],
+            "inc asks for one size larger"
+        );
+        assert_eq!(
+            commands_from(&mut h, &stoat_action::FontSizeDec),
+            vec![Command::FontStep { delta: -1 }],
+            "and dec for one smaller"
+        );
+        assert_eq!(
+            h.stoat.pending_message, None,
+            "a terminal that can act on it needs no explanation"
+        );
+    }
+
+    /// A foreign terminal swallows the frame, so the command has to say why
+    /// nothing happened rather than appear to work.
+    #[test]
+    fn font_size_actions_report_the_requirement_outside_stoatty() {
+        let mut h = Stoat::test();
+
+        assert_eq!(
+            commands_from(&mut h, &stoat_action::FontSizeInc),
+            Vec::new(),
+            "nothing goes on the wire"
+        );
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("font size needs stoatty")
+        );
     }
 
     #[test]

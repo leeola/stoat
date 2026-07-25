@@ -55,8 +55,9 @@ use crate::{
             YankToClipboard,
         },
         file::{
-            AutoReload, AutoReloadConfig, ForceReloadAll, ForceReloadBuffer, ForceSaveBuffer,
-            OpenBuffer, OpenConfig, OpenFile, ReloadAll, ReloadBuffer, ToggleMinimap, ToggleWrap,
+            AutoReload, AutoReloadConfig, FontSizeDec, FontSizeInc, ForceReloadAll,
+            ForceReloadBuffer, ForceSaveBuffer, OpenBuffer, OpenConfig, OpenFile, ReloadAll,
+            ReloadBuffer, ToggleMinimap, ToggleWrap,
         },
         file_finder::{
             FileFinderComplete, FileFinderPageDown, FileFinderPageUp, FileFinderScopeToggle,
@@ -600,6 +601,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ForceReloadBuffer::DEF, |_| Ok(Box::new(ForceReloadBuffer)));
     add(ReloadAll::DEF, |_| Ok(Box::new(ReloadAll)));
     add(ForceReloadAll::DEF, |_| Ok(Box::new(ForceReloadAll)));
+    add(FontSizeInc::DEF, |_| Ok(Box::new(FontSizeInc)));
+    add(FontSizeDec::DEF, |_| Ok(Box::new(FontSizeDec)));
     add(OpenConfig::DEF, |params| {
         // The palette autospaces a submitted command, so a bare `open-config`
         // arrives with an empty argument. That means the default target, not a
@@ -1738,7 +1741,8 @@ mod tests {
         // + 1 GitReview.
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
         // + 1 GitLs.
-        assert_eq!(all().count(), 410);
+        // + 2 FontSizeInc/FontSizeDec.
+        assert_eq!(all().count(), 412);
     }
 
     #[test]

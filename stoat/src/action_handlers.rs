@@ -381,6 +381,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("AutoReloadConfig action downcast");
             file::set_auto_reload_config(stoat, &auto.state)
         },
+        ActionKind::FontSizeInc => file::font_size_step(stoat, 1),
+        ActionKind::FontSizeDec => file::font_size_step(stoat, -1),
         ActionKind::AcceptCompletion => crate::completion::accept::execute(stoat),
         ActionKind::SmartTab => completion::smart_tab(stoat),
         ActionKind::InsertTab => completion::insert_tab(stoat),
