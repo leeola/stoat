@@ -460,6 +460,39 @@ mod tests {
         assert!(h.stoat.commit_picker.is_none(), "Escape closes the picker");
     }
 
+    /// The two roles share every row, so the title is the only thing telling
+    /// the user whether picking a commit starts a review or just closes the
+    /// listing.
+    #[test]
+    fn the_title_names_the_role_the_picker_was_opened_for() {
+        let mut h = seeded_picker_harness();
+        h.snapshot();
+        let pick_base = h.rendered_text();
+        assert!(
+            pick_base.contains(" review from commit "),
+            "a base picker says what selecting a row will start:\n{pick_base}"
+        );
+        assert!(
+            !pick_base.contains(" git log "),
+            "and does not also claim to be a listing"
+        );
+
+        let mut h = seeded_repo_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+        h.snapshot();
+        let browse = h.rendered_text();
+        assert!(
+            browse.contains(" git log "),
+            "a browser names itself for what it shows:\n{browse}"
+        );
+        assert!(
+            !browse.contains(" review from commit "),
+            "and never offers to start a review it will not start"
+        );
+    }
+
     #[test]
     fn snapshot_commit_picker_open() {
         let mut h = seeded_picker_harness();

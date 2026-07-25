@@ -1,5 +1,5 @@
 use crate::{
-    commit_picker::CommitPicker,
+    commit_picker::{CommitPicker, CommitPickerRole},
     render::{file_finder::file_finder_layout, text::write_str_clipped},
     theme::{scope, Theme},
     workspace::Workspace,
@@ -26,12 +26,18 @@ pub(crate) fn render_commit_picker(
         return;
     };
 
+    // The same rows serve both roles, so the title is what tells the user
+    // whether picking one starts a review or just closes the listing.
+    let title = match picker.role {
+        CommitPickerRole::PickBase => " review from commit ",
+        CommitPickerRole::Browse => " git log ",
+    };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     Clear.render(layout.modal, buf);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,
-        Some(" review from commit "),
+        Some(title),
         modal_style,
         theme,
         &mut *scene,
