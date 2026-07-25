@@ -15,24 +15,32 @@ use ratatui::{
 use std::path::Path;
 use stoat_language::LanguageRegistry;
 
+/// Box rows the chrome takes around the list. Two borders, the prompt row, and
+/// the separator under it.
+const CHROME_ROWS: u16 = 4;
+
 /// Lay out the centered symbol finder modal within `area`, or `None` when
 /// `area` is too small to host it.
 ///
 /// Returns the modal box, its inner rect (prompt, separator, then body), the
 /// result-list rect, and an optional preview pane rect. The preview appears only
 /// when the body is wide enough, so a narrow modal stays list-only.
-fn symbol_finder_layout(area: Rect) -> Option<(Rect, Rect, Rect, Option<Rect>)> {
-    if area.width < 40 || area.height < 12 {
-        return None;
-    }
-    let box_width = 120u16.min(area.width.saturating_sub(4));
-    let box_height = 32u16.min(area.height.saturating_sub(4));
-    if box_width < 40 || box_height < 12 {
-        return None;
-    }
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal = Rect::new(x, y, box_width, box_height);
+///
+/// `content_rows` is the symbols the list holds, which the box grows to fit past
+/// its recommended 32 rows. `zoom` is the user's step count from
+/// [`modal_zoom`](crate::app::Stoat::modal_zoom).
+fn symbol_finder_layout(
+    area: Rect,
+    content_rows: u16,
+    zoom: i8,
+) -> Option<(Rect, Rect, Rect, Option<Rect>)> {
+    let modal = crate::render::chrome::modal_box(
+        area,
+        (120, content_rows.saturating_add(CHROME_ROWS)),
+        (120, 32),
+        (40, 12),
+        zoom,
+    )?;
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
     let body_top = inner.y + 2;
@@ -51,16 +59,19 @@ fn symbol_finder_layout(area: Rect) -> Option<(Rect, Rect, Rect, Option<Rect>)> 
     Some((modal, inner, list, preview))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_symbol_finder(
     finder: &mut SymbolFinder,
     ws: &mut Workspace,
     theme: &Theme,
     languages: &LanguageRegistry,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    let Some((modal, inner, list, preview)) = symbol_finder_layout(area) else {
+    let Some((modal, inner, list, preview)) = symbol_finder_layout(area, finder.content_rows, zoom)
+    else {
         return;
     };
 
@@ -282,5 +293,42 @@ fn symbol_kind_label(kind: Option<SymbolKind>) -> &'static str {
         SymbolKind::ENUM_MEMBER => "variant",
         SymbolKind::TYPE_PARAMETER => "type",
         _ => "sym",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::symbol_finder_layout;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn a_short_symbol_list_keeps_the_recommended_box() {
+        let (modal, ..) = symbol_finder_layout(Rect::new(0, 0, 200, 60), 5, 0)
+            .expect("the area hosts the finder");
+        assert_eq!(
+            modal,
+            Rect::new(40, 14, 120, 32),
+            "content under the recommended size leaves the box at 120x32, centered"
+        );
+    }
+
+    /// The box has to carry exactly the chrome its list sits under, or a list
+    /// sized to fit would still scroll by however far the count is off.
+    #[test]
+    fn a_long_symbol_list_grows_the_box_to_show_every_row() {
+        let (modal, _, list, _) = symbol_finder_layout(Rect::new(0, 0, 200, 60), 40, 0)
+            .expect("the area hosts the finder");
+        assert_eq!(modal.height, 44, "forty symbols plus four chrome rows");
+        assert_eq!(
+            list.height, 40,
+            "and the body then holds all forty without scrolling"
+        );
+    }
+
+    #[test]
+    fn a_list_larger_than_the_area_stops_at_the_margin() {
+        let (modal, ..) = symbol_finder_layout(Rect::new(0, 0, 200, 60), u16::MAX, 0)
+            .expect("the area hosts the finder");
+        assert_eq!(modal.height, 56, "growth stops at the area less its margin");
     }
 }

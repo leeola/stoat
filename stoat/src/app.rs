@@ -361,10 +361,8 @@ enum WindowIpc {
 /// diagnostics, jumplist, and workspace pickers) have nothing to zoom and are
 /// absent.
 ///
-/// The finder-family kinds size their boxes by this. The palette, help, and
-/// symbol-finder layouts have yet to adopt it, and the zoom routing that steps
-/// [`Stoat::modal_zoom`] under a kind is likewise still to come.
-#[allow(dead_code)]
+/// Every kind here sizes its box against its own [`Stoat::modal_zoom`] entry.
+/// The zoom routing that steps those entries is still to come.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ModalKind {
     FileFinder,
@@ -7631,9 +7629,16 @@ impl Stoat {
 
         // The help view is a fixed centered modal over the editor like the
         // finder; its list and detail panes pool as two non-pane surfaces.
-        let help_layout = (!overlay && self.help.is_some())
-            .then(|| crate::render::help::help_layout(self.size()))
-            .flatten();
+        let help_layout = (!overlay)
+            .then_some(self.help.as_ref())
+            .flatten()
+            .and_then(|help| {
+                crate::render::help::help_layout(
+                    self.size(),
+                    crate::render::help::help_content_rows(help),
+                    modal_zoom_steps(&self.modal_zoom, ModalKind::Help),
+                )
+            });
 
         // The hover popup is cursor-anchored like the completion popup. Its
         // interior body region pools so Ctrl-u/Ctrl-d and the wheel ease. The
@@ -9811,6 +9816,18 @@ mod tests {
         h.settle();
 
         finder_layout(h).list
+    }
+
+    /// The open help modal's layout, sized from the same content and zoom the
+    /// renderer would read, so a test rect matches the painted one.
+    fn help_layout(h: &crate::test_harness::TestHarness) -> crate::render::help::HelpLayout {
+        let help = h.stoat.help.as_ref().expect("the help modal is open");
+        crate::render::help::help_layout(
+            h.stoat.size(),
+            crate::render::help::help_content_rows(help),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Help),
+        )
+        .expect("the help modal fits the test viewport")
     }
 
     /// The open palette's sizing inputs, so a test lays its box out exactly as
@@ -14608,9 +14625,7 @@ mod tests {
         h.stoat.paint_into(&mut buf);
         h.stoat.emit_apc_scene();
 
-        let modal = crate::render::help::help_layout(h.stoat.size())
-            .expect("help modal fits the test viewport")
-            .modal;
+        let modal = help_layout(&h).modal;
         let cmds = drain_apc(&mut rx);
         assert!(
             cmds.iter().any(|c| matches!(
@@ -14642,9 +14657,7 @@ mod tests {
         h.stoat.paint_into(&mut buf);
         h.stoat.emit_apc_scene();
 
-        let modal = crate::render::help::help_layout(h.stoat.size())
-            .expect("help modal fits the test viewport")
-            .modal;
+        let modal = help_layout(&h).modal;
         let cmds = drain_apc(&mut rx);
         assert!(
             cmds.iter().any(|c| matches!(
@@ -14678,9 +14691,7 @@ mod tests {
         h.stoat.paint_into(&mut buf);
         h.stoat.emit_apc_scene();
 
-        let list = crate::render::help::help_layout(h.stoat.size())
-            .expect("help modal fits the test viewport")
-            .list;
+        let list = help_layout(&h).list;
         let sep_x = (list.x + list.width) as i16 * 16 + 8;
         let sep_y = list.y as i16 * 16;
         let cmds = drain_apc(&mut rx);
@@ -15633,8 +15644,7 @@ mod tests {
         h.stoat.active_workspace_mut().layout(size);
 
         h.stoat.emit_smooth_scroll();
-        let layout =
-            crate::render::help::help_layout(h.stoat.size()).expect("help fits the test terminal");
+        let layout = help_layout(&h);
         let list = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
             top: layout.list.y,

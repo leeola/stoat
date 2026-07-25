@@ -90,6 +90,15 @@ pub(crate) struct SymbolFinder {
     /// Resolved hover markdown for the selected symbol, rendered above the source
     /// preview. `None` when unresolved, empty, or the request failed.
     pub(crate) doc_markdown: Option<String>,
+    /// Rows the modal's list would need for the whole symbol set, which the
+    /// renderer sizes the box against.
+    ///
+    /// Recorded only from an unfiltered result set, never from a narrowed one.
+    /// Document scope filters [`Self::entries`] locally, but workspace scope
+    /// re-issues the server request per keystroke and replaces them with
+    /// query-specific hits, so reading the live count would resize the box under
+    /// the user as they type.
+    pub(crate) content_rows: u16,
 }
 
 impl SymbolFinder {
@@ -119,11 +128,15 @@ impl SymbolFinder {
             pending_doc: None,
             doc_for: None,
             doc_markdown: None,
+            content_rows: 0,
         }
     }
 
     /// Replace the symbol list and re-run the current `query` over it.
     pub(crate) fn set_entries(&mut self, entries: Vec<SymbolFinderEntry>, query: &str) {
+        if query.is_empty() {
+            self.content_rows = u16::try_from(entries.len()).unwrap_or(u16::MAX);
+        }
         self.entries = entries;
         self.refilter(query);
     }
@@ -251,6 +264,7 @@ mod tests {
             pending_doc: None,
             doc_for: None,
             doc_markdown: None,
+            content_rows: titles.len() as u16,
         };
         f.refilter("");
         f

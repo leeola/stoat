@@ -14,6 +14,19 @@ use ratatui::{
 };
 use stoat_config::Predicate;
 
+/// Box rows the chrome takes around the body. Two borders, the search row, and
+/// the status row under it.
+const CHROME_ROWS: u16 = 4;
+
+/// Rows the help list would need for the scope's whole entry set.
+///
+/// Reads the unfiltered entries rather than the search result, so narrowing the
+/// search never resizes the box. A scope flip rebuilds the entries and is
+/// meant to resize it.
+pub(crate) fn help_content_rows(help: &Help) -> u16 {
+    u16::try_from(help.entries().len()).unwrap_or(u16::MAX)
+}
+
 /// The on-screen rectangles of the help modal, derived from a terminal `area`
 /// by [`help_layout`].
 ///
@@ -32,20 +45,20 @@ pub(crate) struct HelpLayout {
 
 /// Lay out the help modal within `area`, or `None` when `area` is too small to
 /// host it.
-pub(crate) fn help_layout(area: Rect) -> Option<HelpLayout> {
-    if area.width < 40 || area.height < 12 {
-        return None;
-    }
-
-    let box_width = 120u16.min(area.width.saturating_sub(4));
-    let box_height = 36u16.min(area.height.saturating_sub(4));
-    if box_width < 40 || box_height < 12 {
-        return None;
-    }
-
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal = Rect::new(x, y, box_width, box_height);
+///
+/// `content_rows` is the entries the list holds, which the box grows to fit
+/// past its recommended 36 rows. It counts the list rather than the detail
+/// pane's wrapped lines, since detail length tracks the selection and would
+/// move the box as the user walks the list. `zoom` is the user's step count
+/// from [`modal_zoom`](crate::app::Stoat::modal_zoom).
+pub(crate) fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<HelpLayout> {
+    let modal = crate::render::chrome::modal_box(
+        area,
+        (120, content_rows.saturating_add(CHROME_ROWS)),
+        (120, 36),
+        (40, 12),
+        zoom,
+    )?;
     // The title rides the top border, so it does not shrink the inner rect.
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
@@ -82,13 +95,14 @@ pub(crate) fn render_help(
     theme: &crate::theme::Theme,
     mode_badges: &std::collections::BTreeMap<String, String>,
     area: Rect,
+    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
     use crate::help::{help_input_mode, HelpInput, HelpScope};
     let input_mode = help_input_mode(stoat_mode);
 
-    let Some(layout) = help_layout(area) else {
+    let Some(layout) = help_layout(area, help_content_rows(help), zoom) else {
         return;
     };
 
@@ -476,5 +490,48 @@ mod tests {
             args: Vec::new(),
         };
         assert_eq!(format_action(&bare), "ToggleKeyHints");
+    }
+
+    #[test]
+    fn a_short_entry_list_keeps_the_recommended_box() {
+        let laid = help_layout(Rect::new(0, 0, 200, 60), 5, 0).expect("the area hosts help");
+        assert_eq!(
+            laid.modal,
+            Rect::new(40, 12, 120, 36),
+            "content under the recommended size leaves the box at 120x36, centered"
+        );
+    }
+
+    /// The box has to carry exactly the chrome its body sits under, or a list
+    /// sized to fit would still scroll by however far the count is off.
+    #[test]
+    fn a_long_entry_list_grows_the_box_to_show_every_row() {
+        let laid = help_layout(Rect::new(0, 0, 200, 60), 50, 0).expect("the area hosts help");
+        assert_eq!(laid.modal.height, 54, "fifty entries plus four chrome rows");
+        assert_eq!(
+            laid.list.height, 50,
+            "and the body then holds all fifty without scrolling"
+        );
+    }
+
+    #[test]
+    fn a_list_larger_than_the_area_stops_at_the_margin() {
+        let laid = help_layout(Rect::new(0, 0, 200, 60), u16::MAX, 0).expect("the area hosts help");
+        assert_eq!(
+            laid.modal.height, 56,
+            "growth stops at the area less its margin"
+        );
+    }
+
+    #[test]
+    fn an_area_too_small_for_the_minimum_hosts_nothing() {
+        assert!(
+            help_layout(Rect::new(0, 0, 41, 60), 5, 0).is_none(),
+            "a width under the 40-column minimum plus its thinnest margin fails"
+        );
+        assert!(
+            help_layout(Rect::new(0, 0, 200, 13), 5, 0).is_none(),
+            "so does a height under the 12-row minimum plus its thinnest margin"
+        );
     }
 }

@@ -667,6 +667,7 @@ pub(crate) fn frame(
             &stoat.theme,
             &stoat.settings.mode_badges,
             full,
+            modal_zoom_steps(&stoat.modal_zoom, ModalKind::Help),
             buf,
             &mut *scene,
         );
@@ -700,6 +701,7 @@ pub(crate) fn frame(
             &stoat.theme,
             &stoat.language_registry,
             full,
+            modal_zoom_steps(&stoat.modal_zoom, ModalKind::SymbolFinder),
             buf,
             &mut *scene,
         );
