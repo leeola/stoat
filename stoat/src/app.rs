@@ -4382,8 +4382,13 @@ impl Stoat {
                 _ => return UpdateEffect::None,
             };
 
+            let lanes = self
+                .commit_picker
+                .as_ref()
+                .and_then(crate::render::commit_picker::graph_lanes);
             let preview = crate::render::commit_picker::commit_picker_layout(
                 self.size(),
+                lanes,
                 modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
             )
             .and_then(|layout| layout.preview);

@@ -1,4 +1,5 @@
 use crate::{
+    commit_graph::{self, GraphRow},
     commit_list::PendingPreview,
     fuzzy,
     host::CommitInfo,
@@ -165,6 +166,14 @@ pub(crate) struct CommitPicker {
     /// What the current scope is called, or `None` at the root scope, where the
     /// title comes from the picker's role instead.
     pub(crate) scope_label: Option<String>,
+    /// Lane layout over [`Self::commits`], with the lane count the widest row
+    /// needs, computed once per scope.
+    ///
+    /// Indexes `commits` rather than `filtered`, so filtering never invalidates
+    /// it. That is also why the graph column only shows while the query is
+    /// empty. A filtered list is non-contiguous, and edges drawn between rows
+    /// that are no longer adjacent would claim a history that does not exist.
+    pub(crate) graph: (Vec<GraphRow>, u16),
 }
 
 impl CommitPicker {
@@ -200,7 +209,9 @@ impl CommitPicker {
             preview_scroll: 0,
             scope_stack: Vec::new(),
             scope_label: None,
+            graph: (Vec::new(), 0),
         };
+        picker.graph = commit_graph::assign_lanes(&picker.commits);
         picker.refilter("");
         picker.selected = picker.default_selection();
         picker
@@ -228,6 +239,7 @@ impl CommitPicker {
         });
 
         self.selected = 0;
+        self.graph = commit_graph::assign_lanes(&self.commits);
         self.refilter("");
         self.preview_scroll = 0;
     }
@@ -244,6 +256,7 @@ impl CommitPicker {
         self.commits = scope.commits;
         self.filter_column = scope.filter_column;
         self.selected = scope.selected;
+        self.graph = commit_graph::assign_lanes(&self.commits);
         self.refilter(&scope.query);
         self.preview_scroll = 0;
 
@@ -437,6 +450,7 @@ mod tests {
     use super::{age_label, CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS};
     use crate::{
         buffer::BufferId,
+        commit_graph,
         editor_state::EditorId,
         host::CommitInfo,
         input_view::{InputView, SubmitTarget},
@@ -491,7 +505,9 @@ mod tests {
             now_epoch: 0,
             scope_stack: Vec::new(),
             scope_label: None,
+            graph: (Vec::new(), 0),
         };
+        p.graph = commit_graph::assign_lanes(&p.commits);
         p.refilter("");
         p
     }
@@ -967,8 +983,106 @@ mod tests {
     fn layout(
         h: &crate::test_harness::TestHarness,
     ) -> crate::render::commit_picker::CommitPickerLayout {
-        crate::render::commit_picker::commit_picker_layout(h.stoat.size(), 0)
+        let lanes = h
+            .stoat
+            .commit_picker
+            .as_ref()
+            .and_then(crate::render::commit_picker::graph_lanes);
+        crate::render::commit_picker::commit_picker_layout(h.stoat.size(), lanes, 0)
             .expect("the picker fits the test terminal")
+    }
+
+    /// Paint `p`'s graph into a fresh buffer and scene under `theme`, returning
+    /// both so a test can look at either path's output.
+    fn painted_graph(
+        p: &CommitPicker,
+        theme: &crate::theme::Theme,
+    ) -> (ratatui::buffer::Buffer, stoatty_widgets::ApcScene) {
+        let area = ratatui::layout::Rect::new(0, 0, 8, 4);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut scene = stoatty_widgets::ApcScene::new();
+        crate::render::commit_picker::paint_commit_graph(p, 0, area, theme, &mut buf, &mut scene);
+        (buf, scene)
+    }
+
+    #[test]
+    fn the_graph_hides_as_soon_as_a_filter_reorders_the_list() {
+        let mut p = picker(history(), &[], "ccc3333");
+        assert_eq!(
+            crate::render::commit_picker::graph_lanes(&p),
+            Some(1),
+            "a linear history lays out one lane"
+        );
+
+        p.refilter("gadget");
+        assert_eq!(
+            crate::render::commit_picker::graph_lanes(&p),
+            None,
+            "a filtered list is no longer the sequence the graph indexes"
+        );
+
+        p.refilter("");
+        assert_eq!(
+            crate::render::commit_picker::graph_lanes(&p),
+            Some(1),
+            "clearing the query restores it"
+        );
+    }
+
+    #[test]
+    fn the_graph_column_shifts_the_table_right() {
+        let h = seeded_picker_harness();
+        let size = h.stoat.size();
+
+        let without =
+            crate::render::commit_picker::commit_picker_layout(size, None, 0).expect("fits");
+        let with =
+            crate::render::commit_picker::commit_picker_layout(size, Some(1), 0).expect("fits");
+
+        assert!(without.graph.is_none());
+        let graph = with.graph.expect("one lane reserves a column");
+        assert_eq!(graph.width, 3, "two cells for the lane plus a separator");
+        assert_eq!(with.list.x, without.list.x + 3, "the table starts after it");
+        assert_eq!(with.list.width, without.list.width - 3);
+        assert_eq!(
+            with.preview.map(|r| r.width),
+            without.preview.map(|r| r.width),
+            "the diff keeps the modal's full width"
+        );
+    }
+
+    #[test]
+    fn a_rich_theme_strokes_the_graph_and_writes_no_glyphs() {
+        let h = seeded_picker_harness();
+        let p = h.stoat.commit_picker.as_ref().expect("open");
+        let (buf, mut scene) = painted_graph(p, &h.stoat.theme);
+
+        let frames = scene
+            .buffer()
+            .windows(b"polyline".len())
+            .filter(|w| *w == b"polyline")
+            .count();
+        assert!(
+            frames >= 3,
+            "a three-commit history strokes at least one node per row, got {frames}"
+        );
+        assert!(
+            buf.content().iter().all(|cell| cell.symbol() == " "),
+            "the stroked path writes no glyphs"
+        );
+    }
+
+    #[test]
+    fn a_theme_without_rgb_falls_back_to_glyphs() {
+        let h = seeded_picker_harness();
+        let p = h.stoat.commit_picker.as_ref().expect("open");
+        let (buf, mut scene) = painted_graph(p, &crate::theme::Theme::empty());
+
+        assert!(scene.buffer().is_empty(), "the fallback emits no frames");
+        let painted: String = (0..3)
+            .map(|y| buf.cell((0, y)).expect("in bounds").symbol().to_owned())
+            .collect();
+        assert_eq!(painted, "●●●", "each row's node lands in lane 0");
     }
 
     /// The picker covers the pane behind it, so a wheel anywhere over it has to
