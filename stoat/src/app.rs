@@ -372,6 +372,12 @@ pub(crate) enum ModalKind {
     SymbolFinder,
 }
 
+/// Rows one wheel notch moves the commit picker's diff preview.
+///
+/// More than the single row a notch moves the list, because a diff is read by
+/// the screenful while a commit list is walked one commit at a time.
+const PREVIEW_WHEEL_ROWS: usize = 3;
+
 /// Furthest a modal may be zoomed out, in steps of a tenth of the screen.
 ///
 /// Shallower than the grow limit because a modal shrinks toward a minimum size
@@ -4366,6 +4372,38 @@ impl Stoat {
             } else {
                 action_handlers::palette_move_selection(self, delta).unwrap_or(UpdateEffect::Redraw)
             };
+        }
+
+        // The commit picker is modal too, so a wheel over it is the picker's.
+        // Over the diff it scrolls the diff. Anywhere else it walks the list and
+        // the diff follows the selection. Without this arm the event falls
+        // through to whatever pane the modal is covering.
+        if self.commit_picker.is_some() {
+            let down = match mouse.kind {
+                MouseEventKind::ScrollDown => true,
+                MouseEventKind::ScrollUp => false,
+                _ => return UpdateEffect::None,
+            };
+
+            let preview = crate::render::commit_picker::commit_picker_layout(
+                self.size(),
+                modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
+            )
+            .and_then(|layout| layout.preview);
+
+            if let Some(rect) = preview
+                && rect.contains(Position::new(mouse.column, mouse.row))
+                && let Some(picker) = self.commit_picker.as_mut()
+            {
+                picker.preview_scroll = match down {
+                    true => picker.preview_scroll.saturating_add(PREVIEW_WHEEL_ROWS),
+                    false => picker.preview_scroll.saturating_sub(PREVIEW_WHEEL_ROWS),
+                };
+                return UpdateEffect::Redraw;
+            }
+
+            let delta = if down { 1 } else { -1 };
+            return action_handlers::review_walk::commit_picker_step(self, delta);
         }
 
         // A wheel over the open hover popup scrolls the popup, not the pane

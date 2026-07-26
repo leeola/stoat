@@ -123,6 +123,12 @@ pub(crate) struct CommitPicker {
     /// Sha the in-flight or most recent preview was requested for, so a build
     /// that lands after the selection moved on is discarded.
     pub(crate) requested_preview: Option<String>,
+    /// Rows the diff preview is scrolled down by, for the selected commit.
+    ///
+    /// Belongs to whichever row is selected and drops when that changes, since
+    /// a position in one commit's diff means nothing in another's. Clamped at
+    /// render, where the diff's own row count is known.
+    pub(crate) preview_scroll: usize,
     /// Column the query is scoped to, or `None` to match the whole row.
     ///
     /// Scoping is what makes the table searchable per field, so typing an
@@ -166,6 +172,7 @@ impl CommitPicker {
             pending_preview: None,
             requested_preview: None,
             filter_column: None,
+            preview_scroll: 0,
         };
         picker.refilter("");
         picker.selected = picker.default_selection();
@@ -292,11 +299,25 @@ impl CommitPicker {
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
         if self.filtered.is_empty() {
-            self.selected = 0;
+            self.set_selected(0);
             return;
         }
         let max = (self.filtered.len() - 1) as i32;
-        self.selected = (self.selected as i32 + delta).clamp(0, max) as usize;
+        self.set_selected((self.selected as i32 + delta).clamp(0, max) as usize);
+    }
+
+    /// Move the cursor to `index`, dropping the preview scroll when the row it
+    /// belongs to actually changes.
+    ///
+    /// Every path that moves the cursor goes through here, so the scroll cannot
+    /// outlive the diff it was measured against. Gating on a real change is what
+    /// keeps the per-keystroke clamp from resetting the scroll while the user is
+    /// only typing.
+    fn set_selected(&mut self, index: usize) {
+        if self.selected != index {
+            self.selected = index;
+            self.preview_scroll = 0;
+        }
     }
 
     /// Page the selection by half the rendered list height in `dir` (negative
@@ -346,9 +367,9 @@ impl CommitPicker {
 
     fn clamp_selected(&mut self) {
         if self.filtered.is_empty() {
-            self.selected = 0;
+            self.set_selected(0);
         } else if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len() - 1;
+            self.set_selected(self.filtered.len() - 1);
         }
     }
 }
@@ -406,6 +427,7 @@ mod tests {
             pending_preview: None,
             requested_preview: None,
             filter_column: None,
+            preview_scroll: 0,
             // The fixture's commits sit at epoch zero, so this dates every row
             // to "now" and keeps the age column out of the row assertions.
             now_epoch: 0,
@@ -776,6 +798,91 @@ mod tests {
             header_fg(&h, "Commit"),
             header_fg(&h, "Author"),
             "and every column it is not scoped to still reads alike"
+        );
+    }
+
+    fn wheel(h: &mut crate::test_harness::TestHarness, down: bool, col: u16, row: u16) {
+        use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+        h.stoat.update(Event::Mouse(MouseEvent {
+            kind: if down {
+                MouseEventKind::ScrollDown
+            } else {
+                MouseEventKind::ScrollUp
+            },
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }));
+    }
+
+    fn layout(
+        h: &crate::test_harness::TestHarness,
+    ) -> crate::render::commit_picker::CommitPickerLayout {
+        crate::render::commit_picker::commit_picker_layout(h.stoat.size(), 0)
+            .expect("the picker fits the test terminal")
+    }
+
+    /// The picker covers the pane behind it, so a wheel anywhere over it has to
+    /// act on the picker rather than falling through to that pane.
+    #[test]
+    fn a_wheel_over_the_list_walks_it_and_never_reaches_the_buffer() {
+        let mut h = seeded_picker_harness();
+        // Long enough that the buffer behind the modal has somewhere to scroll,
+        // so its staying put is evidence rather than a clamp.
+        h.seed_focused_buffer(&"line\n".repeat(200));
+        h.snapshot();
+        let scrolled = h.editor_scroll_rows();
+        let list = layout(&h).list;
+        let selected = h.stoat.commit_picker.as_ref().expect("open").selected;
+
+        wheel(&mut h, true, list.x + 1, list.y + 1);
+
+        assert_eq!(
+            h.stoat.commit_picker.as_ref().expect("open").selected,
+            selected + 1,
+            "a notch over the rows steps the selection one commit"
+        );
+        assert_eq!(
+            h.editor_scroll_rows(),
+            scrolled,
+            "and never reaches the editor the modal is covering"
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_the_diff_scrolls_it_and_leaves_the_selection_put() {
+        let mut h = seeded_picker_harness();
+        h.snapshot();
+        let preview = layout(&h).preview.expect("the diff pane is present");
+        let selected = h.stoat.commit_picker.as_ref().expect("open").selected;
+
+        wheel(&mut h, true, preview.x + 1, preview.y + 1);
+
+        let picker = h.stoat.commit_picker.as_ref().expect("open");
+        assert_eq!(picker.selected, selected, "the list stays where it was");
+        assert!(
+            picker.preview_scroll > 0,
+            "and the diff scrolls down instead"
+        );
+    }
+
+    /// A position in one commit's diff means nothing in another's, so moving the
+    /// selection has to drop it.
+    #[test]
+    fn moving_the_selection_drops_the_diff_scroll() {
+        let mut h = seeded_picker_harness();
+        h.snapshot();
+        let preview = layout(&h).preview.expect("the diff pane is present");
+        wheel(&mut h, true, preview.x + 1, preview.y + 1);
+        assert!(h.stoat.commit_picker.as_ref().expect("open").preview_scroll > 0);
+
+        let list = layout(&h).list;
+        wheel(&mut h, true, list.x + 1, list.y + 1);
+
+        assert_eq!(
+            h.stoat.commit_picker.as_ref().expect("open").preview_scroll,
+            0,
+            "the scroll does not survive onto a different commit's diff"
         );
     }
 

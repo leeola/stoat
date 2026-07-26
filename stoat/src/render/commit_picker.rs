@@ -364,8 +364,12 @@ fn dimmed(style: ratatui::style::Style, muted: ratatui::style::Style) -> ratatui
 
 /// Draw the selected commit's cached diff, or a placeholder while its
 /// background build is still running.
+///
+/// The stored scroll is clamped here, where the diff's row count is known.
+/// Stopping a page short of the end is what keeps the wheel from scrolling the
+/// diff off into blank space.
 fn render_preview(
-    picker: &CommitPicker,
+    picker: &mut CommitPicker,
     area: Rect,
     theme: &Theme,
     buf: &mut Buffer,
@@ -373,10 +377,21 @@ fn render_preview(
 ) {
     let session = picker
         .selected_commit()
-        .and_then(|commit| picker.preview_sessions.get(&commit.sha));
+        .and_then(|commit| picker.preview_sessions.get(&commit.sha))
+        .cloned();
     match session {
         Some(session) => {
-            crate::render::commits::render_commit_preview(session, theme, area, buf, scene)
+            let last_page = crate::render::commits::preview_row_count(&session)
+                .saturating_sub(area.height as usize);
+            picker.preview_scroll = picker.preview_scroll.min(last_page);
+            crate::render::commits::render_commit_preview(
+                &session,
+                theme,
+                area,
+                picker.preview_scroll,
+                buf,
+                scene,
+            )
         },
         None => {
             write_str_clipped(

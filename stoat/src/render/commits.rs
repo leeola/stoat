@@ -188,7 +188,9 @@ fn render_commit_detail_pane(
         area.y + area.height - preview_y,
     );
     match state.preview_sessions.get(sha) {
-        Some(session) => render_commit_preview(session, theme, preview_area, buf, scene),
+        // The commits view has no preview scroll of its own. Only the picker's
+        // wheel handling moves one.
+        Some(session) => render_commit_preview(session, theme, preview_area, 0, buf, scene),
         None => {
             if preview_area.height > 0 {
                 write_str(
@@ -252,14 +254,33 @@ fn render_commit_summary(
     rows_used
 }
 
+/// Rows [`render_commit_preview`] would paint for `session` in full, counting
+/// each chunk's header alongside its diff rows.
+///
+/// A caller's `skip_rows` is measured in these, so this is what bounds it.
+pub(crate) fn preview_row_count(session: &ReviewSession) -> usize {
+    session
+        .files
+        .iter()
+        .flat_map(|file| file.chunks.iter())
+        .filter_map(|chunk_id| session.chunks.get(chunk_id))
+        .map(|chunk| 1 + chunk.hunk.rows.len())
+        .sum()
+}
+
 /// Render a compact preview of a [`ReviewSession`]: each chunk's rows
 /// painted sequentially with a yellow file/chunk header, top-to-bottom
 /// within `area`. Does not rely on editor machinery; used by the
 /// commits view's right pane.
+///
+/// `skip_rows` drops that many rows off the top, counting the same rows
+/// [`preview_row_count`] does, so a caller scrolls the diff by holding a row
+/// offset rather than by owning any of the painting.
 pub(crate) fn render_commit_preview(
     session: &ReviewSession,
     theme: &crate::theme::Theme,
     area: Rect,
+    skip_rows: usize,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
@@ -287,15 +308,16 @@ pub(crate) fn render_commit_preview(
 
     let mut y = area.y;
     let end_y = area.y + area.height;
+    // Counts every row the full preview would hold, painted or skipped, so the
+    // caller's scroll lands on the same row it would have reached by counting
+    // what it can see.
+    let mut row = 0usize;
 
     for file in &session.files {
         for chunk_id in &file.chunks {
             let Some(chunk) = session.chunks.get(chunk_id) else {
                 continue;
             };
-            if y >= end_y {
-                return;
-            }
             let file_total = file.chunks.len();
             let lang_str = file
                 .language
@@ -309,11 +331,23 @@ pub(crate) fn render_commit_preview(
                 file_total,
                 lang_str
             );
-            let label_trunc = truncate_to_cols(&label, area.width as usize);
-            write_str(buf, area.x, y, &label_trunc, header_style);
-            y += 1;
+            let label_row = row;
+            row += 1;
+            if label_row >= skip_rows {
+                if y >= end_y {
+                    return;
+                }
+                let label_trunc = truncate_to_cols(&label, area.width as usize);
+                write_str(buf, area.x, y, &label_trunc, header_style);
+                y += 1;
+            }
 
-            for row in &chunk.hunk.rows {
+            for diff_row in &chunk.hunk.rows {
+                let this_row = row;
+                row += 1;
+                if this_row < skip_rows {
+                    continue;
+                }
                 if y >= end_y {
                     return;
                 }
@@ -324,7 +358,7 @@ pub(crate) fn render_commit_preview(
                 let right_num_x = right_start + status_w as u16;
                 let left_text_x = left_num_x + num_w as u16;
                 let right_text_x = right_num_x + num_w as u16;
-                match row {
+                match diff_row {
                     ReviewRow::Context { left, right } => {
                         render_side_num(buf, left_num_x, y, left.line_num, dim);
                         render_side_text(
