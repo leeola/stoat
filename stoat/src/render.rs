@@ -719,6 +719,7 @@ pub(crate) fn frame(
             &stoat.keymap,
             &mode,
             "help",
+            None,
             &stoat.theme,
             full,
             buf,
@@ -732,6 +733,7 @@ pub(crate) fn frame(
             &stoat.keymap,
             &mode,
             "finder",
+            None,
             &stoat.theme,
             full,
             buf,
@@ -753,6 +755,7 @@ pub(crate) fn frame(
             &stoat.keymap,
             &mode,
             "symbols",
+            None,
             &stoat.theme,
             full,
             buf,
@@ -766,6 +769,7 @@ pub(crate) fn frame(
             &stoat.keymap,
             &mode,
             "code_search",
+            None,
             &stoat.theme,
             full,
             buf,
@@ -787,6 +791,7 @@ pub(crate) fn frame(
             &stoat.keymap,
             &mode,
             "palette",
+            None,
             &stoat.theme,
             full,
             buf,
@@ -794,11 +799,12 @@ pub(crate) fn frame(
         );
     } else if let Some(picker) = &mut stoat.workspace_picker {
         workspace_picker::render_workspace_picker(picker, ws, &stoat.theme, full, buf, &mut *scene);
-        let bindings = picker.hint_bindings();
-        hints::render_hints(
-            "picker",
-            &bindings,
-            None,
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
+            "workspace_picker",
+            Some("picker"),
             &stoat.theme,
             full,
             buf,
@@ -806,16 +812,12 @@ pub(crate) fn frame(
         );
     } else if let Some(modal) = &stoat.quit_all_confirm {
         quit_all_confirm::render_quit_all_confirm(modal, &stoat.theme, full, buf, &mut *scene);
-        let bindings: Vec<(&'static str, String)> = vec![
-            ("y", "discard & quit".to_string()),
-            ("n", "cancel".to_string()),
-            ("Enter", "discard & quit".to_string()),
-            ("Esc", "cancel".to_string()),
-        ];
-        hints::render_hints(
-            "quit",
-            &bindings,
-            None,
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
+            "quit_confirm",
+            Some("quit"),
             &stoat.theme,
             full,
             buf,
@@ -823,10 +825,11 @@ pub(crate) fn frame(
         );
     } else if let Some(picker) = &mut stoat.jumplist_picker {
         jumplist_picker::render_jumplist_picker(picker, &stoat.theme, full, buf, &mut *scene);
-        let bindings = picker.hint_bindings();
-        hints::render_hints(
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
             "jumplist",
-            &bindings,
             None,
             &stoat.theme,
             full,
@@ -841,6 +844,7 @@ pub(crate) fn frame(
             &stoat.keymap,
             &mode,
             "commit_picker",
+            None,
             &stoat.theme,
             full,
             buf,
@@ -855,10 +859,11 @@ pub(crate) fn frame(
             buf,
             &mut *scene,
         );
-        let bindings = picker.hint_bindings();
-        hints::render_hints(
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
             "diagnostics",
-            &bindings,
             None,
             &stoat.theme,
             full,
@@ -874,11 +879,12 @@ pub(crate) fn frame(
             buf,
             &mut *scene,
         );
-        let bindings = picker.hint_bindings();
-        hints::render_hints(
-            "locations",
-            &bindings,
-            None,
+        cached_modal_hints(
+            &mut stoat.hints_cache,
+            &stoat.keymap,
+            &mode,
+            "location",
+            Some("locations"),
             &stoat.theme,
             full,
             buf,
@@ -1026,12 +1032,17 @@ fn hints_cache_key(
 
 /// Paint a modal's hint box, reusing `cache` when its mode and modal are
 /// unchanged so the scoped keymap walk and regrouping run only on a key miss.
+///
+/// `modal` names the keymap scope to walk, which is the modal's name in
+/// config. It also titles the box unless `title` overrides it, for the modals
+/// whose config name is not what a reader wants to see over the hints.
 #[allow(clippy::too_many_arguments)]
 fn cached_modal_hints(
     cache: &mut Option<hints::HintsCache>,
     keymap: &crate::keymap::Keymap,
     mode: &str,
     modal: &'static str,
+    title: Option<&str>,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -1058,7 +1069,7 @@ fn cached_modal_hints(
         });
     }
     let rows = &cache.as_ref().expect("cache populated above").rows;
-    hints::render_hints_grouped(modal, rows, None, theme, area, buf, scene);
+    hints::render_hints_grouped(title.unwrap_or(modal), rows, None, theme, area, buf, scene);
 }
 
 /// Build the review-screen hints footer from the session progress and theme.

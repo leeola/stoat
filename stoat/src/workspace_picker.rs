@@ -299,17 +299,6 @@ impl WorkspacePicker {
             None => PathDisplay::TildeAbsolute,
         }
     }
-
-    pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("Enter", "select".to_string()),
-            ("Esc", "cancel".to_string()),
-            ("Ctrl-N", "next".to_string()),
-            ("Ctrl-P", "prev".to_string()),
-            ("\u{2193}", "next".to_string()),
-            ("\u{2191}", "prev".to_string()),
-        ]
-    }
 }
 
 /// A workspace's display name, its explicit name or its git root's basename

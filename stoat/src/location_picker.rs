@@ -67,15 +67,6 @@ impl LocationPicker {
         self.selected = index.min(self.entries.len().saturating_sub(1));
     }
 
-    pub(crate) fn hint_bindings(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("Enter", "jump".to_string()),
-            ("Esc", "cancel".to_string()),
-            ("Ctrl-N", "next".to_string()),
-            ("Ctrl-P", "prev".to_string()),
-        ]
-    }
-
     fn move_selection(&mut self, delta: i32) {
         crate::picker::nav_move(self.entries.len(), &mut self.selected, delta);
     }

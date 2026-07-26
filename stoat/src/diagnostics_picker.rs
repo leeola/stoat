@@ -167,15 +167,6 @@ impl DiagnosticsPicker {
         self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
     }
 
-    pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("Enter", "jump".to_string()),
-            ("Esc", "cancel".to_string()),
-            ("Ctrl-N", "next".to_string()),
-            ("Ctrl-P", "prev".to_string()),
-        ]
-    }
-
     fn move_selection(&mut self, delta: i32) {
         crate::picker::nav_move(self.entries.len(), &mut self.selected, delta);
     }

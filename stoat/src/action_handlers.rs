@@ -3257,6 +3257,37 @@ mod tests {
         h.assert_snapshot("workspace_picker_listing");
     }
 
+    /// The picker's hints used to be a hand-written list that had already lost
+    /// track of Tab. Naming that binding pins the box to the keymap, so a
+    /// future hand-written list cannot quietly reintroduce the drift.
+    #[test]
+    fn the_picker_hints_list_every_binding_the_keymap_holds() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        h.type_action("SwitchWorkspace()");
+        h.snapshot();
+
+        let buf = h.rendered_buffer();
+        let painted: String = (buf.area.y..buf.area.y + buf.area.height)
+            .map(|row| {
+                (buf.area.x..buf.area.x + buf.area.width)
+                    .map(|col| buf[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for expected in [
+            "complete selected workspace",
+            "page the workspace list down",
+            "close workspace picker",
+        ] {
+            assert!(
+                painted.contains(expected),
+                "the hints box lists {expected:?}, which config binds:\n{painted}"
+            );
+        }
+    }
+
     #[test]
     fn typing_in_the_picker_filters_the_list() {
         let mut h = Stoat::test();

@@ -20275,7 +20275,10 @@ mod tests {
 
     #[test]
     fn location_picker_renders_a_selection_past_the_visible_rows() {
-        let mut h = Stoat::test();
+        // Wider than the default terminal so the hints overlay, which is
+        // right-aligned and sized by the bindings it lists, sits clear of the
+        // centered modal. At 80 columns it covers the rows this reads.
+        let mut h = crate::test_harness::TestHarness::with_size(160, 40);
         open_location_picker(&mut h, 15);
         h.stoat
             .location_picker

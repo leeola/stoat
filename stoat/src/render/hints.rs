@@ -23,24 +23,12 @@ pub(crate) struct HintsCache {
     pub(crate) rows: Vec<(String, String)>,
 }
 
-pub(crate) fn render_hints(
-    mode: &str,
-    bindings: &[(&str, String)],
-    footer: Option<&HintsFooter>,
-    theme: &crate::theme::Theme,
-    area: Rect,
-    buf: &mut Buffer,
-    scene: &mut stoatty_widgets::ApcScene,
-) {
-    let rows = group_by_action(bindings);
-    render_hints_grouped(mode, &rows, footer, theme, area, buf, scene);
-}
-
 /// Paint the hints box from pre-grouped `(keys, action)` rows.
 ///
-/// Split from [`render_hints`] so a caller holding an already-grouped row list
-/// (a per-frame cache keyed on the keymap state) can paint without re-walking
-/// the keymap or regrouping.
+/// Takes rows rather than bindings because every caller holds a per-frame cache
+/// keyed on the keymap state, and so paints an unchanged frame without
+/// re-walking the keymap or regrouping. Run [`group_by_action`] first when
+/// building rows fresh.
 pub(crate) fn render_hints_grouped(
     mode: &str,
     rows: &[(String, String)],
@@ -212,7 +200,7 @@ pub(crate) fn group_by_action(bindings: &[(&str, String)]) -> Vec<(String, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::render_hints;
+    use super::{group_by_action, render_hints_grouped};
     use crate::theme::Theme;
     use ratatui::{buffer::Buffer, layout::Rect};
 
@@ -229,9 +217,9 @@ mod tests {
         // An empty theme resolves no RGB colours, so the helpers still take their
         // cell fallback and the assertions below read real glyphs.
         let mut scene = stoatty_widgets::ApcScene::new();
-        render_hints(
+        render_hints_grouped(
             "normal",
-            bindings,
+            &group_by_action(bindings),
             None,
             &Theme::empty(),
             area,
