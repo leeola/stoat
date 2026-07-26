@@ -6,9 +6,30 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Clear, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 use std::path::Path;
+
+/// Rows of workspaces the modal shows at once. A longer list scrolls under the
+/// selection rather than growing the box past a readable height.
+const MAX_ENTRY_ROWS: u16 = 10;
+
+/// Rows the chrome takes inside the border above the list, which are the
+/// filter input, its separator, and the column header.
+const HEADER_ROWS: u16 = 3;
+
+/// Lay the workspace picker's modal out within `area`, returning its outer box
+/// and the inner rect holding the header and rows, or [`None`] when `area` is
+/// too small to host it or there is nothing to list.
+fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
+    if entries_len == 0 {
+        return None;
+    }
+    let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
+    let content_height = 2 + HEADER_ROWS + entry_rows;
+    let modal = crate::render::chrome::modal_box(area, (0, content_height), (90, 6), (60, 6), 0)?;
+    Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
+}
 
 pub(crate) fn render_workspace_picker(
     picker: &mut WorkspacePicker,
@@ -18,34 +39,13 @@ pub(crate) fn render_workspace_picker(
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    if area.width < 60 || area.height < 8 {
+    let Some((picker_area, inner)) = workspace_picker_layout(area, picker.entries().len()) else {
         return;
-    }
-
-    let entry_count = picker.entries().len();
-    if entry_count == 0 {
-        return;
-    }
-    let max_entries = 10u16;
-    let entry_rows = (entry_count as u16).min(max_entries);
-
-    let box_width = 90u16.min(area.width.saturating_sub(4));
-    if box_width < 60 {
-        return;
-    }
-    // The filter input and its separator add two rows above the list.
-    let box_height = 5 + entry_rows;
-    if box_height > area.height {
-        return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let picker_area = Rect::new(x, y, box_width, box_height);
+    };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     Clear.render(picker_area, buf);
-    let inner = crate::render::chrome::modal_frame(
+    crate::render::chrome::modal_frame(
         buf,
         picker_area,
         Some(" workspaces "),
@@ -107,13 +107,13 @@ pub(crate) fn render_workspace_picker(
         header_style,
     );
 
-    let entries_top = inner.y + 3;
-    picker.viewport_rows = Some(entry_rows as usize);
+    let entries_top = inner.y + HEADER_ROWS;
+    let rows = inner.height.saturating_sub(HEADER_ROWS) as usize;
+    picker.viewport_rows = Some(rows);
     let selected = picker.selected();
     let match_indices = picker.match_indices();
     let entries = picker.entries();
 
-    let rows = max_entries as usize;
     let start = crate::render::picker::window_start(selected, rows);
     for (i, &idx) in picker.filtered().iter().enumerate().skip(start).take(rows) {
         let entry = &entries[idx];
@@ -189,7 +189,7 @@ pub(crate) fn render_workspace_picker(
 
 #[cfg(test)]
 mod tests {
-    use super::render_workspace_picker;
+    use super::{render_workspace_picker, workspace_picker_layout, HEADER_ROWS, MAX_ENTRY_ROWS};
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
@@ -253,6 +253,32 @@ mod tests {
             buf,
             &mut stoatty_widgets::ApcScene::new(),
         );
+    }
+
+    #[test]
+    fn layout_holds_the_header_above_one_row_per_workspace() {
+        let (modal, inner) =
+            workspace_picker_layout(Rect::new(0, 0, 120, 40), 3).expect("the area hosts the modal");
+        assert_eq!(modal.width, 90, "the box holds at its recommended width");
+        assert_eq!(
+            inner.height,
+            HEADER_ROWS + 3,
+            "the filter, separator, and column labels sit above the rows"
+        );
+    }
+
+    #[test]
+    fn layout_caps_the_rows_it_shows() {
+        let (_, inner) = workspace_picker_layout(Rect::new(0, 0, 120, 40), 30)
+            .expect("the area hosts the modal");
+        assert_eq!(inner.height, HEADER_ROWS + MAX_ENTRY_ROWS);
+    }
+
+    #[test]
+    fn layout_none_when_too_small_or_empty() {
+        assert_eq!(workspace_picker_layout(Rect::new(0, 0, 60, 40), 3), None);
+        assert_eq!(workspace_picker_layout(Rect::new(0, 0, 120, 7), 3), None);
+        assert_eq!(workspace_picker_layout(Rect::new(0, 0, 120, 40), 0), None);
     }
 
     #[test]

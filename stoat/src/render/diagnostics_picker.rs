@@ -6,9 +6,25 @@ use lsp_types::DiagnosticSeverity;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Clear, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 use std::path::Path;
+
+/// Rows of diagnostics the modal shows at once. A longer list scrolls under the
+/// selection rather than growing the box past a readable height.
+const MAX_ENTRY_ROWS: u16 = 12;
+
+/// Lay the diagnostics picker's modal out within `area`, returning its outer
+/// box and the inner rect holding the diagnostic rows, or [`None`] when `area`
+/// is too small to host it or there is nothing to list.
+fn diagnostics_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
+    if entries_len == 0 {
+        return None;
+    }
+    let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
+    let modal = crate::render::chrome::modal_box(area, (0, 2 + entry_rows), (80, 3), (50, 3), 0)?;
+    Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
+}
 
 pub(crate) fn render_diagnostics_picker(
     picker: &mut DiagnosticsPicker,
@@ -18,29 +34,9 @@ pub(crate) fn render_diagnostics_picker(
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    if area.width < 50 || area.height < 6 {
+    let Some((modal_area, inner)) = diagnostics_picker_layout(area, picker.entries().len()) else {
         return;
-    }
-
-    let entry_count = picker.entries().len();
-    if entry_count == 0 {
-        return;
-    }
-    let max_entries = 12u16;
-    let entry_rows = (entry_count as u16).min(max_entries);
-
-    let box_width = 80u16.min(area.width.saturating_sub(4));
-    if box_width < 50 {
-        return;
-    }
-    let box_height = 2 + entry_rows;
-    if box_height > area.height {
-        return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal_area = Rect::new(x, y, box_width, box_height);
+    };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     let title = match picker.scope() {
@@ -48,8 +44,7 @@ pub(crate) fn render_diagnostics_picker(
         PickerScope::Workspace => " diagnostics (workspace) ",
     };
     Clear.render(modal_area, buf);
-    let inner =
-        crate::render::chrome::modal_frame(buf, modal_area, Some(title), modal_style, theme, scene);
+    crate::render::chrome::modal_frame(buf, modal_area, Some(title), modal_style, theme, scene);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
@@ -70,8 +65,8 @@ pub(crate) fn render_diagnostics_picker(
     let msg_x = sev_x + sev_w + 1;
     let msg_w = inner.width.saturating_sub(msg_x - inner.x);
 
-    let rows = max_entries as usize;
-    picker.viewport_rows = Some(entry_rows as usize);
+    let rows = inner.height as usize;
+    picker.viewport_rows = Some(rows);
     let selected = picker.selected();
     let start = crate::render::picker::window_start(selected, rows);
     for (i, entry) in picker.entries().iter().enumerate().skip(start).take(rows) {
@@ -146,7 +141,7 @@ fn severity_glyph(severity: Option<DiagnosticSeverity>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::render_diagnostics_picker;
+    use super::{diagnostics_picker_layout, render_diagnostics_picker, MAX_ENTRY_ROWS};
     use crate::{
         buffer::{BufferId, TextBuffer},
         diagnostics_picker::DiagnosticsPicker,
@@ -189,6 +184,28 @@ mod tests {
             buf,
             &mut stoatty_widgets::ApcScene::new(),
         );
+    }
+
+    #[test]
+    fn layout_holds_one_row_per_diagnostic() {
+        let (modal, inner) = diagnostics_picker_layout(Rect::new(0, 0, 100, 40), 3)
+            .expect("the area hosts the modal");
+        assert_eq!(modal.width, 80, "the box holds at its recommended width");
+        assert_eq!(inner.height, 3, "one row per diagnostic");
+    }
+
+    #[test]
+    fn layout_caps_the_rows_it_shows() {
+        let (_, inner) = diagnostics_picker_layout(Rect::new(0, 0, 100, 40), 30)
+            .expect("the area hosts the modal");
+        assert_eq!(inner.height, MAX_ENTRY_ROWS);
+    }
+
+    #[test]
+    fn layout_none_when_too_small_or_empty() {
+        assert_eq!(diagnostics_picker_layout(Rect::new(0, 0, 40, 24), 3), None);
+        assert_eq!(diagnostics_picker_layout(Rect::new(0, 0, 80, 4), 3), None);
+        assert_eq!(diagnostics_picker_layout(Rect::new(0, 0, 80, 24), 0), None);
     }
 
     #[test]

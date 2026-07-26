@@ -2,8 +2,24 @@ use crate::{jumplist_picker::JumplistPicker, render::text::write_str};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Clear, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
+
+/// Rows of jumps the modal shows at once. A longer list scrolls under the
+/// selection rather than growing the box past a readable height.
+const MAX_ENTRY_ROWS: u16 = 12;
+
+/// Lay the jumplist picker's modal out within `area`, returning its outer box
+/// and the inner rect holding the jump rows, or [`None`] when `area` is too
+/// small to host it or there is nothing to list.
+fn jumplist_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
+    if entries_len == 0 {
+        return None;
+    }
+    let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
+    let modal = crate::render::chrome::modal_box(area, (0, 2 + entry_rows), (80, 3), (50, 3), 0)?;
+    Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
+}
 
 pub(crate) fn render_jumplist_picker(
     picker: &mut JumplistPicker,
@@ -12,33 +28,13 @@ pub(crate) fn render_jumplist_picker(
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    if area.width < 50 || area.height < 6 {
+    let Some((modal_area, inner)) = jumplist_picker_layout(area, picker.entries().len()) else {
         return;
-    }
-
-    let entry_count = picker.entries().len();
-    if entry_count == 0 {
-        return;
-    }
-    let max_entries = 12u16;
-    let entry_rows = (entry_count as u16).min(max_entries);
-
-    let box_width = 80u16.min(area.width.saturating_sub(4));
-    if box_width < 50 {
-        return;
-    }
-    let box_height = 2 + entry_rows;
-    if box_height > area.height {
-        return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal_area = Rect::new(x, y, box_width, box_height);
+    };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     Clear.render(modal_area, buf);
-    let inner = crate::render::chrome::modal_frame(
+    crate::render::chrome::modal_frame(
         buf,
         modal_area,
         Some(" jumplist "),
@@ -62,8 +58,8 @@ pub(crate) fn render_jumplist_picker(
     let snippet_x = pos_x + position_w + 1;
     let snippet_w = inner.width.saturating_sub(snippet_x - inner.x);
 
-    let rows = max_entries as usize;
-    picker.viewport_rows = Some(entry_rows as usize);
+    let rows = inner.height as usize;
+    picker.viewport_rows = Some(rows);
     let start = crate::render::picker::window_start(selected, rows);
     for (i, entry) in picker.entries().iter().enumerate().skip(start).take(rows) {
         let row = inner.y + (i - start) as u16;
@@ -95,7 +91,7 @@ pub(crate) fn render_jumplist_picker(
 
 #[cfg(test)]
 mod tests {
-    use super::render_jumplist_picker;
+    use super::{jumplist_picker_layout, render_jumplist_picker, MAX_ENTRY_ROWS};
     use crate::{
         buffer_registry::BufferRegistry,
         jumplist::{JumpEntry, JumpList},
@@ -145,6 +141,55 @@ mod tests {
             buf,
             &mut stoatty_widgets::ApcScene::new(),
         );
+    }
+
+    #[test]
+    fn layout_holds_one_row_per_jump() {
+        let (modal, inner) =
+            jumplist_picker_layout(Rect::new(0, 0, 100, 40), 3).expect("the area hosts the modal");
+        assert_eq!(modal.width, 80, "the box holds at its recommended width");
+        assert_eq!(inner.height, 3, "one row per jump");
+    }
+
+    #[test]
+    fn layout_caps_the_rows_it_shows() {
+        let (_, inner) =
+            jumplist_picker_layout(Rect::new(0, 0, 100, 40), 30).expect("the area hosts the modal");
+        assert_eq!(inner.height, MAX_ENTRY_ROWS);
+    }
+
+    /// An area too short for the whole list gives back a shorter box rather
+    /// than none, where the old hand-rolled sizing refused outright. The rows
+    /// have to follow the box down, or the surplus paints through the bottom
+    /// border and onto the editor behind.
+    #[test]
+    fn a_box_shortened_to_fit_paints_nothing_outside_itself() {
+        let mut picker = picker_over(12);
+        let area = Rect::new(0, 0, 100, 12);
+        let (modal, inner) =
+            jumplist_picker_layout(area, 12).expect("a short area still hosts the modal");
+        assert!(
+            inner.height < 12,
+            "the area forces a box shorter than the list: {inner:?}"
+        );
+
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut buf, area);
+
+        let pristine = Buffer::empty(area);
+        let outside: Vec<(u16, u16)> = (area.y..area.y + area.height)
+            .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| !modal.contains((x, y).into()))
+            .filter(|&(x, y)| buf[(x, y)] != pristine[(x, y)])
+            .collect();
+        assert_eq!(outside, Vec::new(), "every painted cell is inside the box");
+    }
+
+    #[test]
+    fn layout_none_when_too_small_or_empty() {
+        assert_eq!(jumplist_picker_layout(Rect::new(0, 0, 40, 24), 3), None);
+        assert_eq!(jumplist_picker_layout(Rect::new(0, 0, 80, 4), 3), None);
+        assert_eq!(jumplist_picker_layout(Rect::new(0, 0, 80, 24), 0), None);
     }
 
     #[test]

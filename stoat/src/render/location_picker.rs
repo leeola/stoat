@@ -17,23 +17,11 @@ const MAX_ENTRY_ROWS: u16 = 12;
 /// Painting and hit-testing both go through this, so a clicked row cannot
 /// disagree with the row drawn there.
 pub(crate) fn location_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
-    if area.width < 50 || area.height < 6 || entries_len == 0 {
+    if entries_len == 0 {
         return None;
     }
     let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
-
-    let box_width = 80u16.min(area.width.saturating_sub(4));
-    if box_width < 50 {
-        return None;
-    }
-    let box_height = 2 + entry_rows;
-    if box_height > area.height {
-        return None;
-    }
-
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal = Rect::new(x, y, box_width, box_height);
+    let modal = crate::render::chrome::modal_box(area, (0, 2 + entry_rows), (80, 3), (50, 3), 0)?;
     Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
 }
 
