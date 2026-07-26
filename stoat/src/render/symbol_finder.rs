@@ -30,7 +30,7 @@ const CHROME_ROWS: u16 = 4;
 /// its recommended 32 rows. `zoom` is the user's step count from
 /// [`modal_zoom`](crate::app::Stoat::modal_zoom), and `list_percent` the width
 /// the list takes from [`modal_split`](crate::app::Stoat::modal_split).
-fn symbol_finder_layout(
+pub(crate) fn symbol_finder_layout(
     area: Rect,
     content_rows: u16,
     zoom: i8,
@@ -56,7 +56,7 @@ fn symbol_finder_layout(
         inner.width,
         body_height,
         80,
-        24,
+        crate::render::picker::MIN_PANE_COLUMNS,
         list_percent,
     );
     Some((modal, inner, list, preview))

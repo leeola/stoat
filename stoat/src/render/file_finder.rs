@@ -59,7 +59,7 @@ pub(crate) fn file_finder_layout(
         body_width,
         body_height,
         80,
-        24,
+        crate::render::picker::MIN_PANE_COLUMNS,
         list_percent,
     );
 

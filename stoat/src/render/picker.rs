@@ -227,6 +227,13 @@ pub(crate) fn render_picker_preview(
 /// code search, and commit picker all divide their body the same way.
 pub(crate) const DEFAULT_LIST_PERCENT: u16 = 40;
 
+/// Columns each pane of a side-by-side modal keeps.
+///
+/// A list narrower than this cannot show a path worth reading, and a preview
+/// narrower cannot show code, so the split refuses to squeeze either below it
+/// however the share is set or dragged.
+pub(crate) const MIN_PANE_COLUMNS: u16 = 24;
+
 /// Split a picker body rect into a result list and an optional preview pane.
 ///
 /// The preview appears only when `width >= wide_threshold`, where the list

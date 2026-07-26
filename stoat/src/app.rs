@@ -389,6 +389,92 @@ const PREVIEW_WHEEL_ROWS: usize = 3;
 /// sliver.
 pub(crate) const MIN_PREVIEW_ROWS: u16 = 3;
 
+/// Which way a modal's list/preview separator runs, and so which pointer
+/// coordinate a drag along it reads.
+#[derive(Copy, Clone)]
+enum SeparatorAxis {
+    /// A row between a list above and a preview below, as the commit picker
+    /// stacks them. A drag reads the pointer's row.
+    Rows,
+    /// A column between a list and a preview beside it, as the finder family
+    /// splits them. A drag reads the pointer's column.
+    Columns,
+}
+
+impl SeparatorAxis {
+    /// The pointer coordinate a drag along this axis moves.
+    fn along(self, mouse: &MouseEvent) -> u16 {
+        match self {
+            Self::Rows => mouse.row,
+            Self::Columns => mouse.column,
+        }
+    }
+
+    /// The pointer coordinate the separator runs across, which a hit-test bounds
+    /// so a press level with the separator but off the modal never arms.
+    fn across(self, mouse: &MouseEvent) -> u16 {
+        match self {
+            Self::Rows => mouse.column,
+            Self::Columns => mouse.row,
+        }
+    }
+}
+
+/// The open modal's list/preview separator: where it sits, and what a drag along
+/// it redistributes.
+///
+/// One descriptor for both splits the modal family uses. Only the axis and the
+/// floors differ between them -- the pane on one side takes a share of the body,
+/// the separator takes a cell of its own, and the other pane takes the rest --
+/// so resolving a modal into this shape lets one hit-test and one clamp serve
+/// every kind.
+struct ModalSeparator {
+    /// Whose [`Stoat::modal_split`] entry a drag writes.
+    kind: ModalKind,
+    axis: SeparatorAxis,
+    /// The separator's own line, in the axis's units.
+    line: u16,
+    /// How far the separator runs across the other axis.
+    span: Range<u16>,
+    /// The extent a drag redistributes, in the axis's units.
+    body: Range<u16>,
+    /// What the list keeps however far the separator is dragged toward it.
+    min_list: u16,
+    /// What the preview keeps, the counterpart floor on the other side.
+    min_preview: u16,
+}
+
+impl ModalSeparator {
+    /// Whether `mouse` presses the separator itself rather than a pane beside it.
+    fn hit(&self, mouse: &MouseEvent) -> bool {
+        self.axis.along(mouse) == self.line && self.span.contains(&self.axis.across(mouse))
+    }
+
+    /// The list's share of the body once the separator lands at `mouse`, or
+    /// `None` when the body cannot host both floors and so cannot be split.
+    ///
+    /// Clamping happens in the axis's own units rather than in percent, because a
+    /// percent that round-trips through the layout's truncating division lands
+    /// the separator a cell short of the pointer. The extent is clamped to leave
+    /// both panes their floor, and the percent is rounded up so the layout
+    /// recovers exactly that extent.
+    fn share_at(&self, mouse: &MouseEvent) -> Option<u16> {
+        let extent = self.body.end.saturating_sub(self.body.start);
+        let widest_list = extent.saturating_sub(self.min_preview + 1);
+        if widest_list < self.min_list {
+            return None;
+        }
+
+        let list = self
+            .axis
+            .along(mouse)
+            .saturating_sub(self.body.start)
+            .clamp(self.min_list, widest_list);
+
+        Some((list * 100).div_ceil(extent))
+    }
+}
+
 /// Furthest a modal may be zoomed out, in steps of a tenth of the screen.
 ///
 /// Shallower than the grow limit because a modal shrinks toward a minimum size
@@ -4005,70 +4091,111 @@ impl Stoat {
         }
     }
 
-    /// The open commit picker's layout, sized from the same inputs the renderer
-    /// reads, so a hit-test lands on the rows the user is looking at.
-    fn open_commit_picker_layout(
-        &self,
-    ) -> Option<crate::render::commit_picker::CommitPickerLayout> {
-        let picker = self.commit_picker.as_ref()?;
-        crate::render::commit_picker::commit_picker_layout(
-            self.size(),
-            crate::render::commit_picker::graph_lanes(picker),
-            modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
-            modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
-        )
+    /// The open modal's list/preview separator, sized from the same inputs the
+    /// renderer reads so a hit-test lands where the user sees the line.
+    ///
+    /// `None` when no modal with a separator is open, or when the one that is
+    /// shows no preview -- a modal too small for two panes has no line to grab.
+    fn open_modal_separator(&self) -> Option<ModalSeparator> {
+        let size = self.size();
+
+        // The picker stacks its diff under the table, so its separator runs
+        // along the modal's width and a drag redistributes rows.
+        if let Some(picker) = self.commit_picker.as_ref() {
+            let layout = crate::render::commit_picker::commit_picker_layout(
+                size,
+                crate::render::commit_picker::graph_lanes(picker),
+                modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
+                modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
+            )?;
+            layout.preview?;
+            let inner = layout.inner;
+            return Some(ModalSeparator {
+                kind: ModalKind::CommitPicker,
+                axis: SeparatorAxis::Rows,
+                line: layout.list.y + layout.list.height,
+                span: inner.x..inner.x + inner.width,
+                body: layout.list.y..inner.y + inner.height,
+                min_list: MIN_LIST_ROWS,
+                min_preview: MIN_PREVIEW_ROWS,
+            });
+        }
+
+        // The finder family puts its preview beside the list, so the separator
+        // runs down the body and a drag redistributes columns.
+        let (kind, inner, list, preview) = if let Some(finder) = self.file_finder.as_ref() {
+            let kind = ModalKind::FileFinder;
+            let layout = crate::render::file_finder::file_finder_layout(
+                size,
+                finder.content_size,
+                modal_zoom_steps(&self.modal_zoom, kind),
+                modal_split_percent(&self.modal_split, kind),
+            )?;
+            (kind, layout.inner, layout.list, layout.preview)
+        } else if self.code_search.is_some() {
+            // Search hits are unbounded, so code search declares the whole area
+            // exactly as its renderer does.
+            let kind = ModalKind::CodeSearch;
+            let layout = crate::render::file_finder::file_finder_layout(
+                size,
+                (u16::MAX, u16::MAX),
+                modal_zoom_steps(&self.modal_zoom, kind),
+                modal_split_percent(&self.modal_split, kind),
+            )?;
+            (kind, layout.inner, layout.list, layout.preview)
+        } else if let Some(finder) = self.symbol_finder.as_ref() {
+            let kind = ModalKind::SymbolFinder;
+            let (_, inner, list, preview) = crate::render::symbol_finder::symbol_finder_layout(
+                size,
+                finder.content_rows,
+                modal_zoom_steps(&self.modal_zoom, kind),
+                modal_split_percent(&self.modal_split, kind),
+            )?;
+            (kind, inner, list, preview)
+        } else {
+            return None;
+        };
+        preview?;
+
+        Some(ModalSeparator {
+            kind,
+            axis: SeparatorAxis::Columns,
+            line: list.x + list.width,
+            span: list.y..list.y + list.height,
+            body: inner.x..inner.x + inner.width,
+            min_list: crate::render::picker::MIN_PANE_COLUMNS,
+            min_preview: crate::render::picker::MIN_PANE_COLUMNS,
+        })
     }
 
     /// Arm a separator drag when `mouse` presses the open modal's list/preview
     /// separator, reporting whether it did.
-    ///
-    /// The commit picker's separator is the row between its table and the diff
-    /// below, spanning the modal's full inner width. A modal too short to show a
-    /// preview has no separator to grab.
     fn arm_modal_separator(&mut self, mouse: MouseEvent) -> bool {
-        let Some(layout) = self.open_commit_picker_layout() else {
+        let Some(separator) = self.open_modal_separator().filter(|s| s.hit(&mouse)) else {
             return false;
         };
-        if layout.preview.is_none() || mouse.row != layout.list.y + layout.list.height {
-            return false;
-        }
-        let inner = layout.inner;
-        if mouse.column < inner.x || mouse.column >= inner.x + inner.width {
-            return false;
-        }
 
-        self.modal_separator_drag = Some(ModalKind::CommitPicker);
+        self.modal_separator_drag = Some(separator.kind);
         true
     }
 
     /// Move the armed separator to `mouse`, storing the share it lands on.
     ///
-    /// Clamping happens in rows rather than percent, because a percent that
-    /// round-trips through the layout's own truncating division lands a row above
-    /// the pointer. The row count is clamped to leave both panes their floor, and
-    /// the percent is then rounded up so the layout recovers exactly that count.
+    /// A modal that closed or shrank out of its two-pane layout mid-drag leaves
+    /// the share alone, so a stale arm can never write against a separator that
+    /// is no longer there.
     fn drag_modal_separator(&mut self, mouse: MouseEvent) -> UpdateEffect {
-        let Some(ModalKind::CommitPicker) = self.modal_separator_drag else {
+        let Some(separator) = self
+            .open_modal_separator()
+            .filter(|s| Some(s.kind) == self.modal_separator_drag)
+        else {
             return UpdateEffect::None;
         };
-        let Some(layout) = self.open_commit_picker_layout() else {
+        let Some(share) = separator.share_at(&mouse) else {
             return UpdateEffect::None;
         };
 
-        let body_top = layout.list.y;
-        let body_height = (layout.inner.y + layout.inner.height).saturating_sub(body_top);
-        let widest_list = body_height.saturating_sub(MIN_PREVIEW_ROWS + 1);
-        if body_height == 0 || widest_list < MIN_LIST_ROWS {
-            return UpdateEffect::None;
-        }
-
-        let rows = mouse
-            .row
-            .saturating_sub(body_top)
-            .clamp(MIN_LIST_ROWS, widest_list);
-        let percent = (rows * 100).div_ceil(body_height);
-        self.modal_split.insert(ModalKind::CommitPicker, percent);
-
+        self.modal_split.insert(separator.kind, share);
         UpdateEffect::Redraw
     }
 
@@ -4128,14 +4255,16 @@ impl Stoat {
             return self.handle_location_picker_mouse(mouse);
         }
 
-        // An open finder, palette, or commit picker owns the pointer. A left
-        // click selects a row or grabs the modal's separator, and every other
-        // press, drag, or release is swallowed so nothing reaches divider arming,
-        // focus, or the panes beneath the modal covering them. The wheel is
-        // unaffected -- handle_mouse_scroll returns above this.
+        // Any open modal with a list owns the pointer. A left click selects a row
+        // or grabs the modal's separator, and every other press, drag, or release
+        // is swallowed so nothing reaches divider arming, focus, or the panes
+        // beneath the modal covering them. The wheel is unaffected --
+        // handle_mouse_scroll returns above this.
         if self.file_finder.is_some()
             || self.command_palette.is_some()
             || self.commit_picker.is_some()
+            || self.code_search.is_some()
+            || self.symbol_finder.is_some()
         {
             return self.handle_modal_mouse(mouse);
         }
@@ -18805,6 +18934,240 @@ mod tests {
             5,
         ));
         assert!(h.stoat.divider_drag.is_none(), "releasing clears the drag");
+    }
+
+    /// A finder-family modal wide enough for two panes, with the list and preview
+    /// rects the renderer would paint.
+    fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) -> (Rect, Rect) {
+        let separator = h
+            .stoat
+            .open_modal_separator()
+            .expect("the modal shows a preview beside its list");
+        assert_eq!(separator.kind, kind, "the expected modal is the open one");
+        let content = match kind {
+            ModalKind::SymbolFinder => {
+                let finder = h.stoat.symbol_finder.as_ref().expect("open");
+                let (_, _, list, preview) = crate::render::symbol_finder::symbol_finder_layout(
+                    h.stoat.size(),
+                    finder.content_rows,
+                    modal_zoom_steps(&h.stoat.modal_zoom, kind),
+                    modal_split_percent(&h.stoat.modal_split, kind),
+                )
+                .expect("fits");
+                (list, preview)
+            },
+            _ => {
+                let size = h.stoat.size();
+                let declared = match kind {
+                    ModalKind::FileFinder => {
+                        h.stoat.file_finder.as_ref().expect("open").content_size
+                    },
+                    _ => (u16::MAX, u16::MAX),
+                };
+                let layout = crate::render::file_finder::file_finder_layout(
+                    size,
+                    declared,
+                    modal_zoom_steps(&h.stoat.modal_zoom, kind),
+                    modal_split_percent(&h.stoat.modal_split, kind),
+                )
+                .expect("fits");
+                (layout.list, layout.preview)
+            },
+        };
+        (content.0, content.1.expect("the preview pane is present"))
+    }
+
+    /// A harness with the file finder open over a terminal wide enough that the
+    /// modal splits into a list and a preview.
+    fn wide_finder_harness() -> crate::test_harness::TestHarness {
+        let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.settle();
+        h
+    }
+
+    /// Dragging the column between a finder's list and its preview is how the
+    /// user gives one of them more room, so the drag has to land the line where
+    /// the pointer is.
+    #[test]
+    fn dragging_the_finder_vline_widens_the_list() {
+        let mut h = wide_finder_harness();
+        let (list, preview) = side_by_side_layout(&h, ModalKind::FileFinder);
+        let vline = list.x + list.width;
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            vline,
+            list.y + 1,
+        ));
+        assert_eq!(
+            h.stoat.modal_separator_drag,
+            Some(ModalKind::FileFinder),
+            "a press on the vline arms the drag"
+        );
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            vline + 6,
+            list.y + 1,
+        ));
+        let (widened, narrowed) = side_by_side_layout(&h, ModalKind::FileFinder);
+        assert_eq!(
+            widened.width,
+            list.width + 6,
+            "the list grows to exactly where the pointer left the line"
+        );
+        assert_eq!(
+            narrowed.width,
+            preview.width - 6,
+            "and the preview gives up the same columns"
+        );
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            vline + 6,
+            list.y + 1,
+        ));
+        assert_eq!(
+            h.stoat.modal_separator_drag, None,
+            "releasing clears the arm"
+        );
+    }
+
+    #[test]
+    fn a_vline_drag_clamps_at_both_edges() {
+        use crate::render::picker::MIN_PANE_COLUMNS;
+
+        let mut h = wide_finder_harness();
+        let (list, preview) = side_by_side_layout(&h, ModalKind::FileFinder);
+        let row = list.y + 1;
+        let vline = list.x + list.width;
+        // The two panes plus the one-column line are the whole body whatever the
+        // share, so this is what a clamped split still has to add up to.
+        let body = list.width + preview.width + 1;
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            vline,
+            row,
+        ));
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            139,
+            row,
+        ));
+        let (widest, thinnest) = side_by_side_layout(&h, ModalKind::FileFinder);
+        assert_eq!(
+            thinnest.width, MIN_PANE_COLUMNS,
+            "dragged to the screen edge the preview keeps its floor"
+        );
+        assert_eq!(
+            widest.width + thinnest.width + 1,
+            body,
+            "and the list takes the rest rather than overflowing the body"
+        );
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 0, row));
+        let (narrowest, _) = side_by_side_layout(&h, ModalKind::FileFinder);
+        assert_eq!(
+            narrowest.width, MIN_PANE_COLUMNS,
+            "and dragged the other way the list keeps its own floor"
+        );
+    }
+
+    /// Each kind stores its own share, so dragging one finder's line must not
+    /// move another's.
+    #[test]
+    fn each_finder_kind_drags_its_own_separator() {
+        let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h.settle();
+
+        let (list, _) = side_by_side_layout(&h, ModalKind::CodeSearch);
+        let row = list.y + 1;
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + list.width,
+            row,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            list.x + list.width + 5,
+            row,
+        ));
+
+        assert_eq!(
+            side_by_side_layout(&h, ModalKind::CodeSearch).0.width,
+            list.width + 5,
+            "code search's own line moves"
+        );
+        assert_eq!(
+            h.stoat.modal_split.get(&ModalKind::FileFinder),
+            None,
+            "and the file finder's share is untouched"
+        );
+    }
+
+    #[test]
+    fn the_symbol_finder_vline_drags_too() {
+        let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+        h.stoat.symbol_finder = {
+            let executor = h.stoat.executor.clone();
+            let mut finder = SymbolFinder::new(
+                h.stoat.active_workspace_mut(),
+                executor,
+                BufferId::new(0),
+                crate::symbol_finder::SymbolFinderScope::Document,
+                Vec::new(),
+            );
+            finder.content_rows = 12;
+            Some(finder)
+        };
+
+        let (list, _) = side_by_side_layout(&h, ModalKind::SymbolFinder);
+        let row = list.y + 1;
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + list.width,
+            row,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            list.x + list.width + 4,
+            row,
+        ));
+
+        assert_eq!(
+            side_by_side_layout(&h, ModalKind::SymbolFinder).0.width,
+            list.width + 4,
+            "the symbol list widens with its line"
+        );
+    }
+
+    /// Code search covers a pane like every other modal, so a press over it must
+    /// not reach the editor beneath.
+    #[test]
+    fn a_press_over_code_search_never_reaches_the_buffer() {
+        let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+        h.seed_focused_buffer(&"line\n".repeat(200));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        h.settle();
+        let head = h.primary_head_offset();
+        let (list, _) = side_by_side_layout(&h, ModalKind::CodeSearch);
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 4,
+            list.y + 2,
+        ));
+
+        assert_eq!(
+            h.primary_head_offset(),
+            head,
+            "the cursor in the covered editor stays where it was"
+        );
     }
 
     #[test]
