@@ -5037,13 +5037,16 @@ impl Stoat {
                 action_handlers::lsp::close_symbol_finder(self);
                 return UpdateEffect::Redraw;
             }
+            if action_handlers::code_search::close_code_search(self) {
+                return UpdateEffect::Redraw;
+            }
             if let Some(palette) = self.command_palette.take() {
                 let active_idx = self.active_workspace;
                 palette.dispose(&mut self.workspaces[active_idx]);
                 return UpdateEffect::Redraw;
             }
-            if self.workspace_picker.is_some() {
-                self.workspace_picker = None;
+            if let Some(picker) = self.workspace_picker.take() {
+                picker.dispose(self.active_workspace_mut());
                 return UpdateEffect::Redraw;
             }
             if self.quit_all_confirm.is_some() {
@@ -17397,6 +17400,50 @@ mod tests {
         assert!(
             h.stoat.keymap.lookup(&state, &enter).is_none(),
             "editor Enter has no keymap binding, so it falls to the insert newline"
+        );
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    /// Ctrl-C is unbound outside a run pane, so a modal missing from the close
+    /// cascade falls through to the quit that ends the session.
+    #[test]
+    fn ctrl_c_closes_code_search_rather_than_quitting() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
+        assert!(h.stoat.code_search.is_some(), "the modal opened");
+
+        let effect = h.stoat.handle_key(ctrl_c());
+
+        assert!(
+            !matches!(effect, UpdateEffect::Quit),
+            "closing a modal must not take the session with it"
+        );
+        assert!(h.stoat.code_search.is_none(), "and the modal is closed");
+    }
+
+    /// A picker owning an input has to be disposed, not dropped: its scratch
+    /// editor otherwise stays in the workspace for the rest of the session.
+    #[test]
+    fn ctrl_c_disposes_the_workspace_pickers_input() {
+        let mut h = Stoat::test();
+        let before = h.stoat.active_workspace().editors.len();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchWorkspace);
+        assert!(h.stoat.workspace_picker.is_some(), "the picker opened");
+        assert!(
+            h.stoat.active_workspace().editors.len() > before,
+            "which took an editor for its input"
+        );
+
+        h.stoat.handle_key(ctrl_c());
+
+        assert!(h.stoat.workspace_picker.is_none(), "the picker closed");
+        assert_eq!(
+            h.stoat.active_workspace().editors.len(),
+            before,
+            "and gave its editor back"
         );
     }
 
