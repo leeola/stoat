@@ -215,6 +215,16 @@ pub trait GitRepo: Send + Sync {
     /// asked to see. Empty when `start_sha` is unknown.
     fn log_from(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo>;
 
+    /// Walk first-parent history from `tip_sha`, skipping everything
+    /// reachable from `exclude_sha`, and return up to `limit` commits, newest
+    /// first.
+    ///
+    /// Called with a merge's second and first parents, this yields exactly the
+    /// commits that merge brought in. The walk covers the merged branch's own
+    /// work and stops where it forked from the mainline. Empty when either sha
+    /// is unknown.
+    fn log_range(&self, tip_sha: &str, exclude_sha: &str, limit: usize) -> Vec<CommitInfo>;
+
     /// Resolve a revision the user typed to a full commit sha.
     ///
     /// Accepts whatever the backend's revision syntax accepts: a branch or tag

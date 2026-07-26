@@ -302,7 +302,7 @@ impl GitRepo for LocalGitRepo {
             },
         };
 
-        walk_first_parent(&repo, start_oid, limit)
+        walk_first_parent(&repo, start_oid, None, limit)
     }
 
     fn log_from(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo> {
@@ -316,7 +316,24 @@ impl GitRepo for LocalGitRepo {
         if repo.find_commit(oid).is_err() {
             return Vec::new();
         }
-        walk_first_parent(&repo, oid, limit)
+        walk_first_parent(&repo, oid, None, limit)
+    }
+
+    fn log_range(&self, tip_sha: &str, exclude_sha: &str, limit: usize) -> Vec<CommitInfo> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let repo = self.repo.lock().expect("git repo lock");
+        let resolve = |sha: &str| {
+            let oid = git2::Oid::from_str(sha).ok()?;
+            repo.find_commit(oid).ok()?;
+            Some(oid)
+        };
+        let (Some(tip), Some(exclude)) = (resolve(tip_sha), resolve(exclude_sha)) else {
+            return Vec::new();
+        };
+
+        walk_first_parent(&repo, tip, Some(exclude), limit)
     }
 
     fn resolve_rev(&self, rev: &str) -> Option<String> {
@@ -567,10 +584,19 @@ impl GitRepo for LocalGitRepo {
 /// Walk first-parent history from `start`, newest first, yielding at most
 /// `limit` commits.
 ///
-/// Shared by [`GitRepo::log_commits`] and [`GitRepo::log_from`], which differ
-/// only in how they pick the starting commit. A commit the walk cannot read is
+/// Shared by [`GitRepo::log_commits`], [`GitRepo::log_from`], and
+/// [`GitRepo::log_range`], which differ only in how they pick the starting
+/// commit and whether they bound the walk. A commit the walk cannot read is
 /// skipped rather than truncating the rest of the history.
-fn walk_first_parent(repo: &Repository, start: git2::Oid, limit: usize) -> Vec<CommitInfo> {
+///
+/// A `hide` sha bounds the walk. That commit and everything reachable from it
+/// are skipped, which is how a range walk stops at a branch's fork point.
+fn walk_first_parent(
+    repo: &Repository,
+    start: git2::Oid,
+    hide: Option<git2::Oid>,
+    limit: usize,
+) -> Vec<CommitInfo> {
     let mut walk = match repo.revwalk() {
         Ok(w) => w,
         Err(_) => return Vec::new(),
@@ -582,6 +608,11 @@ fn walk_first_parent(repo: &Repository, start: git2::Oid, limit: usize) -> Vec<C
         return Vec::new();
     }
     if walk.push(start).is_err() {
+        return Vec::new();
+    }
+    if let Some(hide) = hide
+        && walk.hide(hide).is_err()
+    {
         return Vec::new();
     }
 
@@ -1060,6 +1091,54 @@ mod tests {
             "a root has no parents"
         );
         assert!(git.parent_shas(&"0".repeat(40)).is_empty());
+    }
+
+    #[test]
+    fn log_range_lists_only_what_a_merge_brought_in() {
+        let (dir, repo, shas) = seeded_repo();
+        let sig = Signature::now("test", "t@t").unwrap();
+        let commit_at = |sha: &str| repo.find_commit(Oid::from_str(sha).unwrap()).unwrap();
+
+        // A two-commit branch forked from the root, so the walk from its tip
+        // would run into mainline history if the exclude did not bound it.
+        let mut branch: Vec<String> = Vec::new();
+        for message in ["f1", "f2"] {
+            let parent = match branch.last() {
+                Some(sha) => commit_at(sha),
+                None => commit_at(&shas[0]),
+            };
+            let tree = parent.tree().unwrap();
+            let sha = repo
+                .commit(None, &sig, &sig, message, &tree, &[&parent])
+                .unwrap()
+                .to_string();
+            branch.push(sha);
+        }
+        let merge = {
+            let (mainline, tip) = (commit_at(&shas[2]), commit_at(&branch[1]));
+            let tree = mainline.tree().unwrap();
+            repo.commit(None, &sig, &sig, "merge", &tree, &[&mainline, &tip])
+                .unwrap()
+                .to_string()
+        };
+
+        let git = discover(&dir);
+        let parents = git.parent_shas(&merge);
+        let walked: Vec<String> = git
+            .log_range(&parents[1], &parents[0], 10)
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(
+            walked,
+            [branch[1].clone(), branch[0].clone()],
+            "the fork point bounds the walk"
+        );
+
+        let unknown = "0".repeat(40);
+        assert!(git.log_range(&unknown, &shas[2], 10).is_empty());
+        assert!(git.log_range(&branch[1], &unknown, 10).is_empty());
+        assert!(git.log_range(&branch[1], &shas[2], 0).is_empty());
     }
 
     #[test]

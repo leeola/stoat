@@ -642,11 +642,22 @@ impl FakeRepoState {
     /// Follow parent links from `start`, newest first, yielding at most `limit`
     /// commits. Stops early at a root commit or a sha with no seeded commit,
     /// which is how a test seeding a partial chain gets a bounded walk.
-    fn walk_first_parent(&self, start: String, limit: usize) -> Vec<CommitInfo> {
+    ///
+    /// A sha in `exclude` ends the walk before it is yielded, which is how a
+    /// range walk stops at a branch's fork point.
+    fn walk_first_parent(
+        &self,
+        start: String,
+        exclude: &HashSet<String>,
+        limit: usize,
+    ) -> Vec<CommitInfo> {
         let mut cursor = start;
         let mut out: Vec<CommitInfo> = Vec::with_capacity(limit.min(4096));
 
         while out.len() < limit {
+            if exclude.contains(&cursor) {
+                break;
+            }
             let Some(commit) = self.commits.get(&cursor) else {
                 break;
             };
@@ -667,6 +678,30 @@ impl FakeRepoState {
         }
 
         out
+    }
+
+    /// `start` plus every commit reachable from it through either parent link,
+    /// which is the set a range walk has to skip to stay on one branch.
+    ///
+    /// Unseeded shas are collected too. They can never appear in a walk, so
+    /// carrying them costs nothing and keeps the sweep total.
+    fn ancestors_inclusive(&self, start: &str) -> HashSet<String> {
+        let mut seen = HashSet::new();
+        let mut pending = vec![start.to_string()];
+
+        while let Some(sha) = pending.pop() {
+            let Some(commit) = self.commits.get(&sha) else {
+                seen.insert(sha);
+                continue;
+            };
+            if !seen.insert(sha) {
+                continue;
+            }
+            pending.extend(commit.parent.iter().cloned());
+            pending.extend(commit.merge_parent.iter().cloned());
+        }
+
+        seen
     }
 }
 
@@ -833,7 +868,7 @@ impl GitRepo for FakeGitRepo {
         let Some(cursor) = start else {
             return Vec::new();
         };
-        state.walk_first_parent(cursor, limit)
+        state.walk_first_parent(cursor, &HashSet::new(), limit)
     }
 
     fn log_from(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo> {
@@ -841,7 +876,20 @@ impl GitRepo for FakeGitRepo {
             return Vec::new();
         }
         let state = self.state.lock().unwrap();
-        state.walk_first_parent(start_sha.to_string(), limit)
+        state.walk_first_parent(start_sha.to_string(), &HashSet::new(), limit)
+    }
+
+    fn log_range(&self, tip_sha: &str, exclude_sha: &str, limit: usize) -> Vec<CommitInfo> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let state = self.state.lock().unwrap();
+        if !state.commits.contains_key(tip_sha) || !state.commits.contains_key(exclude_sha) {
+            return Vec::new();
+        }
+        let exclude = state.ancestors_inclusive(exclude_sha);
+
+        state.walk_first_parent(tip_sha.to_string(), &exclude, limit)
     }
 
     fn resolve_rev(&self, rev: &str) -> Option<String> {
@@ -1501,6 +1549,30 @@ mod tests {
             .map(|c| c.parent_count)
             .collect();
         assert_eq!(counts, [2, 1, 0], "the merge row counts both parents");
+    }
+
+    #[test]
+    fn log_range_lists_only_what_a_merge_brought_in() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("f1", "c1", &[])
+            .commit_with_parent("f2", "f1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .merge_commit("m1", "f2", &[]);
+        let repo = host.discover(&workdir()).unwrap();
+        let parents = repo.parent_shas("m1");
+
+        let walked: Vec<String> = repo
+            .log_range(&parents[1], &parents[0], 10)
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(walked, ["f2", "f1"], "the fork point bounds the walk");
+
+        assert!(repo.log_range("missing", "c2", 10).is_empty());
+        assert!(repo.log_range("f2", "missing", 10).is_empty());
+        assert!(repo.log_range("f2", "c2", 0).is_empty());
     }
 
     #[test]
