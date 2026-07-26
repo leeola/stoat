@@ -84,6 +84,12 @@ fn open_commit_picker(
         ref_sha,
         commits,
         branch_tips,
+        // Ages are measured against the moment the picker opened, so they hold
+        // still while the user scrolls rather than drifting under them.
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs() as i64)
+            .unwrap_or(0),
     );
     stoat.commit_picker = Some(picker);
     ensure_selected_preview(stoat);

@@ -1,6 +1,10 @@
 use crate::{
-    commit_picker::{CommitPicker, CommitPickerRole},
-    render::{file_finder::file_finder_layout, text::write_str_clipped},
+    commit_picker::{CommitColumn, CommitPicker, CommitPickerRole, CommitRow, COMMIT_COLUMNS},
+    render::{
+        file_finder::file_finder_layout,
+        table::{self, Column, Width},
+        text::write_str_clipped,
+    },
     theme::{scope, Theme},
     workspace::Workspace,
 };
@@ -153,38 +157,112 @@ pub(crate) fn render_commit_picker(
     }
 
     picker.viewport_rows = Some(layout.list.height as usize);
-    paint_commit_picker_rows(picker, layout.list, theme, buf);
+    paint_commit_picker_rows(picker, layout.header, layout.list, theme, buf);
 }
 
-/// Paint the commit rows into `area`, following the selection so the selected
-/// row stays visible.
+/// The commit table's columns, in [`CommitColumn`] order.
 ///
-/// A row is the picker's own row text, painted as one string so a fuzzy match
-/// offset lands on the character it matched. The sha and branch segments are
-/// recolored in place afterwards rather than written separately, which is what
-/// keeps the columns and the highlights consistent.
-fn paint_commit_picker_rows(picker: &CommitPicker, area: Rect, theme: &Theme, buf: &mut Buffer) {
+/// The title fills, since it is the column worth the most room and the only one
+/// whose useful length has no bound. The rest size to what they hold: a sha
+/// stops at the abbreviation git prints, a branch or author gets enough to
+/// recognise without crowding out the title, and a relative age never needs
+/// more than a few characters.
+const COLUMNS: [Column; COMMIT_COLUMNS] = [
+    Column {
+        label: "Commit",
+        width: Width::Fit { min: 7, max: 12 },
+    },
+    Column {
+        label: "Branch",
+        width: Width::Fit { min: 6, max: 20 },
+    },
+    Column {
+        label: "Title",
+        width: Width::Fill,
+    },
+    Column {
+        label: "Author",
+        width: Width::Fit { min: 6, max: 16 },
+    },
+    Column {
+        label: "Date",
+        // A relative age never exceeds four characters ("12mo" is the longest
+        // any bucket produces), and the label is four too.
+        width: Width::Fixed(4),
+    },
+];
+
+/// The columns in display order, so a cell index resolves to the column it
+/// belongs to. Parallel to [`COLUMNS`].
+const COLUMN_ORDER: [CommitColumn; COMMIT_COLUMNS] = [
+    CommitColumn::Commit,
+    CommitColumn::Branch,
+    CommitColumn::Title,
+    CommitColumn::Author,
+    CommitColumn::Date,
+];
+
+/// Paint the commit table into `list`, with its column labels in `header`,
+/// following the selection so the selected row stays visible.
+///
+/// Widths resolve over the rows actually about to be painted, so the columns
+/// fit what is on screen rather than the whole history. Match highlights are
+/// translated out of each row's joined haystack onto the column showing them,
+/// and one whose cell truncated it away is dropped.
+fn paint_commit_picker_rows(
+    picker: &CommitPicker,
+    header: Rect,
+    area: Rect,
+    theme: &Theme,
+    buf: &mut Buffer,
+) {
     let rows = area.height as usize;
     if rows == 0 {
         return;
     }
     let start_row = picker.selected.saturating_sub(rows.saturating_sub(1));
 
+    let visible: Vec<CommitRow> = picker
+        .filtered
+        .iter()
+        .skip(start_row)
+        .take(rows)
+        .map(|&idx| picker.row(idx))
+        .collect();
+
+    let text_x = area.x + 1;
+    let table_width = area.width.saturating_sub(1);
+    let widest: Vec<u16> = (0..COMMIT_COLUMNS)
+        .map(|column| {
+            visible
+                .iter()
+                .map(|row| row.cells[column].text.chars().count() as u16)
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let widths = table::resolve_widths(&COLUMNS, &widest, table_width);
+    let starts = table::column_starts(&widths);
+
+    let header_area = Rect::new(text_x, header.y, table_width, header.height);
+    table::paint_header(
+        buf,
+        header_area,
+        &COLUMNS,
+        &widths,
+        theme.get(scope::UI_TEXT_MUTED),
+    );
+
     let row_style = theme.get(scope::UI_TEXT);
     let selected_style = theme.get(scope::UI_SELECTION);
     let match_style = theme.get(scope::UI_SEARCH_MATCH);
     let sha_style = theme.get(scope::VCS_COMMIT_SHA);
     let branch_style = theme.get(scope::VCS_COMMIT_METADATA);
-
     let end_x = area.x + area.width;
-    let text_x = area.x + 1;
 
-    for (row_idx, (&idx, indices)) in picker
-        .filtered
+    for (row_idx, (row, indices)) in visible
         .iter()
-        .zip(picker.match_indices.iter())
-        .skip(start_row)
-        .take(rows)
+        .zip(picker.match_indices.iter().skip(start_row))
         .enumerate()
     {
         let y = area.y + row_idx as u16;
@@ -198,31 +276,49 @@ fn paint_commit_picker_rows(picker: &CommitPicker, area: Rect, theme: &Theme, bu
             buf[(col, y)].set_char(' ').set_style(style);
         }
 
-        let row = picker.row(idx);
-        write_str_clipped(buf, text_x, y, &row.text, style, end_x);
-
-        if !is_selected {
-            let sha_end = text_x + row.sha_chars as u16;
-            recolor(buf, y, text_x, sha_end.min(end_x), sha_style);
-
-            let branch_start = sha_end + 1;
-            let branch_end = branch_start + row.branch_chars as u16;
-            recolor(buf, y, branch_start, branch_end.min(end_x), branch_style);
+        let bounds = Rect::new(text_x, y, table_width, 1);
+        for (column, (&width, &start)) in widths.iter().zip(starts.iter()).enumerate() {
+            // The selection's own background carries the row, so leaving the
+            // metadata colors off it keeps the highlight readable.
+            let cell_style = if is_selected {
+                style
+            } else {
+                match COLUMN_ORDER[column] {
+                    CommitColumn::Commit => sha_style,
+                    CommitColumn::Branch | CommitColumn::Author | CommitColumn::Date => {
+                        branch_style
+                    },
+                    CommitColumn::Title => style,
+                }
+            };
+            table::paint_cell(
+                buf,
+                text_x + start,
+                y,
+                &row.cells[column].text,
+                width,
+                cell_style,
+                bounds,
+            );
         }
 
+        let cell_starts: Vec<usize> = row.cells.iter().map(|cell| cell.start).collect();
+        let cell_lens: Vec<usize> = row
+            .cells
+            .iter()
+            .map(|cell| cell.text.chars().count())
+            .collect();
         for &offset in indices {
-            let col = text_x + offset as u16;
-            if col >= end_x {
-                break;
+            let Some(col) =
+                table::cell_column(offset as usize, &cell_starts, &cell_lens, &widths, &starts)
+            else {
+                continue;
+            };
+            let col = text_x + col;
+            if col < end_x {
+                buf[(col, y)].set_style(match_style);
             }
-            buf[(col, y)].set_style(match_style);
         }
-    }
-}
-
-fn recolor(buf: &mut Buffer, y: u16, from_x: u16, to_x: u16, style: ratatui::style::Style) {
-    for col in from_x..to_x {
-        buf[(col, y)].set_style(style);
     }
 }
 

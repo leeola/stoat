@@ -23,17 +23,70 @@ pub(crate) enum CommitPickerRole {
     Browse,
 }
 
-/// One rendered picker row, and the segment lengths the renderer colors by.
+/// Columns of the commit table, in display order.
 ///
-/// The same string is the fuzzy haystack, so a matched character offset is
-/// always a column offset into this text. See [`CommitPicker::row`].
+/// The order is also the order they are joined into a row's haystack, so a
+/// query reads left to right the way the table does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitColumn {
+    Commit,
+    Branch,
+    Title,
+    Author,
+    Date,
+}
+
+/// How many columns [`CommitRow`] carries, indexable by `CommitColumn as usize`.
+pub(crate) const COMMIT_COLUMNS: usize = 5;
+
+/// One cell of a [`CommitRow`], and where it sits in the row's haystack.
+pub(crate) struct CommitCell {
+    pub(crate) text: String,
+    /// Character offset of this cell's first character within
+    /// [`CommitRow::text`], so a match offset resolves to a cell and a position
+    /// inside it.
+    pub(crate) start: usize,
+}
+
+/// One rendered picker row, holding both its cells and the joined text they
+/// came from.
+///
+/// The join is the fuzzy haystack, so a query still matches across the whole
+/// row and a reported match offset is an offset into [`Self::text`]. The cells
+/// carry their own start offsets so the renderer can put that offset back on
+/// the column showing it. See [`CommitPicker::row`].
 pub(crate) struct CommitRow {
     pub(crate) text: String,
-    /// Characters of `text` holding the abbreviated sha.
-    pub(crate) sha_chars: usize,
-    /// Characters of `text` holding the branch names, excluding the space that
-    /// separates them from the sha. Zero when no branch points at the commit.
-    pub(crate) branch_chars: usize,
+    pub(crate) cells: [CommitCell; COMMIT_COLUMNS],
+}
+
+/// Seconds in each unit an age is reported in, largest first, so a difference
+/// takes the coarsest unit it fills.
+///
+/// A month is a plain thirtieth of a year rather than a calendar month, which
+/// is what lets this stay a pure integer bucket with no date library behind it.
+/// The label is approximate by design. "3mo" tells the reader what they need
+/// about a commit's age, where an exact date would not.
+const AGE_UNITS: [(i64, &str); 5] = [
+    (31_536_000, "y"),
+    (2_592_000, "mo"),
+    (86_400, "d"),
+    (3_600, "h"),
+    (60, "m"),
+];
+
+/// A commit's age at `now`, as a short relative label like `3d` or `2mo`.
+///
+/// Anything under a minute, and anything dated in the future (a skewed clock,
+/// a rewritten author date), reads as `now` rather than a negative age.
+pub(crate) fn age_label(now_epoch: i64, commit_time: i64) -> String {
+    let age = now_epoch.saturating_sub(commit_time);
+    for (seconds, suffix) in AGE_UNITS {
+        if age >= seconds {
+            return format!("{}{suffix}", age / seconds);
+        }
+    }
+    "now".to_string()
 }
 
 /// Modal listing a ref's first-parent history, fuzzy-filtered, with the
@@ -70,10 +123,17 @@ pub(crate) struct CommitPicker {
     /// Sha the in-flight or most recent preview was requested for, so a build
     /// that lands after the selection moved on is discarded.
     pub(crate) requested_preview: Option<String>,
+    /// Unix epoch seconds the picker opened at, which every row's age column is
+    /// measured against.
+    ///
+    /// Captured once rather than read per render, so the ages stay put while
+    /// the user scrolls and a test can pin them to a fixed clock.
+    pub(crate) now_epoch: i64,
 }
 
 impl CommitPicker {
     /// Build a picker over `commits`, starting on [`Self::default_selection`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         ws: &mut Workspace,
         executor: Executor,
@@ -82,9 +142,11 @@ impl CommitPicker {
         ref_sha: String,
         commits: Vec<CommitInfo>,
         branch_tips: HashMap<String, Vec<String>>,
+        now_epoch: i64,
     ) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::CommitPicker, "", "insert", 1);
         let mut picker = Self {
+            now_epoch,
             role,
             workdir,
             ref_sha,
@@ -104,18 +166,19 @@ impl CommitPicker {
         picker
     }
 
-    /// The display text for `idx`, which doubles as its fuzzy haystack.
+    /// The cells for `idx`, joined into the fuzzy haystack the filter matches.
     ///
-    /// Composed as `<short sha> <branches> <summary>`, with the branch segment
-    /// omitted when nothing points at the commit. Returning the segment lengths
-    /// alongside the text lets the renderer color the three columns without
-    /// rebuilding the string, which is what keeps highlight offsets meaningful.
+    /// Every column is present even when empty, so a row's cells always line up
+    /// with the table's columns. The join separates them with single spaces,
+    /// which is what makes a match offset resolvable back to a cell.
     pub(crate) fn row(&self, idx: usize) -> CommitRow {
         let Some(commit) = self.commits.get(idx) else {
             return CommitRow {
                 text: String::new(),
-                sha_chars: 0,
-                branch_chars: 0,
+                cells: std::array::from_fn(|_| CommitCell {
+                    text: String::new(),
+                    start: 0,
+                }),
             };
         };
 
@@ -125,19 +188,31 @@ impl CommitPicker {
             .map(|names| names.join(" "))
             .unwrap_or_default();
 
-        let sha_chars = commit.short_sha.chars().count();
-        let branch_chars = branches.chars().count();
-        let text = if branches.is_empty() {
-            format!("{} {}", commit.short_sha, commit.summary)
-        } else {
-            format!("{} {} {}", commit.short_sha, branches, commit.summary)
-        };
+        let texts = [
+            commit.short_sha.clone(),
+            branches,
+            commit.summary.clone(),
+            commit.author_name.clone(),
+            age_label(self.now_epoch, commit.time),
+        ];
 
-        CommitRow {
-            text,
-            sha_chars,
-            branch_chars,
-        }
+        let mut text = String::new();
+        let mut start = 0;
+        let cells = texts.map(|cell| {
+            if !text.is_empty() {
+                text.push(' ');
+                start += 1;
+            }
+            let cell_start = start;
+            start += cell.chars().count();
+            text.push_str(&cell);
+            CommitCell {
+                text: cell,
+                start: cell_start,
+            }
+        });
+
+        CommitRow { text, cells }
     }
 
     /// Re-rank the rows for `query`, matches first by score then by row text.
@@ -233,7 +308,7 @@ impl CommitPicker {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitPicker, CommitPickerRole};
+    use super::{age_label, CommitColumn, CommitPicker, CommitPickerRole};
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
@@ -283,6 +358,9 @@ mod tests {
             preview_sessions: HashMap::new(),
             pending_preview: None,
             requested_preview: None,
+            // The fixture's commits sit at epoch zero, so this dates every row
+            // to "now" and keeps the age column out of the row assertions.
+            now_epoch: 0,
         };
         p.refilter("");
         p
@@ -332,15 +410,58 @@ mod tests {
     }
 
     #[test]
-    fn row_reports_its_segment_lengths() {
+    fn row_cells_start_where_the_join_puts_them() {
         let p = picker(history(), &[("main", "ccc3333")], "ccc3333");
         let row = p.row(0);
-        assert_eq!(row.text, "ccc3333 main add the widget");
-        assert_eq!((row.sha_chars, row.branch_chars), (7, 4));
+        assert_eq!(row.text, "ccc3333 main add the widget test now");
+        assert_eq!(
+            row.cells.each_ref().map(|c| (c.text.as_str(), c.start)),
+            [
+                ("ccc3333", 0),
+                ("main", 8),
+                ("add the widget", 13),
+                ("test", 28),
+                ("now", 33),
+            ],
+            "every cell reports where its text begins in the join"
+        );
 
         let bare = p.row(1);
-        assert_eq!(bare.text, "bbb2222 rename the gadget");
-        assert_eq!((bare.sha_chars, bare.branch_chars), (7, 0));
+        assert_eq!(
+            bare.text, "bbb2222  rename the gadget test now",
+            "a commit with no branch keeps the empty cell, so the columns line up"
+        );
+        assert_eq!(
+            bare.cells[CommitColumn::Branch as usize].text,
+            "",
+            "and that cell is simply empty"
+        );
+        assert_eq!(
+            bare.cells[CommitColumn::Title as usize].start,
+            9,
+            "the title still starts after the empty branch cell and its space"
+        );
+    }
+
+    #[test]
+    fn age_label_takes_the_coarsest_unit_it_fills() {
+        let now = 1_000_000_000;
+        let ago = |seconds| age_label(now, now - seconds);
+
+        assert_eq!(ago(0), "now");
+        assert_eq!(ago(59), "now", "under a minute is not worth a number");
+        assert_eq!(ago(60), "1m");
+        assert_eq!(ago(3_600), "1h");
+        assert_eq!(ago(86_400 * 2), "2d");
+        assert_eq!(ago(2_592_000 * 3), "3mo");
+        assert_eq!(ago(31_536_000 * 4), "4y");
+    }
+
+    /// A rewritten author date or a skewed clock can put a commit in the
+    /// future, which must not read as a negative age.
+    #[test]
+    fn a_commit_dated_ahead_of_now_reads_as_now() {
+        assert_eq!(age_label(1_000, 5_000), "now");
     }
 
     #[test]
@@ -499,6 +620,12 @@ mod tests {
         h.assert_snapshot("commit_picker_open");
     }
 
+    /// Clock the seeded picker measures its ages against, three days and change
+    /// past the commits the fake repo dates to. Fixed so the age column reads
+    /// the same on every run rather than drifting with the wall clock, and off
+    /// the day boundary so commits seconds apart do not straddle a bucket.
+    const SEEDED_NOW_EPOCH: i64 = 1_700_000_000 + 3 * 86_400 + 3_600;
+
     /// A harness with a three-commit `/repo`, `main` on its tip and `feature`
     /// one commit back, and that repo as the workspace root so the git actions
     /// find it.
@@ -558,6 +685,7 @@ mod tests {
             "c3d4e5f6".to_string(),
             commits,
             branch_tips,
+            SEEDED_NOW_EPOCH,
         );
         h.stoat.commit_picker = Some(picker);
         h.settle();

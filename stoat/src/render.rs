@@ -31,6 +31,7 @@ pub(crate) mod sanitize;
 pub(crate) mod signature_help;
 pub(crate) mod symbol_finder;
 pub(crate) mod symbol_picker;
+pub(crate) mod table;
 pub(crate) mod term_pane;
 pub(crate) mod text;
 pub(crate) mod undercurl;
