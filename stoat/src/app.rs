@@ -18,7 +18,7 @@ use crate::{
         LocalGit, LspHost, NoopFsWatcher,
     },
     keymap::{Keymap, ResolvedAction, StateValue},
-    keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
+    keymap_state::{modal_predicate, normalize_shift_event, resolve_action, StoatKeymapState},
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
@@ -5008,6 +5008,23 @@ impl Stoat {
                 None => (None, None),
             }
         };
+
+        // This line diagnoses a key that appears dead in a running build. It
+        // names which layer dropped the press. An absent line means the event
+        // never arrived, an unexpected modal or mode means the keymap context
+        // was wrong, and a `None` action field means no binding matched. It is
+        // silent under the default `stoat=info` filter.
+        tracing::debug!(
+            target: "stoat::keys",
+            code = ?key.code,
+            mods = ?key.modifiers,
+            modal = ?modal_predicate(self),
+            mode = %self.focused_mode(),
+            actions = ?looked_up
+                .as_ref()
+                .map(|actions| actions.iter().map(|a| &a.name).collect::<Vec<_>>()),
+            "key dispatch"
+        );
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(run_id) = self.modal_run {
