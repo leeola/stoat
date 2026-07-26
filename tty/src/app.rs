@@ -45,7 +45,7 @@ use stoatty_render::{
     render,
 };
 use stoatty_term::{
-    grid::{Bar, Grid, Overlay, Rgb, TextRun},
+    grid::{Bar, Grid, Overlay, Polyline, Rgb, TextRun},
     term::{Cursor, CursorShape, Damage, PoolView, TermEvent, Terminal},
     theme::Theme,
 };
@@ -2037,6 +2037,20 @@ fn copy_pool_region(
                 x: bar.x + dx,
                 y: bar.y + dy,
                 ..*bar
+            })
+            .collect(),
+    );
+    pool_grid.set_polylines(
+        document_grid
+            .polylines()
+            .iter()
+            .map(|polyline| Polyline {
+                points: polyline
+                    .points
+                    .iter()
+                    .map(|&[x, y]| [x + dx, y + dy])
+                    .collect(),
+                ..polyline.clone()
             })
             .collect(),
     );

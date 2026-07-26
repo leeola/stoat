@@ -10,7 +10,9 @@ use std::{
     ops::{BitOr, BitOrAssign},
     sync::Arc,
 };
-use stoatty_protocol::command::{BarCommand, LineSummary, MinimapCommand, TextRunCommand};
+use stoatty_protocol::command::{
+    BarCommand, LineSummary, MinimapCommand, PolylineCommand, TextRunCommand,
+};
 
 /// A rectangular grid of [`Cell`]s addressed by row and column.
 ///
@@ -28,6 +30,7 @@ pub struct Grid {
     icons: Vec<Icon>,
     text_runs: Vec<TextRun>,
     bars: Vec<Bar>,
+    polylines: Vec<Polyline>,
     /// Declared minimap strips, each joined with its viewport thumb. Kept apart
     /// from [`Self::minimap_contents`] so a viewport-only change re-projects this
     /// small list without re-cloning the line summaries.
@@ -63,6 +66,7 @@ impl Grid {
             icons: Vec::new(),
             text_runs: Vec::new(),
             bars: Vec::new(),
+            polylines: Vec::new(),
             minimaps: Vec::new(),
             minimap_contents: HashMap::new(),
             line_heights: Vec::new(),
@@ -163,6 +167,7 @@ impl Grid {
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
+        self.polylines.clear();
         self.minimaps.clear();
         self.minimap_contents.clear();
         self.line_heights.clear();
@@ -180,6 +185,7 @@ impl Grid {
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
+        self.polylines.clear();
         self.minimaps.clear();
         self.minimap_contents.clear();
         self.line_heights.clear();
@@ -264,6 +270,19 @@ impl Grid {
     /// untouched; the caller sets the full list each frame it changes.
     pub fn set_bars(&mut self, bars: Vec<Bar>) {
         self.bars = bars;
+    }
+
+    /// The off-grid stroked paths drawn above the cells, in draw order.
+    pub fn polylines(&self) -> &[Polyline] {
+        &self.polylines
+    }
+
+    /// Replace the off-grid stroked paths.
+    ///
+    /// Grid-level like the bars, so the per-cell projection leaves them
+    /// untouched and the caller sets the full list each frame it changes.
+    pub fn set_polylines(&mut self, polylines: Vec<Polyline>) {
+        self.polylines = polylines;
     }
 
     /// The declared minimap strips, each carrying its viewport thumb.
@@ -432,6 +451,7 @@ impl PagePool {
                 grid: Grid::new(rows, cols),
                 text_runs: Vec::new(),
                 bars: Vec::new(),
+                polylines: Vec::new(),
             })
             .collect();
         PagePool { pages }
@@ -452,11 +472,12 @@ impl PagePool {
         page.grid.clear();
         page.text_runs.clear();
         page.bars.clear();
+        page.polylines.clear();
         &mut page.grid
     }
 
-    /// Store the page-targeted `text_runs` and `bars` captured for document page
-    /// `index`, replacing any already on its slot.
+    /// Store the page-targeted decorations captured for document page `index`,
+    /// replacing any already on its slot.
     ///
     /// Written by the terminal when a fill commits, after [`Self::fill`] has
     /// recycled the slot and its cells are painted. The commands are page-local.
@@ -466,18 +487,20 @@ impl PagePool {
         index: u64,
         text_runs: Vec<TextRunCommand>,
         bars: Vec<BarCommand>,
+        polylines: Vec<PolylineCommand>,
     ) {
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
         page.text_runs = text_runs.into_iter().map(text_run_from_command).collect();
         page.bars = bars.into_iter().map(bar_from_command).collect();
+        page.polylines = polylines.into_iter().map(polyline_from_command).collect();
     }
 
-    /// The page-targeted text runs and bars buffered for document page `index`,
-    /// or `None` when that page is not currently in the pool's window.
-    pub fn page_decorations(&self, index: u64) -> Option<(&[TextRun], &[Bar])> {
+    /// The page-targeted decorations buffered for document page `index`, or
+    /// `None` when that page is not currently in the pool's window.
+    pub fn page_decorations(&self, index: u64) -> Option<(&[TextRun], &[Bar], &[Polyline])> {
         let page = &self.pages[self.slot(index)];
-        (page.index == Some(index)).then_some((&page.text_runs, &page.bars))
+        (page.index == Some(index)).then_some((&page.text_runs, &page.bars, &page.polylines))
     }
 
     /// The buffered grid for document page `index`, or `None` when that page is
@@ -592,6 +615,9 @@ struct Page {
     /// Page-targeted bars captured from the fill that painted this slot,
     /// page-local. See [`Self::text_runs`].
     bars: Vec<Bar>,
+    /// Page-targeted stroked paths captured from the fill that painted this
+    /// slot, page-local. See [`Self::text_runs`].
+    polylines: Vec<Polyline>,
 }
 
 /// A single grid cell: one character and how to render it.
@@ -893,6 +919,23 @@ pub struct Bar {
     pub seq: u32,
 }
 
+/// A stroked path drawn off the cell grid in a solid color.
+///
+/// Grid-level like [`Bar`], and the only decoration whose geometry is not
+/// axis-aligned. Every coordinate and [`Self::width`] is in sixteenths of a
+/// cell (16 = one cell). A single point, or two equal ones, draws a dot, which
+/// is how the commit graph marks a node.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Polyline {
+    /// Vertices in draw order, each `[x, y]`.
+    pub points: Vec<[i16; 2]>,
+    pub width: u16,
+    pub color: Rgb,
+    /// Monotonic declaration-order index across all non-cell components. See
+    /// [`Panel::seq`].
+    pub seq: u32,
+}
+
 /// Convert a page-local [`TextRunCommand`] to its grid [`TextRun`] at capture
 /// time, so the pool projection re-stamps it without re-decoding per frame.
 ///
@@ -919,6 +962,17 @@ fn bar_from_command(command: BarCommand) -> Bar {
         y: command.y,
         width: command.width,
         height: command.height,
+        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+        seq: 0,
+    }
+}
+
+/// Convert a page-local [`PolylineCommand`] to its grid [`Polyline`]. See
+/// [`text_run_from_command`] for the identity-row and `seq` 0 rationale.
+fn polyline_from_command(command: PolylineCommand) -> Polyline {
+    Polyline {
+        points: command.points,
+        width: command.width,
         color: Rgb::new(command.color[0], command.color[1], command.color[2]),
         seq: 0,
     }

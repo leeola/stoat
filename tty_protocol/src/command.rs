@@ -38,6 +38,7 @@ pub enum Command {
     /// text into its [`TextRunCommand::text`]. Carries no payload.
     TextRunEnd,
     Bar(BarCommand),
+    Polyline(PolylineCommand),
     LineLayout(LineLayoutCommand),
     /// Open the page-fill redirect onto a recycled pool slot.
     ///
@@ -438,6 +439,25 @@ pub struct BarCommand {
     pub y: i16,
     pub width: u16,
     pub height: u16,
+    pub color: [u8; 3],
+}
+
+/// A stroked path drawn off the cell grid in a solid color.
+///
+/// The protocol's only non-axis-aligned primitive, added for the commit
+/// graph's lane and merge lines. Every coordinate and [`Self::width`] is in
+/// **sixteenths of a cell** like [`BarCommand`], so a path tracks live font
+/// zoom.
+///
+/// A single point, or two equal points, is legal and draws a dot. That is how
+/// a graph marks a commit node without a second primitive.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PolylineCommand {
+    /// Vertices in draw order, each `[x, y]`. Consecutive pairs are the
+    /// segments. An empty list draws nothing.
+    pub points: Vec<[i16; 2]>,
+    /// Stroke thickness, centered on the path.
+    pub width: u16,
     pub color: [u8; 3],
 }
 
@@ -978,6 +998,35 @@ pub fn encode_bar_into(out: &mut Vec<u8>, command: &BarCommand) {
     frame::end(out);
 }
 
+/// Encode a [`PolylineCommand`] as a full `Gstoatty;polyline` frame for an
+/// emitter.
+pub fn encode_polyline(command: &PolylineCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_polyline_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;polyline` frame for `command` to `out` without
+/// allocating.
+///
+/// The stroke head and the point list ride in one argument. Width and color
+/// come first, then each vertex as a pair of big-endian `i16`s. The points are
+/// streamed straight into the base64 sink rather than through an intermediate
+/// buffer.
+pub fn encode_polyline_into(out: &mut Vec<u8>, command: &PolylineCommand) {
+    frame::begin(out, "polyline");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.width.to_be_bytes())?;
+        w.write_all(&command.color)?;
+        for point in &command.points {
+            w.write_all(&point[0].to_be_bytes())?;
+            w.write_all(&point[1].to_be_bytes())?;
+        }
+        Ok(())
+    });
+    frame::end(out);
+}
+
 /// Encode a [`LineLayoutCommand`] as a full `Gstoatty;line_layout` frame for an
 /// emitter.
 ///
@@ -1469,6 +1518,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         },
         Command::TextRunEnd => encode_text_run_end_into(out),
         Command::Bar(c) => encode_bar_into(out, c),
+        Command::Polyline(c) => encode_polyline_into(out, c),
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
         Command::Fill(c) => encode_fill_into(out, c.pool, c.index),
         Command::FillEnd => encode_fill_end_into(out),
@@ -1508,6 +1558,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "text_run" => decode_text_run(args).map(Command::TextRun),
         "text_run_end" => Some(Command::TextRunEnd),
         "bar" => decode_bar(args).map(Command::Bar),
+        "polyline" => decode_polyline(args).map(Command::Polyline),
         "line_layout" => decode_line_layout(args).map(Command::LineLayout),
         "fill" => decode_fill(args).map(Command::Fill),
         "fill_end" => Some(Command::FillEnd),
@@ -1713,6 +1764,33 @@ fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
         width: u16::from_be_bytes([arg[4], arg[5]]),
         height: u16::from_be_bytes([arg[6], arg[7]]),
         color: [arg[8], arg[9], arg[10]],
+    })
+}
+
+/// Bytes a `polyline` payload spends before its points, holding the width as a
+/// big-endian `u16` followed by rgb.
+const POLYLINE_HEAD: usize = 5;
+
+fn decode_polyline(args: &[Vec<u8>]) -> Option<PolylineCommand> {
+    let arg = args.first()?;
+    let tail = arg.get(POLYLINE_HEAD..)?;
+    if tail.len() % 4 != 0 {
+        return None;
+    }
+
+    let points = tail
+        .chunks_exact(4)
+        .map(|p| {
+            [
+                i16::from_be_bytes([p[0], p[1]]),
+                i16::from_be_bytes([p[2], p[3]]),
+            ]
+        })
+        .collect();
+    Some(PolylineCommand {
+        points,
+        width: u16::from_be_bytes([arg[0], arg[1]]),
+        color: [arg[2], arg[3], arg[4]],
     })
 }
 
@@ -1932,16 +2010,17 @@ mod tests {
         decode, decode_ident_reply, decode_shadow, encode_bar, encode_border, encode_config_reload,
         encode_fill, encode_fill_end, encode_font_step, encode_hello, encode_icon,
         encode_ident_reply, encode_into, encode_line_layout, encode_minimap, encode_minimap_drop,
-        encode_minimap_lines, encode_minimap_view, encode_panel, encode_pool_cursor,
-        encode_pool_drop, encode_pool_region, encode_popover, encode_popover_end,
-        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-        encode_text_run_end, encode_window_close, encode_window_focus, encode_window_open,
-        encode_zoom_capture, BarCommand, BorderCommand, BorderStyle, Command, FillCommand,
-        HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand, LineSummary,
-        MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
-        PanelCommand, PanelShadow, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
-        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
-        TextRunCommand, WindowCloseCommand, WindowFocusCommand, WindowOpenCommand,
+        encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline,
+        encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
+        encode_popover_end, encode_reposition, encode_reset, encode_scale, encode_scroll,
+        encode_scroll_region, encode_text_run_end, encode_window_close, encode_window_focus,
+        encode_window_open, encode_zoom_capture, BarCommand, BorderCommand, BorderStyle, Command,
+        FillCommand, HelloCommand, IconCommand, IconKind, IdentReply, LineLayoutCommand,
+        LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun,
+        MinimapViewCommand, PanelCommand, PanelShadow, PolylineCommand, PoolCursorCommand,
+        PoolDropCommand, PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand,
+        ScrollCommand, ScrollRegionCommand, TextRunCommand, WindowCloseCommand, WindowFocusCommand,
+        WindowOpenCommand,
     };
     use crate::frame::MAX_APC_PAYLOAD;
 
@@ -2390,6 +2469,46 @@ mod tests {
     fn rejects_wrong_length_bar_payload() {
         // The single arg here decodes to 3 bytes, not the 11 a bar needs.
         assert!(decode(b"Gstoatty;bar;YWJj").is_none());
+    }
+
+    #[test]
+    fn polyline_round_trips() {
+        let command = PolylineCommand {
+            points: vec![[8, 0], [8, 12], [24, 16]],
+            width: 6,
+            color: [220, 50, 47],
+        };
+
+        assert_eq!(
+            decode(&encode_polyline(&command)),
+            Some(Command::Polyline(command))
+        );
+    }
+
+    #[test]
+    fn a_one_point_polyline_round_trips_as_a_dot() {
+        let command = PolylineCommand {
+            points: vec![[-4, 40]],
+            width: 6,
+            color: [1, 2, 3],
+        };
+
+        assert_eq!(
+            decode(&encode_polyline(&command)),
+            Some(Command::Polyline(command))
+        );
+    }
+
+    #[test]
+    fn rejects_a_polyline_payload_with_a_partial_point() {
+        // This arg decodes to six bytes, the five-byte head plus one stray,
+        // where a point needs four.
+        assert!(decode(b"Gstoatty;polyline;YWJjZGVm").is_none());
+    }
+
+    #[test]
+    fn rejects_a_polyline_payload_shorter_than_its_head() {
+        assert!(decode(b"Gstoatty;polyline;YWJj").is_none());
     }
 
     #[test]

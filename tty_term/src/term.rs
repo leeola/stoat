@@ -9,8 +9,8 @@
 use crate::{
     grid::{
         self, Bar, Border, BorderStyle, Borders, Cell, DocumentOffset, Flags, Grid, Icon, IconKind,
-        Minimap, MinimapView, Overlay, PagePool, Panel, PanelShadow, Rgb, Scale, ScrollRegion,
-        TextRun, UnderlineStyle,
+        Minimap, MinimapView, Overlay, PagePool, Panel, PanelShadow, Polyline, Rgb, Scale,
+        ScrollRegion, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -38,8 +38,8 @@ use stoatty_protocol::{
     command::{
         self, BarCommand, BorderCommand, Command, HelloCommand, IconCommand, IdentReply,
         LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand, PanelCommand,
-        PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
-        WindowOpenCommand,
+        PolylineCommand, PoolRegionCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+        TextRunCommand, WindowOpenCommand,
     },
     frame::{FrameScratch, MAX_APC_PAYLOAD},
 };
@@ -137,6 +137,10 @@ pub struct Terminal {
     /// by [`Self::project`]. Off-grid components, accumulated and grid-level
     /// like the icons.
     bars: Vec<BarCommand>,
+    /// Stroked paths set by `Gstoatty;polyline` frames, applied to the grid's
+    /// polyline list by [`Self::project`]. Accumulated and grid-level like the
+    /// bars.
+    polylines: Vec<PolylineCommand>,
     /// The logical-line layout set by `Gstoatty;line_layout` frames, applied to
     /// the grid by [`Self::project`]. Replaced, not accumulated, like the scroll
     /// region: the latest layout wins.
@@ -149,6 +153,7 @@ pub struct Terminal {
     icon_seq: Vec<u32>,
     text_run_seq: Vec<u32>,
     bar_seq: Vec<u32>,
+    polyline_seq: Vec<u32>,
     /// Declared minimap strips set by `Gstoatty;minimap` frames, applied to the
     /// grid by [`Self::project`]. A decoration cleared by `Gstoatty;reset` like a
     /// border, with a parallel [`Self::minimap_seq`] for z-order.
@@ -274,6 +279,7 @@ struct DecorationDirty {
     line_layout: bool,
     text_runs: bool,
     bars: bool,
+    polylines: bool,
     minimaps: bool,
 }
 
@@ -290,6 +296,7 @@ impl DecorationDirty {
             line_layout: true,
             text_runs: true,
             bars: true,
+            polylines: true,
             minimaps: true,
         }
     }
@@ -453,6 +460,9 @@ struct FillTarget {
     /// Page-targeted bars captured while this page paints. See
     /// [`Self::text_runs`].
     bars: Vec<BarCommand>,
+    /// Page-targeted stroked paths captured while this page paints. See
+    /// [`Self::text_runs`].
+    polylines: Vec<PolylineCommand>,
 }
 
 impl FillTarget {
@@ -472,6 +482,7 @@ impl FillTarget {
             parser: Processor::new(),
             text_runs: Vec::new(),
             bars: Vec::new(),
+            polylines: Vec::new(),
         }
     }
 }
@@ -524,11 +535,13 @@ impl Terminal {
             icons: Vec::new(),
             text_runs: Vec::new(),
             bars: Vec::new(),
+            polylines: Vec::new(),
             line_layout: None,
             panel_seq: Vec::new(),
             icon_seq: Vec::new(),
             text_run_seq: Vec::new(),
             bar_seq: Vec::new(),
+            polyline_seq: Vec::new(),
             minimaps: Vec::new(),
             minimap_seq: Vec::new(),
             minimap_contents: HashMap::new(),
@@ -684,6 +697,7 @@ impl Terminal {
                         | Command::TextRun(_)
                         | Command::TextRunEnd
                         | Command::Bar(_)
+                        | Command::Polyline(_)
                         | Command::MinimapLines(_)
                         | Command::MinimapView(_)
                         | Command::MinimapDrop(_)
@@ -921,6 +935,12 @@ impl Terminal {
                 Some(fill) => fill.bars.push(bar),
                 None => self.stage_or_apply(Command::Bar(bar)),
             },
+            // Stroked paths take the same fork as bars. They land on the open
+            // fill's slot when one is capturing, and on the live grid otherwise.
+            Command::Polyline(polyline) => match &mut self.fill {
+                Some(fill) => fill.polylines.push(polyline),
+                None => self.stage_or_apply(Command::Polyline(polyline)),
+            },
             Command::PoolRegion(region) => {
                 let window = region.window;
                 match self.pools.get_mut(&region.pool) {
@@ -1131,6 +1151,12 @@ impl Terminal {
                 self.bar_seq.push(self.decoration_seq);
                 self.decoration_seq += 1;
                 self.decorations_dirty.bars = true;
+            },
+            Command::Polyline(polyline) => {
+                self.polylines.push(polyline);
+                self.polyline_seq.push(self.decoration_seq);
+                self.decoration_seq += 1;
+                self.decorations_dirty.polylines = true;
             },
             Command::Popover(popover) => {
                 self.popovers.push(popover);
@@ -1406,7 +1432,7 @@ impl Terminal {
         let grid = pool.page_pool.fill(fill.index);
         project_term_cells(grid, &fill.term, &self.theme, &self.palette);
         pool.page_pool
-            .set_decorations(fill.index, fill.text_runs, fill.bars);
+            .set_decorations(fill.index, fill.text_runs, fill.bars, fill.polylines);
         pool.content_version = pool.content_version.wrapping_add(1);
         let window = pool.region.window;
         self.mark_window_dirty(window);
@@ -1492,10 +1518,12 @@ impl Terminal {
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
+        self.polylines.clear();
         self.panel_seq.clear();
         self.icon_seq.clear();
         self.text_run_seq.clear();
         self.bar_seq.clear();
+        self.polyline_seq.clear();
         // A minimap declaration is a decoration and clears here. Its content
         // stores and views are persistent state and survive, retired only by
         // their own drop.
@@ -1762,6 +1790,9 @@ impl Terminal {
         }
         if self.decorations_dirty.bars || layout_changed {
             apply_bars(grid, &self.bars, &self.bar_seq);
+        }
+        if self.decorations_dirty.polylines || layout_changed {
+            apply_polylines(grid, &self.polylines, &self.polyline_seq);
         }
         if self.decorations_dirty.minimaps || resized {
             apply_minimaps(grid, &self.minimaps, &self.minimap_seq, &self.minimap_views);
@@ -2727,8 +2758,10 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
 
     let mut text_runs = Vec::new();
     let mut bars = Vec::new();
+    let mut polylines = Vec::new();
     for page in first_page..=last_page {
-        let Some((page_runs, page_bars)) = pool.page_decorations(page as u64) else {
+        let Some((page_runs, page_bars, page_polylines)) = pool.page_decorations(page as u64)
+        else {
             continue;
         };
         let shift = 16 * (page * page_rows as i64 - top);
@@ -2752,10 +2785,37 @@ fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, page_rows: 
                 bars.push(Bar { y, ..*bar });
             }
         }
+
+        for polyline in page_polylines {
+            // Shifted whole rather than per point. A path that straddles the
+            // edge stays intact for the renderer to scissor, since clipping a
+            // segment here would need its pixel geometry. A point that cannot
+            // survive the shift drops the whole path, because a partial point
+            // list would draw a wrong line rather than none.
+            let shifted: Option<Vec<[i16; 2]>> = polyline
+                .points
+                .iter()
+                .map(|&[x, y]| i16::try_from(y as i64 + shift).ok().map(|y| [x, y]))
+                .collect();
+            let Some(points) = shifted else { continue };
+            if points
+                .iter()
+                .all(|&[_, y]| (y as i64) < 0 || y as i64 >= out_rows_16)
+            {
+                continue;
+            }
+            polylines.push(Polyline {
+                points,
+                width: polyline.width,
+                color: polyline.color,
+                seq: polyline.seq,
+            });
+        }
     }
 
     out.set_text_runs(text_runs);
     out.set_bars(bars);
+    out.set_polylines(polylines);
 }
 
 /// Replace the grid's text-run list with each stored text-run command's run.
@@ -2800,6 +2860,25 @@ fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32]) {
         })
         .collect();
     grid.set_bars(bars);
+}
+
+/// Replace the grid's polyline list with each stored command's path.
+///
+/// Grid-level like the bars, so the full list is set each projection. Points
+/// pass through unresolved, because a path is free geometry rather than a
+/// component anchored to a logical row.
+fn apply_polylines(grid: &mut Grid, commands: &[PolylineCommand], seqs: &[u32]) {
+    let polylines = commands
+        .iter()
+        .zip(seqs)
+        .map(|(command, &seq)| Polyline {
+            points: command.points.clone(),
+            width: command.width,
+            color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+            seq,
+        })
+        .collect();
+    grid.set_polylines(polylines);
 }
 
 /// Project the declared minimap strips onto `grid`, each joined with its view.
@@ -2940,7 +3019,7 @@ mod tests {
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, Minimap,
-            MinimapView, Overlay, Panel, PanelShadow, Rgb, Scale, ScrollRegion, TextRun,
+            MinimapView, Overlay, Panel, PanelShadow, Polyline, Rgb, Scale, ScrollRegion, TextRun,
             UnderlineStyle,
         },
         theme::Theme,
@@ -2949,15 +3028,15 @@ mod tests {
         encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_end,
         encode_font_step, encode_hello, encode_icon, encode_ident_reply, encode_line_layout,
         encode_minimap, encode_minimap_drop, encode_minimap_lines, encode_minimap_view,
-        encode_panel, encode_pool_cursor, encode_pool_drop, encode_pool_region, encode_popover,
-        encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-        encode_text_run, encode_window_open, encode_zoom_capture, BarCommand, BorderCommand,
-        BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
+        encode_panel, encode_polyline, encode_pool_cursor, encode_pool_drop, encode_pool_region,
+        encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
+        encode_scroll_region, encode_text_run, encode_window_open, encode_zoom_capture, BarCommand,
+        BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, HelloCommand, IconCommand,
         IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, MinimapCommand,
         MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
-        PanelShadow as ProtoPanelShadow, PoolCursorCommand, PoolDropCommand, PoolRegionCommand,
-        PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
-        TextRunCommand, WindowOpenCommand,
+        PanelShadow as ProtoPanelShadow, PolylineCommand, PoolCursorCommand, PoolDropCommand,
+        PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
+        ScrollRegionCommand, TextRunCommand, WindowOpenCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -4928,6 +5007,65 @@ mod tests {
     }
 
     #[test]
+    fn fill_captures_a_polyline_onto_the_slot() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        declare_pool(&mut terminal, 0, 2, 4);
+        let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+        stream.extend_from_slice(&encode_polyline(&PolylineCommand {
+            points: vec![[8, 0], [8, 16], [24, 32]],
+            width: 6,
+            color: [220, 50, 47],
+        }));
+        stream.extend_from_slice(&encode_fill_end());
+        terminal.advance(&stream);
+
+        let (_, _, polylines) = terminal.pools[&0]
+            .page_pool
+            .page_decorations(0)
+            .expect("page buffered");
+        assert_eq!(
+            polylines,
+            [Polyline {
+                points: vec![[8, 0], [8, 16], [24, 32]],
+                width: 6,
+                color: Rgb::new(220, 50, 47),
+                seq: 0,
+            }]
+        );
+
+        terminal.project(&mut grid);
+        assert!(
+            grid.polylines().is_empty(),
+            "a page-targeted path spares the live grid"
+        );
+    }
+
+    #[test]
+    fn a_polyline_outside_a_fill_lands_on_the_live_grid() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        terminal.advance(&encode_polyline(&PolylineCommand {
+            points: vec![[0, 0], [16, 16]],
+            width: 4,
+            color: [1, 2, 3],
+        }));
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.polylines(),
+            [Polyline {
+                points: vec![[0, 0], [16, 16]],
+                width: 4,
+                color: Rgb::new(1, 2, 3),
+                seq: 1,
+            }]
+        );
+    }
+
+    #[test]
     fn fill_captures_bar_and_text_run_onto_the_slot() {
         let mut terminal = Terminal::new(2, 4, Theme::default());
         let mut grid = Grid::new(2, 4);
@@ -4955,7 +5093,7 @@ mod tests {
         stream.extend_from_slice(&encode_fill_end());
         terminal.advance(&stream);
 
-        let (runs, bars) = terminal.pools[&0]
+        let (runs, bars, _) = terminal.pools[&0]
             .page_pool
             .page_decorations(0)
             .expect("page buffered");
@@ -5058,7 +5196,7 @@ mod tests {
         stream.extend_from_slice(&encode_fill_end());
         terminal.advance(&stream);
 
-        let (runs, bars) = terminal.pools[&0]
+        let (runs, bars, _) = terminal.pools[&0]
             .page_pool
             .page_decorations(0)
             .expect("page buffered");
