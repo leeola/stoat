@@ -11,8 +11,43 @@
 //! resolve a buffer offset to a screen cell first and then fit themselves
 //! around wherever that lands.
 
-use crate::editor_state::EditorState;
+use crate::{
+    app::Stoat,
+    editor_state::EditorState,
+    pane::{FocusTarget, View},
+    render::layout::split_pane_status,
+};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+
+/// The focused editor's content area and the screen cell holding
+/// `anchor_offset`, or `None` when no cursor popup should appear.
+///
+/// Every cursor popup starts here, walking focus to a pane, the pane to an
+/// editor, and a buffer offset to a cell. Any step can fail, and each failure
+/// means the same thing to the caller, which is that there is nothing to
+/// anchor to.
+///
+/// Returns owned values rather than borrows, so a caller that needs the editor
+/// afterwards can reach for it again.
+pub(crate) fn focused_editor_popup_ctx(
+    stoat: &mut Stoat,
+    anchor_offset: usize,
+) -> Option<(Rect, (u16, u16))> {
+    let ws = stoat.active_workspace_mut();
+    let FocusTarget::SplitPane = ws.focus else {
+        return None;
+    };
+    let pane_id = ws.panes.focus();
+    let pane = ws.panes.pane(pane_id);
+    let View::Editor(editor_id) = pane.view else {
+        return None;
+    };
+    let (content_area, _) = split_pane_status(pane.area);
+
+    let editor = ws.editors.get_mut(editor_id)?;
+    let cursor = cursor_screen_position(editor, content_area, anchor_offset)?;
+    Some((content_area, cursor))
+}
 
 /// The box a popup of `size` content cells takes next to `cursor`, clamped
 /// inside `content_area`.
@@ -137,7 +172,7 @@ fn paint_row(line: &str, inner: Rect, row: u16, style: Style, buf: &mut Buffer) 
 /// An editor showing a review diff has no stable mapping from a buffer offset
 /// to a screen row, so a popup anchored to one would land somewhere arbitrary.
 /// Returning `None` there is what keeps it from being painted.
-pub(crate) fn cursor_screen_position(
+fn cursor_screen_position(
     editor: &mut EditorState,
     content_area: Rect,
     anchor_offset: usize,

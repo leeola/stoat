@@ -1,7 +1,6 @@
 use crate::{
     app::Stoat,
-    pane::{FocusTarget, View},
-    render::{cursor_popup, layout::split_pane_status, text::truncate_to_width},
+    render::{cursor_popup, text::truncate_to_width},
 };
 use ratatui::{
     buffer::Buffer,
@@ -27,27 +26,10 @@ pub(crate) fn render_code_action(
         _ => return,
     };
 
-    let (content_area, cursor_screen) = {
-        let ws = stoat.active_workspace_mut();
-        let FocusTarget::SplitPane = ws.focus else {
-            return;
-        };
-        let pane_id = ws.panes.focus();
-        let pane = ws.panes.pane(pane_id);
-        let View::Editor(editor_id) = pane.view else {
-            return;
-        };
-        let (content_area, _) = split_pane_status(pane.area);
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let cursor_screen =
-            match cursor_popup::cursor_screen_position(editor, content_area, anchor_offset) {
-                Some(p) => p,
-                None => return,
-            };
-        (content_area, cursor_screen)
+    let Some((content_area, cursor_screen)) =
+        cursor_popup::focused_editor_popup_ctx(stoat, anchor_offset)
+    else {
+        return;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);

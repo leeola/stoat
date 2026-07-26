@@ -3,7 +3,7 @@ use crate::{
     completion::CompletionItem,
     fuzzy,
     pane::{FocusTarget, View},
-    render::{layout::split_pane_status, text::truncate_to_width},
+    render::{cursor_popup, text::truncate_to_width},
 };
 use nucleo::Utf32Str;
 use ratatui::{
@@ -57,21 +57,8 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
 
     let prefix = extract_prefix(stoat, prefix_range);
 
-    let (cursor_screen, content_area) = {
-        let ws = stoat.active_workspace_mut();
-        let FocusTarget::SplitPane = ws.focus else {
-            return None;
-        };
-        let pane_id = ws.panes.focus();
-        let pane = ws.panes.pane(pane_id);
-        let View::Editor(editor_id) = pane.view else {
-            return None;
-        };
-        let (content_area, _) = split_pane_status(pane.area);
-        let editor = ws.editors.get_mut(editor_id)?;
-        let cursor_screen = cursor_screen_position(editor, content_area, anchor_offset)?;
-        (cursor_screen, content_area)
-    };
+    let (content_area, cursor_screen) =
+        cursor_popup::focused_editor_popup_ctx(stoat, anchor_offset)?;
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
@@ -106,27 +93,18 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
         .unwrap_or(0) as u16;
     let footer_rows: u16 = if detail.is_some() { 1 } else { 0 };
 
-    let popup_width = (max_line_width.max(detail_width) + 2).clamp(3, content_area.width.max(3));
-    let popup_height =
-        (visible_count as u16 + footer_rows + 2).clamp(3, content_area.height.max(3));
-
-    let popup_x = cursor_screen
-        .0
-        .min(content_area.x + content_area.width.saturating_sub(popup_width));
-    let popup_y = if cursor_screen.1 + 1 + popup_height <= content_area.y + content_area.height {
-        cursor_screen.1 + 1
-    } else if cursor_screen.1 >= content_area.y + popup_height {
-        cursor_screen.1 - popup_height
-    } else {
-        content_area.y
-    };
-
-    let popup_area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
-    };
+    // Completion prefers below, unlike the other cursor popups. It appears
+    // mid-typing, so covering the line above the cursor hides what was just
+    // written.
+    let popup_area = cursor_popup::popup_rect(
+        content_area,
+        cursor_screen,
+        (
+            max_line_width.max(detail_width),
+            visible_count as u16 + footer_rows,
+        ),
+        false,
+    );
     let full_inner = Block::default().borders(Borders::ALL).inner(popup_area);
     let inner = Rect {
         height: full_inner.height.saturating_sub(footer_rows),
@@ -324,17 +302,6 @@ fn viewport_top_for(selected: usize, total: usize, window: usize) -> usize {
     }
 }
 
-fn cursor_screen_position(
-    editor: &mut crate::editor_state::EditorState,
-    content_area: Rect,
-    anchor_offset: usize,
-) -> Option<(u16, u16)> {
-    if editor.review_view.is_some() {
-        return None;
-    }
-    crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -367,6 +334,38 @@ mod tests {
             lsp_item: None,
             server: None,
         }
+    }
+
+    /// Every other cursor popup prefers the space above the cursor, and
+    /// completion is the one that prefers below. The snapshots all anchor at
+    /// offset 0, where there is no room above and both preferences agree, so
+    /// none of them would notice the difference.
+    #[test]
+    fn the_popup_opens_below_the_cursor_when_either_side_would_fit() {
+        let mut h = TestHarness::with_size(40, 24);
+        let _path = open_scratch(&mut h, &"line\n".repeat(20));
+        h.type_keys("i");
+        // Row 10 of a 20-line buffer on a 24-row terminal, so a four-row popup
+        // has room on either side and only the preference decides.
+        let anchor_offset = "line\n".len() * 10;
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![make_item("alpha"), make_item("beta")],
+            selected_idx: 0,
+            anchor_offset,
+            prefix_range: anchor_offset..anchor_offset,
+        });
+
+        let (_, cursor) =
+            crate::render::cursor_popup::focused_editor_popup_ctx(&mut h.stoat, anchor_offset)
+                .expect("the anchor resolves to a cell on screen");
+        let (_, layout) = super::completion_popup_layout(&mut h.stoat).expect("the popup lays out");
+
+        assert!(
+            layout.popup_area.y > cursor.1,
+            "the popup starts under cursor row {}, not at {}",
+            cursor.1,
+            layout.popup_area.y
+        );
     }
 
     #[test]

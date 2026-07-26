@@ -1,11 +1,9 @@
 use crate::{
     app::Stoat,
-    pane::{FocusTarget, View},
-    render::{editor::render_editor, layout::split_pane_status},
+    render::{cursor_popup, editor::render_editor},
 };
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
     widgets::{Clear, Widget},
 };
 
@@ -29,44 +27,23 @@ pub(crate) fn render_rename_input(
         .map(|s| s.anchor_offset)
         .expect("checked above");
 
-    let (content_area, focus_pane_id) = match stoat.active_workspace().focus {
-        FocusTarget::SplitPane => {
-            let pane_id = stoat.active_workspace().panes.focus();
-            let pane = stoat.active_workspace().panes.pane(pane_id);
-            let (content, _) = split_pane_status(pane.area);
-            (content, pane_id)
-        },
-        _ => return,
-    };
-    let _ = focus_pane_id;
-
-    let cursor_screen = match cursor_screen_position(stoat, content_area, anchor_offset) {
-        Some(p) => p,
-        None => return,
+    let Some((content_area, cursor_screen)) =
+        cursor_popup::focused_editor_popup_ctx(stoat, anchor_offset)
+    else {
+        return;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
 
-    let popup_width = (content_area.width / 3).max(20).min(content_area.width);
-    let popup_height: u16 = 3;
-
-    let popup_x = cursor_screen
-        .0
-        .min(content_area.x + content_area.width.saturating_sub(popup_width));
-    let popup_y = if cursor_screen.1 >= content_area.y + popup_height {
-        cursor_screen.1 - popup_height
-    } else if cursor_screen.1 + 1 + popup_height <= content_area.y + content_area.height {
-        cursor_screen.1 + 1
-    } else {
-        content_area.y
-    };
-
-    let popup_area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
-    };
+    // The rename box is sized to the pane rather than to its content, since
+    // what the user is about to type has no width yet. Stated as an interior,
+    // because popup_rect adds the border back.
+    let interior_width = (content_area.width / 3)
+        .max(20)
+        .min(content_area.width)
+        .saturating_sub(2);
+    let popup_area =
+        cursor_popup::popup_rect(content_area, cursor_screen, (interior_width, 1), true);
 
     Clear.render(popup_area, buf);
     let inner = crate::render::chrome::modal_frame(
@@ -88,25 +65,4 @@ pub(crate) fn render_rename_input(
     if let Some(editor) = ws.editors.get_mut(editor_id) {
         render_editor(editor, inner, modal_style, &theme, buf, true);
     }
-}
-
-fn cursor_screen_position(
-    stoat: &mut Stoat,
-    content_area: Rect,
-    anchor_offset: usize,
-) -> Option<(u16, u16)> {
-    let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane = ws.focus else {
-        return None;
-    };
-    let pane_id = ws.panes.focus();
-    let pane = ws.panes.pane(pane_id);
-    let View::Editor(editor_id) = pane.view else {
-        return None;
-    };
-    let editor = ws.editors.get_mut(editor_id)?;
-    if editor.review_view.is_some() {
-        return None;
-    }
-    crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
 }

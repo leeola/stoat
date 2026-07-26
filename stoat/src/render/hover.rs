@@ -2,8 +2,6 @@ use super::TEXT_SCALE_POPUP;
 use crate::{
     action_handlers::lsp::{HoverPopup, HoverSelection},
     app::Stoat,
-    pane::{FocusTarget, View},
-    render::layout::split_pane_status,
 };
 use ratatui::{
     buffer::Buffer,
@@ -335,20 +333,10 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     // terminal frame. Only the cursor anchor stays pane-relative.
     let frame = stoat.size();
 
-    let cursor_screen = {
-        let ws = stoat.active_workspace_mut();
-        let FocusTarget::SplitPane = ws.focus else {
-            return None;
-        };
-        let pane_id = ws.panes.focus();
-        let pane = ws.panes.pane(pane_id);
-        let View::Editor(editor_id) = pane.view else {
-            return None;
-        };
-        let (content_area, _) = split_pane_status(pane.area);
-        let editor = ws.editors.get_mut(editor_id)?;
-        cursor_screen_position(editor, content_area, anchor_offset)?
-    };
+    // The cursor cell is pane-relative, but the box is sized against the whole
+    // frame, so the content area this resolves alongside it goes unused.
+    let (_, cursor_screen) =
+        crate::render::cursor_popup::focused_editor_popup_ctx(stoat, anchor_offset)?;
 
     let interior_width = frame.width.saturating_sub(2);
     if interior_width == 0 {
