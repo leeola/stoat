@@ -32,6 +32,49 @@ pub(crate) fn next_generation() -> u64 {
     NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Step a list cursor by `delta`, saturating at both ends of a `len`-long list.
+///
+/// Every modal list moves its cursor this way. The cursor is passed in rather
+/// than reached for through a trait, because the pickers keep it in unrelated
+/// places -- some beside a plain `Vec`, some inside a struct that gates writes
+/// to it -- and a caller that has both numbers can always call this.
+///
+/// An empty list parks the cursor at 0, which is where a list that later gains
+/// entries expects to find it.
+pub(crate) fn nav_move(len: usize, selected: &mut usize, delta: i32) {
+    if len == 0 {
+        *selected = 0;
+        return;
+    }
+    let max = (len - 1) as i32;
+    *selected = (*selected as i32 + delta).clamp(0, max) as usize;
+}
+
+/// Rows a page key should move the cursor, given the list's rendered height.
+///
+/// Half a viewport keeps some of the previous screen in view, so the reader
+/// keeps their place across the jump. `viewport_rows` is `None` until the first
+/// render measures the list, and a page before then moves a single row rather
+/// than guessing at a height.
+pub(crate) fn nav_page_step(viewport_rows: Option<usize>) -> i32 {
+    viewport_rows
+        .map(|rows| rows.div_ceil(2).max(1))
+        .unwrap_or(1) as i32
+}
+
+/// Pull a cursor back inside a `len`-long list that may have shrunk under it.
+///
+/// Filtering is what makes this necessary. A cursor resting on row 40 is
+/// meaningless the moment a keystroke narrows the list to 3, so every refilter
+/// ends here.
+pub(crate) fn nav_clamp(len: usize, selected: &mut usize) {
+    if len == 0 {
+        *selected = 0;
+    } else if *selected >= len {
+        *selected = len - 1;
+    }
+}
+
 /// Query-driven fuzzy result list over a fixed `base` set of paths, decoupled
 /// from any input widget.
 ///
@@ -90,24 +133,14 @@ impl PickList {
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let max = (self.filtered.len() - 1) as i32;
-        let next = (self.selected as i32 + delta).clamp(0, max);
-        self.selected = next as usize;
+        nav_move(self.filtered.len(), &mut self.selected, delta);
     }
 
     /// Page the selection by half the rendered list height in `dir` (negative
     /// up, positive down). Before the first render sets [`Self::viewport_rows`]
     /// the step falls back to a single row.
     pub(crate) fn page(&mut self, dir: i32) {
-        let step = self
-            .viewport_rows
-            .map(|v| v.div_ceil(2).max(1))
-            .unwrap_or(1) as i32;
-        self.move_selection(dir * step);
+        self.move_selection(dir * nav_page_step(self.viewport_rows));
     }
 
     /// Re-run the matcher over `base` for `query` via
@@ -159,11 +192,7 @@ impl PickList {
             return;
         };
 
-        matches.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then_with(|| a.haystack.cmp(&b.haystack))
-        });
+        fuzzy::sort_ranked(&mut matches);
         for m in matches {
             self.filtered.push(m.item);
             self.match_indices
@@ -174,11 +203,7 @@ impl PickList {
     }
 
     fn clamp_selected(&mut self) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len() - 1;
-        }
+        nav_clamp(self.filtered.len(), &mut self.selected);
     }
 }
 
@@ -635,6 +660,83 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    /// Walk a cursor through a sequence of deltas, collecting where each one
+    /// leaves it, so a whole traversal is one assertion.
+    fn walk(len: usize, from: usize, deltas: &[i32]) -> Vec<usize> {
+        let mut selected = from;
+        deltas
+            .iter()
+            .map(|&delta| {
+                nav_move(len, &mut selected, delta);
+                selected
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_cursor_stops_at_both_ends_rather_than_wrapping() {
+        assert_eq!(
+            walk(4, 0, &[1, 1, 1, 1, 1]),
+            [1, 2, 3, 3, 3],
+            "walking off the bottom parks on the last row"
+        );
+        assert_eq!(
+            walk(4, 3, &[-1, -1, -1, -1, -1]),
+            [2, 1, 0, 0, 0],
+            "and off the top parks on the first"
+        );
+        assert_eq!(
+            walk(4, 1, &[99, -99]),
+            [3, 0],
+            "a page-sized jump lands on the end it overshot"
+        );
+    }
+
+    #[test]
+    fn an_empty_list_holds_the_cursor_at_zero() {
+        assert_eq!(walk(0, 7, &[1, -1, 50]), [0, 0, 0], "every move yields 0");
+
+        let mut selected = 7;
+        nav_clamp(0, &mut selected);
+        assert_eq!(selected, 0, "and a clamp against no rows yields 0");
+    }
+
+    #[test]
+    fn the_clamp_only_pulls_a_cursor_that_fell_outside() {
+        let mut selected = 2;
+        nav_clamp(4, &mut selected);
+        assert_eq!(selected, 2, "a cursor inside the list stays put");
+
+        let mut selected = 9;
+        nav_clamp(4, &mut selected);
+        assert_eq!(selected, 3, "one past the end lands on the last row");
+    }
+
+    #[test]
+    fn a_page_covers_half_the_viewport_and_never_stalls() {
+        assert_eq!(nav_page_step(Some(20)), 10, "an even viewport halves");
+        assert_eq!(
+            nav_page_step(Some(7)),
+            4,
+            "an odd one rounds up, so two pages clear the screen"
+        );
+        assert_eq!(
+            nav_page_step(Some(1)),
+            1,
+            "a one-row viewport still moves a row"
+        );
+        assert_eq!(
+            nav_page_step(Some(0)),
+            1,
+            "and so does a zero-row one, rather than paging nowhere"
+        );
+        assert_eq!(
+            nav_page_step(None),
+            1,
+            "paging before the first render moves a single row"
+        );
     }
 
     #[test]

@@ -251,19 +251,15 @@ impl WorkspacePicker {
     }
 
     pub fn select_next(&mut self) {
-        move_selection(self.filtered.len(), &mut self.selected, 1);
+        crate::picker::nav_move(self.filtered.len(), &mut self.selected, 1);
     }
 
     pub fn select_prev(&mut self) {
-        move_selection(self.filtered.len(), &mut self.selected, -1);
+        crate::picker::nav_move(self.filtered.len(), &mut self.selected, -1);
     }
 
     fn clamp_selected(&mut self) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len() - 1;
-        }
+        crate::picker::nav_clamp(self.filtered.len(), &mut self.selected);
     }
 
     /// How the per-row path column should render for this picker's entries.
@@ -314,16 +310,6 @@ fn display_name(name: &str, git_root: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("(unnamed)")
         .to_string()
-}
-
-fn move_selection(len: usize, selected: &mut usize, delta: i32) {
-    if len == 0 {
-        *selected = 0;
-        return;
-    }
-    let max = (len - 1) as i32;
-    let next = (*selected as i32 + delta).clamp(0, max);
-    *selected = next as usize;
 }
 
 #[cfg(test)]

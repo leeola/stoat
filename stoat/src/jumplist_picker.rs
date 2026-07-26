@@ -84,12 +84,7 @@ impl JumplistPicker {
     }
 
     fn move_selection(&mut self, delta: i32) {
-        if self.entries.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let max = (self.entries.len() - 1) as i32;
-        self.selected = (self.selected as i32 + delta).clamp(0, max) as usize;
+        crate::picker::nav_move(self.entries.len(), &mut self.selected, delta);
     }
 }
 

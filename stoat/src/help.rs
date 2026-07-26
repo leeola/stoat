@@ -337,12 +337,7 @@ impl Help {
     }
 
     fn move_selection_inner(&mut self, delta: i32) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let max = (self.filtered.len() - 1) as i32;
-        self.selected = (self.selected as i32 + delta).clamp(0, max) as usize;
+        crate::picker::nav_move(self.filtered.len(), &mut self.selected, delta);
         self.detail_scroll = 0;
     }
 
@@ -380,9 +375,7 @@ impl Help {
             HelpScope::All => build_all_entries(),
         };
         self.filtered = (0..self.entries.len()).collect();
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
-        }
+        crate::picker::nav_clamp(self.filtered.len(), &mut self.selected);
         self.detail_scroll = 0;
     }
 
@@ -404,9 +397,7 @@ impl Help {
             // Preserve entries order (sorted by key label for Active, by name
             // for All) so users see a stable reference shape before typing.
             self.filtered = (0..self.entries.len()).collect();
-            if self.selected >= self.filtered.len() {
-                self.selected = self.filtered.len().saturating_sub(1);
-            }
+            crate::picker::nav_clamp(self.filtered.len(), &mut self.selected);
             self.detail_scroll = 0;
             return;
         }
@@ -458,9 +449,7 @@ impl Help {
         filtered.extend(long_match);
 
         self.filtered = filtered;
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
-        }
+        crate::picker::nav_clamp(self.filtered.len(), &mut self.selected);
         self.detail_scroll = 0;
     }
 }

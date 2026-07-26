@@ -308,13 +308,7 @@ pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
         picker.move_selection(delta);
         return Some(UpdateEffect::Redraw);
     }
-    if palette.filtered.is_empty() {
-        palette.selected = 0;
-        return Some(UpdateEffect::Redraw);
-    }
-    let max = (palette.filtered.len() - 1) as i32;
-    let next = (palette.selected as i32 + delta).clamp(0, max);
-    palette.selected = next as usize;
+    crate::picker::nav_move(palette.filtered.len(), &mut palette.selected, delta);
     Some(UpdateEffect::Redraw)
 }
 
@@ -361,10 +355,10 @@ pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
     let step = match stoat.command_palette.as_ref() {
-        Some(p) => p.viewport_rows.map(|v| v.div_ceil(2).max(1)).unwrap_or(1),
+        Some(palette) => crate::picker::nav_page_step(palette.viewport_rows),
         None => return UpdateEffect::None,
     };
-    palette_move_selection(stoat, dir * step as i32).unwrap_or(UpdateEffect::None)
+    palette_move_selection(stoat, dir * step).unwrap_or(UpdateEffect::None)
 }
 
 /// Flip the palette's [`crate::command_palette::PaletteScope`] and re-filter.

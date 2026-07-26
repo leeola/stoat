@@ -262,11 +262,7 @@ impl CommitPicker {
             return;
         };
 
-        matches.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then_with(|| a.haystack.cmp(&b.haystack))
-        });
+        fuzzy::sort_ranked(&mut matches);
 
         self.filtered = Vec::with_capacity(matches.len());
         self.match_indices = Vec::with_capacity(matches.len());
@@ -298,12 +294,9 @@ impl CommitPicker {
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        if self.filtered.is_empty() {
-            self.set_selected(0);
-            return;
-        }
-        let max = (self.filtered.len() - 1) as i32;
-        self.set_selected((self.selected as i32 + delta).clamp(0, max) as usize);
+        let mut next = self.selected;
+        crate::picker::nav_move(self.filtered.len(), &mut next, delta);
+        self.set_selected(next);
     }
 
     /// Move the cursor to `index`, dropping the preview scroll when the row it
@@ -324,11 +317,7 @@ impl CommitPicker {
     /// up, positive down). Falls back to a single row before the first render
     /// sets [`Self::viewport_rows`].
     pub(crate) fn page(&mut self, dir: i32) {
-        let step = self
-            .viewport_rows
-            .map(|v| v.div_ceil(2).max(1))
-            .unwrap_or(1) as i32;
-        self.move_selection(dir * step);
+        self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
     }
 
     /// The commit under the selection cursor, or `None` for an empty list.
@@ -366,11 +355,9 @@ impl CommitPicker {
     }
 
     fn clamp_selected(&mut self) {
-        if self.filtered.is_empty() {
-            self.set_selected(0);
-        } else if self.selected >= self.filtered.len() {
-            self.set_selected(self.filtered.len() - 1);
-        }
+        let mut next = self.selected;
+        crate::picker::nav_clamp(self.filtered.len(), &mut next);
+        self.set_selected(next);
     }
 }
 

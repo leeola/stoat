@@ -86,6 +86,23 @@ pub fn match_and_rank<T>(
     Some(out)
 }
 
+/// Order matches best-first, breaking ties alphabetically by haystack.
+///
+/// This is the ordering a fuzzy result list wants when it has nothing to say
+/// about its own candidates. Alphabetical ties are what stop equally-scored
+/// rows from reshuffling between keystrokes, which is far more distracting than
+/// whatever order they land in.
+///
+/// A list that ranks by something of its own -- the palette's command priority,
+/// the workspace picker's insertion index -- sorts for itself instead.
+pub(crate) fn sort_ranked<T>(matches: &mut [RankedMatch<T>]) {
+    matches.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.haystack.cmp(&b.haystack))
+    });
+}
+
 struct Scored {
     score: u32,
     indices: Vec<u32>,

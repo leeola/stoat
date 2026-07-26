@@ -128,23 +128,14 @@ impl CodeSearchFinder {
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        if self.matches.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let max = (self.matches.len() - 1) as i32;
-        self.selected = (self.selected as i32 + delta).clamp(0, max) as usize;
+        crate::picker::nav_move(self.matches.len(), &mut self.selected, delta);
     }
 
     /// Page the selection by half the rendered list height in `dir` (negative
     /// up, positive down). Falls back to a single row before the first render
     /// sets [`Self::viewport_rows`].
     pub(crate) fn page(&mut self, dir: i32) {
-        let step = self
-            .viewport_rows
-            .map(|v| v.div_ceil(2).max(1))
-            .unwrap_or(1) as i32;
-        self.move_selection(dir * step);
+        self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
     }
 
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
