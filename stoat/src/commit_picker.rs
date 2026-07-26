@@ -436,6 +436,32 @@ impl CommitPicker {
         self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
     }
 
+    /// Jump the selection to the nearest branch tip in `dir` (negative up the
+    /// list toward newer commits, positive down toward older ones).
+    ///
+    /// A tip is the row a reader orients by, so this skips the ordinary commits
+    /// between them rather than counting rows with [`Self::move_selection`]. Any
+    /// local branch counts, the picker's own ref included. What matters is that
+    /// the row is a branch head, not which head it is.
+    ///
+    /// The scan runs over the visible rows, so a tip the query filtered out is
+    /// not somewhere to jump to. It does not wrap, and a direction with no tip
+    /// left in it leaves the selection alone.
+    pub(crate) fn select_branch(&mut self, dir: i32) {
+        let is_tip = |&row: &usize| {
+            self.commits
+                .get(self.filtered[row])
+                .is_some_and(|commit| self.branch_tips.contains_key(&commit.sha))
+        };
+        let found = match dir >= 0 {
+            true => (self.selected + 1..self.filtered.len()).find(is_tip),
+            false => (0..self.selected).rev().find(is_tip),
+        };
+        if let Some(row) = found {
+            self.set_selected(row);
+        }
+    }
+
     /// The commit under the selection cursor, or `None` for an empty list.
     pub(crate) fn selected_commit(&self) -> Option<&CommitInfo> {
         let idx = *self.filtered.get(self.selected)?;
@@ -775,6 +801,74 @@ mod tests {
         assert_eq!(p.selected, 0);
     }
 
+    /// A five-commit history whose only branch tips are the middle row and the
+    /// oldest, so a jump has to pass over ordinary commits to reach one.
+    fn tipped_history() -> Vec<CommitInfo> {
+        vec![
+            commit("eee5555", "newest"),
+            commit("ddd4444", "fourth"),
+            commit("ccc3333", "middle"),
+            commit("bbb2222", "second"),
+            commit("aaa1111", "oldest"),
+        ]
+    }
+
+    #[test]
+    fn a_branch_jump_skips_the_commits_between_tips() {
+        let mut p = picker(
+            tipped_history(),
+            &[("feature", "ccc3333"), ("root", "aaa1111")],
+            "eee5555",
+        );
+
+        p.select_branch(1);
+        assert_eq!(p.selected, 2, "down lands on the first tip below row 0");
+        p.select_branch(1);
+        assert_eq!(p.selected, 4, "and again on the next one past it");
+        p.select_branch(-1);
+        assert_eq!(p.selected, 2, "up walks back to the tip above");
+    }
+
+    #[test]
+    fn a_branch_jump_stops_rather_than_wrapping() {
+        let mut p = picker(tipped_history(), &[("root", "aaa1111")], "eee5555");
+
+        p.select_branch(-1);
+        assert_eq!(p.selected, 0, "no tip lies above row 0, so nothing moves");
+
+        p.select_branch(1);
+        assert_eq!(p.selected, 4, "down reaches the only tip");
+        p.select_branch(1);
+        assert_eq!(
+            p.selected, 4,
+            "and stays there rather than wrapping to the top"
+        );
+    }
+
+    /// The scan runs over the visible rows, so a tip the query filtered out is
+    /// not somewhere the jump can land.
+    #[test]
+    fn a_branch_jump_ignores_a_tip_the_filter_hid() {
+        let mut p = picker(
+            tipped_history(),
+            &[("feature", "ccc3333"), ("root", "aaa1111")],
+            "eee5555",
+        );
+        p.refilter("newest");
+        assert_eq!(shown(&p), ["eee5555"], "only the non-tip row survives");
+
+        p.select_branch(1);
+        assert_eq!(p.selected, 0, "with no visible tip below, nothing moves");
+    }
+
+    #[test]
+    fn a_history_without_branches_never_jumps() {
+        let mut p = picker(tipped_history(), &[], "eee5555");
+        p.select_branch(1);
+        p.select_branch(-1);
+        assert_eq!(p.selected, 0, "no tips means no rows to jump to");
+    }
+
     #[test]
     fn refilter_clamps_a_stale_selection() {
         let mut p = picker(history(), &[], "ccc3333");
@@ -936,6 +1030,49 @@ mod tests {
         h.type_keys("escape");
         h.settle();
         assert!(h.stoat.commit_picker.is_none(), "Escape closes the picker");
+    }
+
+    /// The seeded history puts `main` on the newest commit and `feature` one
+    /// back, leaving the oldest with no branch, so the jumps have a tip to reach
+    /// in one direction and nothing to reach in the other.
+    #[test]
+    fn the_keymap_block_jumps_between_branch_tips() {
+        let mut h = seeded_repo_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+        let selected = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .commit_picker
+                .as_ref()
+                .and_then(|p| p.selected_commit())
+                .map(|c| c.sha.to_string())
+        };
+
+        h.type_keys("ctrl-down");
+        h.settle();
+        assert_eq!(
+            selected(&h).as_deref(),
+            Some("b2c3d4e5"),
+            "Ctrl-Down jumps down the list to feature's tip"
+        );
+
+        h.type_keys("ctrl-down");
+        h.settle();
+        assert_eq!(
+            selected(&h).as_deref(),
+            Some("b2c3d4e5"),
+            "the oldest commit carries no branch, so there is nowhere further \
+             down to jump"
+        );
+
+        h.type_keys("ctrl-up");
+        h.settle();
+        assert_eq!(
+            selected(&h).as_deref(),
+            Some("c3d4e5f6"),
+            "and Ctrl-Up jumps back up to main's tip"
+        );
     }
 
     /// The two roles share every row, so the title is the only thing telling

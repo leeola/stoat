@@ -138,6 +138,8 @@ pub enum ActionKind {
     CommitPickerPrev,
     CommitPickerPageDown,
     CommitPickerPageUp,
+    CommitPickerNextBranch,
+    CommitPickerPrevBranch,
     CommitPickerColumnCycle,
     CommitPickerDrillIn,
     CommitPickerBack,

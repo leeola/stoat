@@ -249,6 +249,19 @@ pub(crate) fn commit_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Jump the commit picker's selection to the nearest branch tip in `dir`.
+///
+/// Syncs the preview like [`commit_picker_step`] and [`commit_picker_page`], so
+/// the diff follows a jumped selection as it does a stepped one.
+pub(crate) fn commit_picker_branch(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    let Some(picker) = stoat.commit_picker.as_mut() else {
+        return UpdateEffect::None;
+    };
+    picker.select_branch(dir);
+    ensure_selected_preview(stoat);
+    UpdateEffect::Redraw
+}
+
 /// Take the selected commit as the review base and start walking from it.
 ///
 /// The walk spans the selected commit through the ref tip, including commits

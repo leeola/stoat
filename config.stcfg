@@ -741,6 +741,8 @@ on key {
         Ctrl-n -> CommitPickerNext();
         Ctrl-f -> CommitPickerPageDown();
         Ctrl-b -> CommitPickerPageUp();
+        Ctrl-Up -> CommitPickerPrevBranch();
+        Ctrl-Down -> CommitPickerNextBranch();
         BackTab -> CommitPickerColumnCycle();
         Alt-Right -> CommitPickerDrillIn();
         Alt-Left -> CommitPickerBack();

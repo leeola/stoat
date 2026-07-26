@@ -166,6 +166,28 @@ define_action!(
 );
 
 define_action!(
+    CommitPickerNextBranchDef,
+    CommitPickerNextBranch,
+    "CommitPickerNextBranch",
+    ActionKind::CommitPickerNextBranch,
+    "jump to the next branch tip",
+    "Move the commit picker's selection down the list to the nearest commit a local branch points at, skipping the ordinary commits between.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPickerPrevBranchDef,
+    CommitPickerPrevBranch,
+    "CommitPickerPrevBranch",
+    ActionKind::CommitPickerPrevBranch,
+    "jump to the previous branch tip",
+    "Move the commit picker's selection up the list to the nearest commit a local branch points at, the counterpart to CommitPickerNextBranch.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     CommitPickerColumnCycleDef,
     CommitPickerColumnCycle,
     "CommitPickerColumnCycle",

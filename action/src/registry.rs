@@ -87,12 +87,13 @@ use crate::{
             CodeSearchClose, CodeSearchModeToggle, CodeSearchNext, CodeSearchPageDown,
             CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, CommitPickerBack,
             CommitPickerClose, CommitPickerColumnCycle, CommitPickerDrillIn, CommitPickerNext,
-            CommitPickerPageDown, CommitPickerPageUp, CommitPickerPrev, CommitPickerSelect,
-            DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPageDown,
-            DiagnosticsPickerPageUp, DiagnosticsPickerPrev, DiagnosticsPickerSelect,
-            JumplistPickerClose, JumplistPickerNext, JumplistPickerPageDown, JumplistPickerPageUp,
-            JumplistPickerPrev, JumplistPickerSelect, LocationPickerClose, LocationPickerNext,
-            LocationPickerPageDown, LocationPickerPageUp, LocationPickerPrev, LocationPickerSelect,
+            CommitPickerNextBranch, CommitPickerPageDown, CommitPickerPageUp, CommitPickerPrev,
+            CommitPickerPrevBranch, CommitPickerSelect, DiagnosticsPickerClose,
+            DiagnosticsPickerNext, DiagnosticsPickerPageDown, DiagnosticsPickerPageUp,
+            DiagnosticsPickerPrev, DiagnosticsPickerSelect, JumplistPickerClose,
+            JumplistPickerNext, JumplistPickerPageDown, JumplistPickerPageUp, JumplistPickerPrev,
+            JumplistPickerSelect, LocationPickerClose, LocationPickerNext, LocationPickerPageDown,
+            LocationPickerPageUp, LocationPickerPrev, LocationPickerSelect,
         },
         prompt::{
             CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
@@ -589,6 +590,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(CommitPickerPageUp::DEF, |_| {
         Ok(Box::new(CommitPickerPageUp))
+    });
+    add(CommitPickerNextBranch::DEF, |_| {
+        Ok(Box::new(CommitPickerNextBranch))
+    });
+    add(CommitPickerPrevBranch::DEF, |_| {
+        Ok(Box::new(CommitPickerPrevBranch))
     });
     add(CommitPickerColumnCycle::DEF, |_| {
         Ok(Box::new(CommitPickerColumnCycle))
@@ -1341,6 +1348,8 @@ mod tests {
         "CommitPickerPrev",
         "CommitPickerPageDown",
         "CommitPickerPageUp",
+        "CommitPickerNextBranch",
+        "CommitPickerPrevBranch",
         "CommitPickerColumnCycle",
         "CommitPickerDrillIn",
         "CommitPickerBack",
@@ -1815,7 +1824,8 @@ mod tests {
         // + 3 CommitPickerPageDown/PageUp/ColumnCycle.
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
         // + 2 CommitPickerDrillIn/CommitPickerBack.
-        assert_eq!(all().count(), 425);
+        // + 2 CommitPickerNextBranch/CommitPickerPrevBranch.
+        assert_eq!(all().count(), 427);
     }
 
     #[test]
