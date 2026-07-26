@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Clear, Widget},
 };
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
 
 pub(crate) fn render_workspace_picker(
     picker: &WorkspacePicker,
@@ -54,29 +54,7 @@ pub(crate) fn render_workspace_picker(
         &mut *scene,
     );
 
-    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
-
-    write_str(buf, inner.x, inner.y, ">", prompt_style);
-    let input_area = Rect::new(inner.x + 2, inner.y, inner.width.saturating_sub(2), 1);
-    picker.input.render(
-        &mut ws.editors,
-        input_area,
-        true,
-        "prompt",
-        theme,
-        &BTreeMap::new(),
-        buf,
-    );
-
-    crate::render::chrome::hline(
-        buf,
-        inner.x,
-        inner.y + 1,
-        inner.width,
-        separator_style,
-        Some(scene),
-    );
+    crate::render::picker::filter_header(buf, inner, ">", &picker.input, ws, theme, scene);
 
     const NAME_W: u16 = 12;
     const BUF_W: u16 = 5;

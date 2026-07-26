@@ -1,6 +1,5 @@
 use crate::{
     file_finder::{FileFinder, FinderScope},
-    render::text::write_str,
     workspace::Workspace,
 };
 use ratatui::{
@@ -104,31 +103,9 @@ pub(crate) fn render_file_finder(
     );
 
     let inner = layout.inner;
-    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
-    let input_row = inner.y;
-    write_str(buf, inner.x, input_row, ">", prompt_style);
-    let input_area = Rect::new(inner.x + 2, input_row, inner.width.saturating_sub(2), 1);
-    finder.input.render(
-        &mut ws.editors,
-        input_area,
-        true,
-        "prompt",
-        theme,
-        &std::collections::BTreeMap::new(),
-        buf,
-    );
-
-    let separator_row = inner.y + 1;
-    crate::render::chrome::hline(
-        buf,
-        inner.x,
-        separator_row,
-        inner.width,
-        separator_style,
-        Some(&mut *scene),
-    );
+    crate::render::picker::filter_header(buf, inner, ">", &finder.input, ws, theme, &mut *scene);
 
     if let Some(preview_rect) = layout.preview {
         crate::render::chrome::vline(

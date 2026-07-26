@@ -6,13 +6,58 @@
 //! a `PathPicker`, so both render through these functions and cannot drift.
 
 use crate::{
+    input_view::InputView,
     picker::{row_display, PickList, Preview},
-    render::{editor::render_editor, text::write_str_clipped},
+    render::{
+        editor::render_editor,
+        text::{write_str, write_str_clipped},
+    },
     theme::{scope, Theme},
     workspace::Workspace,
 };
 use ratatui::{buffer::Buffer, layout::Rect};
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
+
+/// Paint a filter modal's header, which is the prompt glyph, the live input
+/// beside it, and the separator ruling both off from the body.
+///
+/// `inner` is the modal's rect inside its border. The header claims its first
+/// two rows, so a caller's body begins at `inner.y + 2`.
+///
+/// Every filter modal opens this way, and each lays its body rects out from
+/// that same two-row assumption. One painter is what keeps the assumption true
+/// across all of them at once.
+pub(crate) fn filter_header(
+    buf: &mut Buffer,
+    inner: Rect,
+    prompt: &str,
+    input: &InputView,
+    ws: &mut Workspace,
+    theme: &Theme,
+    scene: &mut stoatty_widgets::ApcScene,
+) {
+    write_str(buf, inner.x, inner.y, prompt, theme.get(scope::UI_PROMPT));
+
+    let input_area = Rect::new(inner.x + 2, inner.y, inner.width.saturating_sub(2), 1);
+    input.render(
+        &mut ws.editors,
+        input_area,
+        true,
+        "prompt",
+        theme,
+        &BTreeMap::new(),
+        buf,
+    );
+
+    crate::render::chrome::hline(
+        buf,
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        theme.get(scope::UI_BORDER_INACTIVE),
+        Some(scene),
+    );
+}
 
 /// First entry visible when `selected` is showing, given `rows` on screen.
 ///
