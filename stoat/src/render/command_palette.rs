@@ -1,7 +1,10 @@
 use crate::{
     command_palette::{CommandPalette, PaletteScope},
     input_view::InputView,
-    render::text::{wrap_text, write_str, write_str_clipped},
+    render::{
+        picker::DEFAULT_LIST_PERCENT,
+        text::{wrap_text, write_str, write_str_clipped},
+    },
     workspace::Workspace,
 };
 use ratatui::{
@@ -129,6 +132,10 @@ pub(crate) fn palette_arg_body(
 
 /// Split the arg-picker body below the `:` input into a result-list rect and an
 /// optional preview rect. `None` when the body has no rows.
+///
+/// The split stays at [`DEFAULT_LIST_PERCENT`], because the palette's separator
+/// is not draggable. Its width is capped at 80 columns to keep the minimap band
+/// beside it visible, which leaves little room to redistribute.
 fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
     let body_top = inner.y + 2;
     let body_height = (inner.y + inner.height).saturating_sub(body_top);
@@ -142,6 +149,7 @@ fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
         body_height,
         50,
         20,
+        DEFAULT_LIST_PERCENT,
     ))
 }
 

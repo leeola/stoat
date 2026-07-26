@@ -18,14 +18,10 @@ use ratatui::{
 use std::cmp::Ordering;
 use stoatty_widgets::{polyline::Polyline, ApcScene};
 
-/// Share of the body the commit list takes, the rest going to the diff below
-/// it. A percentage rather than a row count so the split holds at any modal
-/// size.
-const LIST_BODY_PERCENT: u16 = 40;
-
 /// Rows the list keeps however small the body gets, so a short modal still
-/// shows enough history to choose from.
-const MIN_LIST_ROWS: u16 = 5;
+/// shows enough history to choose from, and dragging the separator all the way
+/// up cannot leave the table unreadable.
+pub(crate) const MIN_LIST_ROWS: u16 = 5;
 
 /// The on-screen rectangles of the commit picker modal.
 ///
@@ -104,23 +100,31 @@ pub(crate) fn graph_lanes(picker: &CommitPicker) -> Option<u16> {
 /// than using that layout's side-by-side split.
 ///
 /// `lanes` reserves the graph column, and comes from [`graph_lanes`] so every
-/// caller agrees on whether it is showing.
+/// caller agrees on whether it is showing. `list_percent` is the share of the
+/// body the table takes, from [`modal_split`](crate::app::Stoat::modal_split).
 pub(crate) fn commit_picker_layout(
     area: Rect,
     lanes: Option<u16>,
     zoom: i8,
+    list_percent: u16,
 ) -> Option<CommitPickerLayout> {
     // A commit row plus its diff preview both want room, and the history behind
     // them is arbitrarily long, so the picker asks for the whole area rather
-    // than measuring a list it would only ever outgrow.
-    let box_layout = file_finder_layout(area, (u16::MAX, u16::MAX), zoom)?;
+    // than measuring a list it would only ever outgrow. Only the box comes from
+    // that layout, so the share it splits its own body by never shows.
+    let box_layout = file_finder_layout(
+        area,
+        (u16::MAX, u16::MAX),
+        zoom,
+        crate::render::picker::DEFAULT_LIST_PERCENT,
+    )?;
     let inner = box_layout.inner;
 
     let header = Rect::new(inner.x, inner.y + 2, inner.width, 1);
     let body_top = header.y + 1;
     let body_height = (inner.y + inner.height).saturating_sub(body_top);
 
-    let list_height = (body_height * LIST_BODY_PERCENT / 100)
+    let list_height = (body_height * list_percent / 100)
         .max(MIN_LIST_ROWS)
         .min(body_height);
 
@@ -157,16 +161,18 @@ pub(crate) fn commit_picker_layout(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_commit_picker(
     picker: &mut CommitPicker,
     ws: &mut Workspace,
     theme: &Theme,
     area: Rect,
     zoom: i8,
+    list_percent: u16,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let Some(layout) = commit_picker_layout(area, graph_lanes(picker), zoom) else {
+    let Some(layout) = commit_picker_layout(area, graph_lanes(picker), zoom, list_percent) else {
         return;
     };
 

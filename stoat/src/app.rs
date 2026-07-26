@@ -401,6 +401,21 @@ pub(crate) fn modal_zoom_steps(
     zooms.get(&kind).copied().unwrap_or(0)
 }
 
+/// Share of its body `kind`'s list pane takes, as a percentage.
+///
+/// A kind whose separator the user never dragged reads the layout family's own
+/// default. Free rather than a [`Stoat`] method for the same reason
+/// [`modal_zoom_steps`] is.
+pub(crate) fn modal_split_percent(
+    splits: &std::collections::BTreeMap<ModalKind, u16>,
+    kind: ModalKind,
+) -> u16 {
+    splits
+        .get(&kind)
+        .copied()
+        .unwrap_or(crate::render::picker::DEFAULT_LIST_PERCENT)
+}
+
 pub struct Stoat {
     size: Rect,
     /// Fallback mode store, read and written only when the focused target has
@@ -437,6 +452,15 @@ pub struct Stoat {
     /// Every entry sits within [`MODAL_ZOOM_MIN`]`..=`[`MODAL_ZOOM_MAX`], which
     /// [`Self::handle_zoom_step`] enforces as the only writer.
     pub(crate) modal_zoom: std::collections::BTreeMap<ModalKind, i8>,
+    /// Share of its body each modal's list pane takes, as a percentage, for the
+    /// kinds whose list/preview separator the user has dragged. An absent kind
+    /// sits at [`crate::render::picker::DEFAULT_LIST_PERCENT`].
+    ///
+    /// Stored per kind and session-scoped for [`Self::modal_zoom`]'s reasons. A
+    /// share the user chose outlives the modal it was chosen in, so reopening
+    /// that modal restores the split. It is never persisted, because the choice
+    /// answers what is on screen right now.
+    pub(crate) modal_split: std::collections::BTreeMap<ModalKind, u16>,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
@@ -1481,6 +1505,7 @@ impl Stoat {
             theme_blocks,
             imported_theme_blocks,
             modal_zoom: std::collections::BTreeMap::new(),
+            modal_split: std::collections::BTreeMap::new(),
             command_palette: None,
             help: None,
             file_finder: None,
@@ -3889,6 +3914,7 @@ impl Stoat {
                 size,
                 finder.content_size,
                 modal_zoom_steps(&self.modal_zoom, ModalKind::FileFinder),
+                modal_split_percent(&self.modal_split, ModalKind::FileFinder),
             ) else {
                 return UpdateEffect::None;
             };
@@ -4333,6 +4359,7 @@ impl Stoat {
                     size,
                     finder.content_size,
                     modal_zoom_steps(&self.modal_zoom, ModalKind::FileFinder),
+                    modal_split_percent(&self.modal_split, ModalKind::FileFinder),
                 )
                 .and_then(|layout| layout.preview)
                 .map(|rect| (rect, finder.active_core_ref().preview.editor))
@@ -4390,6 +4417,7 @@ impl Stoat {
                 self.size(),
                 lanes,
                 modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
+                modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
             )
             .and_then(|layout| layout.preview);
 
@@ -7708,6 +7736,7 @@ impl Stoat {
                     self.size(),
                     finder.content_size,
                     modal_zoom_steps(&self.modal_zoom, ModalKind::FileFinder),
+                    modal_split_percent(&self.modal_split, ModalKind::FileFinder),
                 )
             })
             .map(|layout| layout.list);
@@ -7766,6 +7795,7 @@ impl Stoat {
                     self.size(),
                     crate::render::commit_picker::graph_lanes(picker),
                     modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
+                    modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
                 )
             })
             .map(|layout| layout.body());
@@ -7787,6 +7817,7 @@ impl Stoat {
                     self.size(),
                     crate::render::commit_picker::graph_lanes(picker),
                     modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
+                    modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
                 )
             })
             .and_then(|layout| layout.preview);
@@ -9679,6 +9710,33 @@ mod tests {
         );
     }
 
+    /// Kinds read their share independently, so one modal's dragged separator
+    /// must not move another's, and a kind never dragged keeps the layout's own
+    /// default.
+    #[test]
+    fn a_dragged_share_is_read_back_per_kind() {
+        let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+
+        assert_eq!(
+            modal_split_percent(&h.stoat.modal_split, ModalKind::FileFinder),
+            crate::render::picker::DEFAULT_LIST_PERCENT,
+            "an untouched kind sits at the default"
+        );
+
+        h.stoat.modal_split.insert(ModalKind::FileFinder, 65);
+
+        assert_eq!(
+            modal_split_percent(&h.stoat.modal_split, ModalKind::FileFinder),
+            65,
+            "the stored share reads back"
+        );
+        assert_eq!(
+            modal_split_percent(&h.stoat.modal_split, ModalKind::CommitPicker),
+            crate::render::picker::DEFAULT_LIST_PERCENT,
+            "and its sibling kinds are untouched"
+        );
+    }
+
     /// A modal already sized to its content has nothing to zoom, but it still
     /// owns the combo, so the step must not fall through to the panes it hides.
     #[test]
@@ -10237,6 +10295,7 @@ mod tests {
             h.stoat.size(),
             finder.content_size,
             modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
+            modal_split_percent(&h.stoat.modal_split, ModalKind::FileFinder),
         )
         .expect("the finder fits the test terminal")
     }

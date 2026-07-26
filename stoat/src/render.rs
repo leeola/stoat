@@ -40,7 +40,7 @@ pub(crate) mod workspace_picker;
 
 use self::undercurl::UndercurlSpan;
 use crate::{
-    app::{self, modal_zoom_steps, ModalKind, Stoat},
+    app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
@@ -728,7 +728,17 @@ pub(crate) fn frame(
         );
     } else if let Some(finder) = &mut stoat.file_finder {
         let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder);
-        file_finder::render_file_finder(finder, ws, &stoat.theme, full, zoom, buf, &mut *scene);
+        let split = modal_split_percent(&stoat.modal_split, ModalKind::FileFinder);
+        file_finder::render_file_finder(
+            finder,
+            ws,
+            &stoat.theme,
+            full,
+            zoom,
+            split,
+            buf,
+            &mut *scene,
+        );
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,
@@ -748,6 +758,7 @@ pub(crate) fn frame(
             &stoat.language_registry,
             full,
             modal_zoom_steps(&stoat.modal_zoom, ModalKind::SymbolFinder),
+            modal_split_percent(&stoat.modal_split, ModalKind::SymbolFinder),
             buf,
             &mut *scene,
         );
@@ -764,7 +775,17 @@ pub(crate) fn frame(
         );
     } else if let Some(finder) = &mut stoat.code_search {
         let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CodeSearch);
-        code_search::render_code_search(finder, ws, &stoat.theme, full, zoom, buf, &mut *scene);
+        let split = modal_split_percent(&stoat.modal_split, ModalKind::CodeSearch);
+        code_search::render_code_search(
+            finder,
+            ws,
+            &stoat.theme,
+            full,
+            zoom,
+            split,
+            buf,
+            &mut *scene,
+        );
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,
@@ -839,7 +860,17 @@ pub(crate) fn frame(
         );
     } else if let Some(picker) = &mut stoat.commit_picker {
         let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker);
-        commit_picker::render_commit_picker(picker, ws, &stoat.theme, full, zoom, buf, &mut *scene);
+        let split = modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker);
+        commit_picker::render_commit_picker(
+            picker,
+            ws,
+            &stoat.theme,
+            full,
+            zoom,
+            split,
+            buf,
+            &mut *scene,
+        );
         cached_modal_hints(
             &mut stoat.hints_cache,
             &stoat.keymap,

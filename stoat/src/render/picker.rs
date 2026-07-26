@@ -220,12 +220,19 @@ pub(crate) fn render_picker_preview(
     }
 }
 
+/// Share of a modal's body its list pane takes, before the user drags the
+/// separator to a share of their own.
+///
+/// One value for the whole modal family, so an untouched finder, symbol list,
+/// code search, and commit picker all divide their body the same way.
+pub(crate) const DEFAULT_LIST_PERCENT: u16 = 40;
+
 /// Split a picker body rect into a result list and an optional preview pane.
 ///
 /// The preview appears only when `width >= wide_threshold`, where the list
-/// takes 40% (floored at `min_list`) and the preview the rest past a one-cell
-/// separator. Below the threshold the list takes the full width and there is no
-/// preview.
+/// takes `list_percent` of the width (floored at `min_list`) and the preview the
+/// rest past a one-cell separator. Below the threshold the list takes the full
+/// width and there is no preview.
 pub(crate) fn split_list_preview(
     x: u16,
     y: u16,
@@ -233,9 +240,10 @@ pub(crate) fn split_list_preview(
     height: u16,
     wide_threshold: u16,
     min_list: u16,
+    list_percent: u16,
 ) -> (Rect, Option<Rect>) {
     if width >= wide_threshold {
-        let list_width = (width * 40 / 100).max(min_list);
+        let list_width = (width * list_percent / 100).max(min_list);
         let preview_width = width.saturating_sub(list_width + 1);
         (
             Rect::new(x, y, list_width, height),
@@ -260,6 +268,41 @@ mod tests {
             window_start(0, 0),
             0,
             "and a list with no room to paint has nowhere to scroll to"
+        );
+    }
+
+    /// The share is what the drag-resizable separator writes, so the layouts it
+    /// feeds have to move with it, and an untouched modal has to land exactly
+    /// where it landed before the share was a parameter at all.
+    #[test]
+    fn the_list_takes_the_share_it_is_given() {
+        let split = |percent| split_list_preview(0, 0, 100, 10, 80, 24, percent);
+
+        assert_eq!(
+            split(DEFAULT_LIST_PERCENT),
+            (Rect::new(0, 0, 40, 10), Some(Rect::new(41, 0, 59, 10))),
+            "the default share splits the body where it always has"
+        );
+        assert_eq!(
+            split(60),
+            (Rect::new(0, 0, 60, 10), Some(Rect::new(61, 0, 39, 10))),
+            "a wider share moves the boundary and the preview takes the rest"
+        );
+        assert_eq!(
+            split(5),
+            (Rect::new(0, 0, 24, 10), Some(Rect::new(25, 0, 75, 10))),
+            "a share under the minimum still leaves the list its floor"
+        );
+    }
+
+    /// A body too narrow for two panes has no separator to drag, so the share is
+    /// moot and the list keeps the full width whatever it says.
+    #[test]
+    fn a_narrow_body_ignores_the_share_and_stays_list_only() {
+        assert_eq!(
+            split_list_preview(0, 0, 79, 10, 80, 24, 60),
+            (Rect::new(0, 0, 79, 10), None),
+            "below the wide threshold the list takes everything"
         );
     }
 

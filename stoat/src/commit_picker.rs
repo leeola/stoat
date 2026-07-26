@@ -1036,8 +1036,13 @@ mod tests {
             .commit_picker
             .as_ref()
             .and_then(crate::render::commit_picker::graph_lanes);
-        crate::render::commit_picker::commit_picker_layout(h.stoat.size(), lanes, 0)
-            .expect("the picker fits the test terminal")
+        crate::render::commit_picker::commit_picker_layout(
+            h.stoat.size(),
+            lanes,
+            0,
+            crate::render::picker::DEFAULT_LIST_PERCENT,
+        )
+        .expect("the picker fits the test terminal")
     }
 
     /// Paint `p`'s graph into a fresh buffer and scene under `theme`, returning
@@ -1285,10 +1290,13 @@ mod tests {
         let h = seeded_picker_harness();
         let size = h.stoat.size();
 
+        let default_split = crate::render::picker::DEFAULT_LIST_PERCENT;
         let without =
-            crate::render::commit_picker::commit_picker_layout(size, None, 0).expect("fits");
+            crate::render::commit_picker::commit_picker_layout(size, None, 0, default_split)
+                .expect("fits");
         let with =
-            crate::render::commit_picker::commit_picker_layout(size, Some(1), 0).expect("fits");
+            crate::render::commit_picker::commit_picker_layout(size, Some(1), 0, default_split)
+                .expect("fits");
 
         assert!(without.graph.is_none());
         let graph = with.graph.expect("one lane reserves a column");
@@ -1299,6 +1307,41 @@ mod tests {
             with.preview.map(|r| r.width),
             without.preview.map(|r| r.width),
             "the diff keeps the modal's full width"
+        );
+    }
+
+    /// The table/diff separator is draggable, so the share the drag records has
+    /// to move the boundary while the floor that keeps the history readable
+    /// survives a drag all the way to the top.
+    #[test]
+    fn the_share_moves_the_table_diff_boundary_down_to_its_floor() {
+        let size = seeded_picker_harness().stoat.size();
+        let layout = |percent| {
+            crate::render::commit_picker::commit_picker_layout(size, None, 0, percent)
+                .expect("fits")
+        };
+
+        let default = layout(crate::render::picker::DEFAULT_LIST_PERCENT);
+        let tall = layout(70);
+        assert!(
+            tall.list.height > default.list.height,
+            "a larger share gives the table more rows: {} vs {}",
+            tall.list.height,
+            default.list.height
+        );
+        assert_eq!(
+            tall.preview.map(|r| r.height),
+            Some(
+                default.list.height + default.preview.expect("a diff fits").height
+                    - tall.list.height
+            ),
+            "and the diff gives up exactly what the table gained"
+        );
+
+        assert_eq!(
+            layout(0).list.height,
+            crate::render::commit_picker::MIN_LIST_ROWS,
+            "a share dragged to nothing still leaves the table its floor"
         );
     }
 
