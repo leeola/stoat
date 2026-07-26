@@ -182,9 +182,8 @@ pub(crate) fn render_help(
         scene,
     );
 
-    let list_scroll = help
-        .selected()
-        .saturating_sub(list_rect.height.saturating_sub(1) as usize);
+    let list_scroll =
+        crate::render::picker::window_start(help.selected(), list_rect.height as usize);
     paint_help_list_rows(help, list_rect, list_scroll, theme, buf);
     paint_help_detail_rows(help, detail_rect, help.detail_scroll() as usize, theme, buf);
 }

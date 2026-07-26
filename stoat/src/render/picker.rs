@@ -14,6 +14,57 @@ use crate::{
 use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::Path;
 
+/// First entry visible when `selected` is showing, given `rows` on screen.
+///
+/// The window is anchored to the bottom. A selection past it rides the last
+/// visible row, and one still above it leaves the list where it is. Every
+/// scrolling modal list follows this, so a picker's hit test and its paint
+/// agree on which entry a screen row holds.
+///
+/// A list shorter than its window starts at zero, which is what makes this
+/// safe to call before knowing whether scrolling is needed at all.
+pub(crate) fn window_start(selected: usize, rows: usize) -> usize {
+    selected.saturating_sub(rows.saturating_sub(1))
+}
+
+/// Fixtures for asserting which screen row a picker paints its selection on.
+///
+/// The theme and the buffer scan only mean anything together. The theme colors
+/// `ui.selection` and nothing else, so a scan for that background finds the
+/// selected row and can find no other, and a picker that scrolls its selection
+/// off-screen highlights nothing at all.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::theme::Theme;
+    use ratatui::{buffer::Buffer, style::Color};
+
+    /// The background [`selected_rows`] scans for.
+    pub(crate) const SELECTION_BG: Color = Color::Rgb(255, 0, 0);
+
+    pub(crate) fn selection_theme() -> Theme {
+        let src = r##"theme t { ui.selection.bg = "#ff0000"; }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// Rows of `buf` carrying [`SELECTION_BG`], in ascending order.
+    pub(crate) fn selected_rows(buf: &Buffer) -> Vec<u16> {
+        let area = buf.area;
+        (area.y..area.y + area.height)
+            .filter(|&row| {
+                (area.x..area.x + area.width).any(|col| buf[(col, row)].bg == SELECTION_BG)
+            })
+            .collect()
+    }
+
+    pub(crate) fn row_text(buf: &Buffer, row: u16) -> String {
+        let area = buf.area;
+        (area.x..area.x + area.width)
+            .map(|col| buf[(col, row)].symbol().chars().next().unwrap_or(' '))
+            .collect()
+    }
+}
+
 /// Paint a picker's result rows into `area`, one repo-relative path per row,
 /// with the selected row and fuzzy-match characters highlighted.
 ///
@@ -155,6 +206,17 @@ mod tests {
     use super::*;
     use ratatui::style::Color;
     use std::path::PathBuf;
+
+    #[test]
+    fn the_window_holds_the_selection_on_the_last_row() {
+        assert_eq!(window_start(3, 12), 0, "a selection on screen scrolls not");
+        assert_eq!(window_start(14, 12), 3, "one past it scrolls just enough");
+        assert_eq!(
+            window_start(0, 0),
+            0,
+            "and a list with no room to paint has nowhere to scroll to"
+        );
+    }
 
     fn row_text(buf: &Buffer, row: u16, area: Rect) -> String {
         (area.x..area.x + area.width)

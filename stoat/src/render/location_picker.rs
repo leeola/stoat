@@ -37,15 +37,6 @@ pub(crate) fn location_picker_layout(area: Rect, entries_len: usize) -> Option<(
     Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
 }
 
-/// First candidate visible when `selected` is showing, given `rows` on screen.
-///
-/// Keeps the selection on the last visible row once it passes the window, which
-/// is the same derivation the finder and palette lists use, so the picker's hit
-/// test and its paint agree on which entry a row holds.
-pub(crate) fn location_picker_window_start(selected: usize, rows: usize) -> usize {
-    selected.saturating_sub(rows.saturating_sub(1))
-}
-
 pub(crate) fn render_location_picker(
     picker: &LocationPicker,
     git_root: &Path,
@@ -83,7 +74,7 @@ pub(crate) fn render_location_picker(
     let text_w = inner.width.saturating_sub(text_x - inner.x);
 
     let rows = inner.height as usize;
-    let start = location_picker_window_start(picker.selected(), rows);
+    let start = crate::render::picker::window_start(picker.selected(), rows);
 
     for (i, entry) in entries.iter().skip(start).take(rows).enumerate() {
         let row = inner.y + i as u16;
@@ -138,7 +129,7 @@ fn display_path(path: &Path, git_root: &Path, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{location_picker_layout, location_picker_window_start, MAX_ENTRY_ROWS};
+    use super::{location_picker_layout, MAX_ENTRY_ROWS};
     use ratatui::layout::Rect;
 
     #[test]
@@ -160,11 +151,5 @@ mod tests {
         assert_eq!(location_picker_layout(Rect::new(0, 0, 40, 24), 3), None);
         assert_eq!(location_picker_layout(Rect::new(0, 0, 80, 4), 3), None);
         assert_eq!(location_picker_layout(Rect::new(0, 0, 80, 24), 0), None);
-    }
-
-    #[test]
-    fn window_holds_the_selection_on_the_last_row() {
-        assert_eq!(location_picker_window_start(3, 12), 0, "still on screen");
-        assert_eq!(location_picker_window_start(14, 12), 3, "scrolled by 3");
     }
 }

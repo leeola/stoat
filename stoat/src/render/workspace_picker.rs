@@ -133,15 +133,12 @@ pub(crate) fn render_workspace_picker(
     let selected = picker.selected();
     let match_indices = picker.match_indices();
 
-    for (i, &idx) in picker
-        .filtered()
-        .iter()
-        .take(max_entries as usize)
-        .enumerate()
-    {
+    let rows = max_entries as usize;
+    let start = crate::render::picker::window_start(selected, rows);
+    for (i, &idx) in picker.filtered().iter().enumerate().skip(start).take(rows) {
         let entry = &entries[idx];
         let indices = &match_indices[i];
-        let row = entries_top + i as u16;
+        let row = entries_top + (i - start) as u16;
         let is_selected = i == selected;
         let base_style = if is_selected {
             selected_style
@@ -206,6 +203,75 @@ pub(crate) fn render_workspace_picker(
             row,
             &right_pad(&count(entry.editor_count, inactive), EDIT_W),
             base_style,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_workspace_picker;
+    use crate::{
+        buffer::BufferId,
+        editor_state::EditorId,
+        input_view::{InputView, SubmitTarget},
+        render::picker::test_support::{row_text, selected_rows, selection_theme},
+        workspace::{Workspace, WorkspaceId},
+        workspace_picker::WorkspacePicker,
+    };
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use slotmap::SlotMap;
+    use std::{path::PathBuf, sync::Arc};
+    use stoat_scheduler::{Executor, TestScheduler};
+
+    #[test]
+    fn the_last_of_more_workspaces_than_fit_paints_as_selected() {
+        let executor: Executor = Arc::new(TestScheduler::new()).executor();
+        let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
+        let mut active = WorkspaceId::default();
+        for i in 0..15 {
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from(format!("/tmp/ws{i:02}")),
+                &executor,
+            ));
+            workspaces[id].id = id;
+            workspaces[id].name = format!("ws{i:02}");
+            if i == 0 {
+                active = id;
+            }
+        }
+        // The picker renders through the active workspace's editors, and a null
+        // editor key resolves to nothing, so the input row paints blank.
+        let input = InputView {
+            editor_id: EditorId::default(),
+            buffer_id: BufferId::new(0),
+            target: SubmitTarget::WorkspacePicker,
+            max_height: 1,
+        };
+
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
+        while picker.selected() + 1 < picker.entries().len() {
+            picker.select_next();
+        }
+        assert_eq!(picker.selected(), 14, "the last entry is selected");
+        let last = picker.entries()[picker.filtered()[14]].basename.clone();
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render_workspace_picker(
+            &picker,
+            &mut workspaces[active],
+            &selection_theme(),
+            area,
+            &mut buf,
+            &mut stoatty_widgets::ApcScene::new(),
+        );
+
+        let rows = selected_rows(&buf);
+        assert_eq!(rows.len(), 1, "the selection is on screen exactly once");
+        let text = row_text(&buf, rows[0]);
+        assert!(
+            text.contains(&last),
+            "and it is the selected entry ({last}) that paints there: {text:?}"
         );
     }
 }

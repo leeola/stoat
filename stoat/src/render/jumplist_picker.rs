@@ -62,8 +62,10 @@ pub(crate) fn render_jumplist_picker(
     let snippet_x = pos_x + position_w + 1;
     let snippet_w = inner.width.saturating_sub(snippet_x - inner.x);
 
-    for (i, entry) in entries.iter().take(max_entries as usize).enumerate() {
-        let row = inner.y + i as u16;
+    let rows = max_entries as usize;
+    let start = crate::render::picker::window_start(selected, rows);
+    for (i, entry) in entries.iter().enumerate().skip(start).take(rows) {
+        let row = inner.y + (i - start) as u16;
         let is_selected = i == selected;
         let is_current = i == cursor_idx;
         let base_style = if is_selected {
@@ -87,5 +89,72 @@ pub(crate) fn render_jumplist_picker(
         write_str(buf, pos_x, row, &pos, base_style);
         let snippet: String = entry.snippet.chars().take(snippet_w as usize).collect();
         write_str(buf, snippet_x, row, &snippet, base_style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_jumplist_picker;
+    use crate::{
+        buffer_registry::BufferRegistry,
+        jumplist::{JumpEntry, JumpList},
+        jumplist_picker::JumplistPicker,
+        render::picker::test_support::{row_text, selected_rows, selection_theme},
+    };
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use std::path::Path;
+    use stoat_text::{Bias, Selection, SelectionGoal};
+
+    #[test]
+    fn the_last_of_more_jumps_than_fit_paints_as_selected() {
+        let mut buffers = BufferRegistry::new();
+        // Every line is the same width, so entry `i` starts at `i * LINE_LEN`.
+        const LINE_LEN: usize = "entry 00\n".len();
+        let text: String = (0..20).map(|i| format!("entry {i:02}\n")).collect();
+        let (buffer_id, _) = buffers.open(Path::new("/dir/file.rs"), &text);
+
+        let mut jumplist = JumpList::default();
+        for i in 0..20 {
+            let anchor = {
+                let buffer = buffers.get(buffer_id).expect("buffer open");
+                let guard = buffer.read().expect("buffer readable");
+                guard.anchor_at(i * LINE_LEN, Bias::Right)
+            };
+            let entry = JumpEntry {
+                buffer_id,
+                selections: vec![Selection {
+                    id: 0,
+                    start: anchor,
+                    end: anchor,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }],
+            };
+            jumplist.push(entry, &buffers);
+        }
+
+        let mut picker = JumplistPicker::new(&jumplist, &buffers);
+        while picker.selected() + 1 < picker.entries().len() {
+            picker.select_next();
+        }
+        assert_eq!(picker.selected(), 19, "the last entry is selected");
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render_jumplist_picker(
+            &picker,
+            &selection_theme(),
+            area,
+            &mut buf,
+            &mut stoatty_widgets::ApcScene::new(),
+        );
+
+        let rows = selected_rows(&buf);
+        assert_eq!(rows.len(), 1, "the selection is on screen exactly once");
+        let text = row_text(&buf, rows[0]);
+        assert!(
+            text.contains("entry 19"),
+            "and it is the selected entry that paints there: {text:?}"
+        );
     }
 }

@@ -3929,7 +3929,7 @@ impl Stoat {
             return UpdateEffect::None;
         }
         let rows = list.height as usize;
-        let start_row = selected.saturating_sub(rows.saturating_sub(1));
+        let start_row = crate::render::picker::window_start(selected, rows);
         let index = start_row + (mouse.row - list.y) as usize;
         if index >= filtered_len {
             return UpdateEffect::None;
@@ -3968,10 +3968,7 @@ impl Stoat {
             return UpdateEffect::None;
         }
 
-        let start = crate::render::location_picker::location_picker_window_start(
-            selected,
-            inner.height as usize,
-        );
+        let start = crate::render::picker::window_start(selected, inner.height as usize);
         let index = start + (mouse.row - inner.y) as usize;
         if index >= entries_len {
             return UpdateEffect::None;

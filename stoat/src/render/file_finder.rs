@@ -148,11 +148,8 @@ pub(crate) fn render_file_finder(
 
 fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
     let rows = area.height as usize;
-    let start_row = finder
-        .active_core_ref()
-        .picklist
-        .selected
-        .saturating_sub(rows.saturating_sub(1));
+    let start_row =
+        crate::render::picker::window_start(finder.active_core_ref().picklist.selected, rows);
     paint_finder_rows(finder, area, start_row, theme, buf);
 }
 

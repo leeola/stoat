@@ -105,7 +105,7 @@ fn paint_match_rows(
         return;
     }
 
-    let start_row = finder.selected.saturating_sub(rows.saturating_sub(1));
+    let start_row = crate::render::picker::window_start(finder.selected, rows);
 
     let row_style = theme.get(scope::UI_TEXT);
     let selected_style = theme.get(scope::UI_SELECTION);

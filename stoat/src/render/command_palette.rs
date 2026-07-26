@@ -252,10 +252,7 @@ fn render_palette_arg_picker(
     picker.active_core().picklist.viewport_rows = Some(list.height as usize);
     let rows = list.height as usize;
     let core = picker.active_core_ref();
-    let start_row = core
-        .picklist
-        .selected
-        .saturating_sub(rows.saturating_sub(1));
+    let start_row = crate::render::picker::window_start(core.picklist.selected, rows);
     crate::render::picker::paint_path_rows(
         &core.picklist,
         &core.git_root,

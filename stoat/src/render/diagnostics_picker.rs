@@ -70,8 +70,10 @@ pub(crate) fn render_diagnostics_picker(
     let msg_x = sev_x + sev_w + 1;
     let msg_w = inner.width.saturating_sub(msg_x - inner.x);
 
-    for (i, entry) in entries.iter().take(max_entries as usize).enumerate() {
-        let row = inner.y + i as u16;
+    let rows = max_entries as usize;
+    let start = crate::render::picker::window_start(picker.selected(), rows);
+    for (i, entry) in entries.iter().enumerate().skip(start).take(rows) {
+        let row = inner.y + (i - start) as u16;
         let is_selected = i == picker.selected();
         let base_style = if is_selected {
             selected_style
@@ -137,5 +139,65 @@ fn severity_glyph(severity: Option<DiagnosticSeverity>) -> &'static str {
         Some(DiagnosticSeverity::INFORMATION) => "I",
         Some(DiagnosticSeverity::HINT) => "H",
         _ => " ",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_diagnostics_picker;
+    use crate::{
+        buffer::{BufferId, TextBuffer},
+        diagnostics_picker::DiagnosticsPicker,
+        host::OffsetEncoding,
+        render::picker::test_support::{row_text, selected_rows, selection_theme},
+    };
+    use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use std::path::Path;
+
+    #[test]
+    fn the_last_of_more_diagnostics_than_fit_paints_as_selected() {
+        let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
+        let buffer = TextBuffer::with_text(BufferId::new(1), &text);
+        let diagnostics: Vec<(OffsetEncoding, Diagnostic)> = (0..20u32)
+            .map(|line| {
+                let position = Position { line, character: 0 };
+                let diagnostic = Diagnostic {
+                    range: Range {
+                        start: position,
+                        end: position,
+                    },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: format!("diagnostic {line}"),
+                    ..Diagnostic::default()
+                };
+                (OffsetEncoding::Utf16, diagnostic)
+            })
+            .collect();
+
+        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
+        for _ in 1..picker.entries().len() {
+            picker.select_next();
+        }
+        assert_eq!(picker.selected(), 19, "the last entry is selected");
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render_diagnostics_picker(
+            &picker,
+            Path::new("/r"),
+            &selection_theme(),
+            area,
+            &mut buf,
+            &mut stoatty_widgets::ApcScene::new(),
+        );
+
+        let rows = selected_rows(&buf);
+        assert_eq!(rows.len(), 1, "the selection is on screen exactly once");
+        let text = row_text(&buf, rows[0]);
+        assert!(
+            text.contains("diagnostic 19"),
+            "and it is the selected entry that paints there: {text:?}"
+        );
     }
 }

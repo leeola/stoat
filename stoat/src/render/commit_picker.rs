@@ -220,7 +220,7 @@ fn paint_commit_picker_rows(
     if rows == 0 {
         return;
     }
-    let start_row = picker.selected.saturating_sub(rows.saturating_sub(1));
+    let start_row = crate::render::picker::window_start(picker.selected, rows);
 
     let visible: Vec<CommitRow> = picker
         .filtered
