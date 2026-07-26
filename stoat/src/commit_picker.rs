@@ -90,6 +90,22 @@ pub(crate) fn age_label(now_epoch: i64, commit_time: i64) -> String {
     "now".to_string()
 }
 
+/// Longest text in each column across the rows `filtered` names, in
+/// characters.
+///
+/// `rows` is indexed by commit, not by filter position, so this reads through
+/// `filtered` rather than zipping the two.
+fn measure_columns(rows: &[CommitRow], filtered: &[usize]) -> [u16; COMMIT_COLUMNS] {
+    let mut widest = [0u16; COMMIT_COLUMNS];
+    for &idx in filtered {
+        let Some(row) = rows.get(idx) else { continue };
+        for (column, cell) in row.cells.iter().enumerate() {
+            widest[column] = widest[column].max(cell.text.chars().count() as u16);
+        }
+    }
+    widest
+}
+
 /// A picker scope a drill-in displaced, kept so popping back restores exactly
 /// what the user was looking at.
 ///
@@ -174,6 +190,13 @@ pub(crate) struct CommitPicker {
     /// empty. A filtered list is non-contiguous, and edges drawn between rows
     /// that are no longer adjacent would claim a history that does not exist.
     pub(crate) graph: (Vec<GraphRow>, u16),
+    /// Longest text in each column across every filtered row, in characters.
+    ///
+    /// Measured over the whole filtered list rather than the rows on screen,
+    /// for two reasons. Columns sized to the visible slice resize under the
+    /// user as a wider cell scrolls into view, and a pooled page painting an
+    /// arbitrary span has to land on the same geometry every other page did.
+    pub(crate) col_widest: [u16; COMMIT_COLUMNS],
 }
 
 impl CommitPicker {
@@ -210,6 +233,7 @@ impl CommitPicker {
             scope_stack: Vec::new(),
             scope_label: None,
             graph: (Vec::new(), 0),
+            col_widest: [0; COMMIT_COLUMNS],
         };
         picker.graph = commit_graph::assign_lanes(&picker.commits);
         picker.refilter("");
@@ -339,23 +363,26 @@ impl CommitPicker {
             })
             .collect();
 
-        let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
-            self.filtered = (0..self.commits.len()).collect();
-            self.match_indices = vec![Vec::new(); self.commits.len()];
-            self.clamp_selected();
-            return;
-        };
+        match fuzzy::match_and_rank(query, items) {
+            None => {
+                self.filtered = (0..self.commits.len()).collect();
+                self.match_indices = vec![Vec::new(); self.commits.len()];
+            },
+            Some(mut matches) => {
+                fuzzy::sort_ranked(&mut matches);
 
-        fuzzy::sort_ranked(&mut matches);
-
-        self.filtered = Vec::with_capacity(matches.len());
-        self.match_indices = Vec::with_capacity(matches.len());
-        for m in matches {
-            let shift = shift(m.item);
-            self.match_indices
-                .push(m.matched_indices.iter().map(|&i| i + shift).collect());
-            self.filtered.push(m.item);
+                self.filtered = Vec::with_capacity(matches.len());
+                self.match_indices = Vec::with_capacity(matches.len());
+                for m in matches {
+                    let shift = shift(m.item);
+                    self.match_indices
+                        .push(m.matched_indices.iter().map(|&i| i + shift).collect());
+                    self.filtered.push(m.item);
+                }
+            },
         }
+
+        self.col_widest = measure_columns(&rows, &self.filtered);
         self.clamp_selected();
     }
 
@@ -438,6 +465,20 @@ impl CommitPicker {
         self.input.dispose(ws);
     }
 
+    /// The rows the table would paint starting at `start_row`, at most `rows`
+    /// of them.
+    ///
+    /// The window is the caller's to choose. A live picker follows its
+    /// selection, while a pooled page covers a fixed span of the list.
+    pub(crate) fn window(&self, start_row: usize, rows: usize) -> Vec<CommitRow> {
+        self.filtered
+            .iter()
+            .skip(start_row)
+            .take(rows)
+            .map(|&idx| self.row(idx))
+            .collect()
+    }
+
     fn clamp_selected(&mut self) {
         let mut next = self.selected;
         crate::picker::nav_clamp(self.filtered.len(), &mut next);
@@ -506,6 +547,7 @@ mod tests {
             scope_stack: Vec::new(),
             scope_label: None,
             graph: (Vec::new(), 0),
+            col_widest: [0; COMMIT_COLUMNS],
         };
         p.graph = commit_graph::assign_lanes(&p.commits);
         p.refilter("");
@@ -1003,6 +1045,28 @@ mod tests {
         let mut scene = stoatty_widgets::ApcScene::new();
         crate::render::commit_picker::paint_commit_graph(p, 0, area, theme, &mut buf, &mut scene);
         (buf, scene)
+    }
+
+    #[test]
+    fn a_column_sizes_to_the_whole_list_not_the_visible_rows() {
+        let mut long = history();
+        long.push(commit(
+            "ddd4444",
+            "a summary long enough to widen its column",
+        ));
+        let p = picker(long, &[], "ccc3333");
+
+        let title = p.col_widest[CommitColumn::Title as usize];
+        assert_eq!(
+            title, 41,
+            "the widest title sizes the column even though it is the last row"
+        );
+        assert!(
+            p.window(0, 2)
+                .iter()
+                .all(|row| row.cells[CommitColumn::Title as usize].text.len() < title as usize),
+            "and no row in the first window is that wide, so the measure is not local"
+        );
     }
 
     #[test]

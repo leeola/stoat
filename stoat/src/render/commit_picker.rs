@@ -1,11 +1,12 @@
 use crate::{
-    commit_picker::{CommitColumn, CommitPicker, CommitPickerRole, CommitRow, COMMIT_COLUMNS},
+    commit_picker::{CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS},
     render::{
         file_finder::file_finder_layout,
         review::style_rgb,
         table::{self, Column, Width},
         text::write_str_clipped,
     },
+    review_session::ReviewSession,
     theme::{scope, Theme},
     workspace::Workspace,
 };
@@ -197,7 +198,7 @@ pub(crate) fn render_commit_picker(
     picker.viewport_rows = Some(layout.list.height as usize);
     let start_row =
         crate::render::picker::window_start(picker.selected, layout.list.height as usize);
-    paint_commit_picker_rows(picker, layout.header, layout.list, theme, buf);
+    paint_commit_picker_rows(picker, start_row, layout.header, layout.list, theme, buf);
     if let Some(graph_rect) = layout.graph {
         paint_commit_graph(picker, start_row, graph_rect, theme, buf, scene);
     }
@@ -419,15 +420,31 @@ const COLUMN_ORDER: [CommitColumn; COMMIT_COLUMNS] = [
     CommitColumn::Date,
 ];
 
-/// Paint the commit table into `list`, with its column labels in `header`,
-/// following the selection so the selected row stays visible.
+/// `scroll` clamped so the last page of `session`'s diff still fills `height`.
 ///
-/// Widths resolve over the rows actually about to be painted, so the columns
-/// fit what is on screen rather than the whole history. Match highlights are
-/// translated out of each row's joined haystack onto the column showing them,
-/// and one whose cell truncated it away is dropped.
+/// The diff's row count is only known once its session has built, so the wheel
+/// and the paging keys let the scroll run past the end and it is pulled back
+/// here. Split out from the renderer because a pooled preview page clamps
+/// against the same session without a live picker to mutate.
+pub(crate) fn clamped_preview_scroll(scroll: usize, session: &ReviewSession, height: u16) -> usize {
+    let last_page =
+        crate::render::commits::preview_row_count(session).saturating_sub(height as usize);
+    scroll.min(last_page)
+}
+
+/// Paint the commit table into `list`, with its column labels in `header`,
+/// covering the `list.height` rows starting at `start_row`.
+///
+/// The window is the caller's choice rather than derived from the selection,
+/// so a pooled page can paint a span the live picker is not looking at.
+///
+/// Widths come from the picker's measure over the whole filtered list, so every
+/// window agrees on where the columns sit. Match highlights are translated out
+/// of each row's joined haystack onto the column showing them, and one whose
+/// cell truncated it away is dropped.
 fn paint_commit_picker_rows(
     picker: &CommitPicker,
+    start_row: usize,
     header: Rect,
     area: Rect,
     theme: &Theme,
@@ -437,28 +454,12 @@ fn paint_commit_picker_rows(
     if rows == 0 {
         return;
     }
-    let start_row = crate::render::picker::window_start(picker.selected, rows);
 
-    let visible: Vec<CommitRow> = picker
-        .filtered
-        .iter()
-        .skip(start_row)
-        .take(rows)
-        .map(|&idx| picker.row(idx))
-        .collect();
+    let visible = picker.window(start_row, rows);
 
     let text_x = area.x + 1;
     let table_width = area.width.saturating_sub(1);
-    let widest: Vec<u16> = (0..COMMIT_COLUMNS)
-        .map(|column| {
-            visible
-                .iter()
-                .map(|row| row.cells[column].text.chars().count() as u16)
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-    let widths = table::resolve_widths(&COLUMNS, &widest, table_width);
+    let widths = table::resolve_widths(&COLUMNS, &picker.col_widest, table_width);
     let starts = table::column_starts(&widths);
 
     let muted = theme.get(scope::UI_TEXT_MUTED);
@@ -598,9 +599,8 @@ fn render_preview(
         .cloned();
     match session {
         Some(session) => {
-            let last_page = crate::render::commits::preview_row_count(&session)
-                .saturating_sub(area.height as usize);
-            picker.preview_scroll = picker.preview_scroll.min(last_page);
+            picker.preview_scroll =
+                clamped_preview_scroll(picker.preview_scroll, &session, area.height);
             crate::render::commits::render_commit_preview(
                 &session,
                 theme,
