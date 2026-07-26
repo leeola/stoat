@@ -1376,7 +1376,59 @@ mod tests {
         let painted: String = (0..3)
             .map(|y| buf.cell((0, y)).expect("in bounds").symbol().to_owned())
             .collect();
-        assert_eq!(painted, "●●●", "each row's node lands in lane 0");
+        assert_eq!(
+            painted, "◉◉●",
+            "each row's node lands in lane 0, and the two branch tips take the \
+             ringed glyph while the commit under them takes the plain one"
+        );
+    }
+
+    /// A branch tip is the row a reader navigates by, so it has to be tellable
+    /// from the history running past it at a glance.
+    #[test]
+    fn a_branch_tip_strokes_a_wider_node_in_a_stronger_color() {
+        use crate::render::commit_picker::{BRANCH_NODE_DIAMETER, NODE_DIAMETER};
+        use stoatty_protocol::command::Command;
+
+        // The blend only shows against a modal background that resolves to RGB,
+        // so the theme states both that and the foreground the rich path gates
+        // on rather than relying on whatever the default carries.
+        let theme = {
+            let src = r##"theme t { ui.text.fg = "#ffffff"; ui.modal.palette.bg = "#282c34"; }"##;
+            let (config, _) = stoat_config::parse(src);
+            crate::theme::Theme::from_config(&config.expect("theme parses"), "t")
+                .expect("theme loads")
+        };
+
+        let h = seeded_picker_harness();
+        let p = h.stoat.commit_picker.as_ref().expect("open");
+        let (_, mut scene) = painted_graph(p, &theme);
+
+        // A node is the zero-length polyline the renderer draws as a disc. The
+        // lane runs between rows carry two or more points.
+        let nodes: Vec<(u16, [u8; 3])> =
+            crate::test_harness::apc::decode_apc_stream(scene.buffer())
+                .into_iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Polyline(line) if line.points.len() == 1 => {
+                        Some((line.width, line.color))
+                    },
+                    _ => None,
+                })
+                .collect();
+
+        let widths: Vec<u16> = nodes.iter().map(|&(width, _)| width).collect();
+        assert_eq!(
+            widths,
+            [BRANCH_NODE_DIAMETER, BRANCH_NODE_DIAMETER, NODE_DIAMETER],
+            "main and feature sit on the first two rows and draw wide nodes, \
+             leaving the commit below them an ordinary one"
+        );
+        assert_ne!(
+            nodes[0].1, nodes[2].1,
+            "and a tip keeps the raw lane color rather than the blended one \
+             every other node shares"
+        );
     }
 
     /// The picker covers the pane behind it, so a wheel anywhere over it has to

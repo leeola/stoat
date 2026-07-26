@@ -241,13 +241,23 @@ const LANE_COLORS: [[u8; 3]; 6] = [
 ];
 
 /// Share of the background mixed into a lane color, in percent.
-const LANE_BLEND_PERCENT: u16 = 20;
+///
+/// Enough to settle the palette against the modal background without washing
+/// the lanes out. A graph too faint to trace is a graph that does not do its
+/// job, so this stays light.
+const LANE_BLEND_PERCENT: u16 = 10;
 
 /// Stroke thickness of a lane line, in sixteenths of a cell.
-const LANE_STROKE: u16 = 2;
+const LANE_STROKE: u16 = 5;
 
 /// Diameter of a commit's node dot, in sixteenths of a cell.
-const NODE_DIAMETER: u16 = 6;
+pub(crate) const NODE_DIAMETER: u16 = 10;
+
+/// Diameter of a branch tip's node dot, in sixteenths of a cell.
+///
+/// Wider than an ordinary commit's, and drawn in the unblended lane color, so
+/// the rows a reader orients by stand out from the history running past them.
+pub(crate) const BRANCH_NODE_DIAMETER: u16 = 14;
 
 /// Intermediate points sampled along a lane transition. Four segments read as a
 /// curve at cell scale without the protocol needing a curve primitive.
@@ -255,6 +265,9 @@ const CURVE_SEGMENTS: i32 = 4;
 
 /// Paint the node graph for the rows starting at `start_row`, one graph row per
 /// table row.
+///
+/// A row whose commit is a local branch tip gets a wider node in the unblended
+/// lane color, since those are the rows a reader navigates by.
 ///
 /// Under a terminal whose theme resolves to RGB this strokes the lanes as
 /// polylines and writes no glyphs, matching how every other sub-cell component
@@ -280,25 +293,27 @@ pub(crate) fn paint_commit_graph(
     let rich = style_rgb(theme.get(scope::UI_TEXT).fg).is_some();
     let background = style_rgb(theme.get(scope::UI_MODAL_PALETTE).bg);
     let drawn = (*lanes).min(MAX_DRAWN_LANES);
-    let lane_color = |lane: u16| {
-        let raw = LANE_COLORS[lane.min(drawn - 1) as usize % LANE_COLORS.len()];
-        match background {
-            Some(bg) => blend(raw, bg, LANE_BLEND_PERCENT),
-            None => raw,
-        }
+    let raw_lane_color = |lane: u16| LANE_COLORS[lane.min(drawn - 1) as usize % LANE_COLORS.len()];
+    let lane_color = |lane: u16| match background {
+        Some(bg) => blend(raw_lane_color(lane), bg, LANE_BLEND_PERCENT),
+        None => raw_lane_color(lane),
     };
     // A lane past the drawn width folds onto the last one rather than falling
     // off the column, so a deep history still shows every commit's node.
     let clamp = |lane: u16| lane.min(drawn - 1);
 
-    for (row_idx, row) in rows
+    // The lanes are laid out over `commits`, and the column only shows while
+    // that is exactly what the list displays, so the two walk together.
+    for (row_idx, (row, commit)) in rows
         .iter()
+        .zip(&picker.commits)
         .skip(start_row)
         .take(area.height as usize)
         .enumerate()
     {
         let y = row_idx as u16;
         let node_lane = clamp(row.node_lane);
+        let tip = picker.branch_tips.contains_key(&commit.sha);
 
         for edge in &row.edges {
             let (from, to) = (clamp(edge.from_lane), clamp(edge.to_lane));
@@ -317,11 +332,16 @@ pub(crate) fn paint_commit_graph(
 
         match rich {
             true => {
-                let center = [lane_center(node_lane), row_center(y)];
                 Polyline {
-                    points: vec![center],
-                    width: NODE_DIAMETER,
-                    color: lane_color(node_lane),
+                    points: vec![[lane_center(node_lane), row_center(y)]],
+                    width: match tip {
+                        true => BRANCH_NODE_DIAMETER,
+                        false => NODE_DIAMETER,
+                    },
+                    color: match tip {
+                        true => raw_lane_color(node_lane),
+                        false => lane_color(node_lane),
+                    },
                 }
                 .render(area, buf, scene);
             },
@@ -329,7 +349,10 @@ pub(crate) fn paint_commit_graph(
                 let x = area.x + node_lane * LANE_CELLS;
                 if x < area.x + area.width {
                     buf[(x, area.y + y)]
-                        .set_char('●')
+                        .set_char(match tip {
+                            true => '◉',
+                            false => '●',
+                        })
                         .set_style(theme.get(scope::UI_TEXT));
                 }
             },
