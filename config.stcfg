@@ -733,6 +733,7 @@ on key {
         Ctrl-n -> CommitPickerNext();
         Ctrl-f -> CommitPickerPageDown();
         Ctrl-b -> CommitPickerPageUp();
+        BackTab -> CommitPickerColumnCycle();
         Enter -> CommitPickerSelect();
         Escape -> CommitPickerClose();
     }

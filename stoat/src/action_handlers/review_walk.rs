@@ -110,6 +110,24 @@ pub(crate) fn commit_picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect 
     UpdateEffect::Redraw
 }
 
+/// Advance which column of the commit table the query filters.
+///
+/// Refilters against the query already typed, so the list narrows to the new
+/// column immediately, and re-syncs the preview because the selection may land
+/// on a different commit once the rows change.
+pub(crate) fn commit_picker_column_cycle(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(picker) = stoat.commit_picker.as_ref() else {
+        return UpdateEffect::None;
+    };
+    let query = picker.input.text(stoat.active_workspace());
+    let Some(picker) = stoat.commit_picker.as_mut() else {
+        return UpdateEffect::None;
+    };
+    picker.cycle_filter_column(&query);
+    ensure_selected_preview(stoat);
+    UpdateEffect::Redraw
+}
+
 /// Page the commit picker's selection by half its visible rows in `dir`.
 ///
 /// The paging counterpart to [`commit_picker_step`], and it syncs the preview

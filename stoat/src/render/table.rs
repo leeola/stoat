@@ -76,24 +76,32 @@ pub(crate) fn column_starts(widths: &[u16]) -> Vec<u16> {
 
 /// Paint the header labels across `area`'s first row, each truncated to its
 /// column.
+///
+/// `style_of` picks a style per column index, so a table that highlights one
+/// column can say which without the painter knowing why.
 pub(crate) fn paint_header(
     buf: &mut Buffer,
     area: Rect,
     columns: &[Column],
     widths: &[u16],
-    style: Style,
+    style_of: impl Fn(usize) -> Style,
 ) {
     if area.height == 0 {
         return;
     }
-    for ((column, &width), &start) in columns.iter().zip(widths).zip(column_starts(widths).iter()) {
+    for (i, ((column, &width), &start)) in columns
+        .iter()
+        .zip(widths)
+        .zip(column_starts(widths).iter())
+        .enumerate()
+    {
         paint_cell(
             buf,
             area.x + start,
             area.y,
             column.label,
             width,
-            style,
+            style_of(i),
             area,
         );
     }

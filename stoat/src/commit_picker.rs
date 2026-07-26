@@ -123,6 +123,11 @@ pub(crate) struct CommitPicker {
     /// Sha the in-flight or most recent preview was requested for, so a build
     /// that lands after the selection moved on is discarded.
     pub(crate) requested_preview: Option<String>,
+    /// Column the query is scoped to, or `None` to match the whole row.
+    ///
+    /// Scoping is what makes the table searchable per field, so typing an
+    /// author name stops hitting every title that happens to contain it.
+    pub(crate) filter_column: Option<CommitColumn>,
     /// Unix epoch seconds the picker opened at, which every row's age column is
     /// measured against.
     ///
@@ -160,6 +165,7 @@ impl CommitPicker {
             preview_sessions: HashMap::new(),
             pending_preview: None,
             requested_preview: None,
+            filter_column: None,
         };
         picker.refilter("");
         picker.selected = picker.default_selection();
@@ -219,7 +225,29 @@ impl CommitPicker {
     /// An empty or whitespace-only query lists every commit newest-first with
     /// no highlights.
     pub(crate) fn refilter(&mut self, query: &str) {
-        let items = (0..self.commits.len()).map(|idx| (idx, self.row(idx).text));
+        let column = self.filter_column;
+        let rows: Vec<CommitRow> = (0..self.commits.len()).map(|idx| self.row(idx)).collect();
+
+        // A scoped query searches one cell, so the matcher reports offsets into
+        // that cell rather than into the join. Shifting them by the cell's own
+        // start puts them back in join space, which is the only offset space the
+        // renderer knows about.
+        let shift = |idx: usize| match column {
+            Some(column) => rows[idx].cells[column as usize].start as u32,
+            None => 0,
+        };
+        let items: Vec<(usize, String)> = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let text = match column {
+                    Some(column) => row.cells[column as usize].text.clone(),
+                    None => row.text.clone(),
+                };
+                (idx, text)
+            })
+            .collect();
+
         let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
             self.filtered = (0..self.commits.len()).collect();
             self.match_indices = vec![Vec::new(); self.commits.len()];
@@ -236,10 +264,29 @@ impl CommitPicker {
         self.filtered = Vec::with_capacity(matches.len());
         self.match_indices = Vec::with_capacity(matches.len());
         for m in matches {
+            let shift = shift(m.item);
+            self.match_indices
+                .push(m.matched_indices.iter().map(|&i| i + shift).collect());
             self.filtered.push(m.item);
-            self.match_indices.push(m.matched_indices);
         }
         self.clamp_selected();
+    }
+
+    /// Advance which column the query searches, wrapping through every column
+    /// and back to searching the whole row.
+    ///
+    /// Refilters as it goes, so the list narrows to the new column under the
+    /// query already typed rather than waiting for the next keystroke.
+    pub(crate) fn cycle_filter_column(&mut self, query: &str) {
+        self.filter_column = match self.filter_column {
+            None => Some(CommitColumn::Commit),
+            Some(CommitColumn::Commit) => Some(CommitColumn::Branch),
+            Some(CommitColumn::Branch) => Some(CommitColumn::Title),
+            Some(CommitColumn::Title) => Some(CommitColumn::Author),
+            Some(CommitColumn::Author) => Some(CommitColumn::Date),
+            Some(CommitColumn::Date) => None,
+        };
+        self.refilter(query);
     }
 
     /// Adjust the selection cursor by `delta`, saturating at list bounds.
@@ -308,7 +355,7 @@ impl CommitPicker {
 
 #[cfg(test)]
 mod tests {
-    use super::{age_label, CommitColumn, CommitPicker, CommitPickerRole};
+    use super::{age_label, CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS};
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
@@ -358,6 +405,7 @@ mod tests {
             preview_sessions: HashMap::new(),
             pending_preview: None,
             requested_preview: None,
+            filter_column: None,
             // The fixture's commits sit at epoch zero, so this dates every row
             // to "now" and keeps the age column out of the row assertions.
             now_epoch: 0,
@@ -440,6 +488,80 @@ mod tests {
             bare.cells[CommitColumn::Title as usize].start,
             9,
             "the title still starts after the empty branch cell and its space"
+        );
+    }
+
+    #[test]
+    fn cycling_walks_every_column_and_returns_to_all() {
+        let mut p = picker(history(), &[], "ccc3333");
+        assert_eq!(p.filter_column, None, "an opened picker searches the row");
+
+        let mut seen = Vec::new();
+        for _ in 0..COMMIT_COLUMNS + 1 {
+            p.cycle_filter_column("");
+            seen.push(p.filter_column);
+        }
+        assert_eq!(
+            seen,
+            [
+                Some(CommitColumn::Commit),
+                Some(CommitColumn::Branch),
+                Some(CommitColumn::Title),
+                Some(CommitColumn::Author),
+                Some(CommitColumn::Date),
+                None,
+            ],
+            "one pass through the columns lands back on the whole row"
+        );
+    }
+
+    /// The point of scoping is that a query stops hitting columns the user is
+    /// not searching, so a summary word must miss while the sha is active.
+    #[test]
+    fn a_scoped_query_matches_only_its_own_column() {
+        let mut p = picker(history(), &[("main", "ccc3333")], "ccc3333");
+        p.refilter("widget");
+        assert_eq!(shown(&p), ["ccc3333"], "unscoped, the summary matches");
+
+        p.filter_column = Some(CommitColumn::Commit);
+        p.refilter("widget");
+        assert_eq!(
+            shown(&p),
+            Vec::<String>::new(),
+            "scoped to the sha, a summary word matches nothing"
+        );
+
+        p.filter_column = Some(CommitColumn::Branch);
+        p.refilter("main");
+        assert_eq!(
+            shown(&p),
+            ["ccc3333"],
+            "and the branch column finds its own text"
+        );
+    }
+
+    /// Highlights are painted from offsets into the joined row, so a scoped
+    /// match has to be shifted out of its cell or it would light up the sha.
+    #[test]
+    fn a_scoped_match_reports_offsets_into_the_joined_row() {
+        let mut p = picker(history(), &[("main", "ccc3333")], "ccc3333");
+        p.filter_column = Some(CommitColumn::Title);
+        p.refilter("add");
+
+        let row = p.row(p.filtered[0]);
+        let title_start = row.cells[CommitColumn::Title as usize].start;
+        assert_eq!(
+            p.match_indices[0],
+            [
+                title_start as u32,
+                title_start as u32 + 1,
+                title_start as u32 + 2
+            ],
+            "the three matched characters sit where the title begins in the join"
+        );
+        assert!(
+            row.text[..title_start].contains("ccc3333"),
+            "which is past the sha, so the highlight cannot land on it"
         );
     }
 
@@ -611,6 +733,49 @@ mod tests {
         assert!(
             !browse.contains(" review from commit "),
             "and never offers to start a review it will not start"
+        );
+    }
+
+    /// Foreground of the header cell under `label`, on the row the labels are
+    /// painted on.
+    fn header_fg(h: &crate::test_harness::TestHarness, label: &str) -> ratatui::style::Color {
+        let text = h.rendered_text();
+        let (y, line) = text
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains("Commit") && line.contains("Branch"))
+            .expect("the header row is painted");
+        let x = line.find(label).expect("the label is painted") as u16;
+        h.rendered_buffer()[(x, y as u16)].fg
+    }
+
+    /// Scoping is only usable if the table says which column it scoped to, so
+    /// the active header has to look different from the rest.
+    #[test]
+    fn a_scoped_column_stands_out_from_the_dimmed_ones() {
+        let mut h = seeded_picker_harness();
+        h.snapshot();
+        assert_eq!(
+            header_fg(&h, "Commit"),
+            header_fg(&h, "Title"),
+            "with no column scoped every header reads the same"
+        );
+
+        h.stoat
+            .commit_picker
+            .as_mut()
+            .expect("picker open")
+            .filter_column = Some(CommitColumn::Title);
+        h.snapshot();
+        assert_ne!(
+            header_fg(&h, "Title"),
+            header_fg(&h, "Commit"),
+            "the scoped column's header separates from the others"
+        );
+        assert_eq!(
+            header_fg(&h, "Commit"),
+            header_fg(&h, "Author"),
+            "and every column it is not scoped to still reads alike"
         );
     }
 

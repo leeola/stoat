@@ -244,13 +244,15 @@ fn paint_commit_picker_rows(
     let widths = table::resolve_widths(&COLUMNS, &widest, table_width);
     let starts = table::column_starts(&widths);
 
+    let muted = theme.get(scope::UI_TEXT_MUTED);
     let header_area = Rect::new(text_x, header.y, table_width, header.height);
-    table::paint_header(
+    paint_column_header(
         buf,
         header_area,
-        &COLUMNS,
         &widths,
-        theme.get(scope::UI_TEXT_MUTED),
+        picker.filter_column,
+        muted,
+        theme.get(scope::UI_SEARCH_MATCH),
     );
 
     let row_style = theme.get(scope::UI_TEXT);
@@ -291,6 +293,14 @@ fn paint_commit_picker_rows(
                     CommitColumn::Title => style,
                 }
             };
+            // A scoped query dims every column it does not search, so the one
+            // being searched is obvious. The selected row keeps its background
+            // and gives up only its foreground, which would otherwise lose the
+            // selection entirely.
+            let cell_style = match picker.filter_column {
+                Some(active) if active != COLUMN_ORDER[column] => dimmed(cell_style, muted),
+                _ => cell_style,
+            };
             table::paint_cell(
                 buf,
                 text_x + start,
@@ -319,6 +329,36 @@ fn paint_commit_picker_rows(
                 buf[(col, y)].set_style(match_style);
             }
         }
+    }
+}
+
+/// Paint the column labels, marking which one the query is scoped to.
+///
+/// The active label takes the search-match color and the rest stay muted, so
+/// the header says what Shift-Tab has selected. With no column scoped every
+/// label is muted, which is the unscoped table's usual look.
+fn paint_column_header(
+    buf: &mut Buffer,
+    area: Rect,
+    widths: &[u16],
+    active: Option<CommitColumn>,
+    muted: ratatui::style::Style,
+    match_style: ratatui::style::Style,
+) {
+    table::paint_header(buf, area, &COLUMNS, widths, |column| match active {
+        Some(active) if active == COLUMN_ORDER[column] => match_style,
+        _ => muted,
+    });
+}
+
+/// `style` with the muted foreground, keeping whatever background it carries.
+///
+/// Dimming a cell must not drop the selection's background, which is the only
+/// thing marking which row the cursor is on.
+fn dimmed(style: ratatui::style::Style, muted: ratatui::style::Style) -> ratatui::style::Style {
+    match muted.fg {
+        Some(fg) => style.fg(fg),
+        None => style,
     }
 }
 
