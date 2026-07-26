@@ -549,6 +549,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitPickerPageDown => review_walk::commit_picker_page(stoat, 1),
         ActionKind::CommitPickerPageUp => review_walk::commit_picker_page(stoat, -1),
         ActionKind::CommitPickerColumnCycle => review_walk::commit_picker_column_cycle(stoat),
+        ActionKind::CommitPickerDrillIn => review_walk::commit_picker_drill_in(stoat),
+        ActionKind::CommitPickerBack => review_walk::commit_picker_back(stoat),
         ActionKind::CommitPickerSelect => review_walk::commit_picker_select(stoat),
         ActionKind::CommitPickerClose => review_walk::commit_picker_close(stoat),
         ActionKind::LocationPickerNext => picker::location_picker_next(stoat),

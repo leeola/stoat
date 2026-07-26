@@ -128,6 +128,75 @@ pub(crate) fn commit_picker_column_cycle(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Re-scope the list to the commits the selected merge brought in.
+///
+/// The scope is `merge^1..merge^2`, which leaves out the mainline the merge
+/// landed on. That is the branch's own work, which is what a user drilling into
+/// a merge is asking to see. A row with fewer than two parents has no branch to
+/// drill into and badges instead.
+pub(crate) fn commit_picker_drill_in(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(picker) = stoat.commit_picker.as_ref() else {
+        return UpdateEffect::None;
+    };
+    let Some(commit) = picker.selected_commit() else {
+        return UpdateEffect::None;
+    };
+    let (sha, short_sha) = (commit.sha.clone(), commit.short_sha.clone());
+    let workdir = picker.workdir.clone();
+    let query = picker.input.text(stoat.active_workspace());
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        return review_error(stoat, "not in a git repository", None);
+    };
+    let parents = repo.parent_shas(&sha);
+    let [mainline, branch, ..] = parents.as_slice() else {
+        return review_error(stoat, "not a merge commit", None);
+    };
+    let commits = repo.log_range(branch, mainline, WALK_LIMIT);
+    if commits.is_empty() {
+        return review_error(stoat, "merge brought in no commits", None);
+    }
+
+    let branch = branch.clone();
+    let Some(picker) = stoat.commit_picker.as_mut() else {
+        return UpdateEffect::None;
+    };
+    picker.push_scope(format!("merge {short_sha}"), branch, commits, query);
+
+    set_picker_query(stoat, "");
+    ensure_selected_preview(stoat);
+    UpdateEffect::Redraw
+}
+
+/// Return to the scope the last drill re-scoped away from.
+///
+/// The query typed in that scope comes back with it, since the user is being
+/// put back where they were rather than handed a fresh list.
+pub(crate) fn commit_picker_back(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(picker) = stoat.commit_picker.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let Some(query) = picker.pop_scope() else {
+        return UpdateEffect::None;
+    };
+
+    set_picker_query(stoat, &query);
+    ensure_selected_preview(stoat);
+    UpdateEffect::Redraw
+}
+
+/// Write `text` into the picker's query field, replacing whatever is there.
+///
+/// The workspace is reached by index rather than through `active_workspace_mut`
+/// so the picker borrow and the workspace borrow stay disjoint.
+fn set_picker_query(stoat: &mut Stoat, text: &str) {
+    let active_idx = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[active_idx];
+    if let Some(picker) = stoat.commit_picker.as_ref() {
+        picker.input.replace_text(ws, text);
+    }
+}
+
 /// Page the commit picker's selection by half its visible rows in `dir`.
 ///
 /// The paging counterpart to [`commit_picker_step`], and it syncs the preview
@@ -577,6 +646,196 @@ mod tests {
             "a browser starts at the newest commit, not a branch-tip heuristic"
         );
         assert_eq!(picker_shas(&h), ["c3d4e5f6", "b2c3d4e5", "a1b2c3d4"]);
+    }
+
+    /// A harness whose `/repo` has a two-commit `feature` branch merged back
+    /// into `main`, with the merge on the tip so `:git-ls` opens on it.
+    fn merged_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        {
+            let mut repo = h.fake_git().add_repo("/repo");
+            repo.commit_with_message("a1b2c3d4", "feat: add a.rs", &[("a.rs", "fn a() {}\n")])
+                .commit_with_parent_message(
+                    "f1111111",
+                    "a1b2c3d4",
+                    "feat: start the widget",
+                    &[("a.rs", "fn a() {}\n"), ("w.rs", "fn w() {}\n")],
+                )
+                .commit_with_parent_message(
+                    "f2222222",
+                    "f1111111",
+                    "feat: finish the widget",
+                    &[("a.rs", "fn a() {}\n"), ("w.rs", "fn w() {}\nfn w2() {}\n")],
+                )
+                .commit_with_parent_message(
+                    "b2c3d4e5",
+                    "a1b2c3d4",
+                    "chore: tweak a",
+                    &[("a.rs", "fn a() {}\nfn a2() {}\n")],
+                )
+                .merge_commit(
+                    "m9999999",
+                    "f2222222",
+                    &[
+                        ("a.rs", "fn a() {}\nfn a2() {}\n"),
+                        ("w.rs", "fn w() {}\nfn w2() {}\n"),
+                    ],
+                )
+                .branch("main", "m9999999")
+                .set_head_branch("main");
+        }
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h
+    }
+
+    fn picker_query(h: &TestHarness) -> String {
+        h.stoat
+            .commit_picker
+            .as_ref()
+            .map(|p| p.input.text(h.stoat.active_workspace()))
+            .unwrap_or_default()
+    }
+
+    /// Shas of the rows the query actually leaves showing, as opposed to
+    /// [`picker_shas`], which reports the whole scope regardless of filtering.
+    fn picker_filtered_shas(h: &TestHarness) -> Vec<String> {
+        h.stoat
+            .commit_picker
+            .as_ref()
+            .map(|p| {
+                p.filtered
+                    .iter()
+                    .map(|&idx| p.commits[idx].sha.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn drilling_a_merge_lists_only_the_branch_it_brought_in() {
+        let mut h = merged_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(picker_shas(&h), ["m9999999", "b2c3d4e5", "a1b2c3d4"]);
+
+        h.type_keys("alt-right");
+        h.settle();
+
+        assert_eq!(
+            picker_shas(&h),
+            ["f2222222", "f1111111"],
+            "the merged branch's own commits, without the mainline"
+        );
+        let picker = h.stoat.commit_picker.as_ref().expect("picker open");
+        assert_eq!(picker.scope_label.as_deref(), Some("merge m999999"));
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn leaving_a_drilled_scope_restores_the_list_and_the_query() {
+        let mut h = merged_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        h.type_text("9999");
+        h.settle();
+        assert_eq!(
+            picker_filtered_shas(&h),
+            ["m9999999"],
+            "narrowed to the merge"
+        );
+
+        h.type_keys("alt-right");
+        h.settle();
+        assert_eq!(picker_shas(&h), ["f2222222", "f1111111"]);
+        assert_eq!(picker_query(&h), "", "a drilled scope opens unfiltered");
+        assert_eq!(picker_filtered_shas(&h), ["f2222222", "f1111111"]);
+
+        h.type_keys("down");
+        h.settle();
+        h.type_keys("alt-left");
+        h.settle();
+
+        assert_eq!(picker_shas(&h), ["m9999999", "b2c3d4e5", "a1b2c3d4"]);
+        assert_eq!(picker_query(&h), "9999", "the query typed in that scope");
+        assert_eq!(
+            picker_filtered_shas(&h),
+            ["m9999999"],
+            "and the list it was narrowing"
+        );
+        assert_eq!(
+            h.stoat
+                .commit_picker
+                .as_ref()
+                .and_then(|p| p.scope_label.clone()),
+            None,
+            "back at the root, titled by the role again"
+        );
+    }
+
+    #[test]
+    fn drilling_a_row_that_is_not_a_merge_badges_and_leaves_the_list_alone() {
+        let mut h = merged_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        h.type_text("tweak");
+        h.settle();
+        assert_eq!(picker_filtered_shas(&h), ["b2c3d4e5"], "one-parent commit");
+
+        h.type_keys("alt-right");
+        h.settle();
+
+        assert_eq!(review_badge(&h).as_deref(), Some("not a merge commit"));
+        assert_eq!(picker_shas(&h), ["m9999999", "b2c3d4e5", "a1b2c3d4"]);
+        assert_eq!(picker_query(&h), "tweak", "the query survives the refusal");
+    }
+
+    #[test]
+    fn leaving_the_outermost_scope_does_nothing() {
+        let mut h = merged_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        h.type_keys("alt-left");
+        h.settle();
+
+        assert_eq!(picker_shas(&h), ["m9999999", "b2c3d4e5", "a1b2c3d4"]);
+        assert!(h.stoat.commit_picker.is_some(), "the picker stays open");
+    }
+
+    #[test]
+    fn picking_inside_a_drilled_scope_walks_the_drilled_commits() {
+        let mut h = merged_harness();
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+
+        h.type_keys("alt-right");
+        h.settle();
+        assert_eq!(picker_shas(&h), ["f2222222", "f1111111"]);
+
+        h.type_keys("down enter");
+        h.settle();
+
+        let walk = h
+            .stoat
+            .active_workspace()
+            .review_walk
+            .as_ref()
+            .expect("walk installed");
+        assert_eq!(
+            walk.commits
+                .iter()
+                .map(|c| c.sha.as_str())
+                .collect::<Vec<_>>(),
+            ["f1111111", "f2222222"],
+            "the walk covers the drilled branch, oldest first"
+        );
     }
 
     #[test]

@@ -95,10 +95,6 @@ pub(crate) fn age_label(now_epoch: i64, commit_time: i64) -> String {
 /// Drilling into a merge replaces the whole list, and the user expects Alt-Left
 /// to undo that completely rather than dropping them at the top of the old list
 /// with their query gone. Everything a drill overwrites is saved here.
-///
-/// Nothing in the crate drills yet, so the scope machinery reads as dead until
-/// the drill actions that call [`CommitPicker::push_scope`] land.
-#[allow(dead_code)]
 pub(crate) struct CommitScope {
     /// The displaced scope's own label, `None` when it was the root scope whose
     /// title comes from the picker's role.
@@ -165,7 +161,6 @@ pub(crate) struct CommitPicker {
     ///
     /// Empty at the root scope. Nesting is expected, since a merge inside a
     /// drilled branch drills again and each pop unwinds one level.
-    #[allow(dead_code)]
     pub(crate) scope_stack: Vec<CommitScope>,
     /// What the current scope is called, or `None` at the root scope, where the
     /// title comes from the picker's role instead.
@@ -216,7 +211,6 @@ impl CommitPicker {
     /// `query_before` is the text in the input at the moment of the drill,
     /// which the picker cannot read itself. The caller supplies it and clears
     /// the input, because the new list arrives unfiltered.
-    #[allow(dead_code)]
     pub(crate) fn push_scope(
         &mut self,
         label: String,
@@ -242,7 +236,6 @@ impl CommitPicker {
     /// was typed in it so the caller can restore the input.
     ///
     /// `None` at the root scope, where there is nothing to pop back to.
-    #[allow(dead_code)]
     pub(crate) fn pop_scope(&mut self) -> Option<String> {
         let scope = self.scope_stack.pop()?;
 

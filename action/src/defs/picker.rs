@@ -177,6 +177,28 @@ define_action!(
 );
 
 define_action!(
+    CommitPickerDrillInDef,
+    CommitPickerDrillIn,
+    "CommitPickerDrillIn",
+    ActionKind::CommitPickerDrillIn,
+    "drill into the selected merge",
+    "Re-scope the commit list to the commits the selected merge brought in, leaving out the mainline it merged into. Reports a badge on a row that is not a merge.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPickerBackDef,
+    CommitPickerBack,
+    "CommitPickerBack",
+    ActionKind::CommitPickerBack,
+    "leave the drilled commit scope",
+    "Return to the commit list a drill re-scoped away from, restoring its selection and query. Does nothing at the outermost scope.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     CommitPickerPrevDef,
     CommitPickerPrev,
     "CommitPickerPrev",

@@ -139,6 +139,8 @@ pub enum ActionKind {
     CommitPickerPageDown,
     CommitPickerPageUp,
     CommitPickerColumnCycle,
+    CommitPickerDrillIn,
+    CommitPickerBack,
     CommitPickerSelect,
     CommitPickerClose,
     LocationPickerNext,

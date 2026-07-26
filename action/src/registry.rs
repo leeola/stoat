@@ -85,14 +85,14 @@ use crate::{
         },
         picker::{
             CodeSearchClose, CodeSearchModeToggle, CodeSearchNext, CodeSearchPageDown,
-            CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, CommitPickerClose,
-            CommitPickerColumnCycle, CommitPickerNext, CommitPickerPageDown, CommitPickerPageUp,
-            CommitPickerPrev, CommitPickerSelect, DiagnosticsPickerClose, DiagnosticsPickerNext,
-            DiagnosticsPickerPageDown, DiagnosticsPickerPageUp, DiagnosticsPickerPrev,
-            DiagnosticsPickerSelect, JumplistPickerClose, JumplistPickerNext,
-            JumplistPickerPageDown, JumplistPickerPageUp, JumplistPickerPrev, JumplistPickerSelect,
-            LocationPickerClose, LocationPickerNext, LocationPickerPageDown, LocationPickerPageUp,
-            LocationPickerPrev, LocationPickerSelect,
+            CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, CommitPickerBack,
+            CommitPickerClose, CommitPickerColumnCycle, CommitPickerDrillIn, CommitPickerNext,
+            CommitPickerPageDown, CommitPickerPageUp, CommitPickerPrev, CommitPickerSelect,
+            DiagnosticsPickerClose, DiagnosticsPickerNext, DiagnosticsPickerPageDown,
+            DiagnosticsPickerPageUp, DiagnosticsPickerPrev, DiagnosticsPickerSelect,
+            JumplistPickerClose, JumplistPickerNext, JumplistPickerPageDown, JumplistPickerPageUp,
+            JumplistPickerPrev, JumplistPickerSelect, LocationPickerClose, LocationPickerNext,
+            LocationPickerPageDown, LocationPickerPageUp, LocationPickerPrev, LocationPickerSelect,
         },
         prompt::{
             CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
@@ -593,6 +593,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitPickerColumnCycle::DEF, |_| {
         Ok(Box::new(CommitPickerColumnCycle))
     });
+    add(CommitPickerDrillIn::DEF, |_| {
+        Ok(Box::new(CommitPickerDrillIn))
+    });
+    add(CommitPickerBack::DEF, |_| Ok(Box::new(CommitPickerBack)));
     add(CommitPickerSelect::DEF, |_| {
         Ok(Box::new(CommitPickerSelect))
     });
@@ -1322,6 +1326,8 @@ mod tests {
         "CommitPickerPageDown",
         "CommitPickerPageUp",
         "CommitPickerColumnCycle",
+        "CommitPickerDrillIn",
+        "CommitPickerBack",
         "CommitPickerSelect",
         "CommitPickerClose",
         "LocationPickerNext",
@@ -1792,7 +1798,8 @@ mod tests {
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 CommitPickerPageDown/PageUp/ColumnCycle.
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
-        assert_eq!(all().count(), 423);
+        // + 2 CommitPickerDrillIn/CommitPickerBack.
+        assert_eq!(all().count(), 425);
     }
 
     #[test]
