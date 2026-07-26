@@ -7676,7 +7676,7 @@ impl Stoat {
     /// Runs at the frame seam after the live frame is published, so the pane
     /// layout (and thus each editor rectangle) reflects the frame just drawn and
     /// the APC bytes are written to stdout right after the grid frame.
-    fn emit_smooth_scroll(&mut self) {
+    pub(crate) fn emit_smooth_scroll(&mut self) {
         let Some(apc_tx) = self.apc_tx.clone() else {
             return;
         };
@@ -7755,6 +7755,21 @@ impl Stoat {
             })
             .flatten();
 
+        // The commit picker's table and graph column scroll as one, so they
+        // pool as one region. The header above and the diff below stay outside
+        // it, since neither moves with the rows.
+        let commit_picker_body = (!overlay)
+            .then_some(self.commit_picker.as_ref())
+            .flatten()
+            .and_then(|picker| {
+                crate::render::commit_picker::commit_picker_layout(
+                    self.size(),
+                    crate::render::commit_picker::graph_lanes(picker),
+                    modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
+                )
+            })
+            .map(|layout| layout.body());
+
         // The completion popup is cursor-anchored: its inner list region pools
         // and moves with the cursor each frame (emit_into re-emits the region on
         // a move). The layout reads the focused editor, so it borrows self.
@@ -7819,6 +7834,9 @@ impl Stoat {
         }
         if commits_region.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::COMMITS);
+        }
+        if commit_picker_body.is_some() {
+            active.push(crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST);
         }
         if completion.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::COMPLETION);
@@ -8295,6 +8313,49 @@ impl Stoat {
                 |page| {
                     crate::smooth_scroll::render_commits_page(
                         state,
+                        page,
+                        theme,
+                        region.width,
+                        region.height,
+                    )
+                },
+            );
+        }
+
+        if let (Some(body), Some(picker)) = (commit_picker_body, self.commit_picker.as_ref()) {
+            let region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST,
+                top: body.y,
+                left: body.x,
+                width: body.width,
+                height: body.height,
+                window: 0,
+            };
+            let lanes = crate::render::commit_picker::graph_lanes(picker);
+            let scroll_row =
+                crate::render::picker::window_start(picker.selected, body.height as usize) as u32;
+            // A refilter rewrites every row, the column scope recolors them, and
+            // the selection moves the highlight, so all three refill the pages.
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                self.theme_epoch.hash(&mut hasher);
+                picker.filter_generation.hash(&mut hasher);
+                picker.filter_column.map(|c| c as usize).hash(&mut hasher);
+                picker.selected.hash(&mut hasher);
+                lanes.hash(&mut hasher);
+                hasher.finish()
+            };
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                region,
+                scroll_row as f32,
+                content_version,
+                false,
+                |page| {
+                    crate::smooth_scroll::render_commit_picker_list_page(
+                        picker,
+                        lanes,
                         page,
                         theme,
                         region.width,

@@ -54,6 +54,22 @@ pub(crate) struct CommitPickerLayout {
     pub(crate) preview: Option<Rect>,
 }
 
+impl CommitPickerLayout {
+    /// The graph column and the table as one rect, which is what scrolls
+    /// together and so what a pool covers.
+    pub(crate) fn body(&self) -> Rect {
+        match self.graph {
+            Some(graph) => Rect::new(
+                graph.x,
+                self.list.y,
+                graph.width + self.list.width,
+                self.list.height,
+            ),
+            None => self.list,
+        }
+    }
+}
+
 /// Cells one lane occupies, the second of which separates it from its
 /// neighbour so adjacent lanes read as distinct runs rather than a block.
 const LANE_CELLS: u16 = 2;
@@ -65,7 +81,7 @@ const MAX_DRAWN_LANES: u16 = 8;
 
 /// Width in cells of a graph column showing `lanes`, including the blank cell
 /// separating it from the table's first column.
-fn graph_width(lanes: u16) -> u16 {
+pub(crate) fn graph_width(lanes: u16) -> u16 {
     lanes.min(MAX_DRAWN_LANES) * LANE_CELLS + 1
 }
 
@@ -442,7 +458,7 @@ pub(crate) fn clamped_preview_scroll(scroll: usize, session: &ReviewSession, hei
 /// window agrees on where the columns sit. Match highlights are translated out
 /// of each row's joined haystack onto the column showing them, and one whose
 /// cell truncated it away is dropped.
-fn paint_commit_picker_rows(
+pub(crate) fn paint_commit_picker_rows(
     picker: &CommitPicker,
     start_row: usize,
     header: Rect,

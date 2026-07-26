@@ -95,6 +95,7 @@ pub(crate) mod non_pane_pool {
     pub(crate) const SYMBOL: u32 = BASE + 6;
     pub(crate) const WORKSPACE_SYMBOL: u32 = BASE + 7;
     pub(crate) const HOVER: u32 = BASE + 8;
+    pub(crate) const COMMIT_PICKER_LIST: u32 = BASE + 9;
     /// First id of the per-window status-bar partition. A detached pane's status
     /// row pools at `WINDOW_STATUS + pane.index`, so the partition is offset far
     /// enough above the fixed non-pane ids that pane indices never collide.
@@ -942,6 +943,62 @@ pub(crate) fn render_commits_page(
     paint_commit_rows(state, area, start_row, theme, &mut buf);
 
     serialize_buffer(&mut buf, theme)
+}
+
+/// Render `region_height` rows of the commit picker's table, graph column
+/// included, starting at row `page * region_height`.
+///
+/// `lanes` is the graph's lane count from
+/// [`crate::render::commit_picker::graph_lanes`], or `None` when the column is
+/// hidden. The page splits its own region by that count rather than taking the
+/// live rects, since a page sits at the origin and would have to translate them
+/// back anyway.
+///
+/// The graph's stroked lines ride as APC frames appended after the serialized
+/// cells, the same way the diff gutter's rich components reach a page. That is
+/// what makes them glide with the rows instead of staying pinned to the live
+/// grid.
+pub(crate) fn render_commit_picker_list_page(
+    picker: &crate::commit_picker::CommitPicker,
+    lanes: Option<u16>,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    use crate::render::commit_picker::{graph_width, paint_commit_graph, paint_commit_picker_rows};
+
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+
+    let start_row = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+
+    let graph_cells = lanes.map(graph_width).unwrap_or(0).min(region_width);
+    let table = Rect::new(
+        graph_cells,
+        0,
+        region_width.saturating_sub(graph_cells),
+        region_height,
+    );
+    // The column header sits above the pool region, so the page hands the
+    // painter a zero-height rect it will never write into.
+    let header = Rect::new(table.x, 0, table.width, 0);
+    paint_commit_picker_rows(picker, start_row, header, table, theme, &mut buf);
+
+    let mut scene = (graph_cells > 0).then(ApcScene::new);
+    if let Some(scene) = scene.as_mut() {
+        let graph = Rect::new(0, 0, graph_cells, region_height);
+        paint_commit_graph(picker, start_row, graph, theme, &mut buf, scene);
+    }
+
+    let mut bytes = serialize_buffer(&mut buf, theme);
+    if let Some(mut scene) = scene {
+        bytes.extend_from_slice(scene.buffer());
+    }
+
+    bytes
 }
 
 /// Serialize every cell of `buf` to a self-contained VT byte stream via a

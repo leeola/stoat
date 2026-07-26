@@ -197,6 +197,9 @@ pub(crate) struct CommitPicker {
     /// user as a wider cell scrolls into view, and a pooled page painting an
     /// arbitrary span has to land on the same geometry every other page did.
     pub(crate) col_widest: [u16; COMMIT_COLUMNS],
+    /// Bumped by every [`Self::refilter`], so a pool can tell that the rows it
+    /// buffered are stale without hashing the whole filtered list.
+    pub(crate) filter_generation: u64,
 }
 
 impl CommitPicker {
@@ -234,6 +237,7 @@ impl CommitPicker {
             scope_label: None,
             graph: (Vec::new(), 0),
             col_widest: [0; COMMIT_COLUMNS],
+            filter_generation: 0,
         };
         picker.graph = commit_graph::assign_lanes(&picker.commits);
         picker.refilter("");
@@ -383,6 +387,7 @@ impl CommitPicker {
         }
 
         self.col_widest = measure_columns(&rows, &self.filtered);
+        self.filter_generation = self.filter_generation.wrapping_add(1);
         self.clamp_selected();
     }
 
@@ -548,6 +553,7 @@ mod tests {
             scope_label: None,
             graph: (Vec::new(), 0),
             col_widest: [0; COMMIT_COLUMNS],
+            filter_generation: 0,
         };
         p.graph = commit_graph::assign_lanes(&p.commits);
         p.refilter("");
@@ -1045,6 +1051,95 @@ mod tests {
         let mut scene = stoatty_widgets::ApcScene::new();
         crate::render::commit_picker::paint_commit_graph(p, 0, area, theme, &mut buf, &mut scene);
         (buf, scene)
+    }
+
+    /// Every APC command emitted since the last drain.
+    fn drained_apc(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    ) -> Vec<stoatty_protocol::command::Command> {
+        let mut cmds = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            cmds.extend(crate::test_harness::apc::decode_apc_stream(&batch));
+        }
+        cmds
+    }
+
+    #[test]
+    fn the_commit_table_is_pooled_and_retired() {
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = seeded_picker_harness();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        h.stoat.emit_smooth_scroll();
+        let body = layout(&h).body();
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST,
+            top: body.y,
+            left: body.x,
+            width: body.width,
+            height: body.height,
+            window: 0,
+        };
+        assert!(
+            drained_apc(&mut rx).contains(&Command::PoolRegion(expected)),
+            "the picker declares a pool spanning its graph column and table"
+        );
+
+        h.stoat.commit_picker = None;
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            drained_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST,
+            })),
+            "closing the picker retires its pool"
+        );
+    }
+
+    /// A pooled page and the live painter cover the same rows with the same
+    /// geometry, so a glide shows no shift as the pool composites over them.
+    #[test]
+    fn page_zero_paints_what_the_live_table_paints() {
+        let h = seeded_picker_harness();
+        let picker = h.stoat.commit_picker.as_ref().expect("open");
+        let body = layout(&h).body();
+        let lanes = crate::render::commit_picker::graph_lanes(picker);
+
+        let pooled = crate::smooth_scroll::render_commit_picker_list_page(
+            picker,
+            lanes,
+            0,
+            &h.stoat.theme,
+            body.width,
+            body.height,
+        );
+
+        let mut live = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(
+            0,
+            0,
+            body.width,
+            body.height,
+        ));
+        let graph_cells = lanes
+            .map(crate::render::commit_picker::graph_width)
+            .unwrap_or(0);
+        let table =
+            ratatui::layout::Rect::new(graph_cells, 0, body.width - graph_cells, body.height);
+        crate::render::commit_picker::paint_commit_picker_rows(
+            picker,
+            0,
+            ratatui::layout::Rect::new(table.x, 0, table.width, 0),
+            table,
+            &h.stoat.theme,
+            &mut live,
+        );
+        let live_bytes = crate::smooth_scroll::serialize_buffer(&mut live, &h.stoat.theme);
+
+        assert!(
+            pooled.starts_with(&live_bytes),
+            "the page's cells match the live painter's before its graph frames"
+        );
     }
 
     #[test]
