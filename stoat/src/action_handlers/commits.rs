@@ -37,6 +37,7 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
         repo,
         None,
         COMMITS_INITIAL_PAGE,
+        stoat.redraw_notify.clone(),
     ));
 
     stoat.active_workspace_mut().commits = Some(state);
@@ -93,7 +94,13 @@ pub(super) fn commits_refresh(stoat: &mut Stoat) -> UpdateEffect {
     let Some(repo) = stoat.git_host.discover(&git_root) else {
         return UpdateEffect::None;
     };
-    let task = spawn_commit_log_load(&stoat.executor, repo, None, COMMITS_INITIAL_PAGE);
+    let task = spawn_commit_log_load(
+        &stoat.executor,
+        repo,
+        None,
+        COMMITS_INITIAL_PAGE,
+        stoat.redraw_notify.clone(),
+    );
     let ws = stoat.active_workspace_mut();
     if let Some(state) = ws.commits.as_mut() {
         state.commits.clear();
@@ -135,7 +142,13 @@ fn maybe_spawn_next_page(stoat: &mut Stoat) {
     let Some(repo) = stoat.git_host.discover(&workdir) else {
         return;
     };
-    let task = spawn_commit_log_load(&stoat.executor, repo, Some(last_sha), COMMITS_INITIAL_PAGE);
+    let task = spawn_commit_log_load(
+        &stoat.executor,
+        repo,
+        Some(last_sha),
+        COMMITS_INITIAL_PAGE,
+        stoat.redraw_notify.clone(),
+    );
     if let Some(state) = stoat.active_workspace_mut().commits.as_mut() {
         state.pending_load = Some(task);
     }
@@ -176,6 +189,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
             workdir.clone(),
             sha.clone(),
             language_registry,
+            stoat.redraw_notify.clone(),
         ))
     } else {
         None
@@ -239,38 +253,107 @@ pub(crate) fn pump_commits(stoat: &mut Stoat) -> bool {
     landed || (spawned_after && !spawned_before)
 }
 
+/// Spawn the blocking log walk, waking the run loop through `redraw` when the
+/// page lands.
+///
+/// The pump reading this task polls with a noop waker, so the wake is what makes
+/// a page appear on its own rather than waiting for the next input event to
+/// happen to drive the pumps.
 fn spawn_commit_log_load(
     executor: &stoat_scheduler::Executor,
     repo: Arc<dyn crate::host::GitRepo>,
     after: Option<String>,
     limit: usize,
+    redraw: Arc<tokio::sync::Notify>,
 ) -> stoat_scheduler::Task<Vec<crate::host::CommitInfo>> {
-    executor.spawn_blocking(move || repo.log_commits(after.as_deref(), limit))
+    executor.spawn_blocking(move || {
+        let loaded = repo.log_commits(after.as_deref(), limit);
+        redraw.notify_one();
+        loaded
+    })
 }
 
+/// Spawn the blocking diff build for `sha`, waking the run loop through `redraw`
+/// when it lands.
+///
+/// The wake is what makes the preview appear on its own, for the reason
+/// [`spawn_commit_log_load`] describes. It fires on a failed tree read too,
+/// since the pump has a pending handle to clear either way.
 fn spawn_commit_preview_load(
     executor: &stoat_scheduler::Executor,
     repo: Arc<dyn crate::host::GitRepo>,
     workdir: std::path::PathBuf,
     sha: String,
     language_registry: Arc<stoat_language::LanguageRegistry>,
+    redraw: Arc<tokio::sync::Notify>,
 ) -> stoat_scheduler::Task<Option<ReviewSession>> {
     executor.spawn_blocking(move || {
-        let new_tree = repo.commit_tree(&sha)?;
-        let base_tree = match repo.parent_sha(&sha) {
-            Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
-            None => std::collections::BTreeMap::new(),
+        let built = match repo.commit_tree(&sha) {
+            Some(new_tree) => {
+                let base_tree = match repo.parent_sha(&sha) {
+                    Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
+                    None => std::collections::BTreeMap::new(),
+                };
+                let source = ReviewSource::Commit {
+                    workdir: workdir.clone(),
+                    sha: sha.clone(),
+                };
+                super::review::build_session_from_trees(
+                    &language_registry,
+                    source,
+                    &workdir,
+                    &base_tree,
+                    &new_tree,
+                )
+            },
+            None => None,
         };
-        let source = ReviewSource::Commit {
-            workdir: workdir.clone(),
-            sha: sha.clone(),
-        };
-        super::review::build_session_from_trees(
-            &language_registry,
-            source,
-            &workdir,
-            &base_tree,
-            &new_tree,
-        )
+        redraw.notify_one();
+        built
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::Stoat;
+
+    /// The log pump polls with a noop waker, so without a wake at completion a
+    /// page that lands after the last input event stays invisible until some
+    /// unrelated event drives the pumps.
+    #[test]
+    fn a_log_page_wakes_the_run_loop_when_it_lands() {
+        use futures::FutureExt;
+
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+                (
+                    "b2c3d4e5",
+                    "chore: tweak a",
+                    &[("a.rs", "fn a() {}\nfn a2() {}\n")],
+                ),
+            ],
+        );
+        h.open_commits("/repo");
+
+        // Opening the view wakes the loop too. Drain that permit against an Arc
+        // clone, so the observer never borrows `h` across settle, leaving the
+        // refresh's own load as the only wake to observe. Notify holds at most
+        // one permit, so a single drain clears it.
+        let redraw = h.stoat.redraw_notify.clone();
+        let _ = redraw.notified().now_or_never();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitsRefresh);
+        h.settle();
+
+        let notified = redraw.notified();
+        tokio::pin!(notified);
+        assert!(
+            notified.enable(),
+            "the refreshed log page should wake the loop so the list paints \
+             without waiting for the next keystroke",
+        );
+    }
 }

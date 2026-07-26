@@ -468,6 +468,7 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
         workdir,
         sha.clone(),
         stoat.language_registry.clone(),
+        stoat.redraw_notify.clone(),
     );
 
     if let Some(picker) = stoat.commit_picker.as_mut() {
@@ -508,30 +509,45 @@ fn poll_pending_preview(picker: &mut CommitPicker) -> bool {
     }
 }
 
+/// Spawn the blocking diff build for `sha`, waking the run loop through
+/// `redraw` when it lands.
+///
+/// The wake is what makes the preview appear on its own. The pump reading this
+/// task polls with a noop waker, so without it a session that finishes after the
+/// last input event stays behind "loading diff..." until some unrelated event
+/// happens to drive the pumps. It fires on a failed tree read too, since the
+/// pump has a pending handle to clear either way.
 fn spawn_preview_load(
     executor: &stoat_scheduler::Executor,
     repo: Arc<dyn crate::host::GitRepo>,
     workdir: PathBuf,
     sha: String,
     language_registry: Arc<stoat_language::LanguageRegistry>,
+    redraw: Arc<tokio::sync::Notify>,
 ) -> stoat_scheduler::Task<Option<ReviewSession>> {
     executor.spawn_blocking(move || {
-        let new_tree = repo.commit_tree(&sha)?;
-        let base_tree = match repo.parent_sha(&sha) {
-            Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
-            None => std::collections::BTreeMap::new(),
+        let built = match repo.commit_tree(&sha) {
+            Some(new_tree) => {
+                let base_tree = match repo.parent_sha(&sha) {
+                    Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
+                    None => std::collections::BTreeMap::new(),
+                };
+                let source = crate::review_session::ReviewSource::Commit {
+                    workdir: workdir.clone(),
+                    sha: sha.clone(),
+                };
+                super::review::build_session_from_trees(
+                    &language_registry,
+                    source,
+                    &workdir,
+                    &base_tree,
+                    &new_tree,
+                )
+            },
+            None => None,
         };
-        let source = crate::review_session::ReviewSource::Commit {
-            workdir: workdir.clone(),
-            sha: sha.clone(),
-        };
-        super::review::build_session_from_trees(
-            &language_registry,
-            source,
-            &workdir,
-            &base_tree,
-            &new_tree,
-        )
+        redraw.notify_one();
+        built
     })
 }
 
@@ -685,6 +701,38 @@ mod tests {
             "a browser starts at the newest commit, not a branch-tip heuristic"
         );
         assert_eq!(picker_shas(&h), ["c3d4e5f6", "b2c3d4e5", "a1b2c3d4"]);
+    }
+
+    /// The pump reading the preview task polls with a noop waker, so without a
+    /// wake at completion the diff below the table stays on "loading diff..."
+    /// until some unrelated event drives the pumps -- which is what made
+    /// stepping the selection read as a dead key.
+    #[test]
+    fn a_preview_build_wakes_the_run_loop_when_it_lands() {
+        use futures::FutureExt;
+
+        let mut h = harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+
+        // Opening the picker wakes the loop too. Drain that permit against an
+        // Arc clone, so the observer never borrows `h` across settle, leaving
+        // the next build's wake as the only one to observe. Notify holds at
+        // most one permit, so a single drain clears it.
+        let redraw = h.stoat.redraw_notify.clone();
+        let _ = redraw.notified().now_or_never();
+
+        super::commit_picker_step(&mut h.stoat, 1);
+        h.settle();
+
+        let notified = redraw.notified();
+        tokio::pin!(notified);
+        assert!(
+            notified.enable(),
+            "the preview build for the newly selected commit should wake the \
+             loop so the diff follows the selection on its own",
+        );
     }
 
     /// A harness whose `/repo` has a two-commit `feature` branch merged back
