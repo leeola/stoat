@@ -45,6 +45,10 @@ pub struct WorkspacePicker {
     match_indices: Vec<Vec<u32>>,
     /// Cursor into [`Self::filtered`].
     selected: usize,
+    /// Rows the last render painted, stamped by the renderer and read by
+    /// [`Self::page`]. `None` until the first frame, since the modal sizes
+    /// itself to its entries and only render knows how many fit.
+    pub(crate) viewport_rows: Option<usize>,
 }
 
 /// One row in the picker. Built up-front from the workspace slotmap so the
@@ -161,6 +165,7 @@ impl WorkspacePicker {
             filtered: Vec::new(),
             match_indices: Vec::new(),
             selected,
+            viewport_rows: None,
         };
         picker.refilter("");
         picker
@@ -256,6 +261,14 @@ impl WorkspacePicker {
 
     pub fn select_prev(&mut self) {
         crate::picker::nav_move(self.filtered.len(), &mut self.selected, -1);
+    }
+
+    /// Page the selection by half the rendered list height in `dir` (negative
+    /// up, positive down). Falls back to a single row before the first render
+    /// sets [`Self::viewport_rows`].
+    pub(crate) fn page(&mut self, dir: i32) {
+        let step = dir * crate::picker::nav_page_step(self.viewport_rows);
+        crate::picker::nav_move(self.filtered.len(), &mut self.selected, step);
     }
 
     fn clamp_selected(&mut self) {

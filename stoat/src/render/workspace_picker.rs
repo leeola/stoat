@@ -11,7 +11,7 @@ use ratatui::{
 use std::path::Path;
 
 pub(crate) fn render_workspace_picker(
-    picker: &WorkspacePicker,
+    picker: &mut WorkspacePicker,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
@@ -22,12 +22,12 @@ pub(crate) fn render_workspace_picker(
         return;
     }
 
-    let entries = picker.entries();
-    if entries.is_empty() {
+    let entry_count = picker.entries().len();
+    if entry_count == 0 {
         return;
     }
     let max_entries = 10u16;
-    let entry_rows = (entries.len() as u16).min(max_entries);
+    let entry_rows = (entry_count as u16).min(max_entries);
 
     let box_width = 90u16.min(area.width.saturating_sub(4));
     if box_width < 60 {
@@ -108,8 +108,10 @@ pub(crate) fn render_workspace_picker(
     );
 
     let entries_top = inner.y + 3;
+    picker.viewport_rows = Some(entry_rows as usize);
     let selected = picker.selected();
     let match_indices = picker.match_indices();
+    let entries = picker.entries();
 
     let rows = max_entries as usize;
     let start = crate::render::picker::window_start(selected, rows);
@@ -201,12 +203,19 @@ mod tests {
     use std::{path::PathBuf, sync::Arc};
     use stoat_scheduler::{Executor, TestScheduler};
 
-    #[test]
-    fn the_last_of_more_workspaces_than_fit_paints_as_selected() {
+    /// A picker over `count` workspaces named `ws00`..., the first of them
+    /// active, alongside the slotmap the renderer paints its input through.
+    fn picker_over(
+        count: usize,
+    ) -> (
+        WorkspacePicker,
+        SlotMap<WorkspaceId, Workspace>,
+        WorkspaceId,
+    ) {
         let executor: Executor = Arc::new(TestScheduler::new()).executor();
         let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
         let mut active = WorkspaceId::default();
-        for i in 0..15 {
+        for i in 0..count {
             let id = workspaces.insert(Workspace::new(
                 PathBuf::from(format!("/tmp/ws{i:02}")),
                 &executor,
@@ -225,8 +234,63 @@ mod tests {
             target: SubmitTarget::WorkspacePicker,
             max_height: 1,
         };
+        let picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
+        (picker, workspaces, active)
+    }
 
-        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
+    fn render(
+        picker: &mut WorkspacePicker,
+        workspaces: &mut SlotMap<WorkspaceId, Workspace>,
+        active: WorkspaceId,
+        buf: &mut Buffer,
+        area: Rect,
+    ) {
+        render_workspace_picker(
+            picker,
+            &mut workspaces[active],
+            &selection_theme(),
+            area,
+            buf,
+            &mut stoatty_widgets::ApcScene::new(),
+        );
+    }
+
+    #[test]
+    fn paging_moves_by_half_the_rendered_rows_and_stops_at_the_ends() {
+        let (mut picker, mut workspaces, active) = picker_over(15);
+        let area = Rect::new(0, 0, 100, 30);
+        render(
+            &mut picker,
+            &mut workspaces,
+            active,
+            &mut Buffer::empty(area),
+            area,
+        );
+
+        let half = picker.viewport_rows.expect("the render stamped a viewport") / 2;
+        assert!(
+            half > 1,
+            "a meaningful page needs more than one row: {half}"
+        );
+
+        picker.page(1);
+        assert_eq!(picker.selected(), half, "a page down covers half a screen");
+        picker.page(-1);
+        assert_eq!(picker.selected(), 0, "and a page up returns");
+
+        for _ in 0..15 {
+            picker.page(1);
+        }
+        assert_eq!(picker.selected(), 14, "paging past the end stops on it");
+        for _ in 0..15 {
+            picker.page(-1);
+        }
+        assert_eq!(picker.selected(), 0, "and past the start stops there");
+    }
+
+    #[test]
+    fn the_last_of_more_workspaces_than_fit_paints_as_selected() {
+        let (mut picker, mut workspaces, active) = picker_over(15);
         while picker.selected() + 1 < picker.entries().len() {
             picker.select_next();
         }
@@ -235,14 +299,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
-        render_workspace_picker(
-            &picker,
-            &mut workspaces[active],
-            &selection_theme(),
-            area,
-            &mut buf,
-            &mut stoatty_widgets::ApcScene::new(),
-        );
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
 
         let rows = selected_rows(&buf);
         assert_eq!(rows.len(), 1, "the selection is on screen exactly once");

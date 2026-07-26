@@ -88,9 +88,11 @@ use crate::{
             CodeSearchPageUp, CodeSearchPrev, CodeSearchSelect, CommitPickerClose,
             CommitPickerColumnCycle, CommitPickerNext, CommitPickerPageDown, CommitPickerPageUp,
             CommitPickerPrev, CommitPickerSelect, DiagnosticsPickerClose, DiagnosticsPickerNext,
-            DiagnosticsPickerPrev, DiagnosticsPickerSelect, JumplistPickerClose,
-            JumplistPickerNext, JumplistPickerPrev, JumplistPickerSelect, LocationPickerClose,
-            LocationPickerNext, LocationPickerPrev, LocationPickerSelect,
+            DiagnosticsPickerPageDown, DiagnosticsPickerPageUp, DiagnosticsPickerPrev,
+            DiagnosticsPickerSelect, JumplistPickerClose, JumplistPickerNext,
+            JumplistPickerPageDown, JumplistPickerPageUp, JumplistPickerPrev, JumplistPickerSelect,
+            LocationPickerClose, LocationPickerNext, LocationPickerPageDown, LocationPickerPageUp,
+            LocationPickerPrev, LocationPickerSelect,
         },
         prompt::{
             CancelPromptInput, PaletteComplete, PaletteHistoryNext, PaletteHistoryPrev,
@@ -122,7 +124,8 @@ use crate::{
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
             ShowCwd, SwitchWorkspace, WorkspacePickerClose, WorkspacePickerComplete,
-            WorkspacePickerNext, WorkspacePickerPrev, WorkspacePickerSelect,
+            WorkspacePickerNext, WorkspacePickerPageDown, WorkspacePickerPageUp,
+            WorkspacePickerPrev, WorkspacePickerSelect,
         },
     },
     param::{MissingSnafu, ParseFailureSnafu, WrongKindSnafu},
@@ -552,6 +555,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(JumplistPickerSelect::DEF, |_| {
         Ok(Box::new(JumplistPickerSelect))
     });
+    add(JumplistPickerPageDown::DEF, |_| {
+        Ok(Box::new(JumplistPickerPageDown))
+    });
+    add(JumplistPickerPageUp::DEF, |_| {
+        Ok(Box::new(JumplistPickerPageUp))
+    });
     add(JumplistPickerClose::DEF, |_| {
         Ok(Box::new(JumplistPickerClose))
     });
@@ -563,6 +572,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(DiagnosticsPickerSelect::DEF, |_| {
         Ok(Box::new(DiagnosticsPickerSelect))
+    });
+    add(DiagnosticsPickerPageDown::DEF, |_| {
+        Ok(Box::new(DiagnosticsPickerPageDown))
+    });
+    add(DiagnosticsPickerPageUp::DEF, |_| {
+        Ok(Box::new(DiagnosticsPickerPageUp))
     });
     add(DiagnosticsPickerClose::DEF, |_| {
         Ok(Box::new(DiagnosticsPickerClose))
@@ -590,6 +605,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(LocationPickerSelect::DEF, |_| {
         Ok(Box::new(LocationPickerSelect))
+    });
+    add(LocationPickerPageDown::DEF, |_| {
+        Ok(Box::new(LocationPickerPageDown))
+    });
+    add(LocationPickerPageUp::DEF, |_| {
+        Ok(Box::new(LocationPickerPageUp))
     });
     add(LocationPickerClose::DEF, |_| {
         Ok(Box::new(LocationPickerClose))
@@ -1001,6 +1022,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(WorkspacePickerPrev::DEF, |_| {
         Ok(Box::new(WorkspacePickerPrev))
     });
+    add(WorkspacePickerPageDown::DEF, |_| {
+        Ok(Box::new(WorkspacePickerPageDown))
+    });
+    add(WorkspacePickerPageUp::DEF, |_| {
+        Ok(Box::new(WorkspacePickerPageUp))
+    });
     add(WorkspacePickerSelect::DEF, |_| {
         Ok(Box::new(WorkspacePickerSelect))
     });
@@ -1273,15 +1300,21 @@ mod tests {
         "SwitchWorkspace",
         "WorkspacePickerNext",
         "WorkspacePickerPrev",
+        "WorkspacePickerPageDown",
+        "WorkspacePickerPageUp",
         "WorkspacePickerComplete",
         "WorkspacePickerSelect",
         "WorkspacePickerClose",
         "JumplistPickerNext",
         "JumplistPickerPrev",
+        "JumplistPickerPageDown",
+        "JumplistPickerPageUp",
         "JumplistPickerSelect",
         "JumplistPickerClose",
         "DiagnosticsPickerNext",
         "DiagnosticsPickerPrev",
+        "DiagnosticsPickerPageDown",
+        "DiagnosticsPickerPageUp",
         "DiagnosticsPickerSelect",
         "DiagnosticsPickerClose",
         "CommitPickerNext",
@@ -1293,6 +1326,8 @@ mod tests {
         "CommitPickerClose",
         "LocationPickerNext",
         "LocationPickerPrev",
+        "LocationPickerPageDown",
+        "LocationPickerPageUp",
         "LocationPickerSelect",
         "LocationPickerClose",
         "OpenCodeSearch",
@@ -1756,7 +1791,8 @@ mod tests {
         // + 1 GitLs.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 CommitPickerPageDown/PageUp/ColumnCycle.
-        assert_eq!(all().count(), 415);
+        // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
+        assert_eq!(all().count(), 423);
     }
 
     #[test]

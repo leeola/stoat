@@ -18,6 +18,10 @@ pub struct JumplistPicker {
     entries: Vec<JumplistEntry>,
     selected: usize,
     cursor_idx: usize,
+    /// Rows the last render painted, stamped by the renderer and read by
+    /// [`Self::page`]. `None` until the first frame, since the modal sizes
+    /// itself to its entries and only render knows how many fit.
+    pub(crate) viewport_rows: Option<usize>,
 }
 
 pub struct JumplistEntry {
@@ -48,6 +52,7 @@ impl JumplistPicker {
             entries,
             selected,
             cursor_idx,
+            viewport_rows: None,
         }
     }
 
@@ -72,6 +77,13 @@ impl JumplistPicker {
 
     pub fn select_prev(&mut self) {
         self.move_selection(-1);
+    }
+
+    /// Page the selection by half the rendered list height in `dir` (negative
+    /// up, positive down). Falls back to a single row before the first render
+    /// sets [`Self::viewport_rows`].
+    pub(crate) fn page(&mut self, dir: i32) {
+        self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
     }
 
     pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {
@@ -210,6 +222,57 @@ mod tests {
         picker.select_next();
         picker.select_next();
         assert_eq!(picker.selected(), 2);
+    }
+
+    /// Drives the paging bindings through the real keymap, which is what proves
+    /// the def, kind, registration, dispatch arm, and binding all reach each
+    /// other. The per-picker paging tests exercise the arithmetic. Only a
+    /// keypress can show the wiring.
+    #[test]
+    fn ctrl_f_and_ctrl_b_page_the_jumplist_selection() {
+        let mut h = crate::Stoat::test();
+        let lines: String = (0..20)
+            .map(|i| format!("line {i} of the buffer\n"))
+            .collect();
+        h.seed_focused_buffer(&lines);
+        for _ in 0..20 {
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveDown);
+        }
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
+        let _ = h.snapshot();
+
+        let selected = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .jumplist_picker
+                .as_ref()
+                .expect("modal open")
+                .selected()
+        };
+        let start = selected(&h);
+        let half = h
+            .stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("modal open")
+            .viewport_rows
+            .expect("the render stamped the viewport")
+            .div_ceil(2)
+            .max(1);
+        assert!(
+            start >= half,
+            "the picker opens at the walk cursor with room to page up: {start} < {half}"
+        );
+
+        h.type_keys("ctrl-b");
+        assert_eq!(
+            selected(&h),
+            start - half,
+            "Ctrl-B pages up by half the rendered list height"
+        );
+
+        h.type_keys("ctrl-f");
+        assert_eq!(selected(&h), start, "Ctrl-F pages back down");
     }
 
     #[test]

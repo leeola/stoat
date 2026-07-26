@@ -23,6 +23,10 @@ pub(crate) struct LocationEntry {
 pub(crate) struct LocationPicker {
     entries: Vec<LocationEntry>,
     selected: usize,
+    /// Rows the last render painted, stamped by the renderer and read by
+    /// [`Self::page`]. `None` until the first frame, since the modal sizes
+    /// itself to its entries and only render knows how many fit.
+    pub(crate) viewport_rows: Option<usize>,
 }
 
 impl LocationPicker {
@@ -30,6 +34,7 @@ impl LocationPicker {
         Self {
             entries,
             selected: 0,
+            viewport_rows: None,
         }
     }
 
@@ -47,6 +52,13 @@ impl LocationPicker {
 
     pub(crate) fn select_prev(&mut self) {
         self.move_selection(-1);
+    }
+
+    /// Page the selection by half the rendered list height in `dir` (negative
+    /// up, positive down). Falls back to a single row before the first render
+    /// sets [`Self::viewport_rows`].
+    pub(crate) fn page(&mut self, dir: i32) {
+        self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
     }
 
     /// Move the selection to `index`, clamped to the last entry so a stale row

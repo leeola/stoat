@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 pub(crate) fn render_jumplist_picker(
-    picker: &JumplistPicker,
+    picker: &mut JumplistPicker,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -16,12 +16,12 @@ pub(crate) fn render_jumplist_picker(
         return;
     }
 
-    let entries = picker.entries();
-    if entries.is_empty() {
+    let entry_count = picker.entries().len();
+    if entry_count == 0 {
         return;
     }
     let max_entries = 12u16;
-    let entry_rows = (entries.len() as u16).min(max_entries);
+    let entry_rows = (entry_count as u16).min(max_entries);
 
     let box_width = 80u16.min(area.width.saturating_sub(4));
     if box_width < 50 {
@@ -63,8 +63,9 @@ pub(crate) fn render_jumplist_picker(
     let snippet_w = inner.width.saturating_sub(snippet_x - inner.x);
 
     let rows = max_entries as usize;
+    picker.viewport_rows = Some(entry_rows as usize);
     let start = crate::render::picker::window_start(selected, rows);
-    for (i, entry) in entries.iter().enumerate().skip(start).take(rows) {
+    for (i, entry) in picker.entries().iter().enumerate().skip(start).take(rows) {
         let row = inner.y + (i - start) as u16;
         let is_selected = i == selected;
         let is_current = i == cursor_idx;
@@ -105,16 +106,17 @@ mod tests {
     use std::path::Path;
     use stoat_text::{Bias, Selection, SelectionGoal};
 
-    #[test]
-    fn the_last_of_more_jumps_than_fit_paints_as_selected() {
-        let mut buffers = BufferRegistry::new();
+    /// A picker over `count` jumps into one buffer, each on its own line, whose
+    /// snippet carries its index so a painted row is identifiable.
+    fn picker_over(count: usize) -> JumplistPicker {
         // Every line is the same width, so entry `i` starts at `i * LINE_LEN`.
         const LINE_LEN: usize = "entry 00\n".len();
-        let text: String = (0..20).map(|i| format!("entry {i:02}\n")).collect();
+        let mut buffers = BufferRegistry::new();
+        let text: String = (0..count).map(|i| format!("entry {i:02}\n")).collect();
         let (buffer_id, _) = buffers.open(Path::new("/dir/file.rs"), &text);
 
         let mut jumplist = JumpList::default();
-        for i in 0..20 {
+        for i in 0..count {
             let anchor = {
                 let buffer = buffers.get(buffer_id).expect("buffer open");
                 let guard = buffer.read().expect("buffer readable");
@@ -132,8 +134,53 @@ mod tests {
             };
             jumplist.push(entry, &buffers);
         }
+        JumplistPicker::new(&jumplist, &buffers)
+    }
 
-        let mut picker = JumplistPicker::new(&jumplist, &buffers);
+    fn render(picker: &mut JumplistPicker, buf: &mut Buffer, area: Rect) {
+        render_jumplist_picker(
+            picker,
+            &selection_theme(),
+            area,
+            buf,
+            &mut stoatty_widgets::ApcScene::new(),
+        );
+    }
+
+    #[test]
+    fn paging_moves_by_half_the_rendered_rows_and_stops_at_the_ends() {
+        let mut picker = picker_over(20);
+        let area = Rect::new(0, 0, 100, 30);
+        render(&mut picker, &mut Buffer::empty(area), area);
+
+        let half = picker.viewport_rows.expect("the render stamped a viewport") / 2;
+        assert!(
+            half > 1,
+            "a meaningful page needs more than one row: {half}"
+        );
+
+        // The picker opens on the walk cursor, so paging starts from a known row.
+        while picker.selected() > 0 {
+            picker.select_prev();
+        }
+        picker.page(1);
+        assert_eq!(picker.selected(), half, "a page down covers half a screen");
+        picker.page(-1);
+        assert_eq!(picker.selected(), 0, "and a page up returns");
+
+        for _ in 0..20 {
+            picker.page(1);
+        }
+        assert_eq!(picker.selected(), 19, "paging past the end stops on it");
+        for _ in 0..20 {
+            picker.page(-1);
+        }
+        assert_eq!(picker.selected(), 0, "and past the start stops there");
+    }
+
+    #[test]
+    fn the_last_of_more_jumps_than_fit_paints_as_selected() {
+        let mut picker = picker_over(20);
         while picker.selected() + 1 < picker.entries().len() {
             picker.select_next();
         }
@@ -141,13 +188,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
-        render_jumplist_picker(
-            &picker,
-            &selection_theme(),
-            area,
-            &mut buf,
-            &mut stoatty_widgets::ApcScene::new(),
-        );
+        render(&mut picker, &mut buf, area);
 
         let rows = selected_rows(&buf);
         assert_eq!(rows.len(), 1, "the selection is on screen exactly once");

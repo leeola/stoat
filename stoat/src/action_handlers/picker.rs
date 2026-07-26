@@ -14,6 +14,14 @@ pub(super) fn jumplist_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Page the jumplist picker's selection by half its visible rows in `dir`.
+pub(super) fn jumplist_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if let Some(picker) = stoat.jumplist_picker.as_mut() {
+        picker.page(dir);
+    }
+    UpdateEffect::Redraw
+}
+
 pub(super) fn jumplist_picker_close(stoat: &mut Stoat) -> UpdateEffect {
     stoat.jumplist_picker = None;
     UpdateEffect::Redraw
@@ -49,6 +57,14 @@ pub(super) fn diagnostics_picker_next(stoat: &mut Stoat) -> UpdateEffect {
 pub(super) fn diagnostics_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(picker) = stoat.diagnostics_picker.as_mut() {
         picker.select_prev();
+    }
+    UpdateEffect::Redraw
+}
+
+/// Page the diagnostics picker's selection by half its visible rows in `dir`.
+pub(super) fn diagnostics_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if let Some(picker) = stoat.diagnostics_picker.as_mut() {
+        picker.page(dir);
     }
     UpdateEffect::Redraw
 }
@@ -100,6 +116,14 @@ pub(super) fn location_picker_next(stoat: &mut Stoat) -> UpdateEffect {
 pub(super) fn location_picker_prev(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(picker) = stoat.location_picker.as_mut() {
         picker.select_prev();
+    }
+    UpdateEffect::Redraw
+}
+
+/// Page the goto-location picker's selection by half its visible rows in `dir`.
+pub(super) fn location_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if let Some(picker) = stoat.location_picker.as_mut() {
+        picker.page(dir);
     }
     UpdateEffect::Redraw
 }

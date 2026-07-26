@@ -792,7 +792,7 @@ pub(crate) fn frame(
             buf,
             &mut *scene,
         );
-    } else if let Some(picker) = &stoat.workspace_picker {
+    } else if let Some(picker) = &mut stoat.workspace_picker {
         workspace_picker::render_workspace_picker(picker, ws, &stoat.theme, full, buf, &mut *scene);
         let bindings = picker.hint_bindings();
         hints::render_hints(
@@ -821,7 +821,7 @@ pub(crate) fn frame(
             buf,
             &mut *scene,
         );
-    } else if let Some(picker) = &stoat.jumplist_picker {
+    } else if let Some(picker) = &mut stoat.jumplist_picker {
         jumplist_picker::render_jumplist_picker(picker, &stoat.theme, full, buf, &mut *scene);
         let bindings = picker.hint_bindings();
         hints::render_hints(
@@ -846,7 +846,7 @@ pub(crate) fn frame(
             buf,
             &mut *scene,
         );
-    } else if let Some(picker) = &stoat.diagnostics_picker {
+    } else if let Some(picker) = &mut stoat.diagnostics_picker {
         diagnostics_picker::render_diagnostics_picker(
             picker,
             &ws.git_root,
@@ -865,7 +865,7 @@ pub(crate) fn frame(
             buf,
             &mut *scene,
         );
-    } else if let Some(picker) = &stoat.location_picker {
+    } else if let Some(picker) = &mut stoat.location_picker {
         location_picker::render_location_picker(
             picker,
             &ws.git_root,

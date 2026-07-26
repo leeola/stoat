@@ -45,6 +45,28 @@ define_action!(
 );
 
 define_action!(
+    WorkspacePickerPageDownDef,
+    WorkspacePickerPageDown,
+    "WorkspacePickerPageDown",
+    ActionKind::WorkspacePickerPageDown,
+    "page the workspace list down",
+    "Move the workspace picker's selection down by half the visible rows, matching how every other modal list pages.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    WorkspacePickerPageUpDef,
+    WorkspacePickerPageUp,
+    "WorkspacePickerPageUp",
+    ActionKind::WorkspacePickerPageUp,
+    "page the workspace list up",
+    "Move the workspace picker's selection up by half the visible rows, the counterpart to WorkspacePickerPageDown.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     WorkspacePickerCompleteDef,
     WorkspacePickerComplete,
     "WorkspacePickerComplete",

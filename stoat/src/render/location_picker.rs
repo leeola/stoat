@@ -38,15 +38,14 @@ pub(crate) fn location_picker_layout(area: Rect, entries_len: usize) -> Option<(
 }
 
 pub(crate) fn render_location_picker(
-    picker: &LocationPicker,
+    picker: &mut LocationPicker,
     git_root: &Path,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
     scene: &mut stoatty_widgets::ApcScene,
 ) {
-    let entries = picker.entries();
-    let Some((modal_area, inner)) = location_picker_layout(area, entries.len()) else {
+    let Some((modal_area, inner)) = location_picker_layout(area, picker.entries().len()) else {
         return;
     };
 
@@ -74,11 +73,13 @@ pub(crate) fn render_location_picker(
     let text_w = inner.width.saturating_sub(text_x - inner.x);
 
     let rows = inner.height as usize;
-    let start = crate::render::picker::window_start(picker.selected(), rows);
+    picker.viewport_rows = Some(rows);
+    let selected = picker.selected();
+    let start = crate::render::picker::window_start(selected, rows);
 
-    for (i, entry) in entries.iter().skip(start).take(rows).enumerate() {
+    for (i, entry) in picker.entries().iter().skip(start).take(rows).enumerate() {
         let row = inner.y + i as u16;
-        let is_selected = start + i == picker.selected();
+        let is_selected = start + i == selected;
         let base_style = if is_selected {
             selected_style
         } else {
@@ -129,8 +130,57 @@ fn display_path(path: &Path, git_root: &Path, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{location_picker_layout, MAX_ENTRY_ROWS};
-    use ratatui::layout::Rect;
+    use super::{location_picker_layout, render_location_picker, MAX_ENTRY_ROWS};
+    use crate::{
+        location_picker::{LocationEntry, LocationPicker},
+        theme::Theme,
+    };
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn paging_moves_by_half_the_rendered_rows_and_stops_at_the_ends() {
+        let entries = (0..20)
+            .map(|i| LocationEntry {
+                path: PathBuf::from(format!("/r/file{i:02}.rs")),
+                offset: 0,
+                line: i + 1,
+                column: 1,
+                text: format!("candidate {i}"),
+            })
+            .collect();
+        let mut picker = LocationPicker::new(entries);
+
+        let area = Rect::new(0, 0, 100, 30);
+        render_location_picker(
+            &mut picker,
+            Path::new("/r"),
+            &Theme::empty(),
+            area,
+            &mut Buffer::empty(area),
+            &mut stoatty_widgets::ApcScene::new(),
+        );
+
+        let half = picker.viewport_rows.expect("the render stamped a viewport") / 2;
+        assert!(
+            half > 1,
+            "a meaningful page needs more than one row: {half}"
+        );
+
+        picker.page(1);
+        assert_eq!(picker.selected(), half, "a page down covers half a screen");
+        picker.page(-1);
+        assert_eq!(picker.selected(), 0, "and a page up returns");
+
+        for _ in 0..20 {
+            picker.page(1);
+        }
+        assert_eq!(picker.selected(), 19, "paging past the end stops on it");
+        for _ in 0..20 {
+            picker.page(-1);
+        }
+        assert_eq!(picker.selected(), 0, "and past the start stops there");
+    }
 
     #[test]
     fn layout_inner_holds_one_row_per_entry() {

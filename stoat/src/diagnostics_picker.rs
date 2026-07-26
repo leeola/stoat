@@ -27,6 +27,10 @@ pub struct DiagnosticsPicker {
     entries: Vec<DiagnosticsEntry>,
     selected: usize,
     scope: PickerScope,
+    /// Rows the last render painted, stamped by the renderer and read by
+    /// [`Self::page`]. `None` until the first frame, since the modal sizes
+    /// itself to its entries and only render knows how many fit.
+    pub(crate) viewport_rows: Option<usize>,
 }
 
 pub struct DiagnosticsEntry {
@@ -87,6 +91,7 @@ impl DiagnosticsPicker {
             entries,
             selected: 0,
             scope: PickerScope::Local,
+            viewport_rows: None,
         }
     }
 
@@ -131,6 +136,7 @@ impl DiagnosticsPicker {
             entries,
             selected: 0,
             scope: PickerScope::Workspace,
+            viewport_rows: None,
         }
     }
 
@@ -152,6 +158,13 @@ impl DiagnosticsPicker {
 
     pub fn select_prev(&mut self) {
         self.move_selection(-1);
+    }
+
+    /// Page the selection by half the rendered list height in `dir` (negative
+    /// up, positive down). Falls back to a single row before the first render
+    /// sets [`Self::viewport_rows`].
+    pub(crate) fn page(&mut self, dir: i32) {
+        self.move_selection(dir * crate::picker::nav_page_step(self.viewport_rows));
     }
 
     pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {

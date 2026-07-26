@@ -11,7 +11,7 @@ use ratatui::{
 use std::path::Path;
 
 pub(crate) fn render_diagnostics_picker(
-    picker: &DiagnosticsPicker,
+    picker: &mut DiagnosticsPicker,
     git_root: &Path,
     theme: &crate::theme::Theme,
     area: Rect,
@@ -22,12 +22,12 @@ pub(crate) fn render_diagnostics_picker(
         return;
     }
 
-    let entries = picker.entries();
-    if entries.is_empty() {
+    let entry_count = picker.entries().len();
+    if entry_count == 0 {
         return;
     }
     let max_entries = 12u16;
-    let entry_rows = (entries.len() as u16).min(max_entries);
+    let entry_rows = (entry_count as u16).min(max_entries);
 
     let box_width = 80u16.min(area.width.saturating_sub(4));
     if box_width < 50 {
@@ -71,10 +71,12 @@ pub(crate) fn render_diagnostics_picker(
     let msg_w = inner.width.saturating_sub(msg_x - inner.x);
 
     let rows = max_entries as usize;
-    let start = crate::render::picker::window_start(picker.selected(), rows);
-    for (i, entry) in entries.iter().enumerate().skip(start).take(rows) {
+    picker.viewport_rows = Some(entry_rows as usize);
+    let selected = picker.selected();
+    let start = crate::render::picker::window_start(selected, rows);
+    for (i, entry) in picker.entries().iter().enumerate().skip(start).take(rows) {
         let row = inner.y + (i - start) as u16;
-        let is_selected = i == picker.selected();
+        let is_selected = i == selected;
         let base_style = if is_selected {
             selected_style
         } else {
@@ -155,11 +157,12 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
     use std::path::Path;
 
-    #[test]
-    fn the_last_of_more_diagnostics_than_fit_paints_as_selected() {
-        let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    /// A picker over `count` single-line diagnostics, one per line, each
+    /// carrying its own index in the message so a painted row is identifiable.
+    fn picker_over(count: u32) -> DiagnosticsPicker {
+        let text: String = (0..count).map(|i| format!("line {i}\n")).collect();
         let buffer = TextBuffer::with_text(BufferId::new(1), &text);
-        let diagnostics: Vec<(OffsetEncoding, Diagnostic)> = (0..20u32)
+        let diagnostics: Vec<(OffsetEncoding, Diagnostic)> = (0..count)
             .map(|line| {
                 let position = Position { line, character: 0 };
                 let diagnostic = Diagnostic {
@@ -174,8 +177,50 @@ mod tests {
                 (OffsetEncoding::Utf16, diagnostic)
             })
             .collect();
+        DiagnosticsPicker::new(&diagnostics, &buffer)
+    }
 
-        let mut picker = DiagnosticsPicker::new(&diagnostics, &buffer);
+    fn render(picker: &mut DiagnosticsPicker, buf: &mut Buffer, area: Rect) {
+        render_diagnostics_picker(
+            picker,
+            Path::new("/r"),
+            &selection_theme(),
+            area,
+            buf,
+            &mut stoatty_widgets::ApcScene::new(),
+        );
+    }
+
+    #[test]
+    fn paging_moves_by_half_the_rendered_rows_and_stops_at_the_ends() {
+        let mut picker = picker_over(20);
+        let area = Rect::new(0, 0, 100, 30);
+        render(&mut picker, &mut Buffer::empty(area), area);
+
+        let half = picker.viewport_rows.expect("the render stamped a viewport") / 2;
+        assert!(
+            half > 1,
+            "a meaningful page needs more than one row: {half}"
+        );
+
+        picker.page(1);
+        assert_eq!(picker.selected(), half, "a page down covers half a screen");
+        picker.page(-1);
+        assert_eq!(picker.selected(), 0, "and a page up returns");
+
+        for _ in 0..20 {
+            picker.page(1);
+        }
+        assert_eq!(picker.selected(), 19, "paging past the end stops on it");
+        for _ in 0..20 {
+            picker.page(-1);
+        }
+        assert_eq!(picker.selected(), 0, "and past the start stops there");
+    }
+
+    #[test]
+    fn the_last_of_more_diagnostics_than_fit_paints_as_selected() {
+        let mut picker = picker_over(20);
         for _ in 1..picker.entries().len() {
             picker.select_next();
         }
@@ -183,14 +228,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
-        render_diagnostics_picker(
-            &picker,
-            Path::new("/r"),
-            &selection_theme(),
-            area,
-            &mut buf,
-            &mut stoatty_widgets::ApcScene::new(),
-        );
+        render(&mut picker, &mut buf, area);
 
         let rows = selected_rows(&buf);
         assert_eq!(rows.len(), 1, "the selection is on screen exactly once");

@@ -23,6 +23,28 @@ define_action!(
 );
 
 define_action!(
+    JumplistPickerPageDownDef,
+    JumplistPickerPageDown,
+    "JumplistPickerPageDown",
+    ActionKind::JumplistPickerPageDown,
+    "page the jumplist down",
+    "Move the jumplist picker's selection down by half the visible rows, matching how every other modal list pages.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    JumplistPickerPageUpDef,
+    JumplistPickerPageUp,
+    "JumplistPickerPageUp",
+    ActionKind::JumplistPickerPageUp,
+    "page the jumplist up",
+    "Move the jumplist picker's selection up by half the visible rows, the counterpart to JumplistPickerPageDown.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     JumplistPickerSelectDef,
     JumplistPickerSelect,
     "JumplistPickerSelect",
@@ -62,6 +84,28 @@ define_action!(
     ActionKind::DiagnosticsPickerPrev,
     "previous diagnostic row",
     "Move the diagnostics picker's selection to the previous row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    DiagnosticsPickerPageDownDef,
+    DiagnosticsPickerPageDown,
+    "DiagnosticsPickerPageDown",
+    ActionKind::DiagnosticsPickerPageDown,
+    "page the diagnostics list down",
+    "Move the diagnostics picker's selection down by half the visible rows, matching how every other modal list pages.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    DiagnosticsPickerPageUpDef,
+    DiagnosticsPickerPageUp,
+    "DiagnosticsPickerPageUp",
+    ActionKind::DiagnosticsPickerPageUp,
+    "page the diagnostics list up",
+    "Move the diagnostics picker's selection up by half the visible rows, the counterpart to DiagnosticsPickerPageDown.",
     ActionPriority::Common,
     palette_visible = false
 );
@@ -183,6 +227,28 @@ define_action!(
     ActionKind::LocationPickerPrev,
     "previous location row",
     "Move the goto-location picker's selection to the previous row.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    LocationPickerPageDownDef,
+    LocationPickerPageDown,
+    "LocationPickerPageDown",
+    ActionKind::LocationPickerPageDown,
+    "page the location list down",
+    "Move the goto-location picker's selection down by half the visible rows, matching how every other modal list pages.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
+    LocationPickerPageUpDef,
+    LocationPickerPageUp,
+    "LocationPickerPageUp",
+    ActionKind::LocationPickerPageUp,
+    "page the location list up",
+    "Move the goto-location picker's selection up by half the visible rows, the counterpart to LocationPickerPageDown.",
     ActionPriority::Common,
     palette_visible = false
 );
