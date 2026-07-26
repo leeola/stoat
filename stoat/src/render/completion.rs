@@ -3,7 +3,7 @@ use crate::{
     completion::CompletionItem,
     fuzzy,
     pane::{FocusTarget, View},
-    render::layout::split_pane_status,
+    render::{layout::split_pane_status, text::truncate_to_width},
 };
 use nucleo::Utf32Str;
 use ratatui::{
@@ -333,13 +333,6 @@ fn cursor_screen_position(
         return None;
     }
     crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
-}
-
-fn truncate_to_width(line: &str, width: usize) -> String {
-    if line.chars().count() <= width {
-        return line.to_string();
-    }
-    line.chars().take(width).collect()
 }
 
 #[cfg(test)]

@@ -1,11 +1,10 @@
 use crate::{
     app::Stoat,
     pane::{FocusTarget, View},
-    render::layout::split_pane_status,
+    render::{cursor_popup, layout::split_pane_status, text::truncate_to_width},
 };
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
     widgets::{Clear, Widget},
 };
 
@@ -46,10 +45,11 @@ pub(crate) fn render_symbol_picker(
         None => return,
     };
 
-    let cursor_screen = match cursor_screen_position(editor, content_area, picker.anchor_offset) {
-        Some(p) => p,
-        None => return,
-    };
+    let cursor_screen =
+        match cursor_popup::cursor_screen_position(editor, content_area, picker.anchor_offset) {
+            Some(p) => p,
+            None => return,
+        };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let selected_style = stoat.theme.get(crate::theme::scope::UI_SELECTION);
@@ -83,33 +83,8 @@ pub(crate) fn render_symbol_picker(
             interior_width as usize,
         )
     });
-    let max_line_width = body
-        .iter()
-        .chain(footer.as_ref())
-        .map(|s| s.chars().count())
-        .max()
-        .unwrap_or(0) as u16;
-    let total_lines = body.len() as u16 + footer.as_ref().map(|_| 1).unwrap_or(0);
-    let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
-    let popup_height = (total_lines + 2).clamp(3, content_area.height.max(3));
-
-    let popup_x = cursor_screen
-        .0
-        .min(content_area.x + content_area.width.saturating_sub(popup_width));
-    let popup_y = if cursor_screen.1 >= content_area.y + popup_height {
-        cursor_screen.1 - popup_height
-    } else if cursor_screen.1 + 1 + popup_height <= content_area.y + content_area.height {
-        cursor_screen.1 + 1
-    } else {
-        content_area.y
-    };
-
-    let popup_area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
-    };
+    let size = cursor_popup::content_size(&body, footer.as_ref());
+    let popup_area = cursor_popup::popup_rect(content_area, cursor_screen, size, true);
 
     Clear.render(popup_area, buf);
     let inner = crate::render::chrome::modal_frame(
@@ -121,37 +96,14 @@ pub(crate) fn render_symbol_picker(
         scene,
     );
 
-    for (row_idx, line) in body.iter().enumerate() {
-        let row = inner.y + row_idx as u16;
-        if row >= inner.y + inner.height {
-            break;
-        }
-        let style = if viewport_top + row_idx == picker.selected_idx {
-            selected_style
-        } else {
-            modal_style
-        };
-        for (col_idx, ch) in line.chars().enumerate() {
-            let col = inner.x + col_idx as u16;
-            if col >= inner.x + inner.width {
-                break;
-            }
-            buf[(col, row)].set_char(ch).set_style(style);
-        }
-    }
-
-    if let Some(footer) = footer {
-        let row = inner.y + body.len() as u16;
-        if row < inner.y + inner.height {
-            for (col_idx, ch) in footer.chars().enumerate() {
-                let col = inner.x + col_idx as u16;
-                if col >= inner.x + inner.width {
-                    break;
-                }
-                buf[(col, row)].set_char(ch).set_style(modal_style);
-            }
-        }
-    }
+    cursor_popup::paint_numbered_rows(
+        &body,
+        footer.as_ref(),
+        picker.selected_idx.checked_sub(viewport_top),
+        inner,
+        (modal_style, selected_style),
+        buf,
+    );
 }
 
 /// Return the index of the entry that should appear at the top of
@@ -175,22 +127,4 @@ fn viewport_top_for(selected: usize, total: usize, window: usize) -> usize {
 /// onto the current viewport.
 pub(crate) fn viewport_top_for_picker(selected: usize, total: usize) -> usize {
     viewport_top_for(selected, total, VISIBLE_WINDOW)
-}
-
-fn cursor_screen_position(
-    editor: &mut crate::editor_state::EditorState,
-    content_area: Rect,
-    anchor_offset: usize,
-) -> Option<(u16, u16)> {
-    if editor.review_view.is_some() {
-        return None;
-    }
-    crate::render::hover::cursor_screen_position(editor, content_area, anchor_offset)
-}
-
-fn truncate_to_width(line: &str, width: usize) -> String {
-    if line.chars().count() <= width {
-        return line.to_string();
-    }
-    line.chars().take(width).collect()
 }

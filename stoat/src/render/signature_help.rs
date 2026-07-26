@@ -1,10 +1,7 @@
 use crate::{
     app::Stoat,
     pane::{FocusTarget, View},
-    render::{
-        hover::{cursor_screen_position, truncate_to_width},
-        layout::split_pane_status,
-    },
+    render::{hover::cursor_screen_position, layout::split_pane_status, text::truncate_to_width},
 };
 use ratatui::{
     buffer::Buffer,

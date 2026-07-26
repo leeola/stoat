@@ -499,13 +499,6 @@ pub(crate) fn cursor_screen_position(
     Some((x, y))
 }
 
-pub(crate) fn truncate_to_width(line: &str, width: usize) -> String {
-    if line.chars().count() <= width {
-        return line.to_string();
-    }
-    line.chars().take(width).collect()
-}
-
 /// Byte offset of the `char_idx`-th character in `s`, or `s.len()` when
 /// `char_idx` is at or past the end.
 fn char_to_byte(s: &str, char_idx: usize) -> usize {

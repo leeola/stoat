@@ -80,6 +80,19 @@ pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Cut `line` to at most `width` characters.
+///
+/// Counts characters, not display columns, so a wide glyph still counts once.
+/// The popups that use this lay their text out in character positions, which
+/// keeps the truncation in the same units as the layout. See
+/// [`truncate_to_cols`] for the display-column counterpart.
+pub(crate) fn truncate_to_width(line: &str, width: usize) -> String {
+    if line.chars().count() <= width {
+        return line.to_string();
+    }
+    line.chars().take(width).collect()
+}
+
 pub(crate) fn truncate_to_cols(text: &str, max_cols: usize) -> String {
     if max_cols == 0 {
         return String::new();
