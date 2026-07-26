@@ -521,12 +521,15 @@ impl CommitPicker {
 mod tests {
     use super::{age_label, CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS};
     use crate::{
+        app::{ModalKind, MIN_PREVIEW_ROWS},
         buffer::BufferId,
         commit_graph,
         editor_state::EditorId,
         host::CommitInfo,
         input_view::{InputView, SubmitTarget},
+        render::commit_picker::MIN_LIST_ROWS,
     };
+    use crossterm::event::{MouseButton, MouseEventKind};
     use std::{collections::HashMap, path::PathBuf};
 
     fn commit(sha: &str, summary: &str) -> CommitInfo {
@@ -1165,6 +1168,16 @@ mod tests {
         }));
     }
 
+    fn press(h: &mut crate::test_harness::TestHarness, kind: MouseEventKind, col: u16, row: u16) {
+        use crossterm::event::{Event, KeyModifiers, MouseEvent};
+        h.stoat.update(Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }));
+    }
+
     fn layout(
         h: &crate::test_harness::TestHarness,
     ) -> crate::render::commit_picker::CommitPickerLayout {
@@ -1177,7 +1190,7 @@ mod tests {
             h.stoat.size(),
             lanes,
             0,
-            crate::render::picker::DEFAULT_LIST_PERCENT,
+            crate::app::modal_split_percent(&h.stoat.modal_split, ModalKind::CommitPicker),
         )
         .expect("the picker fits the test terminal")
     }
@@ -1477,7 +1490,7 @@ mod tests {
 
         assert_eq!(
             layout(0).list.height,
-            crate::render::commit_picker::MIN_LIST_ROWS,
+            MIN_LIST_ROWS,
             "a share dragged to nothing still leaves the table its floor"
         );
     }
@@ -1592,6 +1605,139 @@ mod tests {
             h.editor_scroll_rows(),
             scrolled,
             "and never reaches the editor the modal is covering"
+        );
+    }
+
+    /// The picker covers a pane, so a press anywhere over it must not reach the
+    /// editor beneath and move a cursor the user cannot see.
+    #[test]
+    fn a_press_over_the_list_never_reaches_the_buffer() {
+        let mut h = seeded_picker_harness();
+        h.seed_focused_buffer(&"line\n".repeat(200));
+        h.snapshot();
+        let head = h.primary_head_offset();
+        let list = layout(&h).list;
+
+        press(
+            &mut h,
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 4,
+            list.y + 1,
+        );
+
+        assert_eq!(
+            h.primary_head_offset(),
+            head,
+            "the cursor in the covered editor stays where it was"
+        );
+    }
+
+    /// Dragging the row between the table and the diff is how the user gives one
+    /// of them more room, so the drag has to land the separator where the pointer
+    /// is and both panes have to keep a usable floor.
+    #[test]
+    fn dragging_the_separator_moves_the_table_diff_split() {
+        let mut h = seeded_picker_harness();
+        h.snapshot();
+        let before = layout(&h);
+        let separator = before.list.y + before.list.height;
+        assert!(
+            before.preview.is_some(),
+            "the seeded modal is tall enough to show a diff"
+        );
+
+        press(
+            &mut h,
+            MouseEventKind::Down(MouseButton::Left),
+            before.inner.x + 2,
+            separator,
+        );
+        assert_eq!(
+            h.stoat.modal_separator_drag,
+            Some(ModalKind::CommitPicker),
+            "a press on the separator arms the drag"
+        );
+
+        press(
+            &mut h,
+            MouseEventKind::Drag(MouseButton::Left),
+            before.inner.x + 2,
+            separator + 2,
+        );
+        let dragged = layout(&h);
+        assert_eq!(
+            dragged.list.height,
+            before.list.height + 2,
+            "the table grows to exactly where the pointer left the separator"
+        );
+
+        press(
+            &mut h,
+            MouseEventKind::Up(MouseButton::Left),
+            before.inner.x + 2,
+            separator + 2,
+        );
+        assert_eq!(
+            h.stoat.modal_separator_drag, None,
+            "releasing clears the arm"
+        );
+
+        press(
+            &mut h,
+            MouseEventKind::Drag(MouseButton::Left),
+            before.inner.x + 2,
+            separator + 5,
+        );
+        assert_eq!(
+            layout(&h).list.height,
+            dragged.list.height,
+            "and a drag after the release moves nothing"
+        );
+    }
+
+    #[test]
+    fn a_separator_drag_clamps_at_both_floors() {
+        let mut h = seeded_picker_harness();
+        h.snapshot();
+        let before = layout(&h);
+        let separator = before.list.y + before.list.height;
+        let column = before.inner.x + 2;
+        let body_height = before.inner.y + before.inner.height - before.list.y;
+
+        press(
+            &mut h,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            separator,
+        );
+        press(
+            &mut h,
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            before.inner.y + before.inner.height,
+        );
+        let bottom = layout(&h);
+        assert_eq!(
+            bottom.preview.map(|r| r.height),
+            Some(MIN_PREVIEW_ROWS),
+            "dragged to the modal's bottom the diff keeps its floor"
+        );
+        assert_eq!(
+            bottom.list.height,
+            body_height - MIN_PREVIEW_ROWS - 1,
+            "and the table takes everything above it"
+        );
+
+        press(
+            &mut h,
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            before.list.y,
+        );
+        assert_eq!(
+            layout(&h).list.height,
+            MIN_LIST_ROWS,
+            "dragged to the top the table keeps its own floor"
         );
     }
 

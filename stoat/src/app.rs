@@ -23,7 +23,10 @@ use crate::{
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
     register,
-    render::undercurl::{self, UndercurlSpan},
+    render::{
+        commit_picker::MIN_LIST_ROWS,
+        undercurl::{self, UndercurlSpan},
+    },
     review_session::ReviewSource,
     run::{CommandMark, GridSelection, PtyNotification, RunId},
     symbol_finder::SymbolFinder,
@@ -377,6 +380,14 @@ pub(crate) enum ModalKind {
 /// More than the single row a notch moves the list, because a diff is read by
 /// the screenful while a commit list is walked one commit at a time.
 const PREVIEW_WHEEL_ROWS: usize = 3;
+
+/// Rows a dragged separator leaves the pane below it.
+///
+/// A floor on the gesture rather than on the layout, which is free to render a
+/// shorter preview when the modal itself is short. Dragging the separator to the
+/// modal's bottom edge should leave a diff still worth looking at instead of a
+/// sliver.
+pub(crate) const MIN_PREVIEW_ROWS: u16 = 3;
 
 /// Furthest a modal may be zoomed out, in steps of a tenth of the screen.
 ///
@@ -861,6 +872,15 @@ pub struct Stoat {
     /// `Drag(Left)` moves that boundary via `set_divider` and `Up(Left)` clears
     /// it. Takes over the pointer so pane handlers never see the drag.
     pub(crate) divider_drag: Option<(NodeId, usize)>,
+    /// Which open modal's list/preview separator the pointer is moving, set on
+    /// `MouseEventKind::Down(Left)` over that separator and cleared on
+    /// `Up(Left)`. While `Some`, `Drag(Left)` writes the pointer's position back
+    /// as that kind's [`Self::modal_split`] share.
+    ///
+    /// Named by kind rather than held as a bare flag because the share it writes
+    /// is stored per kind, and the modal that armed the drag is the one it has to
+    /// land on.
+    pub(crate) modal_separator_drag: Option<ModalKind>,
     /// Set on `MouseEventKind::Down(Left)` over a pane's minimap strip. While
     /// `Some`, `Drag(Left)` scrubs the named editor's viewport to the pointer
     /// position and `Up(Left)` clears it. Takes over the pointer so the press
@@ -1610,6 +1630,7 @@ impl Stoat {
             hover_cell: None,
             hover_diag: None,
             divider_drag: None,
+            modal_separator_drag: None,
             minimap_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
@@ -3896,17 +3917,32 @@ impl Stoat {
         }
     }
 
-    /// Route a mouse press to the open finder or palette modal.
+    /// Route a pointer event to the open finder, palette, or commit picker.
     ///
-    /// Only a left [`MouseEventKind::Down`] acts: it selects the clicked list
-    /// row. Drags, releases, and non-left presses return [`UpdateEffect::None`]
-    /// so the buffer beneath keeps its cursor and focus. A click outside the
-    /// list rect, or on an empty row past the last filtered item, is also a
-    /// swallowed no-op.
+    /// Two gestures act. A left press on the modal's list/preview separator arms
+    /// a drag, and each following `Drag(Left)` moves that separator until the
+    /// release. A left press elsewhere selects the clicked list row, where the
+    /// modal has one. Everything else returns [`UpdateEffect::None`], swallowed
+    /// so the buffer beneath keeps its cursor and focus rather than reacting to
+    /// a click on a modal covering it. A press outside the list rect, or on an
+    /// empty row past the last filtered item, is a swallowed no-op too.
     fn handle_modal_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
-        let MouseEventKind::Down(MouseButton::Left) = mouse.kind else {
-            return UpdateEffect::None;
-        };
+        match mouse.kind {
+            MouseEventKind::Drag(MouseButton::Left) if self.modal_separator_drag.is_some() => {
+                return self.drag_modal_separator(mouse);
+            },
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.modal_separator_drag = None;
+                return UpdateEffect::None;
+            },
+            MouseEventKind::Down(MouseButton::Left) => {},
+            _ => return UpdateEffect::None,
+        }
+
+        if self.arm_modal_separator(mouse) {
+            return UpdateEffect::Redraw;
+        }
+
         let size = self.size();
 
         let (list, selected, filtered_len) = if let Some(finder) = self.file_finder.as_ref() {
@@ -3969,6 +4005,73 @@ impl Stoat {
         }
     }
 
+    /// The open commit picker's layout, sized from the same inputs the renderer
+    /// reads, so a hit-test lands on the rows the user is looking at.
+    fn open_commit_picker_layout(
+        &self,
+    ) -> Option<crate::render::commit_picker::CommitPickerLayout> {
+        let picker = self.commit_picker.as_ref()?;
+        crate::render::commit_picker::commit_picker_layout(
+            self.size(),
+            crate::render::commit_picker::graph_lanes(picker),
+            modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
+            modal_split_percent(&self.modal_split, ModalKind::CommitPicker),
+        )
+    }
+
+    /// Arm a separator drag when `mouse` presses the open modal's list/preview
+    /// separator, reporting whether it did.
+    ///
+    /// The commit picker's separator is the row between its table and the diff
+    /// below, spanning the modal's full inner width. A modal too short to show a
+    /// preview has no separator to grab.
+    fn arm_modal_separator(&mut self, mouse: MouseEvent) -> bool {
+        let Some(layout) = self.open_commit_picker_layout() else {
+            return false;
+        };
+        if layout.preview.is_none() || mouse.row != layout.list.y + layout.list.height {
+            return false;
+        }
+        let inner = layout.inner;
+        if mouse.column < inner.x || mouse.column >= inner.x + inner.width {
+            return false;
+        }
+
+        self.modal_separator_drag = Some(ModalKind::CommitPicker);
+        true
+    }
+
+    /// Move the armed separator to `mouse`, storing the share it lands on.
+    ///
+    /// Clamping happens in rows rather than percent, because a percent that
+    /// round-trips through the layout's own truncating division lands a row above
+    /// the pointer. The row count is clamped to leave both panes their floor, and
+    /// the percent is then rounded up so the layout recovers exactly that count.
+    fn drag_modal_separator(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        let Some(ModalKind::CommitPicker) = self.modal_separator_drag else {
+            return UpdateEffect::None;
+        };
+        let Some(layout) = self.open_commit_picker_layout() else {
+            return UpdateEffect::None;
+        };
+
+        let body_top = layout.list.y;
+        let body_height = (layout.inner.y + layout.inner.height).saturating_sub(body_top);
+        let widest_list = body_height.saturating_sub(MIN_PREVIEW_ROWS + 1);
+        if body_height == 0 || widest_list < MIN_LIST_ROWS {
+            return UpdateEffect::None;
+        }
+
+        let rows = mouse
+            .row
+            .saturating_sub(body_top)
+            .clamp(MIN_LIST_ROWS, widest_list);
+        let percent = (rows * 100).div_ceil(body_height);
+        self.modal_split.insert(ModalKind::CommitPicker, percent);
+
+        UpdateEffect::Redraw
+    }
+
     /// Route a mouse press to the open location picker.
     ///
     /// A left press on a row selects it, and a press on the row already selected
@@ -4025,10 +4128,15 @@ impl Stoat {
             return self.handle_location_picker_mouse(mouse);
         }
 
-        // While a finder or palette modal is open, its list owns the pointer: a
-        // left click selects a row and every other press, drag, or release is
-        // swallowed so nothing reaches divider arming, focus, or the panes.
-        if self.file_finder.is_some() || self.command_palette.is_some() {
+        // An open finder, palette, or commit picker owns the pointer. A left
+        // click selects a row or grabs the modal's separator, and every other
+        // press, drag, or release is swallowed so nothing reaches divider arming,
+        // focus, or the panes beneath the modal covering them. The wheel is
+        // unaffected -- handle_mouse_scroll returns above this.
+        if self.file_finder.is_some()
+            || self.command_palette.is_some()
+            || self.commit_picker.is_some()
+        {
             return self.handle_modal_mouse(mouse);
         }
 
