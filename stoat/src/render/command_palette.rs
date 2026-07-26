@@ -436,7 +436,7 @@ fn render_palette_filter(
             doc_separator_row,
             inner.width,
             separator_style,
-            Some(scene),
+            scene,
         );
         let doc_lines = filtered
             .get(selected)

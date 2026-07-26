@@ -55,7 +55,7 @@ pub(crate) fn filter_header(
         inner.y + 1,
         inner.width,
         theme.get(scope::UI_BORDER_INACTIVE),
-        Some(scene),
+        scene,
     );
 }
 

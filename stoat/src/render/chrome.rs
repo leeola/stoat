@@ -223,20 +223,20 @@ pub(crate) fn popout_frame(
 /// Draw a horizontal separator across `width` cells at row `y`, starting at
 /// column `x`.
 ///
-/// The fallback -- taken when `scene` is absent or `style`'s foreground is not
-/// RGB -- writes `─` glyphs styled with `style`, exactly as the separator sites
-/// did before. Under stoatty it emits one hairline [`Bar`] a sixteenth of a
-/// cell thick centered in the row, and writes no glyphs.
+/// The fallback -- taken when `style`'s foreground does not resolve to RGB --
+/// writes `─` glyphs styled with `style`, exactly as the separator sites did
+/// before. Otherwise it emits one hairline [`Bar`] a sixteenth of a cell thick
+/// centered in the row, and writes no glyphs.
 pub(crate) fn hline(
     buf: &mut Buffer,
     x: u16,
     y: u16,
     width: u16,
     style: Style,
-    scene: Option<&mut ApcScene>,
+    scene: &mut ApcScene,
 ) {
-    match scene.zip(style_rgb(style.fg)) {
-        Some((scene, color)) => {
+    match style_rgb(style.fg) {
+        Some(color) => {
             Bar {
                 x: 0,
                 y: 8,
@@ -530,14 +530,15 @@ mod tests {
     #[test]
     fn hline_fallback_draws_dashes_and_stoatty_emits_a_centered_bar() {
         let mut fallback = Buffer::empty(Rect::new(0, 0, 8, 4));
-        hline(&mut fallback, 2, 3, 4, rgb_style(), None);
+        let mut fallback_scene = ApcScene::new();
+        hline(&mut fallback, 2, 3, 4, plain_style(), &mut fallback_scene);
         assert_eq!(fallback.cell((2, 3)).unwrap().symbol(), "─");
         assert_eq!(fallback.cell((5, 3)).unwrap().symbol(), "─");
         assert_eq!(fallback.cell((6, 3)).unwrap().symbol(), " ");
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
         let mut scene = ApcScene::new();
-        hline(&mut buf, 2, 3, 4, rgb_style(), Some(&mut scene));
+        hline(&mut buf, 2, 3, 4, rgb_style(), &mut scene);
         assert_eq!(buf.cell((2, 3)).unwrap().symbol(), " ");
         assert_eq!(
             scene.buffer(),

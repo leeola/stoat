@@ -98,7 +98,15 @@ pub(crate) fn render_symbol_finder(
         );
         finder.preview_rows = Some(preview_rect.height as usize);
         let source_rect = match &finder.doc_markdown {
-            Some(doc) => render_doc_pane(doc, preview_rect, separator_style, theme, languages, buf),
+            Some(doc) => render_doc_pane(
+                doc,
+                preview_rect,
+                separator_style,
+                theme,
+                languages,
+                buf,
+                scene,
+            ),
             None => preview_rect,
         };
         crate::render::picker::render_picker_preview(&finder.preview, source_rect, theme, ws, buf);
@@ -211,6 +219,7 @@ fn render_doc_pane(
     theme: &Theme,
     languages: &LanguageRegistry,
     buf: &mut Buffer,
+    scene: &mut stoatty_widgets::ApcScene,
 ) -> Rect {
     let lines = crate::markdown::render_markdown(markdown, theme, languages);
     let max_doc_rows = (area.height / 2).max(1);
@@ -241,7 +250,7 @@ fn render_doc_pane(
         separator_row,
         area.width,
         separator_style,
-        None,
+        scene,
     );
     let source_y = separator_row + 1;
     let source_height = (area.y + area.height).saturating_sub(source_y);
@@ -278,8 +287,45 @@ fn symbol_kind_label(kind: Option<SymbolKind>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::symbol_finder_layout;
-    use ratatui::layout::Rect;
+    use super::{render_doc_pane, symbol_finder_layout};
+    use crate::theme::Theme;
+    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+    use stoat_language::LanguageRegistry;
+
+    /// The doc pane used to pass no scene, so its separator fell back to dash
+    /// glyphs while every sibling separator in the same modal drew a hairline.
+    /// A hairline writes no glyphs at all, so the absence of dashes is what
+    /// says the scene arrived.
+    #[test]
+    fn the_doc_separator_is_a_hairline_when_the_style_resolves() {
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoatty_widgets::ApcScene::new();
+        let rgb = Style::default().fg(ratatui::style::Color::Rgb(1, 2, 3));
+
+        let source = render_doc_pane(
+            "one line of doc",
+            area,
+            rgb,
+            &Theme::empty(),
+            &LanguageRegistry::standard(),
+            &mut buf,
+            &mut scene,
+        );
+
+        let separator_row = source.y - 1;
+        let painted: String = (area.x..area.x + area.width)
+            .map(|x| buf[(x, separator_row)].symbol())
+            .collect();
+        assert!(
+            !painted.contains('\u{2500}'),
+            "the separator row holds no dash glyphs: {painted:?}"
+        );
+        assert!(
+            !scene.buffer().is_empty(),
+            "and the hairline reached the scene"
+        );
+    }
 
     #[test]
     fn a_short_symbol_list_keeps_the_recommended_box() {

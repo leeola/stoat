@@ -132,7 +132,7 @@ pub(crate) fn render_commit_picker(
             layout.list.y + layout.list.height,
             layout.list.width,
             separator_style,
-            Some(&mut *scene),
+            &mut *scene,
         );
         render_preview(picker, preview_rect, theme, buf, scene);
     }

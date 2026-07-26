@@ -418,7 +418,7 @@ pub(crate) fn render_pane_dividers(
                     continue;
                 }
                 let width = d.x.saturating_add(d.len).min(buf_end_x).saturating_sub(d.x);
-                chrome::hline(buf, d.x, d.y, width, style, Some(&mut *scene));
+                chrome::hline(buf, d.x, d.y, width, style, &mut *scene);
             },
         }
     }

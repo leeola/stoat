@@ -160,7 +160,7 @@ pub(crate) fn render_hints_grouped(
                 sep_row,
                 inner.width,
                 sep_style,
-                Some(&mut *scene),
+                &mut *scene,
             );
         }
         if text_row < inner.y + inner.height {
