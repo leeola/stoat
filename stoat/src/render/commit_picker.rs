@@ -104,17 +104,22 @@ pub(crate) fn render_commit_picker(
     };
 
     // The same rows serve both roles, so the title is what tells the user
-    // whether picking one starts a review or just closes the listing.
-    let title = match picker.role {
-        CommitPickerRole::PickBase => " review from commit ",
-        CommitPickerRole::Browse => " git log ",
+    // whether picking one starts a review or just closes the listing. A drilled
+    // scope names itself instead, since which commits are listed matters more
+    // there than which role listed them.
+    let title = match &picker.scope_label {
+        Some(label) => format!(" {label} "),
+        None => match picker.role {
+            CommitPickerRole::PickBase => " review from commit ".to_string(),
+            CommitPickerRole::Browse => " git log ".to_string(),
+        },
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     Clear.render(layout.modal, buf);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,
-        Some(title),
+        Some(&title),
         modal_style,
         theme,
         &mut *scene,

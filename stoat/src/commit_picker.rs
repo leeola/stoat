@@ -6,7 +6,7 @@ use crate::{
     review_session::ReviewSession,
     workspace::Workspace,
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, mem, path::PathBuf, sync::Arc};
 use stoat_scheduler::Executor;
 
 /// What selecting a row in a [`CommitPicker`] does.
@@ -89,6 +89,27 @@ pub(crate) fn age_label(now_epoch: i64, commit_time: i64) -> String {
     "now".to_string()
 }
 
+/// A picker scope a drill-in displaced, kept so popping back restores exactly
+/// what the user was looking at.
+///
+/// Drilling into a merge replaces the whole list, and the user expects Alt-Left
+/// to undo that completely rather than dropping them at the top of the old list
+/// with their query gone. Everything a drill overwrites is saved here.
+///
+/// Nothing in the crate drills yet, so the scope machinery reads as dead until
+/// the drill actions that call [`CommitPicker::push_scope`] land.
+#[allow(dead_code)]
+pub(crate) struct CommitScope {
+    /// The displaced scope's own label, `None` when it was the root scope whose
+    /// title comes from the picker's role.
+    label: Option<String>,
+    ref_sha: String,
+    commits: Vec<CommitInfo>,
+    selected: usize,
+    query: String,
+    filter_column: Option<CommitColumn>,
+}
+
 /// Modal listing a ref's first-parent history, fuzzy-filtered, with the
 /// selected commit's diff previewed beside it.
 ///
@@ -140,6 +161,15 @@ pub(crate) struct CommitPicker {
     /// Captured once rather than read per render, so the ages stay put while
     /// the user scrolls and a test can pin them to a fixed clock.
     pub(crate) now_epoch: i64,
+    /// Scopes drilled through to reach the current list, oldest first.
+    ///
+    /// Empty at the root scope. Nesting is expected, since a merge inside a
+    /// drilled branch drills again and each pop unwinds one level.
+    #[allow(dead_code)]
+    pub(crate) scope_stack: Vec<CommitScope>,
+    /// What the current scope is called, or `None` at the root scope, where the
+    /// title comes from the picker's role instead.
+    pub(crate) scope_label: Option<String>,
 }
 
 impl CommitPicker {
@@ -173,10 +203,58 @@ impl CommitPicker {
             requested_preview: None,
             filter_column: None,
             preview_scroll: 0,
+            scope_stack: Vec::new(),
+            scope_label: None,
         };
         picker.refilter("");
         picker.selected = picker.default_selection();
         picker
+    }
+
+    /// Drill into a new scope, parking the current one for [`Self::pop_scope`].
+    ///
+    /// `query_before` is the text in the input at the moment of the drill,
+    /// which the picker cannot read itself. The caller supplies it and clears
+    /// the input, because the new list arrives unfiltered.
+    #[allow(dead_code)]
+    pub(crate) fn push_scope(
+        &mut self,
+        label: String,
+        ref_sha: String,
+        commits: Vec<CommitInfo>,
+        query_before: String,
+    ) {
+        self.scope_stack.push(CommitScope {
+            label: self.scope_label.replace(label),
+            ref_sha: mem::replace(&mut self.ref_sha, ref_sha),
+            commits: mem::replace(&mut self.commits, commits),
+            selected: self.selected,
+            query: query_before,
+            filter_column: self.filter_column.take(),
+        });
+
+        self.selected = 0;
+        self.refilter("");
+        self.preview_scroll = 0;
+    }
+
+    /// Pop back to the scope the last drill displaced, returning the query that
+    /// was typed in it so the caller can restore the input.
+    ///
+    /// `None` at the root scope, where there is nothing to pop back to.
+    #[allow(dead_code)]
+    pub(crate) fn pop_scope(&mut self) -> Option<String> {
+        let scope = self.scope_stack.pop()?;
+
+        self.scope_label = scope.label;
+        self.ref_sha = scope.ref_sha;
+        self.commits = scope.commits;
+        self.filter_column = scope.filter_column;
+        self.selected = scope.selected;
+        self.refilter(&scope.query);
+        self.preview_scroll = 0;
+
+        Some(scope.query)
     }
 
     /// The cells for `idx`, joined into the fuzzy haystack the filter matches.
@@ -418,6 +496,8 @@ mod tests {
             // The fixture's commits sit at epoch zero, so this dates every row
             // to "now" and keeps the age column out of the row assertions.
             now_epoch: 0,
+            scope_stack: Vec::new(),
+            scope_label: None,
         };
         p.refilter("");
         p
@@ -652,6 +732,95 @@ mod tests {
         let mut p = picker(history(), &[], "ccc3333");
         p.move_selection(1);
         assert_eq!(p.selected_commit().map(|c| c.sha.as_str()), Some("bbb2222"));
+    }
+
+    fn branch_history() -> Vec<CommitInfo> {
+        vec![
+            commit("fff5555", "branch work"),
+            commit("eee4444", "branch start"),
+        ]
+    }
+
+    #[test]
+    fn a_drilled_scope_installs_its_own_rows_at_the_top() {
+        let mut p = picker(history(), &[], "ccc3333");
+        p.filter_column = Some(CommitColumn::Title);
+        p.move_selection(2);
+
+        p.push_scope(
+            "merge ccc3333".to_string(),
+            "fff5555".to_string(),
+            branch_history(),
+            "gadget".to_string(),
+        );
+
+        assert_eq!(shown(&p), ["fff5555", "eee4444"], "the branch's own rows");
+        assert_eq!(p.selected, 0, "a new scope starts at the top");
+        assert_eq!(
+            p.filter_column, None,
+            "the column scope does not carry over"
+        );
+        assert_eq!(p.scope_label.as_deref(), Some("merge ccc3333"));
+        assert_eq!(p.ref_sha, "fff5555");
+    }
+
+    #[test]
+    fn popping_a_scope_restores_everything_the_drill_replaced() {
+        let mut p = picker(history(), &[], "ccc3333");
+        p.filter_column = Some(CommitColumn::Title);
+        p.move_selection(2);
+
+        p.push_scope(
+            "merge ccc3333".to_string(),
+            "fff5555".to_string(),
+            branch_history(),
+            "gadget".to_string(),
+        );
+
+        assert_eq!(p.pop_scope().as_deref(), Some("gadget"), "the typed query");
+        assert_eq!(shown(&p), ["bbb2222"], "restored rows, refiltered by it");
+        assert_eq!(p.selected, 0);
+        assert_eq!(p.filter_column, Some(CommitColumn::Title));
+        assert_eq!(p.scope_label, None, "back to the role-titled root");
+        assert_eq!(p.ref_sha, "ccc3333");
+    }
+
+    #[test]
+    fn nested_scopes_unwind_one_level_at_a_time() {
+        let mut p = picker(history(), &[], "ccc3333");
+
+        p.push_scope(
+            "merge ccc3333".to_string(),
+            "fff5555".to_string(),
+            branch_history(),
+            String::new(),
+        );
+        p.push_scope(
+            "merge fff5555".to_string(),
+            "ddd9999".to_string(),
+            vec![commit("ddd9999", "inner work")],
+            String::new(),
+        );
+
+        assert_eq!(shown(&p), ["ddd9999"]);
+        assert_eq!(p.pop_scope(), Some(String::new()));
+        assert_eq!(shown(&p), ["fff5555", "eee4444"], "one level back");
+        assert_eq!(p.scope_label.as_deref(), Some("merge ccc3333"));
+
+        assert_eq!(p.pop_scope(), Some(String::new()));
+        assert_eq!(shown(&p), ["ccc3333", "bbb2222", "aaa1111"], "the root");
+        assert_eq!(p.scope_label, None);
+    }
+
+    #[test]
+    fn popping_the_root_scope_reports_nothing_to_pop() {
+        let mut p = picker(history(), &[], "ccc3333");
+        assert_eq!(p.pop_scope(), None);
+        assert_eq!(
+            shown(&p),
+            ["ccc3333", "bbb2222", "aaa1111"],
+            "list untouched"
+        );
     }
 
     /// The `modal == commit_picker` keymap block reaches the handlers, over a
