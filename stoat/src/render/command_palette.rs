@@ -531,7 +531,7 @@ pub(crate) fn paint_palette_rows(
 
         let name = entry.command_name.as_str();
         let name_x = area.x + 1;
-        write_str(buf, name_x, row, name, style);
+        write_str_clipped(buf, name_x, row, name, style, end_x);
         let indices = match_indices.get(abs).unwrap_or(&empty_indices);
         for (name_col, _) in name.chars().enumerate() {
             let col = name_x + name_col as u16;
@@ -545,18 +545,86 @@ pub(crate) fn paint_palette_rows(
         let desc_col = area.x + 1 + name_col_width as u16 + 2;
         if desc_col < end_x {
             let desc_style = if is_selected { style } else { desc_style };
-            write_str(buf, desc_col, row, entry.def.short_desc(), desc_style);
+            write_str_clipped(
+                buf,
+                desc_col,
+                row,
+                entry.def.short_desc(),
+                desc_style,
+                end_x,
+            );
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{palette_filter_layout, DOC_ROWS, LIST_ROWS, MAX_WIDTH};
-    use ratatui::layout::Rect;
+    use super::{paint_palette_rows, palette_filter_layout, DOC_ROWS, LIST_ROWS, MAX_WIDTH};
+    use crate::theme::Theme;
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use stoat_action::registry;
 
     fn layout(area: Rect, content_rows: u16, zoom: i8) -> super::PaletteFilterLayout {
         palette_filter_layout(area, content_rows, zoom).expect("the area hosts the palette")
+    }
+
+    /// Paint one row of `list_width` cells at x=2 inside a buffer with room to
+    /// spare on either side, and report every cell the painter touched outside
+    /// the list rect it was handed.
+    fn cells_painted_outside(
+        entry: &'static registry::RegistryEntry,
+        list_width: u16,
+    ) -> Vec<(u16, u16)> {
+        let area = Rect::new(0, 0, list_width + 20, 3);
+        let list = Rect::new(2, 1, list_width, 1);
+        let mut buf = Buffer::empty(area);
+        paint_palette_rows(
+            &[entry],
+            &[Vec::new()],
+            0,
+            list,
+            0,
+            &Theme::empty(),
+            &mut buf,
+        );
+
+        let pristine = Buffer::empty(area);
+        (area.y..area.y + area.height)
+            .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| !list.contains((x, y).into()))
+            .filter(|&(x, y)| buf[(x, y)] != pristine[(x, y)])
+            .collect()
+    }
+
+    /// A row wider than the list it is painted into must stop at the list's
+    /// edge. The list spans the full inner width of the modal, so its edge is
+    /// the border column, and anything past that lands on the editor behind.
+    #[test]
+    fn an_overlong_row_paints_nothing_outside_the_list() {
+        let entry = registry::all()
+            .max_by_key(|e| e.command_name.len() + e.def.short_desc().len())
+            .expect("the registry has entries");
+        let name_len = entry.command_name.len() as u16;
+        assert!(
+            entry.def.short_desc().len() > 1,
+            "the widest entry needs a description to overrun with"
+        );
+
+        // The name fits with the two-column gap after it, so the description
+        // starts on screen and runs off the end.
+        assert_eq!(
+            cells_painted_outside(entry, name_len + 4),
+            Vec::new(),
+            "a description longer than the room left for it stays inside"
+        );
+
+        // Narrower than the name itself, which suppresses the description
+        // entirely and leaves the name as the only thing that can overrun.
+        assert_eq!(
+            cells_painted_outside(entry, name_len),
+            Vec::new(),
+            "and so does a name wider than the whole list"
+        );
     }
 
     #[test]
