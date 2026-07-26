@@ -43,6 +43,7 @@ pub(super) fn rewrite_commit(
     );
     let new_target = FakeCommit {
         parent: target.parent.clone(),
+        merge_parent: None,
         tree: tree.clone(),
         message: message
             .map(str::to_string)
@@ -72,6 +73,7 @@ pub(super) fn rewrite_commit(
         );
         let new_commit = FakeCommit {
             parent: Some(current.clone()),
+            merge_parent: None,
             tree: desc.tree.clone(),
             message: desc.message.clone(),
             author_name: desc.author_name.clone(),
@@ -129,6 +131,7 @@ pub(super) fn run_rebase(
                 );
                 let new_commit = FakeCommit {
                     parent: Some(current.clone()),
+                    merge_parent: None,
                     tree: src.tree.clone(),
                     message: src.message.clone(),
                     author_name: src.author_name.clone(),
@@ -179,6 +182,7 @@ pub(super) fn run_rebase(
                 );
                 let new_commit = FakeCommit {
                     parent: prev.parent.clone(),
+                    merge_parent: None,
                     tree: merged_tree,
                     message: combined_message.clone(),
                     author_name: prev.author_name.clone(),

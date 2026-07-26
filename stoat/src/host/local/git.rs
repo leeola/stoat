@@ -267,6 +267,17 @@ impl GitRepo for LocalGitRepo {
         Some(parent.id().to_string())
     }
 
+    fn parent_shas(&self, sha: &str) -> Vec<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Ok(oid) = git2::Oid::from_str(sha) else {
+            return Vec::new();
+        };
+        let Ok(commit) = repo.find_commit(oid) else {
+            return Vec::new();
+        };
+        commit.parents().map(|p| p.id().to_string()).collect()
+    }
+
     fn log_commits(&self, after: Option<&str>, limit: usize) -> Vec<CommitInfo> {
         if limit == 0 {
             return Vec::new();
@@ -1012,6 +1023,43 @@ mod tests {
             .collect();
         assert_eq!(walked, [shas[1].clone(), shas[0].clone()]);
         assert!(git.log_from(&"0".repeat(40), 10).is_empty());
+    }
+
+    #[test]
+    fn parent_shas_reports_both_sides_of_a_merge() {
+        let (dir, repo, shas) = seeded_repo();
+        let sig = Signature::now("test", "t@t").unwrap();
+        let commit_at = |sha: &str| repo.find_commit(Oid::from_str(sha).unwrap()).unwrap();
+
+        // Committed with no ref to update, so `main` stays at shas[2] and the
+        // merge is reachable only by the sha the test holds.
+        let side = {
+            let root = commit_at(&shas[0]);
+            let tree = root.tree().unwrap();
+            repo.commit(None, &sig, &sig, "side", &tree, &[&root])
+                .unwrap()
+                .to_string()
+        };
+        let merge = {
+            let (mainline, branch) = (commit_at(&shas[2]), commit_at(&side));
+            let tree = mainline.tree().unwrap();
+            repo.commit(None, &sig, &sig, "merge", &tree, &[&mainline, &branch])
+                .unwrap()
+                .to_string()
+        };
+
+        let git = discover(&dir);
+        assert_eq!(
+            git.parent_shas(&merge),
+            [shas[2].clone(), side],
+            "mainline first"
+        );
+        assert_eq!(git.parent_shas(&shas[1]), [shas[0].clone()]);
+        assert!(
+            git.parent_shas(&shas[0]).is_empty(),
+            "a root has no parents"
+        );
+        assert!(git.parent_shas(&"0".repeat(40)).is_empty());
     }
 
     #[test]

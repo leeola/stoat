@@ -189,6 +189,14 @@ pub trait GitRepo: Send + Sync {
     /// `CommitRange` review should be used for multi-parent walks.
     fn parent_sha(&self, sha: &str) -> Option<String>;
 
+    /// Every parent of `sha`, first parent first.
+    ///
+    /// Empty for a root commit or an unknown sha. This is the case
+    /// [`Self::parent_sha`] deliberately cannot express: callers that need to
+    /// recognize a merge, or to reach the branch a merge brought in, have to
+    /// see past the first parent.
+    fn parent_shas(&self, sha: &str) -> Vec<String>;
+
     /// Walk first-parent history starting immediately after `after`
     /// (exclusive; `None` starts at HEAD) and return up to `limit`
     /// commits, newest first. Used to paginate the commit-list view:

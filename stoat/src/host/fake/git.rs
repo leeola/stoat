@@ -387,7 +387,7 @@ impl<'a> FakeRepoBuilder<'a> {
     /// tree. `files` is a slice of `(rel_path, content)` pairs; entries
     /// are stored as the commit's full tree snapshot.
     pub fn commit(&mut self, sha: &str, files: &[(&str, &str)]) -> &mut Self {
-        self.commit_full(sha, None, None, files)
+        self.commit_full(sha, None, None, None, files)
     }
 
     /// Seed a commit with a given first-parent. The parent sha does not
@@ -400,7 +400,7 @@ impl<'a> FakeRepoBuilder<'a> {
         parent: &str,
         files: &[(&str, &str)],
     ) -> &mut Self {
-        self.commit_full(sha, Some(parent.to_string()), None, files)
+        self.commit_full(sha, Some(parent.to_string()), None, None, files)
     }
 
     /// Seed a commit with an explicit message. Writers for commit-list
@@ -412,7 +412,7 @@ impl<'a> FakeRepoBuilder<'a> {
         message: &str,
         files: &[(&str, &str)],
     ) -> &mut Self {
-        self.commit_full(sha, None, Some(message.to_string()), files)
+        self.commit_full(sha, None, None, Some(message.to_string()), files)
     }
 
     /// Seed a commit with both a parent and an explicit message.
@@ -426,7 +426,30 @@ impl<'a> FakeRepoBuilder<'a> {
         self.commit_full(
             sha,
             Some(parent.to_string()),
+            None,
             Some(message.to_string()),
+            files,
+        )
+    }
+
+    /// Seed a merge of `second_parent` into the most recently seeded commit,
+    /// which becomes the merge's first parent.
+    ///
+    /// Taking only the second parent mirrors `git merge <branch>`, which
+    /// merges into wherever HEAD already is. Seed the branch being merged
+    /// first, advance the mainline, then call this.
+    pub fn merge_commit(
+        &mut self,
+        sha: &str,
+        second_parent: &str,
+        files: &[(&str, &str)],
+    ) -> &mut Self {
+        let first_parent = self.head_sha();
+        self.commit_full(
+            sha,
+            first_parent,
+            Some(second_parent.to_string()),
+            None,
             files,
         )
     }
@@ -435,6 +458,7 @@ impl<'a> FakeRepoBuilder<'a> {
         &mut self,
         sha: &str,
         parent: Option<String>,
+        merge_parent: Option<String>,
         message: Option<String>,
         files: &[(&str, &str)],
     ) -> &mut Self {
@@ -447,6 +471,7 @@ impl<'a> FakeRepoBuilder<'a> {
             let seq = state.commits.len() as i64;
             let commit = FakeCommit {
                 parent,
+                merge_parent,
                 tree,
                 message: message.unwrap_or_else(|| format!("commit {sha}")),
                 author_name: "fake".into(),
@@ -525,6 +550,14 @@ impl<'a> FakeRepoBuilder<'a> {
     pub fn clear_apply_failure(&mut self) -> &mut Self {
         self.mutate_repo(|state| state.apply_error = None);
         self
+    }
+
+    /// The sha of the most recently seeded commit, which every `commit*`
+    /// builder leaves as HEAD. `None` before any commit is seeded.
+    fn head_sha(&self) -> Option<String> {
+        let mut head = None;
+        self.mutate_repo(|state| head = state.head.clone());
+        head
     }
 
     fn mutate_repo<F: FnOnce(&mut FakeRepoState)>(&self, f: F) {
@@ -624,7 +657,8 @@ impl FakeRepoState {
                 author_name: commit.author_name.clone(),
                 author_email: commit.author_email.clone(),
                 time: commit.time,
-                parent_count: commit.parent.as_ref().map(|_| 1).unwrap_or(0),
+                parent_count: u32::from(commit.parent.is_some())
+                    + u32::from(commit.merge_parent.is_some()),
             });
             match &commit.parent {
                 Some(p) => cursor = p.clone(),
@@ -652,6 +686,10 @@ pub struct RecordedAmend {
 #[derive(Clone)]
 struct FakeCommit {
     parent: Option<String>,
+    /// Second parent, set only on commits seeded by
+    /// [`FakeRepoBuilder::merge_commit`]. Its presence is what makes a seeded
+    /// commit a merge, so the first-parent walk still follows `parent` alone.
+    merge_parent: Option<String>,
     tree: BTreeMap<PathBuf, String>,
     message: String,
     author_name: String,
@@ -770,6 +808,19 @@ impl GitRepo for FakeGitRepo {
         state.commits.get(sha).and_then(|c| c.parent.clone())
     }
 
+    fn parent_shas(&self, sha: &str) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        let Some(commit) = state.commits.get(sha) else {
+            return Vec::new();
+        };
+        commit
+            .parent
+            .iter()
+            .chain(commit.merge_parent.iter())
+            .cloned()
+            .collect()
+    }
+
     fn log_commits(&self, after: Option<&str>, limit: usize) -> Vec<CommitInfo> {
         if limit == 0 {
             return Vec::new();
@@ -858,6 +909,7 @@ impl GitRepo for FakeGitRepo {
             .unwrap_or(head_commit.message.clone());
         let new_commit = FakeCommit {
             parent: head_commit.parent.clone(),
+            merge_parent: None,
             tree: tree.clone(),
             message: new_msg,
             author_name: head_commit.author_name.clone(),
@@ -924,6 +976,7 @@ impl GitRepo for FakeGitRepo {
         );
         let commit = FakeCommit {
             parent: parent_sha.map(str::to_string),
+            merge_parent: None,
             tree: tree.clone(),
             message: message.to_string(),
             author_name: author_name.to_string(),
@@ -1425,6 +1478,29 @@ mod tests {
         assert_eq!(walked, ["c2", "c1"], "start included, root ends the walk");
         assert!(repo.log_from("missing", 10).is_empty());
         assert!(repo.log_from("c3", 0).is_empty());
+    }
+
+    #[test]
+    fn parent_shas_reports_both_sides_of_a_merge() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("f1", "c1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .merge_commit("m1", "f1", &[]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(repo.parent_shas("m1"), ["c2", "f1"], "mainline first");
+        assert_eq!(repo.parent_shas("c2"), ["c1"]);
+        assert!(repo.parent_shas("c1").is_empty(), "a root has no parents");
+        assert!(repo.parent_shas("missing").is_empty());
+
+        let counts: Vec<u32> = repo
+            .log_from("m1", 10)
+            .into_iter()
+            .map(|c| c.parent_count)
+            .collect();
+        assert_eq!(counts, [2, 1, 0], "the merge row counts both parents");
     }
 
     #[test]
