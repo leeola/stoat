@@ -101,7 +101,13 @@ fn open_commit_picker(
 ) -> UpdateEffect {
     stoat.set_focused_mode("normal".to_string());
 
-    let commits = repo.log_from(&ref_sha, WALK_LIMIT);
+    // A browser shows the real DAG, so a merged branch's commits are rows of
+    // their own. A base picker keeps the first-parent walk, because the review
+    // chain a pick seeds is defined over first-parent history.
+    let commits = match role {
+        CommitPickerRole::Browse => repo.log_graph(&ref_sha, WALK_LIMIT),
+        CommitPickerRole::PickBase => repo.log_from(&ref_sha, WALK_LIMIT),
+    };
     let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
     for (name, sha) in repo.local_branches() {
         branch_tips.entry(sha).or_default().push(name);
@@ -721,6 +727,10 @@ mod tests {
         h
     }
 
+    /// Every row `:git-ls` lists over [`merged_harness`], newest seeded first.
+    /// The browser walks the whole DAG, so the merged branch is in here.
+    const MERGED_DAG: [&str; 5] = ["m9999999", "b2c3d4e5", "f2222222", "f1111111", "a1b2c3d4"];
+
     fn picker_query(h: &TestHarness) -> String {
         h.stoat
             .commit_picker
@@ -745,12 +755,36 @@ mod tests {
     }
 
     #[test]
+    fn browsing_lists_merged_branches_while_a_base_pick_does_not() {
+        let mut h = merged_harness();
+        h.type_text(":git-ls");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            picker_shas(&h),
+            ["m9999999", "b2c3d4e5", "f2222222", "f1111111", "a1b2c3d4"],
+            "a browser walks the real DAG, so the merged branch is listed"
+        );
+
+        h.type_keys("escape");
+        h.settle();
+        h.type_text(":git-review main");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            picker_shas(&h),
+            ["m9999999", "b2c3d4e5", "a1b2c3d4"],
+            "a base pick keeps first-parent history, which the review walks"
+        );
+    }
+
+    #[test]
     fn drilling_a_merge_lists_only_the_branch_it_brought_in() {
         let mut h = merged_harness();
         h.type_text(":git-ls");
         h.type_keys("enter");
         h.settle();
-        assert_eq!(picker_shas(&h), ["m9999999", "b2c3d4e5", "a1b2c3d4"]);
+        assert_eq!(picker_shas(&h), MERGED_DAG);
 
         h.type_keys("alt-right");
         h.settle();
@@ -791,7 +825,7 @@ mod tests {
         h.type_keys("alt-left");
         h.settle();
 
-        assert_eq!(picker_shas(&h), ["m9999999", "b2c3d4e5", "a1b2c3d4"]);
+        assert_eq!(picker_shas(&h), MERGED_DAG);
         assert_eq!(picker_query(&h), "9999", "the query typed in that scope");
         assert_eq!(
             picker_filtered_shas(&h),
@@ -815,7 +849,10 @@ mod tests {
         h.type_keys("enter");
         h.settle();
 
-        h.type_text("tweak");
+        // Filtering by sha rather than by summary word, because the fuzzy
+        // matcher runs over the whole joined row and a word like "tweak" is a
+        // subsequence of several of them.
+        h.type_text("b2c3d4");
         h.settle();
         assert_eq!(picker_filtered_shas(&h), ["b2c3d4e5"], "one-parent commit");
 
@@ -823,8 +860,8 @@ mod tests {
         h.settle();
 
         assert_eq!(review_badge(&h).as_deref(), Some("not a merge commit"));
-        assert_eq!(picker_shas(&h), ["m9999999", "b2c3d4e5", "a1b2c3d4"]);
-        assert_eq!(picker_query(&h), "tweak", "the query survives the refusal");
+        assert_eq!(picker_shas(&h), MERGED_DAG);
+        assert_eq!(picker_query(&h), "b2c3d4", "the query survives the refusal");
     }
 
     #[test]
@@ -837,7 +874,7 @@ mod tests {
         h.type_keys("alt-left");
         h.settle();
 
-        assert_eq!(picker_shas(&h), ["m9999999", "b2c3d4e5", "a1b2c3d4"]);
+        assert_eq!(picker_shas(&h), MERGED_DAG);
         assert!(h.stoat.commit_picker.is_some(), "the picker stays open");
     }
 

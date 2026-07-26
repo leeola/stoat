@@ -65,7 +65,7 @@ mod tests {
                     author_name: "test".into(),
                     author_email: "t@t".into(),
                     time: 0,
-                    parent_count: 1,
+                    parents: vec![format!("sha{}", i + 1)],
                 })
                 .collect(),
             cursor: 0,

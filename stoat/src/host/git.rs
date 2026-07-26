@@ -72,7 +72,13 @@ pub struct CommitInfo {
     pub author_email: String,
     /// Author time as unix epoch seconds. Consumers format for display.
     pub time: i64,
-    pub parent_count: u32,
+    /// Full shas of every parent, first parent first.
+    ///
+    /// Empty for a root commit, and more than one entry marks a merge. The
+    /// commit graph draws its edges from these, so a walk that reports only
+    /// first parents still has to fill the whole list per row.
+    #[serde(default)]
+    pub parents: Vec<String>,
 }
 
 /// How a single path changed between a commit and its parent, as
@@ -224,6 +230,14 @@ pub trait GitRepo: Send + Sync {
     /// work and stops where it forked from the mainline. Empty when either sha
     /// is unknown.
     fn log_range(&self, tip_sha: &str, exclude_sha: &str, limit: usize) -> Vec<CommitInfo>;
+
+    /// Walk every parent from `start_sha` and return up to `limit` commits,
+    /// newest first.
+    ///
+    /// [`Self::log_from`] follows first parents and so hides whatever a merge
+    /// brought in. This reports the real DAG instead, so a merged branch's own
+    /// commits appear as rows of their own. Empty when `start_sha` is unknown.
+    fn log_graph(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo>;
 
     /// Resolve a revision the user typed to a full commit sha.
     ///

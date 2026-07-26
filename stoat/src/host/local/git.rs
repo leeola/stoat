@@ -302,7 +302,7 @@ impl GitRepo for LocalGitRepo {
             },
         };
 
-        walk_first_parent(&repo, start_oid, None, limit)
+        walk_history(&repo, start_oid, WalkMode::FirstParent, None, limit)
     }
 
     fn log_from(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo> {
@@ -316,7 +316,7 @@ impl GitRepo for LocalGitRepo {
         if repo.find_commit(oid).is_err() {
             return Vec::new();
         }
-        walk_first_parent(&repo, oid, None, limit)
+        walk_history(&repo, oid, WalkMode::FirstParent, None, limit)
     }
 
     fn log_range(&self, tip_sha: &str, exclude_sha: &str, limit: usize) -> Vec<CommitInfo> {
@@ -333,7 +333,22 @@ impl GitRepo for LocalGitRepo {
             return Vec::new();
         };
 
-        walk_first_parent(&repo, tip, Some(exclude), limit)
+        walk_history(&repo, tip, WalkMode::FirstParent, Some(exclude), limit)
+    }
+
+    fn log_graph(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let repo = self.repo.lock().expect("git repo lock");
+        let Ok(oid) = git2::Oid::from_str(start_sha) else {
+            return Vec::new();
+        };
+        if repo.find_commit(oid).is_err() {
+            return Vec::new();
+        }
+
+        walk_history(&repo, oid, WalkMode::FullGraph, None, limit)
     }
 
     fn resolve_rev(&self, rev: &str) -> Option<String> {
@@ -581,19 +596,28 @@ impl GitRepo for LocalGitRepo {
     }
 }
 
-/// Walk first-parent history from `start`, newest first, yielding at most
-/// `limit` commits.
+/// Which edges a history walk follows.
+enum WalkMode {
+    /// First parents only, so a merge reads as a single row and the branch it
+    /// merged stays hidden.
+    FirstParent,
+    /// Every parent, so a merge's side branches appear as commits of their own.
+    FullGraph,
+}
+
+/// Walk history from `start`, newest first, yielding at most `limit` commits.
 ///
-/// Shared by [`GitRepo::log_commits`], [`GitRepo::log_from`], and
-/// [`GitRepo::log_range`], which differ only in how they pick the starting
-/// commit and whether they bound the walk. A commit the walk cannot read is
-/// skipped rather than truncating the rest of the history.
+/// Shared by every log method on [`GitRepo`], which differ only in how they
+/// pick the starting commit, which edges they follow, and whether they bound
+/// the walk. A commit the walk cannot read is skipped rather than truncating
+/// the rest of the history.
 ///
 /// A `hide` sha bounds the walk. That commit and everything reachable from it
 /// are skipped, which is how a range walk stops at a branch's fork point.
-fn walk_first_parent(
+fn walk_history(
     repo: &Repository,
     start: git2::Oid,
+    mode: WalkMode,
     hide: Option<git2::Oid>,
     limit: usize,
 ) -> Vec<CommitInfo> {
@@ -604,7 +628,7 @@ fn walk_first_parent(
     if walk.set_sorting(Sort::TOPOLOGICAL).is_err() {
         return Vec::new();
     }
-    if walk.simplify_first_parent().is_err() {
+    if matches!(mode, WalkMode::FirstParent) && walk.simplify_first_parent().is_err() {
         return Vec::new();
     }
     if walk.push(start).is_err() {
@@ -638,7 +662,7 @@ fn walk_first_parent(
         let author_name = author.name().unwrap_or_default().to_string();
         let author_email = author.email().unwrap_or_default().to_string();
         let time = commit.time().seconds();
-        let parent_count = commit.parent_count() as u32;
+        let parents = commit.parent_ids().map(|id| id.to_string()).collect();
         out.push(CommitInfo {
             sha,
             short_sha,
@@ -646,7 +670,7 @@ fn walk_first_parent(
             author_name,
             author_email,
             time,
-            parent_count,
+            parents,
         });
     }
     out
@@ -1139,6 +1163,57 @@ mod tests {
         assert!(git.log_range(&unknown, &shas[2], 10).is_empty());
         assert!(git.log_range(&branch[1], &unknown, 10).is_empty());
         assert!(git.log_range(&branch[1], &shas[2], 0).is_empty());
+    }
+
+    #[test]
+    fn log_graph_reaches_the_commits_a_first_parent_walk_hides() {
+        let (dir, repo, shas) = seeded_repo();
+        let sig = Signature::now("test", "t@t").unwrap();
+        let commit_at = |sha: &str| repo.find_commit(Oid::from_str(sha).unwrap()).unwrap();
+
+        let side = {
+            let root = commit_at(&shas[0]);
+            let tree = root.tree().unwrap();
+            repo.commit(None, &sig, &sig, "side", &tree, &[&root])
+                .unwrap()
+                .to_string()
+        };
+        let merge = {
+            let (mainline, branch) = (commit_at(&shas[2]), commit_at(&side));
+            let tree = mainline.tree().unwrap();
+            repo.commit(None, &sig, &sig, "merge", &tree, &[&mainline, &branch])
+                .unwrap()
+                .to_string()
+        };
+
+        let git = discover(&dir);
+        let first_parent: Vec<String> = git
+            .log_from(&merge, 10)
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert!(
+            !first_parent.contains(&side),
+            "the side branch stays hidden from a first-parent walk"
+        );
+
+        let mut graph: Vec<String> = git
+            .log_graph(&merge, 10)
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        graph.sort();
+        let mut expected = vec![
+            merge,
+            side,
+            shas[2].clone(),
+            shas[1].clone(),
+            shas[0].clone(),
+        ];
+        expected.sort();
+        assert_eq!(graph, expected, "every commit reachable, each exactly once");
+
+        assert!(git.log_graph(&"0".repeat(40), 10).is_empty());
     }
 
     #[test]

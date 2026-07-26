@@ -470,8 +470,7 @@ impl<'a> FakeRepoBuilder<'a> {
         self.mutate_repo(|state| {
             let seq = state.commits.len() as i64;
             let commit = FakeCommit {
-                parent,
-                merge_parent,
+                parents: parent.into_iter().chain(merge_parent).collect(),
                 tree,
                 message: message.unwrap_or_else(|| format!("commit {sha}")),
                 author_name: "fake".into(),
@@ -661,17 +660,8 @@ impl FakeRepoState {
             let Some(commit) = self.commits.get(&cursor) else {
                 break;
             };
-            out.push(CommitInfo {
-                sha: cursor.clone(),
-                short_sha: cursor.chars().take(7).collect(),
-                summary: commit.message.lines().next().unwrap_or("").to_string(),
-                author_name: commit.author_name.clone(),
-                author_email: commit.author_email.clone(),
-                time: commit.time,
-                parent_count: u32::from(commit.parent.is_some())
-                    + u32::from(commit.merge_parent.is_some()),
-            });
-            match &commit.parent {
+            out.push(commit_info(&cursor, commit));
+            match commit.parents.first() {
                 Some(p) => cursor = p.clone(),
                 None => break,
             }
@@ -680,8 +670,39 @@ impl FakeRepoState {
         out
     }
 
-    /// `start` plus every commit reachable from it through either parent link,
-    /// which is the set a range walk has to skip to stay on one branch.
+    /// Walk every parent from `start`, newest first, yielding at most `limit`
+    /// commits, each once however many paths reach it.
+    ///
+    /// Ordering is by seeded time, which the builder stamps from the commit
+    /// count and so tracks seeding order. Ties break on sha, since a
+    /// synthesized commit's counter can land on a seeded commit's time and the
+    /// order still has to be the same on every run.
+    fn walk_graph(&self, start: String, limit: usize) -> Vec<CommitInfo> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut pending = vec![start];
+
+        while let Some(sha) = pending.pop() {
+            let Some(commit) = self.commits.get(&sha) else {
+                continue;
+            };
+            if !seen.insert(sha) {
+                continue;
+            }
+            pending.extend(commit.parents.iter().cloned());
+        }
+
+        let mut reached: Vec<CommitInfo> = seen
+            .iter()
+            .filter_map(|sha| self.commits.get(sha).map(|c| commit_info(sha, c)))
+            .collect();
+        reached.sort_by(|a, b| b.time.cmp(&a.time).then_with(|| a.sha.cmp(&b.sha)));
+        reached.truncate(limit);
+
+        reached
+    }
+
+    /// `start` plus every commit reachable from it, which is the set a range
+    /// walk has to skip to stay on one branch.
     ///
     /// Unseeded shas are collected too. They can never appear in a walk, so
     /// carrying them costs nothing and keeps the sweep total.
@@ -697,11 +718,23 @@ impl FakeRepoState {
             if !seen.insert(sha) {
                 continue;
             }
-            pending.extend(commit.parent.iter().cloned());
-            pending.extend(commit.merge_parent.iter().cloned());
+            pending.extend(commit.parents.iter().cloned());
         }
 
         seen
+    }
+}
+
+/// The row a seeded commit reports through any of the log walks.
+fn commit_info(sha: &str, commit: &FakeCommit) -> CommitInfo {
+    CommitInfo {
+        sha: sha.to_string(),
+        short_sha: sha.chars().take(7).collect(),
+        summary: commit.message.lines().next().unwrap_or("").to_string(),
+        author_name: commit.author_name.clone(),
+        author_email: commit.author_email.clone(),
+        time: commit.time,
+        parents: commit.parents.clone(),
     }
 }
 
@@ -720,11 +753,10 @@ pub struct RecordedAmend {
 
 #[derive(Clone)]
 struct FakeCommit {
-    parent: Option<String>,
-    /// Second parent, set only on commits seeded by
-    /// [`FakeRepoBuilder::merge_commit`]. Its presence is what makes a seeded
-    /// commit a merge, so the first-parent walk still follows `parent` alone.
-    merge_parent: Option<String>,
+    /// Every parent, first parent first. More than one entry makes the commit
+    /// a merge, and the first-parent walk still follows only the head of this
+    /// list.
+    parents: Vec<String>,
     tree: BTreeMap<PathBuf, String>,
     message: String,
     author_name: String,
@@ -840,20 +872,19 @@ impl GitRepo for FakeGitRepo {
 
     fn parent_sha(&self, sha: &str) -> Option<String> {
         let state = self.state.lock().unwrap();
-        state.commits.get(sha).and_then(|c| c.parent.clone())
+        state
+            .commits
+            .get(sha)
+            .and_then(|c| c.parents.first().cloned())
     }
 
     fn parent_shas(&self, sha: &str) -> Vec<String> {
         let state = self.state.lock().unwrap();
-        let Some(commit) = state.commits.get(sha) else {
-            return Vec::new();
-        };
-        commit
-            .parent
-            .iter()
-            .chain(commit.merge_parent.iter())
-            .cloned()
-            .collect()
+        state
+            .commits
+            .get(sha)
+            .map(|c| c.parents.clone())
+            .unwrap_or_default()
     }
 
     fn log_commits(&self, after: Option<&str>, limit: usize) -> Vec<CommitInfo> {
@@ -862,7 +893,10 @@ impl GitRepo for FakeGitRepo {
         }
         let state = self.state.lock().unwrap();
         let start = match after {
-            Some(sha) => state.commits.get(sha).and_then(|c| c.parent.clone()),
+            Some(sha) => state
+                .commits
+                .get(sha)
+                .and_then(|c| c.parents.first().cloned()),
             None => state.head.clone(),
         };
         let Some(cursor) = start else {
@@ -890,6 +924,15 @@ impl GitRepo for FakeGitRepo {
         let exclude = state.ancestors_inclusive(exclude_sha);
 
         state.walk_first_parent(tip_sha.to_string(), &exclude, limit)
+    }
+
+    fn log_graph(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let state = self.state.lock().unwrap();
+
+        state.walk_graph(start_sha.to_string(), limit)
     }
 
     fn resolve_rev(&self, rev: &str) -> Option<String> {
@@ -956,8 +999,7 @@ impl GitRepo for FakeGitRepo {
             .map(str::to_string)
             .unwrap_or(head_commit.message.clone());
         let new_commit = FakeCommit {
-            parent: head_commit.parent.clone(),
-            merge_parent: None,
+            parents: head_commit.parents.clone(),
             tree: tree.clone(),
             message: new_msg,
             author_name: head_commit.author_name.clone(),
@@ -1023,8 +1065,7 @@ impl GitRepo for FakeGitRepo {
             state.synth_counter
         );
         let commit = FakeCommit {
-            parent: parent_sha.map(str::to_string),
-            merge_parent: None,
+            parents: parent_sha.map(str::to_string).into_iter().collect(),
             tree: tree.clone(),
             message: message.to_string(),
             author_name: author_name.to_string(),
@@ -1089,8 +1130,8 @@ impl GitRepo for FakeGitRepo {
             return Vec::new();
         };
         let parent_tree = commit
-            .parent
-            .as_ref()
+            .parents
+            .first()
             .and_then(|p| state.commits.get(p))
             .map(|p| p.tree.clone())
             .unwrap_or_default();
@@ -1543,12 +1584,16 @@ mod tests {
         assert!(repo.parent_shas("c1").is_empty(), "a root has no parents");
         assert!(repo.parent_shas("missing").is_empty());
 
-        let counts: Vec<u32> = repo
+        let walked: Vec<Vec<String>> = repo
             .log_from("m1", 10)
             .into_iter()
-            .map(|c| c.parent_count)
+            .map(|c| c.parents)
             .collect();
-        assert_eq!(counts, [2, 1, 0], "the merge row counts both parents");
+        assert_eq!(
+            walked,
+            [vec!["c2", "f1"], vec!["c1"], Vec::new()],
+            "each row carries its own full parent list"
+        );
     }
 
     #[test]
@@ -1573,6 +1618,36 @@ mod tests {
         assert!(repo.log_range("missing", "c2", 10).is_empty());
         assert!(repo.log_range("f2", "missing", 10).is_empty());
         assert!(repo.log_range("f2", "c2", 0).is_empty());
+    }
+
+    #[test]
+    fn log_graph_reaches_the_commits_a_first_parent_walk_hides() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("f1", "c1", &[])
+            .commit_with_parent("f2", "f1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .merge_commit("m1", "f2", &[]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        let first_parent: Vec<String> =
+            repo.log_from("m1", 10).into_iter().map(|c| c.sha).collect();
+        assert_eq!(first_parent, ["m1", "c2", "c1"], "the branch stays hidden");
+
+        let graph: Vec<String> = repo
+            .log_graph("m1", 10)
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(
+            graph,
+            ["m1", "c2", "f2", "f1", "c1"],
+            "every commit once, newest seeded first"
+        );
+
+        assert!(repo.log_graph("missing", 10).is_empty());
+        assert!(repo.log_graph("m1", 0).is_empty());
     }
 
     #[test]
