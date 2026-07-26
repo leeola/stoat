@@ -7770,6 +7770,27 @@ impl Stoat {
             })
             .map(|layout| layout.body());
 
+        // The diff below the table scrolls on its own offset, so it pools
+        // separately. It waits for the selected commit's session to build,
+        // because a page with no diff would composite blank cells over the live
+        // "loading diff..." message.
+        let commit_picker_preview = (!overlay)
+            .then_some(self.commit_picker.as_ref())
+            .flatten()
+            .filter(|picker| {
+                picker
+                    .selected_commit()
+                    .is_some_and(|c| picker.preview_sessions.contains_key(&c.sha))
+            })
+            .and_then(|picker| {
+                crate::render::commit_picker::commit_picker_layout(
+                    self.size(),
+                    crate::render::commit_picker::graph_lanes(picker),
+                    modal_zoom_steps(&self.modal_zoom, ModalKind::CommitPicker),
+                )
+            })
+            .and_then(|layout| layout.preview);
+
         // The completion popup is cursor-anchored: its inner list region pools
         // and moves with the cursor each frame (emit_into re-emits the region on
         // a move). The layout reads the focused editor, so it borrows self.
@@ -7837,6 +7858,9 @@ impl Stoat {
         }
         if commit_picker_body.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST);
+        }
+        if commit_picker_preview.is_some() {
+            active.push(crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW);
         }
         if completion.is_some() {
             active.push(crate::smooth_scroll::non_pane_pool::COMPLETION);
@@ -8356,6 +8380,58 @@ impl Stoat {
                     crate::smooth_scroll::render_commit_picker_list_page(
                         picker,
                         lanes,
+                        page,
+                        theme,
+                        region.width,
+                        region.height,
+                    )
+                },
+            );
+        }
+
+        if let (Some(rect), Some(picker)) = (commit_picker_preview, self.commit_picker.as_ref())
+            && let Some(session) = picker
+                .selected_commit()
+                .and_then(|c| picker.preview_sessions.get(&c.sha))
+                .cloned()
+        {
+            let region = stoatty_protocol::command::PoolRegionCommand {
+                pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW,
+                top: rect.y,
+                left: rect.x,
+                width: rect.width,
+                height: rect.height,
+                window: 0,
+            };
+            // Clamped through the same helper the renderer uses, so the pool
+            // scrolls to the row the diff actually lands on.
+            let scroll_row = crate::render::commit_picker::clamped_preview_scroll(
+                picker.preview_scroll,
+                &session,
+                rect.height,
+            );
+            // A different commit means a different diff, and a rebuilt session
+            // changes its length, so both refill the pages.
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                self.theme_epoch.hash(&mut hasher);
+                picker
+                    .selected_commit()
+                    .map(|c| c.sha.as_str())
+                    .hash(&mut hasher);
+                crate::render::commits::preview_row_count(&session).hash(&mut hasher);
+                hasher.finish()
+            };
+            crate::smooth_scroll::emit_into(
+                &mut out,
+                &mut self.smooth_scroll,
+                region,
+                scroll_row as f32,
+                content_version,
+                false,
+                |page| {
+                    crate::smooth_scroll::render_commit_picker_preview_page(
+                        &session,
                         page,
                         theme,
                         region.width,

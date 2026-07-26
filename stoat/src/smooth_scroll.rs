@@ -96,6 +96,7 @@ pub(crate) mod non_pane_pool {
     pub(crate) const WORKSPACE_SYMBOL: u32 = BASE + 7;
     pub(crate) const HOVER: u32 = BASE + 8;
     pub(crate) const COMMIT_PICKER_LIST: u32 = BASE + 9;
+    pub(crate) const COMMIT_PICKER_PREVIEW: u32 = BASE + 10;
     /// First id of the per-window status-bar partition. A detached pane's status
     /// row pools at `WINDOW_STATUS + pane.index`, so the partition is offset far
     /// enough above the fixed non-pane ids that pane indices never collide.
@@ -997,6 +998,37 @@ pub(crate) fn render_commit_picker_list_page(
     if let Some(mut scene) = scene {
         bytes.extend_from_slice(scene.buffer());
     }
+
+    bytes
+}
+
+/// Render `region_height` rows of the commit picker's diff preview starting at
+/// row `page * region_height`.
+///
+/// Thin because [`crate::render::commits::render_commit_preview`] already takes
+/// a row offset and a scene. The preview's per-row separator bars ride that
+/// scene onto the page, so they glide with the diff rows rather than staying
+/// pinned to the live grid.
+pub(crate) fn render_commit_picker_preview_page(
+    session: &crate::review_session::ReviewSession,
+    page: u64,
+    theme: &crate::theme::Theme,
+    region_width: u16,
+    region_height: u16,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region_width, region_height);
+    let mut buf = Buffer::empty(area);
+    let mut scene = ApcScene::new();
+
+    let skip_rows = page
+        .saturating_mul(region_height as u64)
+        .min(usize::MAX as u64) as usize;
+    crate::render::commits::render_commit_preview(
+        session, theme, area, skip_rows, &mut buf, &mut scene,
+    );
+
+    let mut bytes = serialize_buffer(&mut buf, theme);
+    bytes.extend_from_slice(scene.buffer());
 
     bytes
 }

@@ -1064,6 +1064,98 @@ mod tests {
         cmds
     }
 
+    /// The picker's selected commit with its diff built, so the preview has
+    /// something to pool. Panics if the background build never lands.
+    fn harness_with_preview() -> crate::test_harness::TestHarness {
+        let mut h = seeded_picker_harness();
+        h.settle();
+        h.snapshot();
+        h.settle();
+        let picker = h.stoat.commit_picker.as_ref().expect("open");
+        let sha = picker
+            .selected_commit()
+            .expect("a row is selected")
+            .sha
+            .clone();
+        assert!(
+            picker.preview_sessions.contains_key(&sha),
+            "the selected commit's diff builds during settle"
+        );
+        h
+    }
+
+    #[test]
+    fn the_diff_preview_is_pooled_and_retired() {
+        use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
+
+        let mut h = harness_with_preview();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        h.stoat.emit_smooth_scroll();
+        let preview = layout(&h).preview.expect("the diff pane is present");
+        let expected = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW,
+            top: preview.y,
+            left: preview.x,
+            width: preview.width,
+            height: preview.height,
+            window: 0,
+        };
+        assert!(
+            drained_apc(&mut rx).contains(&Command::PoolRegion(expected)),
+            "the diff declares a pool at the preview rect"
+        );
+
+        h.stoat.commit_picker = None;
+        h.stoat.emit_smooth_scroll();
+        assert!(
+            drained_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
+                pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW,
+            })),
+            "closing the picker retires it"
+        );
+    }
+
+    /// A page and the live painter show the same diff rows for the same offset,
+    /// so a glide shows no shift as the pool composites over them.
+    #[test]
+    fn a_preview_page_paints_what_the_live_skip_shows() {
+        let h = harness_with_preview();
+        let preview = layout(&h).preview.expect("the diff pane is present");
+        let picker = h.stoat.commit_picker.as_ref().expect("open");
+        let session = picker
+            .selected_commit()
+            .and_then(|c| picker.preview_sessions.get(&c.sha))
+            .expect("built above");
+
+        let area = ratatui::layout::Rect::new(0, 0, preview.width, preview.height);
+        for page in [0u64, 1] {
+            let pooled = crate::smooth_scroll::render_commit_picker_preview_page(
+                session,
+                page,
+                &h.stoat.theme,
+                preview.width,
+                preview.height,
+            );
+
+            let mut live = ratatui::buffer::Buffer::empty(area);
+            let mut scene = stoatty_widgets::ApcScene::new();
+            crate::render::commits::render_commit_preview(
+                session,
+                &h.stoat.theme,
+                area,
+                page as usize * preview.height as usize,
+                &mut live,
+                &mut scene,
+            );
+            let mut expected = crate::smooth_scroll::serialize_buffer(&mut live, &h.stoat.theme);
+            expected.extend_from_slice(scene.buffer());
+
+            assert_eq!(pooled, expected, "page {page} matches the live skip");
+        }
+    }
+
     #[test]
     fn the_commit_table_is_pooled_and_retired() {
         use stoatty_protocol::command::{Command, PoolDropCommand, PoolRegionCommand};
