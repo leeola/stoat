@@ -12,6 +12,7 @@ pub mod icon;
 pub mod minimap;
 pub mod overlay;
 pub mod panel;
+pub mod polyline;
 pub mod text;
 
 /// The eased vertical scroll offsets a frame applies, in rows.

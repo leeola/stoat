@@ -20,6 +20,7 @@ use crate::{
         minimap::MinimapPass,
         overlay::OverlayPass,
         panel::PanelPass,
+        polyline::PolylinePass,
         text::TextPass,
         CellMetrics,
     },
@@ -241,6 +242,7 @@ pub struct Renderer {
     overlay: OverlayPass,
     icon: IconPass,
     bar: BarPass,
+    polyline: PolylinePass,
     minimap: MinimapPass,
     /// Perf HUD overlay pass, composited topmost. Present only under `perf`.
     #[cfg(feature = "perf")]
@@ -295,6 +297,7 @@ impl Renderer {
             overlay: OverlayPass::new(device, format, metrics),
             icon: IconPass::new(device, format, metrics),
             bar: BarPass::new(device, format, metrics),
+            polyline: PolylinePass::new(device, format, metrics),
             minimap: MinimapPass::new(device, format, metrics),
             #[cfg(feature = "perf")]
             hud: HudPass::new(device, format),
@@ -335,6 +338,7 @@ impl Renderer {
         self.overlay.set_metrics(metrics);
         self.icon.set_metrics(metrics);
         self.bar.set_metrics(metrics);
+        self.polyline.set_metrics(metrics);
         self.minimap.set_metrics(metrics);
     }
 
@@ -396,6 +400,8 @@ impl Renderer {
             .prepare(device, queue, grid.icons(), &occluders, resolution);
         self.bar
             .prepare(device, queue, grid.bars(), &occluders, resolution);
+        self.polyline
+            .prepare(device, queue, grid.polylines(), &occluders, resolution);
         self.minimap.prepare(device, queue, grid, resolution);
 
         // Time this frame's GPU work when the timer's current slot is free.
@@ -442,6 +448,9 @@ impl Renderer {
             // below floating popovers and icons, like a gutter beneath a
             // tooltip; the bars fill behind the runs.
             self.bar.draw(&mut render_pass);
+            // Stroked paths draw over the bars they share a layer with, so a
+            // commit graph's lines sit above any gutter fill behind them.
+            self.polyline.draw(&mut render_pass);
             // The minimap strip sits over the bars and below the cursor. It
             // scissors to each strip, so restore the full surface before the
             // text runs and cursor that follow.
@@ -575,6 +584,15 @@ impl Renderer {
             shift_rows,
             occludable,
         );
+        self.polyline.prepare_composite(
+            device,
+            queue,
+            pool_grid.polylines(),
+            panels,
+            resolution,
+            shift_rows,
+            occludable,
+        );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
 
@@ -602,6 +620,7 @@ impl Renderer {
             // Off-grid gutter chrome sits above the page glyphs but below the
             // cursor. Bars fill behind the scaled run text.
             self.bar.draw_composite(&mut render_pass);
+            self.polyline.draw_composite(&mut render_pass);
             self.text.draw_composite_text_runs(&mut render_pass);
         }
 
