@@ -1,4 +1,7 @@
-use crate::{location_picker::LocationPicker, render::text::write_str};
+use crate::{
+    location_picker::LocationPicker,
+    render::table::{self, Column, Width},
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -9,6 +12,23 @@ use std::path::Path;
 /// Rows of candidates the modal shows at once. A longer candidate list scrolls
 /// under the selection rather than growing the box past a readable height.
 const MAX_ENTRY_ROWS: u16 = 12;
+
+/// The candidate's file, its line and column, and the line's text. Headerless,
+/// since three columns of obvious content need no labels over them.
+const COLUMNS: [Column; 3] = [
+    Column {
+        label: "path",
+        width: Width::Fixed(32),
+    },
+    Column {
+        label: "position",
+        width: Width::Fixed(12),
+    },
+    Column {
+        label: "text",
+        width: Width::Fill,
+    },
+];
 
 /// Lay the location picker's modal out within `area`, returning its outer box
 /// and the inner rect holding the candidate rows, or [`None`] when `area` is
@@ -52,13 +72,12 @@ pub(crate) fn render_location_picker(
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
 
-    let path_w: u16 = 32;
-    let pos_w: u16 = 12;
-
-    let path_x = inner.x + 1;
-    let pos_x = path_x + path_w + 1;
-    let text_x = pos_x + pos_w + 1;
-    let text_w = inner.width.saturating_sub(text_x - inner.x);
+    // The table sits a column in from the border, and the path column carries
+    // the whole width it asks for so a long path truncates rather than pushing
+    // the position column around.
+    let table_x = inner.x + 1;
+    let table_width = inner.width.saturating_sub(1);
+    let widths = table::resolve_widths(&COLUMNS, &[], table_width);
 
     let rows = inner.height as usize;
     picker.viewport_rows = Some(rows);
@@ -77,43 +96,24 @@ pub(crate) fn render_location_picker(
             buf[(col, row)].set_char(' ').set_style(base_style);
         }
 
-        let path_text = display_path(&entry.path, git_root, path_w as usize);
-        let path_style = if is_selected { base_style } else { muted_style };
-        write_str(buf, path_x, row, &path_text, path_style);
+        let path_text = table::display_path(&entry.path, git_root, widths[0] as usize);
+        let position = format!("{:>4}:{:<3}", entry.line, entry.column);
+        let cells = [path_text.as_str(), position.as_str(), entry.text.as_str()];
 
-        let pos = format!("{:>4}:{:<3}", entry.line, entry.column);
-        let pos: String = pos.chars().take(pos_w as usize).collect();
-        write_str(buf, pos_x, row, &pos, base_style);
-
-        let text: String = entry.text.chars().take(text_w as usize).collect();
-        write_str(buf, text_x, row, &text, base_style);
+        table::paint_row(
+            buf,
+            Rect::new(table_x, row, table_width, 1),
+            &cells,
+            &widths,
+            // The path is context rather than the candidate itself, so it reads
+            // dimmer. A selected row keeps one style throughout, since the
+            // highlight is what carries it.
+            |column| match column {
+                0 if !is_selected => muted_style,
+                _ => base_style,
+            },
+        );
     }
-}
-
-/// Render `path` relative to `git_root` when possible, falling
-/// back to the absolute path. Truncates from the left so the
-/// basename stays visible when the result exceeds `max_chars`,
-/// using a leading ellipsis to mark the truncation.
-fn display_path(path: &Path, git_root: &Path, max_chars: usize) -> String {
-    let relative = path
-        .strip_prefix(git_root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned();
-    if relative.chars().count() <= max_chars {
-        return relative;
-    }
-    let ellipsis = "...";
-    let keep = max_chars.saturating_sub(ellipsis.chars().count());
-    let tail: String = relative
-        .chars()
-        .rev()
-        .take(keep)
-        .collect::<Vec<char>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{ellipsis}{tail}")
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@
 //! text and styles.
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use std::path::Path;
 
 /// Blank columns between one cell and the next.
 const COLUMN_GAP: u16 = 1;
@@ -105,6 +106,60 @@ pub(crate) fn paint_header(
             area,
         );
     }
+}
+
+/// Paint one row's cells across `area`, each truncated to its column.
+///
+/// The counterpart to [`paint_header`], taking cell text where that takes
+/// column labels. `style_of` picks a style per column index, so a picker that
+/// dims one cell of a row says so without the painter knowing why.
+///
+/// Painting only, so the caller fills the row's background first if it wants
+/// one. Two of the pickers fill wider than their table starts, which is why
+/// that stays theirs.
+pub(crate) fn paint_row(
+    buf: &mut Buffer,
+    area: Rect,
+    cells: &[&str],
+    widths: &[u16],
+    style_of: impl Fn(usize) -> Style,
+) {
+    for (i, ((cell, &width), &start)) in cells
+        .iter()
+        .zip(widths)
+        .zip(column_starts(widths).iter())
+        .enumerate()
+    {
+        paint_cell(buf, area.x + start, area.y, cell, width, style_of(i), area);
+    }
+}
+
+/// Render `path` relative to `git_root` when possible, falling back to the
+/// absolute path, cut to `max_chars`.
+///
+/// Truncates from the left, marking the cut with a leading ellipsis, because
+/// the basename is what identifies a row and the leading directories are what
+/// a narrow column can afford to lose.
+pub(crate) fn display_path(path: &Path, git_root: &Path, max_chars: usize) -> String {
+    let relative = path
+        .strip_prefix(git_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+    if relative.chars().count() <= max_chars {
+        return relative;
+    }
+    let ellipsis = "...";
+    let keep = max_chars.saturating_sub(ellipsis.chars().count());
+    let tail: String = relative
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{ellipsis}{tail}")
 }
 
 /// Paint one cell's text at `x`, clipped to `width` and to `bounds`.

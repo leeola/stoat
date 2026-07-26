@@ -1,4 +1,7 @@
-use crate::{jumplist_picker::JumplistPicker, render::text::write_str};
+use crate::{
+    jumplist_picker::JumplistPicker,
+    render::table::{self, Column, Width},
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -8,6 +11,28 @@ use ratatui::{
 /// Rows of jumps the modal shows at once. A longer list scrolls under the
 /// selection rather than growing the box past a readable height.
 const MAX_ENTRY_ROWS: u16 = 12;
+
+/// A one-column marker for the walk cursor, then the file, the position, and
+/// the line's text. Headerless, since the marker column has nothing to label
+/// and the rest are obvious.
+const COLUMNS: [Column; 4] = [
+    Column {
+        label: "",
+        width: Width::Fixed(1),
+    },
+    Column {
+        label: "file",
+        width: Width::Fixed(18),
+    },
+    Column {
+        label: "position",
+        width: Width::Fixed(9),
+    },
+    Column {
+        label: "snippet",
+        width: Width::Fill,
+    },
+];
 
 /// Lay the jumplist picker's modal out within `area`, returning its outer box
 /// and the inner rect holding the jump rows, or [`None`] when `area` is too
@@ -50,13 +75,9 @@ pub(crate) fn render_jumplist_picker(
     let cursor_idx = picker.cursor_idx();
     let selected = picker.selected();
 
-    let filename_w = 18u16;
-    let position_w = 9u16;
-    let marker_x = inner.x;
-    let name_x = marker_x + 2;
-    let pos_x = name_x + filename_w + 1;
-    let snippet_x = pos_x + position_w + 1;
-    let snippet_w = inner.width.saturating_sub(snippet_x - inner.x);
+    // The marker column is flush against the border, so its own gap supplies
+    // the pad the other pickers put in front of their table.
+    let widths = table::resolve_widths(&COLUMNS, &[], inner.width);
 
     let rows = inner.height as usize;
     picker.viewport_rows = Some(rows);
@@ -78,14 +99,23 @@ pub(crate) fn render_jumplist_picker(
         }
 
         let marker = if is_current { ">" } else { " " };
-        write_str(buf, marker_x, row, marker, base_style);
-        let name: String = entry.filename.chars().take(filename_w as usize).collect();
-        write_str(buf, name_x, row, &name, base_style);
-        let pos = format!("{:>4}:{:<3}", entry.line, entry.column);
-        let pos: String = pos.chars().take(position_w as usize).collect();
-        write_str(buf, pos_x, row, &pos, base_style);
-        let snippet: String = entry.snippet.chars().take(snippet_w as usize).collect();
-        write_str(buf, snippet_x, row, &snippet, base_style);
+        let position = format!("{:>4}:{:<3}", entry.line, entry.column);
+        let cells = [
+            marker,
+            entry.filename.as_str(),
+            position.as_str(),
+            entry.snippet.as_str(),
+        ];
+
+        // The whole row already carries the style that says which entry the
+        // walk cursor is on, so no cell needs one of its own.
+        table::paint_row(
+            buf,
+            Rect::new(inner.x, row, inner.width, 1),
+            &cells,
+            &widths,
+            |_| base_style,
+        );
     }
 }
 
