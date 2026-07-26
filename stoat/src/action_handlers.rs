@@ -59,7 +59,7 @@ pub(crate) use review::install_review_session;
 pub(crate) use review::{pump_review_scan, PendingReviewScan};
 use std::{collections::HashMap, path::Path, sync::Arc};
 use stoat_action::{
-    Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GitReview, GotoTab,
+    Action, ActionKind, AutoReload, AutoReloadConfig, Dump, FocusPane, GitLs, GitReview, GotoTab,
     OpenBuffer, OpenConfig, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
     OpenReviewCommitRange, RenameTab, RenameWorkspace, ReviewExternalEdit, Run, SetCwd, SetTheme,
 };
@@ -540,7 +540,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("GitReview action downcast");
             review_walk::git_review(stoat, &action.reference)
         },
-        ActionKind::GitLs => review_walk::git_ls(stoat),
+        ActionKind::GitLs => {
+            let action = action
+                .as_any()
+                .downcast_ref::<GitLs>()
+                .expect("GitLs action downcast");
+            review_walk::git_ls(stoat, action.rev.as_deref())
+        },
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
         ActionKind::ReviewDone => review_walk::review_done(stoat),

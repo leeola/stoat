@@ -32,15 +32,23 @@ pub(crate) fn git_review(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
             Some(format!("no revision named {reference}")),
         );
     };
-    open_commit_picker(stoat, &repo, CommitPickerRole::PickBase, workdir, ref_sha)
+    open_commit_picker(
+        stoat,
+        &repo,
+        CommitPickerRole::PickBase,
+        workdir,
+        ref_sha,
+        None,
+    )
 }
 
-/// List the current branch's history read-only.
+/// List a ref's history read-only, defaulting to the current branch.
 ///
 /// The same picker `:git-review` opens, in a role where selecting a row
 /// dismisses rather than starting a walk, so browsing history never touches the
-/// working tree.
-pub(crate) fn git_ls(stoat: &mut Stoat) -> UpdateEffect {
+/// working tree. A named `rev` titles the modal after itself, since a list
+/// rooted somewhere other than HEAD has to say where.
+pub(crate) fn git_ls(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
     let Some(repo) = stoat.git_host.discover(&git_root) else {
         return review_error(stoat, "not in a git repository", None);
@@ -48,10 +56,29 @@ pub(crate) fn git_ls(stoat: &mut Stoat) -> UpdateEffect {
     let Some(workdir) = repo.workdir() else {
         return review_error(stoat, "git repo has no working tree", None);
     };
-    let Some(head) = repo.resolve_rev("HEAD") else {
-        return review_error(stoat, "no commits on this branch", None);
+
+    let Some(rev) = rev else {
+        let Some(head) = repo.resolve_rev("HEAD") else {
+            return review_error(stoat, "no commits on this branch", None);
+        };
+        return open_commit_picker(stoat, &repo, CommitPickerRole::Browse, workdir, head, None);
     };
-    open_commit_picker(stoat, &repo, CommitPickerRole::Browse, workdir, head)
+    let Some(sha) = repo.resolve_rev(rev) else {
+        return review_error(
+            stoat,
+            "unknown revision",
+            Some(format!("no revision named {rev}")),
+        );
+    };
+
+    open_commit_picker(
+        stoat,
+        &repo,
+        CommitPickerRole::Browse,
+        workdir,
+        sha,
+        Some(format!("git log {rev}")),
+    )
 }
 
 /// Build and install a picker over `ref_sha`'s first-parent history.
@@ -60,12 +87,17 @@ pub(crate) fn git_ls(stoat: &mut Stoat) -> UpdateEffect {
 /// opened the picker releases rather than waiting for a key the picker has
 /// taken focus away from. The picker's own input then supplies the insert mode
 /// its keymap block is gated on.
+///
+/// A `scope_label` titles the modal after what it is rooted at. `None` leaves
+/// the title to the picker's role, which is right whenever the root scope is
+/// the obvious one for that role.
 fn open_commit_picker(
     stoat: &mut Stoat,
     repo: &Arc<dyn crate::host::GitRepo>,
     role: CommitPickerRole,
     workdir: PathBuf,
     ref_sha: String,
+    scope_label: Option<String>,
 ) -> UpdateEffect {
     stoat.set_focused_mode("normal".to_string());
 
@@ -76,7 +108,7 @@ fn open_commit_picker(
     }
 
     let executor = stoat.executor.clone();
-    let picker = CommitPicker::new(
+    let mut picker = CommitPicker::new(
         stoat.active_workspace_mut(),
         executor,
         role,
@@ -91,6 +123,7 @@ fn open_commit_picker(
             .map(|since| since.as_secs() as i64)
             .unwrap_or(0),
     );
+    picker.scope_label = scope_label;
     stoat.commit_picker = Some(picker);
     ensure_selected_preview(stoat);
     UpdateEffect::Redraw
@@ -895,6 +928,34 @@ mod tests {
 
         assert!(h.stoat.commit_picker.is_none());
         assert_eq!(review_badge(&h).as_deref(), Some("not in a git repository"));
+    }
+
+    #[test]
+    fn git_ls_with_a_rev_roots_the_list_there_and_says_so() {
+        let mut h = harness();
+        h.type_text(":git-ls feature");
+        h.type_keys("enter");
+        h.settle();
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker open");
+        assert_eq!(picker.role, CommitPickerRole::Browse);
+        assert_eq!(
+            picker_shas(&h),
+            ["b2c3d4e5", "a1b2c3d4"],
+            "the branch's history, not HEAD's"
+        );
+        assert_eq!(picker.scope_label.as_deref(), Some("git log feature"));
+    }
+
+    #[test]
+    fn git_ls_with_an_unknown_rev_badges_without_opening_anything() {
+        let mut h = harness();
+        h.type_text(":git-ls junk");
+        h.type_keys("enter");
+        h.settle();
+
+        assert!(h.stoat.commit_picker.is_none());
+        assert_eq!(review_badge(&h).as_deref(), Some("unknown revision"));
     }
 
     fn checkouts(h: &TestHarness) -> Vec<String> {

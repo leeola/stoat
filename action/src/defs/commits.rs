@@ -1,4 +1,8 @@
-use crate::{action::define_action, ActionKind, ActionPriority};
+use crate::{
+    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    ValueSource,
+};
+use std::any::Any;
 
 define_action!(
     OpenCommitsDef,
@@ -95,18 +99,69 @@ define_action!(
     ActionPriority::Rare
 );
 
-define_action!(
-    GitLsDef,
-    GitLs,
-    "GitLs",
-    ActionKind::GitLs,
-    "browse commit history",
-    "Open a read-only picker over the current branch's first-parent history, \
-     with a fuzzy filter and a diff preview of the highlighted commit. \
-     Selecting a row dismisses the picker without changing the working tree.",
-    ActionPriority::Rare,
-    command_name = "git-ls"
-);
+const GIT_LS_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "rev",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: false,
+    description: "Branch, tag, sha, or revspec to list. Defaults to HEAD.",
+}];
+
+#[derive(Debug)]
+pub struct GitLsDef;
+
+impl ActionDef for GitLsDef {
+    fn name(&self) -> &'static str {
+        "GitLs"
+    }
+
+    fn command_name(&self) -> Option<&'static str> {
+        Some("git-ls")
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::GitLs
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        GIT_LS_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "browse commit history"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open a read-only picker over a ref's first-parent history, with a \
+         fuzzy filter and a diff preview of the highlighted commit. Lists the \
+         current branch when given no revision. Selecting a row dismisses the \
+         picker without changing the working tree."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+#[derive(Debug)]
+pub struct GitLs {
+    /// Revision to list, or `None` to list HEAD.
+    pub rev: Option<String>,
+}
+
+impl GitLs {
+    pub const DEF: &GitLsDef = &GitLsDef;
+}
+
+impl Action for GitLs {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 define_action!(
     CommitsOpenReviewDef,

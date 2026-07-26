@@ -937,7 +937,23 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsLast::DEF, |_| Ok(Box::new(CommitsLast)));
     add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
     add(CommitsOpenReview::DEF, |_| Ok(Box::new(CommitsOpenReview)));
-    add(GitLs::DEF, |_| Ok(Box::new(GitLs)));
+    add(GitLs::DEF, |params| {
+        // The palette autospaces a submitted command, so a bare `git-ls`
+        // arrives with an empty argument. That means HEAD, not a revision
+        // literally named "".
+        let rev = params
+            .first()
+            .map(|param| {
+                param.as_string().context(WrongKindSnafu {
+                    name: "rev",
+                    expected: ParamKind::String,
+                })
+            })
+            .transpose()?
+            .filter(|rev| !rev.is_empty())
+            .map(str::to_owned);
+        Ok(Box::new(GitLs { rev }))
+    });
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
     add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
     add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
