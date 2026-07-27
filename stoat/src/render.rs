@@ -45,7 +45,8 @@ use crate::{
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
     keymap_state::{
-        binding_display_desc, cursor_token, focus_flags, Flags, FocusFlags, StoatKeymapState,
+        active_modal, binding_display_desc, cursor_token, focus_flags, ActiveModal, Flags,
+        FocusFlags, StoatKeymapState,
     },
     minimap::MinimapContent,
     pane::{DockVisibility, FocusTarget, View},
@@ -278,65 +279,28 @@ pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
 /// where one is open, and the modal lays out on the full window rather than
 /// yielding the band.
 ///
-/// The command palette is deliberately absent. Its box is capped at 80 columns
-/// and centered, so its right edge never passes `width / 2 + 40`, while the
-/// 8-column band exists only from `MINIMAP_MIN_PANE_COLS` up. The two rects are
-/// disjoint at every width where a band exists at all, so hiding the strip for
-/// the palette would cost the user their minimap for no overlap.
+/// Which modals cover the band is [`ActiveModal::hides_minimap`], which explains
+/// why the command palette is left out.
 fn modal_overlay_open(stoat: &Stoat) -> bool {
-    stoat.modal_run.is_some()
-        || stoat.help.is_some()
-        || stoat.file_finder.is_some()
-        || stoat.symbol_finder.is_some()
-        || stoat.workspace_picker.is_some()
-        || stoat.quit_all_confirm.is_some()
-        || stoat.jumplist_picker.is_some()
-        || stoat.diagnostics_picker.is_some()
-        || stoat.commit_picker.is_some()
-        || stoat.location_picker.is_some()
-        || stoat.code_search.is_some()
+    active_modal(stoat).is_some_and(ActiveModal::hides_minimap)
 }
 
 /// True while an open modal owns the zoom combo, so a zoom step belongs to it
 /// rather than to the panes behind it.
 ///
-/// Wider than [`modal_overlay_open`] by the command palette, which that
-/// predicate leaves out to keep the minimap band visible beside it. That has
-/// nothing to do with input, and the palette takes zoom steps like any other
-/// modal.
-///
-/// A modal with no [`ModalKind`] of its own still holds here. Those size
-/// entirely to their content and have nothing to zoom, so a step over them does
-/// nothing -- resizing a pane hidden behind a modal would be a change the user
-/// cannot see or connect to what they pressed.
+/// See also:
+/// - [`ActiveModal::owns_zoom`] for which modals claim a step, and why.
 pub(crate) fn zoom_context_modal(stoat: &Stoat) -> bool {
-    modal_overlay_open(stoat) || stoat.command_palette.is_some()
+    active_modal(stoat).is_some_and(ActiveModal::owns_zoom)
 }
 
 /// The open modal a zoom step applies to, or `None` when the open modal has no
 /// zoom of its own and when no modal is open at all.
 ///
-/// Walks the same priority order as the render dispatch chain in [`frame`], so
-/// the modal that zooms is the one actually being painted.
-///
 /// See also:
 /// - [`zoom_context_modal`] to tell a zoomless modal apart from no modal.
 pub(crate) fn zoom_target_kind(stoat: &Stoat) -> Option<ModalKind> {
-    if stoat.help.is_some() {
-        Some(ModalKind::Help)
-    } else if stoat.file_finder.is_some() {
-        Some(ModalKind::FileFinder)
-    } else if stoat.symbol_finder.is_some() {
-        Some(ModalKind::SymbolFinder)
-    } else if stoat.code_search.is_some() {
-        Some(ModalKind::CodeSearch)
-    } else if stoat.command_palette.is_some() {
-        Some(ModalKind::Palette)
-    } else if stoat.commit_picker.is_some() {
-        Some(ModalKind::CommitPicker)
-    } else {
-        None
-    }
+    active_modal(stoat).and_then(ActiveModal::zoom_kind)
 }
 
 /// Resolve every `Color::Reset` cell in `buf` against `theme`.

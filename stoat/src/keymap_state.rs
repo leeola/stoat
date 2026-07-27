@@ -1,5 +1,5 @@
 use crate::{
-    app::Stoat,
+    app::{ModalKind, Stoat},
     buffer::BufferId,
     diagnostics::DiagnosticSet,
     editor_state::EditorState,
@@ -350,51 +350,216 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     None
 }
 
-/// The topmost open modal as a `modal` predicate value, in render precedence.
-/// Absent when no modal is open.
+/// One of the modal surfaces that can own input, identified independently of the
+/// `Option` field it happens to be stored in.
+///
+/// Stoat keeps each modal in its own field on [`Stoat`], so "which modal is
+/// active" was answered separately, and differently, everywhere it was asked.
+/// This enum plus [`active_modal`] is the single answer. A consumer that needs to
+/// rank, name, or classify the active modal matches here instead of walking the
+/// fields again in an order of its own.
 ///
 /// Covers both the pickers/overlays and the transient text inputs (search,
-/// shell, rename, ...). The latter are plain insert-mode editors, so the
-/// `modal` value is the only thing distinguishing them from an ordinary buffer
-/// when resolving keybindings. The incremental `/` input is `isearch`.
-pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
+/// shell, rename, ...). The latter are plain insert-mode editors, so the `modal`
+/// predicate is the only thing distinguishing them from an ordinary buffer when
+/// resolving keybindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActiveModal {
+    Run,
+    QuitConfirm,
+    WorkspacePicker,
+    Jumplist,
+    Diagnostics,
+    CommitPicker,
+    Location,
+    FileFinder,
+    SymbolFinder,
+    CodeSearch,
+    Palette,
+    Help,
+    Rename,
+    Search,
+    SplitSelection,
+    FilterSelections,
+    ShellInput,
+}
+
+impl ActiveModal {
+    /// The `modal` predicate value keybindings match on.
+    ///
+    /// The incremental `/` input is `isearch` rather than `search`, because a
+    /// binding under it is scoped to the incremental walk, not to searching.
+    pub(crate) fn context_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::QuitConfirm => "quit_confirm",
+            Self::WorkspacePicker => "workspace_picker",
+            Self::Jumplist => "jumplist",
+            Self::Diagnostics => "diagnostics",
+            Self::CommitPicker => "commit_picker",
+            Self::Location => "location",
+            Self::FileFinder => "finder",
+            Self::SymbolFinder => "symbols",
+            Self::CodeSearch => "code_search",
+            Self::Palette => "palette",
+            Self::Help => "help",
+            Self::Rename => "rename",
+            Self::Search => "isearch",
+            Self::SplitSelection => "split_selection",
+            Self::FilterSelections => "filter_selections",
+            Self::ShellInput => "shell",
+        }
+    }
+
+    /// Whether this modal's box covers the minimap band, so the strip is not
+    /// worth drawing beneath it.
+    ///
+    /// False for the palette. Its box is capped at 80 columns and centered, so its
+    /// right edge never passes `width / 2 + 40`, while the 8-column band exists
+    /// only from `MINIMAP_MIN_PANE_COLS` up. The two rects are disjoint at every
+    /// width where a band exists at all, so hiding the strip for the palette would
+    /// cost the user their minimap for no overlap.
+    ///
+    /// Also false for the transient text inputs, which draw in a single row of
+    /// existing chrome rather than over the editor at all.
+    pub(crate) fn hides_minimap(self) -> bool {
+        !matches!(
+            self,
+            Self::Palette
+                | Self::Rename
+                | Self::Search
+                | Self::SplitSelection
+                | Self::FilterSelections
+                | Self::ShellInput
+        )
+    }
+
+    /// Whether a zoom step belongs to this modal rather than to the panes behind
+    /// it.
+    ///
+    /// Wider than [`Self::hides_minimap`] by the palette, which is left out there
+    /// to keep the minimap visible beside it. That has nothing to do with input,
+    /// and the palette takes zoom steps like any other modal.
+    ///
+    /// A modal with no [`ModalKind`] still holds here. Those size entirely to
+    /// their content and have nothing to zoom, so a step over them does nothing.
+    /// Resizing a pane hidden behind a modal would be a change the user cannot
+    /// see or connect to what they pressed.
+    pub(crate) fn owns_zoom(self) -> bool {
+        self.hides_minimap() || self == Self::Palette
+    }
+
+    /// The resizable-box kind a zoom step applies to, or `None` for a modal that
+    /// sizes entirely to its content.
+    pub(crate) fn zoom_kind(self) -> Option<ModalKind> {
+        match self {
+            Self::Help => Some(ModalKind::Help),
+            Self::FileFinder => Some(ModalKind::FileFinder),
+            Self::SymbolFinder => Some(ModalKind::SymbolFinder),
+            Self::CodeSearch => Some(ModalKind::CodeSearch),
+            Self::Palette => Some(ModalKind::Palette),
+            Self::CommitPicker => Some(ModalKind::CommitPicker),
+            _ => None,
+        }
+    }
+}
+
+/// The modal that owns input right now, or `None` when none is open.
+///
+/// The order below is canonical for the whole app because it is what keys already
+/// route by. Anything that ranks modals differently would act on a modal the user
+/// is not typing into. Every non-render consumer derives from this rather than
+/// walking the fields itself.
+///
+/// Modals are mutually exclusive in practice, since the keymap's `!modal` guards
+/// keep a modal's own context from reaching the bindings that open another. That
+/// makes the order unobservable in normal operation and load-bearing only if some
+/// path opens a second modal anyway, which the debug assertion below catches. It
+/// stays debug-only because the release behavior wanted in that case is the
+/// canonical pick, not a panic in the user's editor.
+pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
+    debug_assert!(
+        open_modal_count(stoat) <= 1,
+        "modals must be mutually exclusive, found {} open",
+        open_modal_count(stoat)
+    );
+
+    topmost_modal(stoat)
+}
+
+/// The canonical pick with no exclusivity check.
+///
+/// Split out from [`active_modal`] so the ranking can be pinned by a test over a
+/// state that has two modals open, which the assertion there rejects by design.
+fn topmost_modal(stoat: &Stoat) -> Option<ActiveModal> {
     if stoat.modal_run.is_some() {
-        Some("run")
+        Some(ActiveModal::Run)
     } else if stoat.quit_all_confirm.is_some() {
-        Some("quit_confirm")
+        Some(ActiveModal::QuitConfirm)
     } else if stoat.workspace_picker.is_some() {
-        Some("workspace_picker")
+        Some(ActiveModal::WorkspacePicker)
     } else if stoat.jumplist_picker.is_some() {
-        Some("jumplist")
+        Some(ActiveModal::Jumplist)
     } else if stoat.diagnostics_picker.is_some() {
-        Some("diagnostics")
+        Some(ActiveModal::Diagnostics)
     } else if stoat.commit_picker.is_some() {
-        Some("commit_picker")
+        Some(ActiveModal::CommitPicker)
     } else if stoat.location_picker.is_some() {
-        Some("location")
+        Some(ActiveModal::Location)
     } else if stoat.file_finder.is_some() {
-        Some("finder")
+        Some(ActiveModal::FileFinder)
     } else if stoat.symbol_finder.is_some() {
-        Some("symbols")
+        Some(ActiveModal::SymbolFinder)
     } else if stoat.code_search.is_some() {
-        Some("code_search")
+        Some(ActiveModal::CodeSearch)
     } else if stoat.command_palette.is_some() {
-        Some("palette")
+        Some(ActiveModal::Palette)
     } else if stoat.help.is_some() {
-        Some("help")
+        Some(ActiveModal::Help)
     } else if stoat.rename_input.is_some() {
-        Some("rename")
+        Some(ActiveModal::Rename)
     } else if stoat.search_input.is_some() {
-        Some("isearch")
+        Some(ActiveModal::Search)
     } else if stoat.split_selection_input.is_some() {
-        Some("split_selection")
+        Some(ActiveModal::SplitSelection)
     } else if stoat.filter_selections_input.is_some() {
-        Some("filter_selections")
+        Some(ActiveModal::FilterSelections)
     } else if stoat.shell_input.is_some() {
-        Some("shell")
+        Some(ActiveModal::ShellInput)
     } else {
         None
     }
+}
+
+fn open_modal_count(stoat: &Stoat) -> usize {
+    [
+        stoat.modal_run.is_some(),
+        stoat.quit_all_confirm.is_some(),
+        stoat.workspace_picker.is_some(),
+        stoat.jumplist_picker.is_some(),
+        stoat.diagnostics_picker.is_some(),
+        stoat.commit_picker.is_some(),
+        stoat.location_picker.is_some(),
+        stoat.file_finder.is_some(),
+        stoat.symbol_finder.is_some(),
+        stoat.code_search.is_some(),
+        stoat.command_palette.is_some(),
+        stoat.help.is_some(),
+        stoat.rename_input.is_some(),
+        stoat.search_input.is_some(),
+        stoat.split_selection_input.is_some(),
+        stoat.filter_selections_input.is_some(),
+        stoat.shell_input.is_some(),
+    ]
+    .iter()
+    .filter(|open| **open)
+    .count()
+}
+
+/// The topmost open modal as a `modal` predicate value, in canonical precedence.
+/// Absent when no modal is open.
+pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
+    active_modal(stoat).map(ActiveModal::context_str)
 }
 
 /// Strip the `SHIFT` modifier from events where it duplicates information
@@ -771,6 +936,138 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSearchInput);
         let state = StoatKeymapState::from_stoat(&h.stoat);
         assert_eq!(field(&state, "modal"), Some("isearch".to_string()));
+    }
+
+    /// Every variant, in the canonical order [`active_modal`] resolves them.
+    const ALL_MODALS: [ActiveModal; 17] = [
+        ActiveModal::Run,
+        ActiveModal::QuitConfirm,
+        ActiveModal::WorkspacePicker,
+        ActiveModal::Jumplist,
+        ActiveModal::Diagnostics,
+        ActiveModal::CommitPicker,
+        ActiveModal::Location,
+        ActiveModal::FileFinder,
+        ActiveModal::SymbolFinder,
+        ActiveModal::CodeSearch,
+        ActiveModal::Palette,
+        ActiveModal::Help,
+        ActiveModal::Rename,
+        ActiveModal::Search,
+        ActiveModal::SplitSelection,
+        ActiveModal::FilterSelections,
+        ActiveModal::ShellInput,
+    ];
+
+    fn context_strs(modals: impl IntoIterator<Item = ActiveModal>) -> Vec<&'static str> {
+        modals.into_iter().map(ActiveModal::context_str).collect()
+    }
+
+    /// Config keybindings match these strings, so a renamed one silently unbinds
+    /// every key scoped to that modal.
+    #[test]
+    fn every_modal_keeps_its_predicate_string() {
+        assert_eq!(
+            context_strs(ALL_MODALS),
+            [
+                "run",
+                "quit_confirm",
+                "workspace_picker",
+                "jumplist",
+                "diagnostics",
+                "commit_picker",
+                "location",
+                "finder",
+                "symbols",
+                "code_search",
+                "palette",
+                "help",
+                "rename",
+                "isearch",
+                "split_selection",
+                "filter_selections",
+                "shell",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_palette_keeps_the_minimap_but_still_takes_zoom_steps() {
+        assert_eq!(
+            context_strs(ALL_MODALS.into_iter().filter(|m| m.hides_minimap())),
+            [
+                "run",
+                "quit_confirm",
+                "workspace_picker",
+                "jumplist",
+                "diagnostics",
+                "commit_picker",
+                "location",
+                "finder",
+                "symbols",
+                "code_search",
+                "help",
+            ],
+            "the palette and the transient inputs leave the strip alone"
+        );
+        assert_eq!(
+            context_strs(ALL_MODALS.into_iter().filter(|m| m.owns_zoom())),
+            [
+                "run",
+                "quit_confirm",
+                "workspace_picker",
+                "jumplist",
+                "diagnostics",
+                "commit_picker",
+                "location",
+                "finder",
+                "symbols",
+                "code_search",
+                "palette",
+                "help",
+            ],
+            "zoom adds the palette and nothing else"
+        );
+    }
+
+    #[test]
+    fn only_resizable_modals_carry_a_zoom_kind() {
+        assert_eq!(
+            context_strs(ALL_MODALS.into_iter().filter(|m| m.zoom_kind().is_some())),
+            [
+                "commit_picker",
+                "finder",
+                "symbols",
+                "code_search",
+                "palette",
+                "help"
+            ]
+        );
+    }
+
+    /// The canonical order is only observable when two modals are somehow open at
+    /// once, which [`active_modal`] asserts against. This pins what the release
+    /// build does in that case, through the unchecked resolver.
+    #[test]
+    fn a_quit_prompt_outranks_a_finder_opened_under_it() {
+        let mut h = Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        assert_eq!(
+            topmost_modal(&h.stoat),
+            Some(ActiveModal::FileFinder),
+            "the finder alone is the active modal"
+        );
+
+        h.stoat.quit_all_confirm = Some(crate::quit_all_confirm::QuitAllConfirm::new(
+            &[],
+            std::path::Path::new("/"),
+        ));
+
+        assert_eq!(
+            topmost_modal(&h.stoat),
+            Some(ActiveModal::QuitConfirm),
+            "the prompt keys route to wins over the finder behind it"
+        );
     }
 
     #[test]

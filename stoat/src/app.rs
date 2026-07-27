@@ -18,7 +18,10 @@ use crate::{
         LocalGit, LspHost, NoopFsWatcher,
     },
     keymap::{Keymap, ResolvedAction, StateValue},
-    keymap_state::{modal_predicate, normalize_shift_event, resolve_action, StoatKeymapState},
+    keymap_state::{
+        active_modal, modal_predicate, normalize_shift_event, resolve_action, ActiveModal,
+        StoatKeymapState,
+    },
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
     quit_all_confirm::QuitAllConfirm,
     rebase::RebasePause,
@@ -5452,73 +5455,80 @@ impl Stoat {
     /// Dismiss the modal that currently owns key input, reporting whether one was
     /// open.
     ///
-    /// The arms run in [`modal_predicate`]'s order, which is the order keys route
-    /// by, so the modal dismissed is always the one the user is typing into. A
-    /// modal owning a scratch editor is disposed rather than dropped, or its input
-    /// stays in the workspace for the rest of the session.
+    /// Matching on [`active_modal`] is what keeps the close order and the key
+    /// order from drifting apart, so the modal dismissed is always the one the
+    /// user is typing into. A modal owning a scratch editor is disposed rather
+    /// than dropped, or its input stays in the workspace for the rest of the
+    /// session.
     ///
     /// A run pane is the one arm that does not close. It owns the whole pane
     /// rather than floating over it, so it interrupts its shell and stays open.
     fn close_topmost_modal(&mut self) -> bool {
-        if let Some(run_id) = self.modal_run {
-            let ws = self.active_workspace_mut();
-            if let Some(run_state) = ws.runs.get_mut(run_id) {
-                if let Some(handle) = &mut run_state.shell_handle {
-                    handle.kill();
+        let Some(modal) = active_modal(self) else {
+            return false;
+        };
+
+        match modal {
+            ActiveModal::Run => {
+                let run_id = self.modal_run.expect("the run modal is open");
+                let ws = self.active_workspace_mut();
+                if let Some(run_state) = ws.runs.get_mut(run_id) {
+                    if let Some(handle) = &mut run_state.shell_handle {
+                        handle.kill();
+                    }
+                    if let Some(block) = run_state.active_block_mut() {
+                        block.finished = true;
+                    }
                 }
-                if let Some(block) = run_state.active_block_mut() {
-                    block.finished = true;
+            },
+            ActiveModal::QuitConfirm => self.quit_all_confirm = None,
+            ActiveModal::WorkspacePicker => {
+                if let Some(picker) = self.workspace_picker.take() {
+                    picker.dispose(self.active_workspace_mut());
                 }
-            }
-            return true;
-        }
-        if self.quit_all_confirm.is_some() {
-            self.quit_all_confirm = None;
-            return true;
-        }
-        if let Some(picker) = self.workspace_picker.take() {
-            picker.dispose(self.active_workspace_mut());
-            return true;
-        }
-        if self.jumplist_picker.take().is_some() {
-            return true;
-        }
-        if self.diagnostics_picker.take().is_some() {
-            return true;
-        }
-        if self.commit_picker.is_some() {
-            action_handlers::review_walk::commit_picker_close(self);
-            return true;
-        }
-        if self.location_picker.take().is_some() {
-            return true;
-        }
-        if self.file_finder.is_some() {
-            action_handlers::close_file_finder(self);
-            return true;
-        }
-        if self.symbol_finder.is_some() {
-            action_handlers::lsp::close_symbol_finder(self);
-            return true;
-        }
-        if action_handlers::code_search::close_code_search(self) {
-            return true;
-        }
-        if let Some(palette) = self.command_palette.take() {
-            let active_idx = self.active_workspace;
-            palette.dispose(&mut self.workspaces[active_idx]);
-            return true;
-        }
-        if self.help.is_some() {
-            action_handlers::close_help(self);
-            return true;
+            },
+            ActiveModal::Jumplist => {
+                self.jumplist_picker = None;
+            },
+            ActiveModal::Diagnostics => {
+                self.diagnostics_picker = None;
+            },
+            ActiveModal::CommitPicker => {
+                action_handlers::review_walk::commit_picker_close(self);
+            },
+            ActiveModal::Location => {
+                self.location_picker = None;
+            },
+            ActiveModal::FileFinder => action_handlers::close_file_finder(self),
+            ActiveModal::SymbolFinder => action_handlers::lsp::close_symbol_finder(self),
+            ActiveModal::CodeSearch => {
+                action_handlers::code_search::close_code_search(self);
+            },
+            ActiveModal::Palette => {
+                if let Some(palette) = self.command_palette.take() {
+                    let active_idx = self.active_workspace;
+                    palette.dispose(&mut self.workspaces[active_idx]);
+                }
+            },
+            ActiveModal::Help => action_handlers::close_help(self),
+            ActiveModal::Rename => {
+                action_handlers::lsp::rename_input_cancel(self);
+            },
+            ActiveModal::Search => {
+                action_handlers::search::search_cancel(self);
+            },
+            ActiveModal::SplitSelection => {
+                action_handlers::split_selection::cancel(self);
+            },
+            ActiveModal::FilterSelections => {
+                action_handlers::filter_selections::cancel(self);
+            },
+            ActiveModal::ShellInput => {
+                action_handlers::shell::cancel(self);
+            },
         }
 
-        action_handlers::lsp::rename_input_cancel(self)
-            || action_handlers::search::search_cancel(self)
-            || action_handlers::split_selection::cancel(self)
-            || action_handlers::filter_selections::cancel(self)
-            || action_handlers::shell::cancel(self)
+        true
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
@@ -6184,57 +6194,41 @@ impl Stoat {
         }
     }
 
+    /// The scratch editor the open modal types into, or `None` when no modal is
+    /// open or the open one has no input of its own.
+    ///
+    /// A picker without an input (the jumplist, diagnostics, and location pickers,
+    /// the quit prompt, a modal run) answers `None` so the caller keeps resolving
+    /// through the panes behind it, which is where the keys it does handle land.
+    fn active_modal_input(&self) -> Option<(EditorId, BufferId)> {
+        let input = match active_modal(self)? {
+            ActiveModal::WorkspacePicker => &self.workspace_picker.as_ref()?.input,
+            ActiveModal::CommitPicker => &self.commit_picker.as_ref()?.input,
+            ActiveModal::FileFinder => &self.file_finder.as_ref()?.input,
+            ActiveModal::SymbolFinder => &self.symbol_finder.as_ref()?.input,
+            ActiveModal::CodeSearch => &self.code_search.as_ref()?.input,
+            ActiveModal::Palette => self.command_palette.as_ref()?.focused_input()?,
+            ActiveModal::Help => &self.help.as_ref()?.input,
+            ActiveModal::Rename => &self.rename_input.as_ref()?.input,
+            ActiveModal::Search => &self.search_input.as_ref()?.input,
+            ActiveModal::SplitSelection => &self.split_selection_input.as_ref()?.input,
+            ActiveModal::FilterSelections => &self.filter_selections_input.as_ref()?.input,
+            ActiveModal::ShellInput => &self.shell_input.as_ref()?.input,
+            ActiveModal::Run
+            | ActiveModal::QuitConfirm
+            | ActiveModal::Jumplist
+            | ActiveModal::Diagnostics
+            | ActiveModal::Location => return None,
+        };
+
+        Some((input.editor_id, input.buffer_id))
+    }
+
     pub(crate) fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
         let ws = self.active_workspace();
 
-        if let Some(finder) = &self.file_finder {
-            return Some((finder.input.editor_id, finder.input.buffer_id));
-        }
-
-        if let Some(finder) = &self.symbol_finder {
-            return Some((finder.input.editor_id, finder.input.buffer_id));
-        }
-
-        if let Some(finder) = &self.code_search {
-            return Some((finder.input.editor_id, finder.input.buffer_id));
-        }
-
-        if let Some(picker) = &self.commit_picker {
-            return Some((picker.input.editor_id, picker.input.buffer_id));
-        }
-
-        if let Some(picker) = &self.workspace_picker {
-            return Some((picker.input.editor_id, picker.input.buffer_id));
-        }
-
-        if let Some(palette) = &self.command_palette
-            && let Some(input) = palette.focused_input()
-        {
-            return Some((input.editor_id, input.buffer_id));
-        }
-
-        if let Some(help) = &self.help {
-            return Some((help.input.editor_id, help.input.buffer_id));
-        }
-
-        if let Some(rename) = &self.rename_input {
-            return Some((rename.input.editor_id, rename.input.buffer_id));
-        }
-
-        if let Some(search) = &self.search_input {
-            return Some((search.input.editor_id, search.input.buffer_id));
-        }
-
-        if let Some(ss) = &self.split_selection_input {
-            return Some((ss.input.editor_id, ss.input.buffer_id));
-        }
-
-        if let Some(fs) = &self.filter_selections_input {
-            return Some((fs.input.editor_id, fs.input.buffer_id));
-        }
-
-        if let Some(sh) = &self.shell_input {
-            return Some((sh.input.editor_id, sh.input.buffer_id));
+        if let Some(ids) = self.active_modal_input() {
+            return Some(ids);
         }
 
         if let Some((editor_id, buffer_id)) = ws
