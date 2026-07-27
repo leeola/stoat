@@ -71,3 +71,10 @@ insta = "1"
 name = "fixture_live"
 path = "tests/fixture_live.rs"
 required-features = ["fixture"]
+
+# Drives the real binary on a pty against a fixture, so it needs the fixture
+# materializer and a built binary. Run `cargo build -p stoat_bin` first.
+[[test]]
+name = "foreign_terminal"
+path = "tests/foreign_terminal.rs"
+required-features = ["fixture"]
